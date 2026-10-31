@@ -1,7 +1,12 @@
 # Envoy client
 
-Shared HTTP transport, tool contract, and inbound delivery renderer for Envoy hosts. pi-envoy and
-claude-envoy consume these modules rather than maintaining host-specific envelope parsers.
+Shared HTTP transport, tool contract, inbound delivery renderer, and missed-message replay for Envoy
+hosts. pi-envoy and claude-envoy consume these modules rather than maintaining host-specific
+envelope parsers.
+
+This package has no release of its own: `.github/workflows/changelog-fold.yaml` folds its
+changelog fragments (`.changes/unreleased/`) into `CHANGELOG.md` under `main@<commit>` at the
+first fold run after they merge.
 
 ## Inbound delivery
 
@@ -17,8 +22,137 @@ parsed event under `dispatch: { issue_key, type, actor, payload }` with `payload
 type; a payload whose shape disagrees with its event type's schema is preserved as its raw parsed
 value under `dispatch`, never dropped or reduced to prose. A dispatch envelope with no payload at
 all falls back to the same `summary` field every other source gets and marks `unrecognised:
-payload`. The renderer skips Dispatch events marked `notify: false` on an issue topic before a host
-can steer or record them in its inbox, as well as events authored by the reader's own session.
+payload`. On a `notifications.dispatch.*` topic, which carries every event of its owner, the
+renderer skips the events Dispatch marks `quiet` — a delivery receipt, an anchor refresh,
+settings or per-viewer bookkeeping, a targeted message its session already had, an ask edit that
+only moved a version, or a version nobody named — before a host can steer or record them in its
+inbox, as well as events authored by the reader's own session. It does not skip on `notify`,
+which answers whether to wake the owner's route and is false for every event an agent wrote: a
+session that subscribed to an issue's topic subscribed for exactly that activity. A frame with no
+`quiet` was published before Dispatch stated it and is judged by `notify`, so a replay of the 72
+hours the stream still holds shows no receipts.
+
+## Missed messages
+
+`createReplayEngine` (`@legion/envoy-client/replay`) shows a session, once, each message the
+notification stream stored on a subject it follows while its own NATS subscription was down. A
+host makes one per session process and hands it its live path's `createDeliveryDedupe`, the
+listener client and callbacks (`ReplayHost`): the session id, the followed subjects, how to show
+a stored frame (as a card that runs nothing), a failure notice and a one-time notice, and how to
+persist a change. `sweep()` asks the listener's `POST /v1/replay` for each followed subject's
+messages after its cursor, merges them by stream sequence and hands the host each frame neither
+path showed; it never rejects, and one runs at a time with at most one queued behind it. A
+subject with no cursor starts at the stream's end, so a new follow brings up no history. Role
+forwards are passed over: role messages stay live only.
+
+The ledger holds the identity of each frame the session finished with (its `event_id`, and its
+`dedupe_key` when that names its event, `replayLedgerIdentity`), each expiring 72 hours after it
+was recorded, at most 20,000, the oldest dropped first. A host's live path calls
+`recordDelivered` once the host wrote the frame to the session's record, before it settles the
+claim, and drops a frame `delivered` finds. A `createDeliveryDedupe` claim is settled (`settle()`)
+once the host is done with the frame, shown or not, or released as before; until then `pending()`
+reads it true, and a sweep leaves that frame's stored copy for a later sweep rather than show it
+beside the live one. A host that hands a stored frame, or a failure notice, on without having
+written it yet (Oh My Pi holds a card sent mid-turn until the turn takes it) claims the frame and
+answers `queued`: nothing is recorded and its subjects' cursors stay before it, so a process that
+ends first shows it after the restart, until the host calls `recordDelivered` and settles the
+claim once written. `recordDeliveredFor(sessionID, frame)` records the same way for the session a
+frame was delivered in while the host shuts down: it writes while the host's optional
+`writeSessionID()` still names that session, once `sessionID()` already answers none, and the
+ledger holds the frame from the call on (Oh My Pi records every BTW's event id so, before its side
+turn and before any reply is posted).
+
+The state holds each followed subject's `since` and `after`, the stream's `id` (`stream_id`, the
+`envoy_stream_id` the listener answers as `stream.id`) and `created` time, and the one-time
+notices raised but not told yet (`notices`);
+`restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the
+state at any age. A write carries the state only when it changed; a sweep that handled no message
+and only moved its cursors to the stream's end goes with the next write, or once the state last
+written is an hour old (`REPLAY_STATE_REFRESH_MS`). A frame the host fails to show is retried, and
+on its third failure the host shows a notice naming it instead (`showFailureNotice`); a host whose
+live path failed a frame calls `liveFailed(followed, envelope, error, receivedAt)`, which shows
+that notice at once unless a sweep will show the stream's copy, which it will not for a frame
+received before its subject's cursor started (a new follow, a new session, or a reset after a
+stream recreation), since that cursor can start past it. A host stamps `receivedAt` when the
+subscription yielded the frame: `readArrivals(subscription)` (`@legion/envoy-client/delivery`)
+reads a subscription as its messages arrive and yields each, in order, with that time, so a frame
+queued behind a slow delivery is not stamped late. A replayed removal closes a topic only
+when `followedBefore(topic, seq)`; `replaySuppressed` says which rendered frames a replay does
+not show, `replayedText`, `failureNoticeFields` and `replayNoticeFields` word the cards, and
+`envoyNoticeText` renders a notice's fields under `envoy:` in TOON, so a sender's summary that
+holds a newline stays inside its own field. The session is
+told once when the stream was recreated, when it moved back, when its cursor fell behind the
+stream's oldest message (older than 72 hours), and when the listener does not replay (404) or
+cannot (503 `REPLAY_UNAVAILABLE`, 401, 403). A stream is recreated when its `id` differs from the
+stored one; a `created` that moved under the same id is a restore (or, after a clustered restore,
+a later leader election), not a recreation. An
+answer without an id (an older listener) is judged by `created`, and a state stored before ids
+takes the answer's id. A stream that is not recreated has moved back when any cursor's `after` is
+past the stream's `last_seq`: restored from a backup older than the cursors, or re-added empty
+from its exported configuration, which keeps the id, so its sequences restarted below them.
+Nothing tells which of its messages the session was shown, so every followed subject's `after`
+becomes `first_seq - 1` (each `since` stays) and the sweep reads everything the stream holds
+again: the ledger passes over what the session was already shown (a restore keeps event ids),
+what was published after the restore is shown, and the session is told once (`stream_moved_back`)
+that messages may be shown again and that any published between the backup and the restore are
+missing. A message may be shown twice; none is lost. A recreation's cursor reset, a moved-back
+stream's cursor rewind, and a retention gap's cursor move are written at once, with their notice
+in `notices`, which is dropped once told: a session that ends before telling it tells it once at
+its first sweep after the restart. Work started for one session stops, writing nothing, once
+`sessionID()` names another.
+
+The host policy both plugins share sits beside the engine, so each host keeps only how it shows a
+card, how it warns, and how it persists. `replayFollowedSubjects(ownAgentSubject, topics,
+heldForRole?)` is what a host's `followedSubjects()` answers: its own agent subject and every
+topic it follows but a role lane, a subject it holds for a role, and a topic reaching a private
+stream subject (`reachesPrivateStreamSubject`, which a host's registration applies too: another
+session's agent subject, a failed-delivery lane on an agent subject, the Legion controller lane,
+or a wildcard reaching one, the listener's own rule, `privateStreamSubjects` and
+`ReachesPrivateStreamSubject` in `packages/envoy/internal/bus/stream.go`). `rememberedTopics(state)`
+is what a restore follows again from a persisted state: every
+subject but agent subjects and role lanes. `closeReplayedRemoval(frame, host)` acts on a replayed
+`subscription.removed` naming the session: it closes each topic the session followed before the
+frame was stored (`followedBefore`, through the host's `close`), then starts the host's
+`unregister` of the closed topics from the listener's registry and waits on it and on the host's
+`followedChanged`. `routeReplayNotice(notice, {warn, card})` sends a one-time notice where its kind
+belongs: `not_served` and `unavailable` are a warning, `stream_recreated`, `stream_moved_back` and
+`retention_gap` a card rendered by `envoyNoticeText`.
+
+## NATS connection
+
+`natsConnectionOptions({ servers, name, seed })` (`@legion/envoy-client/nats-connection`) is the
+nats.js `connect` options every session plugin dials with: the credential `natsAuthOptions` builds
+from the seed (`src/nats-auth.ts`, which the package does not export, so a plugin dials only with
+these options), reconnecting forever 2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`)
+with the connection dropped on the tick that finds two pings unanswered (`NATS_MAX_PINGS_OUT`). So a
+path that freezes without closing is left within 30 s and redialed at once, and a session is back
+within 52 s when that redial also hangs on nats.js's 20 s dial timeout and the 2 s wait; nats.js's
+default 120 s interval left a frozen path for up to 6 minutes.
+
+nats.js 2.29.3, the last 2.x release, leaves a redial's socket open when it gives up on that dial
+at its 20 s timeout (a TCP connect that hangs, or a server that never sends `INFO`): it closes
+only a transport that finished connecting, so the socket keeps the process alive and a channel
+server never exits on SIGTERM. Its stale-connection close (two unanswered pings) flushes the
+transport before it destroys the socket, and behind data a dead path never acknowledged that flush
+never completes, so the transport never closes and a client that wrote since the path froze never
+redials. `patches/nats@2.29.3.patch` (root `package.json`'s `patchedDependencies`, applied by bun
+at install and so carried by both plugins' bundles) makes `NodeTransport` keep the socket from the
+moment it dials and destroy it when a transport that never connected is closed, and makes the
+stale-connection close skip the flush (`transport.close()` in place of `transport.disconnect()`
+in `ProtocolHandler.disconnect()`, which the stale-connection close after two unanswered pings and
+`handleAuthError` with no `connectError` handler both call, while a client-initiated `reconnect()`
+still flushes); `src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a
+`patchedDependencies` entry for a version that is not installed without a word, so moving nats
+means carrying the patch to the new version.
+
+`@legion/envoy-client/test/stall-proxy`, `@legion/envoy-client/test/envoy-stack` and
+`@legion/envoy-client/test/stall-scenario` (Bun only, not built, in `test/`) are what the stall
+tests run: a TCP proxy whose `freeze()` stops forwarding on, and stops reading, the connections
+open at that moment without closing either side, and which records when each connection was
+accepted, first subscribed and closed; a real natsd and listener that each stack builds with
+`go build` from `packages/envoy` into its own scratch directory; and `runFreezeScenario`, the
+freeze both plugins' stall tests put their session through. A test that uses the stack runs only
+with `LEGION_E2E_ENVOY_STACK=1`.
 
 ## HTTP transport
 
@@ -30,9 +164,15 @@ the envelope and an optional role holder. Network failures and 5xx responses ret
 listener's bearer is the `token` the client is given (`envoySettings`); without one it sends no
 `Authorization` header.
 
-`subscribe` exposes listener warnings, including a topic that has no event in the configured
-stream. `getRole` returns a role holder with its last-seen timestamp, and `listSessions` accepts
-optional directory and title filters.
+`subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
+`plugin_version` on every registration, and exposes listener warnings, including a topic that has
+no event in the configured stream. `getRole` returns a role holder with its last-seen timestamp,
+and `listSessions` accepts optional directory and title filters; its rows carry `plugin` and
+`plugin_version` when the session registered them.
+
+`replay` posts `POST /v1/replay` once, with no retry and a 10 s timeout, and returns the
+listener's answer in its wire shape; an error body's `code` (such as `REPLAY_UNAVAILABLE`) is on
+`EnvoyApiError.code`.
 
 ## envoy.json
 
@@ -213,17 +353,28 @@ session's commands, or null when that is unset or empty. `sessionSettings(file, 
 notice the session shows at its start: the file's error (`<error>: Dispatch and Envoy are off`),
 the missing file's notice, the missing-file text for a section still off when a variable turned
 the other on, or a section's own error (`Dispatch is off: <error>`, `Envoy is off: <error>`), then
-what a checkout's files hold that the session does not read (its `envoy` section, the file's own
+what a checkout's files hold that the session does not read (its `envoy` section, its `askgate`
+section as `askgate in <checkout file> is not read; set it in <session file>`, the file's own
 error while `DISPATCH_URL` replaces it, or its `.opencode/envoy.json`), then, for a session that
 opens a NATS connection (`nats` not `false`), that an Envoy that is on takes no inbound messages:
 `Envoy's inbound messages are off: <inbound.off>; the Envoy tools still work`. A file that turns a
 section off, or holds no section for it, says nothing.
+`askgateSetting(file)` reads the session file's top-level `askgate` section now, on its own, so a
+section that does not parse never fails the Dispatch or Envoy read: `{"askgate":{"enabled":false}}`
+turns AskGate off (`{ enabled: false, error: null }`); no file, no section or `enabled: true`
+leaves it on. A section that does not parse, or a file that cannot be read or is not JSON, leaves
+it on with an `error` naming the file and `askgate.enabled` and ending `AskGate stays on`. A
+checkout's `.envoy/envoy.json` cannot set it.
 `sessionDispatchSettings(file, env, { cwd })` reads
 Dispatch alone, now: `{ dispatch, warnings, missing }`, Dispatch's resolution beside the files the
 read found and did not read and the missing-file record, for a command, which says the `warnings`
 itself, and for a plugin whose Dispatch calls follow a file that changes. `activeDispatchSettings`
 turns its `dispatch` into the configuration a caller uses, null when nothing configures Dispatch,
-or a `dispatch config: <reason>` throw. `sessionEnvoySettings(file, env, { cwd, nats })` reads
+or a `dispatch config: <reason>` throw. `sessionDispatchUrl(file, env, { cwd })` is the URL alone
+(`dispatchUrl`), resolved without reading the token, so no `!` command runs, or undefined when
+Dispatch is off before its token is read: what a caller on a deadline names to
+`readSessionAnswers` as `dispatchUrl` while a kept resolution is off with an error, so only the list
+read from that URL stands in. `sessionEnvoySettings(file, env, { cwd, nats })` reads
 Envoy alone, for a command such as `envoy-send`.
 
 ## Dispatch
@@ -240,6 +391,42 @@ them, covers the issue; with Envoy off or no answer from the listener it names n
 `dispatch-subscribe.ts` turns `details.follows` into the one-time host notice.
 `dispatch-first.ts` reads the `dispatch-first` skill from a plugin's staged `skills/` and wraps it in
 `DISPATCH_FIRST_MARKER`, the text pi-envoy and claude-envoy inject into a session with Dispatch.
+
+Every write `DispatchClient` makes carries one key. `#send`, which every JSON, multipart and file
+call goes through, mints a `crypto.randomUUID()` `Idempotency-Key` per `POST` and `PATCH` call and
+sends it on every attempt of that call, so Dispatch runs the write once however many attempts
+reach it and answers a repeat with the first answer (`packages/envoy/cmd/dispatch/README.md`,
+"Keyed writes"); a `GET`, `PUT` or `DELETE` carries none and is sent once. The body is encoded once
+for the whole call, a multipart form under a boundary of its own, since a retry whose bytes differ
+from the first attempt's is a different request to Dispatch and its key is refused. A transport
+failure, any 5xx, a 408, a 429 and Dispatch's `409 KEY_IN_FLIGHT` (`retriesUnderKey`, the rule
+the page shares from `@legion/contracts`) are asked again under that key, `DISPATCH_WRITE_RETRY`'s
+pace: at most five attempts, 1, 2, 4 and 8 s apart, a longer `Retry-After` waited instead, and no
+attempt started more than 30 s after the first. An attempt that goes 20 s without progress before
+its answer begins (`silenceMs`) is cut off and asked again the same way, so a write Dispatch is
+slow to finish is answered `409 KEY_IN_FLIGHT` and then replayed rather than waited on for the
+whole deadline. Progress is the connection taking the body: a body of a megabyte or more goes out
+as a stream read 64 KiB at a time, with its `Content-Length`, and each read restarts the bound, so
+an upload on a slow line is never cut off while it is still going out; a smaller body leaves in
+one write. All of it sits inside the call's own 60 s deadline, so a Dispatch that is down holds a
+`dispatch` command, and the session waiting on it, no longer than that. The call's deadline and
+its cancellation end the write at once and are never retried. Any other answer - a 2xx, a replay,
+`422 KEY_REUSED`, another 4xx - is the answer, at once.
+
+A write is asked again only against a Dispatch this process has lately seen run the keyed layer,
+since an earlier Dispatch ignores the header and would run a retried write a second time. A
+failing answer that echoes the request's key (`Idempotency-Key: <key>`) is that proof itself, so
+one of Dispatch's 5xx, 429 or `409 KEY_IN_FLIGHT` is resent at once. A transport failure, a
+silence cut and a gateway's answer carry no echo, so they rely on what an echo, or a
+`GET /healthz` answering `idempotency_keys: true`, showed for that origin within the last five
+minutes (`KEYED_LAYER_MEMORY_MS`), and otherwise read `/healthz` before the first resend, bounded
+at 5 s. Its status is not read, since Dispatch answers 503 while its database or NATS is down and
+still says `idempotency_keys`; a probe that fails, times out, answers no JSON or lacks the field
+means no resend, and the attempt's own failure is the call's. Only a yes is remembered, and only
+for those five minutes, so a rollback to a Dispatch without the layer is noticed within that
+bound. Dispatch's own refusal that carries no echo says its layer did not judge the request, so
+it sets the memory aside and `/healthz` decides afresh. The probe runs only after a write has
+already failed, so the ordinary path makes no request of its own.
 
 A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
 `error`, is the error's message under its `code` (`HTTP_<status>` when the server set none), with
@@ -261,6 +448,31 @@ Dispatch, so the advice is to check whether it took effect before retrying. The 
 request, such as `dispatch issue-update`'s close path, give its own advice instead. The executor
 reads a status as Dispatch's meaning (a 404 as no linked issue, no such document, or a server
 without the route) only when `fromDispatch` is true.
+
+A write whose attempts run out is thrown as the last attempt's own error, with its usual message,
+except where that last answer alone would say the write never took effect while an earlier attempt
+may have reached Dispatch: a gateway's 408 or 429, Dispatch's own 429, and `409 KEY_IN_FLIGHT`.
+Those are a `DispatchWriteUnsettledError`, deliberately not a `DispatchServiceError`, since a
+caller reads one as a refusal Dispatch decided: its message is the last answer, the number of
+attempts, whether an earlier attempt may have reached Dispatch or Dispatch was still running one,
+and that the write may or may not have taken effect, so check before running it again - a new
+command is a new key. A write that ends with no answer at all is one too, naming the request: its
+last attempt cut off for silence ("made no progress for 20 s, so it was cut off"), or the call's
+deadline ending it while an attempt was out or after one that may have reached Dispatch ("had no
+definitive answer when its deadline ended it"); `last` is the cut or the timeout. A write Dispatch
+made whose answer is gone is a `DispatchWriteLandedError` (`code`, an `IdempotencyLandedCode`, and
+`status`): `409 KEY_COMMITTED`, a write that landed before its answer was lost, which Dispatch will
+not run again, or a replayed 2xx (`Idempotency-Replayed: ?1`) reading `ANSWER_NOT_KEPT`, a first
+answer larger than Dispatch keeps (`answerNotKept`, shared with the page). It is no refusal and no
+`DispatchServiceError`, and it is never asked again. Its message is the one line the session
+reads: the method and URL were made, why the answer is gone, and to read what it made back with
+`dispatch read` or the matching list. The `dispatch` command exits 0 on one and records
+`landed_without_answer: <code>` in its ledger entry. A step before the
+command's own write that lands this way fails the command (exit 1) with that line and what it
+means: a picture upload (nothing else was written: run the call again, which uploads it as its
+next version), or the closing reason of `issue-update --status done` (the close was not sent: read
+the issue's messages for the reason, then close with one that points at it). The close's own
+`PATCH` landing this way is the command's write, and exits 0.
 
 Successful write responses may include `advice`. The executor preserves that object as
 `details.advice` and appends short pointers after the subscription/follow suffix: a primary spec

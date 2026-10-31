@@ -63,15 +63,15 @@ const startedAt = new Date().toISOString();
 /** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works
  * (`workflow.RoleFor`, through daemon-pane.go), on the rig's one repository. `capabilities` is the
  * deployment's capability report, `strandedClaims` the claims nothing will wake, `heldOutboxRows`
- * the lifecycle rows held behind their issues' running ones and `repositories` the project's
- * mapping, each of which the strict reader requires; the rig has no deployment to report on, its
- * one claim runs and it has no outbox, so the first three are the empty lists the daemon's
- * MarshalJSON emits when there is none. `settings` is the daemon's resolved legion.yaml with no
- * credential in it, also required; the rig has no file, so it carries the two keys the reader
- * types at the daemon's defaults. */
+ * the lifecycle rows held behind their issues' running ones, `consumers` the lag of the daemon's
+ * durable consumers and `repositories` the project's mapping, each of which the strict reader
+ * requires; the rig has no deployment to report on, its one claim runs, it has no outbox and no
+ * NATS, so the first four are the empty lists the daemon's MarshalJSON emits when there is none.
+ * `settings` is the daemon's resolved legion.yaml with no credential in it, also required; the rig
+ * has no file, so it carries the two keys the reader types at the daemon's defaults. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
-  admission: { cap: 1, active: [issue], waiting: [] },
+  admission: { cap: 1, active: [issue], waiting: [], blocked: [] },
   issues: {
     [issue]: {
       key: issue,
@@ -91,9 +91,11 @@ const STATE = LegionStateResponse.parse({
     owners: ["sjawhar"],
     mapped: [{ repo: "sjawhar/legion-smoke", default: true }],
     refused: [],
+    withoutWebhookApp: [],
     caches: [],
   },
   settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
+  consumers: [],
 });
 
 interface LogLine {

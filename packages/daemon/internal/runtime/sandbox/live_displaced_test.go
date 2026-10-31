@@ -24,7 +24,7 @@ import (
 // architect's process ends with the pod and is observed Displaced at its recorded locator, the
 // verdict the supervisor resumes uncharged (supervise's displaced); and the architect's Resume
 // starts in the displacer's new pod. The fault is an operator's (the restricted identity may not
-// delete a Secret), as kill-launcher's `kill 1` is; the replacement it causes is the runtime's
+// delete a Secret), as kill-role-init's `kill -KILL` is; the replacement it causes is the runtime's
 // alone. The pod that went took its disk with it, so the new pod's is a claim of its own: the same
 // name, which Kubernetes derives from the pod's, owned by the new pod, and a new uid. What the
 // architect carries across the replacement is its session, which the table holds (recordSession);

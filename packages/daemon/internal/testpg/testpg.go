@@ -1,6 +1,7 @@
 // Package testpg gives a test a Postgres database of its own on the devbox and CI Postgres that
-// LEGION_TEST_PG_DSN names, dropped when the test ends, so no test sees another's rows. A test is
-// skipped without it: there is nothing to run against.
+// LEGION_TEST_PG_DSN names, dropped when the test ends, so no test sees another's rows, and a way
+// to reach it across a network's delay (Delayed). A test is skipped without it: there is nothing
+// to run against.
 package testpg
 
 import (
@@ -15,13 +16,19 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// Image is the Postgres server image a developer starts for the daemon's own tests: PostgreSQL 18
+// (tag 18, server 18.6-1.pgdg13+2), pinned by digest through the mirror. 18 is also the major
+// version of the Postgres service CI's daemon test job runs (pr-and-main.yaml's `test` job), and
+// the version envoy-infra gives a new Cloud SQL instance.
+const Image = "mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4"
+
 // Database is the URL of a new, empty database named <prefix>_<random>, dropped at the test's end.
 func Database(t testing.TB, prefix string) string {
 	t.Helper()
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + Image + "\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./...")
 	}

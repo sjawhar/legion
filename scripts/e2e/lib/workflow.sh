@@ -282,6 +282,13 @@ gate_registered() {
   daemon_state | jq -e --arg issue "$1" --arg artifact "$2" \
     '.issues[$issue].designGate.artifactId == $artifact and .issues[$issue].designGate.currentVersion > 0'
 }
+# architect_is_live ISSUE checks the root architect's live claim, including while the root waits on
+# a person. It no longer treats awaiting_person as a substitute for a live claim.
+architect_is_live() { issue_worker_live "$1" architect; }
+wait_for_architect() {
+  until_true 300 "live architect on $1 to register" architect_is_live "$1"
+  assert_claim_endpoints "$1" architect
+}
 # architect_registers_gate ISSUE LABEL waits for a root's architect to register its gate on its
 # own. Nobody prompts it: its first turn is the daemon's catch-up notice, from which it writes the
 # spec (requesting approval when the design gate is armed) and registers the gate. The registration
@@ -290,18 +297,82 @@ gate_registered() {
 architect_registers_gate() {
   local issue=$1 label=$2 artifact
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
-  wait_for_worker "$issue" architect
+  wait_for_architect "$issue"
   until_true 300 "$label architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
   until_true 900 "$label architect to register primary artifact $artifact on its own" gate_registered "$issue" "$artifact"
 }
-# drive_gate ISSUE LABEL: the architect registers the gate on its own, then the proof's human
-# approves the registered version and the daemon moves the issue to planning.
+
+# ---- a root waiting on a person (gates.design armed) ----------------------------------------------
+# A root at admitted whose architect registers a closed gate, with no worker running in its tree,
+# enters awaiting_person: legion state shows waitingOn {kind: "gate", gateVersion} with no
+# answeredAt, the root holds no slot (no .slot, absent from .admission.active), and the architect
+# stays live. The person's review answers the wait (waitingOn.answeredAt), and the answered root
+# takes the next free slot ahead of roots that never ran: at planning when an approval opened the
+# gate, at admitted with the same architect session given its task when changes were requested. A
+# slot free at the answer is taken in the same transaction, so the answer reads as answeredAt or as
+# the root holding a slot again. Nothing of the root's tree advances until it holds a slot.
+root_awaits_gate() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue] as $i
+    | $i.phase == "awaiting_person" and $i.waitingOn.kind == "gate" and ($i.waitingOn.gateVersion // 0) > 0
+      and $i.waitingOn.answeredAt == null and $i.slot == null and (.admission.active | index($issue)) == null'
+}
+root_answered() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue] as $i
+    | ($i.phase == "awaiting_person" and $i.waitingOn.answeredAt != null) or ($i.phase != "awaiting_person" and $i.slot != null)'
+}
+root_holds_slot() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue] as $i
+    | $i.phase != "awaiting_person" and $i.slot != null and (.admission.active | index($issue)) != null'
+}
+# A timeout in the waits below prints the root and the admission state as legion state shows them.
+awaiting_issue=
+report_awaiting() {
+  note "$awaiting_issue in legion state: $(daemon_state | jq -c --arg issue "$awaiting_issue" '{admission, phase: .issues[$issue].phase,
+    slot: .issues[$issue].slot, waitingOn: .issues[$issue].waitingOn, architect: .issues[$issue].architect.state}')"
+}
+# await_gate_wait ISSUE LABEL: once ISSUE's architect registered its closed gate, the root waits on
+# a person at that gate with no slot while its architect remains live. The caller's timeout hook is
+# restored afterwards.
+await_gate_wait() {
+  local issue=$1 label=$2 hook=$timeout_hook
+  awaiting_issue=$issue
+  timeout_hook=report_awaiting
+  until_true 120 "$label root $issue to wait on a person at its gate (awaiting_person, waitingOn.kind gate, no slot)" root_awaits_gate "$issue"
+  until_true "$phase_seconds" "$label architect of $issue to stay live while its root waits on a person" issue_worker_live "$issue" architect
+  timeout_hook=$hook
+  note "$issue waits on a person at gate version $(daemon_state | jq -r --arg issue "$issue" '.issues[$issue].waitingOn.gateVersion') with no admission slot; its architect stays live"
+}
+# await_root_slot ISSUE LABEL [SECONDS] waits for ISSUE to hold an admission slot again, out of
+# awaiting_person: phase_seconds unless SECONDS says, for a run where the slot comes back only when
+# another root gives its own up.
+await_root_slot() {
+  local issue=$1 label=$2 limit=${3:-$phase_seconds} hook=$timeout_hook
+  awaiting_issue=$issue
+  timeout_hook=report_awaiting
+  until_true "$limit" "$label root $issue to hold an admission slot again" root_holds_slot "$issue"
+  timeout_hook=$hook
+}
+# await_answered_slot ISSUE LABEL [SECONDS]: the person's review answered ISSUE's wait, and the root
+# then holds a slot again (await_root_slot's SECONDS).
+await_answered_slot() {
+  local issue=$1 label=$2 limit=${3:-} hook=$timeout_hook
+  awaiting_issue=$issue
+  timeout_hook=report_awaiting
+  until_true 120 "the person's review to answer $label root $issue (waitingOn.answeredAt, or a slot already back)" root_answered "$issue"
+  timeout_hook=$hook
+  await_root_slot "$issue" "$label" "$limit"
+}
+# drive_gate ISSUE LABEL [SECONDS]: the architect registers the gate on its own and its root waits on
+# a person without a slot; the proof's human approves the registered version, the root takes a slot
+# back (await_answered_slot's SECONDS), and the daemon moves it to planning.
 drive_gate() {
-  local issue=$1 label=$2
+  local issue=$1 label=$2 limit=${3:-}
   architect_registers_gate "$issue" "$label"
+  await_gate_wait "$issue" "$label"
   gate_artifact=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.artifactId')
   gate_version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
   dispatch_human POST "artifacts/$gate_artifact/reviews" '{"state":"approved"}' >/dev/null
+  await_answered_slot "$issue" "$label" "$limit"
   wait_for_phase "$issue" planning
   wait_for_worker "$issue" planner
 }
@@ -584,7 +655,7 @@ merge_when_clean_read() {
         autoMergeRequest { enabledAt mergeMethod } mergeQueueEntry { position state } } } }' \
     --jq '.data.repository.pullRequest | .state, .mergeStateStatus, .headRefOid, .headRefName, (.mergeCommit.oid // ""),
       (.autoMergeRequest.enabledAt // ""), (.autoMergeRequest.mergeMethod // ""), (.mergeQueueEntry.position // ""), (.mergeQueueEntry.state // "")' || true)
-  pull_request_state= pull_request_merge_state= pull_request_head= pull_request_head_ref= pull_request_merge_commit= pull_request_armed=
+  pull_request_state='' pull_request_merge_state='' pull_request_head='' pull_request_head_ref='' pull_request_merge_commit='' pull_request_armed=''
   [ "${#fields[@]}" -eq 9 ] || return 0
   pull_request_state=${fields[0]} pull_request_merge_state=${fields[1]} pull_request_head=${fields[2]}
   pull_request_head_ref=${fields[3]} pull_request_merge_commit=${fields[4]}
@@ -597,7 +668,7 @@ merge_when_clean() {
   local bound=${MERGE_WHEN_CLEAN_BOUND:-300} poll=${MERGE_WHEN_CLEAN_POLL:-0.5}
   local started=$SECONDS beat=$SECONDS polls=0 armed="" flag delete_branch=""
   for flag in "$@"; do [ "$flag" != --delete-branch ] || delete_branch=1; done
-  merge_when_clean_by= merge_when_clean_commit=
+  merge_when_clean_by='' merge_when_clean_commit=''
   note "waiting up to ${bound}s for $repo_name#$pr to merge: merged, enqueued or auto-merge armed is left to land; the proof human merges by hand only once it reads CLEAN with nothing armed"
   while ((SECONDS - started < bound)); do
     polls=$((polls + 1))
@@ -714,6 +785,46 @@ smoke_branch_state() {
   local refs
   refs=$(timeout 60 gh api "repos/$repo/git/matching-refs/heads/$1" --jq ".[] | select(.ref == \"refs/heads/$1\") | .ref") || return 1
   if [ -n "$refs" ]; then echo present; else echo absent; fi
+}
+# smoke_commit_files COMMIT prints the paths COMMIT changes on the smoke repository, one a line, as
+# the proof human's gh reads them. It tells the three answers apart, since only one of them says the
+# commit is not there: GitHub's 404 or 422 for a commit the repository does not hold fails naming
+# it; a rate limit the proof human's installation has spent is waited out, up to the 15 minutes
+# smoke_rate_limit_wait allows, reading the reset from `gh api rate_limit` (which no limit counts),
+# and the read made again once; any other failure fails naming gh's own answer. A bare `gh api`
+# whose failure was read as the commit's absence reported a spent rate limit as a missing commit
+# (INFRA-220, 2026-10-26).
+smoke_rate_limit_wait=900
+smoke_commit_files() {
+  local commit=$1 out err status reset wait attempt
+  err=$(mktemp)
+  for attempt in 1 2; do
+    status=0
+    out=$(timeout 60 gh api "repos/$repo/commits/$commit" --jq '.files[].filename' 2>"$err") || status=$?
+    if [ "$status" = 0 ]; then
+      rm -f "$err"
+      printf '%s\n' "$out"
+      return 0
+    fi
+    if grep -qi 'rate limit' "$err" && [ "$attempt" = 1 ]; then
+      reset=$(timeout 60 gh api rate_limit --jq '.resources.core.reset' 2>/dev/null) || reset=
+      case "$reset" in '' | *[!0-9]*) break ;; esac
+      wait=$((reset - $(date +%s) + 5))
+      if [ "$wait" -gt "$smoke_rate_limit_wait" ]; then break; fi
+      note "the proof human's GitHub installation has spent its rate limit; waiting ${wait}s for its reset at $(TZ=UTC date -d "@$reset" +%FT%TZ) to read $commit again" >&2
+      [ "$wait" -le 0 ] || sleep "$wait"
+      continue
+    fi
+    break
+  done
+  if grep -qE 'HTTP (404|422)' "$err"; then
+    rm -f "$err"
+    fail "the handoff commit $commit the implementer reported is not on $repo"
+  fi
+  local said
+  said=$(tr '\n' ' ' <"$err" | cut -c1-400)
+  rm -f "$err"
+  fail "GitHub did not answer the proof human's read of $repo commit $commit (gh exited $status): $said"
 }
 # The cleanup pull request's branch is proof/clean-main-<project, lowercased>. Stage 3's project is
 # a fresh key per run, but Stage 4b's is LEGSMOKE in every run, so the name alone cannot tell this

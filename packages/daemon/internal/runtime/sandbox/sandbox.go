@@ -1,9 +1,10 @@
 // Package sandbox runs each issue in one Agent Sandbox (agents.x-k8s.io/v1beta1 Sandbox,
-// kubernetes-sigs/agent-sandbox v1.0.3). Six role containers share its workspace and network;
-// each has a private launcher that starts and stops only its own worker-shim child. The project
-// controller (`controller: daemon`) runs in a Sandbox of its own whose pod has the controller's
-// launcher alone. The two are the runtime's two kinds of pod (podKind): one supervision path runs
-// both, and each kind builds the facets of its pod the other does not.
+// kubernetes-sigs/agent-sandbox v1.0.3). Its pod's one container, `roles`, runs one launcher that
+// serves all six workflow roles, each role's generation in namespaces of its own (`legion launcher
+// role-init`), and the roles share the issue's workspace and network. The project controller
+// (`controller: daemon`) runs in a Sandbox of its own whose pod has the controller's launcher
+// alone. The two are the runtime's two kinds of pod (podKind): one supervision path runs both, and
+// each kind builds the facets of its pod the other does not.
 //
 // Process Suspend leaves the shared Sandbox running, and so does Release of a claim on an issue.
 // The durable issue close first stops every stored role, then sets its Sandbox Suspended, waits
@@ -77,12 +78,13 @@ type Runtime struct {
 	probeRun                       string
 	volumeSize                     resource.Quantity
 	scheduling                     Scheduling
-	resources                      map[claim.Role]corev1.ResourceRequirements
+	resources                      PodResources
 	streamURL, daemonURL, envoyURL string
 	dispatchURL, dispatchToken     string
 	natsURLs                       []string
 	tools                          Tools
 	pod                            Pod
+	roleConfigFiles                map[claim.Role][]string
 	providerKeys                   map[string]string
 	providersSecrets               []string
 	natsUser                       string
@@ -284,11 +286,14 @@ func configureProber(opts Options) (*Runtime, error) {
 			return refuse("the image's %s path %q is not absolute", tool.name, tool.path)
 		}
 	}
-	// Every container of every pod the runtime builds takes its role's entry of Resources — the
-	// init containers the launching role's — so a role without a reservation would run with no
-	// requests or limits at all, a silently BestEffort pod.
-	for _, role := range launcherRoles {
-		if err := checkReservation(role, opts.Resources); err != nil {
+	// Every container of every pod the runtime builds takes its pod's reservation, an issue pod's
+	// init containers included, so a pod without one would run with no requests or limits at all,
+	// a silently BestEffort pod.
+	for _, pod := range []struct {
+		what         string
+		requirements corev1.ResourceRequirements
+	}{{"the issue pod", opts.Resources.Issue}, {"the controller's pod", opts.Resources.Controller}} {
+		if err := checkRequirements(pod.what, pod.requirements); err != nil {
 			return refuse("%v", err)
 		}
 	}
@@ -310,12 +315,22 @@ func configureProber(opts Options) (*Runtime, error) {
 			return refuse("providers secret %s is not a launch secret (%s)", name, strings.Join(opts.LaunchSecrets, ", "))
 		}
 	}
+	for role, files := range opts.RoleConfigFiles {
+		if !slices.Contains(roleConfigRoles, role) {
+			return refuse("Oh My Pi overlays for %q, which is not a Legion role", role)
+		}
+		for _, file := range files {
+			if !filepath.IsAbs(file) || strings.Contains(file, ":") {
+				return refuse("%s's Oh My Pi overlay %q is not an absolute path PI_CONFIG_FILES can name", role, file)
+			}
+		}
+	}
 	r := &Runtime{
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
 		volumeSize: opts.IssueVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
-		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
+		pod: opts.Pod, roleConfigFiles: opts.RoleConfigFiles, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		sessionStore: opts.SessionStore, controllerSlackChannels: slices.Clone(opts.ControllerSlackChannels),
 		bootTimeout: opts.BootTimeout, registrationIntervals: opts.RegistrationIntervals,
 		busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
@@ -338,27 +353,21 @@ func configureProber(opts Options) (*Runtime, error) {
 	return r, nil
 }
 
-// checkReservation is why resources' entry for role is not a reservation, or nil when it is one:
-// cpu and memory each limited and requested as positive quantities, the request no greater than
-// the limit — equal, the kubelet's Guaranteed rule for the one container, at the daemon's defaults;
-// below, which makes the pod Burstable, where the deployment set a lower request; ephemeral-storage
-// requested as a positive quantity no greater than its positive limit — QoS reads cpu and memory
-// alone, so the disk bound need not be one value as both: it is the node-disk isolation between
-// pods of unrelated trees sharing a node, a limit the kubelet evicts the offending pod alone for
-// passing, over a request the scheduler fits to the node's allocatable disk; and no other resource
-// named, since the daemon sizes nothing else (daemon/kubernetes.go, roleRequirements) and an
-// extended resource here would be one no operator configured. A missing role is the first fault:
-// its containers would carry the zero requirements.
-func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceRequirements) error {
-	requirements, ok := resources[role]
-	if !ok {
-		return fmt.Errorf("resources: no reservation for role %s", role)
-	}
-	return checkRequirements("role "+string(role), requirements)
-}
+// roleConfigRoles are the roles Options.RoleConfigFiles may name, in the workflow's order: every
+// issue role, then the controller.
+var roleConfigRoles = append(slices.Clone(claim.Roles), claim.RoleController)
 
-// checkRequirements is why requirements, what's (a role's, or the repository cache's), is not a
-// reservation (checkReservation's rule), or nil when it is one.
+// checkRequirements is why requirements, what's (an issue pod's, the controller's pod's, or the
+// repository cache's), is not a reservation, or nil when it is one: cpu and memory each limited and
+// requested as positive quantities, the request no greater than the limit — equal, the kubelet's
+// Guaranteed rule for the one container, at the daemon's defaults; below, which makes the pod
+// Burstable, where the deployment set a lower request; ephemeral-storage requested as a positive
+// quantity no greater than its positive limit — QoS reads cpu and memory alone, so the disk bound
+// need not be one value as both: it is the node-disk isolation between pods of unrelated trees
+// sharing a node, a limit the kubelet evicts the offending pod alone for passing, over a request
+// the scheduler fits to the node's allocatable disk; and no other resource named, since the daemon
+// sizes nothing else (daemon/kubernetes.go, requirements) and an extended resource here would be
+// one no operator configured.
 func checkRequirements(what string, requirements corev1.ResourceRequirements) error {
 	for _, list := range []struct {
 		name string
@@ -676,7 +685,8 @@ func (r *Runtime) sandboxClient() dynamic.ResourceInterface {
 	return r.dyn.Resource(sandboxGVR).Namespace(r.namespace)
 }
 
-// locatorFor is one role process's address in an issue pod: role's container.
+// locatorFor is one role process's address in its pod: the pod's one container, `roles` in an
+// issue pod and `controller` in the controller's (podContainer).
 func (r *Runtime) locatorFor(token claim.Token, role claim.Role, uid types.UID, generation uint64) runtime.Locator {
 	podUID := string(uid)
 	return runtime.Locator{
@@ -684,9 +694,18 @@ func (r *Runtime) locatorFor(token claim.Token, role claim.Role, uid types.UID, 
 		Claim:       token,
 		Incarnation: runtime.SandboxIncarnation(podUID, generation),
 		Sandbox: &runtime.SandboxLocator{
-			Namespace: r.namespace, Name: SandboxName(token), PodUID: podUID, Container: string(role), Generation: generation,
+			Namespace: r.namespace, Name: SandboxName(token), PodUID: podUID, Container: podContainer(role), Generation: generation,
 		},
 	}
+}
+
+// podContainer is the one container of the pod role runs in: the controller's pod's, named for its
+// role, or an issue pod's, `roles`, which every workflow role shares.
+func podContainer(role claim.Role) string {
+	if role == claim.RoleController {
+		return runtime.ControllerPodContainer
+	}
+	return runtime.IssuePodContainer
 }
 
 // checkLocator refuses a locator this runtime did not mint.

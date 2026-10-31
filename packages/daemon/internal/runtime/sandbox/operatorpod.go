@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -17,16 +18,17 @@ import (
 
 // imageEnv are the variables the worker image's final stage sets (packages/daemon/docker/
 // worker.Dockerfile, ENV), which every container inherits, and which a pod's env therefore may not
-// override: CGO_ENABLED=0 keeps cgo off by default in every process that inherits the image's
-// environment, the image's gcc on PATH notwithstanding, so a role opts in per command
-// (`CGO_ENABLED=1 go test -race …`) rather than a deployment for every build;
-// COREPACK_DEFAULT_TO_LATEST=0 keeps the corepack shims on the pnpm and yarn their corepack ships;
-// HOME and OMP_PROFILE place Oh My Pi's profile, whose models and settings the image carries and
-// whose sessions a pod never writes, every session being a row in the session database;
-// LEGION_OMP_PATH is the Oh My Pi the image probe proves the workers run; DO_NOT_TRACK=1 is
-// CodeGraph's telemetry and update-check opt-out; and PATH, which the runtime sets as well.
-// TestImageEnvIsWhatTheWorkerImageSets holds the list to the Dockerfile.
-var imageEnv = []string{"CGO_ENABLED", "COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
+// override: AWS_CA_BUNDLE holds the AWS CLI to the system root bundle the image probe verifies;
+// CGO_ENABLED=0 keeps cgo off by default in every process that inherits the image's environment,
+// the image's gcc on PATH notwithstanding, so a role opts in per command (`CGO_ENABLED=1 go test
+// -race …`) rather than a deployment for every build; COREPACK_DEFAULT_TO_LATEST=0 keeps the
+// corepack shims on the pnpm and yarn their corepack ships; HOME and OMP_PROFILE place Oh My Pi's
+// profile, whose models and settings the image carries and whose sessions a pod never writes,
+// every session being a row in the session database; LEGION_OMP_PATH is the Oh My Pi the image
+// probe proves the workers run; DO_NOT_TRACK=1 is CodeGraph's telemetry and update-check opt-out;
+// and PATH, which the runtime sets as well. TestImageEnvIsWhatTheWorkerImageSets holds the list to
+// the Dockerfile.
+var imageEnv = []string{"AWS_CA_BUNDLE", "CGO_ENABLED", "COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
 
 // setter is who sets a variable a worker's Oh My Pi starts with, and whether the operator's pod
 // env may set it too: the pod baseline yields to the operator's own value, and the operator's
@@ -39,7 +41,9 @@ type setter struct {
 // podVariables maps every variable a worker's Oh My Pi finds set before the shim exports a
 // provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned, the session
 // store's two variables named apart, since they are Legion's under either store, the controller's
-// Slack channel list, which the runtime sets in the controller's pod alone, and the name the
+// Slack channel list, which the runtime sets in the controller's pod alone, Claude Code's three
+// (claudelaunch.Environment) and the session its launcher keeps (claudelaunch.SessionVariable),
+// which it tells a Claude role alone, in its start command, and the name the
 // providers volume mounts the session database's URL under, ompsessions.DSNFileName), the worker
 // image (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
 // `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
@@ -56,6 +60,12 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 	}
 	add(ompsessions.DSNFileName, "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)", false)
 	add(slackChannelsVariable, "Legion's runtime sets for the controller it launches, from the project's slack_channels alone", false)
+	const claude = "Legion's runtime sets for a role it launches on Claude Code (worker_backends)"
+	for _, pair := range claudelaunch.Environment("") {
+		name, _, _ := strings.Cut(pair, "=")
+		add(name, claude, false)
+	}
+	add(claudelaunch.SessionVariable, claude, false)
 	for _, name := range slices.Sorted(maps.Keys(runtimeOwned)) {
 		add(name, "Legion's runtime sets in every pod", false)
 	}
@@ -90,12 +100,12 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // a mount at, under, or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool
 // runs from hides it or is hidden by it; and a mount at, under, or above xdgStateHome
 // (/home/legion/.local/state), the path Legion reserves in the image's home directory: no role's
-// agent keeps its Oh My Pi state there any more — every role's state home is its own, under the
+// agent keeps its Oh My Pi state there any more — each role has a separate state home, under the
 // issue's scratch on its volume (roleStateHome), which legionMountPaths() already fences through
 // TreeRoot — and the image makes nothing there either, but Legion names it to the issue pod's
 // workspace-init (xdgEnvironment), so an operator's mount over it is refused here, at
 // `--check-config`, rather than left to surprise someone in a pod. (An operator's
-// pod.VolumeMounts reaches the role containers and the image probe's and no init container, so
+// pod.VolumeMounts reaches the launcher containers and the image probe's and no init container, so
 // this row speaks for the name rather than for workspace-init.) A provider key must name a
 // variable nothing else in the pod sets, since the shim refuses one its own environment names
 // and would replace one Oh My
@@ -153,10 +163,22 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	for i, mount := range pod.VolumeMounts {
 		for _, owner := range owners {
 			for _, owned := range owner.paths {
-				if overlaps(mount.MountPath, owned) {
-					return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s, which %s: a mount may be neither at, under, nor above %s",
-						i, mount.MountPath, owned, owner.owns, owner.forbidden)
+				if spelled, ok := throughImageLinks(mount.MountPath, owned, overlaps); ok {
+					return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s%s, which %s: a mount may be neither at, under, nor above %s",
+						i, mount.MountPath, owned, spelled, owner.owns, owner.forbidden)
 				}
+			}
+		}
+		for _, covered := range roleNamespacePaths {
+			if spelled, ok := throughImageLinks(mount.MountPath, covered, atOrAbove); ok {
+				return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s is at or above %s%s, which every role's namespace in an issue pod covers with its own: mount under it instead",
+					i, mount.MountPath, covered, spelled)
+			}
+		}
+		for _, device := range roleReplacedPaths {
+			if spelled, ok := throughImageLinks(mount.MountPath, device, overlaps); ok {
+				return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s%s, which every role's namespace in an issue pod replaces with a filesystem of its own and carries no mount back onto: a mount may be neither at, under, nor above %s",
+					i, mount.MountPath, device, spelled, device)
 			}
 		}
 	}
@@ -182,8 +204,31 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 
 // overlaps reports whether one of two clean absolute paths is the other or lies under it.
 func overlaps(a, b string) bool {
-	under := func(child, parent string) bool { return parent == "/" || strings.HasPrefix(child, parent+"/") }
-	return a == b || under(a, b) || under(b, a)
+	return a == b || atOrAbove(a, b) || atOrAbove(b, a)
+}
+
+// atOrAbove reports whether the clean absolute path above is below or lies under it.
+func atOrAbove(above, below string) bool {
+	return above == below || above == "/" || strings.HasPrefix(below, above+"/")
+}
+
+// throughImageLinks reports whether a mount at mount stands to guarded as related says, comparing
+// every spelling the worker image's directory links give each (pathSpellings): the kubelet
+// resolves a mount path in the image, so a mount at /run/legion/roles is one at
+// /var/run/legion/roles. spelled is "" when the paths as written are related, and otherwise the
+// note a refusal adds, naming the two spellings that are.
+func throughImageLinks(mount, guarded string, related func(mount, guarded string) bool) (spelled string, ok bool) {
+	if related(mount, guarded) {
+		return "", true
+	}
+	for _, m := range pathSpellings(mount) {
+		for _, g := range pathSpellings(guarded) {
+			if related(m, g) {
+				return fmt.Sprintf(" (spelled %s against %s, through the worker image's directory links)", m, g), true
+			}
+		}
+	}
+	return "", false
 }
 
 // legionClaim reports whether claim is named as the volume claims Legion's pods and Sandboxes make

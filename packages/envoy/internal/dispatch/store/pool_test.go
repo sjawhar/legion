@@ -13,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The pool refuses a second connection to a caller that already holds one of its transactions:
@@ -248,10 +250,19 @@ func TestConcurrentReadsEachHoldOneConnection(t *testing.T) {
 
 // Listener hands out a connection of its own, outside the shared pool: one taken while every shared
 // connection is held is still served, it receives notifications, and once it is closed the next
-// call is served too.
+// call is served too. The shared pool here holds four connections rather than sharedPoolSize's:
+// the property is the same at any size, and holding sixty-four server connections while the
+// other packages' tests share the server would push a default Postgres past its hundred.
 func TestListenerIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
-	database := openTestStore(t)
 	ctx := context.Background()
+	config := openTestStore(t).Pool.Config().Copy()
+	config.MaxConns = 4
+	shared, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a four-connection shared pool: %v", err)
+	}
+	database := &Store{Pool: NewPool(shared)}
+	t.Cleanup(database.Pool.Close)
 	held := make([]*pgxpool.Conn, 0, database.Pool.Config().MaxConns)
 	for range database.Pool.Config().MaxConns {
 		conn, err := database.Pool.Acquire(ctx)
@@ -293,6 +304,73 @@ func TestListenerIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
 	}
 }
 
+// The event log's safe horizon observes on a pool of its own: with every shared connection held,
+// as under request load, an observation - the shape of the batch events.Horizon sends, one short
+// transaction that reads its snapshot's xmin and takes a transaction id - and the stall
+// diagnosis's single-row read are still served. Queued behind the shared pool, the observation
+// holds back every live reader of the event log for as long as the requests ahead of it take.
+func TestHorizonIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
+	ctx := context.Background()
+	config := openTestStore(t).Pool.Config().Copy()
+	config.MaxConns = 4
+	shared, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a four-connection shared pool: %v", err)
+	}
+	database := &Store{Pool: NewPool(shared)}
+	t.Cleanup(database.Pool.Close)
+	held := make([]*pgxpool.Conn, 0, database.Pool.Config().MaxConns)
+	for range database.Pool.Config().MaxConns {
+		conn, err := database.Pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire a shared connection: %v", err)
+		}
+		held = append(held, conn)
+	}
+	defer func() {
+		for _, conn := range held {
+			conn.Release()
+		}
+	}()
+	if stat := database.Pool.Stat(); stat.AcquiredConns() != stat.MaxConns() {
+		t.Fatalf("shared pool holds %d of %d connections, want all", stat.AcquiredConns(), stat.MaxConns())
+	}
+
+	horizon, err := database.Pool.Horizon()
+	if err != nil {
+		t.Fatalf("open the horizon pool: %v", err)
+	}
+	for round := range 2 {
+		waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		batch := &pgx.Batch{}
+		batch.Queue(`begin`)
+		batch.Queue(`select pg_snapshot_xmin(pg_current_snapshot())::text, pg_current_xact_id()::text`)
+		batch.Queue(`commit`)
+		results := horizon.SendBatch(waitCtx, batch)
+		var xmin, xid string
+		_, err := results.Exec()
+		if err == nil {
+			err = results.QueryRow().Scan(&xmin, &xid)
+		}
+		if err == nil {
+			_, err = results.Exec()
+		}
+		if closeErr := results.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			cancel()
+			t.Fatalf("round %d: observation with the shared pool fully acquired: %v", round, err)
+		}
+		var backends int
+		if err := horizon.QueryRow(waitCtx, "select count(*) from pg_stat_activity").Scan(&backends); err != nil {
+			cancel()
+			t.Fatalf("round %d: diagnosis read with the shared pool fully acquired: %v", round, err)
+		}
+		cancel()
+	}
+}
+
 // A refusal is keyed and logged by the call site that asked for the connection: one caller
 // tripping the guard in a loop logs its stack once, and another caller still logs its own.
 // Leaving Begin's guard to BeginTx, instead of to the unexported begin both entry points share,
@@ -306,9 +384,7 @@ func TestEachBeginRefusalIsKeyedToItsCaller(t *testing.T) {
 	ctx, release := HoldsConnection(context.Background())
 	defer release()
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 
 	if _, err := beginFromOneSite(ctx, database.Pool); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("transaction from the first call site: %v, want ErrNestedAcquire", err)

@@ -112,7 +112,7 @@ func TestSpawnAnswersTheScriptAndOtherwiseMintsALocatorThatValidates(t *testing.
 		Claim:       "legion-omp-LEGION-208-tester",
 		Incarnation: "pod-uid/1",
 		Sandbox: &runtime.SandboxLocator{
-			Namespace: "legion", Name: "legion-omp-legion-208", PodUID: "pod-uid", Container: "tester", Generation: 1,
+			Namespace: "legion", Name: "legion-omp-legion-208", PodUID: "pod-uid", Container: "roles", Generation: 1,
 		},
 	}
 	refusal := errors.New("no pane could be opened")

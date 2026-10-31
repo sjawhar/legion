@@ -9,7 +9,7 @@ tags:
   - mutation
   - agent-instructions
 date: 2026-10-26
-status: active
+status: superseded in part by sjawhar/legion#2423 — the pull request no longer rebuilds the generated `packages/claude-envoy/legion/skills/` copy, which main's Rebuild Claude Envoy plugin workflow commits after each merge, so the grep of that copy reads a `bun scripts/build.ts --out <dir>` build; the reader census and finding each guard by mutation stand
 module: packages/daemon/internal/classify
 related_issues:
   - "INFRA-272"

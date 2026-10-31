@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 
 import { primarySpec } from "../../api/issue-cache";
+import { issueQuery } from "../../api/queries";
 import { AttentionBadge } from "../../components/Badge";
 import { LabelPill, StatusPill } from "../../components/Pill";
 import {
@@ -15,19 +16,26 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { type IssueStatus, statusLabel } from "../project/board-model";
-import { actorLabel, shortSessionId } from "./actor";
+import { AgentName } from "./AgentName";
+import { itemOfBlock } from "./block-reference";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
-import { artifactTextQuery, prefetchReference, useReferenceData } from "./reference-target";
+import {
+  artifactTextQuery,
+  blockText,
+  prefetchReference,
+  useBlockDocument,
+  useReferenceData,
+  useReferencePath,
+} from "./reference-target";
 import {
   buildDispatchReference,
-  buildReferencePath,
   type DispatchReferenceRoute,
   isProjectRoute,
-  parseDispatchReference,
-  referenceTargetKind,
+  parseNodeReference,
   shortForm,
 } from "./routes";
+import { referenceTargetKind } from "./target-id";
 
 const CARD_ID = "ref-preview";
 /** Every hover-card trigger: a Markdown anchor `collectReferenceAnchors` tagged, a Proof link
@@ -159,10 +167,14 @@ function inHoverZone(node: EventTarget | null): boolean {
   return state !== undefined && (triggerOf(node) === state.target.anchor || cardContains(node));
 }
 
+/** The route a trigger names, read as a node's reference whatever the length of its target id: a
+ *  `data-dispatch-ref`, which the dashboard writes for a route it already holds, or a Proof link
+ *  mark's `data-dispatch-href`, the target its author named for the link (or the reference a
+ *  picture's fallback link writes), which the card reads as the server reads a request. */
 function routeOf(trigger: HTMLElement): DispatchReferenceRoute | undefined {
   const reference =
     trigger.getAttribute("data-dispatch-ref") ?? trigger.getAttribute("data-dispatch-href");
-  return reference === null ? undefined : parseDispatchReference(reference);
+  return reference === null ? undefined : parseNodeReference(reference);
 }
 
 /** Delegated hover/focus triggers for every reference trigger in the document, present or
@@ -241,8 +253,11 @@ function Body({ markdown }: { markdown: string }): ReactNode {
   );
 }
 
+/** The issue's full read, not the summary its links share: the card shows priority, labels, open
+ *  asks and the spec, and holds that read only while it is shown. */
 function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { issue } = useReferenceData(route);
+  const key = "key" in route ? route.key : undefined;
+  const { data: issue } = useQuery({ ...issueQuery(key), enabled: key !== undefined });
   const spec = primarySpec(issue);
   const specText = useQuery({
     ...artifactTextQuery(spec?.id, undefined),
@@ -287,25 +302,35 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   );
 }
 
+/** Who a document belongs to, as a card names it: an agent's conversation, a project, an issue.
+ *  The card is a tooltip inside one link to the reference (never interactive), so an agent in it
+ *  is named and marked by `AgentName` without a link of its own. */
+function documentOwner(route: DispatchReferenceRoute): ReactNode {
+  return route.kind === "agent-artifact" ? (
+    <>
+      agent <AgentName kind="static" sessionId={route.session} storedTitle={undefined} />
+    </>
+  ) : isProjectRoute(route) ? (
+    route.project
+  ) : (
+    route.key
+  );
+}
+
 function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { artifact, markdown } = useReferenceData(route);
+  const { artifact, markdown } = useReferenceData(route, { text: true });
   if (artifact === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
-  const owner =
-    route.kind === "agent-artifact"
-      ? `agent ${shortSessionId(route.session)}`
-      : isProjectRoute(route)
-        ? route.project
-        : route.key;
-  const latest = artifact.versions.at(-1)?.number;
+  const owner = documentOwner(route);
+  const latest = artifact.latest_version;
   return (
     <>
       <Heading>
         <span className={`font-normal ${textMutedOnSurface}`}>{owner} · </span>
         {artifact.name}
       </Heading>
-      {latest === undefined ? null : (
+      {latest === null ? null : (
         <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>v{latest}</span>
       )}
       {markdown === undefined || markdown.trim() === "" ? null : <Body markdown={markdown} />}
@@ -313,8 +338,60 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
   );
 }
 
+/** A block of a document: its document, then for a pinned reference the version it pins and how
+ *  the block stands since (`BlockPin.state`), then its text - the pinned version's for a pinned
+ *  reference, its current text otherwise. The document's name is the card's own read of its
+ *  summary, which no link to the block reads. A block of a comment or message heads with its item
+ *  and author in place of the document, and reads no summary (`useBlockDocument`), a comment's pin
+ *  naming a revision of the comment; its text is the one its graph node carries, as a document
+ *  block's is. */
+function BlockPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
+  const { block } = useReferenceData(route, { text: false });
+  const artifact = useBlockDocument(route);
+  const item = itemOfBlock(route);
+  const holder =
+    item === undefined ? artifact?.name : item.kind === "comment" ? "Comment" : "Message";
+  if (holder === undefined || block === undefined) {
+    return <Heading>{shortForm(route)}</Heading>;
+  }
+  const { node } = block;
+  const pin = node.pin;
+  const text = blockText(node);
+  const author = item === undefined ? undefined : node.made_by?.[0];
+  const unit = item === undefined ? "version" : "revision";
+  return (
+    <>
+      <Heading>
+        <span className={`font-normal ${textMutedOnSurface}`}>{documentOwner(route)} · </span>
+        {holder}
+        {author === undefined ? null : (
+          <>
+            <span className={`font-normal ${textMutedOnSurface}`}> · </span>
+            <AgentName actor={author} kind="static" />
+          </>
+        )}
+      </Heading>
+      {pin === undefined ? null : (
+        <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>
+          <span className="block">
+            {item === undefined ? "Version" : "Revision"} {pin.version}
+          </span>
+          <span className="block">
+            {pin.state === "changed"
+              ? `Changed in ${unit} ${node.changed_version}`
+              : pin.state === "removed"
+                ? `Removed in ${unit} ${pin.removed_version}`
+                : `Unchanged since ${unit} ${pin.version}`}
+          </span>
+        </span>
+      )}
+      {text === undefined || text.trim() === "" ? null : <Body markdown={text} />}
+    </>
+  );
+}
+
 function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { ask } = useReferenceData(route);
+  const { ask } = useReferenceData(route, { text: false });
   if (ask === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
@@ -333,26 +410,30 @@ function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
 }
 
 function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { comment } = useReferenceData(route);
+  const { comment } = useReferenceData(route, { text: false });
   if (comment === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
   return (
     <>
-      <Heading>{actorLabel(comment.comment.author)}</Heading>
+      <Heading>
+        <AgentName actor={comment.comment.author} kind="static" />
+      </Heading>
       <Body markdown={comment.comment.body} />
     </>
   );
 }
 
 function MessagePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { message } = useReferenceData(route);
+  const { message } = useReferenceData(route, { text: false });
   if (message === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
   return (
     <>
-      <Heading>{actorLabel(message.message.author)}</Heading>
+      <Heading>
+        <AgentName actor={message.message.author} kind="static" />
+      </Heading>
       <Body markdown={message.message.body} />
     </>
   );
@@ -368,6 +449,8 @@ function PreviewContent({ route }: { route: DispatchReferenceRoute }): ReactNode
       return <MessagePreview route={route} />;
     case "document":
       return <DocumentPreview route={route} />;
+    case "block":
+      return <BlockPreview route={route} />;
     case "issue":
       return <IssuePreview route={route} />;
   }
@@ -378,6 +461,7 @@ const ANCHOR_GAP_PX = 6;
 
 function PreviewCard({ target }: { target: PreviewTarget }): ReactNode {
   const element = useRef<HTMLDivElement>(null);
+  const path = useReferencePath(target.route);
   // Re-measured on every render: the card grows when its data arrives, and its size decides
   // whether it fits below the anchor. Fixed positioning against the anchor's viewport rect is
   // the boring choice that works in Chromium and iPhone Safari alike — the native Popover API
@@ -411,7 +495,7 @@ function PreviewCard({ target }: { target: PreviewTarget }): ReactNode {
       ref={element}
       role="tooltip"
     >
-      <Link className="block" tabIndex={-1} to={buildReferencePath(target.route)}>
+      <Link className="block" tabIndex={-1} to={path}>
         <PreviewContent route={target.route} />
       </Link>
     </div>

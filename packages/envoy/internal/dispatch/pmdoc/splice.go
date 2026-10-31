@@ -70,7 +70,7 @@ func BlockIndex(doc *Node, target Range) (int, error) {
 }
 
 func documentBlock(doc *Node, target Range, caller string) (index, start, end int, err error) {
-	if err := wantDocument(doc, caller); err != nil {
+	if _, err := ValidateDocument(doc, caller); err != nil {
 		return 0, 0, 0, err
 	}
 	position := 0
@@ -178,6 +178,11 @@ func insertAt(doc *Node, pos int, with *Node) (*Node, error) {
 	var inline *nodeLocation
 	var boundaries []insertionBoundary
 	walk(doc, func(node *Node, path []int, start, end int) bool {
+		// Only a node whose range holds pos can hold an inline point or a child boundary at pos, so
+		// skipping the rest keeps childBoundary, which measures every child, off nodes that cannot.
+		if pos < start || pos > end {
+			return true
+		}
 		if isTextblock(node.Type) && start+1 <= pos && pos <= end-1 {
 			location := nodeLocation{path: append([]int(nil), path...), pos: start, end: end}
 			inline = &location
@@ -231,14 +236,13 @@ func insertAt(doc *Node, pos int, with *Node) (*Node, error) {
 	return nil, fmt.Errorf("%w: %w", ErrSchema, ErrReplacementDoesNotFit)
 }
 
+// childBoundary is the index of node's child that starts at pos, by walk's position rules
+// (isOpaqueNodeType, boundaryTokens), or len(Children) when pos is the end of its last child.
 func childBoundary(node *Node, nodeStart, pos int) (int, bool) {
-	if node.Type == "text" || isLeafNodeType(node.Type) {
+	if isOpaqueNodeType(node.Type) {
 		return 0, false
 	}
-	childPos := nodeStart
-	if node.Type != "doc" {
-		childPos++
-	}
+	childPos := nodeStart + boundaryTokens(node.Type)/2
 	for index, child := range node.Children {
 		if childPos == pos {
 			return index, true

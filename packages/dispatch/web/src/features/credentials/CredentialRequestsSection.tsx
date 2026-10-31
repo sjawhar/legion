@@ -31,9 +31,9 @@ function pendingRowPath(row: CredentialPendingRow): string {
  *  deliberate quiet path; a failure is surfaced only when no list has ever loaded (a later poll
  *  failing keeps showing the last list it held, `useCredentialRequests`'s `status` stays `listed`).
  *  Calls `useAgents` once for every row in the list (before either early return, so the hook always
- *  runs), rather than once per `CredentialSessionLines` instance: N pending rows then share one 15s
- *  poll of the Agents list instead of each phasing its own from whenever it mounted (LEGION-587's
- *  review, round 3). */
+ *  runs), rather than once per `CredentialSessionLines` instance, for every row's directory and
+ *  machine; the shell's one poller (`AgentRegistryPoller`) refreshes that list, so N pending rows
+ *  never phase N polls of their own (LEGION-587's review, round 3). */
 export function CredentialRequestsSection({
   credentials: { requests, status },
 }: {

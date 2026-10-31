@@ -18,6 +18,9 @@ missing instruction.
 
 ## Accepting
 
+Sign off an issue with no children once its evidence holds; a parent only after its last round
+(below), because before it the approved head does not carry its children's merges.
+
 ```text
 dispatch comment --issue LEGION-40 --body-file - <<'EOF'
 <acceptance: scope, integration evidence, the tester's handoff, both E2E lines, the approved head>
@@ -26,13 +29,58 @@ legion({ op: "sign_off", issue: "LEGION-40" })
 ```
 
 - The issue's Dispatch status stays `needs_review` in `accepting`; `sign_off` moves it to `retro`.
-- Only what is beneath the issue counts for `SIGNOFF_CHILD_IN_WORKFLOW`: a child with nothing
-  beneath it is accepted while its own root runs.
+- A `catch-up` whose `reason` names an issue as waiting for your acceptance is the wake for it: it
+  is in `accepting`, and the `phase-finished` notice that moved it there may never have reached you
+  (the daemon drops a notice to a failed architect, so a retried one learns of the wait from its
+  catch-up alone). Accept it as this section says, a parent only after its last round (below).
+- The daemon lets nothing beneath the issue hold `sign_off`. A parent: sign off only after its
+  last round (below). The daemon then closes a parent that is not the root at its own merge, which
+  under this rule comes after its children's, and those children carry on under the root.
 - `request_backward_move` names the issue, because your grant serves the tree; the daemon starts
   that phase's role with your reason in its task.
 - `handoff_complete` from you in `accepting` is refused `ACCEPTANCE_IS_SIGN_OFF`. CI red at the head
   in `accepting` returns the issue to `implementing` by the daemon's table.
 - No `Production:` line is asked here: the production check is the implementer's, after the close.
+- A finding ask on the issue holds the acceptance: one a worker sent you, or one `dispatch read`
+  lists under `Open asks:` whose question opens `Finding from ` or `Clear defect from `
+  (`skill://legion-worker/references/findings.md`, "When no controller takes it"). Follow each
+  (`dispatch follow --ask <id> --action follow`) and, once it is answered, publish its reference
+  to the controller topic. Accept only once each is resolved, or carries the controller's
+  `Filed dispatch://`, `Handed dispatch://` or `Not filed:` reply, because a closed issue hides its
+  asks from the controller.
+
+## The last round
+
+A parent's own pull request proves each of its criteria, so sign off a parent that has children
+only on an approved head that carries the merges of every child those criteria need. Each
+criterion needs tester evidence at that head, or, for a criterion in another repository, on that
+repository's default branch. Nothing in the tree builds on the parent's own merge, because that
+merge comes last: a child that waits for it waits forever, so work another child builds on is a
+first-wave child of its own. While the approved head does not carry those merges, or the tester's
+evidence of a criterion in another repository is older than the close of a child it needs, leave
+the issue in `accepting` until each of those children has closed (`child-closed`) or been parked
+for good (`child-status`). Move a parked child's criterion to other work first; never downgrade
+it. Then,
+in one turn:
+
+1. `envoy_publish` to the tester's role topic: "The next round of <KEY> is its last round: a full
+   test round of every acceptance criterion, not the forward-merge re-check." The backward move's
+   reason reaches only the implementer.
+2. `request_backward_move` to `implementing`, with the reason "Last round: merge the default
+   branch your addressing line names into the branch, push, end your forward-merge comment with
+   `parent's last round: full test round`, and complete." Never use a hard-coded `main`. The move
+   counts a review round.
+
+While the parent waits in `accepting`, a conflict on its head or a child's merge needs no move of
+its own: the last round's forward merge resolves them all, so spend no backward move per child,
+because every backward move counts toward `review_round_cap`.
+
+A criterion proven on a deployed system is proven there after that child's deploy, as the
+repository's deploy skill says.
+
+If the pull request merged before its last round, it can carry no new head, so move nothing back.
+Once those children have closed, have a fresh `task` subagent prove each criterion on the default
+branch, post that evidence in the acceptance comment, then `sign_off`.
 
 ## The order after your acceptance
 
@@ -128,17 +176,20 @@ The merge closes the issue: when GitHub reports the pull request merged while th
   every member's open production check has closed.
 
 Nothing of the production check is yours. Its record lives on the pull request alone, since
-Dispatch refuses a write on a closed issue; a defect it finds is a `dispatch ask`, never an issue;
-and `read_record` shows a closed issue's open check (`check`: the pull request, the merge commit,
-the looks, what woke the last one and when the next is due).
+Dispatch refuses a write on a closed issue. A defect it finds is never an issue the implementer
+files: a clear defect goes to the controller, and any other is a `dispatch ask`. `read_record`
+shows a closed issue's open check (`check`: the pull request, the merge commit, the looks, what
+woke the last one and when the next is due).
 
 ## Hand-over at a root's linger
 
 When a person closes a root and it stays `done` through its linger, each child still in the
 workflow is handed to Legion as a root of its own: `todo` with the `legion` label, its phase, gate,
-phase records and pull request carried into a new generation, and that phase's role started. The
-child stays its own tree; reopening the old root does not take it back. Park a child with
-`park_child` before then when its work should stop with the root.
+phase records and pull request carried into a new generation, and that phase's role started. A
+child that never started but still waits on an unfinished issue is handed over too, carrying no
+run: it waits in the line until its blockers are done, and its architect starts as a fresh root
+and registers its own spec. The child stays its own tree; reopening the old root does not take it
+back. Park a child with `park_child` before then when its work should stop with the root.
 
 If you are that child's architect:
 

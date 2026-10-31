@@ -92,14 +92,14 @@ function deliveryPRIDs(body: unknown): string[] {
   });
 }
 
-/** Watches the page's real Delivery socket before navigation: no test injects a frame or replaces
- * the transport, so every assertion observes the server route the page actually uses. */
+/** Watches the page's real live socket before navigation: no test injects a frame or replaces the
+ * transport, so every assertion observes the server route the page actually uses. */
 function watchDeliverySocket(page: Page): LiveSocket {
   const opened = Promise.withResolvers<void>();
   const frames: LiveFrame[] = [];
   let connected = false;
   page.on("websocket", (socket) => {
-    if (new URL(socket.url()).pathname !== "/ws/delivery") return;
+    if (new URL(socket.url()).pathname !== "/ws/live") return;
     if (!connected) {
       connected = true;
       opened.resolve();
@@ -112,19 +112,18 @@ function watchDeliverySocket(page: Page): LiveSocket {
   return { frames, opened: opened.promise };
 }
 
-/** Proxies the real live route until a test cuts its connection, then rejects every reconnect so
- * the page remains observably reconnecting instead of immediately reopening after a 1012 restart. */
+/** Proxies the live route until a test cuts its connection, then rejects every reconnect so the
+ * page remains observably reconnecting instead of immediately reopening after a 1012 restart. */
 async function deliveryTransport(page: Page): Promise<{ disconnect: () => Promise<void> }> {
   const routes: WebSocketRoute[] = [];
   let disconnected = false;
-  await page.routeWebSocket(/\/ws\/delivery$/u, async (route) => {
+  await page.routeWebSocket(/\/ws\/live$/u, async (route) => {
     if (disconnected) {
       await route.close({ code: 1011, reason: "test network drop" });
       return;
     }
-    const server = route.connectToServer();
+    route.connectToServer();
     routes.push(route);
-    server.onMessage((message) => route.send(message));
   });
   return {
     disconnect: async () => {
@@ -341,7 +340,7 @@ test("after every socket is dropped, the page resumes and equals the GET answer"
     await insertMergedPR(693, "feat: before the reconnect");
     await expect(page.getByText("feat: before the reconnect", { exact: true })).toBeVisible();
 
-    const disconnected = await context.request.post("/api/v1/delivery/_test/disconnect", {
+    const disconnected = await context.request.post("/api/v1/live/_test/disconnect", {
       headers: { Authorization: "Bearer e2e-token" },
     });
     expect(disconnected.status()).toBe(200);

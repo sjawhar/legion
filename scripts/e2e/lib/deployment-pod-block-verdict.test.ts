@@ -7,7 +7,8 @@ import { runJq } from "./run-jq.ts";
 
 // Stage 4b's verdict on a deployment's worker pod block (deployment-pod-block): the issue pod the
 // daemon launched from the block must carry its ServiceAccount, every volume as the block declares
-// it, every mount in every role container, and every env name and value on a role's process.
+// it, every mount in its one `roles` container (a mount under the image's home where that container
+// holds it, under /var/run/legion/home), and every env name and value on a role's process.
 
 const program = fileURLToPath(new URL("./deployment-pod-block-verdict.jq", import.meta.url));
 const dir = mkdtempSync(join(tmpdir(), "deployment-pod-block-verdict-test."));
@@ -30,8 +31,8 @@ interface ObjectSource {
 interface BlockVolume {
   name: string;
   projected?: { sources: (TokenSource | ObjectSource)[] };
-  config_map?: { name: string; items?: { key: string; path: string }[] };
-  secret?: { name: string };
+  config_map?: { name: string; items?: { key: string; path: string }[]; default_mode?: string };
+  secret?: { name: string; default_mode?: string };
   persistent_volume_claim?: { name: string };
   nfs?: { server: string; path: string };
 }
@@ -51,8 +52,8 @@ interface PodToken {
 interface PodVolume {
   name: string;
   projected?: { sources: { serviceAccountToken: PodToken }[] };
-  configMap?: { name: string; items?: { key: string; path: string }[] };
-  secret?: { secretName: string };
+  configMap?: { name: string; items?: { key: string; path: string }[]; defaultMode?: number };
+  secret?: { secretName: string; defaultMode?: number };
   persistentVolumeClaim?: { claimName: string };
   nfs?: { server: string; path: string };
 }
@@ -142,11 +143,7 @@ const pod = (): Pod => ({
     serviceAccountName: "legion-worker",
     automountServiceAccountToken: false,
     initContainers: [{ name: "workspace-init", volumeMounts: [] }],
-    containers: ["architect", "planner"].map((name) => ({
-      name,
-      env: [{ name: "POD_UID" }],
-      volumeMounts: roleMounts(),
-    })),
+    containers: [{ name: "roles", env: [{ name: "POD_UID" }], volumeMounts: roleMounts() }],
     volumes: [
       { name: "issue", persistentVolumeClaim: { claimName: "x" } },
       {
@@ -296,6 +293,47 @@ describe("deployment-pod-block verdict", () => {
     ]);
   });
 
+  test("a default_mode the block sets is read against the pod's defaultMode", () => {
+    const b = block();
+    b.volumes[1] = {
+      name: "kubernetes-api-ca",
+      config_map: {
+        name: "kube-root-ca.crt",
+        items: [{ key: "ca.crt", path: "ca.crt" }],
+        default_mode: "0o444",
+      },
+    };
+    b.volumes[2] = {
+      name: "operator-creds",
+      secret: { name: "legion-operator-creds", default_mode: "0440" },
+    };
+    const p = pod();
+    p.spec.volumes[2] = {
+      name: "kubernetes-api-ca",
+      configMap: {
+        name: "kube-root-ca.crt",
+        items: [{ key: "ca.crt", path: "ca.crt" }],
+        defaultMode: 0o444,
+      },
+    };
+    p.spec.volumes[3] = {
+      name: "operator-creds",
+      secret: { secretName: "legion-operator-creds", defaultMode: 0o440 },
+    };
+    expect(verdict(p, b)).toEqual({ process: { pid: 10, comm: "legion" }, missing: [], wrong: [] });
+
+    // The API server stores 0644 for a volume that sets no mode, so one the pod left out reads so.
+    const open = pod();
+    open.spec.volumes[3] = {
+      name: "operator-creds",
+      secret: { secretName: "legion-operator-creds", defaultMode: 0o644 },
+    };
+    expect(verdict(open, b).wrong).toEqual([
+      "volume kubernetes-api-ca has defaultMode 0644, not 0444",
+      "volume operator-creds has defaultMode 0644, not 0440",
+    ]);
+  });
+
   test("a projected source the pod lacks is missing", () => {
     const b = block();
     b.volumes[0] = {
@@ -318,13 +356,38 @@ describe("deployment-pod-block verdict", () => {
     ]);
   });
 
-  test("a mount missing from one role container is missing there alone", () => {
+  test("a mount the roles container lacks is missing", () => {
     const p = pod();
-    p.spec.containers[1].volumeMounts = roleMounts().filter(
+    p.spec.containers[0].volumeMounts = roleMounts().filter(
       (m) => m.name !== "kubernetes-api-token"
     );
     expect(verdict(p).missing).toEqual([
-      "mount kubernetes-api-token at /var/run/legion/kubernetes/token in container planner",
+      "mount kubernetes-api-token at /var/run/legion/kubernetes/token in container roles",
+    ]);
+  });
+
+  test("a mount under the image's home is held where the roles container mounts the home's volumes", () => {
+    const b = block();
+    b.volumes.push({ name: "cloud-config", secret: { name: "cloud-config" } });
+    b.volume_mounts.push({ volume: "cloud-config", mount_path: "/home/legion/.config/gcloud" });
+    const p = pod();
+    p.spec.volumes.push({ name: "cloud-config", secret: { secretName: "cloud-config" } });
+    p.spec.containers[0].volumeMounts.push({
+      name: "cloud-config",
+      mountPath: "/var/run/legion/home/.config/gcloud",
+      readOnly: true,
+    });
+    expect(verdict(p, b)).toEqual({ process: { pid: 10, comm: "legion" }, missing: [], wrong: [] });
+    // Control: the mount at the block's own path in the roles container is not where the role's
+    // namespaces bind it back from.
+    const atHome = structuredClone(p);
+    atHome.spec.containers[0].volumeMounts[atHome.spec.containers[0].volumeMounts.length - 1] = {
+      name: "cloud-config",
+      mountPath: "/home/legion/.config/gcloud",
+      readOnly: true,
+    };
+    expect(verdict(atHome, b).missing).toEqual([
+      "mount cloud-config at /var/run/legion/home/.config/gcloud in container roles",
     ]);
   });
 
@@ -343,8 +406,8 @@ describe("deployment-pod-block verdict", () => {
       subPath: "ca.crt",
     };
     expect(verdict(p).wrong).toEqual([
-      "mount kubernetes-api-ca at /var/run/legion/kubernetes/ca in container architect has sub_path ca.crt",
-      "mount kubernetes-api-ca at /var/run/legion/kubernetes/ca in container architect has read_only false",
+      "mount kubernetes-api-ca at /var/run/legion/kubernetes/ca in container roles has sub_path ca.crt",
+      "mount kubernetes-api-ca at /var/run/legion/kubernetes/ca in container roles has read_only false",
     ]);
   });
 
@@ -356,7 +419,7 @@ describe("deployment-pod-block verdict", () => {
       readOnly: true,
     };
     expect(verdict(p).wrong).toEqual([
-      "mount operator-creds at /etc/legion-operator/creds in container architect has read_only true",
+      "mount operator-creds at /etc/legion-operator/creds in container roles has read_only true",
     ]);
   });
 
@@ -370,8 +433,8 @@ describe("deployment-pod-block verdict", () => {
     const none = verdict(pod(), block(), "#1 legion\n");
     expect(none.process).toBeNull();
     expect(none.missing).toEqual([
-      "env KUBECONFIG on any process of the architect container",
-      "env MODEL_GATEWAY_URL on any process of the architect container",
+      "env KUBECONFIG on any process of the architect",
+      "env MODEL_GATEWAY_URL on any process of the architect",
     ]);
   });
 

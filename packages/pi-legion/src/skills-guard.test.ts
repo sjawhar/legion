@@ -32,6 +32,15 @@ afterAll(() => {
   rmSync(path.dirname(staged), { recursive: true, force: true });
 });
 
+// A Legion architect reads leading-a-work-stream. Each edit of a root spec after approval is a new
+// version, which closes the design gate, so the record of accepted requests and waits lives in an
+// artifact of its own and never in the spec.
+test("leading-a-work-stream keeps open items in their own artifact, never the spec", () => {
+  const skill = readFileSync(path.join(staged, "leading-a-work-stream", "SKILL.md"), "utf8");
+  expect(skill).toContain("a line in that issue's `open-items.md` artifact, never its spec");
+  expect(skill).not.toContain("## Open items");
+});
+
 test("every staged file is under Oh My Pi's spill threshold, so a skill:// read arrives whole", () => {
   expect(oversizedFiles(staged)).toEqual([]);
 });
@@ -250,7 +259,8 @@ test("no staged skill or daemon prompt says what a pull request body `CI` line h
 // against a composed prompt: the composed implementer prompt carries the sentence twice, from
 // `roles/implementer.md` and from `go/worker-common.md`. The whole sentence is counted literally, so
 // a reworded half cannot satisfy it. The `packages/claude-envoy/legion/` mirror needs no pin of its
-// own; `packages/claude-envoy/tests/legion-plugin-fresh.test.ts` fails when it drifts from these.
+// own: main's Rebuild Claude Envoy plugin workflow generates it from these (pull requests never
+// commit it).
 //
 // INFRA-83 adds the fifth text. It moved the trailer's contract out of `legion-worker/SKILL.md`
 // into `legion-worker/references/skip-checks-trailer.md`, which is now the file a worker reads

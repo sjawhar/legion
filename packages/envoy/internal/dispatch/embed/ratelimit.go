@@ -12,8 +12,8 @@ import (
 const (
 	// rateLimitFloor is the fastest RateLimitedEmbedder ever paces calls: the steady-state ceiling
 	// it climbs back to after a run of successful batches. Chosen to leave headroom below the
-	// account's sustainable rate for a live search's own query embedding, which never goes
-	// through this limiter at all (cmd/dispatch wires the unwrapped *Client there). The slowest
+	// sustainable rate of the model service for a live search's own query embedding, which never
+	// goes through this limiter at all (cmd/dispatch wires the unwrapped client there). The slowest
 	// this limiter ever paces calls to, reached only after several consecutive throttled batches
 	// in a row, is retry.MaxDelay (not a duplicate constant of its own): the same ceiling
 	// embedqueue's own batchBackoff already uses, so the two mechanisms agree on how bad
@@ -21,21 +21,22 @@ const (
 	rateLimitFloor = 750 * time.Millisecond
 	// rateLimitRecoveryStep is how much one successful (non-throttled) call shortens the interval
 	// by - additive increase, the slow half of AIMD: recovering one small step at a time, rather
-	// than snapping back to rateLimitFloor the moment Bedrock answers once, means a provider that
-	// is still only barely keeping up does not immediately get hit with a burst back at full rate.
+	// than snapping back to rateLimitFloor the moment the model service answers once, means a
+	// provider that is still only barely keeping up does not immediately get hit with a burst
+	// back at full rate.
 	rateLimitRecoveryStep = 50 * time.Millisecond
 	// rateLimitBackoffFactor is how much one throttled call lengthens the interval by -
 	// multiplicative decrease, the fast half of AIMD: back off hard and immediately on the first
-	// sign the account's shared Bedrock quota is exceeded, the same shape TCP congestion control
+	// sign the model service's shared quota is exceeded, the same shape TCP congestion control
 	// uses for the same reason (a shared resource signalled "too much", not a per-caller limit).
 	rateLimitBackoffFactor = 2
 )
 
 // RateLimitedEmbedder paces calls to an inner Embedder so Dispatch's background embedding work -
-// internal/dispatch/embedqueue's poller and a backfill run, its only two callers - never
-// saturates the account's Bedrock quota to the point a live search request's own query embedding
-// gets caught in the same throttling. cmd/dispatch wires this wrapper only around the Embedder it
-// hands to embedqueue.Deps; api.Deps keeps the unwrapped Client directly, so a live query is never
+// internal/dispatch/embedqueue, its only caller - never saturates the model service's quota to
+// the point a live search request's own query embedding gets caught in the same throttling.
+// cmd/dispatch wires this wrapper only around the Embedder it hands to
+// embedqueue.Deps; api.Deps keeps the unwrapped client directly, so a live query is never
 // paced by this limiter and never queues behind background work, however deep into backoff that
 // work currently is - bounded instead only by its own ordinary searchEmbedTimeout.
 //
@@ -44,7 +45,7 @@ const (
 // immediate backoff on the first sign of shared-resource pressure), and shortens it by
 // rateLimitRecoveryStep on every call that was not throttled (slow, incremental recovery, so a
 // provider that is only barely keeping up is not immediately hit with a burst back at full rate).
-// rateLimitFloor is deliberately below the account's sustainable rate, which is what
+// rateLimitFloor is deliberately below the model service's sustainable rate, which is what
 // "leaves headroom" means in practice: background work's own steady-state ceiling stops short of
 // the full quota, leaving room for a live query's call - never gated by this limiter at all - to
 // get through even while background work is actively pacing itself near that ceiling.
@@ -71,14 +72,14 @@ func NewRateLimitedEmbedder(inner Embedder) *RateLimitedEmbedder {
 // one) rather than a hand-rolled elapsed-time computation, then calls the inner Embedder and
 // adjusts that interval from the result: longer (multiplicative) on a throttled error, shorter
 // (additive, floored at rateLimitFloor) on anything else - an ordinary success or a non-throttled
-// failure both count as "Bedrock was not signalling capacity pressure this time." It reserves
-// with Reserve rather than calling the package's own ctx-aware Wait, because Wait fails fast with
-// its own error the moment it can tell the reservation's delay would outlast ctx's deadline,
-// without ever waiting for ctx to actually end - and embedqueue's callers depend on ctx.Err()
-// being set by the time this call returns (handleGroupFailure's own ctx.Err() check, which every
-// embedRows loop iteration relies on), to tell a cancelled wait apart from every other failure.
-// Reserve, by contrast, hands back a delay to wait out ourselves, so the select below only ever
-// returns once ctx.Done() has genuinely fired.
+// failure both count as "the model service was not signalling capacity pressure this time." It
+// reserves with Reserve rather than calling the package's own ctx-aware Wait, because Wait fails
+// fast with its own error the moment it can tell the reservation's delay would outlast ctx's
+// deadline, without ever waiting for ctx to actually end - and embedqueue's callers depend on
+// ctx.Err() being set by the time this call returns (handleGroupFailure's own ctx.Err() check,
+// which every embedRows loop iteration relies on), to tell a cancelled wait apart from every
+// other failure. Reserve, by contrast, hands back a delay to wait out ourselves, so the select
+// below only ever returns once ctx.Done() has genuinely fired.
 func (r *RateLimitedEmbedder) Embed(ctx context.Context, texts []string, inputType InputType) ([][]float32, error) {
 	reservation := r.limiter.Reserve()
 	if delay := reservation.Delay(); delay > 0 {
@@ -95,6 +96,12 @@ func (r *RateLimitedEmbedder) Embed(ctx context.Context, texts []string, inputTy
 	r.adjust(err)
 	return vectors, err
 }
+
+// Identity is the inner Embedder's: pacing calls changes nothing about which model embeds them.
+func (r *RateLimitedEmbedder) Identity() string { return r.inner.Identity() }
+
+// Limits is the inner Embedder's own.
+func (r *RateLimitedEmbedder) Limits() Limits { return r.inner.Limits() }
 
 // adjust moves interval (additive recovery, multiplicative backoff, as RateLimitedEmbedder's own
 // doc comment describes) and pushes a changed value onto the rate.Limiter that Embed actually

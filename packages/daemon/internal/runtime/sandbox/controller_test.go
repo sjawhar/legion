@@ -199,8 +199,8 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	if want := []string{
 		"AGENT_SECRETS_KEY_DIR", "AGENT_SECRETS_URL", "BUN_INSTALL_CACHE_DIR", "DISPATCH_TOKEN_FILE", "DISPATCH_URL",
 		"ENVOY_NATS_URL", "ENVOY_URL", "GH_CONFIG_DIR", "GH_HOST", "GH_TOKEN",
-		"GITHUB_TOKEN", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_KEY_2",
-		"GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1", "GIT_CONFIG_VALUE_2", "GIT_TERMINAL_PROMPT", "GOCACHE", "GOMODCACHE",
+		"GITHUB_TOKEN", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_KEY_2", "GIT_CONFIG_KEY_3", "GIT_CONFIG_KEY_4",
+		"GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1", "GIT_CONFIG_VALUE_2", "GIT_CONFIG_VALUE_3", "GIT_CONFIG_VALUE_4", "GIT_TERMINAL_PROMPT", "GOCACHE", "GOMODCACHE",
 		"LEGION_BOOT_TOKEN_FILE", "LEGION_CONTROLLER", "LEGION_DAEMON_URL",
 		"LEGION_GENERATION", "LEGION_GH_OWNERS_DIR", "LEGION_GH_PATH", "LEGION_PROJECT", "LEGION_ROLE", "LEGION_SLACK_CHANNELS", "LEGION_STATE_DIR",
 		"OMP_SESSION_SQL_DSN_FILE", "OMP_SESSION_STORAGE", "PATH", "PI_SHELL_PREFIX", "POD_UID", "TMPDIR",
@@ -349,7 +349,7 @@ func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("2Gi")},
 		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("40Gi")},
 	}
-	opts.Resources[claim.RoleController] = sized
+	opts.Resources.Controller = sized
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)

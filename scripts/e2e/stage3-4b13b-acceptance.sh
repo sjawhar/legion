@@ -6,8 +6,8 @@
 # lib/workflow.sh, and drives real agents through:
 #   - prompts.New rewriting a stale Go prompt part at boot and leaving identical ones untouched;
 #   - the refused root stop naming `legion claims close` only for a tree no workflow issue backs;
-#   - the phase-stall follow-up: a planner whose turn ends with its phase open gets the one
-#     follow-up, and the tool's handoff_complete closes the stall, with no follow-up after it;
+#   - the phase reminder: a planner whose turn ends with its phase open is reminded, and the
+#     tool's handoff_complete closes the phase, with no reminder after it;
 #   - park_child / rerun_child with their refusals, and the Dispatch writes' actor;
 #   - phase-finished carrying the worker's summary and verdict;
 #   - the daemon posting the merger's READY packet (direct, and stored across a refused gate), and
@@ -82,8 +82,8 @@ port_pg=${ACCEPT_PG_PORT:?ACCEPT_PG_PORT is the host port of that container}
 pg_user=postgres
 legion_db="legion_$ptoken" dispatch_db="dispatch_$ptoken"
 nats_bin=${ACCEPT_NATS_BIN:?ACCEPT_NATS_BIN is the nats-server binary the run starts}
-daemon_pid='' dispatch_pid='' listener_pid='' bridge_pid='' watcher_pid='' nats_pid=''
-port_daemon='' port_listener='' port_dispatch='' port_worker_stream='' port_nats=''
+daemon_pid='' dispatch_pid='' listener_pid='' bridge_pid='' watcher_pid='' nats_pid='' daemon_keeper_pid=''
+port_daemon='' port_listener='' port_dispatch='' port_nats=''
 # timeout_hook names a function lib/rig.sh's until_true runs when a wait times out.
 # shellcheck disable=SC2034
 timeout_hook=''
@@ -154,6 +154,7 @@ cleanup() {
   stop_pid "$listener_pid"
   stop_pid "$bridge_pid"
   stop_pid "$nats_pid"
+  stop_pid "$daemon_keeper_pid"
   stop_pid "${instructor_pid:-}"
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
@@ -198,53 +199,41 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ---- the rig: copied from stage3-devbox-workflow.sh ------------------------------------------------
+# Each service serves on a port the kernel chose, held from that choice until the service serves on
+# it (lib/rig.sh's start_held); the daemon's, which its restart keeps, by a keeper for the whole run.
 start_listener() {
-  local token attempt offset result
+  local token
   token=$(cat "$work/envoy-token")
-  for attempt in 1 2 3 4 5; do
-    pick_port port_listener
-    offset=$(log_size listener)
-    # shellcheck disable=SC2154 # require_app_inputs sets it; this file sources its libs as source=/dev/null
-    ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
-      ENVOY_MACHINE_ID="legion-accept4b13b-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
-    result=0
-    await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
-      curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
-    [ "$result" != 0 ] || return 0
-    note "the Envoy listener lost port $port_listener (attempt $attempt); picking another"
-  done
-  fail "the Envoy listener lost its picked port five times"
+  # shellcheck disable=SC2154 # require_app_inputs sets it; this file sources its libs as source=/dev/null
+  ENVOY_API_TOKEN="$token" ENVOY_LISTEN_HOST=127.0.0.1 \
+    ENVOY_MACHINE_ID="legion-accept4b13b-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
+    start_held listener port_listener ENVOY_LISTEN_FD --env 'PORT={port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
+  await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
+    curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions"
 }
 
 start_dispatch() {
-  local keep=${1:-} dispatch_token envoy_token pg_password attempt offset result
+  local dispatch_token envoy_token pg_password
   dispatch_token=$(cat "$work/dispatch-token")
   envoy_token=$(cat "$work/envoy-token")
   pg_password=$(cat "$work/postgres-password")
   mkdir -p "$work/dispatch-home"
   chmod 0700 "$work/dispatch-home"
-  for attempt in 1 2 3 4 5; do
-    [ -n "$keep" ] || pick_port port_dispatch
-    offset=$(log_size dispatch)
-    # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
-    # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME.
-    DATABASE_URL="postgres://$pg_user:$pg_password@127.0.0.1:$port_pg/$dispatch_db?sslmode=disable" \
-      DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
-      XDG_CONFIG_HOME="$work/dispatch-home/.config" \
-      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
-      DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
-      DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-dispatch"
-    result=0
-    await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
-      curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
-    [ "$result" != 0 ] || return 0
-    [ -z "$keep" ] || fail "the restarted scratch Dispatch lost port $port_dispatch"
-    note "the scratch Dispatch lost port $port_dispatch (attempt $attempt); picking another"
-  done
-  fail "the scratch Dispatch lost its picked port five times"
+  # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
+  # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME. They are the server's alone,
+  # set by its env, not the held-port helper's that runs it.
+  DATABASE_URL="postgres://$pg_user:$pg_password@127.0.0.1:$port_pg/$dispatch_db?sslmode=disable" \
+    DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" \
+    DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
+    DISPATCH_LISTEN_HOST=127.0.0.1 NATS_URLS="nats://127.0.0.1:$port_nats" \
+    ENVOY_URL="http://127.0.0.1:$port_listener" \
+    start_held dispatch port_dispatch DISPATCH_LISTEN_FD \
+    --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+    HOME="$work/dispatch-home" XDG_CONFIG_HOME="$work/dispatch-home/.config" "$work/envoy-dispatch"
+  await_start dispatch "$dispatch_pid" 60 "the scratch Dispatch server" \
+    curl -fsS "http://127.0.0.1:$port_dispatch/api/v1"
 }
 
 # The one difference from Stage 3's configuration: admission_cap 3 (three roots) and a merge queue
@@ -253,7 +242,6 @@ write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
 port: $port_daemon
-worker_stream_port: $port_worker_stream
 postgres_dsn: postgres://$pg_user:$(cat "$work/postgres-password")@127.0.0.1:$port_pg/$legion_db?sslmode=disable
 state_dir: $state
 operator_token_file: $work/operator-token
@@ -275,27 +263,23 @@ $(<"$work/github-apps.yaml")
 EOF
 }
 
+# start_daemon [keep] — keep restarts the Go daemon on the port every pane already names. Its port
+# is kept for the run, so each poll of it carries a timeout: between two daemons a request waits
+# unanswered instead of being refused.
 start_daemon() {
-  local keep=${1:-} attempt offset result
-  for attempt in 1 2 3 4 5; do
-    if [ -z "$keep" ]; then
-      pick_port port_daemon
-      pick_port port_worker_stream
-      write_legion_config
-    fi
-    offset=$(log_size daemon)
-    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$work/realtmux:$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
-      -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
-      "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
-    daemon_pid=$!
-    result=0
-    await_start daemon "$daemon_pid" "$offset" 180 "the Go daemon to answer /healthz" \
-      curl -fsS "http://127.0.0.1:$port_daemon/healthz" || result=$?
-    [ "$result" != 0 ] || return 0
-    [ -z "$keep" ] || fail "the restarted Go daemon lost port $port_daemon or $port_worker_stream"
-    note "the Go daemon lost a port (attempt $attempt); picking again"
-  done
-  fail "the Go daemon lost a picked port five times"
+  local keep=${1:-}
+  if [ -z "$keep" ]; then
+    keep_port daemon_keeper port_daemon
+    write_legion_config
+  fi
+  # HOME, OMP_PROFILE and PATH are the daemon's alone, set by its env, not the held-port helper's
+  # that runs it.
+  start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
+    -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" HOME="$omp_home" OMP_PROFILE="$profile" \
+    PATH="$(dirname "$real_gh"):$work/realtmux:$PATH" "$work/legion" start --config "$work/legion.yaml"
+  await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
 }
 stop_daemon() { kill -TERM "$daemon_pid" 2>/dev/null || true; stop_pid "$daemon_pid"; daemon_pid=; }
 
@@ -381,7 +365,7 @@ rig_sessions_json() {
   jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$evidence/logs/daemon.log"
 }
 production_audit() {
-  local sessions header events envoy found=0
+  local sessions bearer events envoy found=0
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
@@ -390,12 +374,20 @@ production_audit() {
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then printf 'production Envoy listener holds rig sessions: %s\n' "$envoy"; found=1; fi
   if [ "$prod_baseline" = none ]; then printf 'no user-level Dispatch configuration\n'; return "$found"; fi
-  header=$(prod_header_file)
-  curl -sS -N --max-time 25 -H "@$header" "$prod_dispatch_url/api/v1/events?since=$((prod_baseline - 1))" >"$work/production-events.sse" 2>/dev/null || true
-  rm -f "$header"
-  events=$(sed -n 's/^data: //p' "$work/production-events.sse" | jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+  bearer=$work/production-dispatch-bearer
+  (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+  # A refusal of the feed is printed on stderr; the replay's close, resubscribe and duplicate lines
+  # carry no event and are not counted, so an event a redial repeats counts once. The probe takes
+  # its cursor from Dispatch's own events_start, so a --since the server clamps to its head leaves
+  # the events after that head counted, not written off as duplicates.
+  bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
+    --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
+    >"$work/production-events.jsonl" || true
+  rm -f "$bearer"
+  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+    [.[] | .event | select(. != null)] |
     {control: any(.[]; .id == $baseline), count: length,
-     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project))) | {id, issue_key, type, actor: .actor.id, created_at}]}')
+     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project))) | {id, issue_key, type, actor: .actor.id, created_at}]}' "$work/production-events.jsonl")
   printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
   if ! jq -e '.control' >/dev/null <<<"$events"; then printf 'production Dispatch replay did not return its baseline event %s\n' "$prod_baseline"; return 1; fi
   if ! jq -e '.rig == []' >/dev/null <<<"$events"; then printf 'production Dispatch has rig-authored events: %s\n' "$(jq -c .rig <<<"$events")"; found=1; fi
@@ -414,7 +406,8 @@ role_unheld() { ! envoy_role_holder "$1" >/dev/null 2>&1; }
 role_held_by() { [ "$(envoy_role_holder "$1" 2>/dev/null)" = "$2" ]; }
 token_session() { claim_json "$1" | jq -er '.session // empty | select(. != "")'; }
 
-# The follow-up the phase stall sends (packages/pi-legion/src/phase-stall.ts FOLLOW_UP).
+# The reminder the phase stall sends (packages/pi-shared/src/phase-stall.ts REMINDER), which now
+# comes at the end of every turn a phase stays open through; this check reads the first of them.
 followup_needle="Your turn ended with your Legion phase still open"
 
 # tool_outcomes FILE: every tool result in an OMP session file, joined to the call that produced it.
@@ -437,11 +430,17 @@ gate_send() {
   gate_artifacts[$issue]=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   architect_registers_gate "$issue" "$issue"
 }
+# gate_finish ISSUE: the root waits on a person at its closed gate without a slot while its
+# architect stays live (await_gate_wait); the proof human approves, the root takes a slot back
+# (await_answered_slot), and only then reaches planning. admission_cap 3 is the run's three roots
+# (the child takes none), so the slots every waiting root gave back stand free and the answered root takes one at once.
 gate_finish() {
   local issue=$1 artifact=${gate_artifacts[$1]}
   until_true 600 "$issue architect to register primary artifact $artifact" sh -c \
     "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$issue' --arg artifact '$artifact' '.issues[\$issue].designGate.artifactId == \$artifact and .issues[\$issue].designGate.currentVersion > 0'"
+  await_gate_wait "$issue" "$issue"
   dispatch_human POST "artifacts/$artifact/reviews" '{"state":"approved"}' >/dev/null
+  await_answered_slot "$issue" "$issue"
   wait_for_phase "$issue" planning
   wait_for_worker "$issue" planner
 }
@@ -486,7 +485,7 @@ instruction_for() {
   esac
 }
 instructor() {
-  local issue spec role phase f key tick=0 n st cl cur live
+  local issue spec role phase f key tick=0 n st cl cur live watched
   trap - EXIT ERR
   set +e
   mkdir -p "$evidence/instructed"
@@ -494,7 +493,8 @@ instructor() {
     # One state read and one claims read per pass, so the watcher adds two daemon calls every two
     # seconds, not one per issue and role.
     if ! st=$(daemon_state 2>/dev/null) || ! cl=$(claims list --json 2>/dev/null); then sleep 2; continue; fi
-    for issue in $(cat "$work/instructor-issues"); do
+    mapfile -t watched <"$work/instructor-issues"
+    for issue in "${watched[@]}"; do
       cur=$(jq -r --arg i "$issue" '.issues[$i].phase // ""' <<<"$st")
       for spec in implementer:implementing tester:testing reviewer:reviewing implementer:retro merger:merging; do
         role=${spec%%:*} phase=${spec#*:}
@@ -575,7 +575,7 @@ until_true_quiet() {
 }
 
 begin prerequisites
-for tool in go psql jq curl ss tmux bun mise secrets gh jj; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go psql jq curl python3 tmux bun mise secrets agent-secrets gh jj; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
 [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
 # Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
@@ -589,6 +589,9 @@ read_app_logins
 [ -x "$nats_bin" ] || fail "no native nats-server at $nats_bin"
 # The suspension waits are bounded by lib/workflow.sh's turn budget, and the lib sourced is ACCEPT_ROOT's.
 [ -n "${phase_seconds:-}" ] || fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates phase_seconds: point ACCEPT_ROOT at a checkout that has it"
+# The services serve on held ports (start_held, keep_port), which ACCEPT_ROOT's lib/rig.sh and its
+# binaries must both provide.
+declare -F start_held >/dev/null || fail "ACCEPT_ROOT's scripts/e2e/lib/rig.sh ($root) predates start_held: point ACCEPT_ROOT at a checkout that has it"
 real_gh=$(mise which gh) || fail "mise has no gh"
 # The real tmux comes after the real gh on the daemon's PATH: the tmux runtime runs tmux with the
 # pane allow-list alone, where a shimmed tmux, run from a directory under the operator's real
@@ -641,10 +644,13 @@ vcs_rev=$(go version -m "$work/legion" | sed -n 's/^[[:space:]]*build[[:space:]]
 note "daemon binary stamped vcs.revision=$vcs_rev, $(go version -m "$work/legion" | sed -n 's/^[[:space:]]*build[[:space:]]*//p' | { grep vcs.modified || true; }); $evidence/binary-stamp.txt"
 PGPASSWORD=ci psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 -qc "create database $legion_db" -c "create database $dispatch_db" ||
   fail "could not create $legion_db and $dispatch_db in the shared Postgres $pg_container on port $port_pg"
-pick_port port_nats
 mkdir -p "$work/nats-store"
-start_process nats "$nats_bin" -js -a 127.0.0.1 -p "$port_nats" -sd "$work/nats-store"
-until_true 60 "NATS to be ready" grep -q 'Server is ready' "$evidence/logs/nats.log"
+# The port is the kernel's own pick (`-p -1`), read back from the line the server logs once it
+# listens (lib/rig.sh's report_port).
+start_process nats "$nats_bin" -js -a 127.0.0.1 -p -1 -sd "$work/nats-store"
+await_start nats "$nats_pid" 60 "NATS to be ready" grep -q 'Server is ready' "$evidence/logs/nats.log"
+port_nats=$(report_port "$evidence/logs/nats.log" 'Listening for client connections on [^ ]*:') ||
+  fail "the nats-server logged no client port; see $evidence/logs/nats.log"
 start_listener
 start_dispatch
 dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "4b.13b acceptance $project" '{key:$key,name:$name}')" >/dev/null
@@ -724,7 +730,8 @@ holder_tree="${project}-900"
 # the directory, and a delivery first adopts the working copy for the role's App (jj metaedit), so it
 # is a jj repository of its own; the holder never touches the smoke repository.
 holder_dir="$state/workspaces/$repo/${holder_tree,,}"
-mkdir -p "$holder_dir" && jj git init "$holder_dir" >/dev/null 2>&1 || fail "could not create the holder's jj workspace"
+mkdir -p "$holder_dir" || fail "could not create the holder's jj workspace"
+jj git init "$holder_dir" >/dev/null 2>&1 || fail "could not create the holder's jj workspace"
 holder=$(claims spawn --json --tree "$holder_tree" --issue "$holder_tree" --role architect \
   --task "Acceptance operation: call your envoy_role_set tool with role merge-queue now, so this session holds the merge-queue role. Then reply with the single line 'holding merge-queue' and wait. Do nothing else." | jq -er .token)
 claim_registered() { claim_is "$1" '(.session // "") != ""'; }
@@ -758,7 +765,7 @@ set_status "$child" todo
 until_true 180 "$child recorded under $root1" sh -c \
   "'$work/legion' state --json --port '$port_daemon' | jq -e --arg c '$child' '.issues[\$c].phase == \"admitted\"'"
 note "roots $root1 $root2 $root3; child $child admitted under $root1"
-for issue in "$root1" "$root2" "$root3"; do wait_for_worker "$issue" architect; done
+for issue in "$root1" "$root2" "$root3"; do wait_for_architect "$issue"; done
 printf '%s\n' "$root1" "$root2" "$root3" "$child" >"$work/instructor-issues"
 instructor &
 instructor_pid=$!
@@ -812,8 +819,8 @@ pass
 begin phase-stall-follow-up
 db_value "select coalesce(handoff_commit, '') || '|' || coalesce(summary, '') from phases where issue = '$root1' and role = 'planner'" >"$evidence/phase-stall-planner-row-before-follow-up.txt" || true
 note "planner phase row before the follow-up: '$(cat "$evidence/phase-stall-planner-row-before-follow-up.txt")' (no row, or an empty handoff: nothing completed)"
-# The planner's turn ended with its phase open, so the phase stall's follow-up fires; the rig's
-# instructions let it answer WAITING. Once the follow-up is in its session, it is given 60 s to
+# The planner's turn ended with its phase open, so the reminder comes; the rig's
+# instructions let it answer WAITING. Once the reminder is in its session, it is given 60 s to
 # complete on its own, then told to.
 followup_seen() { grep -qF -- "$followup_needle" "$(root1_planner_file)"; }
 until_true 600 "the phase stall's follow-up to reach $root1's planner" followup_seen
@@ -1212,6 +1219,7 @@ daemon_state >"$evidence/final-state.json"
 "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" >"$evidence/final-claims.json"
 stop_pid "$watcher_pid"; watcher_pid=
 stop_pid "$daemon_pid"; daemon_pid=
+stop_pid "$daemon_keeper_pid"; daemon_keeper_pid=
 stop_dispatch() { stop_pid "$dispatch_pid"; dispatch_pid=; }
 stop_dispatch
 stop_pid "$listener_pid"; listener_pid=

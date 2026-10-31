@@ -3,6 +3,7 @@ package bus_test
 import (
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +78,103 @@ func TestPublishCoreReportsAPublishNATSDenies(t *testing.T) {
 	}
 	if _, err := received.NextMsg(5 * time.Second); err != nil {
 		t.Fatalf("granted publish was not delivered: %v", err)
+	}
+}
+
+// jetStreamGrantedClient connects a stream-owning bus client as a user NATS lets publish only to
+// the subjects allow names, beside the JetStream API and the inboxes the client needs to create
+// its stream and to be answered on it.
+func jetStreamGrantedClient(t *testing.T, allow ...string) *bus.Client {
+	t.Helper()
+	seed, public := testnats.User(t)
+	uri := testnats.StartNkeyGranted(t, public, append([]string{"$JS.API.>", "_INBOX.>"}, allow...)...).URL
+	t.Setenv("NATS_NKEY_SEED", seed)
+	client, err := bus.ConnectOwningStream([]string{uri})
+	if err != nil {
+		t.Fatalf("connect as the granted user: %v", err)
+	}
+	t.Cleanup(client.Close)
+	return client
+}
+
+// A JetStream publish the server denies returns the denial, naming the subject, rather than an
+// unreachable NATS: the stream acknowledges a denied publish with nothing, so a publisher reading
+// the acknowledgement alone meets the window running out and reports an outage. A publish of the
+// same stream subject under a grant that covers it is accepted and retained.
+func TestPublishReportsAJetStreamPublishNATSDenies(t *testing.T) {
+	const topic = "notifications.dispatch.issue.ACME-1.message.created"
+	envelope := contracts.Envelope{
+		EventID:       "evt-jetstream-denied",
+		Source:        "dispatch",
+		SourceEventID: "source-jetstream-denied",
+		Topic:         topic,
+		DedupeKey:     "publish.jetstream.denied",
+		IssuedAt:      contracts.NowMillis(),
+	}
+
+	err := jetStreamGrantedClient(t).Publish(envelope)
+	if !errors.Is(err, bus.ErrPublishDenied) || !errors.Is(err, natsgo.ErrPermissionViolation) {
+		t.Fatalf("denied JetStream publish returned %v, want ErrPublishDenied wrapping the permissions violation", err)
+	}
+	if errors.Is(err, bus.ErrUnavailable) {
+		t.Fatalf("denied JetStream publish returned %v, which reads as an unreachable NATS", err)
+	}
+	if !strings.Contains(err.Error(), `Permissions Violation for Publish to "`+topic+`"`) {
+		t.Fatalf("denied JetStream publish error %q does not carry the server's violation for %s", err, topic)
+	}
+
+	granted := jetStreamGrantedClient(t, "notifications.dispatch.>")
+	if err := granted.Publish(envelope); err != nil {
+		t.Fatalf("granted JetStream publish returned %v", err)
+	}
+	if _, err := granted.JS().GetLastMsg(bus.Stream, topic); err != nil {
+		t.Fatalf("the stream did not retain the granted publish: %v", err)
+	}
+}
+
+// A window holding several denied core sends among granted ones answers every denied send with
+// its denial and every granted one accepted, and delivers the granted ones: a granted send whose
+// flush another send's denial left unconfirmed is published again once the window's flushes are
+// in, one at a time, so a further denial cannot leave that republish unconfirmed too.
+func TestAWindowWithSeveralDenialsConfirmsEveryGrantedSend(t *testing.T) {
+	const pairs = 20
+	client, subscriber := grantedClient(t)
+	received, err := subscriber.SubscribeSync(grantedRole)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := subscriber.Flush(); err != nil {
+		t.Fatalf("flush subscription: %v", err)
+	}
+
+	window := client.Window()
+	denied := make([]<-chan error, 0, pairs)
+	granted := make([]<-chan error, 0, pairs)
+	for index := range pairs {
+		denied = append(denied, window.PublishAsync(roleEnvelope(deniedRole+"-"+strconv.Itoa(index))))
+		granted = append(granted, window.PublishAsync(roleEnvelope(grantedRole)))
+	}
+	answer := func(outcome <-chan error) error {
+		select {
+		case err := <-outcome:
+			return err
+		case <-time.After(30 * time.Second):
+			t.Fatal("a send was never answered")
+			return nil
+		}
+	}
+	for index := range pairs {
+		if err := answer(denied[index]); !errors.Is(err, bus.ErrPublishDenied) {
+			t.Fatalf("denied send %d was answered %v, want ErrPublishDenied", index, err)
+		}
+		if err := answer(granted[index]); err != nil {
+			t.Fatalf("granted send %d was answered %v, want accepted", index, err)
+		}
+	}
+	for index := range pairs {
+		if _, err := received.NextMsg(5 * time.Second); err != nil {
+			t.Fatalf("granted envelope %d was not delivered: %v", index, err)
+		}
 	}
 }
 

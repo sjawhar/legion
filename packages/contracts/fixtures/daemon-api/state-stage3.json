@@ -13,7 +13,8 @@
     ],
     "waiting": [
       "LEGION-209"
-    ]
+    ],
+    "blocked": []
   },
   "issues": {
     "LEGION-208": {
@@ -44,6 +45,7 @@
     "owners": [],
     "mapped": [],
     "refused": [],
+    "withoutWebhookApp": [],
     "caches": []
   },
   "settings": {
@@ -84,6 +86,8 @@
     "capabilities": {
       "decided": {}
     },
-    "worker_backends": {}
-  }
+    "worker_backends": {},
+    "role_config_files": {}
+  },
+  "consumers": []
 }

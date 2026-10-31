@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // setting is one row of envoy-dispatch's settings table: a Dispatch setting, an environment
@@ -35,7 +36,8 @@ type setting struct {
 
 // settings is every Dispatch setting, in the order an operator meets them: storage, identity,
 // where the server listens, NATS, the Envoy listener, projects, the GitHub App, cookies,
-// service-account tokens, the secrets broker, the dashboard, and local and test runs.
+// service-account tokens, the secrets broker, meaning search's model service, the dashboard, and
+// local and test runs.
 var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
 		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files` and `rebuild-refs` read it too. A `pool_max_conns` parameter is refused."},
@@ -44,27 +46,31 @@ var settings = []setting{
 	{Name: "DISPATCH_AGENT_TOKEN", Required: "yes",
 		Description: "Shared bearer token an agent may authenticate with: one value, or several separated by whitespace while it rotates, the first the current one, all accepted. Personal tokens minted in Settings are the usual agent credential."},
 	{Name: "DISPATCH_IDENTITY", Default: "`cookie`", Required: "no",
-		Description: "How a browser request names its person: `cookie` (Google sign-in, through a Cognito sign-in pool or with Google directly, then a signed session cookie) or `header:<Header-Name>` (tests and local harnesses only: the header names the person by email)."},
-	{Name: "DISPATCH_SIGNIN_ISSUER", Required: "when `DISPATCH_IDENTITY` is `cookie` and `DISPATCH_DEV_SIGNIN` is unset",
-		Description: "OpenID Connect issuer people sign in through: a Cognito sign-in pool, with `DISPATCH_SIGNIN_GROUP`, or Google itself (`https://accounts.google.com`), with `DISPATCH_SIGNIN_DOMAIN`; Dispatch reads its endpoints from the issuer's discovery document at startup. Google sign-in takes the issuer, client ID, client secret and exactly one of the group or the domain, or none of them, and header identity and dev sign-in refuse every one of them."},
-	{Name: "DISPATCH_SIGNIN_CLIENT_ID", Required: "when `DISPATCH_IDENTITY` is `cookie` and `DISPATCH_DEV_SIGNIN` is unset",
+		Description: "How a browser request names its person: `cookie` (a signed session cookie, issued by Google sign-in through a Cognito sign-in pool or with Google directly where the `DISPATCH_SIGNIN_*` settings configure one, and issued by nothing where they are unset, so no person signs in and the server serves its agent-token API alone) or `header:<Header-Name>` (tests and local harnesses only: the header names the person by email)."},
+	{Name: "DISPATCH_SIGNIN_ISSUER", Required: "when another `DISPATCH_SIGNIN_*` setting is set; with none of them set the server boots and runs no browser sign-in",
+		Description: "OpenID Connect issuer people sign in through: a Cognito sign-in pool, with `DISPATCH_SIGNIN_GROUP`, or Google itself (`https://accounts.google.com`), with `DISPATCH_SIGNIN_DOMAIN`; Dispatch reads its endpoints from the issuer's discovery document in the background from startup, and until then answers a sign-in `503 SIGNIN_UNAVAILABLE`. Google sign-in takes the issuer, client ID, client secret and exactly one of the group or the domain, or none of them, and header identity and dev sign-in refuse every one of them."},
+	{Name: "DISPATCH_SIGNIN_CLIENT_ID", Required: "when another `DISPATCH_SIGNIN_*` setting is set; with none of them set the server boots and runs no browser sign-in",
 		Description: "Client ID of Dispatch's confidential client at the issuer: the sign-in pool's app client, or a Google OAuth web client."},
-	{Name: "DISPATCH_SIGNIN_CLIENT_SECRET", Required: "when `DISPATCH_IDENTITY` is `cookie` and `DISPATCH_DEV_SIGNIN` is unset",
+	{Name: "DISPATCH_SIGNIN_CLIENT_SECRET", Required: "when another `DISPATCH_SIGNIN_*` setting is set; with none of them set the server boots and runs no browser sign-in",
 		Description: "Client secret of that client."},
-	{Name: "DISPATCH_SIGNIN_GROUP", Required: "when `DISPATCH_IDENTITY` is `cookie`, `DISPATCH_DEV_SIGNIN` is unset and `DISPATCH_SIGNIN_DOMAIN` is unset",
+	{Name: "DISPATCH_SIGNIN_GROUP", Required: "when another `DISPATCH_SIGNIN_*` setting is set and `DISPATCH_SIGNIN_DOMAIN` is unset; with none of them set the server boots and runs no browser sign-in",
 		Description: "The pool group (`cognito:groups`) a person must be in to sign in through a Cognito sign-in pool; refused with Google's issuer. Dispatch confirms the membership at least hourly, and a person no longer in it loses every browser session."},
-	{Name: "DISPATCH_SIGNIN_DOMAIN", Required: "when `DISPATCH_IDENTITY` is `cookie`, `DISPATCH_DEV_SIGNIN` is unset and `DISPATCH_SIGNIN_GROUP` is unset",
+	{Name: "DISPATCH_SIGNIN_DOMAIN", Required: "when another `DISPATCH_SIGNIN_*` setting is set and `DISPATCH_SIGNIN_GROUP` is unset; with none of them set the server boots and runs no browser sign-in",
 		Description: "The Google Workspace domain whose people may sign in with Google, a lowercase domain name such as `example.com`; it needs `DISPATCH_SIGNIN_ISSUER` `https://accounts.google.com`, and a Google web client whose OAuth consent screen is Internal. Name the organization's primary domain, which Google puts in `hd` for every account of the organization: a secondary domain admits nobody, and a member whose address is on a secondary domain signs in under that address. A person signs in when their Google ID token's `hd` is this domain and Google has verified their `email`; Dispatch confirms that at least hourly, and a person no longer in it loses every browser session."},
 	{Name: "DISPATCH_IDENTITY_HEADER_TRUSTED", Required: "when `DISPATCH_IDENTITY` is a header",
 		Description: "Set to `1` to acknowledge header identity, which is for tests and local harnesses only; without it a header-identity server refuses to start."},
 	{Name: "DISPATCH_LISTEN_HOST", Default: "every interface", Required: "no",
-		Description: "Host the server binds; an IPv6 host may be written with or without brackets."},
+		Description: "Host the server binds; an IPv6 host may be written with or without brackets. With `DISPATCH_LISTEN_FD` set the server binds nothing, and a set host must be the IP address of the socket that names; an empty one is unset."},
 	{Name: "DISPATCH_PORT", Default: "`" + defaultListenPort + "`", Required: "no",
-		Description: "Port the server binds."},
+		Description: "Port the server binds. With `DISPATCH_LISTEN_FD` set the server binds nothing, and a set port must be the port of the socket that names; an empty one is unset."},
+	{Name: "DISPATCH_LISTEN_FD", Required: "no",
+		Description: "An inherited listening TCP socket (descriptor number) the server serves on instead of binding; for test harnesses that hold the port. `DISPATCH_PORT` and `DISPATCH_LISTEN_HOST`, when set and not empty, must name the socket's address; `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening TCP socket refuses startup, and the server binds nothing in its place."},
+	{Name: "DISPATCH_PPROF_PORT", Required: "no",
+		Description: "Port on `127.0.0.1` the Go profiler (`net/http/pprof`, under `/debug/pprof/`) listens on, reachable only from inside the pod or through `kubectl port-forward`; unset or empty, nothing listens. A value that is not a port 1-65535 refuses startup."},
 	{Name: "XDG_CONFIG_HOME", Default: "`~/.config`", Required: "no",
 		Description: "Directory whose `legion/envoy.json` is the user `envoy.json`, which `DISPATCH_SERVER_URL` and `NATS_URLS` fall back to; set but empty, it is `~/.config` too, and a path that is not absolute refuses startup."},
 	{Name: "DISPATCH_SERVER_URL", Default: "`dispatch.serverUrl` from `envoy.json`", Required: "no",
-		Description: "The origin people open in a browser and the sign-in callback origin (`<origin>/auth/callback`): an absolute http(s) URL with no path. Set, it overrides `envoy.json`; set but empty, it refuses startup."},
+		Description: "The origin people open in a browser, and, where the `DISPATCH_SIGNIN_*` settings configure browser sign-in, the sign-in callback origin (`<origin>/auth/callback`): an absolute http(s) URL with no path. Set, it overrides `envoy.json`; set but empty, it refuses startup."},
 	{Name: "NATS_URLS", Default: "`envoy.natsUrls` from `envoy.json`", Required: "no",
 		Description: "Comma-separated NATS server URLs. Set, it overrides `envoy.json`; set but empty, it refuses startup."},
 	{Name: "ENVOY_ALLOW_REMOTE_NATS", Required: "no",
@@ -73,6 +79,10 @@ var settings = []setting{
 		Description: "Nkey seed of the NATS user Dispatch connects as; unset, it connects with no credential. A set but unusable seed refuses startup."},
 	{Name: "ENVOY_NATS_SOCKS5_PROXY", Required: "no",
 		Description: "SOCKS5 proxy, as `host:port`, that every NATS connection Dispatch makes goes through, each server's host name handed to the proxy unresolved; unset, Dispatch dials NATS directly. A set proxy needs `ENVOY_ALLOW_REMOTE_NATS=1`, since the proxy chooses the server. A deployment that reaches NATS through a tailnet sidecar's SOCKS5 server (tailscaled's `TS_SOCKS5_SERVER`) sets it."},
+	{Name: "ENVOY_NATS_REPLICAS", Default: "`1`", Required: "no",
+		Description: "The deployment's NATS replica count, a whole number from 1 to 5: the `ENVOY_NOTIFICATIONS` stream and the webhook redelivery bucket are created with this many copies, and one found with fewer is raised to it at start and again every 30 seconds while Dispatch runs. More than 1 needs a clustered NATS. Every Envoy program of a deployment carries the same value, so a clustered deployment sets it in every envoy-listener and in Dispatch: a start with a lower or unset value can lower the stream's copies until a program with the higher one raises them back. Lowering copies needs every program's value lowered first. `redeliver-webhooks` reads it too. Any other value refuses startup; a server's refusal of the copies does not, since Dispatch connects in the background, and is logged with `ENVOY_NATS_REPLICAS=<n>` as the warning `envoy nats reconnect hook failed; it is retried` while the retries stay under a minute, and as the error `envoy nats reconnect hooks have not succeeded` from a minute on; a refused redelivery bucket logs `webhook redelivery sweep failed`."},
+	{Name: "ENVOY_STREAM_MAX_BYTES", Required: "no",
+		Description: "Byte limit of the `ENVOY_NOTIFICATIONS` stream, a positive whole number of bytes: once the stream holds that much it refuses every new publish, and the sender gets an error it can retry (`stream ENVOY_NOTIFICATIONS is full`: the outbox retries the event with its backoff, and the listener answers a GitHub webhook 503), while a stored message leaves only by age, after 72 hours. Size it above what the stream takes in 72 hours at its busiest. Set, Dispatch raises a smaller limit, or none, to it at start and again every 30 seconds, and never lowers a deployed limit, so an operator's raise of a full stream stands. Unset, Dispatch creates the stream with no byte limit and keeps the one a deployed stream has. Programs with different values do not fight: the largest stands, so a clustered deployment sets the same value in every envoy-listener and in Dispatch. A concurrent start can put back a smaller limit it read until a program with the larger one raises it back. Lowering or removing the limit needs every program's value lowered or removed first. Any other value refuses startup; a limit the NATS server cannot reserve does not, since Dispatch connects in the background, and is logged with `ENVOY_STREAM_MAX_BYTES=<n>` as the warning `envoy nats reconnect hook failed; it is retried` while the retries stay under a minute, and as the error `envoy nats reconnect hooks have not succeeded` from a minute on."},
 	{Name: "DISPATCH_NATS_DISABLED", Required: "no",
 		Description: "Set to `1` to run without NATS: no event is published, and the agent conversation relay and webhook redelivery are off."},
 	{Name: "ENVOY_URL", Default: "`" + defaultEnvoyURL + "`", Required: "no",
@@ -96,7 +106,7 @@ var settings = []setting{
 	{Name: "DISPATCH_GITHUB_API_BASE", Default: "`https://api.github.com`", Required: "no",
 		Description: "GitHub API origin the App calls; tests point it at a fake. `redeliver-webhooks` reads it too."},
 	{Name: "DISPATCH_SIGNING_KEY", Default: "a key kept in `~/.local/share/dispatch/signing-key`, created on first start", Required: "no",
-		Description: "HMAC key that signs session cookies and seals the refresh tokens Dispatch stores; changing it signs everyone out."},
+		Description: "One or more HMAC keys separated by whitespace, which sign session cookies and seal the refresh tokens Dispatch stores: the first signs and seals, and every one verifies a cookie and opens a seal. Every server process takes the same keys, and one whose keys a live server process does not share refuses to start. Dropping the key a cookie or seal was made under signs its person out; to rotate, add the new key second, then move it first, then remove the old key no sooner than 30 days later."},
 	{Name: "DISPATCH_INSECURE_COOKIE", Required: "no",
 		Description: "Any value drops the `Secure` attribute from Dispatch's cookies, for browsers that reach it over plain http."},
 	{Name: "DISPATCH_OIDC_ISSUER", Required: "when `DISPATCH_OIDC_AUDIENCE` is set",
@@ -107,16 +117,36 @@ var settings = []setting{
 		Description: "Base URL of the secrets broker's API, an absolute http(s) URL with no path; set, the credential-request pages are on."},
 	{Name: "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE", Required: "when `DISPATCH_AGENT_SECRETS_URL` is set",
 		Description: "File holding Dispatch's own projected Kubernetes service-account token, which every call to the secrets broker presents; the broker verifies it and reads the caller from `BROKER_API_ACCOUNTS`. In the cluster it is the projected-token volume's path (`/var/run/secrets/…/token`), which the kubelet rewrites in place; the file is read at call time, so a rotation needs no restart, and a local run writes a token into a file of its own and names that."},
+	{Name: "DISPATCH_EMBEDDER", Default: "`bedrock`", Required: "no",
+		Description: "Where meaning search reaches Cohere Embed v4: `bedrock` (AWS Bedrock, on the AWS SDK's own region and credentials; with no region, search is keyword-only) or `azure` (Azure AI Foundry, configured by the `DISPATCH_AZURE_*` settings, each of which `bedrock` refuses)."},
+	{Name: "DISPATCH_AZURE_EMBED_ENDPOINT", Required: "when `DISPATCH_EMBEDDER` is `azure`",
+		Description: "The base URL the embeddings route is appended to, such as `https://<resource>.services.ai.azure.com/models`: an absolute https URL with a host and no query or fragment."},
+	{Name: "DISPATCH_AZURE_EMBED_DEPLOYMENT", Default: "`embed-v-4-0`", Required: "no",
+		Description: "Name of the Cohere Embed v4 deployment the endpoint serves, sent as each request's model."},
+	{Name: "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE", Required: "when `DISPATCH_EMBEDDER` is `azure`",
+		Description: "The deployment's tokens-per-minute quota, a positive integer; background embedding takes two thirds of it, leaving the rest to search queries."},
+	{Name: "DISPATCH_AZURE_EMBED_KEY", File: true, Required: "when `DISPATCH_EMBEDDER` is `azure` and the keyless sign-in is unset",
+		Description: "The deployment's API key, the key form of credential; refused alongside the keyless sign-in (`DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`)."},
+	{Name: "DISPATCH_AZURE_TENANT_ID", Required: "when `DISPATCH_EMBEDDER` is `azure` and `DISPATCH_AZURE_EMBED_KEY` is unset",
+		Description: "Microsoft Entra tenant of the identity Dispatch signs in to Azure as, the keyless form of credential: it, `DISPATCH_AZURE_CLIENT_ID` and `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` are set together or not at all."},
+	{Name: "DISPATCH_AZURE_CLIENT_ID", Required: "when `DISPATCH_EMBEDDER` is `azure` and `DISPATCH_AZURE_EMBED_KEY` is unset",
+		Description: "Client ID of that identity, whose federated credential trusts the token `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` holds."},
+	{Name: "DISPATCH_AZURE_FEDERATED_TOKEN_FILE", Required: "when `DISPATCH_EMBEDDER` is `azure` and `DISPATCH_AZURE_EMBED_KEY` is unset",
+		Description: "Path of the federated token (a Kubernetes projected service-account token) Dispatch exchanges with Entra for an Azure access token; re-read on every exchange, since the token rotates."},
 	{Name: "DISPATCH_WEB_DIST", Default: "the `packages/dispatch/web/dist` directory found from the binary's location", Required: "no",
 		Description: "Directory of the built dashboard the server serves."},
-	{Name: "DISPATCH_ASSET_STORE_BUCKET", Required: "no",
-		Description: "Bucket holding immutable assets from prior dashboard builds. Unset, Dispatch serves only its local dashboard files."},
 	{Name: "DISPATCH_DEV_SIGNIN", Required: "no",
 		Description: "Set to `1` on a loopback-only local server to sign anyone in by email at `/auth/_dev/signin` without the sign-in issuer; refused alongside any `DISPATCH_SIGNIN_*` setting, `DISPATCH_SIGNIN_DOMAIN` included."},
+	{Name: "DISPATCH_DEV_SIGNIN_SHARED_KEY", Default: "a key generated for each process", Required: "no",
+		Description: "With `DISPATCH_DEV_SIGNIN=1`, a secret every process of one local harness is given, so a session cookie one of them mints is accepted by the others; each signs with HMAC-SHA256 of it under a dev-only label, never with the value itself, so no value placed here signs a cookie a production server accepts. Refused without `DISPATCH_DEV_SIGNIN=1`."},
 	{Name: "DISPATCH_TEST_HOOKS", Required: "no",
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
 	{Name: "DISPATCH_TEST_SETTLE_DELAY", Default: "`2s`", Required: "no",
 		Description: "Document settlement delay for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_EDIT_NOTICE_QUIET", Default: "`30s`", Required: "no",
+		Description: "How long a document stays quiet after a person's last settled version before its `artifact.human_edited` notice goes, for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_ROSTER_UNCACHED", Required: "no",
+		Description: "Set to `1` so every read of the listener's session list (an issue's `route_status`, `GET /api/v1/agents`) asks the listener rather than Dispatch's five-second copy, for an end-to-end test process whose fake listener changes between reads. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is
@@ -126,9 +156,10 @@ var settings = []setting{
 var removedSettings = []struct{ Name, Replacement string }{
 	{"DISPATCH_ALLOWED_LOGINS", "people sign in; DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN names who may"},
 	{"DISPATCH_APP_CLIENT_SECRET", "nobody signs in through the GitHub App; its JWT needs only DISPATCH_APP_CLIENT_ID and DISPATCH_APP_PEM_B64"},
-	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock on the AWS SDK's default credential chain (the task role in production), never a Cohere API key"},
+	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock (the AWS SDK's default credential chain) or Azure AI Foundry (the DISPATCH_AZURE_* settings), chosen by DISPATCH_EMBEDDER, never with a Cohere API key"},
 	{"DISPATCH_AGENT_SECRETS_TOKEN", noSharedBrokerBearer},
 	{"DISPATCH_AGENT_SECRETS_TOKEN_FILE", noSharedBrokerBearer},
+	{"DISPATCH_ASSET_STORE_BUCKET", "every server process now keeps its build's dashboard assets in Dispatch's database"},
 }
 
 // noSharedBrokerBearer is why the secrets broker's shared bearer and its file are gone: the
@@ -201,6 +232,25 @@ func (values settingValues) lookup(name string) (string, bool) {
 func (values settingValues) get(name string) string {
 	value, _ := values.lookup(name)
 	return value
+}
+
+// fileSetting resolves a File row's value: the trimmed contents of the file name+"_FILE" names,
+// ahead of name's own trimmed value. A set but unreadable or blank file is an error naming both,
+// never a silent fallback to the bare variable.
+func fileSetting(env settingValues, name string) (string, error) {
+	fileVariable := name + "_FILE"
+	if path := strings.TrimSpace(env.get(fileVariable)); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("%s names %s, which could not be read, and %s is not read in its place: %w", fileVariable, path, name, err)
+		}
+		value := strings.TrimSpace(string(data))
+		if value == "" {
+			return "", fmt.Errorf("%s names %s, which is empty, and %s is not read in its place", fileVariable, path, name)
+		}
+		return value, nil
+	}
+	return strings.TrimSpace(env.get(name)), nil
 }
 
 // settingEntry is a row as `envoy-dispatch settings` prints it. Default and File are null when the

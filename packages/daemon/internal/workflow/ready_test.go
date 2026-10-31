@@ -749,7 +749,8 @@ func TestAnApprovalOfTheOldRootsDocumentReleasesACarriedChildsREADY(t *testing.T
 // design it carries, and the old document belongs to another tree now. After the carry, a new
 // version of the old document, a changes request on it, or an approval of an older version leaves
 // an open copy open, tells the carried architect nothing, and its merger's READY goes through, while
-// the old root's own gate takes every event as before.
+// the old root's own gate takes the version and the changes request as before, and, like every
+// gate, no review of a version below its latest (applyArtifact).
 func TestTheOldRootsDocumentChangingAfterTheCarryLeavesAnOpenCopyOpen(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -771,8 +772,8 @@ func TestTheOldRootsDocumentChangingAfterTheCarryLeavesAnOpenCopyOpen(t *testing
 		}
 	}
 	var latest, approved int
-	if err := pool.QueryRow(ctx, "select latest_version, coalesce(approved_version, 0) from design_gates where issue = 'LEGION-208'").Scan(&latest, &approved); err != nil || latest != 3 || approved != 1 {
-		t.Fatalf("old root's gate = latest %d, approved %d, %v; want every event applied (latest 3, approved 1)", latest, approved, err)
+	if err := pool.QueryRow(ctx, "select latest_version, coalesce(approved_version, 0) from design_gates where issue = 'LEGION-208'").Scan(&latest, &approved); err != nil || latest != 3 || approved != 0 {
+		t.Fatalf("old root's gate = latest %d, approved %d, %v; want version 3 closed by its changes request and the older approval ignored", latest, approved, err)
 	}
 	var notices int
 	if err := pool.QueryRow(ctx, "select count(*) from outbox where kind = 'notice' and issue = 'LEGION-209'").Scan(&notices); err != nil || notices != 0 {
@@ -798,11 +799,19 @@ func refusalCode(result intake.Result) string {
 }
 
 func readyEngine(mergeQueue string) *Engine {
+	return readyEngineAt(mergeQueue, time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC))
+}
+
+// readyEngineAt is readyEngine with its clock at now.
+func readyEngineAt(mergeQueue string, now time.Time) *Engine {
 	return New(record.NewStore(), Config{
 		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
-		Clock: func() time.Time { return time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC) },
+		Clock: func() time.Time { return now },
 	}, nil)
 }
+
+// heldRedLapses is readyEngine's clock once a red it held while a head waited has lapsed (redHold).
+var heldRedLapses = time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC).Add(redHold + time.Second)
 
 // applyFacts applies each fact to pool through engine, failing the test on an error, and returns
 // the fact's result.

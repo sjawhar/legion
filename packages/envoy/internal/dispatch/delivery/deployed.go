@@ -21,7 +21,7 @@ const DeployedEventType = "issue.deployed"
 // DeployedEventActor writes every issue.deployed: a system actor, since no person or session caused
 // the deploy the timeline observed. Broker.Notify is false for a system actor, which keeps the event
 // out of inboxes and routed delivery only; the outbox publishes it on the issue's subject as it does
-// every unpublished event, and the SSE stream and the event log carry it, whoever the actor is.
+// every unpublished event, and the event feed and the event log carry it, whoever the actor is.
 var DeployedEventActor = model.Actor{Kind: "system", ID: "delivery-timeline"}
 
 // IssueDeployedEventPayload is an issue.deployed event's payload, mirrored by
@@ -55,15 +55,16 @@ type shippedPullRequest struct {
 // the row marked and appends nothing. A pull request whose issue was deleted between the read and
 // the write (its issue_key set null by the foreign key) is skipped the same way. A failed row ends
 // the pass with its error: the rows before it stay written, the rest wait for the next call. The
-// payload is IssueDeployedEventPayload; the actor DeployedEventActor.
-func RecordDeployedEvents(ctx context.Context, pool *store.Pool, settings DeliverySettings, broker *events.Broker, now time.Time) (int, error) {
+// payload is IssueDeployedEventPayload; the actor DeployedEventActor. The marker is the database's
+// now(): only whether it is null is ever read.
+func RecordDeployedEvents(ctx context.Context, pool *store.Pool, settings DeliverySettings, broker *events.Broker) (int, error) {
 	shipped, err := listUnrecordedShipped(ctx, pool, settings.DeployRepo, settings.Production())
 	if err != nil {
 		return 0, err
 	}
 	written := 0
 	for _, pr := range shipped {
-		wrote, err := recordDeployedEvent(ctx, pool, broker, pr, now)
+		wrote, err := recordDeployedEvent(ctx, pool, broker, pr)
 		if err != nil {
 			return written, fmt.Errorf("record issue.deployed for %s#%d on %s: %w", pr.Repo, pr.Number, pr.IssueKey, err)
 		}
@@ -103,16 +104,16 @@ func listUnrecordedShipped(ctx context.Context, pool *store.Pool, deployRepo str
 
 // recordDeployedEvent marks pr and appends its event in one transaction, and reports whether it did:
 // false when another writer marked the row first, or the row no longer names pr's issue.
-func recordDeployedEvent(ctx context.Context, pool *store.Pool, broker *events.Broker, pr shippedPullRequest, now time.Time) (bool, error) {
+func recordDeployedEvent(ctx context.Context, pool *store.Pool, broker *events.Broker, pr shippedPullRequest) (bool, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
 	tag, err := tx.Exec(ctx, `
-		update delivery_pull_requests set deployed_event_at = $4
+		update delivery_pull_requests set deployed_event_at = now()
 		where repo = $1 and number = $2 and issue_key = $3 and deployed_event_at is null
-	`, pr.Repo, pr.Number, pr.IssueKey, now)
+	`, pr.Repo, pr.Number, pr.IssueKey)
 	if err != nil {
 		return false, fmt.Errorf("mark the pull request: %w", err)
 	}

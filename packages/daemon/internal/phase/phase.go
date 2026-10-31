@@ -7,23 +7,28 @@ package phase
 type Phase string
 
 const (
-	Admitted      Phase = "admitted"
-	Planning      Phase = "planning"
-	Implementing  Phase = "implementing"
-	Testing       Phase = "testing"
-	Reviewing     Phase = "reviewing"
-	Accepting     Phase = "accepting"
-	Retro         Phase = "retro"
-	Merging       Phase = "merging"
-	AwaitingMerge Phase = "awaiting_merge"
-	Done          Phase = "done"
-	Held          Phase = "held"
+	Admitted Phase = "admitted"
+	// AwaitingPerson is a root admitted tree that waits only on a person: its architect asked a
+	// question and handed it to the person. It holds no admission slot, and its architect stays
+	// live in its own session, reading and answering the person's comments; the person's answer
+	// puts the root at the front of the waiting line, and its slot delivers the architect its task.
+	AwaitingPerson Phase = "awaiting_person"
+	Planning       Phase = "planning"
+	Implementing   Phase = "implementing"
+	Testing        Phase = "testing"
+	Reviewing      Phase = "reviewing"
+	Accepting      Phase = "accepting"
+	Retro          Phase = "retro"
+	Merging        Phase = "merging"
+	AwaitingMerge  Phase = "awaiting_merge"
+	Done           Phase = "done"
+	Held           Phase = "held"
 )
 
 // All is every phase, in the transition table's order.
 var All = []Phase{
-	Admitted, Planning, Implementing, Testing, Reviewing, Accepting, Retro, Merging, AwaitingMerge,
-	Done, Held,
+	Admitted, AwaitingPerson, Planning, Implementing, Testing, Reviewing, Accepting, Retro, Merging,
+	AwaitingMerge, Done, Held,
 }
 
 // HandoffFile is the handoff a phase ends with, .legion/<issue>/<word>.json, and whether it ends

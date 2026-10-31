@@ -2,12 +2,14 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scriptFunctions } from "./script-functions";
+import { expectNoMissingHelpers, nameMissingHelpers, scriptFunctions } from "./script-functions";
 
 // The 4b.13b acceptance's own soft and cleanup, taken from the script by name and run after the
 // ending each case names, with the teardown's processes, GitHub and production audit stubbed and a
 // merger's failed call seeded in the key command's record, so any notes call the trap makes prints.
-const fn = scriptFunctions(join(import.meta.dir, "..", "stage3-4b13b-acceptance.sh"));
+const script = join(import.meta.dir, "..", "stage3-4b13b-acceptance.sh");
+const fn = scriptFunctions(script);
+const helperGuard = nameMissingHelpers(script);
 const dir = mkdtempSync(join(tmpdir(), "stage3-4b13b-notes-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "bin");
@@ -27,7 +29,7 @@ function acceptanceRun(ending: string) {
       `set -Eeuo pipefail
 work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 unserved_reader=${JSON.stringify(join(import.meta.dir, "model-gateway-unserved.sh"))}
-ok= audited= prod_baseline= daemon_pid= watcher_pid= dispatch_pid= listener_pid= bridge_pid= nats_pid= ptoken=x
+ok= audited= prod_baseline= daemon_pid= watcher_pid= dispatch_pid= listener_pid= bridge_pid= nats_pid= daemon_keeper_pid= ptoken=x
 check=setup check_started=2026-09-30T11:00:00Z
 soft_failures="$evidence/soft-failures.txt"
 mkdir -p "$work" "$evidence/model-gateway"
@@ -35,6 +37,7 @@ mkdir -p "$work" "$evidence/model-gateway"
 # The merger got no key during merge-held and was never served again.
 printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:10Z 4242 /x merger/1 failed no-key >"$evidence/model-gateway/anthropic-key.calls"
 stop_pid() { :; }; run_processes() { :; }; collect_transcripts() { :; }; github_cleanup() { :; }
+${helperGuard}
 first_soft_check=
 first_soft_since=
 ${fn("soft")}
@@ -46,7 +49,11 @@ ${ending}
     ],
     { env: { PATH: `${bin}:${process.env.PATH}` } }
   );
-  return { code: result.exitCode, output: `${result.stdout}${result.stderr}` };
+  const output = `${result.stdout}${result.stderr}`;
+  // A helper of the script that cleanup calls and this harness neither extracts nor stubs is
+  // named here rather than left as a bare exit 127 in the teardown.
+  expectNoMissingHelpers(output);
+  return { code: result.exitCode, output };
 }
 
 describe("the 4b.13b acceptance's notes", () => {

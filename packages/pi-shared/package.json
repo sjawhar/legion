@@ -21,6 +21,10 @@
       "types": "./src/role-claim-bridge.ts",
       "bun": "./src/role-claim-bridge.ts"
     },
+    "./startup-turn": {
+      "types": "./src/startup-turn.ts",
+      "bun": "./src/startup-turn.ts"
+    },
     "./subagent-session": {
       "types": "./src/subagent-session.ts",
       "bun": "./src/subagent-session.ts"
@@ -52,6 +56,22 @@
     "./legion-claim-core": {
       "types": "./src/legion-claim-core.ts",
       "bun": "./src/legion-claim-core.ts"
+    },
+    "./phase-stall": {
+      "types": "./src/phase-stall.ts",
+      "bun": "./src/phase-stall.ts"
+    },
+    "./phase-reminder": {
+      "types": "./src/phase-reminder.ts",
+      "bun": "./src/phase-reminder.ts"
+    },
+    "./stall-limits": {
+      "types": "./src/stall-limits.ts",
+      "bun": "./src/stall-limits.ts"
+    },
+    "./workspace-recreated": {
+      "types": "./src/workspace-recreated.ts",
+      "bun": "./src/workspace-recreated.ts"
     },
     "./test/cross-imports": {
       "types": "./test/cross-imports.ts",
@@ -86,6 +106,7 @@
     "@oh-my-pi/pi-tui": "^18.1.15",
     "@oh-my-pi/pi-utils": "^18.1.15",
     "@types/bun": "latest",
+    "@xterm/headless": "^6.0.0",
     "typescript": "^5.3.0",
     "zod": "4.3.6"
   }

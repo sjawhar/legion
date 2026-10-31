@@ -29,9 +29,11 @@ func ProviderEnvDir(stateDir string) string {
 // (LEGION-208 spec, Identity), because the store's age identity would decrypt every agent-tier
 // secret on the box.
 //
-// Each secretsd key is resolved in two steps: `secrets get <KEY> --no-request` first, which
-// reports the key's tier without costing a tap, then `secrets get <KEY> --value`. A human-tier key
-// is announced before its value is requested, since a YubiKey tap may be needed. The daemon runs
+// A key whose source is a file (`file:/abs/path`, ProviderKey.File) is that file's contents,
+// trimmed, read as the daemon: a host with no secretsd hands the daemon its keys as files only it
+// can read. Each secretsd key is resolved in two steps: `secrets get <KEY> --no-request` first,
+// which reports the key's tier without costing a tap, then `secrets get <KEY> --value`. A human-tier
+// key is announced before its value is requested, since a YubiKey tap may be needed. The daemon runs
 // `secrets` for itself — it is never a pane — under its own environment (environ) less
 // SECRETSD_SESSION_TOKEN_FILE, with its own stdin: secretsd scopes a tokenless caller by its
 // terminal, so the request is the launcher's and never lands on an agent
@@ -42,7 +44,7 @@ func ProviderEnvDir(stateDir string) string {
 // file is written atomically (a temporary file renamed into place), the directory is 0700 and
 // each file 0600, and a file for a variable no longer configured is removed: the directory holds
 // exactly the configured variables. Every refusal names the entry — the variable and its secretsd
-// key — and never the value.
+// key or file — and never the value.
 func MaterializeProviderKeys(keys []ProviderKey, stateDir string, environ []string, log *slog.Logger) (string, error) {
 	dir := ProviderEnvDir(stateDir)
 	if len(keys) == 0 {
@@ -59,7 +61,11 @@ func MaterializeProviderKeys(keys []ProviderKey, stateDir string, environ []stri
 	}
 	values := make(map[string]string, len(keys))
 	for _, key := range keys {
-		value, err := resolveProviderKey(key, env, log)
+		resolve := resolveProviderKey
+		if key.File != "" {
+			resolve = readProviderKeyFile
+		}
+		value, err := resolve(key, env, log)
 		if err != nil {
 			return "", err
 		}
@@ -95,6 +101,14 @@ func MaterializeProviderKeys(keys []ProviderKey, stateDir string, environ []stri
 type secretsStatus struct {
 	Key  string `json:"key"`
 	Tier string `json:"tier"`
+}
+
+// readProviderKeyFile is one entry's value from the file it names, read by
+// ReadPrivateSecretPointer's rules, as every other secret file the daemon reads: refused, naming the
+// file and never its contents, when it cannot be read, is not a regular file, holds nothing, or is
+// readable by its group or others.
+func readProviderKeyFile(key ProviderKey, _ []string, _ *slog.Logger) (string, error) {
+	return ReadPrivateSecretPointer("provider_keys."+key.Env, key.File)
 }
 
 // resolveProviderKey is one entry's value: its secretsd key's tier checked, then the value read.

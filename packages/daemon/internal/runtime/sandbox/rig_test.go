@@ -64,8 +64,8 @@ var (
 
 // testOptions are the options every test starts from: production's shape — a store that keeps
 // sessions in a database included, which configure requires, here the postgres one with its URL key
-// — every role's reservation at the daemon's defaults (reservations), with budgets short enough
-// that a wait the test expects to end never slows the suite.
+// — both pods' reservations at the daemon's defaults (reservations), with budgets short enough that
+// a wait the test expects to end never slows the suite.
 func testOptions() Options {
 	return Options{
 		Namespace:    testNamespace,
@@ -95,7 +95,7 @@ func testOptions() Options {
 		Conns:                 fake.NewConns(),
 		RepositoryCache: RepositoryCache{
 			Volume: resource.MustParse("20Gi"), Refresh: 10 * time.Minute, Retain: 168 * time.Hour,
-			Resources: reservations()[claim.RoleController],
+			Resources: reservations().Controller,
 		},
 		Mapped: func() []ghrepo.Repository { return nil },
 		Log:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -263,6 +263,31 @@ func rootSpec(t *testing.T) runtime.SpawnSpec {
 
 func workerSpec(t *testing.T) runtime.SpawnSpec {
 	return testSpec(t, workerToken, claim.RoleTester, testTree)
+}
+
+// claudeWorkerSpec is workerSpec on the Claude Code backend: the tester, one of the roles Claude
+// Code runs (runtime.Backends).
+func claudeWorkerSpec(t *testing.T) runtime.SpawnSpec {
+	spec := workerSpec(t)
+	spec.Backend = runtime.BackendClaude
+	return spec
+}
+
+// claudeTranscriptID is the session id of the transcript the Claude specs below resume, and
+// claudeTranscript the path a role's Claude Code recorded it at: its own configuration directory
+// (claudeConfigDir), `projects/<cwd>/<id>.jsonl`.
+const claudeTranscriptID = "9f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f"
+
+func claudeTranscript(role claim.Role) string {
+	return claudeConfigDir(role) + "/projects/--legion-workspaces-sjawhar-legion-smoke-legion-208--/" + claudeTranscriptID + ".jsonl"
+}
+
+// claudeResumeSpec is claudeWorkerSpec relaunched on the transcript a replaced pod's role
+// recorded, the session a Claude claim records (packages/claude-envoy's legion-claim.ts).
+func claudeResumeSpec(t *testing.T) runtime.SpawnSpec {
+	spec := claudeWorkerSpec(t)
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", claudeTranscript(spec.Role)
+	return spec
 }
 
 func childSpec(t *testing.T) runtime.SpawnSpec {
@@ -678,14 +703,9 @@ func (g *rig) createPod(s *sandbox) {
 	}
 }
 
-// runningStatus is a Running issue pod's status: workspace-init done and every role launcher
-// running.
+// runningStatus is a Running issue pod's status: workspace-init done and its one container running.
 func runningStatus() corev1.PodStatus {
-	containers := make([]corev1.Container, 0, len(claim.Roles))
-	for _, role := range claim.Roles {
-		containers = append(containers, corev1.Container{Name: string(role)})
-	}
-	return runningStatusOf(corev1.PodSpec{Containers: containers})
+	return runningStatusOf(corev1.PodSpec{Containers: []corev1.Container{{Name: runtime.IssuePodContainer}}})
 }
 
 // runningStatusOf is the status of a pod of spec once Running: workspace-init done and each of its
@@ -979,18 +999,17 @@ func claimLabels(_ claim.Role) map[string]string {
 	return map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: testTree}
 }
 
-// sandboxLocator is a recorded role process locator in its claim's pod.
+// sandboxLocator is a recorded role process locator in its claim's pod's one container.
 func sandboxLocator(token claim.Token, uid string) runtime.Locator {
 	role, ok := token.Role()
 	if !ok {
 		panic("test token has no role")
 	}
-	container := string(role)
 	return runtime.Locator{
 		Runtime:     runtime.RuntimeSandbox,
 		Claim:       token,
 		Incarnation: runtime.SandboxIncarnation(uid, 1),
-		Sandbox:     &runtime.SandboxLocator{Namespace: testNamespace, Name: SandboxName(token), PodUID: uid, Container: container, Generation: 1},
+		Sandbox:     &runtime.SandboxLocator{Namespace: testNamespace, Name: SandboxName(token), PodUID: uid, Container: podContainer(role), Generation: 1},
 	}
 }
 

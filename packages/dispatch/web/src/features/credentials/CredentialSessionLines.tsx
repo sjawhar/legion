@@ -1,9 +1,8 @@
 import type { ReactNode } from "react";
-import { generatePath, Link } from "react-router-dom";
 
 import type { Agent, CredentialSession } from "../../api/types";
-import { focusVisibleRing, linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes";
-import { AGENT_LIVE_PATH } from "../refs/routes";
+import { textMutedOnCanvas } from "../../theme/classes";
+import { AgentName } from "../refs/AgentName";
 import {
   type CredentialSessionLine,
   type CredentialSessionSource,
@@ -17,45 +16,46 @@ const SOURCE_PREFIX: Record<CredentialSessionSource, string> = {
   request: "",
 };
 
-function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): ReactNode {
-  const prefix = line.source === null ? "" : SOURCE_PREFIX[line.source];
+/** The words after the name: where it runs, or that it isn't running or couldn't be checked. */
+function statusText(line: CredentialSessionLine): string {
   switch (line.status.kind) {
     case "running":
-      return (
-        <span className={textMutedOnCanvas}>
-          {prefix}
-          <Link
-            className={`rounded outline-none focus-visible:ring-2 ${focusVisibleRing} ${linkText} ${linkHoverText}`}
-            to={generatePath(AGENT_LIVE_PATH, { sessionId: encodeURIComponent(line.status.id) })}
-          >
-            {line.status.label}
-          </Link>
-          {` · ${line.status.dir} · ${line.status.machineId}`}
-        </span>
-      );
+      return ` · ${line.id} · ${line.status.place.dir} · ${line.status.place.machineId}`;
     case "not-running":
-      return (
-        <span className={textMutedOnCanvas}>{`${prefix}${line.status.id} isn't running.`}</span>
-      );
+      return ` · ${line.id} isn't running.`;
     case "unknown":
-      return (
-        <span className={textMutedOnCanvas}>
-          {`${prefix}Couldn't check whether ${line.status.id} is running.`}
-        </span>
-      );
+      return ` · couldn't check whether ${line.id} is running.`;
   }
 }
 
 /**
- * The credential request's session, resolved against the live Agents list: the Inbox row and the
- * record page both render this one component (LEGION-587), so a running, not-running, couldn't-
- * check or unnamed session always reads identically in both places. Takes the agents list (and
+ * One id: the agent, with its running state and its live link, then its full id, then where it
+ * runs while the agents list lists it, or in words that it isn't running or couldn't be
+ * checked. A request's id is an unsigned claim (`session.ts`), and an unlisted id's name is its
+ * short form `session:<8>…`, which a forged id (or any session started in the same minute)
+ * shares; so the person approving reads the whole id, and the state in words rather than only
+ * the mark's ring. The full id breaks anywhere, so it never widens the record page's grid.
+ */
+function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): ReactNode {
+  return (
+    <span className={`${textMutedOnCanvas} [overflow-wrap:anywhere]`}>
+      {line.source === null ? "" : SOURCE_PREFIX[line.source]}
+      <AgentName sessionId={line.id} storedTitle={undefined} />
+      {statusText(line)}
+    </span>
+  );
+}
+
+/**
+ * The credential request's session: the Inbox row and the record page both render this one
+ * component (LEGION-587), so a running, not-running, couldn't-check or unnamed session always
+ * reads identically in both places. Each id is an `AgentName` and its full id, and a line says
+ * in words when its session isn't running or could not be checked. Takes the agents list (and
  * its loading/error state) as props rather than calling `useAgents` itself: a page that renders
- * several of these (the Inbox's pending-requests list) polls the shared Agents list once from
- * its own page-level `useAgents` call and passes the result down, so N rows cost one 15s poll,
- * not N independently-phased ones (TanStack dedupes only a fetch already in flight, which a
- * second per-row `useQuery` observer mounting later than the first is not). Renders bare
- * text/links, no wrapping element: each call site supplies its own layout.
+ * several of these (the Inbox's pending-requests list) reads the list once from its own
+ * page-level `useAgents` call, and that one read decides every line's status, so the words
+ * follow the same `["agents"]` query as each name's mark. Renders bare text/links,
+ * no wrapping element: each call site supplies its own layout.
  */
 export function CredentialSessionLines({
   agents,
@@ -75,7 +75,7 @@ export function CredentialSessionLines({
   return (
     <>
       {lines.map((line) => (
-        <CredentialSessionLineText key={line.source ?? line.status.id} line={line} />
+        <CredentialSessionLineText key={line.source ?? line.id} line={line} />
       ))}
     </>
   );

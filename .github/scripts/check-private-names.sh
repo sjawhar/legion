@@ -20,7 +20,9 @@
 #   3. a private host below `.internal.`, in any case. A reserved example host (`<name>` then
 #      `.internal.example`, optionally `.com`, `.net` or `.org`) passes, and so does the NATS
 #      client's own `this` property of that name in the one bundle that vendors it
-#      (packages/claude-envoy/dist/envoy-channel.js), and nowhere else;
+#      (packages/claude-envoy/dist/envoy-channel.js, which reaches this check on main and through
+#      packages/claude-envoy/scripts/verify-build.sh, never in a pull request's diff), and nowhere
+#      else;
 #   4. a Tailscale MagicDNS host — a DNS label then `.ts.net`, in any case, with no letter or
 #      digit after it. A reserved tailnet name (`example-tailnet`, under any machine name of its
 #      own in front) passes;
@@ -32,12 +34,12 @@
 #
 # With no arguments it scans the repository: every file git tracks, a file under an ignored path
 # included, plus every untracked file git does not ignore, so a new file is caught before it is
-# added. With arguments it scans each named directory or file instead, tracked or not; docs.yaml
-# passes it the built site (docs/site/dist), whose generated reference pages and copied media
-# captions exist only after the build, and check-pr-text.sh a pull request's title, body, branch
-# name, commits (each one's message, author and committer), issue comments, reviews and review
-# comments. The first two rules also read
-# every file's path, directories included, as git and find print it unquoted. Binary files are
+# added. With arguments it scans each named directory or file instead, tracked or not; ci.yaml's
+# docs job passes it the built site (docs/site/dist), whose generated reference pages and copied
+# media captions exist only after the build, and check-pr-text.sh a pull request's title, body,
+# branch name, commits (each one's message, author and committer), issue comments, reviews and
+# review comments. The first two rules also read every file's path, directories included, as git
+# and find print it unquoted. Binary files are
 # skipped, and so are lockfiles (bun.lock, go.sum, go.work.sum), whose integrity hashes are random
 # text. Every hit is printed as its file and line, never its text, and a path component a rule
 # matches is printed as <name>, so the log does not repeat the name; the only non-zero exits are
@@ -48,15 +50,39 @@
 # too, which is why the check needs no exception for itself.
 #
 # Run from anywhere: .github/scripts/check-private-names.sh [path...]
-# CI runs it over the repository in the lint job of pr-and-main.yaml, over the built site in
-# docs.yaml, over a pull request's title, body, branch name, commits (each one's message, author
-# and committer), issue comments, reviews and review comments through check-pr-text.sh (the
-# required lint job at each push, and pr-title.yaml when the pull request is edited or a comment,
-# review or review comment is posted, edited or deleted), and its tests in pr-and-main.yaml's test
-# job.
+# CI runs it over the repository in ci.yaml's lint job, over the built site in ci.yaml's docs job,
+# over a pull request's title, body, branch name, commits (each one's message, author and
+# committer), issue comments, reviews and review comments through check-pr-text.sh (ci.yaml's lint
+# job, whose runs ci.yaml names, and pr-title.yaml at each push, draft or not, and when the pull
+# request is opened, reopened or edited, a review is submitted or edited, or the merge queue runs
+# its group), and its tests in ci.yaml's test job.
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+# A relative path argument is read from the caller's directory, so it is prefixed with that
+# directory's path from the repository root (or its absolute path, outside the repository) before
+# the cd below. The path is never rewritten: the kernel follows its symlinks and `..` parts as the
+# caller's shell would, and a name starting with "-" gets a "./" so find does not read an option.
+# Each directory is read with an "x" after pwd's newline, since a command substitution drops every
+# trailing newline, a directory name's own included.
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P && printf x)
+repo_root=${repo_root%$'\n'x}
+caller=$(pwd -P && printf x)
+caller=${caller%$'\n'x}
+case $caller in
+  "$repo_root") prefix= ;;
+  "$repo_root"/*) prefix=${caller#"$repo_root"/}/ ;;
+  *) prefix=$caller/ ;;
+esac
+args=()
+for arg in "$@"; do
+  case $arg in
+    '' | /*) args+=("$arg") ;;
+    -*) args+=("${prefix:-./}$arg") ;;
+    *) args+=("$prefix$arg") ;;
+  esac
+done
+set -- "${args[@]}"
+cd "$repo_root"
 
 encoded_byte='%[[:xdigit:]]{2}'
 dashes='‐|‑|‒|–|—|―|−|﹘|﹣|－'

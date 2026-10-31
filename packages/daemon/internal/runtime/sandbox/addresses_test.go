@@ -45,7 +45,7 @@ func movedSince(t *testing.T, launched, now *Runtime) []movedAddress {
 	}
 	s := &sandbox{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{addressesAnnotation(claim.RoleTester): record}}}
 	var moved []movedAddress
-	if stream, ok := now.movedStream(pod, string(claim.RoleTester)); ok {
+	if stream, ok := now.movedStream(pod, podContainer(claim.RoleTester)); ok {
 		moved = append(moved, stream)
 	}
 	environment, err := now.movedEnvironment(s, claim.RoleTester, 1)

@@ -32,11 +32,12 @@ func TestTheBootCensusRefusesLegacyIssueSandboxesOnly(t *testing.T) {
 	}
 }
 
-// The census passes both pods this runtime builds, an issue pod's six launchers and the project
-// controller's one, and holds every other Sandbox to the launchers of the kind its labels name
+// The census passes both pods this runtime builds, an issue pod's one container and the project
+// controller's one, and holds every other Sandbox to the one container of the kind its labels name
 // (podKindOf): the controller Sandbox a daemon before issue pods made (role=controller, one worker
-// container), a pod missing a launcher or running one more, and a Sandbox whose labels name no kind
-// are each refused, by name, before the daemon adopts, suspends or deletes any of them.
+// container), a controller pod running the workflow launchers, an issue pod of the earlier layout
+// missing a launcher or running one more, and a Sandbox whose labels name no kind are each refused,
+// by name, before the daemon adopts, suspends or deletes any of them.
 func TestTheBootCensusHoldsEverySandboxToTheLaunchersItsLabelsName(t *testing.T) {
 	g := newRig(t, nil)
 	g.spawn(controllerSpec(t))
@@ -54,10 +55,10 @@ func TestTheBootCensusHoldsEverySandboxToTheLaunchersItsLabelsName(t *testing.T)
 		containers []string
 		want       string
 	}{
-		"the controller pod of a daemon before issue pods": {"legion-legion-controller", controller, []string{"worker"}, "not exactly the launchers its labels name"},
-		"a controller pod running the workflow launchers":  {"legion-legion-controller", controller, workflow, "not exactly the launchers its labels name"},
-		"an issue pod missing a launcher":                  {"legion-legion-legion-208", issue, workflow[1:], "not exactly the launchers its labels name"},
-		"an issue pod running a container more":            {"legion-legion-legion-208", issue, append(append([]string{}, workflow...), string(claim.RoleController)), "not exactly the launchers its labels name"},
+		"the controller pod of a daemon before issue pods": {"legion-legion-controller", controller, []string{"worker"}, "not the one container controller its labels name"},
+		"a controller pod running the workflow launchers":  {"legion-legion-controller", controller, workflow, "not the one container controller its labels name"},
+		"an issue pod missing a launcher":                  {"legion-legion-legion-208", issue, workflow[1:], "not the one container roles its labels name"},
+		"an issue pod running a container more":            {"legion-legion-legion-208", issue, append(append([]string{}, workflow...), string(claim.RoleController)), "not the one container roles its labels name"},
 		"a controller-labelled pod of a tree": {"legion-legion-other", map[string]string{labelProject: testProject, labelRole: string(claim.RoleController), labelTree: testTree},
 			[]string{string(claim.RoleController)}, "name neither an issue nor the project controller"},
 		"labels naming no role list": {"legion-legion-other", map[string]string{labelProject: testProject}, []string{string(claim.RoleController)}, "name neither an issue nor the project controller"},
@@ -80,9 +81,9 @@ func TestTheBootCensusNamesEveryRefusedSandboxAndHowMany(t *testing.T) {
 	g.spawn(rootSpec(t))
 	built := SandboxName(rootToken)
 	legacy := map[string]string{
-		"legion-legion-legion-208-tester":   "not exactly the launchers its labels name",
-		"legion-legion-legion-208-reviewer": "not exactly the launchers its labels name",
-		"legion-legion-controller":          "not exactly the launchers its labels name",
+		"legion-legion-legion-208-tester":   "not the one container roles its labels name",
+		"legion-legion-legion-208-reviewer": "not the one container roles its labels name",
+		"legion-legion-controller":          "not the one container controller its labels name",
 		"legion-legion-other":               "name neither an issue nor the project controller",
 	}
 	for name, labels := range map[string]map[string]string{
@@ -213,7 +214,7 @@ func TestTheBootCensusNamesEveryTreeVolumeLayoutSandboxInOneRefusal(t *testing.T
 	refused := map[string]string{
 		"legion-legion-controller-old": "owns no volume",
 		"legion-legion-legion-300":     `owns a volume claim template named "tree"`,
-		"legion-legion-legion-301":     "runs containers [worker], not exactly the launchers its labels name",
+		"legion-legion-legion-301":     "runs containers [worker], not the one container roles its labels name",
 	}
 	for _, object := range []*unstructured.Unstructured{
 		sandboxRunning(t, "legion-legion-legion-209", claimLabels(claim.RoleImplementer), workflowContainers()...),
@@ -249,7 +250,8 @@ func TestTheBootCensusNamesEveryTreeVolumeLayoutSandboxInOneRefusal(t *testing.T
 	}
 }
 
-// workflowContainers are an issue pod's launcher containers, one per workflow role.
+// workflowContainers are an issue pod's containers in the layout before one container: one per
+// workflow role, each named for its role.
 func workflowContainers() []string {
 	containers := make([]string, 0, len(claim.Roles))
 	for _, role := range claim.Roles {

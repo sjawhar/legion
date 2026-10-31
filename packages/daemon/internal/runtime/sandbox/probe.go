@@ -65,6 +65,12 @@ const (
 	// probeTerminationGrace is the probe pod's terminationGracePeriodSeconds: it holds nothing to
 	// save.
 	probeTerminationGrace = 5
+	// probeCommandReserve is kept after a probe-image command's deadline for the pod to report its
+	// exit, the daemon to read the log, and the probe Sandbox to delete.
+	probeCommandReserve = time.Minute
+	// probeStartupBudget allows a cold node to schedule and start the probe before its command
+	// phase begins. The documented 213s cold start fits with more than 40 percent headroom.
+	probeStartupBudget = 5 * time.Minute
 )
 
 // definitiveWaiting are the container waiting reasons no retry changes: the image reference itself
@@ -170,6 +176,12 @@ type ImageProbe struct {
 	// Sandbox's shutdownTime is the budget and one API call after it, so the log of a pod that
 	// finished at the budget is still there to read.
 	Budget time.Duration
+	// CommandBudget is the duration the probe-image command has before it must stop. probeAttempt
+	// derives it from each attempt's Budget; a direct manifest test leaves it zero and sends no flag.
+	CommandBudget  time.Duration
+	commandReserve time.Duration
+	startupBudget  time.Duration
+	onPhase        func(string)
 	// Retry waits out the attempts that say nothing about the image: bootprobe.Daemon at boot.
 	Retry bootprobe.Retry
 	// RoleReferences are the task agents and skills the daemon's own role prompts name, required:
@@ -185,6 +197,31 @@ type ImageProbe struct {
 	// runs Oh My Pi three times, one at a time (pi.agents, the plugin's load, the session-storage
 	// setting), and exits, so it is sized for that and not for a role's work.
 	Resources corev1.ResourceRequirements
+}
+
+func probeCommandBudget(budget time.Duration) time.Duration {
+	return budget - probeCommandReserve
+}
+
+func (p ImageProbe) commandReserveDuration() time.Duration {
+	if p.commandReserve > 0 {
+		return p.commandReserve
+	}
+	return probeCommandReserve
+}
+
+func (p ImageProbe) commandBudget() time.Duration {
+	return p.Budget - p.commandReserveDuration()
+}
+
+func (p ImageProbe) startupBudgetDuration() time.Duration {
+	if p.startupBudget > p.Budget {
+		return p.startupBudget
+	}
+	if p.startupBudget > 0 {
+		return p.Budget
+	}
+	return probeStartupBudget
 }
 
 // ProbeImage proves the runtime's image (Options.Image) on the cluster before any claim runs on
@@ -205,6 +242,9 @@ type ImageProbe struct {
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.ImageReport, error) {
 	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
 		return bootprobe.ImageReport{}, errors.New("image probe: a contract, a positive budget, and a positive retry wait are required")
+	}
+	if p.Budget <= p.commandReserveDuration() {
+		return bootprobe.ImageReport{}, fmt.Errorf("image probe: budget %s must exceed command reserve %s", p.Budget, p.commandReserveDuration())
 	}
 	if p.RoleReferences.Zero() {
 		return bootprobe.ImageReport{}, errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
@@ -310,9 +350,13 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	}); err != nil {
 		return unlessStopped(ctx, err, "probe sandbox "+name)
 	}
-	// Built at each create, so the shutdown is the budget from that moment, whatever came before it.
+	// Built at each create, so the shutdown and command budget are each from that moment,
+	// whatever came before it.
 	manifest := func() (*unstructured.Unstructured, error) {
-		return encodeProbe(r.probeManifest(name, p, r.now().Add(p.Budget+apiTimeout)))
+		now := r.now()
+		commandProbe := p
+		commandProbe.CommandBudget = p.commandBudget()
+		return encodeProbe(r.probeManifest(name, commandProbe, now.Add(p.startupBudgetDuration()+p.Budget+apiTimeout)))
 	}
 	uid, outcome, created := r.createProbe(ctx, name, digest, manifest, p.Budget)
 	if !created {
@@ -341,7 +385,11 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		readErr   error
 		mountRead time.Time
 	)
-	err := r.await(ctx, p.Budget, "probe pod "+name+" to finish", func(context.Context) (bool, error) {
+	startupBudget := p.startupBudgetDuration()
+	if p.onPhase != nil {
+		p.onPhase("startup")
+	}
+	err := r.await(ctx, startupBudget, "probe pod "+name+" to start", func(context.Context) (bool, error) {
 		s, err := r.storedSandbox(name)
 		if err != nil {
 			readErr = err
@@ -352,11 +400,10 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		case live:
 			seen = true
 		case seen || (s != nil && s.UID == uid):
-			vanished := bootprobe.Outcome{Detail: fmt.Sprintf("probe sandbox %s vanished before its pod finished", name)}
-			verdict = &vanished
+			verdict = &bootprobe.Outcome{Detail: fmt.Sprintf("probe sandbox %s vanished before its pod started", name)}
 			return true, nil
 		default:
-			return false, nil // not in the store yet
+			return false, nil
 		}
 		pod := r.storedPod(name)
 		if !ownedBy(pod, uid) {
@@ -364,6 +411,9 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		}
 		if terminal(pod) {
 			finished = pod
+			return true, nil
+		}
+		if probeStarted(pod) {
 			return true, nil
 		}
 		if stuck := r.stuck(ctx, pod, name, digest, &mountRead); stuck != nil {
@@ -378,9 +428,50 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	case readErr != nil:
 		return bootprobe.Outcome{Detail: fmt.Sprintf("probe sandbox %s: %v", name, readErr)}
 	case err != nil:
-		return bootprobe.Outcome{Detail: r.unfinished(ctx, name, uid, p.Budget)}
+		return bootprobe.Outcome{Detail: r.unstarted(ctx, name, uid, startupBudget)}
 	case verdict != nil:
 		return *verdict
+	}
+	if finished == nil {
+		if p.onPhase != nil {
+			p.onPhase("command")
+		}
+		err = r.await(ctx, p.Budget, "probe pod "+name+" to finish", func(context.Context) (bool, error) {
+			s, err := r.storedSandbox(name)
+			if err != nil {
+				readErr = err
+				return false, err
+			}
+			live := s != nil && s.UID == uid && s.DeletionTimestamp == nil
+			switch {
+			case live:
+				seen = true
+			case seen || (s != nil && s.UID == uid):
+				verdict = &bootprobe.Outcome{Detail: fmt.Sprintf("probe sandbox %s vanished before its pod finished", name)}
+				return true, nil
+			default:
+				return false, nil
+			}
+			pod := r.storedPod(name)
+			if !ownedBy(pod, uid) {
+				return false, nil
+			}
+			if terminal(pod) {
+				finished = pod
+				return true, nil
+			}
+			return false, nil
+		})
+		switch {
+		case ctx.Err() != nil:
+			return bootprobe.Outcome{}
+		case readErr != nil:
+			return bootprobe.Outcome{Detail: fmt.Sprintf("probe sandbox %s: %v", name, readErr)}
+		case err != nil:
+			return bootprobe.Outcome{Detail: r.unfinished(ctx, name, uid, p.Budget)}
+		case verdict != nil:
+			return *verdict
+		}
 	}
 	logTail, logErr := r.probeLog(ctx, name)
 	return r.judge(name, digest, finished, logTail, logErr, p.Contract)
@@ -977,6 +1068,27 @@ func probeWaiting(pod *corev1.Pod) *corev1.ContainerStateWaiting {
 	return nil
 }
 
+func probeStarted(pod *corev1.Pod) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == probeContainer {
+			return status.State.Running != nil || status.State.Terminated != nil
+		}
+	}
+	return false
+}
+
+func (r *Runtime) unstarted(ctx context.Context, name string, uid types.UID, budget time.Duration) string {
+	pod := r.storedPod(name)
+	if !ownedBy(pod, uid) {
+		return fmt.Sprintf("probe pod %s did not start within %s: no pod", name, budget)
+	}
+	detail := fmt.Sprintf("probe pod %s did not start within %s (phase %s)", name, budget, phaseOf(pod))
+	if waiting := probeWaiting(pod); waiting != nil && waiting.Reason != "" {
+		detail += fmt.Sprintf(" (container %s waiting: %s)", probeContainer, waiting.Reason)
+	}
+	return detail
+}
+
 // probeLog is the probe container's last log lines, kept to probeLogBytes from the tail's end
 // (lastBytes), so a refusal's quote reaches the OK line whatever a line's length.
 func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
@@ -995,11 +1107,25 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 	return strings.TrimSpace(text), nil
 }
 
-// lastBytes reads r to its end, keeping only the last keep bytes (one buffer of 2×keep, compacted
-// in place), and answers that tail: with a leading … line (everything up to and including the
-// first \n dropped, so what remains starts on its own line) when anything of r was cut, unchanged
-// when r was keep bytes or shorter.
+// lastBytes reads r to its end, keeping only the last keep bytes (tailBytes), and answers that
+// tail: with a leading … line (everything up to and including the first \n dropped, so what
+// remains starts on its own line) when anything of r was cut, unchanged when r was keep bytes or
+// shorter.
 func lastBytes(r io.Reader, keep int) (string, error) {
+	buf, dropped, err := tailBytes(r, keep)
+	if err != nil || !dropped {
+		return string(buf), err
+	}
+	if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+		buf = buf[i+1:]
+	}
+	return "…\n" + string(buf), nil
+}
+
+// tailBytes reads r to its end and answers its last keep bytes, and whether it dropped any before
+// them. It holds one buffer of 2×keep, compacted in place, and one read chunk of keep, whatever
+// r's length: no read grows the buffer, since at most keep bytes are added to at most keep kept.
+func tailBytes(r io.Reader, keep int) ([]byte, bool, error) {
 	buf := make([]byte, 0, 2*keep)
 	chunk := make([]byte, keep)
 	dropped := false
@@ -1011,19 +1137,12 @@ func lastBytes(r io.Reader, keep int) (string, error) {
 			buf = append(buf[:0], buf[len(buf)-keep:]...)
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
+			return buf, dropped, nil
 		}
 		if err != nil {
-			return "", err
+			return nil, false, err
 		}
 	}
-	if !dropped {
-		return string(buf), nil
-	}
-	if i := bytes.IndexByte(buf, '\n'); i >= 0 {
-		buf = buf[i+1:]
-	}
-	return "…\n" + string(buf), nil
 }
 
 // undefinedFlag is Go's flag package refusing a flag the probed CLI does not define.
@@ -1042,10 +1161,12 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // (bootprobe.ExtensionsDiscovered): a CLI that predates the discovery-on pod lane probed the plugin
 // roots with Oh My Pi's extension discovery disabled, and the image it certified links the plugins
 // into its profile, which a pod of this daemon — discovery on, the two roots explicit — would load
-// twice. It must carry the capabilities mark too
-// (bootprobe.CapabilitiesChecked): a CLI that predates the capability check prints none, having
-// checked no capability, and a current one that found a capability missing exits 1 before the OK
-// line, so the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild. When the
+// twice. It must carry the capabilities mark too, at bootprobe.CapabilitiesAll
+// (bootprobe.Capabilities): a CLI that predates the capability check prints none, having checked
+// no capability, and a current one that found a capability missing exits 1 before the OK line, so
+// the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild; a line that left
+// the browser row unchecked (bootprobe.CapabilitiesBrowserSkipped, `probe-image --skip-browser`,
+// which this probe's command never passes) is refused naming that mark. When the
 // daemon has a pane NATS nkey seed (Options.NATSUser),
 // the probe must also name the same user as the seed its pointer read (bootprobe.NATSUser), a
 // refusal otherwise. Naming none is the image's: a current CLI whose pointer holds a blank or
@@ -1073,6 +1194,10 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 			return imageRefusal(digest, "pod %s Failed%s: its legion CLI has no %s, a flag this daemon's probe passes: build the image from this daemon's commit — log tail: %s",
 				name, ended, flag[1], logTail)
 		}
+		if role, why, ok := bootprobe.RoleOverlaysRefused(logTail); ok {
+			return bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s refused role %s's Oh My Pi overlays: %s; the probe pod mounts runtime.kubernetes.pod's volumes as every pod does, so the %s's Oh My Pi would not start: add the file to the ConfigMap its mount serves, or correct role_config_files.%s — log tail: %s",
+				name, role, why, role, role, logTail)}
+		}
 		if refused := r.unreadableShares(name, pod); refused != nil {
 			return *refused
 		}
@@ -1099,8 +1224,13 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 		return imageRefusal(digest, "pod %s Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit — log tail: %s",
 			name, logTail)
 	}
-	if !bootprobe.CapabilitiesChecked(logTail) {
+	switch mark := bootprobe.Capabilities(logTail); mark {
+	case bootprobe.CapabilitiesAll:
+	case "":
 		return imageRefusal(digest, "pod %s Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit — log tail: %s", name, logTail)
+	default:
+		return imageRefusal(digest, "pod %s Succeeded without checking the whole capability list (its OK line's capabilities mark: %s, where the daemon's probe requires %s) — log tail: %s",
+			name, mark, bootprobe.CapabilitiesAll, logTail)
 	}
 	if r.natsUser != "" {
 		switch got := bootprobe.NATSUser(logTail); got {
@@ -1177,16 +1307,26 @@ type probeSpec struct {
 // Secret's keys exported as the worker's shim exports them (--provider-env-dir) when its pod mounts
 // that Secret (mountsProviders), each providers secret's `<NAME>_FILE` pointing at its file there
 // as a worker's does (so neither exports it), and resolving the daemon's own role prompts'
-// references (--role-references), which ProbeImage requires. Its command and env are escaped
-// against the kubelet's expansion as every worker container's are (kubeletLiteral). It carries
-// Karpenter's `do-not-disrupt` alone, not the Cluster Autoscaler's `safe-to-evict` (podTemplate
-// sets both): GKE Autopilot places a pod carrying that one on a node of its own whenever possible,
-// so each boot's probe would ask for a node, and a probe minutes long and already retried on
-// failure (kubeletFailure, ImageProbe.Retry) gains nothing from a seven-day eviction window.
+// references (--role-references), which ProbeImage requires, and, first, running one role
+// generation's namespaces as an issue pod's launcher runs every role (--role-namespaces), over a
+// disk emptyDir of its own at RoleProbeDir, as an issue pod's role homes volume is, so a runtime
+// that refuses a role's namespaces fails the probe rather than every role's start. Its command and
+// env are escaped against the kubelet's expansion as every worker container's are
+// (kubeletLiteral). It carries Karpenter's `do-not-disrupt` alone, not the Cluster Autoscaler's
+// `safe-to-evict` (podTemplate sets both): GKE Autopilot places a pod carrying that one on a node
+// of its own whenever possible, so each boot's probe would ask for a node, and a probe minutes long
+// and already retried on failure (kubeletFailure, ImageProbe.Retry) gains nothing from a seven-day
+// eviction window.
+// For each role role_config_files names (Options.RoleConfigFiles), in the workflow's order, it
+// passes that role's overlays (--role-config-files), which the probe reads as that role's Oh My Pi
+// will: none are passed for a deployment that names none.
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
 	command := []string{r.tools.Legion, "probe-image", "--daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
+	if p.CommandBudget > 0 {
+		command = append(command, "--probe-budget", p.CommandBudget.String())
+	}
 	// The probe reads the providers directory as a worker's shim does, and only where its pod mounts
 	// the providers Secret there, which it does when something needs it (mountsProviders: a provider
 	// key, a providers secret, or a session database URL key); a directory it is told and cannot read
@@ -1196,13 +1336,22 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 	if r.mountsProviders() {
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}
-	command = append(command, "--role-references", p.RoleReferences.Encode())
+	command = append(command, "--role-references", p.RoleReferences.Encode(), "--role-namespaces", RoleProbeDir)
+	// Each role that names overlays of its own is read as it will start: the probe pod mounts the
+	// operator's volumes as every pod does, so a file a role's PI_CONFIG_FILES names and the mounts
+	// lack refuses the boot here, naming the role and the file, rather than that role's Oh My Pi at
+	// its first launch.
+	for _, role := range roleConfigRoles {
+		if files := r.roleConfigFiles[role]; len(files) > 0 {
+			command = append(command, bootprobe.RoleConfigFilesFlag, bootprobe.RoleConfigFilesValue(string(role), files))
+		}
+	}
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,
 		Command:         command,
 		Env:             slices.Concat(r.operatorEnv(), r.providersPointers(), r.sessionDSNPointer()),
-		VolumeMounts:    slices.Concat(providersMounts, r.pod.VolumeMounts),
+		VolumeMounts:    slices.Concat([]corev1.VolumeMount{{Name: roleProbeVolume, MountPath: RoleProbeDir}}, providersMounts, r.pod.VolumeMounts),
 		Resources:       p.Resources,
 		SecurityContext: restrictedContainer(),
 	}
@@ -1229,7 +1378,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 					NodeSelector:      r.nodeSelector(),
 					Tolerations:       r.tolerations(),
 					PriorityClassName: r.scheduling.PriorityClass,
-					Volumes:           slices.Concat(providers, r.pod.Volumes),
+					Volumes:           slices.Concat([]corev1.Volume{{Name: roleProbeVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}, providers, r.pod.Volumes),
 					Containers:        []corev1.Container{container},
 				},
 			},

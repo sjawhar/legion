@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
@@ -44,9 +45,9 @@ func providersItems(pod corev1.PodSpec) []corev1.KeyToPath {
 // pointer, and the shim reads the providers directory and, seeing the pointer, never exports the
 // URL into Oh My Pi's environment; the image probe mounts the key too, so a Secret that lacks it
 // refuses boot. Under cloudsql-iam no pod and no probe mounts a session key at all: the file is the
-// generation's own, written beside the socket each role container's launcher proxies to the
-// instance, and that launcher is told the instance, the database and the login. The image probe
-// tells its Oh My Pi nothing of the store under either.
+// generation's own, written beside the socket the pod's one launcher proxies to the instance for
+// that generation of that role, and the launcher is told the instance, the database and the login.
+// The image probe tells its Oh My Pi nothing of the store under either.
 func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 	projection := corev1.KeyToPath{Key: "SESSION_DSN", Path: "OMP_SESSION_SQL_DSN"}
 	proxyFlags := []string{
@@ -80,25 +81,37 @@ func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 					if got := slices.Contains(items, projection); got != tc.projected {
 						t.Errorf("the providers volume projects the session key: %t (%v), want %t", got, items, tc.projected)
 					}
-					role := containerNamed(t, pod, string(spec.Role))
+					// The launcher's flags are the pod's one container's, an issue pod's `roles`
+					// serving every workflow role or the controller's own, which is the container
+					// workerOf read.
 					wantFlags := tc.store.Kind == ompsessions.StoreCloudSQLIAM
-					if got := containsSequence(role.Command, proxyFlags); got != wantFlags {
-						t.Errorf("the role container's launcher carries the session proxy's flags: %t (%q), want %t", got, role.Command, wantFlags)
+					podLauncher := containerNamed(t, pod, worker.Name)
+					if got := containsSequence(podLauncher.Command, proxyFlags); got != wantFlags {
+						t.Errorf("the pod's launcher carries the session proxy's flags: %t (%q), want %t", got, podLauncher.Command, wantFlags)
 					}
 					dsnFile := tc.dsnFile(spec.Generation)
 					if env["OMP_SESSION_STORAGE"] != "sql" || env["OMP_SESSION_SQL_DSN_FILE"] != dsnFile {
 						t.Errorf("OMP_SESSION_STORAGE = %q, OMP_SESSION_SQL_DSN_FILE = %q; want sql and %s",
 							env["OMP_SESSION_STORAGE"], env["OMP_SESSION_SQL_DSN_FILE"], dsnFile)
 					}
-					mount := mountHolding(worker, dsnFile)
+					// The agent reads the URL at the path its own namespaces show it; the
+					// container holds the volume behind it at the fixed path in the controller's
+					// pod and under the role's own directory in an issue pod, which role-init
+					// binds back to the fixed path.
+					held := dsnFile
+					if worker.Name == runtime.IssuePodContainer {
+						held = strings.Replace(dsnFile, LauncherPrivateDir, roleDir(spec.Role)+"/private", 1)
+					}
 					switch tc.store.Kind {
 					case ompsessions.StorePostgres:
+						mount := mountHolding(worker, dsnFile)
 						if mount == nil || mount.Name != providersVolume || !mount.ReadOnly {
 							t.Errorf("%s is held by %+v, want the providers volume read-only", dsnFile, mount)
 						}
 					case ompsessions.StoreCloudSQLIAM:
+						mount := mountHolding(podLauncher, held)
 						if mount == nil || mount.Name != roleVolume("private", spec.Role) || mount.ReadOnly {
-							t.Errorf("%s is held by %+v, want the role's writable private volume: its launcher writes the URL there", dsnFile, mount)
+							t.Errorf("%s is held by %+v, want the role's writable private volume: its launcher writes the URL there", held, mount)
 						}
 					}
 					if !slices.Contains(worker.Command, "--provider-env-dir") && tc.store.Kind == ompsessions.StorePostgres {
@@ -281,6 +294,108 @@ func TestTheProvidersDirectoryIsToldWhereThePodMountsIt(t *testing.T) {
 						t.Errorf("the pod holds the providers volume: %t, mounted by %q; want %t", volume, mounting, tc.mounted)
 					}
 				})
+			}
+		})
+	}
+}
+
+// A Claude Code role is told the session store's two variables as an Oh My Pi role of the pod is:
+// the runtime tells every role pod both (mainEnvironment), whichever harness it runs. The URL
+// file's pointer is what keeps the database's credentials out of Claude Code: under postgres the
+// providers volume mounts the database's URL for the whole pod, and the shim exports a providers
+// file into the agent's environment unless its `_FILE` pointer is set, so without the pointer the
+// URL, password and all, would reach Claude Code and every command it runs.
+func TestAClaudeWorkerIsToldTheSessionStoreAsAnOhMyPiWorkerIs(t *testing.T) {
+	for _, store := range []ompsessions.Store{postgresStore, cloudSQLStore} {
+		t.Run(string(store.Kind), func(t *testing.T) {
+			opts := testOptions()
+			opts.SessionStore = store
+			r, err := configure(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claude := envOf(workerOf(t, r, claudeWorkerSpec(t)))
+			omp := envOf(workerOf(t, r, workerSpec(t)))
+			for _, name := range sessionStoreVariables {
+				if claude[name] == "" || claude[name] != omp[name] {
+					t.Errorf("a Claude worker is told %s=%q, want %q as the Oh My Pi worker is", name, claude[name], omp[name])
+				}
+			}
+			if store.Kind != ompsessions.StorePostgres {
+				return
+			}
+			for _, pair := range providersExported(t, claude) {
+				if strings.Contains(pair, "secret@") {
+					t.Errorf("a Claude worker's shim exports the session database's URL into its environment: %q", pair)
+				}
+			}
+		})
+	}
+}
+
+// A Claude Code generation's start command names the session its launcher keeps in the session
+// table, LEGION_CLAUDE_SESSION_ID, beside both of Oh My Pi's session variables, which are what the
+// launcher reaches the table through: the fresh session its agent command starts (`--session-id`),
+// or the recorded transcript's id when it resumes. An Oh My Pi generation's start command names no
+// such session, so its launcher keeps nothing beside Oh My Pi. The id is the generation's, never
+// the pod's: no container of the pod carries it, so a pod the next generation reuses is unchanged.
+func TestAClaudeStartCommandNamesTheSessionItsLauncherKeeps(t *testing.T) {
+	for _, store := range []ompsessions.Store{postgresStore, cloudSQLStore} {
+		t.Run(string(store.Kind), func(t *testing.T) {
+			opts := testOptions()
+			opts.SessionStore = store
+			r, err := configure(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			startEnv := func(spec runtime.SpawnSpec) (map[string]string, launch) {
+				l := launchOf(t, r, spec)
+				env := map[string]string{}
+				for _, entry := range launcherCommand(l, r).Env {
+					name, value, _ := strings.Cut(entry, "=")
+					env[name] = value
+				}
+				return env, l
+			}
+			fresh, l := startEnv(claudeWorkerSpec(t))
+			argv := l.agentArgv(r.agent)
+			at := slices.Index(argv, "--session-id")
+			if at < 0 || at+1 == len(argv) || fresh[claudelaunch.SessionVariable] != argv[at+1] {
+				t.Errorf("a fresh Claude start command names %s=%q, want the session its agent command starts in %q",
+					claudelaunch.SessionVariable, fresh[claudelaunch.SessionVariable], argv)
+			}
+			resumeSpec := claudeResumeSpec(t)
+			resumed, _ := startEnv(resumeSpec)
+			if resumed[claudelaunch.SessionVariable] != claudeTranscriptID {
+				t.Errorf("a resuming Claude start command names %s=%q, want the recorded transcript's %s",
+					claudelaunch.SessionVariable, resumed[claudelaunch.SessionVariable], claudeTranscriptID)
+			}
+			// The Oh My Pi generation each is compared with is the same generation of the same role.
+			ompOf := func(spec runtime.SpawnSpec) map[string]string {
+				spec.Backend, spec.ResumeSessionFile = "", ""
+				env, _ := startEnv(spec)
+				return env
+			}
+			for name, tc := range map[string]struct{ claude, omp map[string]string }{
+				"a fresh Claude":    {fresh, ompOf(claudeWorkerSpec(t))},
+				"a resuming Claude": {resumed, ompOf(resumeSpec)},
+			} {
+				for _, variable := range sessionStoreVariables {
+					if tc.claude[variable] == "" || tc.claude[variable] != tc.omp[variable] {
+						t.Errorf("%s start command names %s=%q, want %q as the Oh My Pi one does", name, variable, tc.claude[variable], tc.omp[variable])
+					}
+				}
+				if value, named := tc.omp[claudelaunch.SessionVariable]; named {
+					t.Errorf("an Oh My Pi start command names %s=%q, want no Claude session", claudelaunch.SessionVariable, value)
+				}
+			}
+			pod := r.podTemplate(l).Spec
+			for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+				for _, v := range c.Env {
+					if v.Name == claudelaunch.SessionVariable {
+						t.Errorf("the pod's container %s carries %s=%q, want it in the start command alone", c.Name, v.Name, v.Value)
+					}
+				}
 			}
 		})
 	}

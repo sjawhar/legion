@@ -1,8 +1,10 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -15,7 +17,9 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -175,13 +179,14 @@ func TestANewGenerationStopsTheEarlierOneFirst(t *testing.T) {
 }
 
 // Every role's launcher token projection, private credential directory, state directory,
-// agent-secrets key directory and gh volume are mounted in that role's container alone: no other
-// role, nor an init container, can read another role's credentials, the GitHub App token in its gh
-// files included. The issue's checkout, tree and sessions are what roles share. The gh volume
-// projects each owner's two gh keys of the role Secret as the files gh reads, <owner>/hosts.yml
-// and <owner>/config.yml, and the launcher volume the launcher token alone; the launching role's
-// agent is told, in its start command, the default owner's directory as GH_CONFIG_DIR, the volume
-// as LEGION_GH_OWNERS_DIR and the image's real gh as LEGION_GH_PATH.
+// agent-secrets key directory and gh volume are mounted once, in the pod's one container under that
+// role's own directory of RolesDir, which only that role's namespace binds back (`legion launcher
+// role-init`); no init container mounts any of them, so neither can read a role's credentials, the
+// GitHub App token in its gh files included. The issue's checkout, tree and sessions are what roles
+// share. The gh volume projects each owner's two gh keys of the role Secret as the files gh reads,
+// <owner>/hosts.yml and <owner>/config.yml, and the launcher volume the launcher token alone; the
+// launching role's agent is told, in its start command, the default owner's directory as
+// GH_CONFIG_DIR, the volume as LEGION_GH_OWNERS_DIR and the image's real gh as LEGION_GH_PATH.
 func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -193,20 +198,20 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 	pod := r.podTemplate(l).Spec
 	containers := append(slices.Clone(pod.InitContainers), pod.Containers...)
 	for _, role := range claim.Roles {
-		for _, volume := range []string{
-			roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role),
-			roleVolume(agentSecretsKeyVolume, role), roleVolume("gh", role),
+		for volume, dir := range map[string]string{
+			roleVolume("launcher", role): launcher.RoleLauncherDir, roleVolume("private", role): launcher.RolePrivateDir, roleVolume(stateVolume, role): launcher.RoleStateDir,
+			roleVolume(agentSecretsKeyVolume, role): launcher.RoleAgentSecretsDir, roleVolume("gh", role): launcher.RoleGHDir,
 		} {
-			var mountedIn []string
+			var mountedAt []string
 			for _, c := range containers {
 				for _, m := range c.VolumeMounts {
 					if m.Name == volume {
-						mountedIn = append(mountedIn, c.Name)
+						mountedAt = append(mountedAt, c.Name+":"+m.MountPath)
 					}
 				}
 			}
-			if len(mountedIn) != 1 || mountedIn[0] != string(role) {
-				t.Errorf("%s is mounted in %v, want %s alone", volume, mountedIn, role)
+			if want := workerContainer + ":" + roleDir(role) + "/" + dir; len(mountedAt) != 1 || mountedAt[0] != want {
+				t.Errorf("%s is mounted at %v, want %s alone", volume, mountedAt, want)
 			}
 		}
 	}
@@ -215,9 +220,9 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 		volumes[v.Name] = v
 	}
 	for _, role := range claim.Roles {
-		launcher := volumes[roleVolume("launcher", role)].Secret
-		if launcher == nil || len(launcher.Items) != 1 || launcher.Items[0].Key != LauncherTokenFile {
-			t.Errorf("%s's launcher volume projects %+v, want only the launcher token", role, launcher)
+		token := volumes[roleVolume("launcher", role)].Secret
+		if token == nil || len(token.Items) != 1 || token.Items[0].Key != LauncherTokenFile {
+			t.Errorf("%s's launcher volume projects %+v, want only the launcher token", role, token)
 		}
 		gh := volumes[roleVolume("gh", role)].Secret
 		var want []corev1.KeyToPath
@@ -228,9 +233,9 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 		if gh == nil || gh.SecretName != roleSecretName(l.name, role) || !slices.Equal(gh.Items, want) || gh.DefaultMode == nil || *gh.DefaultMode != 0o440 {
 			t.Errorf("%s's gh volume projects %+v, want %s's %+v, read-only", role, gh, roleSecretName(l.name, role), want)
 		}
-		mount := mountHolding(containerNamed(t, pod, string(role)), GHConfigDir)
-		if mount == nil || mount.Name != roleVolume("gh", role) || mount.MountPath != GHConfigDir || !mount.ReadOnly {
-			t.Errorf("%s's container mounts %+v at %s, want its gh volume read-only", role, mount, GHConfigDir)
+		mount := mountHolding(containerNamed(t, pod, workerContainer), roleDir(role)+"/"+launcher.RoleGHDir)
+		if mount == nil || mount.Name != roleVolume("gh", role) || !mount.ReadOnly {
+			t.Errorf("the container mounts %+v at %s's gh directory, want its gh volume read-only", mount, role)
 		}
 	}
 	start := map[string]string{}
@@ -265,5 +270,53 @@ func TestRejectedLauncherHellosDoNotSpendKubernetesRequests(t *testing.T) {
 		if action.GetVerb() == "get" && action.GetResource().Resource == "secrets" {
 			t.Fatal("unauthenticated launcher hello issued a Kubernetes Secret GET")
 		}
+	}
+}
+
+// A Claude Code launch's start command carries one file beside its credentials: the MCP document
+// its agent command reads, naming the image's bun and the claude-envoy server it runs, with the
+// plugin's data under the role's own Claude Code directory. It travels in Files and not in the
+// spec's secrets, which would point a `<NAME>_FILE` variable at it and be refused for its name
+// besides. An Oh My Pi launch carries no such file.
+func TestAClaudeLaunchCarriesItsMCPDocumentAsALauncherFile(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := claudeWorkerSpec(t)
+	start := launcherCommand(launchOf(t, r, spec), r)
+	raw, carried := start.Files[claudeMCPFile]
+	if !carried {
+		t.Fatalf("the start command carries the files %v, want %s among them", slices.Sorted(maps.Keys(start.Files)), claudeMCPFile)
+	}
+	var document struct {
+		MCPServers map[string]struct {
+			Command string
+			Args    []string
+			Env     map[string]string
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(raw), &document); err != nil {
+		t.Fatalf("the MCP document %q: %v", raw, err)
+	}
+	server, named := document.MCPServers[claudelaunch.MCPServer]
+	if !named || server.Command != "/usr/local/bin/bun" ||
+		!slices.Equal(server.Args, []string{"/opt/legion/claude-envoy/dist/envoy-channel.js"}) ||
+		server.Env["CLAUDE_PLUGIN_DATA"] != claudeConfigDir(spec.Role)+"/envoy-plugin-data" {
+		t.Errorf("the MCP document is %q, want the image's bun running the claude-envoy server with its data under %s", raw, claudeConfigDir(spec.Role))
+	}
+	if got := slices.Index(start.Argv, "--mcp-config"); got < 0 || start.Argv[got+1] != generationDir(spec.Generation)+"/"+claudeMCPFile {
+		t.Errorf("the start command's argv %q does not read the document where the launcher writes it", start.Argv)
+	}
+	// Had the document travelled in spec.Secrets, the worker would be told a `<NAME>_FILE`
+	// pointer at it (mainEnvironment), and ValidateSpawnSpec would refuse the name besides.
+	for _, pair := range start.Env {
+		if name, value, _ := strings.Cut(pair, "="); value == generationDir(spec.Generation)+"/"+claudeMCPFile {
+			t.Errorf("the worker is told %s=%s, the pointer every launch secret gets", name, value)
+		}
+	}
+	omp := launcherCommand(launchOf(t, r, workerSpec(t)), r)
+	if _, carried := omp.Files[claudeMCPFile]; carried {
+		t.Errorf("an Oh My Pi launch carries %s: %v", claudeMCPFile, slices.Sorted(maps.Keys(omp.Files)))
 	}
 }

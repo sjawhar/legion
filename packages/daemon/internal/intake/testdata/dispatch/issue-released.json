@@ -1,0 +1,11 @@
+{
+  "event_id": "dispatch-issue-released",
+  "source": "dispatch",
+  "source_event_id": "37",
+  "topic": "notifications.dispatch.issue.CAPTURE-4.issue.released",
+  "dedupe_key": "dispatch-issue-released",
+  "issued_at": 1790124397000,
+  "payload_summary": "CAPTURE-4 issue released",
+  "payload": "{\"id\":37,\"issue_key\":\"CAPTURE-4\",\"artifact_id\":null,\"project\":\"CAPTURE\",\"seq\":12,\"type\":\"issue.released\",\"actor\":{\"kind\":\"user\",\"id\":\"human\"},\"notify\":true,\"created_at\":\"2026-09-23T00:46:37Z\",\"payload\":{\"key\":\"CAPTURE-4\",\"status\":\"in_progress\",\"claim\":null,\"previous_claim\":{\"actor\":{\"kind\":\"user\",\"id\":\"human\"},\"at\":\"2026-09-23T00:46:36Z\"},\"reason\":\"released\"}}",
+  "trace_id": "dispatch-issue-released"
+}

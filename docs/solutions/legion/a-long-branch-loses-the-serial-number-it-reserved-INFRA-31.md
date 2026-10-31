@@ -7,7 +7,7 @@ tags:
   - release
   - decision-rules
 date: 2026-10-21
-status: active
+status: superseded in part by sjawhar/legion#2423 — a renumber no longer rebuilds `dist/envoy-channel.js` or runs `check-dist` in the pull request, since main's Rebuild Claude Envoy plugin workflow commits the bundle after each merge; the registry rule, both entries staying, the manifest sweep and the base-merge rule stand
 module: packages/daemon/internal/api
 related_issues:
   - "INFRA-31"

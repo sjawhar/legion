@@ -5,13 +5,16 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { askgateStore, MARKER_MAX_AGE_MS, processStart } from "../askgate-marker";
 import { adviceMemory, resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures, shownPictures } from "../dispatch-picture-tools";
+import { sessionDirectory } from "../dispatch-session-directory";
 import {
   appendResult,
   loadSessionMemory,
@@ -21,7 +24,6 @@ import {
   recordOutcome,
   resultsEnd,
   saveSessionMemory,
-  sessionDirectory,
   writePicture,
 } from "../dispatch-session-state";
 
@@ -41,10 +43,6 @@ describe("per-session state", () => {
     expect(adviceMemory().has("triage:LEGION-2")).toBe(true);
     expect(shownPictures("s1").has("dispatch://LEGION-2/artifact/a@v1")).toBe(true);
     expect(follows.has("ask-1")).toBe(true);
-  });
-
-  test("a session id that could leave the state directory is refused", () => {
-    expect(() => sessionDirectory({ DISPATCH_STATE_DIR: root() }, "../x")).toThrow();
   });
 
   test("the ledger returns only what was appended after an offset", () => {
@@ -94,6 +92,29 @@ describe("per-session state", () => {
     pruneSessions(r, now);
     expect(existsSync(old)).toBe(false);
     expect(existsSync(fresh)).toBe(true);
+  });
+
+  // A crashed process's marker store is inert, since the CLI reads only a live owner's store. The
+  // daily pass removes it once its process is gone and nothing touched it for MARKER_MAX_AGE_MS.
+  test("pruning removes a marker store whose process is gone, and keeps a live or recent one", () => {
+    const r = root();
+    const now = Date.now();
+    const old = new Date(now - MARKER_MAX_AGE_MS - 60_000);
+    const store = (dir: string, touched: Date) => {
+      mkdirSync(join(dir, "markers"), { recursive: true });
+      writeFileSync(join(dir, "markers", "marker"), "{}");
+      utimesSync(join(dir, "markers"), touched, touched);
+      utimesSync(dir, touched, touched);
+      return dir;
+    };
+    const live = store(askgateStore(r, process.pid, processStart(process.pid)), old);
+    const crashed = store(askgateStore(r, process.pid, "1"), old);
+    const recent = store(askgateStore(r, process.pid, "2"), new Date(now));
+    const unknown = store(join(r, "askgate", "notes"), old);
+    pruneSessions(r, now);
+    expect(existsSync(crashed)).toBe(false);
+    expect([live, recent, unknown].map((dir) => existsSync(dir))).toEqual([true, true, true]);
+    rmSync(r, { recursive: true, force: true });
   });
 
   test("a malformed ledger line is named once, with its file and line, and the reader reads on", () => {

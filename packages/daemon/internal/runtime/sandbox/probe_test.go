@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -19,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -245,6 +247,7 @@ const testRoleReferencesJSON = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/p
 func probeOptions(t *testing.T) ImageProbe {
 	return ImageProbe{
 		Contract: 3, Budget: 10 * time.Second, RoleReferences: testRoleReferences,
+		commandReserve: time.Millisecond, startupBudget: unfinishedBudget,
 		Retry: bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
 	}
 }
@@ -277,7 +280,7 @@ func wantContains(t *testing.T, err error, wants ...string) {
 // okLine is the OK line an image prints when every probe passed, confirming contract, the
 // prompt-named agents' models resolved, the capability list checked, model fallback off.
 func okLine(contract int) string {
-	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved, "off")
+	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved, bootprobe.CapabilitiesAll, "off")
 }
 
 // Role references whose encoding the image's Decode refuses would fail the probe pod, and the
@@ -347,6 +350,125 @@ func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
 	g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
 }
 
+func TestProbeImagePassesTheRemainingAttemptBudgetToItsCommand(t *testing.T) {
+	g := newProbeRig(t, nil)
+	now := time.Date(2026, 10, 28, 13, 30, 0, 0, time.UTC)
+	g.r.now = func() time.Time { return now }
+	g.succeeds(okLine(3) + "\n")
+	probe := probeOptions(t)
+	probe.Budget = 300 * time.Second
+	probe.startupBudget = 0
+	probe.commandReserve = 0
+
+	if _, err := g.r.ProbeImage(g.ctx, probe); err != nil {
+		t.Fatalf("ProbeImage = %v, want a pass", err)
+	}
+	var created probeSandbox
+	for _, write := range g.writes() {
+		if write.verb != "create" || write.resource != "sandboxes" {
+			continue
+		}
+		if err := k8sruntime.DefaultUnstructuredConverter.FromUnstructured(write.object.(*unstructured.Unstructured).Object, &created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := created.Spec.PodTemplate.Spec.Containers[0].Command
+	flag := slices.Index(command, "--probe-budget")
+	if flag < 0 || flag+1 == len(command) {
+		t.Fatalf("probe command = %q, want --probe-budget", command)
+	}
+	if got, want := command[flag+1], (240 * time.Second).String(); got != want {
+		t.Fatalf("probe budget = %q, want the 300s attempt budget less the 60s reserve %q", got, want)
+	}
+	if got, want := created.Spec.ShutdownTime.Time, now.Add(probeStartupBudget+probe.Budget+apiTimeout).UTC().Truncate(time.Second); !got.Equal(want) {
+		t.Fatalf("probe shutdown time = %s, want startup budget plus command budget and API cleanup %s", got, want)
+	}
+}
+
+func TestProbeCommandBudgetKeepsTheFullReserveBelowFourMinutes(t *testing.T) {
+	if got, want := probeCommandBudget(180*time.Second), 120*time.Second; got != want {
+		t.Fatalf("probeCommandBudget(180s) = %s, want 120s after the 60s reserve", got)
+	}
+}
+
+func TestProbeImageRefusesABudgetWithoutCommandTime(t *testing.T) {
+	g := newProbeRig(t, nil)
+	probe := probeOptions(t)
+	probe.Budget = probeCommandReserve
+	probe.commandReserve = 0
+
+	_, err := g.r.ProbeImage(g.ctx, probe)
+	if err == nil || !strings.Contains(err.Error(), "budget") || !strings.Contains(err.Error(), "command reserve") {
+		t.Fatalf("ProbeImage() = %v, want a refusal naming the budget and command reserve", err)
+	}
+	if got := g.creates.Load(); got != 0 {
+		t.Fatalf("created %d probe sandboxes, want a budget refusal before a pod", got)
+	}
+}
+
+func TestProbeImageRefusesAProbePodThatDoesNotStart(t *testing.T) {
+	g := newProbeRig(t, nil).waits("ErrImagePull")
+	phases := make(chan string, 1)
+	releaseStartup := make(chan struct{})
+	probe := probeOptions(t)
+	probe.Budget = 100 * time.Millisecond
+	probe.startupBudget = 100 * time.Millisecond
+	probe.Retry.Attempts = 1
+	probe.onPhase = func(phase string) {
+		phases <- phase
+		if phase == "startup" {
+			<-releaseStartup
+		}
+	}
+	result := make(chan error, 1)
+	go func() { result <- g.probe(probe) }()
+
+	if phase := <-phases; phase != "startup" {
+		t.Fatalf("first phase = %q, want startup", phase)
+	}
+	g.eventually("the probe pod pending before the startup bound", func() bool {
+		pod := g.pod(probeSandboxName)
+		return pod != nil && pod.Status.Phase == corev1.PodPending && probeWaiting(pod) != nil
+	})
+	close(releaseStartup)
+	wantContains(t, <-result, "did not start within 100ms", "phase Pending", "container probe waiting: ErrImagePull")
+}
+
+func TestProbeImageCollectsAProbeDeadlineAfterStartup(t *testing.T) {
+	g := newProbeRig(t, nil)
+	g.with(func() {
+		g.log = "worker TLS probe failed: curl cannot verify refusal of the AAA chain: unavailable (probe deadline)"
+	})
+	phases := make(chan string, 2)
+	probe := probeOptions(t)
+	probe.Retry.Attempts = 1
+	probe.onPhase = func(phase string) { phases <- phase }
+	result := make(chan error, 1)
+	go func() { result <- g.probe(probe) }()
+
+	if phase := <-phases; phase != "startup" {
+		t.Fatalf("first phase = %q, want startup", phase)
+	}
+	g.eventually("the probe pod pending before startup completes", func() bool {
+		pod := g.pod(probeSandboxName)
+		return pod != nil && pod.Status.Phase == corev1.PodPending
+	})
+	g.update(g.pod(probeSandboxName), func(pod *corev1.Pod) {
+		pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}}
+	})
+	if phase := <-phases; phase != "command" {
+		t.Fatalf("second phase = %q, want command", phase)
+	}
+	g.update(g.pod(probeSandboxName), func(pod *corev1.Pod) {
+		pod.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},
+		}}}
+	})
+	wantContains(t, <-result, "curl cannot verify refusal of the AAA chain", "probe deadline")
+}
+
 // A passing probe reports what its OK line said of the image: the model-fallback mark, as the
 // line carries it, on the table the pod printed before it.
 func TestProbeImageReportsTheModelFallbackMark(t *testing.T) {
@@ -355,7 +477,7 @@ func TestProbeImageReportsTheModelFallbackMark(t *testing.T) {
 			g := newProbeRig(t, nil)
 			g.succeeds("probe-image: capability eval-js: present (Oh My Pi is its JavaScript runtime, and the launch probes ran it)\n" +
 				"probe-image: capability model-fallback: reported (the daemon reports it from the deployment's configuration)\n" +
-				bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsResolved, mark) + "\n")
+				bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsResolved, bootprobe.CapabilitiesAll, mark) + "\n")
 
 			report, err := g.r.ProbeImage(g.ctx, probeOptions(t))
 
@@ -400,9 +522,13 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 				"legion probe-image: capability browser is missing: /nonexistent/chromium (PUPPETEER_EXECUTABLE_PATH) --version: fork/exec /nonexistent/chromium: no such file or directory")
 		}, []string{"Failed (container probe terminated", "exit code 1", "capability browser is missing"}},
 		{"a build-time probe's result", func(g *probeRig) {
-			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped, "off"))
+			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped, bootprobe.CapabilitiesAll, "off"))
 		},
 			[]string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: skipped, where the daemon's probe requires resolved)"}},
+		{"a probe that left the browser row unchecked", func(g *probeRig) {
+			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsResolved, bootprobe.CapabilitiesBrowserSkipped, "off"))
+		},
+			[]string{"Succeeded without checking the whole capability list (its OK line's capabilities mark: browser-skipped, where the daemon's probe requires checked)"}},
 		{"a CLI that predates the discovery-on pod lane", func(g *probeRig) {
 			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved capabilities=checked model-fallback=on daemon-api-version=3")
 		}, []string{"Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit"}},
@@ -487,7 +613,7 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 		want  []string
 	}{
 		{"an image still being pulled", func(g *probeRig) { g.waits("ImagePullBackOff") },
-			[]string{"probe pod " + probeSandboxName + " still Pending after 300ms (container probe waiting: ImagePullBackOff)"}},
+			[]string{"probe pod " + probeSandboxName + " did not start within 300ms (phase Pending) (container probe waiting: ImagePullBackOff)"}},
 		// A pull that failed for any reason but the registry not having the image says nothing
 		// about the image: credentials, the network and a rate limit may all change by the next
 		// attempt.
@@ -540,7 +666,7 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 			g.waitsSaying("ErrImagePull", pullFailure("ErrImagePull", "NotFound", resolving(testImage+": not found"))).pullsFailed(1, "NotFound", resolving(testImage+": not found"))
 		}, []string{"(container probe waiting: ErrImagePull)"}},
 		{"no pod at all", func(g *probeRig) { g.hold.Store(true) },
-			[]string{"probe sandbox " + probeSandboxName + " has no pod after 300ms"}},
+			[]string{"probe pod " + probeSandboxName + " did not start within 300ms: no pod"}},
 		// A pod whose probe outlasts the attempt: what it logged so far is quoted.
 		{"a pod still probing", func(g *probeRig) {
 			g.with(func() {
@@ -1399,7 +1525,7 @@ func TestProbeImageWaitsOnAProbePodThePoolCannotPlace(t *testing.T) {
 		err := g.probe(p)
 
 		wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)",
-			"probe pod "+probeSandboxName+" still Pending after 300ms")
+			"probe pod "+probeSandboxName+" did not start within 300ms (phase Pending)")
 		if strings.Contains(logged.String(), "waiting on capacity") {
 			t.Errorf("a pod unschedulable for less than the boot timeout was read as a capacity wait:\n%s", logged.String())
 		}
@@ -1481,7 +1607,7 @@ func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing
 		err := g.probe(p)
 
 		wantContains(t, err, "the worker image probe never completed within its retry budget (1 attempts)",
-			"probe pod "+probeSandboxName+" still Pending after 300ms")
+			"probe pod "+probeSandboxName+" did not start within 300ms (phase Pending)")
 		if strings.Contains(logged.String(), "waiting on capacity") {
 			t.Errorf("a budget below the boot timeout read a capacity wait it never had time to see:\n%s", logged.String())
 		}
@@ -1492,15 +1618,16 @@ func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing
 // reads the providers Secret's keys as the worker's shim does, with or without a provider key —
 // under the postgres store goldenOptions configures, the probe's pod mounts that Secret for the
 // session database's URL key at least (mountsProviders). A pod that mounts none is told no
-// directory (TestTheProvidersDirectoryIsToldWhereThePodMountsIt).
+// directory (TestTheProvidersDirectoryIsToldWhereThePodMountsIt). It also runs a role generation's
+// namespaces over its own volume at RoleProbeDir, as an issue pod's launcher runs every role.
 func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
 		keys map[string]string
 		want []string
 	}{
-		{"no provider keys", nil, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON}},
-		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON}},
+		{"no provider keys", nil, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON, "--role-namespaces", RoleProbeDir}},
+		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON, "--role-namespaces", RoleProbeDir}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			opts := goldenOptions()
@@ -1513,6 +1640,15 @@ func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 			base := []string{opts.Tools.Legion, "probe-image", "--daemon-api-version", "3", "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
 			if want := append(base, testCase.want...); !slices.Equal(command, want) {
 				t.Errorf("the probe's command = %q, want %q", command, want)
+			}
+			pod := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, RoleReferences: testRoleReferences}, time.Now()).Spec.PodTemplate.Spec
+			if mount := mountHolding(pod.Containers[0], RoleProbeDir); mount == nil || mount.MountPath != RoleProbeDir || mount.Name != roleProbeVolume {
+				t.Errorf("the probe's %s is on mount %+v, want the %s volume's own", RoleProbeDir, mount, roleProbeVolume)
+			}
+			if !slices.ContainsFunc(pod.Volumes, func(v corev1.Volume) bool {
+				return v.Name == roleProbeVolume && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumDefault
+			}) {
+				t.Errorf("the probe pod's volumes %+v hold no disk emptyDir %s", pod.Volumes, roleProbeVolume)
 			}
 		})
 	}
@@ -1665,6 +1801,49 @@ func TestLastBytesKeepsTheEndOfTheTail(t *testing.T) {
 			t.Fatalf("lastBytes of an exactly-keep stream was not returned unchanged (len %d, want %d)", len(got), keep)
 		}
 	})
+}
+
+// tailBytes holds a log's newest keep bytes and no more, however long the log: a log of a hundred
+// times keep is read to its end, its last keep bytes come back with the cut reported, and the
+// buffer never grew past the 2×keep it started with, so a log's size never decides what the daemon
+// holds (readLog's memory, which io.ReadAll let a 2000-line tail grow to its whole size).
+func TestTailBytesHoldsOnlyTheNewestBytes(t *testing.T) {
+	const keep = 4 << 10
+	var log strings.Builder
+	for i := 0; log.Len() < 100*keep; i++ {
+		fmt.Fprintf(&log, "line %d %s\n", i, strings.Repeat("x", i%300))
+	}
+	full := log.String()
+	counted := &countingReader{r: strings.NewReader(full)}
+	got, cut, err := tailBytes(counted, keep)
+	if err != nil {
+		t.Fatalf("tailBytes = %v", err)
+	}
+	if counted.n != len(full) {
+		t.Fatalf("tailBytes read %d bytes of %d, want the whole log", counted.n, len(full))
+	}
+	if !cut || string(got) != full[len(full)-keep:] {
+		t.Fatalf("tailBytes = %d bytes, cut %v; want the log's last %d bytes and the cut reported", len(got), cut, keep)
+	}
+	if cap(got) > 2*keep {
+		t.Fatalf("tailBytes' buffer grew to %d bytes reading a %d-byte log, want at most %d", cap(got), len(full), 2*keep)
+	}
+	short := "a short log\n"
+	if got, cut, err := tailBytes(strings.NewReader(short), keep); err != nil || cut || string(got) != short {
+		t.Fatalf("tailBytes of a short log = %q, cut %v, %v; want it whole and no cut", got, cut, err)
+	}
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
 }
 
 // A probe pod's log a hundred lines of a kilobyte, the OK line last, still passes: probeLog keeps

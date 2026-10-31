@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
-
-	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
 // waitForQueuedLock waits until some session is queued, not yet granted, for mode on relation: a
@@ -169,12 +167,13 @@ func TestMigrate0064To0066RecordApprovalHandBacks(t *testing.T) {
 
 // 0066 bounds its own lock wait below deadlock_timeout. A comment write that goes on to write asks
 // while 0066 waits for comments closes a cycle with it, and 0066 gives up first, applying nothing,
-// before Postgres's deadlock check runs on either side: the write commits, and the next run
-// applies 0066. Under the runner's five-second bound that cycle aborts one side with 40P01.
+// before Postgres's deadlock check runs on either side: the write commits, and the runner's next
+// attempt applies 0066. Under the runner's five-second bound that cycle aborts one side with 40P01.
 func TestMigrate0066GivesUpBeforeACommentWriteThatWritesAsksDeadlocks(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 65)
+	logs := captureLogs(t)
 	var askID string
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
@@ -210,13 +209,11 @@ func TestMigrate0066GivesUpBeforeACommentWriteThatWritesAsksDeadlocks(t *testing
 	if err := writer.Commit(ctx); err != nil {
 		t.Fatalf("commit the comment write: %v", err)
 	}
-	err = <-migrated
-	var lockTimeout *pgmigrate.LockTimeoutError
-	if !errors.As(err, &lockTimeout) || !strings.Contains(lockTimeout.Migration, "0066_asks_handed_back_reply_fkey") {
-		t.Fatalf("0066 should have given up at its own lock timeout, got: %v", err)
+	if err := <-migrated; err != nil {
+		t.Fatalf("the runner should have applied 0066 on a later attempt once the comment write ended, got: %v", err)
 	}
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate once the comment write ended: %v", err)
+	if out := logs.String(); !strings.Contains(out, "the runner tries it again") || !strings.Contains(out, "migration=0066_asks_handed_back_reply_fkey.up.sql") || !strings.Contains(out, "attempt=1") {
+		t.Fatalf("0066 should have given up at its own lock timeout on its first attempt; logs:\n%s", out)
 	}
 	var applied bool
 	if err := store.Pool.QueryRow(ctx, `select exists(select 1 from schema_migrations where version = 66)`).Scan(&applied); err != nil {

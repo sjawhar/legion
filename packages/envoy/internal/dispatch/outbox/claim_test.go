@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -51,6 +52,12 @@ func (p *rendezvousPublisher) Publish(item contracts.Envelope) error {
 		}
 	})
 	return nil
+}
+
+func (p *rendezvousPublisher) Window() bus.Sender { return p }
+
+func (p *rendezvousPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
 }
 
 func (p *rendezvousPublisher) published() []string {

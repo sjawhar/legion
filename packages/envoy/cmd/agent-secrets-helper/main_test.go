@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // registerEnv names the helper socket a child of this test binary registers with as a session
@@ -282,6 +283,119 @@ func TestServeNamesTheSignalItStopsOn(t *testing.T) {
 			want := `level=WARN msg="agent-secrets-helper stopping on a signal" signal=` + tc.name + ` sessions=2 launcher_credential=true`
 			if !strings.Contains(logged(), want) {
 				t.Fatalf("stderr after %s:\n%s\nwant a line carrying %s", tc.sig, logged(), want)
+			}
+		})
+	}
+}
+
+// TestServeLogsTheBrokerWithoutACredential: a user name and password AGENT_SECRETS_URL carries
+// never reach the helper's journal; its listening line names the broker with both masked.
+func TestServeLogsTheBrokerWithoutACredential(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agent-secrets-helper")
+	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	dir := shortTempDir(t)
+	stderr, err := os.Create(filepath.Join(dir, "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	logged := func() string {
+		b, err := os.ReadFile(stderr.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	host := strings.TrimPrefix(fakeBroker(t).URL, "http://")
+	cmd := exec.Command(binary, "serve")
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir,
+		"AGENT_SECRETS_URL=http://tokuser9f3:hunter2pw@" + host,
+		"AGENT_SECRETS_HELPER_SOCK=" + filepath.Join(dir, "run", "helper.sock")}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	defer func() { _ = cmd.Process.Kill(); <-exited }()
+	want := `level=INFO msg="agent-secrets-helper listening"`
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(logged(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no listening line within 10 s; stderr:\n%s", logged())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := logged(); !strings.Contains(got, `broker="`+redact.NotPrinted+`"`) ||
+		strings.Contains(got, "tokuser9f3") || strings.Contains(got, "hunter2pw") {
+		t.Fatalf("stderr:\n%s\nwant the broker named as %q, with no user name or password", got, redact.NotPrinted)
+	}
+}
+
+// TestALoginTheBrokerNeverAnswersNamesNoCredential: a machine login against a broker that never
+// answers fails with an error `agent-secrets machine login` prints. For an AGENT_SECRETS_URL
+// redact.URL will not print, it names the URL as redact.NotPrinted and the failure's class
+// alone; for a clean one, it reads as net/http wrote it.
+func TestALoginTheBrokerNeverAnswersNamesNoCredential(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agent-secrets-helper")
+	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	for _, row := range []struct{ base, want string }{
+		{"http://127.0.0.1:1", `"http://127.0.0.1:1/v1/oauth/device_authorization": dial tcp 127.0.0.1:1: connect: connection refused`},
+		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", `"` + redact.NotPrinted + `": connection refused`},
+		{"http://127.0.0.1:1/?token=qtok77", `"` + redact.NotPrinted + `": connection refused`},
+		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", `"` + redact.NotPrinted + `": not a valid URL`},
+	} {
+		t.Run(row.base, func(t *testing.T) {
+			dir := shortTempDir(t)
+			operator := filepath.Join(dir, "operator")
+			if err := os.WriteFile(operator, []byte("alice@example.com\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			logged, err := os.Create(filepath.Join(dir, "stderr"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer logged.Close()
+			sock := filepath.Join(dir, "run", "helper.sock")
+			cmd := exec.Command(binary, "serve")
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir, "AGENT_SECRETS_URL=" + row.base,
+				"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_OPERATOR_FILE=" + operator}
+			cmd.Stderr = logged
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			exited := make(chan error, 1)
+			go func() { exited <- cmd.Wait() }()
+			defer func() { _ = cmd.Process.Kill(); <-exited }()
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				if resp, err := helper.Call(sock, helper.Request{Op: "sessions"}, time.Second); err == nil && resp.OK {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the helper never answered on its socket")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			resp, err := helper.Call(sock, helper.Request{Op: "login"}, 5*time.Second)
+			if err != nil || resp.OK {
+				t.Fatalf("login against a broker that never answers: %+v %v; want a refusal", resp, err)
+			}
+			if !strings.Contains(resp.Error, row.want) {
+				t.Fatalf("login error %q; want it to name %s", resp.Error, row.want)
+			}
+			journal, err := os.ReadFile(logged.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77", "%zz"} {
+				if strings.Contains(resp.Error, secret) || strings.Contains(string(journal), secret) {
+					t.Fatalf("login error %q or the helper's log %q names %q", resp.Error, journal, secret)
+				}
 			}
 		})
 	}

@@ -215,7 +215,7 @@ func (in *Intake) route(ctx context.Context, settings DeliverySettings, raw stri
 // which is acknowledged as every handled envelope is: the reconcile records at the end of every
 // pass too, so a row this call could not write gets its event within five minutes.
 func (in *Intake) recordDeployed(ctx context.Context, settings DeliverySettings) {
-	written, err := RecordDeployedEvents(ctx, in.pool, settings, in.events, time.Now())
+	written, err := RecordDeployedEvents(ctx, in.pool, settings, in.events)
 	if err != nil {
 		slog.Error("dispatch delivery: record issue.deployed after an envelope", "error", err)
 	}
@@ -499,9 +499,9 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 		// No period (0): this is not a periodic loop but a step of every bind poll, and what
 		// keeps it from running on each of them is the throttle below, which is this process's
 		// own and deliberately so -- a durable each process binds for itself. So the lease is
-		// asked for mutual exclusion and nothing else.
+		// asked for mutual exclusion and nothing else, and no tick is due (the zero time).
 		reconciled := true
-		ran := duty.Exclusive(ctx, leases, consumerLease(wanted.Durable), 0, func(context.Context) {
+		ran := duty.Exclusive(ctx, leases, consumerLease(wanted.Durable), time.Time{}, 0, func(context.Context) {
 			reconciled = reconcileDurableConsumer(client.JS(), wanted)
 		})
 		if !reconciled {
@@ -679,7 +679,7 @@ func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, string) 
 	case !handled:
 		return
 	}
-	if err := RecordEventAt(ctx, in.pool, time.Now()); err != nil {
+	if err := RecordEventAt(ctx, in.pool); err != nil {
 		slog.Error("dispatch delivery: record event freshness", "error", err)
 	}
 }

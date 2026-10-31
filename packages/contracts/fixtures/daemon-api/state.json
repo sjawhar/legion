@@ -14,6 +14,21 @@
     ],
     "waiting": [
       "LEGION-211"
+    ],
+    "blocked": [
+      {
+        "issue": "LEGION-209",
+        "blockedBy": [
+          "LEGION-210",
+          "LEGION-213"
+        ]
+      },
+      {
+        "issue": "LEGION-211",
+        "blockedBy": [
+          "LEGION-210"
+        ]
+      }
     ]
   },
   "issues": {
@@ -93,7 +108,7 @@
                 "namespace": "legion",
                 "name": "legion-legion-legion-208",
                 "podUid": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-                "container": "implementer",
+                "container": "roles",
                 "generation": 5
               }
             },
@@ -127,7 +142,7 @@
                 "namespace": "legion",
                 "name": "legion-legion-legion-208",
                 "podUid": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-                "container": "planner",
+                "container": "roles",
                 "generation": 2
               }
             },
@@ -173,6 +188,22 @@
           },
           "rounds": 1
         }
+      }
+    },
+    "LEGION-212": {
+      "key": "LEGION-212",
+      "generation": 1,
+      "phase": "awaiting_person",
+      "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {},
+      "waitingOn": {
+        "kind": "ask",
+        "ask": "9a8fd348-55d5-4d72-a793-3cd037f75f13",
+        "since": "2026-09-22T08:05:00Z",
+        "answeredAt": "2026-09-22T09:21:00Z",
+        "answeredBy": "ask"
       }
     }
   },
@@ -283,9 +314,14 @@
       "detail": "checked by the daemon's probe of the worker image, which passed"
     },
     {
+      "name": "claude-code",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
       "name": "resource-limits",
       "status": "open",
-      "detail": "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester",
+      "detail": "no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod",
       "configLine": "capabilities.decided.resource-limits: \"\u003creason\u003e\"",
       "source": "configuration"
     },
@@ -349,6 +385,12 @@
         "reason": "the review App is not installed on acme/gadgets"
       }
     ],
+    "withoutWebhookApp": [
+      {
+        "repo": "zeta/tools",
+        "reason": "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"
+      }
+    ],
     "caches": [
       {
         "repo": "acme/legacy",
@@ -392,13 +434,13 @@
           "priority_class": "legion-workers"
         },
         "resources": {
-          "architect": {
-            "cpu": "250m",
-            "cpu_request": "250m",
-            "memory": "1Gi",
-            "memory_request": "1Gi",
-            "ephemeral_storage": "10Gi",
-            "ephemeral_storage_request": "1Gi"
+          "issue": {
+            "cpu": "4",
+            "cpu_request": "4",
+            "memory": "24Gi",
+            "memory_request": "24Gi",
+            "ephemeral_storage": "80Gi",
+            "ephemeral_storage_request": "6Gi"
           },
           "controller": {
             "cpu": "2",
@@ -406,46 +448,6 @@
             "memory": "6Gi",
             "memory_request": "4Gi",
             "ephemeral_storage": "10Gi",
-            "ephemeral_storage_request": "1Gi"
-          },
-          "implementer": {
-            "cpu": "1500m",
-            "cpu_request": "1500m",
-            "memory": "8Gi",
-            "memory_request": "8Gi",
-            "ephemeral_storage": "20Gi",
-            "ephemeral_storage_request": "1Gi"
-          },
-          "merger": {
-            "cpu": "250m",
-            "cpu_request": "250m",
-            "memory": "1Gi",
-            "memory_request": "1Gi",
-            "ephemeral_storage": "10Gi",
-            "ephemeral_storage_request": "1Gi"
-          },
-          "planner": {
-            "cpu": "250m",
-            "cpu_request": "250m",
-            "memory": "1Gi",
-            "memory_request": "1Gi",
-            "ephemeral_storage": "10Gi",
-            "ephemeral_storage_request": "1Gi"
-          },
-          "reviewer": {
-            "cpu": "750m",
-            "cpu_request": "750m",
-            "memory": "4Gi",
-            "memory_request": "4Gi",
-            "ephemeral_storage": "10Gi",
-            "ephemeral_storage_request": "1Gi"
-          },
-          "tester": {
-            "cpu": "750m",
-            "cpu_request": "750m",
-            "memory": "6Gi",
-            "memory_request": "6Gi",
-            "ephemeral_storage": "20Gi",
             "ephemeral_storage_request": "1Gi"
           }
         },
@@ -564,6 +566,34 @@
     },
     "worker_backends": {
       "tester": "omp"
+    },
+    "role_config_files": {}
+  },
+  "consumers": [
+    {
+      "name": "legion-go-LEGION-dispatch",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": "2026-09-22T09:17:50Z",
+      "stalled": false
+    },
+    {
+      "name": "legion-go-LEGION-dispatch-server",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": null,
+      "stalled": false,
+      "unavailable": "read the consumer's info: context deadline exceeded"
+    },
+    {
+      "name": "legion-go-LEGION-github",
+      "waiting": 412,
+      "oldestAt": "2026-09-22T09:05:34Z",
+      "oldestAgeSeconds": 754,
+      "lastHandledAt": "2026-09-22T09:16:41Z",
+      "stalled": true
     }
-  }
+  ]
 }

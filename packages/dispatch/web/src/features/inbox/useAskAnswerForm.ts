@@ -1,7 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 
-import { ApiError, api, apiErrorMessage } from "../../api/client";
+import { ApiError, api, apiErrorMessage, type WriteBounds } from "../../api/client";
 import { inboxQuery, projectsQuery, whoAmIQuery } from "../../api/queries";
 import type {
   AnswerAskInput,
@@ -14,6 +14,7 @@ import type {
 } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { isViewer } from "../refs/actor";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { answerAskInput } from "./answer-ask";
 import {
   clearPendingAskThreadInvalidation,
@@ -23,8 +24,12 @@ import { isQuestionShapedAnswer } from "./question-shaped-answer";
 
 interface UseAskAnswerFormOptions {
   ask: Ask;
-  answer: (id: string, input: AnswerAskInput) => Promise<Ask>;
-  createReply: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+  answer: (id: string, input: AnswerAskInput, bounds: WriteBounds) => Promise<Ask>;
+  createReply: (
+    issueKey: string,
+    input: CreateCommentInput,
+    bounds: WriteBounds
+  ) => Promise<Comment>;
   getAskThread: (id: string) => Promise<AskRead>;
   /** Data the Inbox response already hydrated for this card's first render. */
   initialThread?: AskRead;
@@ -118,9 +123,10 @@ export function useAskAnswerForm({
   const initialChangeConsumed = useRef(false);
   const submitGuard = useSubmitGuard();
   // Shared by this card, its edit-version history, its collapsed disclosure, and its inline
-  // thread. A thread invalidated while its Inbox snapshot was in flight bypasses that snapshot.
+  // thread. A thread invalidated while its Inbox snapshot was in flight bypasses that snapshot,
+  // and so does every thread on an issue whose claim or route moved while it was in flight.
   const refreshInitialThread =
-    initialThread !== undefined && hasPendingAskThreadInvalidation(queryClient, ask.id);
+    initialThread !== undefined && hasPendingAskThreadInvalidation(queryClient, ask);
   const threadQuery = useQuery<AskRead, Error>({
     initialData: refreshInitialThread ? undefined : initialThread,
     initialDataUpdatedAt: refreshInitialThread ? undefined : initialThreadUpdatedAt,
@@ -135,8 +141,12 @@ export function useAskAnswerForm({
   }, [ask.id, queryClient, refreshInitialThread, threadQuery.data]);
   const edits = threadQuery.data?.edits ?? [];
   const answers = threadQuery.data?.answers ?? [];
-  const mutation = useMutation({
-    mutationFn: (input: AnswerAskInput) => answer(ask.id, input),
+  // The card says why an answer was refused, in the ask's own words, beside the draft it holds;
+  // the shell's indicator shows the answer only while it is out.
+  const mutation = useKeyedWrite({
+    inline: true,
+    label: () => `Answer to “${ask.question}”`,
+    write: (input: AnswerAskInput, bounds) => answer(ask.id, input, bounds),
     onMutate: async () => {
       if (replacing.current !== undefined) return undefined;
       await queryClient.cancelQueries({ queryKey: inboxQuery().queryKey });
@@ -178,9 +188,11 @@ export function useAskAnswerForm({
       const changed = replacing.current !== undefined;
       replacing.current = undefined;
       setChanging(false);
+      // Answered either way; with no answer to give, the card reads the ask afresh instead of
+      // showing the one Dispatch would have handed back.
       setJustAnswered(updatedAsk);
-      if (changed) {
-        if (updatedAsk.answer !== null) {
+      if (changed || updatedAsk === null) {
+        if (updatedAsk?.answer != null) {
           const changedAnswer = updatedAsk.answer;
           queryClient.setQueryData<AskRead>(["ask-thread", ask.id], (current) =>
             current === undefined
@@ -190,18 +202,23 @@ export function useAskAnswerForm({
         }
         void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
         void queryClient.invalidateQueries({ queryKey: ["me", "answers"] });
-      } else {
-        onAnswered?.(ask.id);
       }
+      if (!changed) onAnswered?.(ask.id);
       invalidateOwnerReads();
     },
   });
-  const clarification = useMutation({
-    mutationFn: (text: string) => {
+  const clarification = useKeyedWrite({
+    inline: true,
+    label: () => `Question back on “${ask.question}”`,
+    write: (text: string, bounds) => {
       if (ask.issue_key === null) {
-        return api.createArtifactComment(documentArtifactId(), { ask_id: ask.id, body: text });
+        return api.createArtifactComment(
+          documentArtifactId(),
+          { ask_id: ask.id, body: text },
+          bounds
+        );
       }
-      return createReply(ask.issue_key, { ask_id: ask.id, body: text });
+      return createReply(ask.issue_key, { ask_id: ask.id, body: text }, bounds);
     },
     onSettled: () => {
       submitGuard.release();

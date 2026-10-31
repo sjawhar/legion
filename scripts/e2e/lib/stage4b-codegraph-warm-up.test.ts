@@ -5,16 +5,16 @@ import { join } from "node:path";
 import { scriptFunctions } from "./script-functions";
 
 // Stage 4b's repository-tools checkpoint reads which role shim of tree 2's pod built the CodeGraph
-// index, and how long after the pod's creation, from the pod's log as `kubectl logs
-// --all-containers --timestamps --prefix` prints it. warm_up_built_elapsed runs as the script
-// defines it, on a log shaped like a run where the reviewer's shim won the warm-up lease while the
-// planner's and the implementer's skipped, and the implementer's agent echoed a success line of
-// its own through its bash tool before the reviewer's shim had built.
+// index, and how long after the pod's creation, from the log of the pod's one `roles` container as
+// `kubectl logs -c roles --timestamps` prints it: a timestamp, then each line behind the launcher's
+// `<role>: ` prefix. warm_up_built_elapsed runs as the script defines it, on a log shaped like a run
+// where the reviewer's shim won the warm-up lease while the planner's and the implementer's
+// skipped, and the implementer's agent echoed a success line of its own through its bash tool
+// before the reviewer's shim had built.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage4b-codegraph-warm-up-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-const pod = "legion-legsmoke-legsmoke-564";
 const workspace = "/legion/workspaces/sjawhar/legion-smoke/legsmoke-564";
 const warmUp = `[legion] codegraph warm-up for ${workspace}`;
 const skipped = `${warmUp} skipped: another process holds ${workspace}/.codegraph/legion-warm.lock`;
@@ -25,8 +25,7 @@ const built = (subcommand: string, took: string, done: string) =>
 // (`tool_execution_start bash …`), never the shim's `[legion] `, so it is not the line found.
 const forgedCommand = `echo [legion] codegraph warm-up for x ${built("init", "1s", "2s")}`;
 const created = "2026-10-09T09:04:30Z";
-const line = (container: string, stamp: string, text: string) =>
-  `[pod/${pod}/${container}] ${stamp} ${text}`;
+const line = (role: string, stamp: string, text: string) => `${stamp} ${role}: ${text}`;
 const before = [
   line(
     "planner",
@@ -51,7 +50,7 @@ interface Run {
   readonly err: string;
 }
 let runs = 0;
-/** Runs warm_up_built_elapsed on LINES written as the pod's log, with the pod created at `created`. */
+/** Runs warm_up_built_elapsed on LINES written as the roles container's log, with the pod created at `created`. */
 function run(lines: string[]): Run {
   const log = join(dir, `log-${++runs}.txt`);
   writeFileSync(log, `${lines.join("\n")}\n`);
@@ -66,7 +65,7 @@ warm_up_built_elapsed ${created} <${JSON.stringify(log)}`,
 }
 
 describe("warm_up_built_elapsed", () => {
-  test("prints the container that built and the whole seconds from the pod's creation", () => {
+  test("prints the role that built and the whole seconds from the pod's creation", () => {
     const success = line(
       "reviewer",
       "2026-10-09T09:06:12.481Z",
@@ -105,5 +104,12 @@ describe("warm_up_built_elapsed", () => {
 
   test("with no success line, the forged one still present, it prints nothing and exits 1", () => {
     expect(run([...before, ...after])).toEqual({ code: 1, out: "", err: "" });
+  });
+
+  // A line of the launcher's own, or one with no role prefix, is passed over even when its words
+  // are the success line's.
+  test("a success line without a role's prefix is passed over", () => {
+    const bare = `2026-10-09T09:06:12.481Z ${warmUp} ${built("init", "1s", "2s")}`;
+    expect(run([...before, bare, ...after])).toEqual({ code: 1, out: "", err: "" });
   });
 });

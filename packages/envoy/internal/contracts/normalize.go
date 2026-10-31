@@ -784,14 +784,20 @@ func githubPayload(event string, body map[string]any) string {
 		addCappedBody(data, reviewBody)
 	case "pull_request":
 		data = map[string]string{
-			"kind":             "pr",
-			"action":           action,
-			"repo":             repo,
-			"number":           number,
-			"title":            nestedString(body, "pull_request", "title"),
-			"author":           nestedString(body, "pull_request", "user", "login"),
-			"url":              nestedString(body, "pull_request", "html_url"),
-			"head_sha":         nestedString(body, "pull_request", "head", "sha"),
+			"kind":     "pr",
+			"action":   action,
+			"repo":     repo,
+			"number":   number,
+			"title":    nestedString(body, "pull_request", "title"),
+			"author":   nestedString(body, "pull_request", "user", "login"),
+			"url":      nestedString(body, "pull_request", "html_url"),
+			"head_sha": nestedString(body, "pull_request", "head", "sha"),
+			// before is the head a synchronize moved the branch from (GitHub sends it, with after,
+			// only on synchronize): the Legion daemon reads the move a head arrives by from it.
+			"before": stringValue(body["before"]),
+			// sender is the account whose push the synchronize reports (the webhook's sender): the
+			// daemon takes the move's push by it.
+			"sender":           nestedString(body, "sender", "login"),
 			"head_ref":         nestedString(body, "pull_request", "head", "ref"),
 			"base_ref":         nestedString(body, "pull_request", "base", "ref"),
 			"merged":           strconv.FormatBool(boolValue(nested(body, "pull_request", "merged"))),
@@ -815,12 +821,14 @@ func githubPayload(event string, body map[string]any) string {
 	case "push":
 		changedPaths, truncated := githubPushChangedPaths(body)
 		data = map[string]string{
-			"kind":                    "push",
-			"repo":                    repo,
-			"ref":                     stringValue(body["ref"]),
-			"after":                   stringValue(body["after"]),
-			"before":                  stringValue(body["before"]),
-			"pusher":                  nestedString(body, "pusher", "name"),
+			"kind":   "push",
+			"repo":   repo,
+			"ref":    stringValue(body["ref"]),
+			"after":  stringValue(body["after"]),
+			"before": stringValue(body["before"]),
+			"pusher": nestedString(body, "pusher", "name"),
+			// sender is the account that pushed, as a pull request's synchronize names it.
+			"sender":                  nestedString(body, "sender", "login"),
 			"head_subject":            firstNonEmptyLine(nestedString(body, "head_commit", "message")),
 			"commit_count":            strconv.Itoa(len(sliceValue(body["commits"]))),
 			"compare_url":             stringValue(body["compare"]),

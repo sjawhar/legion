@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -116,7 +117,7 @@ func awaitSettledVersion(t *testing.T, published <-chan model.Event, artifactID 
 		select {
 		case event, ok := <-published:
 			if !ok {
-				t.Fatalf("the event stream closed before version %d of %s was published", number, artifactID)
+				t.Fatalf("the broker's subscription closed before version %d of %s was published", number, artifactID)
 			}
 			if event.Type != "artifact.version" {
 				continue
@@ -163,6 +164,7 @@ type askEvent struct {
 		Question   string               `json:"question"`
 		State      string               `json:"state"`
 		Resolution *model.AskResolution `json:"resolution"`
+		Restored   bool                 `json:"restored"`
 	} `json:"payload"`
 }
 
@@ -612,6 +614,15 @@ func TestBlockRemovedFromTheDocumentRetractsAsTheSystemActorAndUndoRestores(t *t
 	if back := readBlockAsk(t, handler, askID); back.State != "open" {
 		t.Fatalf("undoing the deletion did not bring the ask back: state=%q", back.State)
 	}
+	var opened []bool
+	for _, event := range issueAskEvents(t, handler, issue.Key) {
+		if event.Type == "ask.opened" && event.Payload.ID == askID {
+			opened = append(opened, event.Payload.Restored)
+		}
+	}
+	if len(opened) != 2 || opened[0] || !opened[1] {
+		t.Fatalf("ask.opened restored flags = %v, want the opening unmarked and the restoration marked", opened)
+	}
 }
 
 // Acceptance 6: the revision a human reads is the revision they answer, whatever the document
@@ -936,5 +947,171 @@ func TestIdempotentBlockAskEditRewritesNothing(t *testing.T) {
 	}](t, read).Comment
 	if after.Anchor == nil || after.Anchor.Orphaned {
 		t.Fatalf("the idempotent retry orphaned the comment's anchor: %#v", after.Anchor)
+	}
+}
+
+// An options edit that keeps what a person wrote under an option splices that item, which the
+// list's own markdown spaces, into a list the parser built. Get the spread wrong and the block's
+// markdown stops reading back as the block, which leaves the ask reading as changed to the next
+// write and marks it `invalid` at the next settlement. Neither happens: the settlement after the
+// edit rewrites nothing and the ask keeps the options the edit sent.
+func TestAskBlockOptionsEditKeepingContentSettlesUnchanged(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	const nestedAsk = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport?\n\n" +
+		"- REST: Matches the platform\n" +
+		"- gRPC: Adds streaming\n\n" +
+		"  - only behind the [proxy](https://proxy.test)\n" +
+		":::\n"
+	issue, askID := seedBlockAsk(t, handler, "Block ask preserving options", "decision", nestedAsk, "Which transport?")
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"options": []map[string]string{
+			{"label": "REST", "description": "Ship now"},
+			{"label": "gRPC", "description": "Adds streaming"},
+		},
+		"actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("options edit: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	written := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	for _, want := range []string{"- REST: Ship now", "- gRPC: Adds streaming", "  - only behind the [proxy](https://proxy.test)"} {
+		if !strings.Contains(written, want) {
+			t.Fatalf("the document does not carry %q after the edit:\n%s", want, written)
+		}
+	}
+
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-preserving")
+
+	// settleDocument appends its marker block, so the document settlement left is the markdown
+	// the edit wrote with that block after it: settlement rewrote none of the ask.
+	if settled := documentMarkdown(t, handler, issue.PrimaryArtifactID); !strings.HasPrefix(settled, written) {
+		t.Fatalf("settlement rewrote the edited ask:\nafter the edit:\n%s\nafter settling:\n%s", written, settled)
+	}
+	for _, event := range issueAskEvents(t, handler, issue.Key) {
+		if event.Type == "block.invalid" && event.Payload.BlockID != nil && *event.Payload.BlockID == "decision" {
+			t.Fatalf("settlement marked the edited ask invalid: %#v", event)
+		}
+	}
+	ask := readBlockAsk(t, handler, askID)
+	if len(ask.Options) != 2 || ask.Options[0] != (model.AskOption{Label: "REST", Description: "Ship now"}) ||
+		ask.Options[1] != (model.AskOption{Label: "gRPC", Description: "Adds streaming"}) {
+		t.Fatalf("the ask reads %#v after settling, want the options the edit sent", ask.Options)
+	}
+}
+
+// A browser can leave a decision whose question is empty and which holds a second bullet list.
+// An ask edit carrying a question repairs the question, and keeps both lists: the block it leaves
+// still reads as no decision, and what it parses back to joins the options of both lists. The row
+// keeps the options it was indexed with - settlement leaves the row of a block it cannot read as
+// it was, so a row given that reading would offer a person options read out of a stray list until
+// somebody repairs the block - while the question and the urgency the edit named are written. It
+// keeps them whichever fields the request named: a repair that sends the options beside the
+// question sends that joined reading, the only options such a block accepts.
+func TestEditOfAnAskWhoseBlockHoldsASecondListKeepsTheRowsOptions(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{
+			Store: database, Settle: 20 * time.Millisecond, Identity: headerIdentity(database),
+		})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue, askID := seedBlockAsk(t, handler, "Block ask second list", "decision", transportAsk, "Which transport?")
+	indexed := readBlockAsk(t, handler, askID).Options
+
+	// What no route writes: a browser empties the question and leaves a second list behind.
+	second, err := pmdoc.Parse("- Ship: Release it\n")
+	if err != nil {
+		t.Fatalf("parse the second list: %v", err)
+	}
+	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+	t.Cleanup(peer.close)
+	peer.edit(t, func(tree *pmdoc.Node) error {
+		for _, child := range tree.Children {
+			if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id != "decision" {
+				continue
+			}
+			child.Children[0].Children = nil
+			child.Children = append(child.Children, second.Children...)
+			return nil
+		}
+		return fmt.Errorf("the document holds no block under %q", "decision")
+	})
+	peer.barrier(t)
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships this week?", "urgency": "low", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("repair the emptied question: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	repaired := decodeBody[model.Ask](t, edited)
+	if repaired.Question != "Which transport ships this week?" || repaired.Urgency != "low" {
+		t.Fatalf("the repaired ask reads question=%q urgency=%q, want the edit's own",
+			repaired.Question, repaired.Urgency)
+	}
+	if !slices.Equal(repaired.Options, indexed) {
+		t.Fatalf("the repaired ask holds options %#v, want the %#v its row held: the block's two lists "+
+			"joined are no decision's options", repaired.Options, indexed)
+	}
+	// The document holds both lists - the second written with a bullet marker of its own, which
+	// is how the markdown keeps two lists apart - so the block is still no decision, and the row
+	// the next settlement leaves alone is the one the edit wrote.
+	written := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	for _, want := range []string{
+		"Which transport ships this week?", "- REST: Matches the platform", "- gRPC: Adds streaming", "Ship: Release it",
+	} {
+		if !strings.Contains(written, want) {
+			t.Fatalf("the document does not carry %q after the repair:\n%s", want, written)
+		}
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-repair")
+	if stored := readBlockAsk(t, handler, askID); !slices.Equal(stored.Options, indexed) ||
+		stored.Question != "Which transport ships this week?" {
+		t.Fatalf("the ask reads question=%q options=%#v after settling, want the repaired question and the "+
+			"options its row held", stored.Question, stored.Options)
+	}
+
+	// The same repair, sent again by a caller that names the options beside the question. The
+	// only options such a block accepts are the joined reading of its two lists - any others
+	// are refused, since no options edit can say which list an option is in - so a row taking
+	// the request's own would hold that reading too.
+	peer.edit(t, func(tree *pmdoc.Node) error {
+		for _, child := range tree.Children {
+			if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id != "decision" {
+				continue
+			}
+			child.Children[0].Children = nil
+			return nil
+		}
+		return fmt.Errorf("the document holds no block under %q", "decision")
+	})
+	peer.barrier(t)
+
+	withOptions := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships next week?",
+		"options": []map[string]string{
+			{"label": "REST", "description": "Matches the platform"},
+			{"label": "gRPC", "description": "Adds streaming"},
+			{"label": "Ship", "description": "Release it"},
+		},
+		"actor": sessionActor(),
+	})
+	if withOptions.Code != http.StatusOK {
+		t.Fatalf("repair the emptied question with options beside it: status=%d body=%s",
+			withOptions.Code, withOptions.Body.String())
+	}
+	repairedAgain := decodeBody[model.Ask](t, withOptions)
+	if repairedAgain.Question != "Which transport ships next week?" {
+		t.Fatalf("the repaired ask asks %q, want the question the edit sent", repairedAgain.Question)
+	}
+	if !slices.Equal(repairedAgain.Options, indexed) {
+		t.Fatalf("the ask edited with options holds %#v, want the %#v its row held: the block's two lists "+
+			"joined are no decision's options, whichever fields the request named", repairedAgain.Options, indexed)
+	}
+	if stored := readBlockAsk(t, handler, askID); !slices.Equal(stored.Options, indexed) {
+		t.Fatalf("the ask row reads options %#v after the edit naming them, want the %#v it held",
+			stored.Options, indexed)
 	}
 }

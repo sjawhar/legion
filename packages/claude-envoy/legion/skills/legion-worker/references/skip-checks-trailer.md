@@ -8,7 +8,7 @@ sjawhar/legion.
 
 ## The shape GitHub honours
 
-A push whose commits touch only `.legion/` (a handoff-only push) ends its head's commit message
+A push whose commits touch only `.legion/<issue>/` (a handoff-only push) ends its head's commit message
 with `skip-checks: true` as the last line, preceded by two empty lines, so GitHub starts no
 workflow run for it and the daemon carries the code head's verdict to it — except retro's push,
 which never carries the line whatever paths it touches, for the reason the next section gives.

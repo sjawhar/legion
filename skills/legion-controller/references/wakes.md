@@ -16,8 +16,9 @@ the issue header. Triage it as `skill://legion-controller/references/triage.md` 
 
 ## `slot-free on <KEY>` (`{kind: "slot-free"}`)
 
-The daemon released `<KEY>`'s slot, because its tree finished or left the workflow, and no waiting
-root took it. Name the free slots; take nothing.
+The daemon released `<KEY>`'s slot and no waiting root took it: its tree finished or left the
+workflow, or the root returned the slot to wait on a person (`awaiting_person`, which also sends
+its own `awaiting-person` wake). Name the free slots; take nothing.
 
 ## `todo on <KEY>` (`{kind: "todo"}`)
 
@@ -25,7 +26,7 @@ root took it. Name the free slots; take nothing.
 daemon waits half a minute and folds that window's events into one wake. Take nothing: it is not
 Legion's.
 
-## `tick on <PROJECT>` (`{kind: "tick", openCapabilities?}`)
+## `tick on <PROJECT>` (`{kind: "tick", openCapabilities?, blocked?}`)
 
 The daemon's periodic wake, a minute after it starts and then every
 `controller_wake_interval_seconds` (an hour by default), whatever the slots. Run the skill's every-turn
@@ -41,14 +42,33 @@ has no `configLine`. The next daily report names each row still open; take no ot
 because the operator closes or decides a deployment row, and the operator or the issue's architect
 fixes a live row's session.
 
+`blocked`, when present, is `[{issue, blockedBy}, …]`: every root and child Legion is waiting to
+start behind an unfinished Dispatch issue, each with the issues it waits on. `read_state` shows the
+same list under `admission.blocked`, and `legion state` prints it as `blocked on Dispatch links:`.
+The wait ends when each blocker reaches `done` (a person's close, or the blocker's own merge) or its
+link is taken off (by a person or the tree's architect): name the waits in the day's report and
+take nothing for them.
+
 ## `unslotted on <KEY>` (`{kind: "unslotted", reason}`)
 
-A root that waited for a slot was moved from `todo` to the status `reason` names, by a person or by
-another session, so the daemon took it out of the workflow (`phase: done`) and starts nothing for
-it. Re-admit nothing, because the move was someone else's; `dispatch read` shows who claims it now.
-Tell the person in your summary: "<KEY> left Legion's waiting line: it was set to <status> while it
-waited for a slot, so Legion let it go; `todo` with the `legion` label queues it again". Other
-admission states: `skill://legion-controller/references/admission.md`.
+Either a root that waited for a slot was moved from `todo` to the status `reason` names, by a
+person or by another session, or a root waiting on a person (`awaiting_person`) could not be
+resumed — its `legion` label is gone, or a person or a session outside its tree took its Dispatch
+claim. Either way the daemon took it out of the workflow (`phase: done`) and starts nothing for it;
+`reason` says which. Re-admit nothing, because the move was someone else's; `dispatch read` shows
+who claims it now. Tell the person in your summary: "<KEY> left Legion's workflow: <reason as the
+wake gives it>; `todo` with the `legion` label queues it again". Other admission states:
+`skill://legion-controller/references/admission.md`.
+
+## `awaiting-person on <KEY>` (`{kind: "awaiting-person", reason}`)
+
+A root whose architect asked a person a question, or handed its spec to a person for approval, and
+now waits only on them: the daemon returned its slot while the architect stays live to read the
+person's comments and replies. Read `issues.<KEY>.waitingOn`. Do not park it or start anything, and
+take nothing for the slot it returned: it is no reason to label or admit an issue ([Free
+slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts it at the front of
+`admission.waiting` by itself, and the next free slot delivers its task. A lost label or a foreign
+Dispatch claim sends the separate `unslotted` wake.
 
 ## `held on <KEY>` (`{kind: "held", phase, role?, reason?}`)
 

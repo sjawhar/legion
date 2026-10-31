@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    The `dispatch` and `dispatch-writing-specs` skills this plugin links tell a session to write
+    each ask or comment id whole in a reference, taking it from `dispatch read`'s `Ask id:` or
+    from the page URL, because the command accepts a prefix while a person's link does not. The
+    `dispatch` skill said an ask or comment id could be an 8-hex prefix, and a reference built
+    from one opens nothing for the person who clicks it.
+time: 2026-10-30T22:40:05.000000000Z
+custom:
+    Issue: pr2577

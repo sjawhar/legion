@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -17,6 +16,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 func TestGetDeliveryTimelineWithoutSettingsIs404(t *testing.T) {
@@ -742,10 +743,8 @@ func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 		}
 	}
 
-	previous := slog.Default()
-	var logs bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logs := &storetest.LockedLog{}
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	const window = "from=2026-10-10T00:00:00Z&to=2026-10-11T00:00:00Z"
 	for range 2 {

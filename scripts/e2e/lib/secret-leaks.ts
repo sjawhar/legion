@@ -18,7 +18,7 @@
 //     watches the namespace's Secrets that carry the label selector until SIGTERM, then writes to
 //     <verdict> one JSON line, {"pods","secrets","values","judged","excluded","leaks","unseen",
 //     "unreadable"}: judged is each Secret key whose values were judged, excluded each key that was
-//     not (both sorted, each once); leaks is each pod in <pod-watch> whose six role launchers were
+//     not (both sorted, each once); leaks is each pod in <pod-watch> whose one `roles` container was
 //     ready and one of whose containers carries a value a Sandbox-owned Secret held, as
 //     {"uid","pod","secret"}; unseen is each such pod/Secret pair the watch never saw, since its
 //     check would have judged nothing; unreadable counts the lines of <pod-watch> before its last
@@ -174,9 +174,9 @@ function judge(): void {
     if (pod?.kind !== "Pod" || !uid || !name) continue;
     const labels = pod.metadata?.labels ?? {};
     if (labels["legion.dev/probe"] || labels["legion.dev/e2e-control"]) continue;
+    // An issue pod runs every role in its one `roles` container; a pod is judged once that is ready.
     const statuses = pod.status?.containerStatuses ?? [];
-    if (!roles.every((role) => statuses.some((status) => status.name === role && status.ready)))
-      continue;
+    if (!statuses.some((status) => status.name === "roles" && status.ready)) continue;
     const entry = pods.get(uid) ?? { name, words: new Set<string>() };
     for (const c of [...(pod.spec?.initContainers ?? []), ...(pod.spec?.containers ?? [])]) {
       for (const word of [

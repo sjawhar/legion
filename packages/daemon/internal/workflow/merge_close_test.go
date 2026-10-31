@@ -73,14 +73,16 @@ func TestAChildsMergeClosesItAndHandsItsImplementerTheFirstLook(t *testing.T) {
 		t.Fatalf("the check task opens %q, want the line a resumed session tells the check by", lead)
 	}
 	for _, want := range []string{"sjawhar/legion", "#43", "merge-43", "Look 1, woken by the merge.", "handoff_complete", "pass", "pending", "fail", "the daemon wakes the check",
-		// A defect is a finding ask on the report issue, whose reference the implementer publishes
-		// to the controller, which follows it and files only on a person's answer.
-		"dispatch ask", "skill://legion-worker/references/findings.md", "report issue", "controller topic"} {
+		// A defect with a clear fix goes to the controller topic, which hands it to the tree that
+		// owns the code and files it for Legion only when none does; one that needs a decision is a
+		// finding ask on the report issue, whose reference the implementer publishes to the
+		// controller, which files only on a person's answer.
+		"a defect with a clear fix goes to the controller topic", "dispatch ask", "skill://legion-worker/references/findings.md", "report issue", "controller topic"} {
 		if !strings.Contains(start.Task, want) {
 			t.Fatalf("the check task lacks %q:\n%s", want, start.Task)
 		}
 	}
-	// A defect the check finds is an ask a person answers, never an issue the implementer files.
+	// The implementer never files an issue for a defect the check finds: the controller does.
 	for _, never := range []string{"dispatch issue", "issue of its own"} {
 		if strings.Contains(start.Task, never) {
 			t.Fatalf("the check task still says %q:\n%s", never, start.Task)
@@ -439,7 +441,8 @@ func TestARootWithNoOpenTreeClosesAtItsMerge(t *testing.T) {
 
 // A merged root stands in awaiting_merge for as long as its tree runs, so the two facts that would
 // take an awaiting pull request back to implementing can land on a merge GitHub already made. A
-// push past the head READY named takes neither move (withdrawMovedReady), and a red required check
+// synchronize past the head READY named is older than the merge, since GitHub synchronizes only an
+// open pull request, and changes nothing (pullRequestSynchronized), and a red required check
 // withdraws nothing there, as it never has (classify.RedWithdrawsReady): there is nothing left to
 // merge or to re-implement.
 func TestNothingWithdrawsTheREADYOfAWaitingMergedRoot(t *testing.T) {

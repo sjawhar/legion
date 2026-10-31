@@ -18,7 +18,9 @@ import (
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -207,13 +209,20 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 	}
 }
 
-// ServeHTTP serves the Hocuspocus-framed document websocket endpoint.
+// ServeHTTP serves the Hocuspocus-framed document websocket endpoint. A caller that does not
+// resolve is refused 401, except a person whose lapsed confirmation the sign-in issuer could not
+// renew (identity.ErrSignInUnavailable), who is still signed in and is refused 503
+// SIGNIN_UNAVAILABLE as every other route refuses them (identity.WriteError).
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	room := r.PathValue("room")
 	if room == "" {
 		room = path.Base(r.URL.Path)
 	}
 	if _, err := s.requestActor(r); err != nil {
+		if errors.Is(err, identity.ErrSignInUnavailable) {
+			identity.WriteError(w, err)
+			return
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -235,9 +244,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
 	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
-	// until it is replaced from markdown. The server decides it here, for every client at once, by
-	// the same stored document and rendering `/text` answers with (readDocument), so a socket is
-	// refused exactly when that read is ErrDocOutsideSchema.
+	// until it is replaced from markdown. An ask holding blocks off its content rule is inside it:
+	// the editor keeps such an ask rather than normalizing it away, and settlement marks it
+	// `invalid`. The server decides it here, for every client at once, by the same stored document
+	// and rendering `/text` answers with (readDocument), so a socket is refused exactly when that
+	// read is ErrDocOutsideSchema.
 	tree, loaded, err := s.loadTree(r.Context(), room)
 	if err == nil && tree != nil {
 		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
@@ -259,7 +270,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	connection := &connectionState{}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
-	s.srv.ServeHTTP(w, r.WithContext(ctx))
+	// The socket's peer hears from it at least every s.keepAlive (documentKeepAlive), however idle
+	// the room (keepalive.go), so its provider never takes the socket for dead.
+	keepAlive := newKeepAliveWriter(w, room, s.keepAlive)
+	s.srv.ServeHTTP(keepAlive, r.WithContext(ctx))
+	keepAlive.stop()
 	if connection.added {
 		s.removeConnection(connection.room, connection.id)
 	}
@@ -333,6 +348,8 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 		// set. Service means "the server verified this Kubernetes subject", so a
 		// shared-token holder copying one into the header would forge a verified
 		// identity onto every document version it writes.
+		accesslog.Note(r.Context(), accesslog.KindSharedToken, "")
+		accesslog.Note(r.Context(), accesslog.KindSession, supplied.ID)
 		return model.Actor{Kind: "session", ID: supplied.ID, Origin: supplied.Origin}, nil
 	}
 	if s.identity == nil {
@@ -342,6 +359,7 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	if err != nil {
 		return model.Actor{}, err
 	}
+	accesslog.Note(r.Context(), accesslog.KindUser, login)
 	return model.Actor{Kind: "user", ID: login}, nil
 }
 
@@ -428,11 +446,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// returns (sjawhar/ygo v1.51.3-sami.1, provider/websocket/server.go:1749-1837: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
 	tree, err := treeOf(doc)
-	var markdown string
 	if err == nil {
-		markdown, err = documentMarkdown(tree)
+		_, err = documentMarkdown(tree)
 	}
-	var contentMarkdown *string
 	var askBlocks map[string]struct{}
 	switch {
 	case errors.Is(err, ErrDocOutsideSchema):
@@ -440,7 +456,6 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	case err != nil:
 		return err
 	default:
-		contentMarkdown = &markdown
 		askBlocks = askBlockIDs(tree)
 	}
 	// The room this load publishes holds the state it takes from here until ygo retires it
@@ -481,7 +496,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		s.scheduleSettleLocked(room, state)
 	}
 	s.unlockState(room, state)
-	replica := s.keepReplica(doc, contentMarkdown)
+	// The log is opened before the observer is registered and before ygo hands the room to anyone
+	// (above), so it holds every transaction the room commits from here on, in commit order.
+	replica := s.keepReplica(doc, doc.OpenUpdateLog())
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {
@@ -492,7 +509,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		if published, ok := origin.(*liveWriteOrigin); ok {
 			s.finishSuppressedPersistence(published.slot, update)
 		}
-		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
+		repair, identityRepair := origin.(*identityClosureOrigin)
+		if identityRepair {
 			s.recordSuppressedCommit(repair.slot, update)
 			// A repair's update is not classified or credited - its writer appends it in its own
 			// transaction - but it names this instance all the same: one that reaches the room's
@@ -501,28 +519,62 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			// it was made in has to take that version in or stand behind the head for good. The
 			// class counts for nothing else: it is not durable work the room's state waits on.
 			s.recordUpdateClass(room, update, documentUpdateClass{contentChanged: true, cursor: &instance.cursor})
-			return
-		}
-		if s.beforeObserveUpdate != nil {
+		} else if s.beforeObserveUpdate != nil {
 			s.beforeObserveUpdate(room)
 		}
-		contentChanged := replica.observe(room, doc, func(tree *pmdoc.Node) {
-			s.observeAskBlocksForUpdate(room, tree)
-		})
-		// The cursor is this instance's, taken here rather than looked up when the update reaches
-		// the store: a room evicted and reloaded in between is a different instance, which did not
-		// take this update and must not be recorded as holding the version it is stored at.
-		class := documentUpdateClass{contentChanged: contentChanged, durable: true, cursor: &instance.cursor}
-		if contentChanged {
-			class.credit = s.creditContentChange(room, origin, hold)
-			if s.afterCreditUpdate != nil {
-				s.afterCreditUpdate(room)
+		// Every observer drains the room's update log, a repair's too, and each committed update
+		// is classified once, by whichever observer reaches it first, against the room as the
+		// commit before it left it (renderedReplica). This observer's own update is in the log -
+		// ygo appended it under the document's lock at its commit - so its class is recorded
+		// before ygo's persistence observer, which runs after this one on this goroutine, hands it
+		// on. Another observer's update is recorded while the replica is held: that observer can
+		// be waiting for the replica, and runs its persistence observer as soon as it has it.
+		var classified, changed bool
+		var own *documentUpdateClass
+		replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, asks *observedAsks) {
+			if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
+				// Its own observer records its class (above). The replica takes it all the same,
+				// so the update after it is measured against the room the repair left.
+				return
 			}
+			classified = true
+			if asks != nil {
+				s.observeAskBlocksForUpdate(room, asks.askBlocks())
+			}
+			// The cursor is this instance's, taken here rather than looked up when the update
+			// reaches the store: a room evicted and reloaded in between is a different instance,
+			// which did not take this update and must not be recorded as holding the version it
+			// is stored at.
+			class := documentUpdateClass{contentChanged: contentChanged, durable: true, cursor: &instance.cursor}
+			if contentChanged {
+				class.credit = s.creditContentChange(room, logged.Origin, hold)
+				changed = true
+			}
+			if sameUpdate(logged.Update, update) {
+				own = &class
+				return
+			}
+			s.recordUpdateClass(room, logged.Update, class)
+		})
+		if changed && s.afterCreditUpdate != nil {
+			s.afterCreditUpdate(room)
 		}
-		s.recordUpdateClass(room, update, class)
-		s.scheduleSettle(room)
+		if own != nil {
+			s.recordUpdateClass(room, update, *own)
+		}
+		if classified {
+			s.scheduleSettle(room)
+		}
 	})
 	return nil
+}
+
+// sameUpdate reports whether logged, an update the room's update log handed over, is update, the
+// one an observer was called with: ygo hands both the very slice it encoded at the commit
+// (crdt.LoggedUpdate), so the same backing array is the same commit, where equal bytes need not be
+// - two commits that change nothing encode alike.
+func sameUpdate(logged, update []byte) bool {
+	return len(logged) > 0 && len(logged) == len(update) && &logged[0] == &update[0]
 }
 
 // soleConnectedActor is the one actor connected to a room, and whether more than one distinct
@@ -542,14 +594,14 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 	return sole, ambiguous
 }
 
-// observeAskBlocksForUpdate records the ask blocks an update left in room's document and
-// attributes each one not already recorded (observeAskBlocks), in the same critical section the
-// update observer renders tree in (renderedReplica.observe): the observer renders each update in
-// the order the replica took them, so the room's record of its ask blocks moves forward only. The
-// tree walk that lists those ask blocks runs only once the cheap markdown comparison inside
-// observe already showed a real change, so the no-op path, the common one, pays for neither.
-func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
-	askBlocks := askBlockIDs(tree)
+// observeAskBlocksForUpdate records askBlocks, the ask blocks an update left in room's document,
+// and attributes each one not already recorded (observeAskBlocks), in the same critical section
+// the update observer classifies the update in (renderedReplica.observe): the observer classifies
+// each update in the order the replica took them, so the room's record of its ask blocks moves
+// forward only. The tree walk that lists those ask blocks (observedAsks.askBlocks) runs only once
+// the cheap markdown comparison inside observe already showed a real change, so the no-op path,
+// the common one, pays for neither.
+func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]struct{}) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	var author *model.Actor

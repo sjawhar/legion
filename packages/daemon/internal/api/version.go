@@ -274,7 +274,7 @@ package api
 // is 751 MiB of build cache and 375 MiB of module cache for this repository, so the five
 // redundant copies would be about 5.5 GiB spent on nothing. `XDG_STATE_HOME`, whose
 // `/home/legion/.local/state/<role>` entry 18 declared, is the one directory of the scratch that
-// stays the role's own, `/legion/scratch/state/<role>`: Oh My Pi names its browser broker's lock
+// stays one per role, `/legion/scratch/state/<role>`: Oh My Pi names its browser broker's lock
 // from the state root, the name is an abstract unix socket, and an abstract socket name is one
 // name across every container of the pod, so one state home would block every role's broker but
 // the first. `XDG_CONFIG_HOME` is unchanged, the pod's shared in-memory volume `workspace-init`
@@ -328,4 +328,102 @@ package api
 // this number, refuses either pair. (This branch took 36; main then landed INFRA-229 at 36 and
 // released pi-legion declaring it, so this branch takes the number above it, as the collision
 // note says.)
-const DaemonAPIVersion = 37
+//
+// 38: sjawhar/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
+// issue, and says what it is waiting for. `api.Admission` gains `blocked`, required: every root
+// and every child Legion is waiting to start, by issue key, each `{issue, blockedBy}` with the
+// keys it waits on that are not done (`blockedBy` is never null, and a key the daemon has no
+// mirror row of counts as unfinished). `waiting` is unchanged, the roots' waiting line.
+// `api.WaveReleaseResponse` gains `started` and `held`, both required, `held` an array of the
+// same `{issue, blockedBy}` row: a release accepts the whole wave whatever its children's links
+// say, and these two say which children it started and which it left held. A 37 plugin's strict
+// reader refuses a state carrying `blocked` and a release answer carrying `started` or `held`,
+// so the boot gate and `legion probe-image` refuse the mixed pair. (This branch took 36, then 37;
+// main landed INFRA-229 at 36 and INFRA-80 at 37 while it was open, so this change takes the
+// number above them, as the collision note says.)
+//
+// 39: INFRA-208 -- an issue pod is one container, `roles`, whose PID 1 is one `legion launcher`
+// serving every workflow role (`--roles-dir /var/run/legion/roles` and one `--role` per role), each
+// role's generation started in namespaces of its own by `legion launcher role-init`; each role's
+// own volumes are mounted under `/var/run/legion/roles/<role>/` and the role homes volume at
+// `/var/run/legion/roles/.homes`. An image whose `legion launcher` lacks multi-role mode cannot run
+// that pod, and the image probe refuses an image whose pi-legion declares another contract, so the
+// bump keeps a daemon from building such pods for an older image. A sandbox locator of an issue
+// pod's role names container `roles`, and store migration 0054 rewrites every stored one at boot;
+// a running pod of the layout before it is StaleAddress for every role and replaced once by the
+// next launch of any of them, uncharged. `settings.runtime.kubernetes.resources` is now
+// `{issue, controller}`, the two pods' reservations, rather than one entry per role; the
+// resource-limits capability row names those pods. (This branch took 36; main then landed
+// INFRA-229 at 36, so this branch took 37; main then landed INFRA-80 at 37 with store migration
+// 0051, so this branch took 38 and store migration 0052; main then landed INFRA-225 at 38 with
+// store migrations 0052 and 0053, so this branch takes 39 and store migration 0054, as the
+// collision note says. Other open branches may declare 39 or a migration 0054 too: whichever
+// merges after another takes the next free contract number and renumbers its store migration past
+// main's, every site that names either included, among them the rollback's
+// `delete from schema_version where version = 54` in docs/kubernetes.md.)
+//
+// 40: a root whose architect asked a person a question and handed the turn back gives its
+// admission slot up in the new phase `awaiting_person`, and its strict state issue view gains
+// `waitingOn`: `kind` `ask` with the question's `ask`, or `gate` with `gateVersion` and
+// `artifactId` (in the contract now, so the next release's gate waits need no plugin bump; no
+// daemon of this contract writes one), `since`, the hand-back the wait began at, and, once the
+// wait was answered, `answeredAt` and `answeredBy` (`answeredBy` names how, not always by a
+// person). A 39 plugin's strict reader refuses the phase
+// and the field, so the boot gate and `legion probe-image` refuse the mixed pair. (39 is INFRA-208,
+// on main before this change, so this change takes the number above it, as the collision note
+// says.)
+//
+// 41: `legion controller start` passes `/legion-controller-start`
+// (daemon.ControllerStartCommand) on the operator's Oh My Pi command line, and pi-legion sends the
+// controller's start message from that extension command rather than from session_start: Oh My Pi
+// drains every session_start send at the end of its startup, so the start turn ran inside the
+// startup wait, with no TUI and no input, while a command-line word runs as a prompt after startup
+// and once the TUI listens. Under this CLI a pi-legion before 41 sends from session_start and then
+// gets the word as a prompt, and a pi-legion at 41 under an older CLI never sends the start, so the
+// controller probe refuses either pair before the mint. The daemon-launched controller is unchanged
+// on the wire. (This branch took 40; main then landed the awaiting_person change at 40 and released
+// pi-legion v11.1.0 declaring it, without these shapes, so this branch takes the number above it,
+// as the collision note says. Other open branches may declare 41 too: whichever merges after
+// another takes the next free number, as the collision note says.)
+//
+// 42: a worker's environment gains the four LEGION_STALL_* numbers under both
+// runtimes (`internal/daemon/specs.go` merges each one the daemon holds into `spec.Env`, which a
+// pane's `-e` pairs and a pod launcher's start command carry verbatim), and a Claude Code role
+// gains CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and CLAUDE_CODE_DISABLE_CRON in
+// its start command's environment. Both plugins read the four numbers through
+// `packages/pi-shared/src/stall-limits.ts`, and `@sjawhar/claude-envoy` reads the Claude
+// directory, so the daemon and the image that carries them ship together. With 37's disk dying
+// with its pod, a Claude Code role's session is kept in Oh My Pi's session table by the pod's
+// own launcher: each Claude launch's start command carries LEGION_CLAUDE_SESSION_ID, the session
+// it starts or resumes (`claudelaunch.SessionVariable`), and the image's `legion launcher` reads
+// it, in the manager of that role in the one `roles` container, to keep the transcript and the
+// phase-reminder record as rows of `omp_session_files` keyed by their paths, restoring both before
+// a resume's child starts, and writes `<transcript>.legion-saved` once its first save of a fresh
+// transcript has committed, which the image's `@sjawhar/claude-envoy` waits for before it
+// registers the transcript. A launcher before 42 ignores the variable and keeps nothing, so the
+// next pod's resume of that transcript is refused, and a claude-envoy before 42 registers a
+// transcript the table may not hold yet; an image at 42 under a daemon before 42 is told no
+// session, so its claude-envoy waits for no marker and its launcher keeps nothing. The image probe
+// refuses either pair. This change adds no store migration. (This branch took 36 through 41 in
+// turn; main landed each of those numbers first, the controller start command last at 41, so this
+// branch takes the number above them, as the collision note says.)
+//
+// 43: api.State gains `consumers`, the lag of the daemon's three durable consumers
+// (api.ConsumerLagView), read from NATS after the state's transaction commits: each consumer's
+// `name`, `waiting` (JetStream's NumPending plus NumAckPending), `oldestAt` and
+// `oldestAgeSeconds` (the stream time of the first message after its ack floor on one of its
+// filter subjects, and that message's age in whole seconds; both null when nothing waits or the
+// message could not be read), `lastHandledAt` (when the daemon last acknowledged one of its
+// messages or terminated one as poison, null before the first; a nak is not handled), `stalled`
+// (messages waiting and none handled for 60 seconds, counted from the consumer's open before the
+// first) and `unavailable` (what NATS did not answer within the read's 2-second bound or refused,
+// absent when every read answered: a failed CONSUMER.INFO leaves `waiting` 0 and `stalled` false,
+// a failed STREAM.MSG.GET only the oldest null). Never null, so a 42 plugin's strict reader
+// refuses the state, and the boot gate and `legion probe-image` refuse the mixed pair. The state's
+// `repositories` gains `withoutWebhookApp` in the same contract: each served repository, as
+// Dispatch maps it, that Dispatch's GitHub App (the one GitHub sends its webhook events through)
+// is not known to be installed on, `{repo, reason}` sorted by repo, the reason naming whether the
+// App is not installed, the check failed, or Dispatch does not answer the check; never null, and
+// the repository is served all the same. (This branch took 41, then 42; 42 is declared by main's
+// stalled-worker reminder, so this change takes the number above it, as the collision note says.)
+const DaemonAPIVersion = 43
