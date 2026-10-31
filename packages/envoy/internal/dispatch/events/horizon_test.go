@@ -372,16 +372,18 @@ func TestHorizonStaysBelowAnOpenLowerWrite(t *testing.T) {
 // snapshot was taken, and the id the snapshot saw is final at once. H must then reach a freshly
 // committed event after a single Safe, with no gap left open and nothing to observe again for.
 //
-// Transaction ids are instance-wide, so another test's write, or this process's background
-// database drops, can hold one while the observation runs and leave a snapshot that proves
-// nothing. The quiet case is therefore built again, up to a bound, and the test logs the attempt
-// it took.
+// Transaction ids are instance-wide, so another test's write (another package's tests share the
+// Postgres instance and run beside this one), or this process's background database drops, can
+// hold one while the observation runs and leave a snapshot that proves nothing. The quiet case is
+// therefore built again, pausing between attempts so those transactions can end, for up to
+// thirty seconds, and the test logs the attempt it took. Twenty attempts back to back were not
+// enough when the module's packages ran together on two CPUs.
 func TestHorizonProvesItsOwnObservationOnAQuietInstance(t *testing.T) {
 	database := storetest.Open(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	const attempts = 20
+	deadline := time.Now().Add(30 * time.Second)
 	for attempt := 1; ; attempt++ {
 		horizon := NewHorizon(database.Pool)
 		id := commitHorizonEvent(ctx, t, database)
@@ -394,10 +396,11 @@ func TestHorizonProvesItsOwnObservationOnAQuietInstance(t *testing.T) {
 			t.Logf("one observation proved itself on attempt %d: H = %d after committing id %d", attempt, safe, id)
 			return
 		}
-		if attempt == attempts {
-			t.Fatalf("after %d attempts no single observation proved itself: Safe = %d after committing id %d, Gap = %d",
-				attempts, safe, id, gap)
+		if time.Now().After(deadline) {
+			t.Fatalf("after %d attempts over 30 s no single observation proved itself: Safe = %d after committing id %d, Gap = %d",
+				attempt, safe, id, gap)
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
