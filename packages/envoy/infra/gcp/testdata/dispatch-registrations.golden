@@ -33,7 +33,9 @@ kubernetes:secrets-store.csi.x-k8s.io/v1:SecretProviderClass example-dispatch-na
 pulumi:providers:gcp gcp-example parent=urn:pulumi:s::p::pulumi:pulumi:Stack::p-s
 pulumi:providers:kubernetes example-dispatch-kubernetes parent=urn:pulumi:s::p::envoy-infra:gcp:Dispatch::example-dispatch
 pulumi:providers:random random-example parent=urn:pulumi:s::p::pulumi:pulumi:Stack::p-s
+pulumi:providers:tailscale tailscale-example parent=urn:pulumi:s::p::pulumi:pulumi:Stack::p-s
 random:index/randomPassword:RandomPassword example-dispatch-agent-token parent=urn:pulumi:s::p::envoy-infra:gcp:Dispatch::example-dispatch
 random:index/randomPassword:RandomPassword example-dispatch-listener-token parent=urn:pulumi:s::p::envoy-infra:gcp:Dispatch::example-dispatch
 random:index/randomPassword:RandomPassword example-dispatch-password parent=urn:pulumi:s::p::envoy-infra:gcp:Dispatch::example-dispatch
 random:index/randomPassword:RandomPassword example-dispatch-signing-key parent=urn:pulumi:s::p::envoy-infra:gcp:Dispatch::example-dispatch
+tailscale:index/service:Service example-dispatch parent=urn:pulumi:s::p::envoy-infra:gcp:Dispatch::example-dispatch

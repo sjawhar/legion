@@ -306,8 +306,16 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // PgVersioned.maxPendingItems; the store's check of a rebuilt seed, at the same cap; and the check
 // of a history against the queue a service's rooms decode under (validateUpdate,
 // Service.maxPendingItems). See maxUpdateItems for what those caps hold.
+//
+// Every copy replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each
+// remote apply that changes formatted text with a commit of its own: every update a copy applies
+// is one the room committed, and every cleanup the room made is already among them (the room's own
+// repairs and sweeps are local commits, which never clean up; a write's publish and a browser's
+// update reach the room as remote applies, and the cleanup either makes is stored), so a copy that
+// cleaned up would hold a state the room never held - and a compaction that folded such a copy
+// would store it. A write's fork commits its own writes locally, which never clean up.
 func newCappedDocumentCopy(maxPending int, options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(append(options, crdt.WithMaxPendingItems(maxPending))...)
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxPending), crdt.WithFormatCleanup(false))...)
 }
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's

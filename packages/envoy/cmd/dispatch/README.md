@@ -2434,7 +2434,9 @@ Each item below names a status and code, then its meaning.
 
 - `409 ANCHOR_MISSING`
 
-  A browser submitted a `mark_id` that the server did not observe in the live tree.
+  A browser submitted a `mark_id` that the server did not observe in the live tree, in the second it waits for the document's next update and in one last read of the document when that wait ends.
+  A mark no ask or comment row records is swept from the document a minute after a settlement first saw it.
+  A mark whose `by` names a user with a browser on the room is kept instead, so a composer left open sends, and a mark a closed or offline tab left behind goes a minute after that user's last browser left the room.
 
 - `409 ANCHOR_ORPHANED`
 

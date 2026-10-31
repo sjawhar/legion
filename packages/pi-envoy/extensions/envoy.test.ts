@@ -51,9 +51,7 @@ import {
 } from "@legion/pi-shared/interface";
 import type {
   HostSlashCommand,
-  MessageRenderer,
   MessageRendererTheme,
-  PiApi,
   UserInputResult,
 } from "@legion/pi-shared/pi-types";
 import {
@@ -69,89 +67,13 @@ import { z } from "zod";
 import { version as packageVersion } from "../package.json" with { type: "json" };
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
 import { REPLAY_STATE_ENTRY } from "../src/missed-messages";
+import {
+  type CommandContext,
+  createStandInHost,
+  type SessionContext,
+  type TestPi,
+} from "../test/stand-in-host";
 
-type ToolResult = {
-  readonly content: readonly { readonly type: "text"; readonly text: string }[];
-  readonly details: Readonly<Record<string, unknown>>;
-  readonly isError?: boolean;
-};
-
-type RegisteredTool = {
-  readonly name: string;
-  readonly description: string;
-  readonly parameters: unknown;
-  readonly execute: (
-    id: string,
-    params: Record<string, unknown>,
-    signal?: AbortSignal,
-    onUpdate?: unknown,
-    context?: SessionContext
-  ) => Promise<ToolResult>;
-};
-
-type RegisteredCommand = {
-  readonly name: string;
-  readonly description: string | undefined;
-  readonly handler: (args: string, context: CommandContext) => Promise<void>;
-};
-
-type SessionContext = {
-  readonly cwd: string;
-  /** Oh My Pi's agent identity: the top-level session's runner is `main`, a `task` subagent's `sub`. */
-  readonly agent?: { readonly kind: "main" | "sub" };
-  readonly sessionManager: {
-    readonly getSessionId: () => string;
-    readonly getSessionName?: () => string | undefined;
-    readonly getBranch?: () => readonly unknown[];
-    readonly getEntries: () => readonly unknown[];
-    readonly getSessionFile: () => string | undefined;
-    readonly ensureOnDisk: () => Promise<void>;
-  };
-  readonly setInterval: (callback: () => void, intervalMs: number) => void;
-  /** The host's `ctx.isIdle()`: false while a turn runs. */
-  readonly isIdle?: () => boolean;
-  readonly ui: {
-    readonly notify: (message: string, level: "info" | "warning") => void;
-    readonly onTerminalInput: (handler: (input: unknown) => void) => () => void;
-    readonly getEditorText: () => string;
-  };
-};
-
-type CommandContext = {
-  readonly ui: {
-    readonly notify: (message: string, level: "info" | "warning" | "error") => void;
-  };
-};
-
-type TestPi = {
-  readonly zod: typeof z;
-  readonly registerTool: (tool: RegisteredTool) => void;
-  readonly registerCommand: (name: string, command: Omit<RegisteredCommand, "name">) => void;
-  readonly registerMessageRenderer: PiApi["registerMessageRenderer"];
-  readonly on: (
-    event:
-      | "resources_discover"
-      | "session_start"
-      | "session_switch"
-      | "session_branch"
-      | "session_tree"
-      | "session_shutdown"
-      | "before_agent_start"
-      | "agent_end"
-      | "message_start"
-      | "session_stop"
-      | "input"
-      | "tool_call"
-      | "tool_result",
-    handler: (event: unknown, context: SessionContext) => Promise<unknown>
-  ) => void;
-  readonly sendMessage: (
-    message: { readonly content: string; readonly customType?: string; readonly display?: boolean },
-    options: unknown
-  ) => void;
-  readonly sendUserMessage: (content: string, options?: unknown) => void;
-  readonly appendEntry: PiApi["appendEntry"];
-};
 type Subscription = {
   readonly unsubscribe: () => void;
   readonly [Symbol.asyncIterator]: () => AsyncIterator<{
@@ -507,68 +429,13 @@ afterEach(async () => {
   hostBuiltins.length = 0;
 });
 
-/** A message the extension sent through `pi.sendMessage`, as `createPi()` records it. */
-type Delivery = {
-  readonly content: string;
-  readonly customType?: string;
-  readonly details?: unknown;
-  readonly display?: boolean;
-  readonly options: unknown;
-};
-
-/** An event handler the extension registered through `pi.on`. */
-type EventHandler = (event: unknown, context: SessionContext) => Promise<unknown>;
-
 function createPi(options: { readonly clipboardError?: Error; readonly zod?: typeof z } = {}) {
   clipboardState.error = options.clipboardError;
-  const commands: RegisteredCommand[] = [];
-  const tools: RegisteredTool[] = [];
-  const handlers = new Map<string, EventHandler>();
-  const renderers = new Map<string, MessageRenderer>();
-  const messages: string[] = [];
-  const deliveries: Delivery[] = [];
-  // User turns the extension started, in the order it sent them.
-  const userMessages: { readonly content: string; readonly options: unknown }[] = [];
-  // Persisted custom entries, in the shape a later `getBranch()` or `getEntries()` returns them.
-  const entries: {
-    readonly type: "custom";
-    readonly customType: string;
-    readonly data: unknown;
-  }[] = [];
-  const pi: TestPi = {
-    zod: options.zod ?? z,
-    registerTool: (tool) => tools.push(tool),
-    registerCommand: (name, command) => commands.push({ name, ...command }),
-    registerMessageRenderer: (customType, renderer) => renderers.set(customType, renderer),
-    on: (event, handler) => handlers.set(event, handler),
-    sendMessage: (message, options) => {
-      messages.push(message.content);
-      deliveries.push({
-        content: message.content,
-        customType: message.customType,
-        details: "details" in message ? message.details : undefined,
-        display: message.display,
-        options,
-      });
-    },
-    sendUserMessage: (content, options) => {
-      userMessages.push({ content, options });
-    },
-    appendEntry: (customType, data) => {
-      entries.push({ type: "custom", customType, data });
-    },
-  };
+  // The stand-in host `scripts/role-takeover/omp-client.ts` drives the extension with too, plus
+  // the clipboard this suite mocks.
   return {
-    commands,
+    ...createStandInHost({ zod: options.zod }),
     copiedSessionIDs: clipboardState.copiedSessionIDs,
-    deliveries,
-    entries,
-    handlers,
-    messages,
-    pi,
-    renderers,
-    tools,
-    userMessages,
   };
 }
 
@@ -3023,6 +2890,8 @@ describe("envoy OMP extension", () => {
           title: "",
           driving: false,
           self_subscribed: true,
+          // Minted once per extension instance and sent on every registration (R5).
+          client_instance_id: expect.stringMatching(/^[0-9a-f]{32}$/),
           capabilities: ["aside", "steer"],
           host: machineID(),
           plugin: "@sjawhar/pi-envoy",
@@ -9118,7 +8987,11 @@ console.log(JSON.stringify(args));
     await held.reached;
     const moved = await hostMoves(fixture, live, context, "ses_cw_new");
     held.release();
-    await expect(claimed).rejects.toThrow("the session moved from ses_cw");
+    // The claim landed while the host moved, so the plugin is told what became of it rather than
+    // that nothing was claimed.
+    await expect(claimed).rejects.toThrow(
+      "the session moved from ses_cw to ses_cw_new while its claim of role reviewer was in flight; the next pass keeps the hold for the session the host is on, or hands it back"
+    );
     await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
     expect(handedBack).toContain("notifications.role.reviewer@ses_cw");
     expect(claimEntryRoles(fixture.entries)).not.toContain("reviewer");
@@ -10676,6 +10549,8 @@ console.log(JSON.stringify(args));
         title: "",
         driving: false,
         self_subscribed: true,
+        // Minted once per extension instance and sent on every registration (R5).
+        client_instance_id: expect.stringMatching(/^[0-9a-f]{32}$/),
         capabilities: ["aside", "steer"],
         host: machineID(),
         plugin: "@sjawhar/pi-envoy",
