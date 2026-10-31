@@ -6,6 +6,7 @@
  * (`envoy-channel-server`, `envoy-channel-handoff`, `envoy-channel-registry`) as
  * the rest of this package's tests do, rather than one file per entry point.
  */
+import { randomBytes } from "node:crypto"
 import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -331,7 +332,9 @@ export function recordingClient(calls: string[], overrides: Partial<FakeClient> 
 }
 
 /** Options binding the fakes, with the envoy.json the test's environment picks as they are built:
- * `isolatePaneEnvironment`'s scratch file in a file that calls it. */
+ * `isolatePaneEnvironment`'s scratch file in a file that calls it. Each call mints its own client
+ * instance id, as each channel-server process does; a test that asserts it reads it back from the
+ * registration the session sent. */
 export function sessionOptions(
   identity: SessionIdentity,
   stateDirectory: string,
@@ -346,6 +349,7 @@ export function sessionOptions(
     heartbeatMs: 60_000,
     configFile: sessionConfigFile("claude", process.env),
     stateDirectory,
+    clientInstanceID: randomBytes(16).toString("hex"),
     pluginVersion: "source",
     ...extra,
   }
