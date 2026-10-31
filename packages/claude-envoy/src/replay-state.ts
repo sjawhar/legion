@@ -1,27 +1,27 @@
-// One session's delivery record, in one file per session id under `CLAUDE_PLUGIN_DATA`: the
-// replay engine's (`@legion/envoy-client/replay`: its cursors, the subjects it follows and the
-// frames it was shown in the last 72 hours), and consumer delivery's
-// (`@legion/envoy-client/consumer-delivery`: the resume point and when each topic was first
-// followed). Claude Code can resume a session at any later time, so no sweep prunes these files;
-// each holds only cursors, followed subjects, a resume point and at most 72 hours of ledger,
-// since the engine drops older ledger entries before every write.
+// One session's delivery record, in one file per session id under `CLAUDE_PLUGIN_DATA` (named
+// `replay-<id>.json` since the first release that wrote one): the delivery ledger's
+// (`@legion/envoy-client/delivery-ledger`: the topics it follows and the frames it was shown in
+// the last 72 hours), and consumer delivery's (`@legion/envoy-client/consumer-delivery`: the
+// resume point and when each topic was first followed). Claude Code can resume a session at any
+// later time, so no sweep prunes these files; each holds only followed subjects, a resume point
+// and at most 72 hours of ledger, since the ledger drops older entries before every write.
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import {
   type ConsumerDeliverySnapshot,
   ConsumerDeliverySnapshotSchema,
 } from "@legion/envoy-client/consumer-delivery"
+import { type LedgerSnapshot, LedgerSnapshotSchema } from "@legion/envoy-client/delivery-ledger"
 import { hasErrnoCode } from "@legion/envoy-client/errors"
-import { type ReplaySnapshot, ReplaySnapshotSchema } from "@legion/envoy-client/replay"
 import type { z } from "zod"
 import { writeAtomicStateFile } from "./session-state"
 
 /**
- * A session's file: the replay snapshot, and the consumer delivery snapshot once the session had
- * one. `consumer` is optional, so a file a release before consumer delivery wrote still reads, and
- * such a release reading a newer file passes over it.
+ * A session's file: the delivery ledger's snapshot, and the consumer delivery snapshot once the
+ * session had one. `consumer` is optional, so a file a release before consumer delivery wrote
+ * still reads, and such a release reading a newer file passes over it.
  */
-export const ReplayStateFileSchema = ReplaySnapshotSchema.extend({
+export const ReplayStateFileSchema = LedgerSnapshotSchema.extend({
   consumer: ConsumerDeliverySnapshotSchema.optional(),
 })
 
@@ -36,7 +36,7 @@ export function replayStateFile(stateDirectory: string, sessionId: string): stri
 /**
  * The record a session's file holds; an empty one when there is no file, which is a session that
  * never ran this plugin, or a new id (a `/clear`, a fresh start). A file that cannot be read or
- * holds no replay snapshot throws.
+ * holds no ledger snapshot throws.
  */
 export async function readReplayState(file: string): Promise<ReplayStateFile> {
   let text: string
@@ -53,7 +53,7 @@ export async function readReplayState(file: string): Promise<ReplayStateFile> {
     throw new Error(`${file} is not JSON`)
   }
   const snapshot = ReplayStateFileSchema.safeParse(parsed)
-  if (!snapshot.success) throw new Error(`${file} holds no replay state`)
+  if (!snapshot.success) throw new Error(`${file} holds no delivery state`)
   return snapshot.data
 }
 
@@ -64,8 +64,8 @@ export async function writeReplayState(file: string, state: ReplayStateFile): Pr
 
 /** Writes one session's file from its two parts, each written whenever its owner changes it. */
 export interface ReplayStateWriter {
-  /** The replay engine's snapshot changed; resolves once a file holding it is in place. */
-  replay(snapshot: ReplaySnapshot): Promise<void>
+  /** The delivery ledger's snapshot changed; resolves once a file holding it is in place. */
+  ledger(snapshot: LedgerSnapshot): Promise<void>
   /** The consumer delivery snapshot changed; resolves once a file holding it is in place. */
   consumer(snapshot: ConsumerDeliverySnapshot): Promise<void>
   /** Resolves once every write asked for so far has finished, failed ones included. */
@@ -87,7 +87,7 @@ export function replayStateWriter(file: string, restored: ReplayStateFile): Repl
     return run
   }
   return {
-    replay: (snapshot) =>
+    ledger: (snapshot) =>
       write(
         current.consumer === undefined ? snapshot : { ...snapshot, consumer: current.consumer },
       ),

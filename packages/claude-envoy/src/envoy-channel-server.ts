@@ -10,7 +10,9 @@ import {
   type ConsumerDelivery,
   type ConsumerDeliverySnapshot,
   type ConsumerFrame,
+  type ConsumerGapNotice,
   createConsumerDelivery,
+  gapNoticeText,
 } from "@legion/envoy-client/consumer-delivery"
 import {
   createDeliveryDedupe,
@@ -28,19 +30,14 @@ import { machineID } from "@legion/envoy-client/machine"
 import { natsConnectionOptions } from "@legion/envoy-client/nats-connection"
 import {
   closeReplayedRemoval,
-  createReplayEngine,
+  createDeliveryLedger,
+  type DeliveryLedger,
   envoyNoticeText,
   failureNoticeFields,
-  type ReplayDeliveryOutcome,
-  type ReplayFrame,
-  type ReplayNotice,
   reachesPrivateStreamSubject,
   rememberedTopics,
-  replayedText,
   replayFollowedSubjects,
-  replaySuppressed,
-  routeReplayNotice,
-} from "@legion/envoy-client/replay"
+} from "@legion/envoy-client/delivery-ledger"
 import {
   type SessionConfigFile,
   sessionConfigFile,
@@ -207,7 +204,7 @@ export interface ChannelDelivery {
    * whether it went to Claude Code, once the notifier resolved its write: `false` for a frame
    * skipped, dropped, suppressed, or answered on Dispatch with an error instead (once that reply
    * is posted). `late` is a relay frame delivered before or stored before the current epoch
-   * (`ConsumerFrame.late`): a late BTW is suppressed, as a replayed one is.
+   * (`ConsumerFrame.late`): a late BTW is suppressed.
    */
   enqueue(input: {
     readonly subject: string
@@ -219,25 +216,17 @@ export interface ChannelDelivery {
 }
 
 /**
- * The channel delivery of a running session, which also shows what replay recovers
- * (`@legion/envoy-client/replay`), on the same notifier as a live frame: the channel notification,
- * or the Legion bridge's inbox.
+ * The channel delivery of a running session, which also shows Envoy's own notices on the same
+ * notifier as a live frame: the channel notification, or the Legion bridge's inbox.
  */
 export interface ChannelDeliveryPath extends ChannelDelivery {
-  /**
-   * Shows a stored frame the session missed, rendered as a live one is, with when it was
-   * published, and runs nothing: a replay answers nothing on Dispatch, so a targeted delivery the
-   * renderer refuses gets no late reply. `suppressed` for a frame the renderer does not show; a
-   * rejection is a failure.
-   */
-  replay(frame: ReplayFrame): Promise<ReplayDeliveryOutcome>
   /** Shows a notice of Envoy's own; a rejection says it was not shown. */
   notice(content: string): Promise<void>
 }
 
 export interface ChannelSession {
   readonly delivery: ChannelDelivery
-  /** Every NATS subject this process is consuming right now, direct route included. */
+  /** Every subject this session follows, direct route included. */
   topics(): readonly string[]
   /** Follow Envoy topics and refresh the registry interest; returns the topics that were new. */
   follow(topics: readonly string[]): Promise<readonly string[]>
@@ -269,13 +258,7 @@ export interface ChannelSessionOptions {
   readonly capabilities: readonly DeliveryCapability[]
   readonly client: Pick<
     EnvoyClient,
-    | "subscribe"
-    | "unsubscribe"
-    | "unregisterSession"
-    | "setRole"
-    | "getRole"
-    | "getInterest"
-    | "replay"
+    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
   >
   readonly heartbeatMs: number
   /**
@@ -287,7 +270,7 @@ export interface ChannelSessionOptions {
   readonly handoffFlushTimeoutMs?: number
   /**
    * `${CLAUDE_PLUGIN_DATA}`: role state per session id, the per-process handoff files, and the
-   * replay state per session id.
+   * delivery state per session id.
    */
   readonly stateDirectory: string
   /**
@@ -451,12 +434,12 @@ export function createChannelDelivery(input: {
 
   // A BTW never starts a turn here. The listener sends one only to a session that advertises
   // `btw`, which this one never does, and neither delivery path can show a message without
-  // starting a turn (the Legion bridge's inbox starts one when Claude Code is idle). So a BTW that
-  // arrives replayed or late anyway is passed over, named on stderr.
-  const passOverBtw = (rendered: RenderInboundResult, how: "replayed" | "late"): boolean => {
+  // starting a turn (the Legion bridge's inbox starts one when Claude Code is idle). So a late
+  // BTW that arrives anyway is passed over, named on stderr.
+  const passOverLateBtw = (rendered: RenderInboundResult): boolean => {
     if (rendered.delivery?.mode !== "btw") return false
     process.stderr.write(
-      `envoy-channel: passing over ${how} BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn\n`,
+      `envoy-channel: passing over late BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn\n`,
     )
     return true
   }
@@ -491,15 +474,8 @@ export function createChannelDelivery(input: {
         )
         return tail.then(() => false)
       }
-      if (late === true && passOverBtw(rendered, "late")) return tail.then(() => false)
+      if (late === true && passOverLateBtw(rendered)) return tail.then(() => false)
       return show(rendered, subject, rendered.content).then(() => true)
-    },
-    async replay(frame) {
-      const rendered = renderInbound(frame.data, input.identity.id, frame.subject)
-      if (replaySuppressed(rendered)) return "suppressed"
-      if (passOverBtw(rendered, "replayed")) return "suppressed"
-      await show(rendered, frame.subject, replayedText(rendered.content, frame.time))
-      return "shown"
     },
     notice(content) {
       return queue({
@@ -514,25 +490,10 @@ export function createChannelDelivery(input: {
 }
 
 /**
- * Queues a channel event and resolves whether Claude Code was handed it. Nothing is answered on
- * the bus: a role forward counts as delivered once the stream stored it, and every other frame on
- * the direct subject is a JetStream publish whose reply inbox belongs to the server's PubAck. A
- * duplicate, which includes a core copy of a frame the listener relays (consumer delivery),
- * queues nothing.
- */
-export async function enqueueChannelMessage(
-  delivery: ChannelDelivery,
-  message: ChannelInboundMessage,
-): Promise<boolean> {
-  if (message.duplicate) return false
-  return delivery.enqueue({ subject: message.subject, raw: message.raw })
-}
-
-/**
- * Begin one real NATS consumer before advertising the route to Envoy. The
- * channel server owns direct and followed subjects, and the listener's relay
- * subject when it delivers the session's consumer, so no Monitor or helper
- * process is needed between NATS and Claude Code.
+ * Begin the session's relay subscription before advertising the route to Envoy. The channel
+ * server holds the listener's relay subject for the session's own durable consumer, which is
+ * every message it receives, so no Monitor or helper process is needed between NATS and Claude
+ * Code.
  */
 export async function startChannelSession(options: ChannelSessionOptions): Promise<ChannelSession> {
   const { identity } = options
@@ -567,145 +528,81 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // The live path's claims, which a replay sweep reads to leave a frame being delivered alone.
   const dedupe = createDeliveryDedupe()
   /**
-   * The session id whose replay state the engine holds. Replay does nothing until it is the
-   * current id, so the work of one id never lands in another's file across a `/clear`.
+   * The session id whose delivery record the ledger holds. The ledger does nothing until it is
+   * the current id, so the work of one id never lands in another's file across a `/clear`.
    */
-  let replayBound: string | undefined
+  let ledgerBound: string | undefined
 
   /**
-   * A stored frame is shown as a live one is, and runs nothing. A removal closes a topic only when
-   * it was stored after the session started following that topic (`closeReplayedRemoval`).
-   *
-   * The frame is claimed in the live path's dedupe before it is handed to the write queue, as a
-   * live frame is (`createChannelForwarder`, `deliverRelayed`): a live copy that arrives while the
-   * channel write is still open finds the claim and is a repeat, rather than being shown beside
-   * it. The claim is released when the frame was not shown after all (the renderer suppressed it,
-   * the write failed), so a later copy still reaches the session, and settled once it was shown:
-   * the dedupe's record outlives the claim, so a copy that arrives before the engine records the
-   * frame in its ledger is a repeat too. A frame the live path is delivering now is that path's to
-   * show and record, so the sweep leaves the stream's copy for a later one (`queued`); a frame the
-   * dedupe recorded and let go of that the ledger does not hold (one shown before a `/clear` moved
-   * the engine, say) is handed over with no claim.
+   * Tells the session a gap notice of consumer delivery: a notice card, because it is about the
+   * messages the session was shown, which the session itself must know of.
    */
-  const showReplayed = async (frame: ReplayFrame): Promise<ReplayDeliveryOutcome> => {
-    const identityOf = deliveryIdentity(frame.data)
-    const claim = dedupe.claim(identityOf)
-    if (claim === undefined && identityOf !== undefined && dedupe.pending(identityOf)) {
-      return "queued"
-    }
-    try {
-      await closeReplayedRemoval(frame, {
-        sessionID: identity.id,
-        engine: replay,
-        close: (topic) => userTopics.delete(topic),
-        unregister: unfollowRemovedTopics,
-        followedChanged: () => replay.followedChanged(),
-      })
-      const outcome = await delivery.replay(frame)
-      if (outcome === "shown") claim?.settle()
-      else claim?.release()
-      return outcome
-    } catch (error) {
-      claim?.release()
-      throw error
-    }
-  }
-
-  /**
-   * Tells the session a notice of the replay engine or of consumer delivery (a gap). That the
-   * listener does not replay goes where every start notice of this server goes, as pi-envoy raises
-   * it as a warning rather than a card for the model; every other one is a notice card.
-   */
-  const tellNotice = (notice: ReplayNotice): void => {
-    routeReplayNotice(notice, {
-      warn: (message) => process.stderr.write(`envoy-channel: ${message}\n`),
-      card: (content) => {
-        delivery.notice(content).catch((error: unknown) => {
-          process.stderr.write(
-            `envoy-channel: ${notice.message} (the session could not be told — ${messageFor(error)})\n`,
-          )
-        })
-      },
+  const tellGapNotice = (notice: ConsumerGapNotice): void => {
+    delivery.notice(gapNoticeText(notice)).catch((error: unknown) => {
+      process.stderr.write(
+        `envoy-channel: ${notice.message} (the session could not be told — ${messageFor(error)})\n`,
+      )
     })
   }
 
-  /** The writer of the bound id's state file (`replayStateWriter`), set by `restoreReplay`. */
+  /** The writer of the bound id's state file (`replayStateWriter`), set by `restoreDelivery`. */
   let stateWriter: ReplayStateWriter | undefined
 
   /**
-   * Shows the session each message the notification stream stored for it while its subscriptions
-   * were down, once (`@legion/envoy-client/replay`), with its state in the session id's file.
+   * What this session was already shown, and the notice naming a frame it could not be shown
+   * (`@legion/envoy-client/delivery-ledger`), with its state in the session id's file.
    */
-  const replay = createReplayEngine({
+  const ledger: DeliveryLedger = createDeliveryLedger({
     host: {
-      sessionID: () => (shuttingDown || replayBound !== identity.id ? undefined : identity.id),
+      sessionID: () => (shuttingDown || ledgerBound !== identity.id ? undefined : identity.id),
       // What the session registers (`replayFollowedSubjects`).
       followedSubjects: () => replayFollowedSubjects(directSubject, userTopics),
-      deliver: showReplayed,
       showFailureNotice: (notice) => delivery.notice(envoyNoticeText(failureNoticeFields(notice))),
       failureNoticeFailed: (notice, error) => {
         process.stderr.write(
           `envoy-channel: message ${notice.eventId} from ${notice.sender} was not shown, nor was the notice naming it — ${messageFor(error)}\n`,
         )
       },
-      notify: tellNotice,
       log: (message, error) => {
         process.stderr.write(
           `envoy-channel: ${message}${error === undefined ? "" : ` — ${messageFor(error)}`}\n`,
         )
       },
-      write: (change) => stateWriter?.replay(change.snapshot()),
+      write: (change) => stateWriter?.ledger(change.snapshot()),
     },
-    transport: options.client,
-    dedupe,
   })
 
   /**
-   * Loads the current id's state file: the replay state into the engine, and the consumer delivery
-   * snapshot into a new relay for the id, whose subject it subscribes (`openRelay`). Returns the
-   * topics it followed that a restore follows again (`rememberedTopics`). A file that cannot be
-   * read starts the session's replay over; its next write replaces the file.
+   * Loads the current id's state file: the ledger's record, and the consumer delivery snapshot
+   * into a new relay for the id, whose subject it subscribes (`openRelay`). Returns the topics it
+   * followed that a restore follows again (`rememberedTopics`). A file that cannot be read starts
+   * the session's record over; its next write replaces the file.
    */
-  const restoreReplay = async (): Promise<readonly string[]> => {
+  const restoreDelivery = async (): Promise<readonly string[]> => {
     const sessionId = identity.id
     const file = replayStateFile(options.stateDirectory, sessionId)
     const snapshot = await readReplayState(file).catch((error: unknown): ReplayStateFile => {
       process.stderr.write(
-        `envoy-channel: could not read the replay state (${messageFor(error)}); this session's replay starts over\n`,
+        `envoy-channel: could not read the delivery state (${messageFor(error)}); this session's record starts over\n`,
       )
       return { ledger: [] }
     })
-    replay.restore(snapshot)
+    ledger.restore(snapshot)
     stateWriter = replayStateWriter(file, snapshot)
     openRelay(sessionId, stateWriter, snapshot.consumer)
-    replayBound = sessionId
+    ledgerBound = sessionId
     return rememberedTopics(snapshot.state)
   }
 
-  /** A sweep runs on the engine's own chain, never in the registry's. */
-  const triggerReplay = (): void => {
-    if (!shuttingDown) void replay.sweep()
-  }
-
-  /** A human Dispatch subscription removal naming this session drops its topics here too. */
-  const takeRemovals = (raw: string): void => {
-    const removedTopics = subscriptionRemovedTopics(raw, identity.id)
-    // An empty list would mean "every topic" to both unfollow and the listener.
-    if (removedTopics !== undefined && removedTopics.length > 0) {
-      for (const topic of removedTopics) userTopics.delete(topic)
-      void dropRemovedTopics(removedTopics)
-    }
-  }
-
   /**
-   * Consumer delivery (`@legion/envoy-client/consumer-delivery`). The current id's relay subject
-   * is subscribed before any registration under that id, and every registration asks the listener
-   * for consumer delivery (the relay's epoch and resume point). Answered `consumer`, the listener
-   * relays the session's durable consumer on that subject: its agent subject and every followed
-   * topic the stream stores, each frame handed to the channel's write queue in stream order and
-   * answered `done` once written (`deliverRelayed`). The core copies of those subjects are then
-   * dropped (`relaysCoreTopic`), and the replay engine makes no `/v1/replay` call.
-   * Answered `core`, or not at all, the core path runs as before.
+   * Consumer delivery (`@legion/envoy-client/consumer-delivery`), the one path a message reaches
+   * this session by. The current id's relay subject is subscribed before any registration under
+   * that id, and every registration asks the listener for consumer delivery (the relay's epoch
+   * and resume point). The listener relays the session's durable consumer on that subject: its
+   * agent subject and every followed topic the stream stores, each frame handed to the channel's
+   * write queue in stream order and answered `done` once written (`deliverRelayed`). A
+   * registration the listener can give no consumer is refused, and the session receives nothing
+   * until a later heartbeat's registration is accepted.
    */
   interface Relay {
     readonly sessionID: string
@@ -715,9 +612,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     subscription: ChannelTopicSubscription | undefined
   }
   let relay: Relay | undefined
-
-  const relaysCoreTopic = (topic: string): boolean =>
-    relay?.sessionID === identity.id && relay.delivery.relays(topic)
 
   /**
    * Hands one relay frame to the channel's write queue, and answers it once Claude Code has it:
