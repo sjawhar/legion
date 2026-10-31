@@ -101,7 +101,7 @@ function signedInAs(page: Page, login: string) {
 /** The broker's session cookie in `context`, read from every cookie the context holds, since
  *  Playwright's `cookies(url)` drops a Secure cookie for any http URL but localhost's. */
 async function brokerSession(context: BrowserContext) {
-  const host = new URL(realBrokerOrigin).hostname;
+  const host = new URL(realBrokerOrigin()).hostname;
   return (await context.cookies()).find((c) => c.domain === host && c.name === sessionCookie);
 }
 
@@ -152,7 +152,7 @@ test("from the Inbox, a live broker session lands on the record's page with no s
     await expect(approve).toBeVisible();
     await expect(record).toContainText("a pod enrollment");
     expect(traffic.documents).toEqual([request.approve_url]);
-    expect(traffic.requests.filter((url) => url.startsWith(devIssuerOrigin))).toEqual([]);
+    expect(traffic.requests.filter((url) => url.startsWith(devIssuerOrigin()))).toEqual([]);
 
     await approve.click();
     await expect(page.locator(".outcomes")).toContainText(
@@ -191,13 +191,13 @@ test("from the Inbox, a lapsed broker session signs in once and returns to the s
     await expect(signedInAs(page, aliceBrokerLogin)).toBeVisible();
     // One pass: the record's page, the issuer's sign-in, the broker's callback, the page again.
     const signIns = traffic.documents.filter((url) =>
-      url.startsWith(`${devIssuerOrigin}/authorize?`)
+      url.startsWith(`${devIssuerOrigin()}/authorize?`)
     );
     expect(signIns).toHaveLength(1);
     expect(traffic.documents.map((url) => new URL(url).origin + new URL(url).pathname)).toEqual([
       request.approve_url,
-      `${devIssuerOrigin}/authorize`,
-      `${realBrokerOrigin}/signin/callback`,
+      `${devIssuerOrigin()}/authorize`,
+      `${realBrokerOrigin()}/signin/callback`,
       request.approve_url,
     ]);
     expect(new URL(signIns[0] ?? "").searchParams.get("login_hint")).toBe(aliceBrokerLogin);
@@ -269,7 +269,7 @@ async function hostileSibling(request: SeededRequest): Promise<{ origin: string;
     .map(([name, value]) => `<input type="hidden" name="${name}" value="${value}">`)
     .join("");
   const pages: Record<string, string> = {
-    "/form": `<form method="post" action="${realBrokerOrigin}/approve">${inputs}<button>Win a prize</button></form>`,
+    "/form": `<form method="post" action="${realBrokerOrigin()}/approve">${inputs}<button>Win a prize</button></form>`,
     "/frame": `<iframe title="the broker" src="${request.approve_url}" width="600" height="400"></iframe>`,
     "/script": "<p>A page that sends a credentialed fetch.</p>",
   };
@@ -300,7 +300,7 @@ test("a page on a sibling origin cannot decide the record with a form, a credent
     const page = await alice.newPage();
     await signInToBroker(page, request);
     const decide = (response: Response) =>
-      response.url() === `${realBrokerOrigin}/approve` && response.request().method() === "POST";
+      response.url() === `${realBrokerOrigin()}/approve` && response.request().method() === "POST";
     expect(await brokerSession(alice)).toBeDefined();
 
     // (a) A form posted to the broker carries alice's session (same site, so SameSite=Lax sends
@@ -337,7 +337,7 @@ test("a page on a sibling origin cannot decide the record with a form, a credent
             return `failed: ${String(error)}`;
           }
         },
-        { body: forgedDecision(request), mode, url: `${realBrokerOrigin}/approve` }
+        { body: forgedDecision(request), mode, url: `${realBrokerOrigin()}/approve` }
       );
     expect(await sendFetch("cors")).toBe("failed: TypeError: Failed to fetch");
     expect(await states(state)).toEqual(["pending"]);
@@ -401,8 +401,10 @@ test("signed in as another person, the record's page offers only the switch, whi
     await expect(page).toHaveURL(request.approve_url);
     await expect(signedInAs(page, aliceBrokerLogin)).toBeVisible();
     await expect(approve).toBeVisible();
-    const signIn = traffic.documents.find((url) => url.startsWith(`${devIssuerOrigin}/authorize?`));
-    const signInQuery = new URL(signIn ?? devIssuerOrigin).searchParams;
+    const signIn = traffic.documents.find((url) =>
+      url.startsWith(`${devIssuerOrigin()}/authorize?`)
+    );
+    const signInQuery = new URL(signIn ?? devIssuerOrigin()).searchParams;
     expect(signInQuery.get("login_hint")).toBe(aliceBrokerLogin);
     expect(signInQuery.get("prompt")).toBe("select_account");
     expect(await states(state)).toEqual(["pending"]);

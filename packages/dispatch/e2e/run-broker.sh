@@ -3,27 +3,43 @@ set -euo pipefail
 # The REAL secrets broker e2e/broker-approval.e2e.ts approves requests on, and the issuer it trusts,
 # as two harness listeners (e2e/harness-listeners.ts):
 #
-#   run-broker.sh issuer   cmd/dev-oidc-issuer on DEV_OIDC_ISSUER_PORT (default 9025)
-#   run-broker.sh broker   cmd/broker on REAL_BROKER_PORT (default 9026)
+#   run-broker.sh issuer   cmd/dev-oidc-issuer, always on a port the OS chooses
+#   run-broker.sh broker   cmd/broker on REAL_BROKER_PORT, or a port the OS chooses with it unset
 #
-# The issuer stands in for two things: the cluster's ServiceAccount token issuer, whose POST
-# /dev/mint mints the tokens the seeding step (packages/envoy/internal/broker/brokertest/requestseed)
-# logs a service in and enrolls its pods with, and the person's sign-in provider for the broker's
-# own client, signing a person in with no page to fill in: the one POST /dev/sign-in-as queued,
-# else the authorization request's login_hint (the record's approver), else alice. Dispatch's
-# server never reaches this broker: it keeps relaying e2e/fake-broker.ts, whose pending rows a row
-# points at this broker's records, so only the browser and the seeding step speak to it.
+# The issuer stands in for two things: the cluster's ServiceAccount token issuer, whose minted
+# tokens the seeding step (packages/envoy/internal/broker/brokertest/requestseed) logs a service in
+# and enrolls its pods with, and the person's sign-in provider for the broker's own client, signing
+# a person in with no page to fill in. Dispatch's server never reaches this broker: it keeps
+# relaying e2e/fake-broker.ts, whose pending rows a row points at this broker's records, so only
+# the browser and the seeding step speak to it.
 #
-# The ports resolve as e2e/harness-ports.ts resolves them (${VAR:-default}). DATABASE_URL is the
-# Dispatch suite's own database, which e2e/seed.ts truncates; the broker never touches it, and
-# runs instead in a database of its own on the same server, <that database>_broker, dropped and
-# created afresh on every start so each harness begins with no enrollment, request or session.
+# The ports follow e2e/harness-ports.ts: a variable left unset means bind port 0 and report the
+# port the OS chose, and a set one is bound as given. Each half prints exactly one line
+# e2e/harness-listeners.ts matches to read its port from:
+#
+#   dev-oidc-issuer: issuer listening url=http://127.0.0.1:<port>
+#   <date> <time> INFO broker listening addr=127.0.0.1:<port>
+#
+# cmd/dev-oidc-issuer has no way to bind a given port, so DEV_OIDC_ISSUER_PORT set is refused for
+# the issuer rather than ignored, as e2e/run-signin-issuer.sh refuses its own. The broker half
+# reads that variable instead: e2e/harness-start.ts exports it from the issuer's report, and the
+# broker takes that URL as its token issuer and its sign-in provider, so a broker started with it
+# unset is refused too. The broker's public URL follows the port it binds, since the approval
+# page refuses a form post from any other origin: with REAL_BROKER_PORT set both name that port,
+# and with it unset both are port 0, which cmd/broker resolves from the address it bound
+# (packages/envoy/cmd/broker/main.go).
+#
+# DATABASE_URL is the Dispatch suite's own database, which e2e/seed.ts truncates; the broker never
+# touches it, and runs instead in a database of its own on the same server, <that database>_broker,
+# dropped and created afresh on every start so each harness begins with no enrollment, request or
+# session.
 : "${DATABASE_URL:?DATABASE_URL must name an isolated Dispatch e2e database}"
 mode="${1:-}"
+# The harness Dispatch this broker names in the machine-login link on its page. The broker row
+# follows the Dispatch server's in the table, so the harness has exported its port by then; 8777
+# is the placeholder for a broker started by hand, which that link alone names.
 e2e_port="${DISPATCH_E2E_PORT:-8777}"
-issuer_port="${DEV_OIDC_ISSUER_PORT:-9025}"
-broker_port="${REAL_BROKER_PORT:-9026}"
-issuer_url="http://127.0.0.1:$issuer_port"
+broker_port="${REAL_BROKER_PORT:-0}"
 e2e_dir="$(cd "$(dirname "$0")" && pwd)"
 
 # The broker's own OpenID Connect client at the issuer, whose secret both processes read from a
@@ -53,6 +69,22 @@ case "$mode" in
     ;;
 esac
 
+# Both halves name the issuer by DEV_OIDC_ISSUER_PORT, and neither can go on without the right
+# answer here, so each is refused before the build rather than after it. cmd/dev-oidc-issuer
+# serves on a loopback port the OS chooses, so a port given to the issuer could only be ignored,
+# as e2e/run-signin-issuer.sh refuses its own. The broker discovers that issuer before it binds,
+# and e2e/harness-start.ts has exported the port from the issuer row's report by the time the
+# broker row starts.
+if [ "$mode" = issuer ]; then
+  if [ -n "${DEV_OIDC_ISSUER_PORT:-}" ]; then
+    echo "run-broker.sh: the dev issuer serves on a port the OS chooses; unset DEV_OIDC_ISSUER_PORT" >&2
+    exit 2
+  fi
+else
+  : "${DEV_OIDC_ISSUER_PORT:?DEV_OIDC_ISSUER_PORT must name the dev issuer \`run-broker.sh issuer\` reported}"
+  issuer_url="http://127.0.0.1:$DEV_OIDC_ISSUER_PORT"
+fi
+
 cd "$e2e_dir/../../envoy"
 # Built first and exec'd, as run-server.sh does its server, so the pid Playwright started is the
 # listener's. One build of the three binaries per checkout, under a lock, so the two listeners
@@ -63,12 +95,12 @@ mkdir -p "$bin"
 flock "$bin/.build.lock" go build -o "$bin/" ./cmd/broker ./cmd/dev-oidc-issuer ./internal/broker/brokertest/requestseed
 
 if [ "$mode" = issuer ]; then
+  # One client, the broker's, whose secret the issuer reads from the file once at its start. An
+  # authorization with nobody queued signs alice in, so every sign-in that reaches the issuer ends
+  # with a person; her hd claim is signin_domain, the domain the broker requires.
   exec "$bin/dev-oidc-issuer" \
-    --listen "127.0.0.1:$issuer_port" \
-    --sign-in-client "$signin_client" \
-    --sign-in-client-secret-file "$signin_secret_file" \
-    --sign-in-domain "$signin_domain" \
-    --sign-in-default "alice@$signin_domain"
+    --code-flow "$signin_client=$signin_secret_file" \
+    --sign-in-as "alice@$signin_domain"
 fi
 
 # The broker's database, beside DATABASE_URL's on the same server. psql runs without PGHOSTADDR,
@@ -85,7 +117,7 @@ env -u PGHOSTADDR psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 \
 
 # The fake Secrets Manager: a human-tier secret each of the suite's people owns, which a pod's
 # request waits on that person to approve, and a shared one anyone signed in may approve.
-fake_secrets_file="$PWD/$bin/fake-secrets-$broker_port.json"
+fake_secrets_file="$PWD/$bin/fake-secrets-$broker_database.json"
 (
   umask 077
   cat >"$fake_secrets_file" <<EOF
@@ -100,8 +132,9 @@ fake_secrets_file="$PWD/$bin/fake-secrets-$broker_port.json"
 EOF
 )
 
-# The broker discovers its token issuer before it listens and refuses to boot without it, and
-# Playwright starts both listeners at once, so it waits for the issuer here.
+# The broker discovers its token issuer before it listens and refuses to boot without it. The
+# harness has it serving already, since the issuer row reported before this row started, so this
+# wait is for a broker started by hand beside an issuer still building.
 for _ in $(seq 1 120); do
   curl -sf -o /dev/null "$issuer_url/.well-known/openid-configuration" && break
   sleep 0.5

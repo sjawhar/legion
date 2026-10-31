@@ -10,10 +10,13 @@ import { harnessPorts } from "./harness-ports";
 
 const execFileAsync = promisify(execFile);
 
-/** The real broker's public URL, the origin of every record's page. */
-export const realBrokerOrigin = `http://127.0.0.1:${harnessPorts.realBroker.port}`;
-/** The dev issuer: the broker's token issuer and its sign-in provider. */
-export const devIssuerOrigin = `http://127.0.0.1:${harnessPorts.devIssuer.port}`;
+/** The real broker's public URL, the origin of every record's page. The harness reports the
+ *  broker's port once it binds, and `harnessPorts` reads the environment when it is called, so
+ *  this reads it at every use rather than at import: a module imported before the listeners
+ *  reported would otherwise hold port 0 forever. */
+export const realBrokerOrigin = () => `http://127.0.0.1:${harnessPorts().realBroker.port}`;
+/** The dev issuer: the broker's token issuer and its sign-in provider, read the same way. */
+export const devIssuerOrigin = () => `http://127.0.0.1:${harnessPorts().devIssuer.port}`;
 
 /** The broker logins of the suite's people (every one in the issuer's `example.com`), and the
  *  human-tier secret run-broker.sh's fake secrets file gives alice, which a pod's request waits on
@@ -51,7 +54,7 @@ async function requestSeed(
   const { stdout } = await execFileAsync(requestseed, [
     command,
     "--broker",
-    realBrokerOrigin,
+    realBrokerOrigin(),
     ...options,
   ]);
   return stdout;
@@ -91,7 +94,7 @@ export async function seedPendingRequests(
   secret: string,
   count = 1
 ): Promise<readonly SeededRequest[]> {
-  const options = ["--issuer", devIssuerOrigin, "--state", state, "--secret", secret];
+  const options = ["--issuer", devIssuerOrigin(), "--state", state, "--secret", secret];
   const printed = await requestSeed("ask", [...options, "--count", String(count)]);
   return printedRequests(printed).map((row) => ({
     approve_url: stringField(row, "approve_url"),
@@ -118,7 +121,7 @@ export async function withdrawSeededRequests(state: string): Promise<void> {
 
 /** Makes the issuer sign in `email` at the next sign-in, whatever its login_hint names. */
 export async function queueSignIn(email: string): Promise<void> {
-  const response = await fetch(`${devIssuerOrigin}/dev/sign-in-as`, {
+  const response = await fetch(`${devIssuerOrigin()}/dev/sign-in-as`, {
     body: JSON.stringify({ email }),
     headers: { "Content-Type": "application/json" },
     method: "POST",

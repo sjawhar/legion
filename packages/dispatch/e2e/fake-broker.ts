@@ -1,22 +1,37 @@
-import type { CredentialPendingResponse, CredentialPendingRow } from "../web/src/api/types";
+import type {
+  CredentialPendingResponse,
+  CredentialPendingRow,
+  CredentialRecord,
+} from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
 
 // The secrets broker's reads Dispatch relays on every Inbox and Settings load: `GET /v1/pending`
-// (the credential requests waiting on an approver) and `GET /v1/grants` (the live grants of a
-// person's sessions and those the person approved). The server reaches this through
+// (the credential requests waiting on an approver), `GET /v1/credential-requests/{id}` (one
+// record's full detail, for the record page) and `GET /v1/grants` (the live grants of a person's
+// sessions and those the person approved). The server reaches this through
 // DISPATCH_AGENT_SECRETS_URL (run-server.sh) whenever the harness switch is left unset
 // (e2e/harness-broker.ts), and it lists nothing until a test seeds a request through
-// /__fixture/pending, relaying each row as seeded: a secret request's row carries the
-// `approve_url` of its page on the broker that the Inbox links to (an absolute URL, which
-// e2e/broker-approval.e2e.ts points at a record on the real broker, e2e/run-broker.sh), a machine
-// login's row none. It verifies no caller: the token the server presents,
-// e2e/fake-broker-account-token's, is never read. Every other broker route answers 404.
+// /__fixture/pending or a record through /__fixture/records, relaying each row as seeded: a
+// secret request's row carries the `approve_url` of its page on the broker that the Inbox links
+// to (an absolute URL, which e2e/broker-approval.e2e.ts points at a record on the real broker,
+// e2e/run-broker.sh), a machine login's row none. It verifies no caller: the token the server
+// presents, e2e/fake-broker-account-token's, is never read. Every other broker route answers 404.
 
 /** A pending credential request as the broker lists it, beside the approver it waits on: the row
  *  is the SPA's own type, so a change to the contract fails the typecheck here too. */
 export type FakePendingRequest = CredentialPendingRow & { readonly approver: string };
 
-let pending: FakePendingRequest[] = [];
+/** Every piece of fixture state this listener holds; `PUT /__fixture/reset` replaces it whole. */
+interface FakeBrokerState {
+  pending: FakePendingRequest[];
+  records: Record<string, CredentialRecord>;
+}
+
+function emptyState(): FakeBrokerState {
+  return { pending: [], records: {} };
+}
+
+let state = emptyState();
 
 // FAKE_BROKER_PORT, or with it unset port 0, so the OS chooses; the line at the end reports the
 // port bound, which e2e/harness-start.ts reads.
@@ -29,21 +44,38 @@ const server = Bun.serve({
     if (request.method === "GET" && url.pathname === "/v1/pending") {
       const approver = url.searchParams.get("approver");
       const body: CredentialPendingResponse = {
-        pending: pending
+        pending: state.pending
           .filter((row) => row.approver === approver)
           .map(({ approver: _, ...row }) => row),
       };
       return Response.json(body);
     }
+    if (request.method === "GET" && url.pathname.startsWith("/v1/credential-requests/")) {
+      const recordID = decodeURIComponent(url.pathname.slice("/v1/credential-requests/".length));
+      const record = state.records[recordID];
+      if (record === undefined) {
+        return Response.json(
+          { code: "NOT_FOUND", error: "no such credential request" },
+          { status: 404 }
+        );
+      }
+      return Response.json(record);
+    }
     if (request.method === "GET" && url.pathname === "/v1/grants") {
       return Response.json({ grants: [] });
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/pending") {
-      pending = (await request.json()) as FakePendingRequest[];
+      const pending = (await request.json()) as FakePendingRequest[];
+      state = { ...state, pending };
+      return Response.json({ ok: true });
+    }
+    if (request.method === "PUT" && url.pathname === "/__fixture/records") {
+      const records = (await request.json()) as CredentialRecord[];
+      state = { ...state, records: Object.fromEntries(records.map((r) => [r.record_id, r])) };
       return Response.json({ ok: true });
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/reset") {
-      pending = [];
+      state = emptyState();
       return Response.json({ ok: true });
     }
     if (url.pathname === "/healthz") return Response.json({ ok: true });
