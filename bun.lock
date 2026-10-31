@@ -152,7 +152,7 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-envoy",
-      "version": "13.10.2",
+      "version": "13.11.1",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -169,7 +169,7 @@
     },
     "packages/pi-legion": {
       "name": "@sjawhar/pi-legion",
-      "version": "15.6.1",
+      "version": "15.7.1",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
