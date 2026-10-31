@@ -328,11 +328,12 @@ select l.lexeme, l.tf, quote_literal(l.lexeme),
 
 // relatedProbeSQL answers which of the given lexemes some item of the project holds, leaving out
 // the excluded owner's items. Issues, comments, asks and messages each probe their search index
-// with an exists; documents have no index on their versions' vectors (0010_search), so they are
-// read once for all the lexemes: each document's latest version, as search reads it, tested
-// against the lexemes ORed, and only a version that matches is unnested. An item on no document
-// (an issue's comment or ask) is never the excluded document's, so the document test applies only
-// when $4 names one: `is distinct from` a null $4 would leave out every such item.
+// with an exists; documents probe document_search (migration 0154), the GIN-indexed vector of
+// each document's latest version, which they are read through once for all the lexemes: the
+// vector is tested against the lexemes ORed, and only a document that matches is unnested. An
+// item on no document (an issue's comment or ask) is never the excluded document's, so the
+// document test applies only when $4 names one: `is distinct from` a null $4 would leave out
+// every such item.
 //
 // Parameters: $1 project, $2 lexemes, $3 excluded issue key (empty for none), $4 excluded document
 // artifact id (null for none).
@@ -345,8 +346,8 @@ any_probe as (
 ),
 document_hits as (
   select distinct u.lexeme
-    from artifacts a
-    join lateral (select v.search from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1) v on true
+    from document_search v
+    join artifacts a on a.id = v.artifact_id
     cross join any_probe
     cross join lateral unnest(v.search) u
    where a.kind = 'doc' and a.project_key = $1

@@ -1475,6 +1475,68 @@ refuses none and rewrites none, and the census report still names `asks`, the ta
 index, so a deployment sees what it locks. No operator follow-up: nothing is left to rebuild,
 and a rollback past it is an image rollback alone, since no release reads the index.
 
+Migration `0154_document_search` creates `document_search`, one row for each document holding its
+latest version's `search` vector (`artifact_id`, `number`, `created_at`, `search`), and
+`document_search_vector`, the GIN index over that vector. Search's document arm, the related-item
+check's and the related-terms probe's each read every document's latest version through a lateral
+join and tested `v.search @@ q.tsq` on it before this release, because `artifact_versions.search`
+has no index and can have none: `0010` left it out, since an index over every version would also
+find a word only an old version holds, and `artifact_versions` is 5.2 GiB, above the size the
+pre-deploy census lets a migration touch. One row per document is an index over exactly the
+versions search reads. The table declares no foreign key to `artifacts` or to
+`artifact_versions`: a `references` makes the census size the table it points at, so a key to
+`artifact_versions` would refuse every deploy carrying this migration. Nothing is lost by leaving
+it out, because every reader joins `artifacts` on `a.kind = 'doc'`, so a row whose document no
+longer exists cannot surface; there is no delete path and no trigger for one, since no production
+code path deletes an artifact or a version. Both statements lock only the table this same
+migration creates, which no other session can reach before the commit, so the transaction holds
+nothing of `artifacts` or `artifact_versions` and takes milliseconds. Its census answers `0`: the
+table is new and holds no row, and the migration reads no other table. No operator follow-up —
+`0155` keeps the table in step and `0156` fills it for the documents already stored, both in the
+same boot.
+
+Migration `0155_artifact_versions_document_search_trigger` creates
+`artifact_versions_document_search`, the function and the `after insert or update of markdown,
+search` trigger on `artifact_versions` that writes each version into `0154`'s table under
+`on conflict (artifact_id) do update … where excluded.number >= document_search.number`, so a late
+write of an older version and an edit of an old version both leave the latest version's vector in
+place. It fires after `0058`'s BEFORE trigger has filled `search`, and `when (new.markdown is not
+null)` keeps a version with no markdown — an image or a file upload, whose vector is null — from
+blanking the document's row, exactly as `0122`'s trigger guards itself. `update of search` is in
+the column list so that a writer setting the vector directly cannot leave the table behind. A
+function and a trigger are the migration's only two statements, which is what exempts it from the
+census's table-size limit (`internal/pgmigrate/exempt.go`): neither reads a row, so the time they
+hold their lock does not grow with the table. Its census answers `0`: a trigger runs only on later
+writes and rewrites no row already stored.
+
+The risk `0155` carries is its lock. `create trigger` takes `SHARE ROW EXCLUSIVE` on
+`artifact_versions`, the 5.2 GiB table every document save writes and every search page still
+reads for its snippet: a read is not held, since `ACCESS SHARE` does not conflict with it, but
+every version write waits for the commit, and the migration waits for every version write already
+in flight. Every migration runs with `lock_timeout` at `pgmigrate.LockTimeout`, five seconds, and
+the runner applies one whose lock wait outlasts it `pgmigrate.LockTimeoutAttempts` times, three,
+pausing two seconds between attempts and holding nothing meanwhile. A holder that outlives all
+three fails the migration and the boot with it: that pod never serves, the release before it
+keeps serving every request, and the deployment reports the new pod crash-looping. A retry is
+safe — the failed attempt's transaction rolled back, so nothing of it is in the database and no
+version record was written, and the next boot applies the migration again from the same state.
+
+Migration `0156_document_search_backfill` fills `document_search` for the documents already
+stored: `insert … select distinct on (artifact_id) … from artifact_versions where markdown is not
+null order by artifact_id, number desc`, under the same write guard as `0155`'s trigger, so a
+version written between the two migrations keeps its higher number. It reads `artifact_versions`
+and writes no row of it, so the census does not size that table and the migration is not refused
+over its 5.2 GiB; the read takes `ACCESS SHARE`, which waits only behind an `ACCESS EXCLUSIVE`
+holder, and the order `distinct on` asks for is the one
+`artifact_versions_artifact_id_number_key` already holds, so the plan can walk that index rather
+than sort the table. Its own lock is on `document_search`, which only this release's build reads.
+Its census answers `0`: it rewrites no row already stored and refuses none. The operator follow-up
+is the wait: a migration runs inside `pg_advisory_xact_lock(8150001)`, so this backfill holds the
+runner's advisory lock for its whole run, and every other Dispatch process booting meanwhile waits
+on it before it can apply or check a migration of its own. The pull request records the run time
+on the larger test database; a boot that looks stuck during a deploy of this release is this
+statement.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
