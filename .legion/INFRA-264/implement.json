@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-264",
+  "completed": "2026-10-31T19:20:00Z",
+  "round": 7,
+  "answers": "CI red at the retro head 61e45835: the required aggregator ci-ok, red because the dispatch job failed one Playwright row of packages/dispatch/e2e/overlapping-marks.e2e.ts (job 124592486461, 1 failed of 1433 passed). This round changes no file of the change: it establishes that the row is a flake, re-runs the failed jobs once, and records the evidence. The product proofs stand where round six's and the tester's round-six handoff left them.",
+  "codeChanged": false,
+  "proof": [
+    {
+      "criterion": "The red at 61e45835 is a flake of the browser row, not this change: the row passes at this head, repeatedly.",
+      "surface": "Dispatch's own browser suite in this pod — the real Go server this branch builds, the production SPA bundle, and Chromium, started by packages/dispatch/e2e/run.ts over the pod's Postgres 17.11 with pgvector (/legion/harness) on a database of this round's own.",
+      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e_impl?sslmode=disable bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/overlapping-marks.e2e.ts --project=chromium -g 'the wider made first' --repeat-each=5",
+      "observed": "15 passed (1.9m): five repeats of each of the three rows that match, the ask row CI failed among them, each in 5.4 to 8.1 s against CI's 30 s timeout.",
+      "headSha": "61e45835fdb66d998e80c9fa42b174f85b27ccaf",
+      "negativeControl": "The run is the control for itself twice over: the two sibling rows (comment, suggestion) exercise the same page through the same server and would fail with it on a real defect, and the selector is a `-g` over a name CI printed, so a run that matched nothing would report 0 passed rather than 15."
+    },
+    {
+      "criterion": "The same row passes on main, so nothing about this branch is what CI met.",
+      "surface": "The same suite in a throwaway clone of main under $TMPDIR (/legion/scratch/tmp/mainrun at 290625b75ce8ecc20ed83f65964a702f8e6390c5, which contains b4dc9f96, the main this branch merged), on a database of its own; the workspace was not touched.",
+      "command": "git clone --shared --branch main \"$LEGION_WORKSPACE/.git\" /legion/scratch/tmp/mainrun && (cd /legion/scratch/tmp/mainrun && bun install && cd packages/contracts && bun run build) && cd /legion/scratch/tmp/mainrun/packages/dispatch && bun run build:web && DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e_main?sslmode=disable bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/overlapping-marks.e2e.ts --project=chromium -g 'the wider made first' --repeat-each=5",
+      "observed": "15 passed (1.9m), the same three rows five times each. So the row is green on main and green here: it is a flake, not a break this branch would have to fix and not one belonging to main.",
+      "headSha": "61e45835fdb66d998e80c9fa42b174f85b27ccaf",
+      "negativeControl": "`diff -q` shows the spec file byte-identical in the clone and the workspace, so the two runs differ only in the server and the web build, which is the comparison this asks for; the clone's HEAD contains b4dc9f96 (`git merge-base --is-ancestor`)."
+    },
+    {
+      "criterion": "The failing row reads as an environment failure rather than a product one, and belongs to code this pull request does not touch.",
+      "surface": "The job's own log and this branch's file list.",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/124592486461/logs, and jj diff --from \"fork_point(main@origin | legion/INFRA-264@origin)\" --to legion/INFRA-264@origin --name-only | cut -d/ -f1-2 | sort | uniq -c",
+      "observed": "The row ends `Test timeout of 30000ms exceeded.` and then `Error: browserContext.close: Protocol error (Target.disposeBrowserContext): Failed to find context with id …` at overlapping-marks.e2e.ts:384, the suite's own teardown — the browser's context was already gone. The branch's 117 files are 101 under packages/envoy, 6 docs/solutions, 3 packages/envoy-client, 3 packages/contracts, 2 docs/site and 2 .github/workflows: none under packages/dispatch, so neither the spec nor the page it drives is this branch's.",
+      "headSha": "61e45835fdb66d998e80c9fa42b174f85b27ccaf",
+      "negativeControl": "The same job ran 1433 other rows of the same suite against the same server at the same head and passed every one, including every other row of this spec."
+    }
+  ],
+  "filesChanged": [],
+  "trickyParts": [
+    "The re-run is attempt 2 of run 41216990032 (gh run rerun --failed), which re-runs the dispatch job and the ci-ok aggregator on the same head. No push of this round carries code, so the code head stays 61e45835 and that attempt's verdict is the one the daemon reads.",
+    "The browser rig is up in this pod and shared: Postgres 127.0.0.1:5433 through /legion/harness/env.sh, Chromium already in XDG_CACHE_HOME's playwright registry, databases dispatch_e2e_impl (this head) and dispatch_e2e_main (the control clone). e2e/run.ts chooses its own ports, so a sibling role's run does not collide.",
+    "Running the control needed packages/contracts built in the clone (bun run build) before e2e/run.ts could import @legion/contracts, and `playwright` is not on PATH in this pod: the runner command is `bunx playwright test`."
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "notRunHere": [
+    "The rest of the dispatch suite was not re-run in the pod: CI's own attempt 2 at this head is what covers it, and no role records a check result for a later step to trust."
+  ]
+}
