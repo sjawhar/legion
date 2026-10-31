@@ -11,9 +11,9 @@
 # lists — in any dependency section, so a new workspace joins it by declaring zod.
 #
 # It checks manifests, not `bun.lock`: an exact pin in every manifest leaves the lockfile nothing
-# to nest, and a failure here names the manifest that drifted. The one package outside the
-# workspace set that declares zod, `@assistant-ui/react`, nests its own, which no Legion schema
-# crosses.
+# to nest, and a failure here names the manifest that drifted. Packages outside the workspace set
+# that declare zod (`@assistant-ui/react` and `astro` among them) nest their own, which no Legion
+# schema crosses.
 #
 # Run from anywhere: .github/scripts/check-zod-version.sh
 # CI runs it in ci.yaml's lint job, and its tests in ci.yaml's test job.
