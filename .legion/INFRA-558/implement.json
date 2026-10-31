@@ -2,30 +2,38 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-558",
-  "completed": "2026-10-31T00:40:00Z",
+  "completed": "2026-10-31T03:05:00Z",
   "proof": [
     {
-      "criterion": "Tester round 4: the required lint and test checks fail on the dispatch-two-builds job's Postgres image; every CI image comes from ghcr.io/sjawhar/legion/ci.",
-      "surface": "The repository's own CI image and filter checks, as the lint and test jobs run them",
-      "command": "bash .github/scripts/check-ci-images.sh tree && bash .github/scripts/check-ci-images.test.sh && bash .github/scripts/check-ci-filters.sh && bash .github/scripts/check-ci-filters.test.sh",
-      "observed": "'37 reference(s) in 32 file(s) of CI's reach name one of those rows; ... the 28 that name mirror.gcr.io are all in the exception list' (exit 0); check-ci-images.test.sh 99 passed 0 failed; check-ci-filters.sh: every filter matches (27 gates); check-ci-filters.test.sh 132 passed",
-      "headSha": "74666d32c2be",
-      "negativeControl": "At bfb12f38 (image mirror.gcr.io/pgvector/pgvector): CI run 41140700903 lint failed with check-ci-images.sh naming .github/workflows/ci.yaml:2664, and test failed 'FAIL: the real tree passes the tree mode'."
+      "criterion": "Review round 4 N1: a revoked socket's kept entry never takes a live socket's token, so no live socket's own entry is left waiting and the read-only reconnect of the key is admitted.",
+      "surface": "schemaAdmissions in package docs",
+      "command": "cd packages/envoy && go test -count=1 -run TestARevokedSocket ./internal/dispatch/docs/ && CGO_ENABLED=1 go test -race -count=20 -run 'TestARevokedSocket|Admission|KeepAlive' ./internal/dispatch/docs/",
+      "observed": "Newer page admitted first, revoked, the older page's token answered from its own entry, and after remove(newer) a read-only admit of the key succeeds; all revoke and admission tests pass 20 times under -race; the whole docs package passes",
+      "headSha": "f7632be57ad2",
+      "negativeControl": "At 4e43e662 (the test before its fix 7efbd8af): 'the older page's token was answered from the revoked entry ...' and 'the revoked page's read-only reconnect was refused ...'."
+    },
+    {
+      "criterion": "Review round 4: the D1 test proves nothing is written after the close frame.",
+      "surface": "A real loopback TCP socket wrapped as production wraps it, a gorilla client",
+      "command": "cd packages/envoy && go test -count=1 -run TestARevokedSocketTakesNoWriteAfterItsCloseFrame ./internal/dispatch/docs/",
+      "observed": "After closeBetweenMessages and before any Close, a Write returns net.ErrClosed, writeBetweenMessages writes nothing, and the page reads zero bytes after the 1012 frame",
+      "headSha": "f7632be57ad2",
+      "negativeControl": "With `if c.closed { return 0, net.ErrClosed }` deleted from keepAliveConn.Write: the write returns nil and the page reads 6 bytes after the close frame (FAIL)."
     },
     {
       "criterion": "Item 6 / acceptance 1: the two-build test passes for the current build against the previous release (CLI, documents, messages both ways).",
-      "surface": "Two real envoy-dispatch processes (legion-envoy-v24.4.0, the release --previous-release and CI resolve for this base, built from git archive, and this head) on one Postgres 17 + pgvector and one nats-server",
-      "command": "bash packages/envoy/scripts/build-dispatch-build.sh --previous-release --out $TMPDIR/dispatch-previous-244 && cd packages/envoy && DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-244 DISPATCH_TEST_DATABASE_URL=<fresh db> go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch",
-      "observed": "TestTwoBuildsAnswerEachOthersCLI PASS (17.9s), TestTwoBuildsReadAndEditEachOthersDocuments PASS (62.4s; 57 of 57 refs rows survive each way), TestTwoBuildsPassMessagesBothWays PASS (118.3s)",
-      "headSha": "bfb12f380708",
+      "surface": "Two real envoy-dispatch processes (legion-envoy-v24.6.0, the release --previous-release and CI resolve for this base, built from git archive, and this head) on one Postgres 17 + pgvector and one nats-server",
+      "command": "bash packages/envoy/scripts/build-dispatch-build.sh --previous-release --out $TMPDIR/dispatch-previous-246 && cd packages/envoy && DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-246 DISPATCH_TEST_DATABASE_URL=<fresh db> go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch",
+      "observed": "TestTwoBuildsAnswerEachOthersCLI PASS (18.8s), TestTwoBuildsReadAndEditEachOthersDocuments PASS (61.4s; 57 of 57 refs rows survive each way), TestTwoBuildsPassMessagesBothWays PASS (117.8s)",
+      "headSha": "f7632be57ad2",
       "negativeControl": "This tree's intake stop made to skip its ack: TestTwoBuildsPassMessagesBothWays FAIL '#1011 2 times [current build ... current build ...]'."
     },
     {
       "criterion": "Item 6 browser half: each build's page works against the other build's server.",
-      "surface": "Dispatch web app in real Chromium through the two-process proxy; process B is legion-envoy-v24.4.0",
-      "command": "cd packages/dispatch && DATABASE_URL=<fresh db> DISPATCH_E2E_BINARY_B=$TMPDIR/dispatch-previous-244/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=$TMPDIR/dispatch-previous-244/web DISPATCH_E2E_PORT_B=<free port> bun run e2e:multiprocess -- cross-build.multiprocess; then DATABASE_URL=<fresh db> bun run e2e:multiprocess",
-      "observed": "2 passed (each build's page against the other's server), the newer-content row skipped by design with B on v24.4.0; full e2e:multiprocess with both processes on this tree: 8 passed",
-      "headSha": "bfb12f380708",
+      "surface": "Dispatch web app in real Chromium through the two-process proxy; process B is legion-envoy-v24.6.0",
+      "command": "cd packages/dispatch && DATABASE_URL=<fresh db> DISPATCH_E2E_BINARY_B=$TMPDIR/dispatch-previous-246/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=$TMPDIR/dispatch-previous-246/web DISPATCH_E2E_PORT_B=<free port> bun run e2e:multiprocess -- cross-build.multiprocess; then DATABASE_URL=<fresh db> bun run e2e:multiprocess",
+      "observed": "2 passed (each build's page against the other's server), the newer-content row skipped by design with B on v24.6.0",
+      "headSha": "f7632be57ad2",
       "negativeControl": "Proxy made to ignore the page/API pin cookies: all 3 rows FAIL."
     },
     {
@@ -54,6 +62,9 @@
     }
   ],
   "filesChanged": [
+    "4e43e662/7efbd8af: docs/schema_admission.go (answer takes a revoked entry last), schema_admission_test.go (N1 test, the no-write-after-close test)",
+    "5049c682: delivery/held_durable.go (the hold comment), packages/envoy/AGENTS.md (0151_server_processes_schema)",
+    "f7632be5: merge of main 39b51494 (AGENTS.md and cmd/dispatch/README.md rewritten in main's one-sentence-per-line layout; bun.lock main's)",
     "74666d32: .github/workflows/ci.yaml (dispatch-two-builds' Postgres service is the ghcr.io/sjawhar/legion/ci copy of pgvector, same digest)",
     "b52a1c5d/d4d3d793: docs/keepalive.go (closeBetweenMessages), docs/schema_admission.go (Close, revokeUnless keeps an unanswered revoked entry), schema_admission_test.go",
     "54967fa8/55cf521d: delivery/held_durable.go and intake.go (receivers, retryHeld logs once, takeOverConfig/startingAt moved, one account), api/server.go and agent_stream.go (refuseUndeclaredMembers), live_agent_test.go, twobuild_documents_test.go, routes_table_test.go",
