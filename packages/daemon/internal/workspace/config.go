@@ -405,8 +405,19 @@ func refuseSymlinkedLayout(root, dir string) error {
 // a repository too, since that is jj's own workspace pointer form, and a component that does not
 // exist holds no `.jj`, so it is passed over, as refuseSymlinkedLayout does. The walk costs a
 // handful of os.Lstat calls once per clone, which is why nothing here is cached.
+//
+// The walk starts at the directory read physically, not at the path the caller named: a child
+// chdir'd into a path that holds a symlink asks the kernel where it stands, and the kernel
+// answers with the resolved path, so jj walks up from the link's target. A lexical walk with
+// filepath.Dir would pass over every `.jj` above that target and let the command open and write
+// it — which is exactly the state directory an operator reaches through a symlink, the one
+// refuseSymlinkedLayout deliberately allows, standing on a checkout.
 func refuseEnclosingWorkspace(dir string) error {
-	for above := dir; ; {
+	resolved, err := resolveExisting(dir)
+	if err != nil {
+		return fmt.Errorf("refusing to run jj in %s: resolve it as the child would stand in it: %w", dir, err)
+	}
+	for above := resolved; ; {
 		enclosing := filepath.Join(above, ".jj")
 		switch _, err := os.Lstat(enclosing); {
 		case err == nil:
@@ -419,6 +430,34 @@ func refuseEnclosingWorkspace(dir string) error {
 			return nil
 		}
 		above = parent
+	}
+}
+
+// resolveExisting answers with dir read physically, as the kernel answers a child that stands in
+// it: every symlink in the longest prefix of dir that exists is resolved, and the components
+// below that prefix are rejoined onto it. filepath.EvalSymlinks alone will not do, because it
+// refuses a path that does not exist, and provisioning names directories it is about to create —
+// the two "a directory that is not there yet" cases of TestAJJThatCreatesARepositoryIsRefusedInsideOne
+// are what prove it, and refusing them would refuse every first provisioning run. A dir no prefix
+// of which exists is its own answer, since there is nothing to resolve it against. The components
+// rejoined onto the resolved prefix hold no symlink, because they are not there at all: whatever
+// the run creates there, it creates as the real directories provisioning makes.
+func resolveExisting(dir string) (string, error) {
+	var missing []string
+	for current := dir; ; {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			return filepath.Join(append([]string{resolved}, missing...)...), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return dir, nil
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+		current = parent
 	}
 }
 
