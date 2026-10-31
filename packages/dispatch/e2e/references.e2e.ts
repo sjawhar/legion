@@ -74,21 +74,33 @@ test("an issue and its ask show a cross-project message and structural backlinks
   ).resolves.toBe(true);
 
   await page.goto("/");
-  const askCard = page.getByTestId(`ask-${decision.id}`);
-  await askCard.getByRole("button", { name: /^Referenced by \(1\)$/ }).click();
-  const askReferences = askCard.getByRole("region", { name: "Referenced by" });
-  await expect(askReferences).toContainText(`Message · ${source.key}`);
+  const phoneCard = page.getByTestId(`ask-${decision.id}`);
+  await phoneCard.getByRole("button", { name: /^Referenced by \(1\)$/ }).click();
+  await expect(phoneCard.getByRole("region", { name: "Referenced by" })).toContainText(
+    `Message · ${source.key}`
+  );
 
   const phoneAsk = testInfo.outputPath("referenced-by-ask-card-390.png");
-  await askCard.screenshot({ path: phoneAsk });
+  await phoneCard.screenshot({ path: phoneAsk });
   await testInfo.attach("Referenced by ask card (390px)", {
     contentType: "image/png",
     path: phoneAsk,
   });
 
+  // The card is drawn where its width draws it: in the row below 1280 px, and in the Inbox's
+  // reading column from there (INFRA-575). So the resize unmounts the node resolved at 390 px
+  // and draws a fresh card in the column, with its own collapsed backlink panel: resolve the
+  // card again, and open that panel again, before the shot.
   await page.setViewportSize({ height: 900, width: 1440 });
+  const desktopCard = await askCard(page, decision.id);
+  await expect(desktopCard).toBeVisible();
+  await desktopCard.getByRole("button", { name: /^Referenced by \(1\)$/ }).click();
+  await expect(desktopCard.getByRole("region", { name: "Referenced by" })).toContainText(
+    `Message · ${source.key}`
+  );
+
   const desktopAsk = testInfo.outputPath("referenced-by-ask-card-1440.png");
-  await askCard.screenshot({ path: desktopAsk });
+  await desktopCard.screenshot({ path: desktopAsk });
   await testInfo.attach("Referenced by ask card (1440px)", {
     contentType: "image/png",
     path: desktopAsk,
