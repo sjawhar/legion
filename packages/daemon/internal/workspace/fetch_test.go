@@ -794,8 +794,6 @@ func TestFetchRemovesTheLocksAnInterruptedFetchLeftInTheFeed(t *testing.T) {
 		t.Errorf("the partial pack's removal was not logged: %q", logged)
 	}
 	for _, object := range objects {
-		// The fixture's git runs in the repository it names, never in the directory the test
-		// process happens to have.
 		held := exec.Command("git", "--git-dir="+feed, "cat-file", "-e", object)
 		held.Dir = feed
 		if err := held.Run(); err != nil {
@@ -1163,7 +1161,6 @@ func killGitGC(t *testing.T, feed string) {
 	t.Helper()
 	slowGitGC(t, feed)
 	command := exec.Command("/usr/bin/git", "--git-dir="+feed, "gc", "--prune=now")
-	// The gc runs in the feed it names, never in the directory the test process happens to have.
 	command.Dir = feed
 	environment := without(os.Environ(), "PATH")
 	for _, key := range []string{"OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION"} {
@@ -1488,8 +1485,6 @@ func incompleteCacheOf(t *testing.T, remote string) string {
 	}
 	old := packOf(t, cache)
 	command := exec.Command("git", "--git-dir="+cache, "pack-objects", "--quiet", filepath.Join(cache, "objects", "pack", "pack"))
-	// The repack runs in the cache it names, never in the directory the test process happens to
-	// have.
 	command.Dir = cache
 	command.Stdin = strings.NewReader(strings.Join(kept, "\n") + "\n")
 	if output, err := command.CombinedOutput(); err != nil {

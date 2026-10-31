@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
 
 // Every agent of a tree writes the shared clone, so everything below is what a tree agent can plant
@@ -174,7 +176,7 @@ func TestProvisionStartsOnlyTheGitBootResolved(t *testing.T) {
 // planted there never runs with the token file in its environment — though it does run, in the
 // uncredentialed workspace add.
 func TestTheCredentialedFetchRunsNoWorkingCopyFilter(t *testing.T) {
-	requireFilters(t)
+	testbin.RequireJJFilters(t)
 	sink := filepath.Join(t.TempDir(), "filter-ran")
 	err := provisionTwice(t, func(t *testing.T, _ *recordingRunner, clone string) {
 		filter := recordingScript(t, "filter", sink, "exec cat")
@@ -200,22 +202,6 @@ func TestTheCredentialedFetchRunsNoWorkingCopyFilter(t *testing.T) {
 		if line != "filter token-file=" {
 			t.Errorf("the filter the tree planted ran inside a credentialed step: %s", line)
 		}
-	}
-}
-
-// requireFilters fails unless the jj under test, reading no configuration of the user's, has
-// working-copy filters: provisioning is proven against the jj the worker image ships.
-func requireFilters(t *testing.T) {
-	t.Helper()
-	home := t.TempDir()
-	probe := exec.Command("jj", "config", "list", "--include-defaults", "git.filter.enabled")
-	// The probe runs in the empty directory it reads its configuration from: jj searches upward
-	// from the directory it runs in for the closest .jj, so a probe with no Dir would open the
-	// workspace the test process stands in, which in a Legion issue pod is a real one.
-	probe.Dir = home
-	probe.Env = append(os.Environ(), "JJ_CONFIG="+filepath.Join(home, "none.toml"), "XDG_CONFIG_HOME="+home, "HOME="+home)
-	if out, _ := probe.Output(); len(strings.TrimSpace(string(out))) == 0 {
-		t.Fatal("this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs")
 	}
 }
 

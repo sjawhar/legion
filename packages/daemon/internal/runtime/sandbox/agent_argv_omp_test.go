@@ -48,8 +48,6 @@ func TestTheAgentArgvImportsTheRepositorysExtensionsHooksAndCommands(t *testing.
 	}
 	testbin.OMPHome(t, omp, home)
 	initialise := exec.Command("git", "init", "--quiet", repo)
-	// The repository's files are written just above, so the init runs inside it rather than in the
-	// directory the test process happens to have.
 	initialise.Dir = repo
 	if out, err := initialise.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)

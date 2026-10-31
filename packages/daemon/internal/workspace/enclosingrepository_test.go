@@ -202,9 +202,7 @@ func TestTheRunnerRefusesACommandWithNoAbsoluteWorkingDirectory(t *testing.T) {
 			// than a child that ran and failed.
 			marker := filepath.Join(dir, "ran")
 			stub := filepath.Join(dir, "git")
-			if err := os.WriteFile(stub, []byte("#!/bin/sh\n: > '"+marker+"'\n"), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			writeExecutable(t, stub, "#!/bin/sh\n: > '"+marker+"'\n")
 			command := Command{Argv: []string{"git", "status", "--porcelain"}, Dir: tc.dir, Timeout: testTimeout}
 			if tc.own {
 				command.Dir = dir

@@ -172,19 +172,19 @@ func seedRemote(t *testing.T, root, defaultBranch string) string {
 // test wrote, not the pod's. GIT_DIR, GIT_WORK_TREE and GIT_ALTERNATE_OBJECT_DIRECTORIES go for
 // the same reason, and the three provisioning variables so that no fixture reaches the pod's
 // token or its repository cache (cmd/legion's runtimeOptionalEnv drops those three for
-// `provision`). GIT_CONFIG_COUNT goes with the pairs it counts, so a pair a caller appends
-// (fromOrigin's) is the whole block git then reads. JJ_CONFIG stays: TestMain sets it
-// deliberately, and newLocalRunnerOnBranch sets it again.
+// `provision`). The block itself goes through withoutGitConfigPairs, which owns which entries
+// make it up, so a pair a caller appends (fromOrigin's) is the whole block git then reads.
+// JJ_CONFIG stays: TestMain sets it deliberately, and newLocalRunnerOnBranch sets it again.
 func fixtureEnvironment() []string {
-	return slices.DeleteFunc(os.Environ(), func(entry string) bool {
+	return slices.DeleteFunc(withoutGitConfigPairs(os.Environ()), func(entry string) bool {
 		key := environmentKey(entry)
-		for _, prefix := range []string{"GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_AUTHOR_", "GIT_COMMITTER_"} {
+		for _, prefix := range []string{"GIT_AUTHOR_", "GIT_COMMITTER_"} {
 			if strings.HasPrefix(key, prefix) {
 				return true
 			}
 		}
 		return slices.Contains([]string{
-			"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_DIR", "GIT_WORK_TREE",
+			"GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_WORK_TREE",
 			"GIT_ALTERNATE_OBJECT_DIRECTORIES", "LEGION_PROVISION_TOKEN_FILE",
 			"LEGION_REPOSITORY_CACHE_URL", "LEGION_REPOSITORY_CACHE_TOKEN_FILE",
 		}, key)
