@@ -327,15 +327,22 @@ A daemon that was down catches each root at `admitted` or `awaiting_person` up a
 decides it: it reads the root's Dispatch event log after the root's cursor (`caught_up_seq`, else
 its last handout) and applies every ask, review and version event through the live handlers, with
 the root held out of admission's decision until its whole window is applied, then decides it once
-and moves the cursor to the sequence it read through. One event its handlers fail on is logged and
-passed over, not retried at every boot: the durable Dispatch consumer still holds it. A root
+and moves the cursor to the sequence it read through. An event the decoder refuses is passed over,
+as the durable consumer terminates it as poison; one whose fact fails to apply (a handler's or the
+database's error) is logged, the rest of the window is still applied, and the cursor stops just
+below the first such event, so the next boot reads it again, as the durable consumer retries it
+live; that boot passes over, in one query, the window's events a catch-up already applied. A root
 recorded before the cursor existed has none until the daemon first gives it work (an admission, a
 re-admission or a resume sets the cursor to 0, so the next catch-up reads from that handout) or
 catches it up: a catch-up of a root with no cursor replays nothing and only sets the cursor, so the
 first boot on this release replays nothing, and the events of the deploy's own downtime reach a
 root that has no cursor yet one at a time from the durable consumer, unheld, as before this
-release. A re-admission sets the cursor back to 0, so a new generation never replays the old
-one's tail. A gate whose document
+release. A boot whose read of such a root Dispatch refused leaves it with no cursor, so its next
+catch-up replays nothing too. A re-admission sets the cursor back to 0, so a new generation never
+replays the old one's tail. A daemon of an earlier release ignores the cursor, so a return to this
+release after one ran would replay, from the cursor this release left, events that daemon already
+applied live; before such a return, set every cursor to null (`update issues set caught_up_seq =
+null`), so each root's next catch-up replays nothing again. A gate whose document
 has no approval request in the mirror (one an earlier release registered before the mirror
 existed) has the request Dispatch shows open on that document mirrored at boot, and when that
 request waits on the person the boot declares the hand-back as a registration would, so a root already waiting on its approval at the deploy returns its slot. A root Dispatch
