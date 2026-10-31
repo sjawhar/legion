@@ -738,3 +738,39 @@ test("an options-only answer the server refuses keeps its question in the column
     await alice.close();
   }
 });
+
+test("Enter opens the selected decision block's note field and puts the focus in it", async ({
+  browser,
+}) => {
+  const seed = await seedInbox();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    const pane = inboxPane(page);
+    await page.goto(INBOX);
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.decisionAskId);
+    const card = pane
+      .locator(`[data-dispatch-ask-block="${DECISION_BLOCK}"]`)
+      .locator("article[data-testid^=ask-]");
+    const disclosure = card.getByRole("button", {
+      name: "Add a note or answer in your own words",
+    });
+    await expect(disclosure).toHaveAttribute("aria-expanded", "false");
+
+    // One Enter, the key the Inbox offers for answering the selected question: the note field
+    // opens AND the reader is in it. A field that opens without the focus leaves every later
+    // keystroke to the Inbox's own keys - `j` walks the list while the reader believes they are
+    // writing an answer.
+    await page.keyboard.press("Enter");
+    await expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    await expect(card.locator("[data-ask-answer]")).toBeFocused();
+
+    // What the reader types then reaches the answer, and the selection stays where it was.
+    await page.keyboard.type("Ledger first, for the lease.");
+    await expect(card.locator("[data-ask-answer]")).toHaveValue("Ledger first, for the lease.");
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.decisionAskId);
+  } finally {
+    await alice.close();
+  }
+});
