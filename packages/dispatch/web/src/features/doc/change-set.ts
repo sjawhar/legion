@@ -74,11 +74,32 @@ export function pairBlocks(before: readonly string[], after: readonly string[]):
   return pairs;
 }
 
+/**
+ * The most word edits a changed pair is diffed through. The Myers diff behind `changedWords`
+ * costs about the square of that number, and one block is now a whole list, table or fenced
+ * code block, so a pair of large unrelated blocks - which is what two blocks paired by position
+ * can be - would otherwise hold the main thread for seconds (1000 words 0.7 s, 3000 words 7.7 s,
+ * 6000 words 39 s). At this bound no pair costs more than about 110 ms, and a change to a tenth
+ * of a 3000-word block is still diffed word by word.
+ */
+const MAX_WORD_EDITS = 800;
+
 /** A changed block's words: what `before` lost, what `after` gained, and the rest unmarked. The
  *  runs are in `after`'s order, so their lengths add up to `after` once the removed ones are left
- *  out, which is what puts an added run at an offset into the later version's text. */
+ *  out, which is what puts an added run at an offset into the later version's text.
+ *
+ *  A pair too far apart to diff inside `MAX_WORD_EDITS` is the whole of `before` removed and the
+ *  whole of `after` added: the two surfaces draw that as the block struck through beside the
+ *  block that replaced it, which is what a reader of two unrelated blocks needs anyway. */
 export function changedWords(before: string, after: string): WordPart[] {
-  return diffWordsWithSpace(before, after).map((part) => ({
+  const parts = diffWordsWithSpace(before, after, { maxEditLength: MAX_WORD_EDITS });
+  if (parts === undefined) {
+    return [
+      { kind: "removed", value: before },
+      { kind: "added", value: after },
+    ];
+  }
+  return parts.map((part) => ({
     kind: part.added ? "added" : part.removed ? "removed" : "same",
     value: part.value,
   }));

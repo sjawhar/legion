@@ -59,8 +59,9 @@ function topLevelBlocks(doc: ProseMirrorNode): TopLevelBlock[] {
 
 /** Where one run of a block's own text sits: the offset into that text the run starts at, its
  *  length, and the document position of its first character. A block's text is what ProseMirror
- *  counts as its text content, so an inline atom standing between two runs takes positions without
- *  taking offsets, and so does the boundary between two of the block's own text blocks. */
+ *  counts as its text content, so an inline atom standing between two runs takes positions
+ *  without taking offsets unless its type draws text for one (`leafText`), and the boundary
+ *  between two of the block's own text blocks takes positions without taking offsets. */
 interface TextRun {
   offset: number;
   length: number;
@@ -71,12 +72,23 @@ function textRuns(block: TopLevelBlock): TextRun[] {
   const runs: TextRun[] = [];
   let offset = 0;
   block.node.descendants((node, pos) => {
-    if (!node.isText) return true;
-    const length = node.text?.length ?? 0;
-    // `descendants` counts from the start of the block's content, one position inside the block.
-    runs.push({ offset, length, position: block.start + 1 + pos });
-    offset += length;
-    return false;
+    if (node.isText) {
+      const length = node.text?.length ?? 0;
+      // `descendants` counts from the start of the block's content, one position inside the
+      // block.
+      runs.push({ offset, length, position: block.start + 1 + pos });
+      offset += length;
+      return false;
+    }
+    if (node.isLeaf) {
+      // ProseMirror's `textContent` draws a leaf through its type's `leafText` - commonmark's
+      // `hardbreak` declares one newline - so the block's text counts those characters where its
+      // text nodes count none, and a run after the leaf stands that much further on. A host
+      // reading its offsets off `textContent` would otherwise name the wrong characters.
+      offset += node.type.spec.leafText?.(node).length ?? 0;
+      return false;
+    }
+    return true;
   });
   return runs;
 }
@@ -86,7 +98,8 @@ function textRuns(block: TopLevelBlock): TextRun[] {
  *  document whenever anything stands between them, so an offset there belongs to the run that
  *  begins at it while a decoration opens (`"from"`) and to the one that ends at it while a
  *  decoration closes (`"to"`): a mark over a word never reaches over the atom or the block
- *  boundary beside it. */
+ *  boundary beside it. An offset inside a leaf's own text - the newline of a hard break - names
+ *  no character of any run, so it is drawn at the boundary of the run it falls against. */
 function positionAt(
   runs: readonly TextRun[],
   offset: number,
@@ -94,7 +107,8 @@ function positionAt(
 ): number | undefined {
   for (const run of runs) {
     const end = run.offset + run.length;
-    if (side === "to" ? offset <= end : offset < end) return run.position + (offset - run.offset);
+    if (side === "to" ? offset <= end : offset < end)
+      return run.position + Math.min(Math.max(offset - run.offset, 0), run.length);
   }
   const last = runs.at(-1);
   // A `"from"` at the very end of the text: the last run's end is the only position it names.

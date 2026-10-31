@@ -1,14 +1,17 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerAskSnoozes, answerIssuePatches } from "../../__tests__/send-answers";
 import { wholeText } from "../../__tests__/whole-text";
 import { ApiError, api } from "../../api/client";
 import type {
+  Artifact,
   AskRead,
   Comment,
   CredentialPendingRow,
@@ -16,6 +19,8 @@ import type {
   Issue,
   IssueDetails,
 } from "../../api/types";
+import { DocumentRuntime, type DocumentRuntimeValue } from "../doc/runtime";
+import { MarginProvider } from "../margin/margin-context";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { DIALOG_SCOPE } from "../shell/keymap";
 import { Inbox } from "./Inbox";
@@ -1462,19 +1467,34 @@ function RouteProbe() {
 
 /** `route` is the whole history when it is a list, the last entry being where the reader is:
  *  whether a filter change replaces its entry or pushes one is only visible from a history that
- *  has something underneath it. */
-function renderInbox(route: string | readonly string[] = "/") {
+ *  has something underneath it. `runtime` is for the tests whose reading column opens a
+ *  document: that column mounts `ProofDocument`, which wants the document runtime and the
+ *  margin the app shell gives it, and every other test's column shows a card and needs
+ *  neither. */
+function renderInbox(
+  route: string | readonly string[] = "/",
+  { runtime }: { runtime?: DocumentRuntimeValue } = {}
+) {
   const entries = typeof route === "string" ? [route] : [...route];
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
+  const inbox = (
+    <KeymapProvider>
+      <RouteProbe />
+      <Inbox />
+    </KeymapProvider>
+  );
   const view = render(
     <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
       <QueryClientProvider client={queryClient}>
-        <KeymapProvider>
-          <RouteProbe />
-          <Inbox />
-        </KeymapProvider>
+        {runtime === undefined ? (
+          inbox
+        ) : (
+          <DocumentRuntime.Provider value={runtime}>
+            <MarginProvider>{inbox}</MarginProvider>
+          </DocumentRuntime.Provider>
+        )}
       </QueryClientProvider>
     </MemoryRouter>
   );
@@ -2862,6 +2882,182 @@ test("Enter pressed inside the column belongs to the control holding it, and sti
     getAsk.mockRestore();
     getInbox.mockRestore();
     getIssue.mockRestore();
+  }
+});
+
+test("with the column on, Enter is the link's or the button's wherever the reader holds it", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    const pane = await screen.findByTestId("inbox-pane");
+    // A link in another row: the owner link, which opens that ask inside its issue. The
+    // registry's handler calls `preventDefault` for every binding that fires, so a binding that
+    // claimed Enter here would press the link for nothing and pull the focus into the selected
+    // question's answer box instead.
+    const link = shortRow("ask-b").querySelector<HTMLElement>("[data-inbox-owner]");
+    if (link === null) throw new Error("the ask-b row has no owner link");
+    link.focus();
+    expect(fireEvent.keyDown(link, { key: "Enter" })).toBe(true);
+    expect(document.activeElement).toBe(link);
+    expect(pane.contains(document.activeElement)).toBe(false);
+
+    // A button outside the list, with the column still showing an answerable question.
+    const filter = filterTrigger();
+    filter.focus();
+    expect(fireEvent.keyDown(filter, { key: "Enter" })).toBe(true);
+    expect(document.activeElement).toBe(filter);
+
+    // And the row's own Enter still carries the reader into the column's answer box.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "Enter" });
+    expect(document.activeElement).toBe(pane.querySelector("[data-ask-answer]"));
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+/** The schema a decision block is built with, so a test can construct the node view the real
+ *  editor constructs for every `ask` node of the document (`ProofDocument.decisions.test.tsx`
+ *  does the same against the same fake editor). */
+const askBlockSchema = new Schema({
+  nodes: {
+    ask: {
+      attrs: {
+        answer: { default: undefined },
+        answered_at: { default: undefined },
+        answered_by: { default: undefined },
+        blockId: { default: null },
+        invalid: { default: undefined },
+        multiple: { default: false },
+        selected: { default: undefined },
+        state: { default: "open" },
+        urgency: { default: "med" },
+      },
+      content: "paragraph+",
+      group: "block",
+    },
+    doc: { content: "block+" },
+    paragraph: { content: "inline*", group: "block" },
+    text: { group: "inline" },
+  },
+});
+
+function askBlockNode(blockId: string, question: string): ProseMirrorNode {
+  return askBlockSchema.node("ask", { blockId }, [
+    askBlockSchema.node("paragraph", undefined, [askBlockSchema.text(question)]),
+  ]);
+}
+
+const SPEC_DOCUMENT: Artifact = {
+  created_at: "2026-09-10T00:00:00Z",
+  created_by: { id: "alice", kind: "user" },
+  id: "artifact-1",
+  issue_key: "CORE-1",
+  kind: "doc",
+  name: "spec.md",
+  primary: true,
+  project: "CORE",
+  slug: "spec",
+  versions: [],
+};
+
+test("the answer keys act on the selected decision block, not the first one in the document", async () => {
+  // Both questions are decision blocks of one document, so the column draws that document and
+  // hosts an answerable card for each of them. The selected one is the second card in the DOM.
+  const narrow = widenToReadingPane();
+  const blockArtifact = { id: "artifact-1", primary: true, slug: "spec" };
+  const first = inboxIssue("ask-a", "CORE-1", "Ship behind a flag?", {
+    block_artifact: blockArtifact,
+    block_id: "block-a",
+    options: [{ label: "Ship" }, { label: "Hold" }],
+  });
+  const second = inboxIssue("ask-b", "CORE-1", "Rename the flag?", {
+    block_artifact: blockArtifact,
+    block_id: "block-b",
+    options: [{ label: "Rename" }, { label: "Keep" }],
+  });
+  const rows = [first, second];
+  const fake = fakeDocumentRuntime({ text: "The live document" });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue(SPEC_DOCUMENT);
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "",
+    version: null,
+  });
+  const getArtifactBlocks = spyOn(api, "getArtifactBlocks").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue(
+    rows.map((row) => ({ ...row, last_reply: null }))
+  );
+  const { unmount } = renderInbox("/?item=ask-b", { runtime: fake.runtime });
+
+  try {
+    const pane = await screen.findByTestId("inbox-pane");
+    expect(selectedIds()).toEqual(["ask-b"]);
+    await waitFor(() => expect(fake.connections).toHaveLength(1));
+    act(() => fake.sync());
+    await waitFor(() => expect(fake.editors).toHaveLength(1));
+    const editor = fake.editors[0];
+    if (editor === undefined) throw new Error("the column mounted no editor");
+    // The fake editor records the node views the document installs; constructing the `ask` one
+    // per block is what the real editor does for the document's two open decisions.
+    const nodeViews = editor.viewProps.nodeViews as Record<
+      string,
+      (node: ProseMirrorNode) => { dom: HTMLElement; destroy(): void }
+    >;
+    const construct = nodeViews.ask;
+    if (construct === undefined) throw new Error("the ask node view was not installed");
+    act(() => {
+      editor.root.append(construct(askBlockNode("block-a", first.question)).dom);
+      editor.root.append(construct(askBlockNode("block-b", second.question)).dom);
+    });
+    const selectedCard = await within(pane).findByTestId("ask-ask-b");
+    const firstCard = within(pane).getByTestId("ask-ask-a");
+
+    // `1` is the selected question's first option, not the first block's.
+    fireEvent.keyDown(document.body, { key: "1" });
+    await waitFor(() =>
+      expect(
+        (within(selectedCard).getByRole("radio", { name: "Rename" }) as HTMLInputElement).checked
+      ).toBe(true)
+    );
+    expect(
+      (within(firstCard).getByRole("radio", { name: "Ship" }) as HTMLInputElement).checked
+    ).toBe(false);
+
+    // Enter opens the selected card's own note disclosure - the first block's stays shut - and
+    // lands in the box it reveals. The box is drawn by the render that click schedules, which a
+    // browser flushes inside the click and `fireEvent` only at the end of the event, so the
+    // focus is what the press after it does here.
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    const answerBox = selectedCard.querySelector("[data-ask-answer]");
+    expect(answerBox).not.toBeNull();
+    expect(firstCard.querySelector("[data-ask-answer]")).toBeNull();
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    expect(document.activeElement).toBe(answerBox);
+  } finally {
+    unmount();
+    narrow();
+    getArtifact.mockRestore();
+    getArtifactBlocks.mockRestore();
+    getArtifactText.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+    listIssueAsks.mockRestore();
   }
 });
 

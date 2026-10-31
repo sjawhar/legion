@@ -688,6 +688,23 @@ export function Inbox({
   /** The control `selector` names in whichever of the two that is, or null for none: every
    *  `when` below tests this against `null`, so the accessor never answers `undefined`. */
   const inHand = (selector: string) => hand()?.querySelector<HTMLElement>(selector) ?? null;
+  /** Where the answer keys - Enter and 1-9 - act: the selected question's own card, not the
+   *  whole column. The column of a question written as a decision block draws the whole live
+   *  document, and `ProofDocument` hosts an answerable card for every open block of it
+   *  (`ProofDocument.tsx`), so the first `[data-ask-option]` under the column is the first open
+   *  block's, which is another question than the one the reader selected. Null where the
+   *  selected question has no card drawn for it: an approval, whose column is the document's
+   *  version and whose answer is the head's own Approve, and a document whose block has not
+   *  mounted its card yet. Outside the column the keys act on the focused row, as all of them
+   *  do. */
+  const answerHand = () =>
+    paneShown
+      ? selectedId === undefined
+        ? null
+        : (paneRef.current?.querySelector<HTMLElement>(`[data-testid="ask-${selectedId}"]`) ?? null)
+      : focusedRow();
+  const inAnswerHand = (selector: string) =>
+    answerHand()?.querySelector<HTMLElement>(selector) ?? null;
   const focusInPane = () => paneRef.current?.contains(document.activeElement) === true;
   const focusInList = () => listRef.current?.contains(document.activeElement) === true;
   /** The row the column is showing, or null while it is showing none. Held to the selection,
@@ -753,22 +770,25 @@ export function Inbox({
         // A decision block's compact card folds its answer box behind "Add a note or answer in
         // your own words"; Enter opens that disclosure and lands in the box it reveals. Only
         // the column draws that compact card: from a row the key goes straight to the box.
-        if (paneShown && inHand("[data-ask-answer]") === null) {
-          inHand(NOTE_DISCLOSURE_SELECTOR)?.click();
+        if (paneShown && inAnswerHand("[data-ask-answer]") === null) {
+          inAnswerHand(NOTE_DISCLOSURE_SELECTOR)?.click();
         }
-        inHand("[data-ask-answer]")?.focus();
+        inAnswerHand("[data-ask-answer]")?.focus();
       },
       // Enter is the list's key: it carries the reader from the row they are on into the
-      // column's answer box. Inside the column the key is already somebody's - the card's own
-      // `Ask back instead`, a link in the head, an option - and the registry's handler calls
-      // `preventDefault`, so pressing it there would press nothing. `h` stands down inside an
-      // ask card for the same reason (`outsideAskCard`); Enter's own is the whole column,
-      // since the head's controls take it too.
+      // column's answer box. Everywhere else the key belongs to the control that holds the
+      // focus - the card's own `Ask back instead` or an option inside the column, a row's owner
+      // link, `Later (n)`, the bulk-snooze bar, a filter control - and the registry's handler
+      // calls `preventDefault` for every binding that fires, so a binding that claimed the key
+      // there would press nothing. It fires from a row itself, and with the focus on nothing
+      // (`document.body`), where a reader who has pressed no key yet stands. `h` stands down
+      // inside an ask card for the same reason (`outsideAskCard`).
       when: () =>
         paneShown
-          ? !focusInPane() &&
-            (inHand("[data-ask-answer]") !== null || inHand(NOTE_DISCLOSURE_SELECTOR) !== null)
-          : inHand("[data-ask-answer]") !== null,
+          ? (focusedRow() !== null || document.activeElement === document.body) &&
+            (inAnswerHand("[data-ask-answer]") !== null ||
+              inAnswerHand(NOTE_DISCLOSURE_SELECTOR) !== null)
+          : inAnswerHand("[data-ask-answer]") !== null,
     },
     {
       id: "option",
@@ -777,10 +797,10 @@ export function Inbox({
         ? "Select option 1–9 of the selected ask"
         : "Select option 1–9 of the focused ask",
       run: (event) => {
-        const options = hand()?.querySelectorAll<HTMLElement>("[data-ask-option]");
+        const options = answerHand()?.querySelectorAll<HTMLElement>("[data-ask-option]");
         options?.[Number(event.key) - 1]?.click();
       },
-      when: () => inHand("[data-ask-option]") !== null,
+      when: () => inAnswerHand("[data-ask-option]") !== null,
     },
     {
       id: "open",

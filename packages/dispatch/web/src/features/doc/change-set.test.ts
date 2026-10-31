@@ -49,3 +49,16 @@ test("the word parts of a changed pair name the removed and the added words and 
     { kind: "same", value: " today." },
   ]);
 });
+
+test("a pair too far apart to diff is the whole block removed and the whole block added", () => {
+  // Two unrelated blocks of 600 words - one list, one table, one fenced code block replaced by
+  // another - share no word in order, so their word diff is thousands of edits: past the bound,
+  // and seconds of the main thread if nothing bounded it.
+  const before = Array.from({ length: 600 }, (_, index) => `before${index}`).join(" ");
+  const after = Array.from({ length: 600 }, (_, index) => `after${index}`).join(" ");
+
+  expect(changedWords(before, after)).toEqual([
+    { kind: "removed", value: before },
+    { kind: "added", value: after },
+  ]);
+});

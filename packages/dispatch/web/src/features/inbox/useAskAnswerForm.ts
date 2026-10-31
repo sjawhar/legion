@@ -116,14 +116,22 @@ export function useAskAnswerForm({
   const answerFieldId = `${useId()}-answer`;
   const [selected, setSelected] = useState<string[]>([]);
   const [otherSelected, setOtherSelected] = useState(false);
-  // The reader's unsent answer, which outlives this form: the ask's own Inbox row can leave
-  // under it (withdrawn, resolved, or answered by somebody else), and the reading column then
-  // keeps the question with this text under it rather than taking both off the screen.
-  const [answerText, setAnswerText] = useAnswerDraft(ask.id);
   const [questionChoice, setQuestionChoice] = useState(false);
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
   const [askChanged, setAskChanged] = useState(false);
   const [changing, setChanging] = useState(false);
+  // The reader's unsent answer, which outlives this form: the ask's own Inbox row can leave
+  // under it (withdrawn, resolved, or answered by somebody else), and the reading column then
+  // keeps the question with this text under it rather than taking both off the screen.
+  const [draftAnswer, setDraftAnswer] = useAnswerDraft(ask.id);
+  // The text of a recorded answer the reader is changing. It is this form's own and never the
+  // shared draft: an answer the server has recorded is not unsent text, so a change they cancel
+  // or walk away from leaves nothing behind for another card to show them as one
+  // (`unsentAnswer`) or for the reading column to hold the question by (`Inbox.tsx`, `paneAsk`).
+  // Cancelling is what puts the draft that stood before the change back in the box.
+  const [changeAnswer, setChangeAnswer] = useState("");
+  const answerText = changing ? changeAnswer : draftAnswer;
+  const setAnswerText = changing ? setChangeAnswer : setDraftAnswer;
   const replacing = useRef<AskAnswer | undefined>(undefined);
   const initialChangeConsumed = useRef(false);
   const submitGuard = useSubmitGuard();
@@ -301,10 +309,14 @@ export function useAskAnswerForm({
     mutation.reset();
     setSelected(realSelected);
     setOtherSelected(realSelected.length === 0 && current.text !== null && current.text !== "");
-    setAnswerText(current.text ?? "");
+    // `changing` is still false this render, so the recorded text goes straight to the form's
+    // own state rather than through `setAnswerText` into the shared draft.
+    setChangeAnswer(current.text ?? "");
     setQuestionChoice(false);
     setChanging(true);
   };
+  // Cancelling leaves the recorded answer where it was recorded: `answerText` falls back to the
+  // draft that stood before the change, which is empty on a card the reader only read.
   const cancelChanging = () => {
     replacing.current = undefined;
     mutation.reset();

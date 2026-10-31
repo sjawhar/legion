@@ -54,6 +54,22 @@ test("a word changed inside a paragraph marks that paragraph, the added words an
   });
 });
 
+test("a changed pair too far apart to diff is drawn as the whole block, struck through and added", () => {
+  // The word diff gives up past its bound (`change-set.ts`), and the column draws what it is
+  // handed: the baseline's block beside the one that replaced it, rather than nothing.
+  const before = Array.from({ length: 600 }, (_, index) => `before${index}`).join(" ");
+  const after = Array.from({ length: 600 }, (_, index) => `after${index}`).join(" ");
+  const doc = render(`# Plan\n\n${after}\n`);
+
+  expect(changeMarksAgainst(`# Plan\n\n${before}\n`, doc)).toEqual({
+    text: [
+      { blockIndex: 1, className: CHANGED_BLOCK_CLASS },
+      { blockIndex: 1, className: ADDED_WORDS_CLASS, from: 0, to: after.length },
+    ],
+    widgets: [{ blockIndex: 1, className: REMOVED_WORDS_CLASS, offset: 0, text: before }],
+  });
+});
+
 test("a paragraph that only lost words draws them where they stood", () => {
   const baseline = "# Plan\n\nThe plan ships behind a flag today.\n";
   const doc = render("# Plan\n\nThe plan ships today.\n");

@@ -68,6 +68,21 @@ test("an inline decoration counts a block's own text, not its document positions
   });
 });
 
+test("an inline decoration counts the newline a hard break draws in the block's text", async () => {
+  // Commonmark's `hardbreak` declares `leafText: () => "\n"`, so the block's text counts one
+  // character for the break where its text nodes count none: a host reading its offsets off
+  // that text - the approval column's marks do - names characters one further on per break.
+  await withMarksEditor("Line one  \nthe canary word.", ({ handle, view }) => {
+    expect(view.state.doc.child(0).textContent).toBe("Line one\nthe canary word.");
+
+    handle.setTextDecorations([
+      { ...wordRange(view, 0, "canary"), blockIndex: 0, className: ADDED },
+    ]);
+
+    expect(drawn(view, ADDED)).toEqual(["canary"]);
+  });
+});
+
 test("an entry naming a block the document does not hold, or text it does not reach, draws nothing", async () => {
   await withMarksEditor("One short block.", ({ handle, view }) => {
     handle.setTextDecorations([

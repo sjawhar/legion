@@ -14,6 +14,7 @@ import { ApiError, api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskAnswer, AskRead, Comment } from "../../api/types";
 import { seedUnread } from "../replies/replies-fixture";
 import { AskCard } from "./AskCard";
+import { answerDraft } from "./answer-drafts";
 
 let whoAmI: Mock<typeof api.whoAmI>;
 let getReferences: Mock<typeof api.getReferences>;
@@ -274,6 +275,27 @@ test("a compact card's change shows the seeded note, so nothing is sent unseen",
     expect(note.value).toBe("First note");
     expect(view.getByRole("button", { name: "Save answer" })).toBeTruthy();
     expect(view.getByRole("button", { name: "Cancel" })).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("Change answer then Cancel leaves the recorded answer alone and no draft behind", async () => {
+  const mine = answeredAsk();
+  const { view } = renderCard(<AskCard ask={mine} initialThread={thread(mine)} />);
+  const card = within(view.container);
+  try {
+    fireEvent.click(await view.findByRole("button", { name: "Change answer" }));
+    expect((card.getByLabelText("Your answer") as HTMLTextAreaElement).value).toBe("First note");
+    fireEvent.click(card.getByRole("button", { name: "Cancel" }));
+
+    // The card is back to the recorded answer, and the reader's own answer is not handed back
+    // to them as text no form will send.
+    expect(await card.findByText(/Answered by/)).toBeTruthy();
+    expect(card.queryByTestId("ask-unsent-answer")).toBeNull();
+    // Nor is any of it left in the draft every card for this ask reads, and the Inbox's reading
+    // column holds the question in the column by (`Inbox.tsx`, `paneAsk`).
+    expect(answerDraft(mine.id)).toBe("");
   } finally {
     view.unmount();
   }
