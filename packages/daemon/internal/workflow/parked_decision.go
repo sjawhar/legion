@@ -172,10 +172,12 @@ func (e *Engine) EnqueueNaming(ctx context.Context, tx pgx.Tx, issue, tree strin
 // at once. A row that holds nothing returns at once, so a row whose settle committed and whose
 // finish did not writes no second catch-up when it runs again.
 //
-// Three finishes hand over, and only three: an architect start whose task reached no claim (the
+// Four finishes hand over, and only four: an architect start whose task reached no claim (the
 // outbox's settleKept), a catch-up a newer one supersedes (catchUpSuperseded, the outbox's
-// notice), and a receipt timeout on a catch-up the re-hold finds superseded, which queues no copy
-// to carry its claims on (the daemon's reholdNotice, through the same supersededKept). Every other
+// notice), a receipt timeout on a catch-up the re-hold finds superseded, which queues no copy
+// to carry its claims on (the daemon's reholdNotice, through the same supersededKept), and a
+// receipt timeout on a catch-up whose re-holds are spent, which queues no copy either while its
+// architect still holds its launch (reholdNotice, through spentKept). Every other
 // undelivered finish keeps the older rule — the row's deletion releases what it claimed, and the
 // architect's next ready names every unclaimed decision in its catch-up. Each of those endings is
 // one where the architect can take no notice at all now — its row was deleted under its lease, it

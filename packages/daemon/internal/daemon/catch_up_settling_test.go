@@ -303,3 +303,56 @@ func TestAReceiptTimeoutOnASupersededCatchUpHandsOverWhatItNamed(t *testing.T) {
 		t.Fatalf("kept after the hand-over = %s, want the decision claimed by the fresh catch-up", keptRefs(left))
 	}
 }
+
+// A catch-up whose last copy's receipt the architect's session never confirmed has spent its
+// re-holds (noticeReholdDelays), so no copy carries its claims on. Its architect still holds the
+// launch the catch-up was written for, so no ready of a new launch is coming to name what the row's
+// deletion would release. What it named is handed to a fresh catch-up of that launch instead
+// (spentKept): the decision waits in the outbox, claimed, and reaches the architect once it
+// confirms a delivery. Left to the row's deletion, the decision would wait unclaimed with nothing
+// to name it while the architect worked the tree.
+func TestACatchUpWhoseReholdsAreSpentHandsOverWhatItNamed(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	ask := "dispatch://LEGION-1/ask/ask-2"
+	now := time.Now()
+	keepDecision(t, pool, records, "LEGION-1", ask, time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC))
+	keptCatchUp(t, pool, records, "LEGION-1", 1, now)
+	// The catch-up is the last copy the re-hold queues: it has been queued again the most times a
+	// notice is.
+	if _, err := pool.Exec(ctx, `update outbox set payload = jsonb_set(payload, '{resends}', to_jsonb($1::int))
+		where payload->>'kind' = 'catch-up'`, len(noticeReholdDelays)); err != nil {
+		t.Fatalf("make the catch-up its last copy: %v", err)
+	}
+	leased, payload := leaseCatchUp(t, pool, records, "LEGION-1", now)
+	if payload.Resends != len(noticeReholdDelays) {
+		t.Fatalf("the leased catch-up has been queued again %d times, want %d", payload.Resends, len(noticeReholdDelays))
+	}
+
+	publisher := &hookPublisher{answer: fmt.Errorf("publish notice: listener returned 504 Gateway Timeout: %w",
+		notify.ErrNotDelivered{Reason: notify.ReasonReceiptTimeout, Holder: "ses-architect"})}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
+		supervisor: sup, project: "legion", now: func() time.Time { return now }}
+	if err := runner.notice(ctx, leased, payload); err != nil {
+		t.Fatalf("run the catch-up whose last receipt timed out: %v", err)
+	}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return records.FinishOutbox(ctx, tx, leased.ID, leased.LeaseToken)
+	}); err != nil {
+		t.Fatalf("finish the spent catch-up: %v", err)
+	}
+
+	naming := catchUpsNaming(t, pool, "LEGION-1", leased.ID, ask)
+	if named := namingRef(naming); named != 1 {
+		t.Fatalf("the catch-ups left after the spent catch-up name %s %d times: %v, want a fresh catch-up of the architect's "+
+			"launch to name it once: a decision whose catch-up gave up must not wait in the table with nothing to name it",
+			ask, named, naming)
+	}
+	if left := keptDecisions(t, pool, records, "LEGION-1"); len(left) != 1 || left[0].ClaimedBy == 0 {
+		t.Fatalf("kept after the spent catch-up = %s, want the decision claimed by the fresh catch-up", keptRefs(left))
+	}
+}

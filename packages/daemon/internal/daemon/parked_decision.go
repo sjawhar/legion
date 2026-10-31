@@ -235,3 +235,32 @@ func (r *outbox) supersededKept(ctx context.Context, root string, row int64, key
 		return workflow.HandOverKept(ctx, tx, r.records, r.designGate, row, r.now().UTC())
 	})
 }
+
+// spentKept hands over what a catch-up named once its re-holds are spent (noticeReholdDelays):
+// no copy is queued to carry its claims on, and the architect it went to still holds its launch,
+// so nothing else would name those decisions until that architect's next launch. claims is the
+// row still running that claims them (the receipt timeout the notice executor answers), whose
+// claims go to a fresh catch-up of the launch the architect stands at (workflow.HandOverKept); 0
+// is an earlier listener's report after the row finished and its deletion released them, and then
+// a fresh catch-up names what the tree is owed and nothing claims, when there is any. A telling
+// one of the catch-up's rows already made hands nothing over: settleTold tells it.
+func (r *outbox) spentKept(ctx context.Context, root string, claims int64, key string) error {
+	return r.writeSettlement(ctx, root, claims, func(ctx context.Context, tx pgx.Tx) error {
+		told, err := r.records.Processed(ctx, tx, record.KeptToldSource, key)
+		if err != nil || told {
+			return err
+		}
+		if claims != 0 {
+			return workflow.HandOverKept(ctx, tx, r.records, r.designGate, claims, r.now().UTC())
+		}
+		tree, err := r.treeOfIssue(ctx, tx, root)
+		if err != nil {
+			return err
+		}
+		decisions, approved, _, err := r.records.UnclaimedKept(ctx, tx, tree)
+		if err != nil || len(decisions) == 0 && approved == 0 {
+			return err
+		}
+		return workflow.CatchUpTheTreesOwed(ctx, tx, r.records, r.designGate, []string{tree}, r.now().UTC())
+	})
+}
