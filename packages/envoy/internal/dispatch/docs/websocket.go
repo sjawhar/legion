@@ -309,11 +309,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel(nil)
 	connection := &connectionState{admission: &schemaAdmission{documentSince: pmdoc.DocumentSince(tree), cancel: cancel}}
 	ctx = context.WithValue(ctx, connectionContextKey{}, connection)
-	// The socket's peer hears from it at least every s.keepAlive (documentKeepAlive), however idle
-	// the room (keepalive.go), so its provider never takes the socket for dead.
-	keepAlive := newKeepAliveWriter(w, room, s.keepAlive)
-	s.srv.ServeHTTP(keepAlive, r.WithContext(ctx))
-	keepAlive.stop()
+	s.srv.ServeHTTP(w, r.WithContext(ctx))
 	s.schemaAdmissions.remove(connection.admission)
 	if connection.added {
 		s.removeConnection(connection.room, connection.id)
