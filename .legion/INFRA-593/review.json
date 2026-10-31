@@ -2,22 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-10-31T15:37:29Z",
-  "round": 9,
-  "headReviewed": "be665c1502",
-  "reviewerCommits": ["3dbbb3f7b3d9b827dc2ddf19e0004f6285e45564", "843f4c6856282b3e44041b86f13ff56e4493c976", "f0fbe8af2223e8c9bb9c8aef072f87c4cb465dd2"],
+  "completed": "2026-10-31T17:59:22Z",
+  "round": 10,
+  "headReviewed": "6bc39af6e5ddde93cc87659549136006300aaf61",
+  "reviewerCommits": ["bad4567067da8a5018852ac68c56f86e83be7494"],
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 0,
-  "repin": "go.mod replaces ygo with github.com/sjawhar/ygo v1.54.1-sami.1; go.sum h1:71YqsDIb1u2SUwUlANY/YkhqZ/t+hhrQVuXO+CyxCwU= matches sum.golang.org; tag object 1d92267b is signed (verified, valid) on commit 8dae657d. The tag still doubles wrapUpdateErr's wording, so invalidOnce stays.",
-  "ci": "At 843f4c68 (run 41193122617, merged into main 8d0030ea): lint, typecheck, test, pr-title passed; envoy-go failed only in internal/dispatch/api TestAReconnectCatchesUpWhatTheListenerMissed (main's flake, fixed by #2594 at 11:34Z, after that merge ref) and listener-server-change in cmd/listener TestServerChange (untouched package). The architect's fresh-run commit f0fbe8af started no run: GitHub reports the pull request CONFLICTING with main (0 runs at 15:36Z).",
-  "thermonuclear": "Both run once on the delta f60452da..3dbbb3f7: deep review APPROVE (one go.mod overstatement about #356), code quality prose findings in the PR body, go.mod comment and changelog (stale release-candidate text, #357 called moot, #356's reach). All prose, fixed by the reviewer in 843f4c68 and the PR body.",
-  "roundEightThread": "PRRT_kwDORFy7ds6yPXcx answered as accepted and fixed in be665c15; the implementer asked to resolve it.",
+  "roundShape": "round-shape.py v3, old 843f4c6856282b3e44041b86f13ff56e4493c976 (last reviewed head, my prose included) -> new 6bc39af6e5ddde93cc87659549136006300aaf61: 2 files whose own diff differs, packages/envoy/go.mod and go.sum, which leave the PR's diff because main pins the same tag v1.54.1-sami.1 since #2526. No runtime file: the merge of main is a confirmation round.",
+  "ci": "At 6bc39af6 (read 16:59 UTC): lint, listener-server-change, docs, worker-image passed; envoy-go and test in progress; the rest queued. My prose push bad45670 replaced that run; at 17:59 UTC its lanes were queued. A request for changes does not wait for them.",
+  "codeVerdict": "Approved apart from the adaptation below: the merge resolved service.go and websocket.go without changing the PR's own diff, and go.mod/go.sum are main's.",
   "keyFindings": [
-    {"severity": "important", "file": "(branch)", "description": "The pull request conflicts with main, so GitHub runs no checks and ci-ok cannot go green. Main changed seven of the PR's files since its fork point, two of them runtime (docs/service.go, docs/websocket.go) plus go.mod/go.sum, AGENTS.md, running-dispatch.md and dispatch-docs.md. The implementer merges main; then round-shape decides the next round."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/tree.go", "description": "TAIL's #2604 (approved, auto-merge armed) lands on main first. Merge main once it does and adapt: put crdt.WithFormatCleanup(false) into newCappedDocumentCopy (tree.go:310), the one place every fold, read-back, documentThrough and validateUpdate builds its document (#2604 puts it in newDocumentCopy's body, which on this branch only delegates); and keep one load hook that applies the stored state with the cleanup off, under the server's MaxPendingItems with this change's refusal (bootstrapLoadedState through decodeStoredState/invalidOnce), in place of #2604's applyLoadedState (math.MaxInt pending, raw error). Runtime conflict, so a full round."}
   ],
-  "notDefects": [
-    "envoy-go and listener-server-change reds at 843f4c68: untouched packages; main's flakes."
-  ]
+  "proseFixedByReviewer": "bad45670: the changelog fragment drops the ygo repin text, which main's own entry (INFRA-767) ships, and keeps this change's refusal wording. PR body: the ygo bullet names the pin as main's (#2526); a Not proven / risk line on the format-cleanup regression until #2604.",
+  "reportedOutside": "To the INFRA-514 architect at 17:00 UTC: #2604 does not cover this branch's folds as written, and its load hook overlaps this change's."
 }
