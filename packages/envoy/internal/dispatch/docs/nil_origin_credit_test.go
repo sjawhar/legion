@@ -302,7 +302,7 @@ func paragraphLine(t *testing.T, markdown, prefix string) string {
 	return ""
 }
 
-func roomMarkdown(t *testing.T, room *crdt.Doc) string {
+func copiedRoomMarkdown(t *testing.T, room *crdt.Doc) string {
 	t.Helper()
 	copied, err := snapshotDocument(room)
 	if err != nil {
@@ -405,7 +405,7 @@ func testADeleteThatDanglesABoldRun(t *testing.T) {
 		bolded.Format(txn, boldAt, len(nilOriginWord), crdt.Attributes{"strong": map[string]any{}})
 	})
 	waitForLandedAppends(t, service, artifactID)
-	boldLine := paragraphLine(t, roomMarkdown(t, room), nilOriginParagraph)
+	boldLine := paragraphLine(t, copiedRoomMarkdown(t, room), nilOriginParagraph)
 	if !strings.Contains(boldLine, "**"+nilOriginWord+"**") {
 		t.Fatalf("the room's paragraph reads %q, which holds no bold %q", boldLine, nilOriginWord)
 	}
@@ -500,7 +500,7 @@ func testADeleteThatDanglesABoldRun(t *testing.T) {
 
 	sh.check(t)
 	expectReplicaHoldsTheRoom(t, service, room)
-	line := paragraphLine(t, roomMarkdown(t, room), nilOriginParagraph)
+	line := paragraphLine(t, copiedRoomMarkdown(t, room), nilOriginParagraph)
 	t.Logf("the room's paragraph after the delete: %q", line)
 	if strings.Contains(line, nilOriginWord) || strings.Contains(line, "**") {
 		t.Errorf("the room's paragraph reads %q: the deleted bold run is still there", line)

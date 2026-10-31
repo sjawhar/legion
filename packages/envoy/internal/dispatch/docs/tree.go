@@ -307,9 +307,11 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 //
 // It replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each remote
 // apply that changes formatted text with a commit of its own: every update a copy applies is one
-// the room committed, and the room's own cleanups are already among them, so a copy that cleaned
-// up would hold a tree the room never held. A write's fork commits its own writes locally, which
-// never clean up, as the room's own writes do not.
+// the room committed, and every cleanup the room made is already among them (the room's own
+// repairs and sweeps are local commits, which never clean up; a write's publish and a browser's
+// update reach the room as remote applies, and the cleanup either makes is stored), so a copy
+// that cleaned up would hold a state the room never held. A write's fork commits its own writes
+// locally, which never clean up.
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems), crdt.WithFormatCleanup(false))...)
 }

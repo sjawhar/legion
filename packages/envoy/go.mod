@@ -153,12 +153,12 @@ require (
 // closes the peer (#339); the pending cap refuses an update before it changes the document (#340);
 // a relay-injected update that fails partway reaches the node's peers (#341); a per-peer write
 // queue byte budget (#342); a server close drops the peer's buffered input (#343); a re-sent
-// pending struct parks once (#344); the token hook can receive the connection's request context
-// (Server.OnTokenAuthContext, #351), which Dispatch does not set; clocks past 2^53-1 and clients
-// past 2^55-1 are refused, so a stored state holding one does not load (#356); a partly applied
-// update reaches the other peers with what it parked as well as what landed (#357); and a document
-// can apply remote updates without the format cleanup Yjs runs after them (WithFormatCleanup,
-// #369), which every copy that replays the room's commits turns off (newDocumentCopy). One is
-// fork-only, with no upstream pull request yet: a per-apply scan budget stacked on #333, which
-// Dispatch does not set.
+// pending struct parks once (#344); clocks past 2^53-1 and clients past 2^55-1 are refused, so a
+// stored state holding one does not load (#356); a partly applied update reaches the other
+// peers with what it parked as well as what landed (#357); Server.OnTokenAuthContext, OnTokenAuth
+// with the connection's request context, which Dispatch does not set (#351); and WithFormatCleanup
+// and Doc.SetFormatCleanup, which turn off the format cleanup a remote apply runs, so a copy that
+// replays the room's commit log (newDocumentCopy) and a room loading its stored history
+// (applyLoadedState) make no commit the room never made (#369). One is fork-only, with no upstream
+// pull request yet: a per-apply scan budget stacked on #333, which Dispatch does not set.
 replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.3
