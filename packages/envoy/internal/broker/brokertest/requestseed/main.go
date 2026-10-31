@@ -2,7 +2,7 @@
 // suite (packages/dispatch/e2e/broker-approval.e2e.ts), as pods would: a service logs in with
 // its ServiceAccount token, enrolls pods that prove their accounts with projected tokens, and each
 // pod asks for a human-tier secret, through brokertest.Pods, the client cmd/broker's tests drive
-// the binary with. The tokens come from the dev issuer's POST /dev/mint (cmd/dev-oidc-issuer), the
+// the binary with. The tokens come from the dev issuer's POST /_dev/mint (cmd/dev-oidc-issuer), the
 // issuer that broker trusts. It lives under internal/ so no release builds or ships it.
 //
 //	requestseed ask --broker <url> --issuer <url> --state <file> --secret <name> [--count <n>]
@@ -72,7 +72,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	broker := fs.String("broker", "", "the broker's public `<url>`")
 	stateFile := fs.String("state", "", "the `<file>` ask writes and state and withdraw read")
-	issuer := fs.String("issuer", "", "ask: the dev issuer's `<url>`, whose /dev/mint mints the tokens")
+	issuer := fs.String("issuer", "", "ask: the dev issuer's `<url>`, whose /_dev/mint mints the tokens")
 	secret := fs.String("secret", "", "ask: the `<name>` of the secret each pod asks for")
 	count := fs.Int("count", 1, "ask: how many pods ask, `<n>`")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -166,7 +166,7 @@ func withdraw(t *command, pods brokertest.Pods, file seeded) {
 	}
 }
 
-// devIssuerTokens is a Pods' Token minted by the dev issuer at issuer through its POST /dev/mint,
+// devIssuerTokens is a Pods' Token minted by the dev issuer at issuer through its POST /_dev/mint,
 // for a random pod when podUID is empty.
 func devIssuerTokens(t *command, issuer string) func(account, podUID string) string {
 	return func(account, podUID string) string {
@@ -174,21 +174,21 @@ func devIssuerTokens(t *command, issuer string) func(account, podUID string) str
 		if err != nil {
 			t.Fatalf("encode the mint request: %v", err)
 		}
-		response, err := http.Post(issuer+"/dev/mint", "application/json", bytes.NewReader(body))
+		response, err := http.Post(issuer+"/_dev/mint", "application/json", bytes.NewReader(body))
 		if err != nil {
-			t.Fatalf("POST %s/dev/mint: %v", issuer, err)
+			t.Fatalf("POST %s/_dev/mint: %v", issuer, err)
 		}
 		defer response.Body.Close()
 		answer, err := io.ReadAll(response.Body)
 		if err != nil {
-			t.Fatalf("read the answer to POST %s/dev/mint: %v", issuer, err)
+			t.Fatalf("read the answer to POST %s/_dev/mint: %v", issuer, err)
 		}
 		var minted struct {
 			Token string `json:"token"`
 		}
 		if response.StatusCode != http.StatusOK || json.Unmarshal(answer, &minted) != nil || minted.Token == "" {
 			// The answer is printed only when it carries no token.
-			t.Fatalf("POST %s/dev/mint for %s = %d %s, want 200 with a token", issuer, account, response.StatusCode, bytes.TrimSpace(answer))
+			t.Fatalf("POST %s/_dev/mint for %s = %d %s, want 200 with a token", issuer, account, response.StatusCode, bytes.TrimSpace(answer))
 		}
 		return minted.Token
 	}

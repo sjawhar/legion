@@ -119,14 +119,22 @@ export async function withdrawSeededRequests(state: string): Promise<void> {
   await requestSeed("withdraw", ["--state", state]);
 }
 
-/** Makes the issuer sign in `email` at the next sign-in, whatever its login_hint names. */
+/** Makes the issuer sign in `email` at the next authorization, whatever its `login_hint` names.
+ *  The control route takes the ID token's claims themselves, so this builds the four the broker
+ *  reads: the subject, the verified email, and the Workspace domain `BROKER_SIGNIN_DOMAIN` names
+ *  (`e2e/run-broker.sh`), which the broker refuses a sign-in without. */
 export async function queueSignIn(email: string): Promise<void> {
-  const response = await fetch(`${devIssuerOrigin()}/dev/sign-in-as`, {
-    body: JSON.stringify({ email }),
+  const response = await fetch(`${devIssuerOrigin()}/_dev/sign-in-as`, {
+    body: JSON.stringify({
+      email,
+      email_verified: true,
+      hd: email.slice(email.indexOf("@") + 1),
+      sub: email,
+    }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });
   if (response.status !== 204) {
-    throw new Error(`dev issuer /dev/sign-in-as ${email}: ${response.status}`);
+    throw new Error(`dev issuer /_dev/sign-in-as ${email}: ${response.status}`);
   }
 }

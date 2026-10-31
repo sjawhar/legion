@@ -30,6 +30,12 @@
 // given (identity.GroupRule). Dispatch takes a domain only from Google's own issuer, so a Dispatch
 // signing people in here runs under DISPATCH_SIGNIN_GROUP set to --sign-in-group's group.
 //
+// A caller that needs a token for an account no --token names, or for a pod of its own choosing,
+// asks the loopback-only control route POST <issuer URL>/_dev/mint, whose body names the subject,
+// the audience and, when it matters, the pod uid, and whose answer is {"token": "…"}. The browser
+// suite's request seeder (internal/broker/brokertest/requestseed) enrolls each of its pods that
+// way, since every pod needs a uid of its own.
+//
 // Once every file is written it logs "issuer listening url=<issuer URL>", the value
 // BROKER_K8S_OIDC_ISSUER and DISPATCH_SIGNIN_ISSUER take, and serves until it is interrupted. Its
 // signing key lives in its memory alone: a restart publishes another, and no token minted before
@@ -208,6 +214,40 @@ func signInAsHandler(issuer *oidctest.Issuer) http.Handler {
 	})
 }
 
+// mintHandler is POST /_dev/mint: it mints one ServiceAccount token for the subject, audience and
+// pod uid its JSON body names, as a --token file's token is minted, and answers {"token": "…"}.
+// A caller that names no pod uid gets a random one, as the API server assigns a pod's. The token
+// lives lifetime, the same span a file's does. It answers loopback callers only, for the reason
+// the sign-in control does: whoever can reach it mints a token for any account the broker lists.
+func mintHandler(issuer *oidctest.Issuer, key *oidctest.Key, p *process, lifetime time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+			http.Error(w, "the mint control answers loopback callers only", http.StatusForbidden)
+			return
+		}
+		var want struct {
+			Subject  string `json:"subject"`
+			Audience string `json:"audience"`
+			PodUID   string `json:"pod_uid"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&want); err != nil || want.Subject == "" || want.Audience == "" {
+			http.Error(w, `want {"subject": "system:serviceaccount:<namespace>:<name>", "audience": "…", "pod_uid": "…"}`, http.StatusBadRequest)
+			return
+		}
+		if want.PodUID == "" {
+			want.PodUID = uuid.NewString()
+		}
+		now := time.Now()
+		claims := issuer.Claims(want.Subject, want.Audience)
+		claims["iat"] = now.Unix()
+		claims["exp"] = now.Add(lifetime).Unix()
+		claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": want.PodUID}}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": issuer.Mint(p, key, claims)})
+	})
+}
+
 // tokenSpec is one --token: the audience and the service account a token is minted for, the file
 // it is kept in, and the uid of the pod it is bound to.
 type tokenSpec struct {
@@ -252,6 +292,7 @@ func serve(ctx context.Context, specs []tokenSpec, flow codeFlow, lifetime time.
 		}
 		issuer.Handle("POST /_dev/sign-in-as", signInAsHandler(issuer))
 	}
+	issuer.Handle("POST /_dev/mint", mintHandler(issuer, key, p, lifetime))
 	// Each token's pod, a random UUID as the API server assigns a pod's uid.
 	for i := range specs {
 		specs[i].podUID = uuid.NewString()
