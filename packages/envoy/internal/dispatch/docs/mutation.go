@@ -1194,6 +1194,27 @@ func (s *Service) AcquireConditionalEdit(ctx context.Context, artifactID string)
 	}
 }
 
+// lockTableAskAnchorsQuery and lockTableCommentAnchorsQuery take a share lock on each row of
+// their table that is anchored on the document bound to $1 and records one of the marks bound
+// to $2, so no writer resolves or answers one of them while the edit that would remove its
+// table row runs. Each finds its rows through its table's anchor index
+// (anchorTarget.anchoredOn), so the lock reads the document's anchors rather than the table;
+// the text of each is built once, as the edit validation's statements are.
+var (
+	lockTableAskAnchorsQuery = `
+		select id::text, anchor->>'mark_id', state
+		from asks
+		where ` + asksAnchorTarget.anchoredOn() + ` and anchor->>'mark_id' = any($2::text[])
+		for share
+	`
+	lockTableCommentAnchorsQuery = `
+		select id::text, anchor->>'mark_id', resolved
+		from comments
+		where ` + commentsAnchorTarget.anchoredOn() + ` and anchor->>'mark_id' = any($2::text[])
+		for share
+	`
+)
+
 func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snapshots []tableAnchorSnapshot) error {
 	byMark := make(map[string]tableAnchorSnapshot)
 	for _, snapshot := range snapshots {
@@ -1211,12 +1232,7 @@ func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snap
 	sort.Strings(markIDs)
 	seen := make(map[string]struct{}, len(markIDs))
 	var active []string
-	rows, err := tx.Query(ctx, `
-		select id::text, anchor->>'mark_id', state
-		from asks
-		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
-		for share
-	`, artifactID, markIDs)
+	rows, err := tx.Query(ctx, lockTableAskAnchorsQuery, artifactID, markIDs)
 	if err != nil {
 		return fmt.Errorf("lock table ask anchors: %w", err)
 	}
@@ -1237,12 +1253,7 @@ func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snap
 	}
 	rows.Close()
 
-	rows, err = tx.Query(ctx, `
-		select id::text, anchor->>'mark_id', resolved
-		from comments
-		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
-		for share
-	`, artifactID, markIDs)
+	rows, err = tx.Query(ctx, lockTableCommentAnchorsQuery, artifactID, markIDs)
 	if err != nil {
 		return fmt.Errorf("lock table comment anchors: %w", err)
 	}

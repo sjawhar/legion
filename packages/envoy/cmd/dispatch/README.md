@@ -1433,6 +1433,48 @@ waits out a write of a follower already open and holds off a new one for that mo
 reads are not held, and the table is small. Its census answers `0`: one index on an existing
 column, refusing no row and rewriting none.
 
+Migration `0151_asks_issue_key` creates `asks_issue_key` on `asks (issue_key)`, for the read of
+every ask of one issue that `GET /api/v1/issues/{key}/asks` makes with no state filter
+(`api/asks.go` `listIssueAsksQueryAll`) and for the reference closure's read of an issue's asks.
+No index served either: `asks_open` (`0001`) is partial on `state = 'open'`, which a read asking
+for every state cannot use, and every other index of `asks` is keyed on something else, so both
+scanned the table. The read orders by `created_at, id` within the issue, so `(issue_key,
+created_at, id)` would be strictly better — the index would answer the order too and leave the
+plan no sort — and this migration keeps the plain key the spec names, because the sort is over
+one issue's asks and this release does not change the statement. A plain `create index` inside
+the runner's transaction, it holds `SHARE` on `asks` while it builds: ask writes wait, reads do
+not. Its census answers `0`: one index on an existing column, refusing no row and rewriting
+none.
+
+Migration `0152_messages_issue_roots` creates `messages_issue_roots` on `messages (issue_key,
+created_at, id)`, for the read of an issue's root messages that `GET
+/api/v1/issues/{key}/messages` makes, `where issue_key = $1 and in_reply_to is null order by
+created_at, id` (`api/messages.go` `listIssueRootMessagesQuery`). No index of `messages` led
+with `issue_key` — `messages_in_reply_to` (`0033`) leads with the parent and `messages_search`
+(`0061`) is the text index — so every read of an issue's threads scanned the table, 15.8 s of
+database time in the 24 hours to 2026-10-30 22:00Z. The key is the read's predicate and then its
+order, so the plan takes one range of the index and sorts nothing. It is deliberately not
+partial on `in_reply_to is null`: the reference closure reads an issue's messages whatever they
+reply to, and one whole index serves both reads. A plain `create index` inside the runner's
+transaction, it holds `SHARE` on `messages` while it builds: message writes wait, reads do not,
+and the census of 2026-10-30 gives `messages` 5,810 rows and 20 MiB. Its census answers `0`.
+
+Migration `0153_drop_asks_open_artifact` drops `asks_open_artifact`, `asks (artifact_id) where
+state = 'open' and artifact_id is not null` (`0009`). It was built for the one read that lists a
+document's open asks (`api/asks.go` `listArtifactAsksQueryOpen`), and that read uses
+`asks_artifact_id` (`0032`) instead, which a plan test holds it to; the index audit of
+2026-10-25 found `asks_open_artifact` unused from 2026-10-16 to 2026-10-25. An index nothing
+reads is write cost on every ask that opens, closes or changes its document, and one more plan
+for the planner to cost on every read of `asks`. The drop is a contracting change, and the
+expand-then-contract rule does not hold it to the next release: an index is not a shape the
+running code reads, so the release before this one and the release after it both keep working
+over this schema, with one plan choice fewer. `drop index` takes `ACCESS EXCLUSIVE` on `asks`
+for the instant it unlinks the index, inside the runner's transaction, so every read and write
+of an ask waits behind it for that moment. Its census answers `0`: the drop reads no row,
+refuses none and rewrites none, and the census report still names `asks`, the table behind the
+index, so a deployment sees what it locks. No operator follow-up: nothing is left to rebuild,
+and a rollback past it is an image rollback alone, since no release reads the index.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
