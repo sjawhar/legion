@@ -1,0 +1,11 @@
+kind: Added
+body: |-
+  The listener keeps a role message it cannot deliver and gives it to the role's next holder.
+  A publish to a role with no live holder, or one whose claim has lapsed, is answered 202 with
+  `kept: true` and `kept_reason` (`unclaimed` or `holder_lapsed`) in place of 404, and the message
+  is stored on `notifications.envoy.kept.role.<role>`, a private stream subject the listener alone
+  reads. The next session to claim that role is handed each kept copy once, in the order the
+  copies were kept, each carrying `kept_at`. A copy kept more than an hour before the claim is
+  dropped and counted on the new `envoy_role_kept_expired_total`. A sender that keeps a queue of
+  its own publishes with `keep: false` and gets the 404 unchanged. `notifications.role.>` is still
+  not a stream subject, and no NATS grant changed.

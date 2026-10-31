@@ -1,0 +1,4 @@
+kind: Changed
+body: |-
+  A phase worker's stall reminder published while no session holds the architect role is now kept
+  by Envoy and delivered when that role is claimed, so the architect hears it.

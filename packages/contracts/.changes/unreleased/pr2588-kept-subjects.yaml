@@ -1,0 +1,5 @@
+kind: Added
+body: |-
+  `KEPT_TOPIC_PREFIX`, `keptRoleSubject` and `keptRoleCursorSubject`, the subjects Envoy's listener
+  keeps an undeliverable role message and its drain cursor on, and the envelope's optional
+  `kept_at`.
