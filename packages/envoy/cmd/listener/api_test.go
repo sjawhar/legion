@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -837,7 +838,7 @@ func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
 		t.Fatalf("register %s: %v", sessionID, err)
 	}
 	recorder := httptest.NewRecorder()
-	roleSetHandler(d, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+	roleSetHandler(d, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 		strings.NewReader(fmt.Sprintf(`{"session_id":%q,"role":%q}`, sessionID, role))))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("%s claims %s: status %d %s", sessionID, role, recorder.Code, recorder.Body.String())
@@ -907,7 +908,7 @@ func TestASoftClaimWhoseSessionCacheTrailsTheBucketLeavesALiveHolderItsRole(t *t
 		t.Fatalf("register ses_resumer: %v", err)
 	}
 	recorder := httptest.NewRecorder()
-	roleSetHandler(observer, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+	roleSetHandler(observer, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 		strings.NewReader(`{"session_id":"ses_resumer","role":"contested","soft":true}`)))
 	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"holder":"ses_live_holder"`) {
 		t.Fatalf("soft claim of a live holder's role on a listener whose session cache trails the bucket: status %d %s, want 409 naming ses_live_holder", recorder.Code, recorder.Body.String())
@@ -1002,7 +1003,7 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		stallSessionReads(t, observer.sessions)
 		started := time.Now()
 		recorder := httptest.NewRecorder()
-		roleSetHandler(observer, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+		roleSetHandler(observer, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 			strings.NewReader(`{"session_id":"ses_resumer","role":"unread","soft":true}`)))
 		if elapsed := time.Since(started); recorder.Code != http.StatusServiceUnavailable || elapsed > bound {
 			t.Fatalf("soft claim while the session bucket cannot be read: status %d %s after %s, want 503 within %s", recorder.Code, recorder.Body.String(), elapsed, bound)
@@ -1242,7 +1243,7 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	}
 	firstState := &listenerDeps{client: client, registry: firstRegistry, sessions: firstSessions}
 	claim := httptest.NewRecorder()
-	roleSetHandler(firstState, "test-machine").ServeHTTP(
+	roleSetHandler(firstState, "test-machine", logging.New("test")).ServeHTTP(
 		claim,
 		httptest.NewRequest(
 			http.MethodPost,
@@ -1383,11 +1384,17 @@ func TestRoleSetHandlerSoftClaim(t *testing.T) {
 		}
 	})
 
-	t.Run("a live predecessor is superseded when the claimant declares it", func(t *testing.T) {
+	t.Run("a live predecessor of the claimant's own client instance gives up the role", func(t *testing.T) {
 		// ses_resumer holds the role and is still live (a fork's parent keeps
-		// heartbeating). The forked child names it as its predecessor.
-		if err := sessions.Put("ses_fork_child", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
-			t.Fatalf("register child: %v", err)
+		// heartbeating). The forked child runs inside the same client instance
+		// - one Oh My Pi Envoy extension instance, one Claude Code
+		// channel-server process - and names it as its predecessor, so the
+		// role is the same conversation's and passes to the child.
+		const instance = "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"
+		for _, id := range []string{"ses_resumer", "ses_fork_child"} {
+			if err := sessions.Put(id, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true, ClientInstanceID: instance}); err != nil {
+				t.Fatalf("register %s in the forking client instance: %v", id, err)
+			}
 		}
 		rec := post(`{"session_id":"ses_fork_child","role":"sre","soft":true,"previous_session_id":"ses_resumer"}`)
 		if rec.Code != http.StatusOK {
@@ -1430,6 +1437,201 @@ func TestRoleSetHandlerSoftClaim(t *testing.T) {
 		holder, err := registry.RoleHolder("legacy")
 		if err != nil || holder != "ses_heir" {
 			t.Fatalf("holder after soft claim over ses:bad = %q, %v; want ses_heir", holder, err)
+		}
+	})
+}
+
+// registerInstance registers sessionID through sessions as its client instance's plugin does, with
+// the client instance id that instance mints at its own start (empty for a client predating the
+// field).
+func registerInstance(t *testing.T, sessions *session.SessionRegistry, sessionID, instanceID string) {
+	t.Helper()
+	if err := sessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true, ClientInstanceID: instanceID}); err != nil {
+		t.Fatalf("register %s: %v", sessionID, err)
+	}
+}
+
+// A soft claim that names a predecessor asks which client instance that predecessor belongs to -
+// one Oh My Pi Envoy extension instance, one Claude Code channel-server process - and takes the
+// role from it only when the predecessor has no live entry, when its entry carries the claimant's
+// own instance id, or when either side carries no instance id at all. A predecessor still live
+// inside another instance keeps the role: knowing its session id is not enough to take it.
+func TestRoleSetHandlerSoftClaimPredecessorInstance(t *testing.T) {
+	const (
+		claimantInstance = "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"
+		otherInstance    = "9b8a7c6d5e4f3a2b9b8a7c6d5e4f3a2b"
+	)
+	setup := func(t *testing.T) (*store.Registry, *session.SessionRegistry, *bytes.Buffer, func(body string) *httptest.ResponseRecorder) {
+		t.Helper()
+		registry, sessions := setupSessionsTest(t, nil, nil)
+		logs := &bytes.Buffer{}
+		handler := roleSetHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.NewWithWriter("test", logs))
+		return registry, sessions, logs, func(body string) *httptest.ResponseRecorder {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(body)))
+			return recorder
+		}
+	}
+	claim := func(t *testing.T, post func(string) *httptest.ResponseRecorder, body string) {
+		t.Helper()
+		if rec := post(body); rec.Code != http.StatusOK {
+			t.Fatalf("seed claim %s: status = %d, body = %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	holderOf := func(t *testing.T, registry *store.Registry, role string) string {
+		t.Helper()
+		holder, err := registry.RoleHolder(role)
+		if err != nil {
+			t.Fatalf("read the %s claim: %v", role, err)
+		}
+		return holder
+	}
+
+	t.Run("a live predecessor of another client instance keeps the role", func(t *testing.T) {
+		// ses_pred is another process entirely, whose session id this claimant knows: a resumed
+		// transcript records it, and the role must not follow the id out of its own instance.
+		registry, sessions, _, post := setup(t)
+		registerInstance(t, sessions, "ses_pred", otherInstance)
+		claim(t, post, `{"session_id":"ses_pred","role":"sre"}`)
+		registerInstance(t, sessions, "ses_claimant", claimantInstance)
+		rec := post(`{"session_id":"ses_claimant","role":"sre","soft":true,"previous_session_id":"ses_pred"}`)
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"holder":"ses_pred"`) {
+			t.Fatalf("soft claim naming a predecessor live in another client instance: status %d %s, want 409 naming ses_pred", rec.Code, rec.Body.String())
+		}
+		if holder := holderOf(t, registry, "sre"); holder != "ses_pred" {
+			t.Fatalf("holder after the refused claim = %q, want ses_pred", holder)
+		}
+	})
+
+	t.Run("a predecessor with no registry entry gives up the role", func(t *testing.T) {
+		// The predecessor's process is gone: its entry has left the session bucket (aged out at
+		// the 5m TTL in production, deleted here), and its role is the resumed session's to take
+		// whatever instance that predecessor ran in.
+		registry, sessions, _, post := setup(t)
+		registerInstance(t, sessions, "ses_pred", otherInstance)
+		claim(t, post, `{"session_id":"ses_pred","role":"sre"}`)
+		if err := sessions.Delete(context.Background(), "ses_pred"); err != nil {
+			t.Fatalf("end the predecessor's session: %v", err)
+		}
+		registerInstance(t, sessions, "ses_claimant", claimantInstance)
+		rec := post(`{"session_id":"ses_claimant","role":"sre","soft":true,"previous_session_id":"ses_pred"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("soft claim naming a predecessor the bucket has lost: status %d %s, want 200", rec.Code, rec.Body.String())
+		}
+		if holder := holderOf(t, registry, "sre"); holder != "ses_claimant" {
+			t.Fatalf("holder after the claim = %q, want ses_claimant", holder)
+		}
+	})
+
+	t.Run("a claim under the holder's own session id keeps the role", func(t *testing.T) {
+		// The holder re-claims its own role and names a predecessor of another instance. The
+		// predecessor rule is never reached: the role is already this session's.
+		registry, sessions, _, post := setup(t)
+		registerInstance(t, sessions, "ses_holder", claimantInstance)
+		claim(t, post, `{"session_id":"ses_holder","role":"sre"}`)
+		registerInstance(t, sessions, "ses_other", otherInstance)
+		rec := post(`{"session_id":"ses_holder","role":"sre","soft":true,"previous_session_id":"ses_other"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("the holder's own soft claim: status %d %s, want 200", rec.Code, rec.Body.String())
+		}
+		if holder := holderOf(t, registry, "sre"); holder != "ses_holder" {
+			t.Fatalf("holder after its own claim = %q, want ses_holder", holder)
+		}
+	})
+
+	for _, tc := range []struct {
+		name                string
+		claimantInstance    string
+		predecessorInstance string
+	}{
+		{name: "a claimant with no client instance id takes the role", claimantInstance: "", predecessorInstance: otherInstance},
+		{name: "a predecessor with no client instance id gives up the role", claimantInstance: claimantInstance, predecessorInstance: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A client predating the field names no instance, and must still recover its own
+			// role rather than be stranded by the new rule; the listener logs the takeover with
+			// both session ids, since this is the one it cannot tell from another instance's.
+			registry, sessions, logs, post := setup(t)
+			registerInstance(t, sessions, "ses_pred", tc.predecessorInstance)
+			claim(t, post, `{"session_id":"ses_pred","role":"sre"}`)
+			registerInstance(t, sessions, "ses_claimant", tc.claimantInstance)
+			rec := post(`{"session_id":"ses_claimant","role":"sre","soft":true,"previous_session_id":"ses_pred"}`)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("soft claim with a missing client instance id: status %d %s, want 200", rec.Code, rec.Body.String())
+			}
+			if holder := holderOf(t, registry, "sre"); holder != "ses_claimant" {
+				t.Fatalf("holder after the claim = %q, want ses_claimant", holder)
+			}
+			logged := logs.String()
+			if !strings.Contains(logged, `"session_id":"ses_claimant"`) || !strings.Contains(logged, `"previous_session_id":"ses_pred"`) {
+				t.Fatalf("takeover log = %q, want a line naming both session ids", logged)
+			}
+		})
+	}
+
+	t.Run("a claim keeps the claimant's stored client instance id", func(t *testing.T) {
+		// The claim refreshes the claimant's registration, and that refresh must leave the id the
+		// next soft claim reads: a claim that cleared it would demote every later claim.
+		_, sessions, _, post := setup(t)
+		registerInstance(t, sessions, "ses_claimant", claimantInstance)
+		claim(t, post, `{"session_id":"ses_claimant","role":"sre","soft":true}`)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		stored, err := sessions.Refresh(ctx, "ses_claimant")
+		if err != nil {
+			t.Fatalf("read the claimant's entry back from the bucket: %v", err)
+		}
+		if stored.ClientInstanceID != claimantInstance {
+			t.Fatalf("stored client instance id after the claim = %q, want %q", stored.ClientInstanceID, claimantInstance)
+		}
+	})
+
+	t.Run("a predecessor whose entry cannot be read keeps the role", func(t *testing.T) {
+		// A read that does not answer takes nothing from a holder, predecessor or not: the claim
+		// is the bus-unavailable 503, inside the bound its reads hold.
+		const bound = 5 * time.Second
+		claimant, observer := trailingListeners(t)
+		claimRole(t, claimant, "ses_pred", "unread-predecessor")
+		registerInstance(t, observer.sessions, "ses_claimant", claimantInstance)
+		stallSessionReads(t, observer.sessions)
+		started := time.Now()
+		recorder := httptest.NewRecorder()
+		roleSetHandler(observer, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+			strings.NewReader(`{"session_id":"ses_claimant","role":"unread-predecessor","soft":true,"previous_session_id":"ses_pred"}`)))
+		if elapsed := time.Since(started); recorder.Code != http.StatusServiceUnavailable || elapsed > bound {
+			t.Fatalf("soft claim whose predecessor cannot be read: status %d %s after %s, want 503 within %s", recorder.Code, recorder.Body.String(), elapsed, bound)
+		}
+		if holder := holderOf(t, claimant.registry, "unread-predecessor"); holder != "ses_pred" {
+			t.Fatalf("holder after the unanswered read = %q, want ses_pred", holder)
+		}
+	})
+
+	t.Run("a cached predecessor entry the bucket has replaced does not decide", func(t *testing.T) {
+		// The observer's cache still holds an entry of the instance the claimant belongs to,
+		// while the bucket's entry says the predecessor now runs in another one. The cache trails
+		// the bucket, so it cannot be what decides: the bucket's entry is read, and the live
+		// predecessor keeps the role.
+		claimant, observer := trailingListeners(t)
+		claimRole(t, claimant, "ses_pred", "contested-instance")
+		registerInstance(t, observer.sessions, "ses_pred", claimantInstance)
+		registerInstance(t, claimant.sessions, "ses_pred", otherInstance)
+		registerInstance(t, observer.sessions, "ses_claimant", claimantInstance)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if cached, err := observer.sessions.Get("ses_pred"); err != nil || cached.ClientInstanceID != claimantInstance {
+			t.Fatalf("the observer's cached predecessor = %+v, %v; want the claimant's instance %q", cached, err, claimantInstance)
+		}
+		if current, err := claimant.sessions.Refresh(ctx, "ses_pred"); err != nil || current.ClientInstanceID != otherInstance {
+			t.Fatalf("the bucket's predecessor = %+v, %v; want instance %q", current, err, otherInstance)
+		}
+		recorder := httptest.NewRecorder()
+		roleSetHandler(observer, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+			strings.NewReader(`{"session_id":"ses_claimant","role":"contested-instance","soft":true,"previous_session_id":"ses_pred"}`)))
+		if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"holder":"ses_pred"`) {
+			t.Fatalf("soft claim decided on a trailing cache: status %d %s, want 409 naming ses_pred", recorder.Code, recorder.Body.String())
+		}
+		if holder := holderOf(t, claimant.registry, "contested-instance"); holder != "ses_pred" {
+			t.Fatalf("holder after the refused claim = %q, want ses_pred", holder)
 		}
 	})
 }

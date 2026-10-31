@@ -1,0 +1,5 @@
+kind: Changed
+body: 'A soft role claim on `POST /v1/roles/set` that names a `previous_session_id` takes the role from that predecessor only when the predecessor has no live registration, when its live registration carries the same `client_instance_id` as the claimant, or when either side carries no instance id. Any other live predecessor keeps the role, and the claim is answered 409 naming it. The predecessor''s registration is read from the `envoy_sessions` bucket itself rather than from the cache of it, and the claimant''s is read from the bucket too, falling back to the cache when that read does not answer. `POST /v1/interests/subscribe` stores the new optional `client_instance_id` field on the session entry, and `DELETE /v1/sessions/<id>` accepts it as a query parameter: with it, the registration is removed only while it carries that id or none, and the answer is `200 {"deleted":true}` or `200 {"deleted":false,"reason":...}`.'
+time: 2026-10-31T04:26:04.295501197Z
+custom:
+    Issue: pr2592
