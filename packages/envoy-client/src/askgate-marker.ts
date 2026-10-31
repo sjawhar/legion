@@ -25,8 +25,8 @@ import { hasErrnoCode, messageFor } from "./errors";
  * removes only its own file, so two processes that bind one session at the same time never drop
  * each other. An owner counts while its process lives and, on Linux, has that start time, so a
  * crashed session's file, or one whose pid another process took, is inert. A session no live
- * process records (a terminal, CI, Claude Code, a pod without pi-envoy, a session with
- * Dispatch or AskGate off) needs no marker.
+ * process records (a terminal, CI, Claude Code, a pod without pi-envoy, a session with Dispatch
+ * or AskGate off) needs no marker.
  *
  * The marker. For each literal `dispatch` call it lets run, the gate mints one file in the store,
  * `<store>/markers/<sha256 of the argv>.<32 random hex>`, created owner-only and exclusively,
