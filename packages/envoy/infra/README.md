@@ -558,7 +558,7 @@ those is, the sandbox in the paragraph under it.
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. | Built |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. | Not built |
 | Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the component's own names and registered after the Tailscale Service), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). | Not built |
-| Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, the component's own `tags`, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (no resource option of the consumer's own program reaches a component's child, so a fixed one could be undone only by a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert, so a Service that already exists under that name is adopted and its comment, ports and tags overwritten ([Inputs](#inputs)). | Not built |
+| Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, the component's own `tags`, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (a child's explicit `Protect` overrides what it would inherit, so a fixed one could be changed only by a resource transform on the component or a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert, so a Service that already exists under that name is adopted and its comment, ports and tags overwritten ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)). | Not built |
 | ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. | Not built |
 | Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. | Not built |
 | Three ClusterIP Services and three NetworkPolicies (two Services with `natsInCluster`) | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener, neither the Service nor that rule rendered with `natsInCluster`, which leaves the front door's policy admitting nothing; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). | Not built |
@@ -685,9 +685,10 @@ the component requires wherever it builds the front door — every deployment bu
 `clusterOnly`, neither of which builds one — and the tailnet that provider is configured for is
 the tailnet the Service is declared in. The Service is parented on the component, not on the
 cluster, and its `protect` follows `deletionProtection`, the input that already guards the
-cluster and the database: no resource option of a consumer's own program reaches a component's
-child, so a fixed `protect` could be undone only by a state edit, and a consumer that unprotects
-a Dispatch unprotects the Service with it.
+cluster and the database, rather than being fixed: a child's explicit `Protect` overrides what
+it would inherit, so a fixed one could be changed only by a resource transform on the component
+([Providers and transformations](#providers-and-transformations)) or by a state edit, and a
+consumer that unprotects a Dispatch unprotects the Service with it.
 The Serve ConfigMap `<hostname>-serve` and the front door's Deployment are both registered after
 it, so on a fresh stack no pod advertises the Service before it exists: a node that advertises a
 Service before it exists is not approved when the Service appears.
@@ -695,11 +696,13 @@ Service before it exists is not approved when the Service appears.
 **The component adopts a Service that already exists under that name.** The Tailscale provider's
 create is an upsert (`VIPServices().CreateOrUpdate`), so a first apply does not fail on a live
 `svc:<hostname>`: it takes the Service over and overwrites its comment, its ports and its tags
-with the component's. A stack that declared that Service itself must therefore take its own
-declaration out of its state, without deleting the Service, before the apply that moves the pin
+with the component's. A stack that declared that Service itself must therefore hand it over
+before the apply that moves the pin, with `retainOnDelete: true` on its own declaration rather
+than a state edit
 ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)
-below); removing the declaration with the Service still in that state deletes the Service the
-component has just adopted, and readers lose `<hostname>.<tailnetDnsName>`.
+below); removing the declaration without that, while the component's own Service is in the same
+apply, deletes the Service the component has just adopted, and readers lose
+`<hostname>.<tailnetDnsName>`.
 
 The tailnet policy is still the operator's. The Service's hosts are approved there, so give
 `tags` an auto-approval for `svc:<hostname>` before an apply creates the front door's pods; that
@@ -1217,7 +1220,7 @@ output, so a consumer that hands it to its agents passes them the new value too.
 `<hostname>-tailnet-tls` carries no checksum: a renewed certificate rolls no pod.
 
 `DISPATCH_SIGNING_KEY` rotates by a roll too, but the variable holds a key set rather than one
-key, and which keys it holds is `signingKeyGenerations` ([Inputs](#inputs)): the list's
+key, and which keys it holds is `signingKeyGenerations` ([Inputs](#inputs-1)): the list's
 generations' keys, in the list's order, one space between them. Only the Secret
 `<hostname>-dispatch` carries that variable, so the `checksum/<hostname>-dispatch` annotation on
 the app's pod template is what rolls the app's pods when the set changes; the listener's and the
@@ -1311,7 +1314,7 @@ before then, since a pod started after it cannot join: a new `tailnetAuthKey` re
 declares the Service itself, and both the Serve ConfigMap and this Deployment are registered
 after it, so no apply creates a pod before the Service exists; the tailnet policy's
 auto-approval for `tags` is the operator's and must be in place before that apply
-([Inputs](#inputs)).
+([Inputs](#inputs-1)).
 
 No pod advertises the Service by itself (`TS_EXPERIMENTAL_SERVICE_AUTO_ADVERTISEMENT` is `false`).
 Each pod's advertiser, a script on the Tailscale image in a container of its own, advertises it
@@ -1431,19 +1434,29 @@ program and pass that Service's `Name`. This release declares the same Service i
 component, so one tailnet Service would have two owners. Make the move in this order, and never
 in one apply:
 
-1. Take the consumer's own `tailscale.Service` out of its stack's state without deleting the
-   Service: `pulumi state delete '<its URN>'`. (`retainOnDelete: true` on that resource, applied
-   before the declaration is removed, does the same job in two applies.) Pulumi now owns no
-   Tailscale Service, and the live one is untouched.
-2. Remove that resource and the `tailnetService` argument from the program, pass the component a
-   `tailscale` provider, and apply. The component's create is an upsert, so it adopts the live
-   `svc:<hostname>` and writes the component's comment, port `tcp:443` and `tags` over it.
+1. On the old pin, set `retainOnDelete: true` on the consumer's own `tailscale.Service` and
+   apply. If that resource is protected, unprotect it in the same step
+   (`pulumi state unprotect '<its URN>'`): a protected resource is not deleted even with the
+   retain, so the apply that removes it would be refused. Nothing changes in the tailnet here;
+   the stack still owns the Service, and now its delete would drop the state entry alone.
+2. In the next apply, remove that resource and the `tailnetService` argument from the program and
+   pass the component a `tailscale` provider. The component registers the Service without the
+   consumer's dependency, its create is an upsert, so it adopts the live `svc:<hostname>` and
+   writes the component's comment, port `tcp:443` and `tags` over it; the consumer's retained
+   delete then removes its own state entry and leaves the Service where it is.
 
-Removing the consumer's declaration while the Service is still in its state deletes the Service
-in that same apply, after the component has adopted it: readers lose
-`<hostname>.<tailnetDnsName>`, and the component's state still records a Service that is gone,
-so the next `up` plans nothing until a `pulumi refresh`. Keeping both declarations is no better:
-two resources then own one Service and each apply overwrites the other's tags.
+Do not reach for `pulumi state delete` on the consumer's Service instead. A stack that passed
+that Service's `Name` as `tailnetService` has the component depending on it — the SDK puts the
+input's dependency in the Construct request's `Dependencies`, which becomes the component's own
+`DependsOn` — and `pulumi state delete` refuses a resource something in state depends on. The
+`--target-dependents` the CLI suggests there removes the Dispatch component and every child of
+it from state, which is far worse than the problem.
+
+Removing the consumer's declaration without the retain deletes the Service in that same apply,
+after the component has adopted it: readers lose `<hostname>.<tailnetDnsName>`, and the
+component's state still records a Service that is gone, so the next `up` plans nothing until a
+`pulumi refresh`. Keeping both declarations is no better: two resources then own one Service and
+each apply overwrites the other's tags.
 
 ### YAML
 

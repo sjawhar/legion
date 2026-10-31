@@ -5,10 +5,11 @@ body: |-
   switch has restarted the database. Breaking: the `tailnetService` input is gone and a consumer
   passes a `tailscale` provider instead. The component's create is an upsert, so it adopts a
   Service that already exists under that name and overwrites its comment, ports and tags: a stack
-  that declared `svc:<hostname>` itself must take that declaration out of its state without
-  deleting the Service (`pulumi state delete '<its URN>'`) before this release's first apply,
-  since removing it with the Service still in that state deletes the Service the component has
-  just adopted. The front door's Deployment waits for the Service and the
+  that declared `svc:<hostname>` itself hands it over in two applies, `retainOnDelete: true` on
+  its own declaration first (unprotecting it if it is protected) and the pin move second, since
+  removing that declaration without the retain deletes the Service the component has just
+  adopted, and `pulumi state delete` is refused there because the component depends on the
+  Service's output. The front door's Deployment waits for the Service and the
   instance; the server Deployment no longer waits for the front door, so it comes back inside a
   cutover's stop, while the listener's still does. A new `databaseWaitsFor` input orders the
   instance's update after a resource the consumer names. A new `signingKeyGenerations` input makes

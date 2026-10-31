@@ -481,9 +481,11 @@ gate() {
 // children's options.
 //
 // Its Protect follows deletionProtection, the input that already guards the cluster and the
-// database, rather than being hard-coded: no resource option of the consumer's own program
-// reaches a component's child, so a hard-coded Protect could be undone only by a state edit
-// (`pulumi state unprotect <urn>`), and deleting a Dispatch would need one.
+// database, rather than being hard-coded: a child's own Protect overrides the one it would
+// inherit from the component (the SDK takes the parent's only when the child names none,
+// pulumi/sdk/v3 v3.268.0's go/pulumi/context.go:1450-1453), so a hard-coded one could be
+// changed only by a resource transform on the component or by a state edit
+// (`pulumi state unprotect <urn>`), and deleting a Dispatch would need one of the two.
 //
 // It waits for the Cloud SQL instance because the front door waits for it in turn: switching the
 // instance's availability type updates it in place and restarts it, and the name must come back
