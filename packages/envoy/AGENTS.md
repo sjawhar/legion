@@ -582,6 +582,12 @@ In a room, which keeps what it parks across updates, the queue is also the most 
 `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` is a server-encoded one the store judges by its header alone (`refuseUpdateItemCap`), which such a check would refuse the same way;
 `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`, `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
+Every copy that replays the room's commits makes no commit of its own:
+ygo follows a remote apply that changes formatted text with a format cleanup committed with a nil origin, as Yjs does, while the room's own repairs and sweeps are local commits, which never clean up, so `newDocumentCopy` builds every copy with `crdt.WithFormatCleanup(false)` (reearth/ygo#369, in the pinned fork), and a room's load applies its stored history itself, with the cleanup off, then turns the cleanup back on for the updates that follow (`applyLoadedState`, from `onLoadDocument`;
+ygo's `LoadDoc` is handed no bytes).
+A browser's update and a write's publish (`publishLiveUpdate`) reach the room as remote applies, and any cleanup either makes is stored with the rest of the room's history, so every copy replays it.
+Without this a replica and a fold of the stored history each ran cleanups the room never ran, and `*x*y` read back as `*xy*` (`TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown`), and a room loaded from a history holding repeated markers at a text's start held a state the room before it never held (`TestARoomLoadsItsStoredHistoryAsItWasStored`).
+
 A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's edit, a read outside any transaction - stays resident until it has been idle for a minute (`roomIdleTimeout`), when ygo's idle sweeper evicts it.
 ygo's default, eager eviction, evicts a room the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go` checks only the peers):
 the callback's write then lands on the evicted room and reaches the store only through its retiring persistence worker, while the next access has already loaded the store without it and serves, and takes, the next write on a document missing the first.
@@ -644,15 +650,10 @@ The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts 
 A room an `Apply` opened with no peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
 `PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
-A document socket's peer hears from it at least every 15 s (`documentKeepAlive`, `docs/keepalive.go`), as `/ws/live`'s page does.
-`@hocuspocus/provider` closes a socket that has delivered no message for 30 s, and counts every message and nothing else:
-a websocket ping reaches no page, and ygo, unlike `@hocuspocus/server`, sends no peer its own awareness renewal back, so a lone idle editor heard nothing after its sync and closed and re-synced every 33 s.
-The keep-alive is the protocol's own message, an awareness update naming no client, which the provider applies as no change.
-ygo gives no application a way to write to one of its peers, so `Service.ServeHTTP` hands ygo's upgrade a response writer whose hijacked connection follows the frames gorilla/websocket writes on it (`frameWatch`) and puts the keep-alive only between two of its messages:
-never inside a frame gorilla writes in two parts, between a streamed message's frames, or after a close (`TestAKeepAliveGoesOutOnlyBetweenTheWritersMessages`).
-A keep-alive that cannot be written within 10 s closes the connection, which ends ygo's read of it.
-A ygo that sends its peers a keep-alive of its own makes this wrapper removable;
-a provider upgrade that counts something other than messages needs `TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts` checked against it again.
+`@hocuspocus/provider` renews its awareness every 15 to 18 s and closes a socket that has delivered no message for 30 s, and counts every message and nothing else: a websocket ping reaches no page.
+ygo returns a read-write peer's awareness update to every peer, including its sender, so a lone editor receives that renewal.
+A read-only peer receives ygo's bounded empty awareness response and cannot change shared awareness.
+Dispatch writes no document-socket keep-alive frames.
 
 The room's update observer renders a replica of the room, the one its reads walk, not the live tree, since ygo fires it after the transaction has released the document's lock and another write can be integrating meanwhile (`renderedReplica`).
 The replica moves only through the room's commits, one at a time and in commit order:
@@ -3121,8 +3122,12 @@ Each item below names an endpoint and its method, then its contract, and an item
 
   Claims a role for a live session; the claim alone makes it the holder, and the route also adds the role's topic to its interest record.
   Last-claim-wins by default.
-  With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues);
-  any other live holder answers `409 {error, role, holder}` and nothing changes.
+  With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues) in one of three cases:
+  that predecessor has no live registry entry, its live entry carries the claimant's own `client_instance_id`, or either side carries no instance id.
+  The third case is the one this route cannot tell from another client instance's, so it logs that takeover with both session ids.
+  A predecessor still live under another client instance keeps the role, and the claim answers `409 {error, role, holder}` naming it, as any other live holder does.
+  The predecessor's entry is read from the `envoy_sessions` bucket itself, never from this listener's trailing cache of it, and a predecessor read that did not answer is the bus-unavailable 503 with nothing changed.
+  The claimant's own entry is read from the bucket too, and a claimant read that does not answer falls back to the cached entry, so a cache that trails without the claimant's id decides that claim as the third case.
   A write route (below the list).
 
 - `/v1/interests/subscribe` (POST)
@@ -3133,6 +3138,9 @@ Each item below names an endpoint and its method, then its contract, and an item
   It also stores `plugin` and `plugin_version` on the session entry, trimmed of surrounding space and otherwise as sent:
   the npm package the session registers through and that plugin's build (`@legion/envoy-client`'s `subscribe()` sends both on every registration);
   a registration from an older plugin sends neither, and the entry keeps neither.
+  It stores `client_instance_id` the same way: the client instance driving the session, which is one Oh My Pi Envoy extension instance or one Claude Code channel-server process, each minting a random id when it starts.
+  Every registration replaces the stored id with the one it carries, or with none when it carries none, and `/v1/roles/set`'s refresh of the claimant's entry keeps the stored id.
+  That id is what decides a soft claim naming a predecessor and a deregistration that carries one, as those two entries say.
   A topic reaching a private stream subject (`bus.privateStreamSubjects`:
   each session's inbox `notifications.agent.>`, the failed-delivery lane `notifications.envoy.exceptions.notifications.agent.>`, the Legion controller lane `notifications.legion.>`) other than the session's own literal `notifications.agent.<id>` — another session's agent subject, any failed-delivery lane (its own included), a controller lane, or a wildcard overlapping one (`notifications.agent.*`, `notifications.envoy.>`, `notifications.>`, `notifications.*.<x>`;
   `bus.ReachesPrivateStreamSubject`) — is not stored, since `/v1/replay` answers the stored topics and the stored topics drive the fan-out to serve-port sessions, and such a topic would hand the session messages meant for another session or for the controller's role holder:
@@ -3224,7 +3232,11 @@ Each item below names an endpoint and its method, then its contract, and an item
 
 - `/v1/sessions/<session_id>` (DELETE)
 
-  Removes a live session registration.
+  Removes a live session registration, and answers 200 whether or not there was one to remove.
+  The optional `client_instance_id` query parameter names the client instance that is leaving:
+  with it the registration is removed only while it carries that id or carries none, answered `200 {"deleted":true}` for a registration that is gone and `200 {"deleted":false,"reason":…}` for one that stayed, since the caller has nothing to retry either way.
+  So a departing instance never removes the registration a later instance made under the same session id, which is what stops a Claude Code `/clear` handoff clearing the predecessor its own role claim is then weighed against.
+  Without the parameter the registration is removed whoever wrote it, and the answer carries no body at all, as this route always answered.
   A write route (below the list).
 
 The write routes - `POST /v1/interests/subscribe`, `POST /v1/interests/unsubscribe`, `POST /v1/roles/set`, `DELETE /v1/interests/<session_id>` and `DELETE /v1/sessions/<session_id>` - do every store read and write within one 3.5 s budget (`sendRequestBudget`) taken from the request's own context (`store.Registry.UpsertWithin`, `Remove`, `SetRoleWithPrevious`, `session.SessionRegistry.PutWithin` and `Delete`, each bucket call bounded by `bus.Bounded`), where a silent bus held them for the 10 s JetStream wait.
@@ -3780,12 +3792,13 @@ ALREADY_ENROLLED`, and the policy never sees the slot:
 a pod is a requester with no operator, whose service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`.
 Migration 0007 is forward-only: an older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled back past it once a slotted enrollment exists.
 An older broker binary refuses a `BROKER_SERVICES` that names a service for more than one account (`must give each service once`), and the broker is one pod, so once the setting names a service twice the image is never rolled back past this change without moving the setting back in the same step.
-An enrollment's kind is `session` (an agent session on a machine its person logged in:
-the helper's own, or a key a launcher such as agentbox brings through the helper's `enroll-session-key`) or `pod`;
-migration 0012 rewrote every stored `box`/`host` to `session`.
+An enrollment the broker creates is of kind `session` (an agent session on a machine its person logged in:
+the helper's own, or a key a launcher such as agentbox brings through the helper's `enroll-session-key`) or `pod`.
+The `enrollments` kind constraint also admits `vm` (migration 0020), which no route creates.
+Migration 0012 rewrote every stored `box`/`host` to `session`.
 `POST /v1/enrollments` takes only `session` and `pod` (`400 INVALID_KIND` otherwise):
 the `host` and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in again.
-No reader of stored data needs them: the `enrollments` kind constraint admits only the two, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which `record.ParseBody` reads without checking the kind.
+No reader of stored data needs them: the kind constraint admits neither, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which `record.ParseBody` reads without checking the kind.
 The helper still asks an older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box` (`helper/broker.go`, `enroll`:
 gone once the production broker records `session`).
 The CLI and helper speak only the kind-free pair:

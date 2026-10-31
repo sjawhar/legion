@@ -628,7 +628,12 @@ The composer a selection-bar action opens is anchored to the provisional mark th
 the margin owns that mark from then on (`margin-context.tsx`): its Comment / Suggest / Ask switch
 retypes the mark through `ProofEditorHandle.retypeMark` so the server verifies a mark of the kind
 being sent, and the mark is removed when the composer ends unsaved — cancelled, or replaced by a
-newer composer. Each document has one compose send (`marginComposeSendKey`, beneath
+newer composer. The server leaves that mark where it is while the reader is there: its sweep of
+the marks no `asks` or `comments` row records keeps one whose `by` names a user with a browser on
+the room, and counts the mark's time to live from that author's last presence, so a composer open
+longer than the minute a stray mark is given still sends, and a tab that closes or goes offline
+loses the mark it left one more minute later. Each document has one compose send
+(`marginComposeSendKey`, beneath
 `MARGIN_COMPOSER_SEND_KEY`), and from Send on the compose is that send's: the margin hands its
 mark to the held-send store, which keeps it until the send lands or the reader discards the
 refusal (the margin then removes the mark), and the editor's promise resolves. A Retry of the

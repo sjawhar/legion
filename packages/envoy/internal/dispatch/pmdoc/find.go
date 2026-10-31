@@ -1040,12 +1040,19 @@ type MarkRef struct {
 	ID   string
 }
 
+// Marked is a mark identity in the tree with the `by` attribute its first run carries, empty
+// when it has none.
+type Marked struct {
+	MarkRef
+	By string
+}
+
 // ListMarks returns each distinct Proof or Dispatch mark identity in document
-// order. doc must be a tree Validate accepts: the walk descends into every
-// node's children and computes no positions.
-func ListMarks(doc *Node) []MarkRef {
+// order, with the author its first run names. doc must be a tree Validate accepts: the walk
+// descends into every node's children and computes no positions.
+func ListMarks(doc *Node) []Marked {
 	seen := make(map[MarkRef]struct{})
-	var refs []MarkRef
+	var marked []Marked
 	Walk(doc, func(node *Node) bool {
 		if node.Type != "text" {
 			return true
@@ -1063,11 +1070,12 @@ func ListMarks(doc *Node) []MarkRef {
 				continue
 			}
 			seen[ref] = struct{}{}
-			refs = append(refs, ref)
+			by, _ := mark.Attrs["by"].(string)
+			marked = append(marked, Marked{MarkRef: ref, By: by})
 		}
 		return true
 	})
-	return refs
+	return marked
 }
 
 // MarkAttrs returns a copy of the attributes on the first matching mark run: FindMarks' Attrs,

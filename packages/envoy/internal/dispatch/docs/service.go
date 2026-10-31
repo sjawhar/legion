@@ -102,9 +102,6 @@ type Service struct {
 	unrecordedMarkTTL time.Duration
 	// editNoticeQuiet is Deps.EditNoticeQuiet, with its default applied.
 	editNoticeQuiet time.Duration
-	// keepAlive is how often a document socket's peer is sent a keep-alive (keepalive.go):
-	// documentKeepAlive, which a test shortens.
-	keepAlive time.Duration
 	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
@@ -294,13 +291,14 @@ type Service struct {
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to
 	// the document (keepInstance). roomLoads holds what each room's load records between its read
 	// of the store (servicePersistenceAdapter.LoadDoc) and the instance the hook ygo calls next on
-	// the same goroutine starts (onLoadDocument): the head that read saw, and every version this
-	// process appended while the load ran, which reaches no instance of its own (roomLoad).
+	// the same goroutine starts (onLoadDocument): the head that read saw, the state it read, which
+	// that hook applies to the room's document (applyLoadedState), and every version this process
+	// appended while the load ran, which reaches no instance of its own (roomLoad).
 	instances sync.Map
 	roomLoads sync.Map
 	// loadsBegun counts the room loads this service has begun, and numbers each load's record
-	// as it is made (beginRoomLoad), so a caller answering for a refusal its Apply met can tell
-	// the load it waited on from a load that began after it (failUnfinishedLoad).
+	// as it is made (beginRoomLoad), so a caller answering for a load ygo failed on its own can
+	// tell the load it waited on from a load that began after it (failUnfinishedLoad).
 	loadsBegun atomic.Uint64
 	// reads holds the renderings of the documents cold reads served, each under the stored state
 	// it was rendered from (coldRead).
@@ -628,7 +626,6 @@ func New(deps Deps) *Service {
 		agentTokens:       deps.AgentTokens,
 		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:            settle,
-		keepAlive:         documentKeepAlive,
 		markWait:          markWait,
 		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),

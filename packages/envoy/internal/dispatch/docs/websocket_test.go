@@ -334,11 +334,11 @@ func refusedForTheItemCap(t *testing.T, what string, err error, items uint64) {
 // every cold load of a document one client wrote (sjawhar/legion#2519).
 //
 // A header that reads says nothing about the body behind it, so the append of a malformed update
-// is taken, and it is ygo that refuses the history, decoding it into the room it is loading
-// (loadRoomDoc). That refusal reaches the Apply the load answers rather than the adapter, which
-// answers for that load there (applyRoom, failUnfinishedLoad) as a history the adapter itself
-// refused fails it: the room is left failed for the next access to reload, and the record the
-// load began goes with it, since no instance will ever take it (beginRoomLoad, keepInstance).
+// is taken, and the refusal comes when the room's own load applies that history to its document
+// (onLoadDocument, applyLoadedState). That refusal is the load's own failure, not one of this
+// service's answers, so the hook fails the room there and drops the record the load began: the
+// room is left failed for the next access to reload, and the record goes because no instance will
+// ever take it (beginRoomLoad, keepInstance).
 func TestTheStoreJudgesAnUpdateByItsHeader(t *testing.T) {
 	overTheCap := encoding.NewEncoder()
 	overTheCap.WriteVarUint(1)
@@ -419,48 +419,52 @@ func TestTheStoreJudgesAnUpdateByItsHeader(t *testing.T) {
 	}
 }
 
-// heldSecondLoadStore serves update as every room's stored history, and holds the second load of
-// one room where that load has recorded itself and has read nothing yet (beginRoomLoad, inside
-// servicePersistenceAdapter.LoadDoc): the window in which the room's name holds a record whose
-// load is still running.
+// heldSecondLoadStore panics in the store read a room's load makes
+// (servicePersistenceAdapter.LoadDoc), and holds the second load of one room where that load has
+// recorded itself and has read nothing yet (beginRoomLoad): the window in which the room's name
+// holds a record whose load is still running. A panic ygo recovers out of that read is the one
+// load failure nothing of this service answers for on the load's own goroutine (sjawhar/ygo
+// v1.54.1-sami.3, provider/websocket/server.go:1904-1923) - the store's refusal and the history
+// the room's load cannot take are both answered there (LoadDoc, onLoadDocument) - so the record
+// the load began is left under the room's name for the caller whose Apply met the failure
+// (failUnfinishedLoad).
 type heldSecondLoadStore struct {
 	VersionedStore
 	room    string
-	update  []byte
 	loads   atomic.Int64
 	reading chan struct{}
 	release chan struct{}
 }
 
-func (s *heldSecondLoadStore) Load(_ context.Context, room string) (persistence.LoadResult, error) {
-	if room == s.room && s.loads.Add(1) == 2 {
+func (s *heldSecondLoadStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
+	if room != s.room {
+		return s.VersionedStore.Load(ctx, room)
+	}
+	if s.loads.Add(1) == 2 {
 		close(s.reading)
 		<-s.release
 	}
-	return persistence.LoadResult{Update: s.update, Version: 1}, nil
+	panic("the store's read of this room's history panicked")
 }
 
 // A load's failure is answered for the load that failed, and never for the load after it. ygo
-// removes the room and closes its barrier before any waiter wakes (sjawhar/ygo v1.51.3-sami.4,
-// provider/websocket/server.go:1879-1888), so a second load of the room can begin before the
+// removes the room and closes its barrier before any waiter wakes (sjawhar/ygo v1.54.1-sami.3,
+// provider/websocket/server.go:1932-1941), so a second load of the room can begin before the
 // first load's caller has answered for the first, and the record under the room's name by then
 // is the second load's: failing the room there would fail the room that load is building, and
 // dropping that record would leave its instance holding none, so the versions appended while it
-// ran would reach no cursor (keepInstance, sjawhar/legion#2519). Here the second load is held
-// where it has recorded itself and read nothing, and the first load's caller answers in that
-// window: it must leave both the record and the room alone, and the second load's own failure
-// must still fail the room and drop its own record.
+// ran would reach no cursor (keepInstance, sjawhar/legion#2519). Here both loads fail the one way
+// a load fails with nothing of this service left to answer on its goroutine - a panic ygo
+// recovers out of the adapter's read - the second is held where it has recorded itself and read
+// nothing, and the first load's caller answers in that window: it must leave both the record and
+// the room alone, and the second load's own failure must still fail the room and drop its own
+// record.
 func TestALoadFailureAnswersForItsOwnLoadAndNotTheLoadAfterIt(t *testing.T) {
-	malformed := encoding.NewEncoder()
-	malformed.WriteVarUint(1)
-	malformed.WriteVarUint(1)
-	malformed.WriteRaw([]byte{0xff, 0xff, 0xff})
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
 	held := &heldSecondLoadStore{
 		VersionedStore: NewPgVersioned(database),
 		room:           artifactID,
-		update:         malformed.Bytes(),
 		reading:        make(chan struct{}),
 		release:        make(chan struct{}),
 	}
@@ -504,7 +508,7 @@ func TestALoadFailureAnswersForItsOwnLoadAndNotTheLoadAfterIt(t *testing.T) {
 	close(answer)
 
 	if err := <-refused; err == nil {
-		t.Fatal("the first load took a history ygo cannot decode, so nothing here is answered for")
+		t.Fatal("the first load's read panicked, so nothing here is answered for")
 	}
 	if _, kept := service.roomLoads.Load(artifactID); !kept {
 		t.Error("the first load's caller dropped the record of the load that began after it")
@@ -514,7 +518,7 @@ func TestALoadFailureAnswersForItsOwnLoadAndNotTheLoadAfterIt(t *testing.T) {
 	}
 	close(held.release)
 	if err := <-later; err == nil {
-		t.Fatal("the second load took a history ygo cannot decode, want its load refused")
+		t.Fatal("the second load's read panicked too, want its load refused")
 	}
 	if failure := service.roomFailure(artifactID); failure == nil {
 		t.Error("the second load's own failure left the room healthy, so nothing reloads the document")
@@ -541,10 +545,25 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 		return loaded.Update
 	}
 
+	// The load hands ygo nothing and keeps the state on its record for the room's load to apply
+	// (applyLoadedState).
+	loadedState := func(t *testing.T) []byte {
+		t.Helper()
+		served, err := adapter.LoadDoc(artifactID)
+		if err != nil || len(served) != 0 {
+			t.Fatalf("LoadDoc handed ygo %d bytes (%v), want none", len(served), err)
+		}
+		record, ok := service.roomLoads.Load(artifactID)
+		if !ok {
+			t.Fatal("LoadDoc recorded no load")
+		}
+		return record.(*roomLoad).takeState()
+	}
+
 	held := preload(t)
-	served, err := adapter.LoadDoc(artifactID)
-	if err != nil || &served[0] != &held[0] {
-		t.Fatalf("load with a current preload served %d bytes (%v), want the preloaded history itself", len(served), err)
+	served := loadedState(t)
+	if len(served) == 0 || &served[0] != &held[0] {
+		t.Fatalf("load with a current preload served %d bytes, want the preloaded history itself", len(served))
 	}
 	if _, kept := service.preloads.Load(artifactID); kept {
 		t.Fatal("a served preload stayed behind for a later load")
@@ -560,10 +579,7 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 	if _, err := service.persistence.AppendUpdate(context.Background(), artifactID, moved); err != nil {
 		t.Fatalf("append update after the check: %v", err)
 	}
-	served, err = adapter.LoadDoc(artifactID)
-	if err != nil {
-		t.Fatalf("load after the history moved: %v", err)
-	}
+	served = loadedState(t)
 	doc := crdt.New()
 	if err := crdt.ApplyUpdateV1(doc, served, nil); err != nil {
 		t.Fatalf("decode the loaded history: %v", err)

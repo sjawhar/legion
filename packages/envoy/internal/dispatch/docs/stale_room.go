@@ -166,10 +166,11 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 // each of those reached nobody, nothing sends them again, and a document nobody writes again
 // notifies nobody again. service.roomLoads is every room this process has loaded, and nothing
 // here takes an entry out of it: an entry goes when its document is collected (keepInstance),
-// or, for a load that left no document, with the failure that ended that load (onLoadDocument,
-// failRoomLoad), so this ranges over every room loaded since the last collection. An entry
-// whose room has gone costs the interval's lookup and the server's (mayEvict, srv.GetDoc) and no
-// database read, since the head is read only for a room that is still resident.
+// or, for a load that left no document, with the failure that ended that load, where that failure
+// was met (LoadDoc, onLoadDocument, failUnfinishedLoad), so this ranges over every room loaded
+// since the last collection. An entry whose room has gone costs the interval's lookup and the
+// server's (mayEvict, srv.GetDoc) and no database read, since the head is read only for a room
+// that is still resident.
 //
 // The test hook runs after the sweep, so a test that waits on it waits for the sweep too.
 func (e *staleRoomEvictor) connected(ctx context.Context) func() {
