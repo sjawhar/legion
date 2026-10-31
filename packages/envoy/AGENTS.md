@@ -3701,7 +3701,8 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
   An abandoned attempt (`model.MentionAbandonedSQL`) is settled `failed` by the outbox, with its `comment.delivery` receipt, before it publishes the copy (`mentionComment.settleAbandoned`), and an attempt past that lease (`model.MentionResumedSQL`: any pending attempt older than the lease that is not abandoned - the delivery sweep resends it, or a sender holds it queued behind a lane held longer than a lease, or a Retry overtook it while the sender that queued it still holds it) has its copy held as a `comment_fallback_copies` row (migration `0150`), which the fallback pass decides later;
   a row whose decision or publish fails counts the attempt and backs off by `retry.Delay`, as an event does, and is never given up, its `retry.DeadLetterAttempts`th failure logged at Error.
   The doc comment of `publishFallbackCopies` in `internal/dispatch/outbox/mentions.go` is that protocol's one description, races included.
-  Every other session - each attempt `failed`, or no row at all - is published to as if it had not been mentioned, but for the dedupe key of its copy:
+
+- Every other session - each attempt `failed`, or no row at all - is published to as if it had not been mentioned, but for the dedupe key of its copy:
   a copy on the own topic of a session with a `failed` attempt (or an abandoned one, which the outbox settles `failed` first) carries the key that attempt's send went under, `contracts.AgentSendDedupeKey(session, model.CommentMentionIdempotencyKey(comment, target))` - the listener's `agent.<session>.<comment>:<target>` for the mention - in place of `dispatch-<event id>`, and keeps the event id `dispatch-<event id>` (`attempt.sessionCopy`, `mentionDeliveries.fallbackKeys`).
   Of several failed targets the lowest target string keys it;
   the mode a target's attempts went in never shows in it, every attempt of one mention sending under that one key.
@@ -3710,7 +3711,8 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
   A deferral with a denial (`bus.ErrPublishDenied`) or any other failure of the event is backed off as a failure, its attempt counted;
   a deferral that meets a lost NATS connection (`bus.ErrUnavailable`) or a stopping process is released, not backed off, like any event that met them.
   A comment's edit, resolution and reopening, and every other event, are never left to a mention.
-  A mention that landed before its attempt failed is not shown twice:
+
+- A mention that landed before its attempt failed is not shown twice:
   a receipt timeout records the attempt `failed` though the listener may have delivered the mention, a first attempt stranded `pending` past the minute may have landed before its sender stopped, and the outbox settles it and publishes the copy, and a send the killed process had handed the listener before it died, whose delivery sweep resend then fails for good (the listener down after the restart), is followed by the fallback pass's copy.
   Each way the copy carries the mention's own dedupe key, so the host, which drops a frame whose event id it saw or whose named dedupe key it claimed within `DELIVERY_DUPLICATE_WINDOW_MS` (`createDeliveryDedupe` in `packages/envoy-client`), drops it;
   and the stream, whose MsgId is the dedupe key and the subject, stores it no second time within its 72-hour duplicate window.
