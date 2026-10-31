@@ -108,6 +108,10 @@ type RequestObject struct {
 	// LifetimeSeconds is how long an agent-secret grant lasts once granted; nil when it lasts
 	// until the session ends.
 	LifetimeSeconds *int
+	// Peer is what the kernel said about the process that asked, as the helper read it through
+	// the pidfd it had pinned; nil for a request object signed with no handle pinned (a pod, a
+	// box, the CLI's own key) and for every one signed before the claim existed.
+	Peer *PeerFacts
 }
 
 // Service is the service a machine login is for: its one launcher_credential detail's service, ""
@@ -134,6 +138,7 @@ type requestClaims struct {
 	Reason               string                `json:"reason,omitempty"`
 	LoginHint            string                `json:"login_hint,omitempty"`
 	LifetimeSeconds      *int                  `json:"lifetime_seconds,omitempty"`
+	Peer                 *PeerFacts            `json:"peer,omitempty"`
 }
 
 // ValidLifetime reports whether seconds may be a grant's lifetime: a whole number of seconds from
@@ -201,6 +206,11 @@ func VerifyRequestObject(compact, audience string, skew time.Duration, now time.
 			return RequestObject{}, fmt.Errorf("%w: lifetime_seconds is not between 1 and %d", ErrRequestInvalid, math.MaxInt32)
 		}
 	}
+	if c.Peer != nil {
+		if err := ValidPeerFacts(*c.Peer); err != nil {
+			return RequestObject{}, fmt.Errorf("%w: %s", ErrRequestInvalid, err)
+		}
+	}
 	return RequestObject{
 		Compact:         compact,
 		Thumbprint:      c.Issuer,
@@ -212,6 +222,7 @@ func VerifyRequestObject(compact, audience string, skew time.Duration, now time.
 		Reason:          c.Reason,
 		LoginHint:       c.LoginHint,
 		LifetimeSeconds: c.LifetimeSeconds,
+		Peer:            c.Peer,
 	}, nil
 }
 

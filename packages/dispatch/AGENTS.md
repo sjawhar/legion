@@ -836,11 +836,31 @@ the section, the Inbox's empty state, its `Blocked on you` banner and both `Need
 all read it, so a request one of them counts is one the section lists.
 
 `CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
-(`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
-a pod enrollment's worker slot when it has one, session (the same resolution the Inbox row's
-own line uses), lifetime, requested/expiry timestamps, policy
-version, approver - the broker's `anyone`, which a shared secret's request and a service's machine
-login name, reads "Anyone signed in to Dispatch" - then the agent's reason) and
+(`/credentials/machine`) share `CredentialRecordFacts.tsx`, which renders the facts in three
+`<section>`s, each under its own visible heading, so the reader reads the source of a value and
+not only its position. First, **What the broker recorded**: kind, identifiers, enrollment, a pod
+enrollment's worker slot when it has one, lifetime, requested/expiry timestamps, policy version,
+approver - the broker's `anyone`, which a shared secret's request and a service's machine login
+name, reads "Anyone signed in to Dispatch". Second, **What the kernel says about the asking
+process**, which renders only when the broker answered a `peer` (`CredentialPeerFacts` in
+`api/types.ts`: `pid`, `executable`, `working_dir`, `cgroup`, `started_at`, `read_at`), what the
+agent-secrets helper read from the kernel through the pidfd it pinned on its own unix socket.
+Under the heading one sentence, "Read from the kernel through the handle the agent-secrets
+helper pinned, at `<read_at>`, and signed with the session's key. On a machine session the
+helper runs, the asking process never holds that key.", then Process ID, Executable, Working
+directory, Started (`started_at`) and Control group. The sentence says what the broker checked
+and no more: the signature proves the enrolled session's key made the claim, which for a machine
+session the helper runs is the helper's alone, while a box holds its own key (the broker refuses
+a pod's claim outright). Both instants are absolute UTC ("2026-10-30 23:04:11Z", `utcInstant`,
+the one place the page formats one), since the relative `Timestamp` the record facts use would
+not say which moment the helper read. A machine login, a pod, a box that signs its own requests
+and every record the broker made before the field answer no `peer`, and that whole group then
+renders nothing - never empty rows. Third, **What the process says about itself**, which always
+renders: the sentence "Nothing checked these. The asking process, or the launcher that started
+it, chose them.", then the session (the same `CredentialSessionLines` resolution the Inbox row's
+own line uses, "No session named." when neither id is set), which lives here and not among the
+broker's or the kernel's facts because the id is the process's or its launcher's own unsigned
+claim. Then the agent's reason. Both pages also share
 `CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown whenever the record is `pending`).
 The broker's `enrollment.slot` (`implementer-g3`, null without one) is what tells the requests of
 two roles in one pod apart, since they share the pod's kind and runtime id. A record waiting on

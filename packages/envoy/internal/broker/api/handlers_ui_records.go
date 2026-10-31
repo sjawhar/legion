@@ -61,6 +61,41 @@ func enrollmentResp(e record.Enrollment) recordEnrollmentResp {
 	return recordEnrollmentResp{Kind: e.Kind, RuntimeID: e.RuntimeID, Operator: e.Operator, Slot: strPtr(e.Slot)}
 }
 
+// recordPeerResp is what the kernel answered about the process that asked for a credential, as
+// the agent-secrets helper read it through the pidfd it had pinned on its own unix socket and
+// signed into the request object. The record's other fields about the asking session are what
+// that session stated — its Session ids, its Reason — and a page renders the two apart. The
+// signature proves the enrolled session's key made the claim: for a machine session the helper
+// runs, that key is the helper's alone (record.PeerFacts says where that reasoning stops), and a
+// pod's claim is refused when the request is created.
+type recordPeerResp struct {
+	// The pid the pinned handle named when the helper read these facts.
+	PID int `json:"pid"`
+	// /proc/<pid>/exe: the binary the kernel resolved, not the argv the process chose.
+	Executable string `json:"executable"`
+	// /proc/<pid>/cwd: the directory the process is working in.
+	WorkingDir string `json:"working_dir"`
+	// The unified hierarchy's line of /proc/<pid>/cgroup, which names the systemd scope or
+	// service the process runs under.
+	Cgroup string `json:"cgroup"`
+	// When the kernel says the process started.
+	StartedAt time.Time `json:"started_at"`
+	// When the helper read these facts through the pinned handle. A fact a page renders hours
+	// later is honest only while it says when it was read.
+	ReadAt time.Time `json:"read_at"`
+}
+
+func peerResp(f record.PeerFacts) recordPeerResp {
+	return recordPeerResp{
+		PID:        f.PID,
+		Executable: f.Executable,
+		WorkingDir: f.WorkingDir,
+		Cgroup:     f.Cgroup,
+		StartedAt:  time.Unix(f.StartedAt, 0).UTC(),
+		ReadAt:     time.Unix(f.ReadAt, 0).UTC(),
+	}
+}
+
 // recordDecisionResp is a decided record's terminal event. CredentialID is null unless the
 // decision minted a launcher credential: an agent_secret record's approval names none.
 type recordDecisionResp struct {
@@ -109,6 +144,10 @@ type recordResponse struct {
 	RequestedAt time.Time `json:"requested_at"`
 	// How it was decided; null while pending.
 	Decided *recordDecisionResp `json:"decided"`
+	// What the kernel said about the process that asked, read through the handle the helper had
+	// pinned; null for a machine login, for a request no helper signed (a pod's, a box's) and
+	// for one made before the claim existed.
+	Peer *recordPeerResp `json:"peer"`
 }
 
 // buildRecordResponse is GET /v1/credential-requests/{id}'s exact shape, reused verbatim by
@@ -125,6 +164,10 @@ func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 		resp.Enrollment = &enr
 	}
 	resp.Service = strPtr(detail.Service)
+	if detail.Peer != nil {
+		peer := peerResp(*detail.Peer)
+		resp.Peer = &peer
+	}
 	if detail.Decided != nil {
 		resp.Decided = &recordDecisionResp{Event: detail.Decided.Event, At: detail.Decided.At, CredentialID: strPtr(detail.Decided.CredentialID)}
 	}

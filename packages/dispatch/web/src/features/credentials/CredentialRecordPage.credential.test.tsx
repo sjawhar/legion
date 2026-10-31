@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -189,6 +189,110 @@ test("a record's request-only session id is shown with no preamble", async () =>
       "Reviewing LEGION-587 · sess-1 · /home/alice/legion · devbox-alice"
     );
     expect(screen.queryByText(/says it came from/)).toBeNull();
+  } finally {
+    cleanup();
+    getRecord.mockRestore();
+    agents.mockRestore();
+  }
+});
+
+// What the kernel said about the asking process, read through the pidfd the helper pinned: the
+// page groups it apart from what the process says about itself, so the reader sees the source of
+// every value and not only its position.
+test("a record with peer facts renders the kernel group, its one sentence and all five rows", async () => {
+  const { getRecord } = renderRecordPage({
+    ...decidedSecretRecord(),
+    peer: {
+      cgroup: "0::/user.slice/user-1000.slice/session-3.scope",
+      executable: "/home/sami/.mise/installs/github-sjawhar-oh-my-pi/18.13.2/bin/omp",
+      pid: 3224579,
+      read_at: "2026-10-30T23:04:11Z",
+      started_at: "2026-10-30T23:04:08Z",
+      working_dir: "/home/sami/src/oss-verifier",
+    },
+  });
+  try {
+    const kernel = await screen.findByRole("region", {
+      name: "What the kernel says about the asking process",
+    });
+    expect(
+      within(kernel).getByText(
+        "Read from the kernel through the handle the agent-secrets helper pinned, at 2026-10-30 23:04:11Z, and signed with the session's key. On a machine session the helper runs, the asking process never holds that key."
+      )
+    ).toBeDefined();
+    const broker = screen.getByRole("region", { name: "What the broker recorded" });
+    expect(within(broker).getByText("Policy version")).toBeDefined();
+    expect(within(broker).queryByText("Process ID")).toBeNull();
+    expect(within(kernel).getByText("Process ID")).toBeDefined();
+    expect(within(kernel).getByText("3224579")).toBeDefined();
+    expect(within(kernel).getByText("Executable")).toBeDefined();
+    expect(
+      within(kernel).getByText("/home/sami/.mise/installs/github-sjawhar-oh-my-pi/18.13.2/bin/omp")
+    ).toBeDefined();
+    expect(within(kernel).getByText("Working directory")).toBeDefined();
+    expect(within(kernel).getByText("/home/sami/src/oss-verifier")).toBeDefined();
+    expect(within(kernel).getByText("Started")).toBeDefined();
+    expect(within(kernel).getByText("2026-10-30 23:04:08Z")).toBeDefined();
+    expect(within(kernel).getByText("Control group")).toBeDefined();
+    expect(
+      within(kernel).getByText("0::/user.slice/user-1000.slice/session-3.scope")
+    ).toBeDefined();
+  } finally {
+    cleanup();
+    getRecord.mockRestore();
+  }
+});
+
+// Every record from before the helper read a peer, and every machine login, answers without one:
+// the page then says nothing about a kernel at all, rather than showing five empty rows.
+test("a record with no peer facts renders no kernel group and no empty kernel rows", async () => {
+  const { getRecord } = renderRecordPage(decidedSecretRecord());
+  try {
+    expect(await screen.findByText("DEEL_API_KEY")).toBeDefined();
+    expect(screen.queryByText("What the kernel says about the asking process")).toBeNull();
+    expect(screen.queryByText("Process ID")).toBeNull();
+    expect(screen.queryByText("Executable")).toBeNull();
+    expect(screen.queryByText("Working directory")).toBeNull();
+    expect(screen.queryByText("Started")).toBeNull();
+    expect(screen.queryByText("Control group")).toBeNull();
+  } finally {
+    cleanup();
+    getRecord.mockRestore();
+  }
+});
+
+// The session id is the process's own unsigned claim, so it sits under what the process says
+// about itself and never among the kernel's facts, whose group must not contain it.
+test("the session id renders under what the process says about itself, not in the kernel group", async () => {
+  const agents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const { getRecord } = renderRecordPage({
+    ...decidedSecretRecord(),
+    peer: {
+      cgroup: "0::/user.slice/user-1000.slice/session-3.scope",
+      executable: "/usr/bin/omp",
+      pid: 3224579,
+      read_at: "2026-10-30T23:04:11Z",
+      started_at: "2026-10-30T23:04:08Z",
+      working_dir: "/home/sami/src/oss-verifier",
+    },
+    session: { enrollment: null, request: "sess-claimed" },
+  });
+  try {
+    const claimed = await screen.findByRole("region", {
+      name: "What the process says about itself",
+    });
+    expect(
+      within(claimed).getByText(
+        "Nothing checked these. The asking process, or the launcher that started it, chose them."
+      )
+    ).toBeDefined();
+    expect(within(claimed).getByText("Session")).toBeDefined();
+    expect(within(claimed).getByText(/sess-claimed/)).toBeDefined();
+    const kernel = screen.getByRole("region", {
+      name: "What the kernel says about the asking process",
+    });
+    expect(within(kernel).queryByText(/sess-claimed/)).toBeNull();
+    expect(within(kernel).queryByText("Session")).toBeNull();
   } finally {
     cleanup();
     getRecord.mockRestore();

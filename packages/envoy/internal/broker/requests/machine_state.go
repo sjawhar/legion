@@ -265,6 +265,13 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if len(obj.Details) == 0 || obj.Details[0].Type != record.KindAgentSecret {
 		return Request{}, fmt.Errorf("%w: this endpoint accepts only agent_secret authorization_details", record.ErrRequestInvalid)
 	}
+	if obj.Peer != nil && enr.Kind != "session" {
+		// A peer claim is what a machine session's helper read through the pidfd it pinned on its
+		// own socket. A pod has no helper and no such socket, so a pod's claim can only be a value
+		// something in the pod chose, and the approval page renders a peer claim as the kernel's
+		// answer about the asking process. Refuse it rather than store it.
+		return Request{}, fmt.Errorf("%w: a peer claim comes from a machine session's helper, not a %s enrollment", record.ErrRequestInvalid, enr.Kind)
+	}
 	fresh, err := m.Replay(ctx, obj.JTI, obj.Expires.Add(m.Skew+jtiRetentionMargin))
 	if err != nil {
 		return Request{}, err
