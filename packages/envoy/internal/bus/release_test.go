@@ -59,6 +59,18 @@ func awaitHook(t *testing.T, hooked <-chan struct{}) {
 	}
 }
 
+// awaitPushBound waits for the durable consumer to report want for its push binding. nats-server
+// applies a push subscriber's interest, and its release, on the consumer's own goroutine, after
+// the client's bind or unsubscribe is answered, so only the consumer's own report tells a test
+// that the server has applied one.
+func awaitPushBound(t *testing.T, client *bus.Client, consumer string, want bool, what string) {
+	t.Helper()
+	waitFor(t, 10*time.Second, what, func() bool {
+		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+		return err == nil && info.PushBound == want
+	})
+}
+
 func publishReleaseProbe(t *testing.T, client *bus.Client, subject string) {
 	t.Helper()
 	if _, err := client.JS().Publish(subject, []byte(`{}`)); err != nil {
@@ -169,6 +181,9 @@ func TestDrainSubscriptionEndsWhatARestoreBoundAfterTheSubscriptionEnded(t *test
 	if !client.SubOK() {
 		t.Fatal("the reconnect did not bind the drained registration again; the test proves nothing")
 	}
+	// Wait for the server to apply the restore's bind before draining it: the drain and the checks
+	// below would otherwise pass on a binding the server applies afterwards.
+	awaitPushBound(t, client, consumer, true, "the durable to take the restore's binding")
 
 	drained, err := client.DrainSubscription(sub)
 	if err != nil {
@@ -180,10 +195,7 @@ func TestDrainSubscriptionEndsWhatARestoreBoundAfterTheSubscriptionEnded(t *test
 	if client.SubOK() {
 		t.Fatal("SubOK reports a subscription bound after it was drained")
 	}
-	waitFor(t, 10*time.Second, "the durable to lose its subscriber", func() bool {
-		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
-		return err == nil && !info.PushBound
-	})
+	awaitPushBound(t, client, consumer, false, "the durable to lose its subscriber")
 	publishReleaseProbe(t, client, "notifications.github.test.released")
 	time.Sleep(time.Second)
 	if got := stopped.Load(); got != 0 {
@@ -334,15 +346,17 @@ func TestReleaseFailedUnsubscribesWhatARestoreBound(t *testing.T) {
 	if !client.SubOK() {
 		t.Fatal("the reconnect did not bind the failed registration; the test proves nothing")
 	}
+	// Wait for the server to apply the restore's bind before releasing it: only once the durable
+	// has reported the binding, and then its loss, is the server known to have applied both, so the
+	// probe published next stays pending for the fresh bind rather than going to the released
+	// handle's deliver inbox and waiting out the consumer's AckWait there.
+	awaitPushBound(t, client, consumer, true, "the durable to take the restore's binding")
 
 	client.ReleaseFailed("")
 	if client.SubOK() {
 		t.Fatal("SubOK reports a subscription bound after its failed registration was released")
 	}
-	waitFor(t, 10*time.Second, "the durable to lose its subscriber", func() bool {
-		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
-		return err == nil && !info.PushBound
-	})
+	awaitPushBound(t, client, consumer, false, "the durable to lose its subscriber")
 	publishReleaseProbe(t, client, "notifications.github.test.failed")
 	time.Sleep(time.Second)
 	if got := failed.Load(); got != 0 {
@@ -419,6 +433,9 @@ func TestDrainSubscriptionDrainsTheHandleARestoreBound(t *testing.T) {
 	if sub.IsValid() {
 		t.Fatal("the handle Subscribe returned is still valid after its connection closed; the test proves nothing")
 	}
+	// Wait for the server to apply the recovery's bind before draining it, so the drain's release
+	// of the binding below is one the server has something to apply it to.
+	awaitPushBound(t, client, consumer, true, "the durable to take the recovery's binding")
 
 	drained, err := client.DrainSubscription(sub)
 	if err != nil {
@@ -428,10 +445,7 @@ func TestDrainSubscriptionDrainsTheHandleARestoreBound(t *testing.T) {
 		t.Fatalf("DrainSubscription drained %p, want the handle the recovery bound, not the one Subscribe returned (%p)", drained, sub)
 	}
 	waitFor(t, 10*time.Second, "the drain to end", func() bool { return !drained.IsValid() })
-	waitFor(t, 10*time.Second, "the durable to lose its subscriber", func() bool {
-		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
-		return err == nil && !info.PushBound
-	})
+	awaitPushBound(t, client, consumer, false, "the durable to lose its subscriber")
 
 	client.Conn.Close()
 	awaitHook(t, hooked)
