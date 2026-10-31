@@ -309,8 +309,9 @@ type Client struct {
 	// answers without waiting on either: nats.go holds its connection's lock across every
 	// reconnect dial and the connect init after it, which a route that drops the process's
 	// packets leaves hanging for the connect timeout, and nats.Conn.Status waits for that lock.
-	// cmd/listener's delivery lease reads this from the loop that renews the machine's lease
-	// record (lease.SetReceiveSignal), so a read that waits stalls the renewals with it.
+	// cmd/listener's delivery lease reads this, through ConnectedConn, from the loop that renews
+	// the machine's lease record (lease.SetReceiveSignal), so a read that waits stalls the
+	// renewals with it.
 	//
 	// The connection's own callbacks keep it (noteConnection, the state callback of options): a
 	// connect or a reconnect stores the connection, and a disconnect or a close clears it, each
@@ -320,12 +321,23 @@ type Client struct {
 	// it c.Conn, then set the flag themselves (markConnected), since nats.go reports the connect of
 	// a connection the client dialled before either has run, and then clear it if it is not
 	// connected (settleConnected), so a drop around the install never leaves it reading connected.
-	// A connection the client dialled and did not install is cleared where it is let go
-	// (ensureConnWithContext), since it is closed with its callbacks taken off.
+	// A connection the client dialled and did not install never reaches this field at all, since
+	// only an install stores one.
 	connectedConn atomic.Pointer[nats.Conn]
 	// installedConn is the connection the client last made c.Conn, read by the connection
 	// callbacks without c.mu (noteConnection).
 	installedConn atomic.Pointer[nats.Conn]
+
+	// reconnectQueue holds the connections whose connection event has still to be worked through
+	// (onReconnect), oldest first, and reconnectRunning whether a goroutine of the client's is
+	// working through it; both are under reconnectQueueMu. The work of a connection event -
+	// restoring the subscriptions and running the reconnect hooks, which make requests of the
+	// server - must not run on nats.go's callback goroutine: that goroutine runs every callback
+	// of the connection one at a time, so a disconnect that lands during the work would wait
+	// behind it and the connected flag would read up throughout (queueReconnect).
+	reconnectQueueMu sync.Mutex
+	reconnectQueue   []*nats.Conn
+	reconnectRunning bool
 
 	// recovery state
 	recovering int32
@@ -372,7 +384,7 @@ func Dial(name string, urls []string, environment func(string) (string, bool), o
 	}
 	settings := opts.connectionSettings(credential)
 	dial := func(first nats.Option) (*nats.Conn, error) {
-		return connect(name, urls, allOf(settings, first), dialer, nil, nil, nil, nil, opts.reconnectErrClock)
+		return connect(name, urls, allOf(settings, first), dialer, connectCallbacks{}, opts.reconnectErrClock)
 	}
 	if opts.background {
 		return connectFirstInBackground(name, urls, opts.reconnectErrClock, dial, nil, nil)
@@ -442,7 +454,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	}
 	stream := opts.streamConfig()
 	dial := func(first nats.Option) (*nats.Conn, error) {
-		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.noteConnection, c.reconnectErrClock)
+		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.callbacks(), c.reconnectErrClock)
 	}
 	if opts.background {
 		c.awaitingConnection = true
@@ -558,7 +570,17 @@ func (c *Client) JS() nats.JetStreamContext {
 // itself, so it waits neither on the client's lock nor on nats.go's, which a reconnect dial that
 // hangs holds for the connect timeout at a time.
 func (c *Client) Connected() bool {
-	return c.connectedConn.Load() != nil
+	return c.ConnectedConn() != nil
+}
+
+// ConnectedConn is the connection the client is installed on and connected over now, and nil
+// while it has none: the flag Connected reads, as the connection it names. A caller that holds a
+// connection of its own compares the two to tell whether it is still the client's, which no read
+// of nats.Conn can answer: a connection the client replaced goes on reading connected while
+// nats.go reconnects it. It is one atomic load, so it waits on no lock either
+// (cmd/listener's durableReceiver.receiveUp).
+func (c *Client) ConnectedConn() *nats.Conn {
+	return c.connectedConn.Load()
 }
 
 // noteConnection is how a connection's own events move the client's connected flag: nc connected
@@ -849,9 +871,10 @@ var subscriptionRefusal = regexp.MustCompile(`Subscription to ("(?:[^"\\]|\\.)*"
 // subscription and the subscription valid, though the server has removed it.
 //
 // The mark cannot outlive the refusal: nats.go queues the reconnect callback, which clears it
-// (onReconnect), before any refusal of the subscriptions it re-sent, since it holds the
-// connection's lock from the re-send until that callback is queued and reads the server's -ERR
-// only under that lock, and both callbacks run in order on one goroutine. c.mu is held across the
+// (countConnectionEvent, on the callback goroutine, before the event's own work is queued),
+// before any refusal of the subscriptions it re-sent, since it holds the connection's lock from
+// the re-send until that callback is queued and reads the server's -ERR only under that lock,
+// and both callbacks run in order on one goroutine. c.mu is held across the
 // mark so a replacement connection cannot be installed between the check and the mark.
 func (c *Client) onAsyncError(nc *nats.Conn, err error) {
 	if !errors.Is(err, nats.ErrPermissionViolation) {
@@ -1113,7 +1136,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.noteConnection, c.reconnectErrClock)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.callbacks(), c.reconnectErrClock)
 		if err != nil {
 			return err
 		}
@@ -1141,9 +1164,6 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			c.mu.Unlock()
 			nc.SetClosedHandler(nil)
 			nc.SetDisconnectErrHandler(nil)
-			// Its connect counted for nothing, since it was never installed (noteConnection);
-			// the clear below changes nothing unless an earlier install named it.
-			c.noteConnection(nc, false)
 			nc.Close()
 			slog.Info("envoy nats discarded a second replacement connection", slog.String("name", c.name))
 			continue

@@ -67,22 +67,36 @@ Renewing is not the whole of holding. The lease renews on a NATS connection of i
 (`envoy-listener-lease <instance>`), while the durable is received on the pod's main client
 (`envoy-listener <instance>`), so the one can be up while the other is down. The receive loop
 gives the lease one signal for that (`durableReceiver.receiveUp`, `lease.SetReceiveSignal`),
-the same state that makes `/healthz` 503 on the active pod: the main client's connection is
-connected, and a term that is receiving holds a subscription that is valid on that connection. A
+the same state that makes `/healthz` 503 on the active pod: the main client has a connected
+connection, and a term that is receiving is subscribed on that very connection. A
 pod still preparing - reading the durable, waiting out a binding, settling before it has
 subscribed - counts as receiving, as `/healthz` counts it a standby rather than an inactive
 subscription. The lease judges that signal once a round, for the holder's release and the
 standby's take alike ("Take-over" below).
 
+The term's connection is compared with the bus client's own (`bus.Client.ConnectedConn`), not
+with the receive loop's copy of it: a run of the reconnect hooks stops at the first hook that
+fails and main registers the KV rewatch hook ahead of the receive loop's
+(`durableReceiver.reconnected`), so a rewatch that keeps failing leaves the loop's copy naming
+the connection the client replaced - the same closed connection the term is subscribed on, which
+read against each other said this pod was receiving while it delivered nothing. A reconnect in
+place keeps the connection and nats.go re-sends its subscriptions, so the signal reads up
+throughout one, its hooks included. The loop's copy must name the client's connection too, term
+or no term: the loop subscribes on its copy, so a standby whose copy still names a replaced
+connection takes no lease, since every term it started would subscribe nowhere.
+
 The signal loads atomics and waits for nothing. The lease reads it from the loop that renews the
 record, so it may wait on no lock a call into nats.go can hold: nats.go holds its connection's
 lock across every reconnect dial and the connect init after it, which a route that drops the
 pod's packets leaves hanging for the 5 s connect timeout, and the receive loop's own lock is held
-across the subscribe that waits for that same lock. The receive loop keeps the two atomics
-current from what it already learns - the bus client's connection events and each term's
-subscribe and end - and the bus client keeps its connected flag the same way, from its
+across the subscribe that waits for that same lock. The receive loop keeps its atomic current
+from each term's subscribe and end, and the bus client keeps its connected flag from its
 connection's connect, reconnect, disconnect and close callbacks (`bus.Client.Connected`), so no
-caller of it waits on a connection either.
+caller of it waits on a connection either. nats.go runs those callbacks one at a time on one
+goroutine per connection, so the client runs a connection event's own work - restoring its
+subscriptions and running the reconnect hooks, which make requests of the server - on a
+goroutine of its own (`Client.queueReconnect`): on the callback goroutine, a cut during a slow
+hook waited behind it and the flag read up for as long as the hook ran.
 
 The durable's ack wait is 6 s (`consumerAckWait`). The holder sends `InProgress` every 2 s for
 every message it has received and not settled, queued or in hand, so a message waits out the ack
@@ -202,7 +216,11 @@ wait only once the pod holding it has died or lost the lease.
   through. The receive loop ends the term as it ends any lost lease - it drops the subscription
   and leaves what it queued to come back at its ack wait - since nothing can be NAKed over a
   connection that is down. A message published as the connection was cut reaches its session
-  about 13 s later (3 s detection, the 3 s bound, a standby poll and the 7 s hold), inside the
+  about 14.5 s later at worst: up to 3 s before nats.go declares the connection stale
+  (`bus.WithSilentCutDetection`), up to the holder's 1 s renewal round before the lease reads
+  the signal down (`leaseRenewEvery`), the 3 s bound, the standby's 0.5 s poll
+  (`leaseStandbyPoll`) and its 7 s settle hold (`consumerAckWait` and `settleMargin`), plus the
+  standby's subscribe and the delivery itself, inside the
   15 s a hard take-over is bounded at. No pod takes the lease while its own receive connection is
   down - not an absent record, not a released one, not an expired one, and a holder that has
   lapsed does not resume - so the cut pod does not take back what it just released; it stands by

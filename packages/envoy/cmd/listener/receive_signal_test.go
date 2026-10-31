@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -172,4 +173,76 @@ func awaitHeldLock(t *testing.T, complaint string, read func()) {
 		}
 	}
 	t.Fatal(complaint)
+}
+
+// The signal reads the bus client's installed, connected connection itself, and requires the
+// receive loop's own copy and the term's subscription to name it. A run of the reconnect hooks
+// stops at the first hook that fails (bus.Client.runReconnectHooks) and main registers the KV
+// rewatch hook ahead of the receiver's (durableReceiver.reconnected), so a rewatch that keeps
+// failing leaves the receiver's copy and the term's subscription both naming the connection the
+// client has replaced. A signal that compared those two would find them the same closed
+// connection and read up, so the holder would go on renewing a lease it received nothing on while
+// /healthz answered 503; and once it released, a pod with no term left would read up and take
+// the lease back, only to subscribe on the closed connection.
+func TestAReplacedConnectionBehindAFailingHookReadsDownAndReleasesTheLease(t *testing.T) {
+	uri := testnats.URL(t)
+	const machineID = "box-replaced-behind-a-failing-hook"
+	handle, _ := recordingHandler()
+	// The production bound, so the moment between the close and the replacement - well under a
+	// second on a local server - cannot release the lease by itself: the release this row waits
+	// for is the one the replaced connection earns.
+	leaseTiming := testLeaseTiming()
+	leaseTiming.receiveLost = leaseReceiveLost
+	rig := newReceiverRig(t, uri, machineID, "pod-a", handle, testReceiveTiming(), leaseTiming)
+	// The lease judges this pod's receiving by that one signal, as main wires it.
+	rig.lease.SetReceiveSignal(rig.receiver.receiveUp)
+	rig.lease.Start(context.Background())
+	rig.receiver.Start()
+	rig.awaitState(t, receiveActive, 10*time.Second)
+	if !rig.lease.Holding() {
+		t.Fatal("pod-a does not hold the lease it subscribed under")
+	}
+
+	// main's hook order: the hook ahead of the receiver's fails as a rewatch whose request goes
+	// unanswered does, and keeps failing, so the receiver never hears of the replacement.
+	rig.hookBeforeTheReceivers(func(*natsgo.Conn) error {
+		return errors.New("rewatch interest cache: nats: no responders available for request")
+	})
+	closed := rig.client.ConnectedConn()
+	cut := time.Now()
+	closed.Close()
+	waitFor(t, 20*time.Second, "the client to install a connection in place of the closed one", func() bool {
+		installed := rig.client.ConnectedConn()
+		return installed != nil && installed != closed
+	})
+	if rig.receiver.receiveUp() {
+		t.Fatalf("the receive signal reads up %s after the client replaced the connection the term is subscribed on:\n%s",
+			time.Since(cut).Round(time.Millisecond), rig.logs.String())
+	}
+
+	// The lease reads the signal once a round, so the release is due a round after the bound,
+	// counted from the cut: the signal has read down since the close.
+	within := leaseTiming.receiveLost + leaseTiming.renewEvery + 2*time.Second
+	released := rig.logRecord(t, "listener lease released: the receive connection is down", within)
+	if took := time.Since(cut); took > within {
+		t.Fatalf("the holder released %s after the cut, want it within %s", took.Round(time.Millisecond), within)
+	}
+	if down, ok := released["down_ms"].(float64); !ok || down < float64(leaseTiming.receiveLost.Milliseconds()) {
+		t.Fatalf("the release names down_ms %v, want at least the %s bound", released["down_ms"], leaseTiming.receiveLost)
+	}
+	if rig.lease.Holding() {
+		t.Fatal("pod-a still holds the lease it released")
+	}
+
+	// The release ends the term, so no subscription is left to compare, but the receive loop's own
+	// copy of the connection still names the closed one, and every subscribe would go there: the
+	// pod takes the released record no more, though no other pod is there to take it.
+	deadline := time.Now().Add(10 * leaseTiming.standbyPoll)
+	for time.Now().Before(deadline) {
+		if rig.lease.Holding() || rig.receiver.receiveUp() {
+			t.Fatalf("pod-a reads its receive signal up (%v) or holds the lease again (%v) while its receive loop names the connection the client replaced:\n%s",
+				rig.receiver.receiveUp(), rig.lease.Holding(), rig.logs.String())
+		}
+		time.Sleep(leaseTiming.standbyPoll / 2)
+	}
 }

@@ -288,10 +288,14 @@ type durableReceiver struct {
 	reconnects chan struct{}
 	// clientConn is the main client's connection as the receive loop last heard of it: the one
 	// the constructor was handed, and the one each reconnect hook reports (reconnected). It is
-	// an atomic because the lease's signal reads it (receiveUp) and must take no lock a call
-	// into nats.go can hold: nats.go holds its connection's lock across a reconnect dial that a
-	// route dropping this pod's packets leaves hanging, and durableReceiver.begin holds r.mu
-	// across the subscribe that waits for it.
+	// what the loop subscribes a term on (begin, resubscribe) and judges the term's subscription
+	// stale against (repair, report). It is an atomic because the reconnect hook writes it
+	// without r.mu: the hook must wait on no lock of the receive loop's, which begin holds
+	// across the subscribe that waits for nats.go's connection lock, which a reconnect dial a
+	// route dropping this pod's packets leaves hanging holds for the connect timeout. The
+	// lease's signal reads the bus client's own connection instead, so a hook that never runs
+	// cannot leave this copy and the term agreeing on a connection the client has replaced
+	// (receiveUp).
 	clientConn atomic.Pointer[nats.Conn]
 	// subscribed is the term being served as the signal reads it, nil while no term is receiving
 	// (termSubscription). The receive loop stores it whole: a term's successful subscribe
@@ -403,27 +407,42 @@ type termSubscription struct {
 // (lease.SetReceiveSignal): the lease holder releases the record once it has been down for
 // leaseReceiveLost, and no pod takes the record while it is down. It is the state /healthz
 // reports as an inactive subscription on the active pod, read here rather than there: the
-// client's connection is not connected, or the term is receiving and its subscription is no
-// longer valid on that connection, which a connection the client replaced leaves until the
-// resubscribe (report, repair). A holder that is still preparing - reading the durable, waiting
-// out a pre-lease build's binding, settling before it has subscribed - is receiving as far as
-// this goes, as /healthz counts it a standby rather than an inactive subscription: its
-// connection is up and its term is on its way.
+// client has no connected connection, or the term is receiving and its subscription is not on
+// that connection, which a connection the client replaced leaves until the resubscribe (report,
+// repair). A holder that is still preparing - reading the durable, waiting out a pre-lease
+// build's binding, settling before it has subscribed - is receiving as far as this goes, as
+// /healthz counts it a standby rather than an inactive subscription: its connection is up and
+// its term is on its way.
+//
+// The term's connection is compared with the bus client's own installed, connected one
+// (bus.Client.ConnectedConn), never with what the receive loop last heard: a run of the
+// reconnect hooks stops at the first hook that fails (bus.Client.AddReconnectHook) and main
+// registers the KV rewatch hook ahead of this loop's (durableReceiver.reconnected), so a rewatch
+// that keeps failing leaves this loop's own copy of the connection naming the one the client
+// replaced - the same closed connection the term is subscribed on, which compared with each
+// other read as a pod that receives and delivered nothing. A reconnect in place keeps the
+// connection, and nats.go re-sends its subscriptions, so it reads up throughout, hooks and all.
+//
+// The receive loop's own copy of the connection (clientConn) must name that installed one too,
+// with or without a term: the loop subscribes on its copy (begin), so a pod whose copy still
+// names a connection the client replaced cannot receive whatever term it starts, and a standby in
+// that state must not take the lease (lease.poll), only to fail every subscribe until it gives
+// the lease up again.
 //
 // It loads atomics and nothing else. The lease reads it from its own loop, the one that renews
 // the record and releases it when this pod stops receiving, so it may wait on no lock a call
 // into nats.go can hold: nats.go holds its connection's lock across every reconnect dial and the
 // connect init after it, which a route that drops this pod's packets leaves hanging for the
 // connect timeout, and durableReceiver.begin holds the receive loop's lock across the subscribe
-// that waits for that same lock. The receive loop keeps both atomics current from what it
-// already learns: the client's reconnect hook (reconnected) and each term's subscribe and end
-// (begin, resubscribe, end).
+// that waits for that same lock. The receive loop keeps its atomics current from what it already
+// learns: each reconnect (reconnected) and each term's subscribe and end (begin, resubscribe, end).
 func (r *durableReceiver) receiveUp() bool {
-	if !r.client.Connected() {
+	connected := r.client.ConnectedConn()
+	if connected == nil || r.clientConn.Load() != connected {
 		return false
 	}
 	subscribed := r.subscribed.Load()
-	return subscribed == nil || (subscribed.conn != nil && subscribed.conn == r.clientConn.Load())
+	return subscribed == nil || subscribed.conn == connected
 }
 
 func (r *durableReceiver) setState(state receiveState) {

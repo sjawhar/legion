@@ -2801,21 +2801,33 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
 - The delivery lease renews on a NATS connection of its own (`envoy-listener-lease <instance>`) while the durable is received on the pod's main client (`envoy-listener <instance>`), so renewing says nothing about receiving:
   a holder whose main connection alone was lost renewed for as long as its lease connection was up, answered `/healthz` 503 `subscription inactive` and delivered nothing, and no standby took over until the self-health monitor killed the pod.
   The receive loop gives the lease one signal for that state, the same one that makes the 503 (`durableReceiver.receiveUp`, `lease.SetReceiveSignal`):
-  the main client is connected, and a term that is receiving holds a subscription valid on that connection;
+  the main client has a connected connection, and a term that is receiving is subscribed on that very connection (`bus.Client.ConnectedConn`);
   a pod preparing the durable, waiting out a binding or settling before it has subscribed counts as receiving, as `/healthz` counts it a standby.
+  The term's connection is compared with the client's own, never with the receive loop's copy of it:
+  a run of the reconnect hooks stops at the first hook that fails and main registers the KV rewatch hook ahead of the receive loop's, so a rewatch that keeps failing left that copy and the term's subscription naming the same connection the client had replaced, which read against each other said this pod was receiving while it delivered nothing.
+  A reconnect in place keeps the connection and nats.go re-sends its subscriptions, so the signal reads up throughout one, its hooks included.
+  The receive loop's copy must name the client's connection too, term or no term: the loop subscribes on its copy, so a standby whose copy still names a replaced connection takes no lease.
   The lease judges it once a round, for the holder and the standby alike (`lease.receiveDown`, called from `step`).
-  The signal loads atomics and nothing else, since the lease reads it from the loop that renews the record and so may wait on no lock a call into nats.go can hold:
+
+- The signal loads atomics and nothing else, since the lease reads it from the loop that renews the record and so may wait on no lock a call into nats.go can hold:
   nats.go holds its connection's lock across every reconnect dial and the connect init after it, which a route that drops this pod's packets leaves hanging for the 5 s connect timeout, and `durableReceiver.begin` holds the receive loop's own lock across the subscribe that waits for that lock.
-  The receive loop keeps the two atomics current from what it already learns - the client's reconnect hook and each term's subscribe and end (`durableReceiver.reconnected`, `begin`, `resubscribe`, `end`) - and `bus.Client.Connected` reads a flag the connection's own connect, reconnect, disconnect and close callbacks keep (`Client.noteConnection`, the `state` callback of `internal/bus/connect.go`'s `options`), so no caller of it waits on a connection either.
-  A connection the client dials and does not install is taken out of that flag where it is let go, and a late callback of a connection the client has replaced clears nothing, since each clear takes out only its own connection.
-  A holder whose signal has been down for `leaseReceiveLost` (3 s:
+  The receive loop keeps its atomic current from each term's subscribe and end (`durableReceiver.begin`, `resubscribe`, `end`), and `bus.Client.Connected` reads a flag the connection's own connect, reconnect, disconnect and close callbacks keep (`Client.noteConnection`, the `state` callback of `internal/bus/connect.go`'s `options`), so no caller of it waits on a connection either.
+  A late callback of a connection the client has replaced clears nothing, since each clear takes out only its own connection, and only an install sets the flag, so a connection the client dials and does not install never reaches it at all.
+  nats.go runs every callback of one connection one at a time on that connection's own goroutine, so the client hands a connection event's work - restoring the subscriptions and running the reconnect hooks, which make requests of the server - to a goroutine of its own (`Client.queueReconnect`, `workThroughReconnects`).
+  Run on the callback goroutine, that work held the next disconnect behind it and the flag read up for as long as it took, 12.19 s after a cut in a deep review.
+  The flag still moves on nats.go's goroutine alone, so a set and the clear of a later disconnect keep nats.go's own order and no stale set can override a later disconnect or a replacement.
+
+- A holder whose signal has been down for `leaseReceiveLost` (3 s:
   comfortably past the ~1 s nats.go takes to reconnect after it declares a connection stale in 2 to 3 s, and short enough that the hand-over lands inside the 15 s a hard take-over is bounded at) stops renewing and releases the record, logging the WARN `listener lease released: the receive connection is down` with `down_ms`.
+  A message published as the connection was cut reaches its session about 14.5 s later at worst:
+  up to 3 s of detection, up to the holder's 1 s round before the lease reads the signal down (`leaseRenewEvery`), the 3 s bound, the standby's 0.5 s poll and its 7 s settle hold, plus the subscribe and the delivery itself.
   That release carries `unsettled`, `ack_wait_owed` and `stale_binding` whatever the term's own flags stood at, so the standby that takes it at its next poll subscribes at once beside the lost connection's binding and holds the full 7 s settle cap, and no clean-hand-back mark vouches for it;
   the receive loop ends the term as it ends any lost lease (`durableReceiver.endLost`), since nothing can be NAKed over a connection that is down.
   No pod takes the lease while its own receive connection is down - no absent, released or expired record, and no resume after a lapse - so the cut pod does not take back what it released and stands by again once the connection is up;
   a release the bucket does not take keeps the hold, leaving the record to expire as it did before this bound.
   `TestTwoPodsReceiveConnectionLostHandsOverWithin15s` and `TestTwoPodsReceiveConnectionBackInsideTheBoundKeepsTheLease` (build tag `multiprocess`) cut one of a pod's two connections by the client name in its CONNECT frame (`mpLaneRelay`, `cmd/listener/multiprocess_harness_test.go`), and `TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s` holds every connection that pod opens next before its first byte, so its reconnect dials hang.
   In process, `TestTheReceiveSignalAnswersWhileTheReceiveConnectionsLocksAreHeld` (`cmd/listener/receive_signal_test.go`) and `TestConnectedAnswersWhileAReconnectDialHangs` (`internal/bus/connected_test.go`) read the signal and the flag while nats.go holds its connection's lock across such a dial.
+  `TestAReplacedConnectionBehindAFailingHookReadsDownAndReleasesTheLease` (`cmd/listener/receive_signal_test.go`) replaces the connection behind a hook that keeps failing, and `TestConnectedReadsDownAtACutWhileTheReconnectHooksRun` (`internal/bus/connected_cut_during_hooks_test.go`) cuts the link while a hook runs.
 
 - An agent delivery (`notifications.agent.<session>`) reads the session it pushes to from the session bucket itself, bounded by `deliverySessionReadTimeout` (2 s), and tells the three causes of an unplaced attempt apart:
   no record at all (`session.ErrNoSessionRecord`, logged and labelled `no_session_record`), a record naming nothing to push to (`session.ErrNoPushTarget`, `no_push_target`), and a push that failed (`session.ReasonPushFailed`, `push_failed`:

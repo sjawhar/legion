@@ -40,10 +40,12 @@ const (
 // 3 s is chosen between the two bounds it sits in. Below it: nats.go notices a silent cut in two
 // to three seconds (bus.WithSilentCutDetection) and reconnects about a second after that, a
 // second attempt about a second later again, so a link that comes back keeps the lease and only
-// one that stays down loses it. Above it: the standby takes the released record at its next poll
-// (leaseStandbyPoll) and then holds its settle cap (7 s), so a message published as the
-// connection was cut reaches its session about 13 s after the cut, inside the 15 s a hard
-// take-over is bounded at.
+// one that stays down loses it. Above it: the holder reads the signal once a renewEvery, the
+// standby takes the released record at its next poll (leaseStandbyPoll) and then holds its
+// settle cap (7 s), so a message published as the connection was cut reaches its session about
+// 14.5 s after the cut at worst (3 s detection, up to 1 s before the signal is read down, this
+// bound, the 0.5 s poll and the 7 s hold, plus the subscribe and the delivery), inside the 15 s
+// a hard take-over is bounded at.
 const leaseReceiveLost = 3 * time.Second
 
 // leaseConfig carries the lease's timing, so a test of this package shortens it;
@@ -493,11 +495,14 @@ func (l *lease) letGo() (uint64, error) {
 // releasedRecordLocked is the record a release of this term writes: the record as this process
 // last wrote or read it, marked released and no longer receiving, keeping service_since,
 // stale_binding and former_boots as they stand and writing unsettled and ack_wait_owed as the
-// term stands, or both of them set when lapsed says the term's validity had run out (letGo).
+// term stands, or both of them set when owesAckWait says this release owes its successor a full
+// ack wait whatever the term's own flags said. A term whose validity had run out owes one
+// (letGo): what it had in hand comes back only at the ack wait. So does a release for a receive
+// connection that is down (releaseReceiveLost), on a term that has not lapsed at all.
 // Callers must hold l.mu.
-func (l *lease) releasedRecordLocked(lapsed bool) leaseRecord {
+func (l *lease) releasedRecordLocked(owesAckWait bool) leaseRecord {
 	record := l.record
-	record.StaleBinding, record.Unsettled, record.AckWaitOwed, record.Receiving = l.staleBinding, l.unsettled || lapsed, l.ackWaitOwed || lapsed, false
+	record.StaleBinding, record.Unsettled, record.AckWaitOwed, record.Receiving = l.staleBinding, l.unsettled || owesAckWait, l.ackWaitOwed || owesAckWait, false
 	record.Released = true
 	return record
 }
@@ -591,6 +596,14 @@ func (l *lease) giveUp() time.Duration {
 	if err != nil {
 		l.logger.Warn("listener lease not released; a standby takes it once it expires", slog.String("error", err.Error()))
 	}
+	return l.standDown(rev)
+}
+
+// standDown leaves the loop a standby after this term let the record go at revision rev, zero
+// when no release was written: the loop reads the record afresh, does not take rev back for two
+// standby polls (poll), and times its next round at the standby poll it returns. Only the loop
+// calls it, as it calls giveUp and releaseReceiveLost, so the fields it writes need no lock.
+func (l *lease) standDown(rev uint64) time.Duration {
 	l.seenRev, l.lapseSignalled = 0, false
 	l.givenUpRev, l.givenUpAt = rev, l.now()
 	return l.cfg.standbyPoll
@@ -607,7 +620,8 @@ func (l *lease) giveUp() time.Duration {
 // loop does not take the record back for two standby polls, as a give-up does, and takes none at
 // all while the connection stays down (poll). A record another pod has already taken writes
 // nothing and is no error: the revision logged is then zero, and this pod stops holding it all
-// the same.
+// the same. The term is this pod's own hold, read by step in this goroutine a moment ago, so
+// there is no un-held case to answer here.
 //
 // A release the bucket does not take keeps the hold: nothing was handed over, so this pod goes on
 // as a holder whose bucket calls fail - its renewals lapse and a standby takes its record once it
@@ -616,13 +630,10 @@ func (l *lease) giveUp() time.Duration {
 // with no hand-back possible on it (durableReceiver.endLost).
 func (l *lease) releaseReceiveLost(down time.Duration) time.Duration {
 	l.mu.Lock()
-	held, rev := l.held, l.rev
+	rev := l.rev
 	record := l.releasedRecordLocked(true)
 	record.StaleBinding = true
 	l.mu.Unlock()
-	if !held {
-		return l.cfg.standbyPoll
-	}
 	next, err := l.writeRelease(record, rev)
 	if err != nil {
 		l.noteFailure("release after the receive connection went down", err)
@@ -635,9 +646,7 @@ func (l *lease) releaseReceiveLost(down time.Duration) time.Duration {
 		slog.String("lease", l.key), slog.Int64("down_ms", down.Milliseconds()),
 		slog.Uint64("revision", next))
 	l.signal()
-	l.seenRev, l.lapseSignalled = 0, false
-	l.givenUpRev, l.givenUpAt = next, l.now()
-	return l.cfg.standbyPoll
+	return l.standDown(next)
 }
 
 // renew rewrites the holder's record at the revision it last wrote. A renewal that lands counts

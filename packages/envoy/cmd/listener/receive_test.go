@@ -71,6 +71,17 @@ type receiverRig struct {
 	receiver *durableReceiver
 	logs     *cmdtest.LockedBuffer
 	consumer string
+	// earlierHook is the reconnect hook the rig runs ahead of the receiver's, as main registers
+	// the KV rewatch hook ahead of it, and nil until a test sets one (hookBeforeTheReceivers). A
+	// run of the hooks stops at the first that fails (bus.Client.runReconnectHooks), so one that
+	// fails here leaves the receiver's hook unrun.
+	earlierHook atomic.Pointer[func(*natsgo.Conn) error]
+}
+
+// hookBeforeTheReceivers makes hook the rig's reconnect hook ahead of the receiver's, for a row
+// that needs main's hook order. It takes effect from the next connection event.
+func (rig *receiverRig) hookBeforeTheReceivers(hook func(*natsgo.Conn) error) {
+	rig.earlierHook.Store(&hook)
 }
 
 // newReceiverRig builds a pod named instance of machineID's listener on the NATS at uri, whose
@@ -137,7 +148,14 @@ func newReceiverRigAs(t *testing.T, busURI, stateURI, seed, machineID, instance 
 		logger:   logger,
 		timing:   timing,
 	})
-	client.AddReconnectHook(rig.receiver.reconnected)
+	client.AddReconnectHook(func(conn *natsgo.Conn) error {
+		if earlier := rig.earlierHook.Load(); earlier != nil {
+			if err := (*earlier)(conn); err != nil {
+				return err
+			}
+		}
+		return rig.receiver.reconnected(conn)
+	})
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
