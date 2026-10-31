@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-336",
+  "previousHandoff": "ec7c7ad0a98ff101f123d1228a9af5ba348c737e",
+  "round": "3 — the forward merge of main; the head conflicted, so GitHub ran no checks on it. No code of this change was altered.",
+  "proof": [
+    {
+      "criterion": "The conflict with main is resolved, every removal this change makes survives the merge, and main's own edits on the same lines survive it too",
+      "surface": "the repository at the merge head",
+      "command": "jj -R \"$LEGION_WORKSPACE\" new legion/INFRA-336 \"main@origin\" -m \"merge: resolve conflict against main@origin\"; then the plan's C1 grep with its score.test.ts exclusion, the guard grep over that one file, the C4 greps and the C5 grep, all at the merge head",
+      "observed": "One conflicted file, packages/daemon/internal/prompts/go/architect-common.md: both sides append a paragraph after the credential paragraph — this change's time sentence, and main's paragraph on the bash tool's one shell and the Dispatch variables (3f7b3e75, sjawhar/legion#2295). Resolved by keeping both, main's first and this change's last. C1 prints nothing (exit 1); the guard grep over packages/pi-legion/scripts/skill-scenarios/score.test.ts prints its one line, :2956, the legacy-shape body in the tester's red test; the time sentence is in go/architect-common.md, go/worker-common.md and roles/controller-root.md, once each; previousHandoff is in go/worker-common.md and the four role residues; the correction sentence is in each of the four docs/solutions notes.",
+      "headSha": "5c5474e08c3ac5da7c2c66bff72213dcb8885f81",
+      "negativeControl": "before the resolution the merge left the conflict markers in that one file, and `jj status` named it `2-sided conflict`; `jj restore --from main@origin` alone would have dropped this change's paragraph, which the C4 grep then prints for two files instead of three. The resolution was checked with that grep, not by reading the file."
+    },
+    {
+      "criterion": "C3 (A2, A4, R1, R3) holds at the merge head: an agent reading the prompt this checkout's daemon composes writes a handoff with no `completed` key and with `previousHandoff`",
+      "surface": "three real headless Oh My Pi sessions on the tester, reviewer and implementer prompts `workerPane()` composes from this checkout's daemon module (`go run ./cmd/daemon-pane`, which snapshots the merge head's embedded prompts)",
+      "command": "bash /legion/scratch/tmp/infra336/c3-sessions.sh head \"$LEGION_WORKSPACE/packages/daemon\" — composes each role's --append-system-prompt argument, then runs `omp -p --session-dir <dir> \"<the role's task>\" --append-system-prompt \"$(cat <prompt>)\"` with every LEGION_* and DISPATCH_* variable unset, OMP_SESSION_SQL_DSN_FILE unset and OMP_SESSION_STORAGE=file; then `jq -r 'has(\"completed\")'` and `jq -c 'keys'` on each handoff",
+      "observed": "all three print has(completed)=false, and each body's key set is the shape its role part spells: the reviewer's carries previousHandoff 2b05c945… (the commit its task named) and headReviewed 9b2d7e6c…, the tester's and the implementer's carry previousHandoff \"\". The implementer session's pull-request comment carried 2026-10-31T04:59:01Z, and that string is in a `toolResult` entry of its JSONL — the `date -u +%FT%TZ` it ran.",
+      "headSha": "5c5474e08c3ac5da7c2c66bff72213dcb8885f81",
+      "negativeControl": "the same three tasks on the new main's prompt, composed from the daemon module of 3f7b3e753f8510131c725e9df0df0d97126edb6e extracted with `git archive`: all three handoffs carry `completed` and none carries `previousHandoff`, and the tester's and the reviewer's both read 2026-10-31T00:00:00Z — midnight — in sessions that ran at 05:00Z, each string in an assistant entry of its transcript and in no tool result. The implementer control, whose task made it run `date`, wrote the true 05:00:08Z, which its transcript holds in a toolResult. That is the defect, reproduced against the base this merge brings in."
+    },
+    {
+      "criterion": "C7: the repository's own checks for this change's paths, on the merged tree, before the push",
+      "surface": "the repository's own test and lint lanes",
+      "command": "(cd packages/daemon && go test -count=1 ./internal/prompts/... ./internal/api/... && go vet -tags e2e ./...); (cd packages/pi-legion && bun run typecheck && bun test scripts/skill-scenarios/score.test.ts); bunx biome check packages/pi-legion packages/daemon docs skills",
+      "observed": "go test ok for both packages (0.131s, 1.067s), go vet clean, tsc clean, score.test.ts 68 pass 0 fail including the tester's red test, biome checked 117 files with no fixes",
+      "headSha": "5c5474e08c3ac5da7c2c66bff72213dcb8885f81",
+      "negativeControl": "the merge brought 80 new and 118 modified files from main, so these lanes judge this change against the base it will merge into rather than the base it was written on; before the merge they ran on the old base, where main's 2295 was absent"
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/prompts/go/architect-common.md (the merge's one conflict, resolved by keeping both paragraphs)"
+  ],
+  "trickyParts": [
+    "The merge resolution took main's whole copy of architect-common.md with `jj restore --from main@origin` and then added this change's paragraph back at the end, rather than editing conflict markers by hand: main's own new paragraph is long and reproducing it by hand would have risked changing its bytes."
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "After a retro, the revset the prompt gives for `previousHandoff` answers retro's removal commit rather than a commit that carries a handoff: `files(root:\".legion/<issue>/<phase>.json\")` matches any commit whose diff touches the path, and the removal does. This round's value, ec7c7ad0, is therefore the retro commit. It still serves the field's purpose — it differs from the round before's value and makes the bytes new — but it does not describe what the prompt says it describes. Reported to the architect.",
+    "The scratch harness of the earlier rounds was lost with the pod: $TMPDIR/infra336 was empty in the recreated workspace. It was rebuilt from the retro note docs/solutions/testing/prove-a-prompt-change-with-the-production-composer-a-real-session-and-the-old-prompt-as-the-control-INFRA-336.md, which was written for exactly this case and was enough to rebuild it without re-deriving anything."
+  ]
+}
