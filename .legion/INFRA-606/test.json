@@ -2,52 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-30T20:45:00Z",
-  "round": 16,
-  "headTested": "afab3fdca01bad52fda2aff7fac839a8f3641b11",
-  "handoffHead": "7ab1b26526c652288b1182f2478f4502c7dc0745",
-  "roundShape": "Full round, as the architect asked: b423cb71 changes runtime files (model.go, comment_delivery.go, delivery_sweep.go, outbox/mentions.go), and afab3fdc merges main d126b19d forward.",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round16-tar-gz (RESULTS.md); scripts: dispatch://INFRA-606/artifact/infra606-tester-scripts-tar-gz version 6",
+  "completed": "2026-10-31T01:10:00Z",
+  "round": 17,
+  "headTested": "ed9b67599c7c73016199563d60ef3a626a0cca53",
+  "handoffHead": "859ac72da2a4c88c2971838157453296ae6d1db5",
+  "roundShape": "Full round, as the architect asked: 8f68d44d merges #2392 (the event horizon) through runtime files (event_stream_relay.go, live_events.go, delivery_live_hub*.go, server.go, store/pool.go), and 57c4a697 changes four hub-test rigs.",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round17-tar-gz (RESULTS.md); scripts: dispatch://INFRA-606/artifact/infra606-tester-scripts-tar-gz version 7",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's tests at head (113 api tests across the red tests and the Supersede, Retry, Sweep, Mention, Keyed, Fallback and Claimant groups) and they pass. Then drove the round-8 case on the real binary: a Retry in another mode that lands but times out leaves one copy, where round 15's build delivers two."
+    "how": "Re-ran the implementer's suites at head. Events, outbox, store (on a fresh database) and multiprocess (129) pass. The api suite passes except two tests that are now flaky (failures below) and the local-collation test. The horizon claim holds on the real binary (proof below)."
   },
   "failures": [
     {
-      "criterion": "The pull request merges into main (the architect's instruction for this round: complete failing on a conflict).",
-      "evidence": "gh pr view 2406 --json mergeable,mergeStateStatus reads CONFLICTING / DIRTY at 7ab1b265, against main 6fa26c74. Main's #2392 (733bac81, 'writes to different issues no longer wait on one database-wide event lock', INFRA-591) took migration 0149 (0149_event_horizon.up.sql and .census.sql), the number this PR's 0149_comment_fallback_copies uses. It also changes 20 files this PR changes, among them the runtime files api/event_stream_relay.go, delivery_live_hub.go, delivery_live_hub_intake.go, delivery_live_events.go, live_events.go, events.go, server.go, routes_table.go, events/broker.go, events/stream.go and store/pool.go. The next forward merge resolves runtime code, so it is a full round."
+      "criterion": "No required test is made flaky by the change (the CI lanes that run internal/dispatch/api stay green).",
+      "evidence": "TestIdenticalViewsShareOneRecompute (delivery_live_hub_test.go:2086, 'recomputes for two identical views = 2, want 1') failed in CI's envoy-go-race-api at ed9b6759 (job 124369018657, log line 7697). Locally `go test -p 2 -parallel 4 ./internal/dispatch/api/ -run '^TestIdenticalViewsShareOneRecompute$' -count=20` fails 4 of 20 at head, and failed 2 of 15 in a second run. The same command at afab3fdc fails 0 of 15, and on main 76221977 fails 0 of 15. The extra recompute has cause=change: the relay feed, taken on a goroutine of the hub generation's own, marks every view dirty when it arrives. That is the seed recompute 57c4a697 settled in four other hub tests, and this test was not given the same settle."
+    },
+    {
+      "criterion": "No required test is made flaky by the change (this PR's own held-lane order test).",
+      "evidence": "TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep fails 4 of 20 at head (`go test -p 2 -parallel 4 ./internal/dispatch/api/ -run '^TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep$' -count=20`), 3 of 15 in a second run, and once in the full api suite. The failure is 'the queued attempt of <id> for session:s1 does not carry the claim its sender holds' (comment_delivery_sender_test.go:954). The same command at afab3fdc fails 0 of 15. ageQueuedClaims holds sender.mu and expects each row's claimed_at to equal sender.claims. But the refresh loop (20 ms in this test) writes the rows outside the lock and updates the map afterwards under it (comment_mention_sender.go:340-350), so a refresh in flight leaves the row newer than the map. The merged pool change shifts the timing so the window is hit."
     }
   ],
-  "failed": 1,
+  "failed": 2,
   "proof": [
     {
-      "criterion": "Review round 8 finding 1: a Retry in another mode that lands but times out leaves the mentioned session exactly one copy, with no attempt left pending.",
-      "surface": "Two envoy-dispatch processes on one database. A reaches the listener through the 2 s latency proxy. B reaches it through slowsend.py, which forwards every request at once and holds only the answer to POST /v1/messages/send for 7 s, so B's send lands and B's 5 s window runs out. ses-y advertises steer and aside.",
-      "command": "timedretry.sh head-none none; timedretry.sh head-route route (6 person comments on LGA-7 mention ses-y on A, so c6's attempt 1 waits queued in A's lane; c6 is then retried in aside through B)",
-      "observed": "The Retry answers 201 with attempt 2 failed, 'the message may already have been delivered'; the proxy log shows the listener answered that send 200. A's lane then sends attempt 1, which the listener answers duplicate=true. Attempt 1 settles sent, nothing stays pending, there is no fallback row, and ses-y stores c1-c6 once each. The routed run gives the same result.",
-      "headSha": "afab3fdca01b",
-      "negativeControl": "timedretry.sh r15-none none on round 15's build edaaae7e: attempt 1 is sent with duplicate=false, and ses-y stores c6 twice."
+      "criterion": "The event horizon on the real binary: with an event insert held open below a committed comment, a live stream, a resume and an overflow catch-up each deliver both in id order once the insert commits, and none skips the lower id.",
+      "surface": "GET /ws/live, events view, as person-1 (wse client), against envoy-dispatch built from 859ac72d. The held insert is a psql transaction that calls pg_current_xact_id() and then inserts an artifact.version event, as Broker.Append does.",
+      "command": "horizon.sh live live; horizon.sh resume resume (reconnects with resume.since = the newest id before L); horizon2.sh head-stall (L1 held, 100 comments, L2 held, 100 comments with 3 KB bodies; the reader stops reading, with a 2 KB receive buffer, while L1 commits; Postgres logged every statement)",
+      "observed": "Live: nothing above L while it was open, then L (29786) and the comment (29787) in order. Resume: events_start replay_complete true and nothing until L committed, then 29786 and 29787. Overflow: after L1 committed the subscriber held 101 events, the highest 29886 = L2-1. Postgres logged two catch-up reads, 'id > 29850 and id <= 29886' and then 'id > 29951 and id <= 29987'. After L2 committed it held all 202 events once each, in id order, with L1 first and L2 at position 101. Past the replay bounds (300 comments of 6 KB): L and 64 events, then ended 'behind', as designed.",
+      "headSha": "ed9b67599c7c",
+      "negativeControl": "The same three runs on round 16's build afab3fdc, whose relay reads past the horizon: live and resume deliver the comment while L is open, and L is never delivered. The overflow run delivers 200 events, and neither L1 nor L2 is ever delivered."
     },
     {
-      "criterion": "The review's repros: round 8's gives the session one frame and fails with the shared key reverted; round 7's no-route failed Retry keeps its copy.",
-      "surface": "Go tests in internal/dispatch/api against Postgres 16, added through go -overlay, so the workspace is not changed",
-      "command": "go test -overlay ov/head.json -run 'TestR8|TestRepro' ./internal/dispatch/api/; the same with ov/modekey.json, which appends ':'+mode to the key at comment_delivery.go:653. I adapted the r8 repro: it calls dropRepeats and counts the frames the listener handed (not duplicate), because with a shared key its own 'k1 != k2' assertion can never fail.",
-      "observed": "Head: 2 sends of the comment, 1 frame handed, 1 key; PASS. The r7 no-route repro passes, with attempt 1 sent. Its routed case fails, because it asserts a route copy that round 7's build needed; at head attempt 1 is sent, so the route copy is rightly suppressed and s1 has one copy.",
-      "headSha": "afab3fdca01b",
-      "negativeControl": "With the mode restored in the key: 2 frames handed under 2 keys, and the r8 repro fails."
+      "criterion": "Round 16's results still hold at this head: one frame per mention, the late-answered Retry leaves one copy, the restart without a storm.",
+      "surface": "Go tests through go -overlay; two Dispatch processes with slowsend.py in front of the second process's listener; the load-test restart scenario",
+      "command": "go test -overlay ov/head.json and ov/modekey.json -run 'TestR8|TestRepro'; timedretry.sh h17-none none and h17-route route; run-step.sh r17-restart-1x --events 4 --sessions 400 --requests 60 --live 50 --live-resume 1 --live-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms",
+      "observed": "The r8 repro hands 1 frame. The late-answered Retry: attempt 1 is sent with duplicate=true, ses-y stores one copy and nothing stays pending, with and without a route. Restart (build 859ac72d, clean tree): 50 reconnects, replayed frames per reconnect at most 35 (last_id) and 9 (stale, 12,600 behind), 10 refetches by the stale sockets, 898 KiB replayed in total, 19.5 Dispatch CPU-s in the minute after the restart. Sampled pod memory peak during it: 7.6 GB.",
+      "headSha": "ed9b67599c7c",
+      "negativeControl": "With the mode restored in the key, the r8 repro hands 2 frames and fails."
     },
     {
-      "criterion": "Round 7's paths still give one copy each (failed Retry, Retry in flight, dead sender, the sweep); the migration runs both ways against main; the suites pass.",
-      "surface": "The local stack, a scratch database 'mig', and Go suites against Postgres 16",
-      "command": "retryfail.sh h16 30; retryk.sh flight16 steer 3 2; crash.sh r16person 1 150; STOP_LISTENER=1 crash.sh r16down 1 170; stealp.sh 45; defer.sh h16 40; rolling.sh; mig.sh main, then head, main, head on database mig; go test ./internal/dispatch/outbox/ ./internal/dispatch/store/; go test -tags multiprocess ./cmd/dispatch",
-      "observed": "Failed Retry with no route: attempt 1 is sent, and every comment arrives once, in order. Retry in flight: attempt 1 is superseded, attempt 2 sent, one copy. Kills: one copy per session, with the listener up and down. Two processes: 45 comments once, in order. Silent listener: published within 62 s. Rolling update: 30 attempts once, in creation order. Migration: main 0be366cf migrates a fresh database to 148; head applies 149 (the table and its 2 indexes); main then starts healthy on the 149 database, and head starts again. Suites: outbox ok, store ok, multiprocess 127 PASS (sampled pod memory peak 3.47 GB).",
-      "headSha": "afab3fdca01b",
-      "negativeControl": "Round 14 recorded the no-route failed Retry giving no copy on e4846fb7."
+      "criterion": "The migration runs both ways against main; the hub-test rig change only waits for the seed.",
+      "surface": "A scratch database 'mig'; the diff of 57c4a697",
+      "command": "mig.sh main, head, main, head on database mig (main is 76221977, which carries 0149_event_horizon); jj diff -r 57c4a697",
+      "observed": "Main migrates a fresh database to 149, head applies 150 (comment_fallback_copies and its 2 indexes), main starts healthy on the 150 database, and head starts again. 57c4a697 adds rig.settle() waits, narrows the held-recompute filter to the measured timeline view, subscribes a warm measures view before the measured timeline, raises one wait from 3 s to eventFeedWait (30 s), and adds one freshness expectation. No assertion is removed or loosened. The warm view does mean the timeline is no longer the generation's first view in that test.",
+      "headSha": "ed9b67599c7c",
+      "negativeControl": "None for the diff reading; the migration's control is main itself starting on the newer database."
     }
   ],
   "notes": [
-    "CI at afab3fdc, read at about 20:40Z: lint, typecheck, test and pr-title success; dispatch-multiprocess and envoy-go-race success. Still running or queued: dispatch, envoy-go, envoy-client, ci-filters, listener-server-change, dispatch-memory, dispatch-browser-multiprocess and envoy-smoke; dispatch and envoy-go are unread. The handoff head 7ab1b265 reported no runs.",
-    "Every red test (5) passes at head, and none was modified this round.",
-    "The pod was recreated before this round; the stack was rebuilt from the attached scripts and seeded at migration 149."
+    "CI at ed9b6759, read at about 01:00Z: lint, typecheck, test and pr-title success; envoy-go-race-api failure (TestIdenticalViewsShareOneRecompute). envoy-go and dispatch were in progress, so both are unread. GitHub showed mergeable UNKNOWN while it recomputed.",
+    "The store suite's one failure on the shared 'postgres' test database (TestPgSessionStoreAdvancesGenerationOnRevocation: relation comment_fallback_copies already exists) came from that database carrying the PR's earlier 0149 table from my round 16. On a fresh database the suite passes.",
+    "Every red test (5) still passes at head, and none was modified this round."
   ]
 }
