@@ -276,7 +276,7 @@ func TestAnOwnerLeftForTheBatchsEndLogsItsFailureOnce(t *testing.T) {
 	for line := range strings.SplitSeq(logged.String(), "\n") {
 		if strings.Contains(line, "dispatch outbox: publish event") {
 			lines++
-			if !strings.Contains(line, fmt.Sprint(denied.ID)) {
+			if !strings.Contains(line, fmt.Sprintf("event_id=%d ", denied.ID)) {
 				t.Fatalf("the publish line %q names no denied event; event %d was denied", line, denied.ID)
 			}
 		}

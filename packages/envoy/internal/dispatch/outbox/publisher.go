@@ -301,7 +301,7 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 		record, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 		defer cancel()
 		holds, err := recordBatch(record, deps, outcomes, holder)
-		done.wrote, done.holds = true, holds
+		done.holds = holds
 		return done, err
 	}
 	settleOwner := func(owner string) {
@@ -320,7 +320,7 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 		switch {
 		case err != nil:
 			recordErr = err
-		case !done.wrote:
+		case result.fenced:
 			return
 		case !done.holds:
 			slog.Error("dispatch outbox: the publisher hold is no longer this process's, so the owner's back-offs and releases were not written",
@@ -390,7 +390,7 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 		result.blocked = true
 		return result, err
 	}
-	if !done.wrote {
+	if result.fenced {
 		return result, nil
 	}
 	if !done.holds {
@@ -437,13 +437,12 @@ type batchResult struct {
 }
 
 // settlement is what one settle-and-record (publishBatch's settleAndRecord) came to: how many of
-// its events it marked published, whether any of them was released, whether it wrote them at all
-// - a batch past the publisher hold's deadline is left unrecorded - and, when it wrote, whether
-// the hold was still this process's.
+// its events it marked published, whether any of them was released, and, when it wrote them,
+// whether the hold was still this process's. It wrote them unless the batch is fenced
+// (result.fenced): a batch past the publisher hold's deadline is left unrecorded.
 type settlement struct {
-	published    int
-	released     bool
-	wrote, holds bool
+	published       int
+	released, holds bool
 }
 
 // outcomeState is what an event of a batch came to.
