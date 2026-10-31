@@ -110,6 +110,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	skipBrowser := flags.Bool("skip-browser", false, "leave the browser row unchecked: the build of an image for a deployment that turns Oh My Pi's browser off (browser.enabled: false), which carries no Chromium")
 	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the role prompts this binary embeds")
 	roleNamespaces := flags.String("role-namespaces", "", "run one role generation's namespaces (legion launcher role-init) over a layout of its own in this directory, on a volume of its own, and refuse when it fails; its home is an empty directory there, not the image's (the probe Sandbox passes it)")
+	testPostgres := flags.String("test-postgres", "", "prove the pod's own test database in this directory — the image's legion-testpg checked and started, a database made and dropped through LEGION_TEST_PG_DSN, and the server stopped — and refuse when it fails (the probe Sandbox passes it for a deployment that sets runtime.kubernetes.test_postgres; the image build does not)")
 	var roleOverlays roleConfigFilesFlag
 	flags.Var(&roleOverlays, strings.TrimPrefix(bootprobe.RoleConfigFilesFlag, "--"), "<role>=<file>[:<file>…]: a role's own Oh My Pi overlays (role_config_files), read after the environment's PI_CONFIG_FILES as that role's Oh My Pi starts on them; repeatable, one per role (the probe Sandbox passes it)")
 	if code, ok := parseFlags(flags, args); !ok {
@@ -147,6 +148,15 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 			err = launcher.CheckRoleNamespaces(*roleNamespaces, self, "version")
 		}
 		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+			return 1
+		}
+	}
+	// The pod's own test database, under the runtime a pod runs on: the probe pod is the first
+	// place this deployment's gVisor starts the server, so a runtime it cannot run under refuses
+	// the boot probe rather than every pod's first Postgres test.
+	if *testPostgres != "" {
+		if err := launcher.CheckTestPostgres(*testPostgres); err != nil {
 			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 			return 1
 		}

@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -61,6 +62,7 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 	}
 	add(ompsessions.DSNFileName, "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)", false)
 	add(slackChannelsVariable, "Legion's runtime sets for the controller it launches, from the project's slack_channels alone", false)
+	add(launcher.TestPGVariable, "Legion's runtime sets in every role of an issue pod whose deployment serves the pod's own test database (runtime.kubernetes.test_postgres), and refuses here whether or not it does, since a pod env naming another server would point every test at it", false)
 	const claude = "Legion's runtime sets for a role it launches on Claude Code (worker_backends)"
 	for _, pair := range claudelaunch.Environment("") {
 		name, _, _ := strings.Cut(pair, "=")

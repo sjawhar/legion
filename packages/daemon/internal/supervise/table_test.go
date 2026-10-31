@@ -162,6 +162,7 @@ func samples(t *testing.T) map[string][]Event {
 		"RequestOperatorClose": {RequestOperatorClose{}},
 		"RequestRetry":         {RequestRetry{}},
 		"RequestOperatorRetry": {RequestOperatorRetry{}},
+		"RequestForgetSession": {RequestForgetSession{}},
 		"RequestDeliver":       {RequestDeliver{}},
 		"RequestExit":          {RequestExit{}},
 	}
@@ -309,6 +310,8 @@ func fenced(ev Event, c Claim) Event {
 		return RequestRetry{Claim: c.Token}
 	case RequestOperatorRetry:
 		return RequestOperatorRetry{Claim: c.Token}
+	case RequestForgetSession:
+		return RequestForgetSession{Claim: c.Token, Session: c.Session}
 	case RequestDeliver:
 		return RequestDeliver{Claim: c.Token, Task: "another task"}
 	case RequestExit:
@@ -415,7 +418,7 @@ func TestAnEventForAnotherClaimIsAnError(t *testing.T) {
 func wantsRefusal(ev Event) bool {
 	switch ev.(type) {
 	case RequestSpawn, RequestRegister, RequestReady, RequestSuspend, RequestResume, RequestStop,
-		RequestRetry, RequestOperatorRetry, RequestDeliver, RequestExit:
+		RequestRetry, RequestOperatorRetry, RequestForgetSession, RequestDeliver, RequestExit:
 		return true
 	}
 	return false

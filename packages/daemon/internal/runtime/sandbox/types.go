@@ -174,6 +174,14 @@ type Options struct {
 	// working directory and with the environment Oh My Pi gets — through the start wrapper
 	// (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
 	Setup []string
+	// TestPostgres is runtime.kubernetes.test_postgres: every issue pod serves its own PostgreSQL
+	// for tests, started by the roles container's launcher before it accepts a role start and
+	// started again whenever the postmaster exits (launcher.Config.TestPostgres), and every role
+	// of such a pod is told TestPGVariable. It is the launcher's and not a role's setup step
+	// because a role's generation runs as the init of its own PID namespace, whose end kills
+	// every process in it, so a server a role started would die with that generation and take
+	// every sibling role's test database with it.
+	TestPostgres bool
 	// BootTimeout bounds each wait of a relaunch, its wait for the API server to answer one of its
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).
