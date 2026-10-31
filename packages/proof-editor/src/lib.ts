@@ -89,7 +89,7 @@ import {
 } from 'proof-sdk-upstream/src/editor/plugins/marks';
 
 import { dispatchMarkPlugins, remarkDispatchMarksPlugin, dispatchMarkHandler } from './dispatch-marks';
-import type { MarkAction, SelectionBarActionKind } from './dispatch-marks';
+import type { MarkAction, RecordMarkPlacement, SelectionBarActionKind } from './dispatch-marks';
 import { commentOnSelection, dispatchActionBarPlugin } from './dispatch-action-bar';
 import { registerPopoverHookInstance } from './dispatch-popover-hook';
 import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
@@ -103,11 +103,11 @@ import {
   setChangeDecorations as applyChangeDecorations,
 } from './editor-change-decorations';
 import type { ChangeDecorations } from './editor-change-decorations';
-import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
-import type { RetypeOutcome } from './record-mark-retype';
+import { removeRecordMark, remarkRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
+import type { RemarkOutcome, RetypeOutcome } from './record-mark-retype';
 
-export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
-export type { RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
+export type { MarkAction, RecordMarkPlacement, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
+export type { RemarkOutcome, RemarkRefusal, RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
 export type { BlockWidget, ChangeDecorations, TextDecoration } from './editor-change-decorations';
 export type {
   BlockAttributeKind,
@@ -190,6 +190,18 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   /** Replaces a provisional record mark with a fresh one of `kind` over the same text, as the
    *  margin composer's kind switch needs; a refusal names why nothing changed. */
   retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
+  /** Writes a fresh mark of `kind` over `quote` - the words the composer that owns the provisional
+   *  record mark `markId` is anchored to - wherever they are now: under the mark while the
+   *  document still holds it, else where those words read, which `placement` - the one the
+   *  `MarkAction` for that mark carried - narrows by the text the reader had around them. Answers
+   *  it under a new id, as the margin needs when the server refuses a send whose mark the document
+   *  has lost; a refusal names why nothing changed. */
+  remarkMark(
+    markId: string,
+    kind: SelectionBarActionKind,
+    quote: string,
+    placement: RecordMarkPlacement | null
+  ): RemarkOutcome;
   /** Starts a comment on the current selection exactly as the selection bar's Comment button
    *  does, `onMarkAction` included, and answers whether it did: false for an empty selection and
    *  while the document is read-only, where the bar offers no Comment. */
@@ -495,6 +507,14 @@ export async function createProofEditor(
     },
     retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome {
       return retypeRecordMark(view, markId, kind, opts.user.name);
+    },
+    remarkMark(
+      markId: string,
+      kind: SelectionBarActionKind,
+      quote: string,
+      placement: RecordMarkPlacement | null
+    ): RemarkOutcome {
+      return remarkRecordMark(view, markId, kind, opts.user.name, quote, placement);
     },
     commentOnSelection(): boolean {
       return commentOnSelection(view);
