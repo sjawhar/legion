@@ -1059,8 +1059,8 @@ claim_session_text() {
 pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
 # pair_dispatch AGENT reads a reviewer session on stdin and prints what the session holds for AGENT:
 # every task call naming it, the tool result of each call (text, isError, details), the ids its
-# results name for AGENT (details.results — a task call runs in the background now, since
-# async.enabled is the pinned binary's own default again, INFRA-338), and every task-result block
+# results name for AGENT (details.results — a task call runs in the background, since
+# async.enabled is the pinned binary's own default), and every task-result block
 # naming AGENT the session received, however it arrived: an async-result delivery, or a `wait`
 # result or a `read` of a `proc://` job that recovered it first. A delivery is that block alone, never
 # the rest of a snapshot, which carries other jobs' output. Nothing else is summarised, so the
@@ -4399,8 +4399,8 @@ begin ci-red-no-takeover
 # CI settling red while the tester is in its turn takes the phase back without the tester's
 # completion (workflow's TriggerChecksRed) and takes nothing else: the implementer's start acts at
 # once and waits for nobody, and the tester keeps its turn, its background job, its process and
-# its session (INFRA-338, which deleted the takeover, its wait for the outgoing turn and the abort
-# frame it rode on). The tester starts a job that writes a witness file once a ten-minute sleep ends and
+# its session: the daemon takes no turn over, waits for no outgoing turn, and its RPC carries no
+# abort frame. The tester starts a job that writes a witness file once a ten-minute sleep ends and
 # waits for it; the proof human commits .fail-me to the pull request's branch, and the smoke
 # repository's fail-on-demand check fails on that head. The daemon moves tree 1 back to
 # implementing and hands the implementer its task while that sleep is still in the tester's
@@ -4409,13 +4409,11 @@ begin ci-red-no-takeover
 # is in; and its job runs on, so the witness file appears after all. The control: the same chain
 # with a twenty-second sleep, run before the red, which writes its file.
 #
-# The witness is a background job because that is what a long bash call is now: with
-# `bash.autoBackground.enabled` the pinned binary's own default again (nothing of Legion's turns it
-# off, INFRA-338), Oh My Pi backgrounds a bash call left running past its own threshold under
-# `--mode rpc` and hands the agent a job to `wait` on. That is the case the old takeover could
-# never stop and this rule no longer tries to: a background job outlives the turn that started it,
-# so the witness file is the proof that the role's work was left alone, where under the takeover it
-# was the proof that the turn had been killed.
+# The witness is a background job because that is what a long bash call is: with
+# `bash.autoBackground.enabled` the pinned binary's own default (nothing of Legion's turns it
+# off), Oh My Pi backgrounds a bash call left running past its own threshold under
+# `--mode rpc` and hands the agent a job to `wait` on. A background job outlives the turn that
+# started it, so the witness file is the proof that the role's work was left alone.
 tester_pod=$(claim_sandbox "$tree1" tester) || fail "tree 1's tester has no Sandbox"
 witness=/tmp/stage4b-ci-red-witness control=/tmp/stage4b-ci-red-control
 send_agent "$tree1" tester "Stage 4b proof control operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 20 && date -u +%FT%TZ > $control && echo CONTROL-WRITTEN. Then reply WAITING and wait for the next targeted message."

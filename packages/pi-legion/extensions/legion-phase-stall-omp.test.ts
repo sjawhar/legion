@@ -719,7 +719,7 @@ test.skipIf(omp === undefined && !onActions)(
   180_000
 );
 
-// A7/R8. Background work is on for every role, so a worker can end its turn with a job of its own
+// Background work is on for every role, so a worker can end its turn with a job of its own
 // still running. The pinned Oh My Pi holds `session_stop` back until its agent-owned async jobs
 // are idle (omp://extensions.md: it "defers until agent-owned background jobs are fully idle"),
 // so the phase reminder — which rides that hook — never fires into such a wait, and the job's own

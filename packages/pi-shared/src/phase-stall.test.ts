@@ -76,7 +76,7 @@ test("a record's last message reads back no longer than the notice quotes", () =
   });
 });
 
-// R8. A worker whose turn ends while its own background job runs is not stalled: that job's
+// A worker whose turn ends while its own background job runs is not stalled: that job's
 // result starts the next turn, and a reminder in between would be telling a working worker that
 // it has done nothing. It buys the same quiet wait a WAITING line does, which is what bounds it:
 // a job that never finishes is a wait the host's waiting delay ends.

@@ -565,8 +565,7 @@ func (rig *checkWakeRig) reportPending(t *testing.T) {
 	}
 	sh.send(shimwire.AgentEnd{})
 	// Oh My Pi writes the prompt's result behind that agent_end, and the task retires on it: an
-	// agent_end names no prompt, and a background result's turn ends with one just like it
-	// (INFRA-338 R8).
+	// agent_end names no prompt, and a background result's turn ends with one just like it.
 	sh.send(shimwire.PromptResult{ID: prompt.ID, AgentInvoked: true})
 }
 

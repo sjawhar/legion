@@ -6,10 +6,12 @@
 //   - a `prompt` becomes a user message and starts a turn (`agent_start`); a prompt that arrives
 //     during a turn is acknowledged and then refused the way Oh My Pi refuses it ("Agent is already
 //     processing"), which the daemon takes back uncharged and sends again at the turn's end;
-//   - `abort` becomes an interrupt control request, answered once Claude Code acknowledges it;
 //   - `get_state` and `negotiate_protocol` are the bridge's own to answer;
+//   - every other request that names an id, `abort` among them, is answered with a refusal naming
+//     the frame type the bridge does not support;
 //   - each user message's `result` ends one step of the turn, and the turn ends (`agent_end`) once
-//     no Envoy delivery waits;
+//     no Envoy delivery waits, with a `prompt_result` behind the `agent_end` of a turn a `prompt`
+//     started, which is what names the prompt that turn ran;
 //   - a turn Claude Code starts by itself, when a background task it had left running finishes, is
 //     a turn of the daemon's too: the `system` `init` line Claude Code writes at the start of every
 //     turn is `agent_start` when it arrives between turns, and that turn's one `result` is

@@ -427,7 +427,7 @@ package api
 // the repository is served all the same. (This branch took 41, then 42; 42 is declared by main's
 // stalled-worker reminder, so this change takes the number above it, as the collision note says.)
 //
-// 44: INFRA-338 -- a Claude Code role's start command and pane no longer carry
+// 44: a Claude Code role's start command and pane no longer carry
 // CLAUDE_CODE_DISABLE_BACKGROUND_TASKS; CLAUDE_CONFIG_DIR and CLAUDE_CODE_DISABLE_CRON stay, and
 // the name is no longer the runtime's, so an operator's `runtime.kubernetes.pod.env` and
 // `runtime.tmux.pane_env` may set it as they may set Claude Code's other variables. A role may

@@ -84,7 +84,7 @@ export interface PhaseReminder {
    * `StopFailure` hook returns — says so with `canContinue: false`, and the reminder it earned
    * comes from the timer instead, under every guard an armed reminder has. `backgroundWork` is a
    * turn ending with the session's own background job still running, which buys the same quiet
-   * wait a WAITING line does (INFRA-338 R8). */
+   * wait a WAITING line does. */
   readonly settle: (
     lastAssistantText: string,
     options?: { readonly canContinue?: boolean; readonly backgroundWork?: boolean }

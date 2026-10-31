@@ -259,11 +259,11 @@ func TestNoPartSaysLegionNeverMerges(t *testing.T) {
 	}
 }
 
-// Background work is on for every role (INFRA-338): Legion writes no Oh My Pi settings overlay, so
+// Background work is on for every role: Legion writes no Oh My Pi settings overlay, so
 // a long bash call becomes a background job and a task subagent runs as one, and a role reads a
-// result with the `wait` tool. Nothing takes a turn away from a role any more either: a CI red
+// result with the `wait` tool. Nothing takes a turn away from a role either: a CI red
 // that ends a phase starts the implementer at once and tells the role by one message, which stops
-// nothing. So no part may still say a takeover cancels a turn or tell a role to keep its work in
+// nothing. So no part may say a takeover cancels a turn or tell a role to keep its work in
 // the foreground, and a part that dispatches a task subagent names the tool that reads its result.
 //
 // Both halves are read over the markdown parts alone, and both are exact. The call shape appears
@@ -297,7 +297,7 @@ func TestNoPartKeepsItsWorkInTheForegroundAndEveryDispatchNamesWait(t *testing.T
 			part, text := dir+"/"+name, string(body)
 			for _, phrase := range retired {
 				if strings.Contains(text, phrase) {
-					t.Errorf("%s says %q, which no longer holds: nothing interrupts a turn and background work is on", part, phrase)
+					t.Errorf("%s says %q, which does not hold: nothing interrupts a turn and background work is on", part, phrase)
 				}
 			}
 			if strings.Contains(text, `task(agent="`) {

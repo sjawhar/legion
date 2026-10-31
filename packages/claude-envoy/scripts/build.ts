@@ -62,9 +62,9 @@ export const CLAUDE_TOOL_NAMES: Readonly<Record<string, string | null>> = {
 /** One pi-legion agent file in Claude Code's agent format. The frontmatter keeps `name`,
  *  `description` and `color`; `tools` is mapped through `CLAUDE_TOOL_NAMES`; `autoloadSkills`
  *  becomes `skills`, each the plugin's namespaced `legion:<skill>`; `model` (an Oh My Pi model
- *  role, which Claude Code does not read, so the agent runs on the pane's model), `blocking` (Claude
- *  Code waits on an agent unless told otherwise) and every comment are dropped. The body is kept
- *  as it is. */
+ *  role, which Claude Code does not read, so the agent runs on the pane's model) and every
+ *  comment are dropped. The body is kept as it is. No shipped agent declares `blocking`
+ *  (`packages/pi-legion/src/shipped-agents.test.ts`), so nothing here reads it. */
 export function claudeAgent(file: string, source: string): string {
   const match = /^---\n([\s\S]*?)\n---\n/.exec(source)
   if (match === null) throw new Error(`${file} has no frontmatter`)
@@ -78,7 +78,7 @@ export function claudeAgent(file: string, source: string): string {
       continue
     }
     const value = line.slice(key.length + 1).trim()
-    dropping = key === "model" || key === "blocking"
+    dropping = key === "model"
     if (dropping) continue
     if (key === "tools") {
       const tools = value.split(",").map((name) => {
@@ -129,7 +129,7 @@ const LEGION_HOOKS: readonly {
       stopHookActive: "${stop_hook_active}",
       // The session's own background tasks, each `{ id, type, status, description, command }`,
       // rendered as JSON text: a turn that ends with one still running is a worker waiting to be
-      // woken by it rather than a stalled one, and earns no reminder (INFRA-338 R8).
+      // woken by it rather than a stalled one, and earns no reminder.
       backgroundTasks: "${background_tasks}",
     },
     // The `Stop` answer waits on the reminder's record check, which bounds its own daemon read at

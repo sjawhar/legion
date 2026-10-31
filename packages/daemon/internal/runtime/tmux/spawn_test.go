@@ -241,7 +241,7 @@ func TestTmuxRuntimeNeverReadsSpecPlugins(t *testing.T) {
 // PaneVariables (and launch, the same way) writes no settings overlay under the state directory
 // and names none of Legion's own: a pane's PI_CONFIG_FILES is the operator's overlays and the
 // role's own alone, empty where neither names one, so Oh My Pi's own defaults for the protocol
-// every role runs reach a pane's agent (INFRA-338).
+// every role runs reach a pane's agent.
 func TestPaneVariablesNamesNoOverlayOfLegionsOwn(t *testing.T) {
 	stateDir := t.TempDir()
 	variables, err := PaneVariables(testSpec(), PaneInputs{StateDir: stateDir}, nil)

@@ -130,7 +130,7 @@ func TestTheDaemonLaunchesItsControllerAndHandsItTheStartMessage(t *testing.T) {
 	sh.send(shimwire.AgentStart{})
 	sh.send(shimwire.AgentEnd{})
 	// What Oh My Pi writes behind the agent_end of the turn its prompt ran, and the only frame
-	// that names that prompt: the delivery's life ends on it (INFRA-338 R8).
+	// that names that prompt: the delivery's life ends on it.
 	sh.send(shimwire.PromptResult{ID: prompt.ID, AgentInvoked: true})
 	testwait.Eventually(t, "the start turn to end", func() bool {
 		c := d.claim(token)

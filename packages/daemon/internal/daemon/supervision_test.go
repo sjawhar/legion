@@ -1224,7 +1224,7 @@ func TestEveryStreamEventMapsToItsSuperviseEvent(t *testing.T) {
 // writes milliseconds later and which the Claude Code bridge writes too. The delivery retires on
 // that result rather than on the agent_end alone, because with background work on a role's own
 // background result starts turns the daemon never prompted and an agent_end names no prompt at
-// all (INFRA-338 R8). A turn no confirmed delivery of the daemon's was running in ends with no
+// all. A turn no confirmed delivery of the daemon's was running in ends with no
 // result behind it, exactly as such a turn does on the wire.
 func endTurn(ctx context.Context, t *testing.T, machine *supervise.Machine, token claim.Token) {
 	t.Helper()

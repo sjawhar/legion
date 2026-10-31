@@ -1,6 +1,6 @@
 //go:build e2e
 
-// The live proof's driver for the rule this change makes: a CI red takes nobody's turn over. The
+// The live proof's driver for the rule a CI red follows: it takes nobody's turn over. The
 // start it makes acts at once — the role the new phase belongs to is prompted while the role whose
 // phase ended is still working a turn it has not ended — nothing is sent to that role's connection
 // to end its turn, the role is told its phase is over by one message on its own Envoy role topic,
@@ -23,11 +23,10 @@
 // asked to launch and suspend. The store is read only for the one thing no route shows: whether
 // the outbox still holds the phase-ended row of step 5.
 //
-// There is no abort frame to watch for: this change deleted shimwire's, and with it
-// supervise.Machine.Quiesce, runtime.Conn.Abort and the bridge's interrupt handling. So the proof
-// holds the stronger fact the deletion leaves — that the role's connection is sent nothing at all
-// while the start acts, and that the start acts while that role's claim is still `working` on a
-// delivery it confirmed — rather than the absence of one frame type.
+// The RPC carries no abort frame, and the daemon has no quiesce of a claim and no abort of a
+// connection, so the proof holds the stronger fact that leaves — that the role's connection is
+// sent nothing at all while the start acts, and that the start acts while that role's claim is
+// still `working` on a delivery it confirmed — rather than the absence of one frame type.
 //
 // What the proof stands in for lies outside the rule. The broker is a native nats-server the
 // script starts and names in LEGION_E2E_NATS_URL. GitHub is ciRedGitHub, a REST stand-in for the
@@ -352,8 +351,8 @@ func (c *ciRedClaimant) endTurn() {
 	})
 }
 
-// silent holds that the daemon sends this role's connection nothing at all for within: no abort —
-// this change deleted the frame — and nothing else that would end its turn either.
+// silent holds that the daemon sends this role's connection nothing at all for within: the RPC
+// carries no abort frame, and nothing else it could send would end that role's turn either.
 func (c *ciRedClaimant) silent(within time.Duration) {
 	t := c.r.t
 	t.Helper()
@@ -438,7 +437,7 @@ func (r *ciRedNoTakeoverLive) testerWorksItsAssignment() {
 // implementer is prompted its fix task at once — while the tester is still working the turn it
 // started in step 1, which the daemon neither ends nor asks after: its connection is sent nothing
 // at all, its claim stays working on the delivery it confirmed, and its process is not suspended.
-// Before this change the start waited for that turn, after an abort frame that interrupted it.
+// The start waits for no turn: it acts in the drain that moved the phase.
 func (r *ciRedNoTakeoverLive) redStartsAtOnce() {
 	t := r.t
 	before := r.d.claim(r.test.token)
@@ -482,7 +481,8 @@ func (r *ciRedNoTakeoverLive) redStartsAtOnce() {
 }
 
 // Step 3. The tester is told, once, on its own Envoy role topic, that its phase ended: the
-// phase-ended row (record.PhaseEnded) the red enqueued on the outbox's role-message lane. It is
+// phase-ended row (record.PhaseEnded) the red enqueued on the outbox's role-message lane, the red
+// itself behind the `Reason:` label that marks it off from the daemon's own sentences. It is
 // not the architect's checks-red notice, which the same red sends to another topic altogether.
 func (r *ciRedNoTakeoverLive) testerIsToldItsPhaseEnded() {
 	t := r.t

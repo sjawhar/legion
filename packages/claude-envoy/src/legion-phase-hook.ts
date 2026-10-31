@@ -92,7 +92,7 @@ const backgroundTaskList = z.array(z.object({ status: z.string() }).loose())
  * `${background_tasks}` in the `Stop` hook's input. Claude Code substitutes it as that JSON array
  * rendered to text, and as `[]` when there are none; measured on 2.1.310 against a `Bash` call
  * with `run_in_background: true`, whose task reads `"status":"running"` at the `Stop` of the turn
- * that started it (INFRA-338 R8).
+ * that started it.
  *
  * A status other than `running` — a task that finished inside the turn — is no reason to keep the
  * reminder back, and an argument an older binary does not substitute at all is read as no
@@ -447,7 +447,7 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
           // `stop_hook_active` arrives as "true" once this hook has already continued the turn. It
           // decides nothing: the count is what bounds a run of reminders. `background_tasks` does
           // decide: a turn that ends with a background task of the worker's own still running is
-          // a worker waiting to be woken by it, not a stalled one (INFRA-338 R8).
+          // a worker waiting to be woken by it, not a stalled one.
           const backgroundWork = backgroundWorkRunning(event.backgroundTasks)
           deps.log.debug("legion: a Claude Code phase worker's turn is settling", {
             issue: claim.issue,

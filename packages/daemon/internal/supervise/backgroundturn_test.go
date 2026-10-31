@@ -44,7 +44,7 @@ func TestAnAcknowledgementThatLandsInsideItsOwnTurnStillAwaitsItsResult(t *testi
 	}
 }
 
-// A7. Background work is on for every role, so Oh My Pi wakes a settled session with its own
+// Background work is on for every role, so Oh My Pi wakes a settled session with its own
 // background result and starts a turn the daemon never prompted. That turn's agent_start carries
 // no delivery id — Oh My Pi's own never does — and its agent_end names no prompt either, so both
 // look exactly like the turn the daemon's task is waiting for. Only the prompt's own result says

@@ -73,7 +73,7 @@ func TestEveryPhaseStartMintsTheRoleAnAssignmentOnItsRowAndItsPayload(t *testing
 	assertPhase(t, pool, phase.Testing)
 	secondTesting := assignmentOfStart(t, pool, claim.RoleTester, 2)
 	if secondTesting == firstTesting {
-		t.Fatalf("the tester's second start carries its first assignment %q, want a new one: this is the pair A6 turns on", secondTesting)
+		t.Fatalf("the tester's second start carries its first assignment %q, want a new one: nothing would tell the two testing phases apart", secondTesting)
 	}
 	// The issue never left run 1, which is why the run alone cannot tell these two testing phases
 	// apart.

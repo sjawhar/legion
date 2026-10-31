@@ -9,8 +9,8 @@ import (
 )
 
 // A database can hold supervise start rows the previous release queued with a `quiesce` key when
-// 0065 arrives. A start no longer waits for the turn of the role it takes the phase from, the field
-// is gone, and the payload decodes strictly (record.DecodeOutboxPayload), so a row still carrying
+// 0065 arrives. A start waits for no turn of the role it takes the phase from, so the payload has
+// no such field and decodes strictly (record.DecodeOutboxPayload), so a row still carrying
 // the key would fail to decode on every attempt and stall its issue's lifecycle lane. The negative
 // control is that failure read before the migration; the migration strips the key and leaves
 // everything else of the row as it is, so the start then runs as the start it already was. A row

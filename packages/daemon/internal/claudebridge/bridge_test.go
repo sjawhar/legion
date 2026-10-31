@@ -447,8 +447,7 @@ const (
 // the daemon is told of as a turn: agent_start when the init of that turn arrives, agent_end when
 // its result does, and in between only what Claude Code's own lines carry. The prompt's turn ends
 // on its own result first, so the daemon sees two turns, not one long one — and only the first
-// carries a prompt_result behind it, which is the whole of how the daemon tells them apart (A3,
-// A7).
+// carries a prompt_result behind it, which is the whole of how the daemon tells them apart.
 func TestATurnClaudeCodeStartsByItselfIsATurnOfTheDaemons(t *testing.T) {
 	r := newRig(t, "-p", "--resume", sessionID)
 	r.prompt("p1", backgroundTurn)

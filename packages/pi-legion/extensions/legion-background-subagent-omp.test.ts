@@ -14,10 +14,10 @@ import {
   writeStandinProfile,
 } from "@legion/pi-shared/test/omp-harness";
 
-// A2/R2 of INFRA-338 on the real Oh My Pi: a Legion role pane dispatches `deep-worker`, gets its
+// On the real Oh My Pi: a Legion role pane dispatches `deep-worker`, gets its
 // `task` call back while the subagent is still running, reads a message that arrives in the
-// meantime, and is woken by the job's own result. Legion writes no Oh My Pi settings overlay any
-// more, so `async.enabled` and `bash.autoBackground.enabled` are the pinned binary's own defaults,
+// meantime, and is woken by the job's own result. Legion writes no Oh My Pi settings overlay,
+// so `async.enabled` and `bash.autoBackground.enabled` are the pinned binary's own defaults,
 // and no agent the plugin ships declares `blocking`; nothing in the plugin decides any of this,
 // which is exactly why only the real binary can say it. A pin whose defaults turned background
 // work off, or a `blocking: true` put back into agents/deep-worker.md, would hold the pane in the
@@ -74,7 +74,7 @@ const MESSAGE_SUMMARY = "BGSUB-MESSAGE: answer the reviewer's question about the
 /** How long the case waits for one thing the pane owes it before failing on it. */
 const DEADLINE_MS = 60_000;
 
-/** A2's bound on the message: in the role's context at its next model turn within 30 seconds. */
+/** The bound on the message: in the role's context at its next model turn within 30 seconds. */
 const MESSAGE_BOUND_MS = 30_000;
 
 const cleanup: Cleanup = [];
@@ -473,7 +473,7 @@ test.skipIf(skip)(
     const releasedAt = subagent.reply([{ type: "text", text: SUBAGENT_REPORT }]);
     expect(endedAt).toBeLessThan(releasedAt);
     // The message's own turn ran while the subagent's request was still held: the role read it
-    // while the worker was running, which is what A2 asks, not once the worker had ended.
+    // while the worker was running, not once the worker had ended.
     expect(read.arrivedAt).toBeLessThan(releasedAt);
 
     // The finished job wakes the role into a turn nothing prompted, carrying the worker's report.

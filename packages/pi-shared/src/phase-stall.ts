@@ -20,7 +20,7 @@ import { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
  * - `closed`: no assignment since the last successful completion, or none seen yet;
  * - `open`: assigned and not completed, so a turn that settles now earns a reminder;
  * - `waiting`: still open, and either the worker's last reply said with a WAITING line what it
- *   waits on, or its turn ended with background work of its own still running (INFRA-338 R8);
+ *   waits on, or its turn ended with background work of its own still running;
  *   both buy the longer quiet wait `LEGION_STALL_WAITING_MS` before the next reminder.
  * The reminding never stops: a reminder that changes nothing is followed by another. */
 export type PhaseStall = "closed" | "open" | "waiting";
@@ -44,7 +44,7 @@ export type PhaseStallInput =
       readonly lastAssistantText: string;
       /**
        * The session ends this turn with background work of its own still running, which will wake
-       * it when it finishes (INFRA-338 R8). Only a host whose turn can end that way sets it: Oh My
+       * it when it finishes. Only a host whose turn can end that way sets it: Oh My
        * Pi holds `session_stop` back until its own async jobs are idle, so its settle never has
        * any, while Claude Code's `Stop` hook fires with the running tasks in its payload
        * (`background_tasks`, measured on 2.1.310).

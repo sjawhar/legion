@@ -671,7 +671,7 @@ test.skipIf(claude === undefined)(
   180_000,
 )
 
-// A3/R8. A turn that ends while a background task of the worker's own is still running is a
+// A turn that ends while a background task of the worker's own is still running is a
 // worker waiting to be woken, not a stalled one: the `Stop` carries `${background_tasks}` with
 // that task `"status":"running"` (measured on 2.1.310), the endpoint buys the quiet wait instead
 // of a reminder, and the task's own result starts the next turn with nothing prompting it. Only

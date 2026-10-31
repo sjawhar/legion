@@ -2143,7 +2143,7 @@ func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 // it, and an Oh My Pi role is told neither. The directory is the role's own under its state home,
 // so it is no sibling role's. Nothing in the pod turns Claude Code's background tasks off: a task
 // that finishes wakes a turn of Claude Code's own, which the bridge reports to the daemon as a
-// turn, so the name is no longer the runtime's and an operator's pod may carry it.
+// turn, so the name is not the runtime's and an operator's pod may carry it.
 func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {

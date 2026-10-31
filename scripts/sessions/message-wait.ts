@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import { SQL } from "bun";
 
 /**
- * INFRA-338's A9 measurement: how long every Envoy message waited, in the role session it
+ * Measures how long every Envoy message waited, in the role session it
  * reached, for that session's next assistant message, and which tool call was open when it
  * arrived. The source is the project's Oh My Pi session store, whose connection URL the file
  * `OMP_SESSION_SQL_DSN_FILE` names; each session is its `omp_session_files.content` row followed
@@ -27,7 +27,7 @@ const TOOL_START_CUSTOM_TYPE = "tool_execution_start";
 const TOOL_RESULT_ROLE = "toolResult";
 /** The role a session claimed, which is the name a message was delivered to. */
 const ROLE_CLAIM_CUSTOM_TYPE = "envoy-role-claim";
-/** The calls INFRA-338 moves out of the turn: A9 fails only on a wait one of these held. */
+/** The calls that can hold a turn open: the verdict fails only on a wait one of these held. */
 const HOLDING_TOOLS: Readonly<Record<string, true>> = { bash: true, task: true };
 
 const DEFAULT_THRESHOLD_MS = 10 * 60_000;
@@ -52,7 +52,7 @@ const USAGE = `usage: bun scripts/sessions/message-wait.ts --since <duration> [o
 
 Measures, over the project's Oh My Pi session store, how long each Envoy message waited in the
 role session it reached for that session's next assistant message, and which tool call was open
-when it arrived (INFRA-338, A9).
+when it arrived.
 
 Options:
   --since <duration>      Required. Measure the sessions launched within this much of now, read
@@ -67,7 +67,7 @@ Options:
   --help                  Print this.
 
 Prints one line per wait of at least the threshold, longest first, in two groups: the waits a
-bash or task call was open for, which A9 fails on, and every other wait. Each line carries the
+bash or task call was open for, which the verdict fails on, and every other wait. Each line carries the
 wait, the message's arrival, the calls open at the arrival, the call that took the longest part
 of the wait, and the session. Then the arrivals no assistant message ever answered, which are no
 measured wait, and a verdict line.
@@ -380,11 +380,14 @@ function report(measurement: Measurement, options: Options): string[] {
   ].join("");
   const lines = [
     scope,
-    "each line below: the wait, the arrival, the calls open at the arrival (A9's field), the " +
-      "call that took the longest part of the wait, and the session",
+    "each line below: the wait, the arrival, the calls open at the arrival (the calls the " +
+      "verdict turns on), the call that took the longest part of the wait, and the session",
   ];
   const groups = [
-    [`waits of ${threshold} or more with a bash or task call open (A9 fails on these)`, true],
+    [
+      `waits of ${threshold} or more with a bash or task call open (the verdict fails on these)`,
+      true,
+    ],
     [`waits of ${threshold} or more with no bash or task call open`, false],
   ] as const;
   for (const [title, holding] of groups) {
@@ -414,7 +417,7 @@ function report(measurement: Measurement, options: Options): string[] {
     "",
     `verdict: ${answered.length} arrivals measured, ${over.length} waited ${threshold} or more, ` +
       `${byHold(true).length} of those with a bash or task call open. ` +
-      "A9 holds only while that last count is 0."
+      "The measurement passes only while that last count is 0."
   );
   return lines;
 }

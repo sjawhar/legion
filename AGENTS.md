@@ -87,7 +87,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   CI runs this command in each of these, in a job of ci.yaml that runs when a change touches a file it reads:
   packages/contracts, envoy-client, envoy-plugin, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch, and docs/site
 
-- `bunx tsc --noEmit -p scripts/dispatch && bunx tsc --noEmit -p scripts/github-apps`
+- `bunx tsc --noEmit -p scripts/dispatch && bunx tsc --noEmit -p scripts/github-apps && bunx tsc --noEmit -p scripts/sessions`
 
   Type check the three script directories that are no workspace, as ci.yaml's `test` job does
 

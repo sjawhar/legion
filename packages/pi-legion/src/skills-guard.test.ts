@@ -296,16 +296,17 @@ test("one sentence states that retro's push never carries the trailer, in each t
   expect(counts).toEqual(texts.map((file) => ({ file: path.relative(REPO_ROOT, file), found: 1 })));
 });
 
-// INFRA-338 turned background work back on for every role: Legion writes no Oh My Pi settings
+// Background work is on for every role: Legion writes no Oh My Pi settings
 // overlay, so a long bash call becomes a background job and a `task` subagent runs as one, and a
 // role reads a result with the `wait` tool, which a message to its session also returns from. No
-// task agent declares `blocking` any more, and nothing interrupts a turn: a CI red that ends a
+// task agent declares `blocking`, and nothing interrupts a turn: a CI red that ends a
 // phase starts the implementer at once and tells the role whose phase ended by one message, which
 // stops nothing of its. So no skill, no shipped agent and no file of the plugin a Claude Code role
-// loads may still say that a takeover cancels a turn or tell a role to keep its work in the
-// foreground, and each that dispatches a task subagent names the tool that reads its result.
+// loads may say that a takeover cancels a turn or tell a role to keep its work in
+// the foreground, and each that dispatches a task subagent names the tool that reads its result.
 //
-// Three of A8's four trees are read here — the repository's skills/, the plugin's agents/, and a
+// Three of the four trees that carry this text are read here — the repository's skills/, the
+// plugin's agents/, and a
 // fresh `buildLegionPlugin` output, which is generated from those two and so is the only copy of
 // `packages/claude-envoy/legion/` a pull request can check (that tree is committed by main's
 // Rebuild Claude Envoy plugin workflow alone). The daemon's prompts are the fourth, read by

@@ -762,7 +762,7 @@ until_true 300 "the implementer's turn to end" issue_worker_state "$issue" imple
 note "handoff_complete through mcp__legion__legion recorded commit $commit, pushed to $repo under .legion/$issue/"
 pass
 
-# Background work on the Claude Code backend (INFRA-338). The runtime no longer sets
+# Background work on the Claude Code backend. The runtime sets no
 # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS on a Claude Code pane — only CLAUDE_CODE_DISABLE_CRON, the
 # one feature that would start a turn no task of the daemon's asked for and nothing would read —
 # so a role can start work that outlives the turn that started it, and a result that lands after

@@ -17,13 +17,13 @@ import (
 // pod (podsafety.Apply over the PI_CONFIG_FILES the Sandbox runtime composed, sandbox.
 // roleOperatorEnv) and in a pane (PaneVariables), for a worker, the architect and the controller:
 // Legion sets neither key and names no settings overlay of its own, so the pinned binary's own
-// defaults for the protocol every role runs reach the agent (INFRA-338). Each read is asserted
+// defaults for the protocol every role runs reach the agent. Each read is asserted
 // against the same binary's read under HOME and PATH alone, so what carries the proof is the
 // relation between two reads of the pin rather than a default written out here (docs/solutions/
 // testing/a-settings-proof-asserts-the-relation-between-two-reads-of-the-same-binary-never-a-
 // literal-upstream-default-LEGION-578.md). PI_CONFIG_FILES is the operator's overlay and the
-// role's own exactly: the overlay Legion used to write read both keys off under this pin, so an
-// overlay that came back would fail both the value and the list.
+// role's own exactly: an overlay of Legion's reads both keys off under this pin, so one in that
+// list would fail both the value and the list.
 func TestEveryRolesOhMyPiHasAsyncAndAutoBackgroundOnInAPodAndInAPane(t *testing.T) {
 	omp := testbin.OMP(t)
 	dir := t.TempDir()

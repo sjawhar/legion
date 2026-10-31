@@ -795,8 +795,8 @@ The checks:
   the daemon records the completion's commit, which the implement App authored and committed, which is on `sjawhar/legion-smoke` and which changes `.legion/<issue>/`, and the transcript holds the `mcp__legion__legion` call with a result that is not an error.
   No pull request is opened.
 
-- `claude-background-tasks`: the implementer's Claude Code carries no `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` and keeps `CLAUDE_CODE_DISABLE_CRON=1`, read once from `/proc/<pid>/environ` (INFRA-338:
-  the runtime sets the first no more, so an operator who wants background tasks off sets it itself).
+- `claude-background-tasks`: the implementer's Claude Code carries no `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` and keeps `CLAUDE_CODE_DISABLE_CRON=1`, read once from `/proc/<pid>/environ` (the runtime never sets the first,
+  so an operator who wants background tasks off sets it itself).
   Told to start a background `Bash` job (`run_in_background`) and a background `Task` subagent, each sleeping 90 s behind a marker of the run's own, and to end its turn at once, it does:
   the two calls are read from the transcript's tool calls rather than from its prose, the claim goes idle with the job's file still unwritten, and the daemon then has the claim working on no delivery of its own
   — the turn Claude Code starts when a background result lands, which the bridge reports as `agent_start`…`agent_end`.
@@ -2270,10 +2270,10 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 - `ci-red-no-takeover`
 
   CI settling red while tree 1's tester is in a turn takes the phase back without its completion and takes nothing else:
-  the implementer's start acts at once, and the tester keeps its turn, its background job, its process and its session (INFRA-338).
+  the implementer's start acts at once, and the tester keeps its turn, its background job, its process and its session.
   The control: the tester runs `/usr/bin/sleep 20 && date … > /tmp/stage4b-ci-red-control`, and the file is written.
   The witness: the tester runs the same chain with `/usr/bin/sleep 600` into `/tmp/stage4b-ci-red-witness`
-  — a bash call Oh My Pi backgrounds once it outruns its own threshold, since nothing of Legion's turns `bash.autoBackground.enabled` off any more, so the tester waits on it with the `wait` tool — its claim `working` and the sleep in its pod's process list;
+  — a bash call Oh My Pi backgrounds once it outruns its own threshold, since nothing of Legion's turns `bash.autoBackground.enabled` off, so the tester waits on it with the `wait` tool — its claim `working` and the sleep in its pod's process list;
   the proof human commits `.fail-me` to the pull request's branch, the smoke repository's `fail-on-demand` check fails on it, and tree 1 returns to `implementing`.
   The daemon then has the implementer in a turn of the red's task
   — its claim `working` on a confirmed `implementing` delivery, the task in its session — while that sleep is still in the tester's process list and the witness file is absent;
@@ -3658,14 +3658,14 @@ Facts enter only as production's do:
 CI settlements, the pushes and the synchronizes as `notifications.github.…` envelopes on the `ENVOY_NOTIFICATIONS` stream;
 the daemon's own HTTP routes for each role's registration, readiness, grants and completions;
 and the daemon's worker stream for each role's turns, which the driver speaks as `legion worker-shim` does (`shimwire` frames: the prompt's response, `agent_start`, `agent_end` and the `prompt_result` behind it).
-There is no abort frame to watch for — this change deleted it — so the proof holds the stronger fact the deletion leaves:
+The daemon's RPC has no abort frame, so the proof holds the stronger fact that leaves:
 the role's connection is sent nothing at all while the start acts, read by reading that connection for three seconds and finding it silent.
 
 | step | driven by | read back as |
 | :--- | :--- | :--- |
 | `step1-the-tester-works-the-assignment-its-phase-handed-it` | the seeded implementer's `handoff_complete` at `h1`, then the tester's registration, readiness and turn on the task it is prompted | the issue in `testing`, and the tester's claim `working` on a confirmed delivery of its testing task |
 | `step2-the-red-starts-the-implementer-while-the-testers-turn-runs-on` | CI's settlement of `h1` with `ci` failed, while that turn runs | the implementer prompted its fix task at once, named with the red; the issue in `implementing`; the tester still `working` the delivery it confirmed before the red; its connection sent nothing at all over three seconds; and the runtime asked to suspend nothing |
-| `step3-the-tester-is-told-its-phase-ended-on-its-own-role-topic` | nothing: the red's own `phase_ended` row, on the outbox's role-message lane | exactly one message on `notifications.role.<the tester's claim>`, the sentence `record.PhaseEnded` writes, and the architect's one `checks-red` on its own topic beside it — a different message to a different role |
+| `step3-the-tester-is-told-its-phase-ended-on-its-own-role-topic` | nothing: the red's own `phase_ended` row, on the outbox's role-message lane | exactly one message on `notifications.role.<the tester's claim>`, the sentence `record.PhaseEnded` writes, printed in full, with the red behind its `Reason:` label; and the architect's one `checks-red` on its own topic beside it — a different message to a different role |
 | `step4-the-old-turns-completion-is-refused-and-the-new-assignments-is-taken` | the implementer's push of `h2`, GitHub's synchronize and its completion there, which hands testing out again; then the tester's completion from the turn it began in step 1, and the same completion once its turn has ended and the new assignment's task has reached it | the first refused `409 HANDOFF_STALE_ASSIGNMENT` with the issue left in `testing`, the second taken, with the issue in `reviewing` |
 | `step5-a-phase-ended-message-no-session-holds-finishes-and-the-start-still-acts` | the reviewer's role topic answered `404 unclaimed`, as the listener answers for a role no live session holds; then the push of `h3`, its synchronize and CI's settlement of `h3` with `ci` failed | the implementer prompted its fix task again and the issue in `implementing`, one refused publish on that topic and no retry over three seconds, no `phase_ended` row left in the outbox, and nothing delivered on the topic |
 
