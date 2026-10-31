@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-598",
+  "completed": "2026-10-31T01:42:34Z",
+  "round": 6,
+  "reviewedCodeHead": "6ac308721eb5",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 3,
+  "roundShape": "Full round. The merge 106808451c66 (main after #2466) changes the PR's own diff in runtime files: own diff of f7beb833 from its merge base e65900f4 against own diff of 10680845 from e018f1d3 differs in 54 files, among them live.go, run.go, tables.go, sse.go, api.go, common.sh, run-step.sh, stack.sh, cluster.sh and the replay_*.go files (the INFRA-639 files leave the own diff because main now holds them). Then fix 6ac30872.",
+  "mergeState": "GitHub reports CONFLICTING again: main 8a72cf79 (#2422, 01:03Z) reflowed packages/envoy/AGENTS.md one sentence per line; git merge-tree lists only that file. A docs-only conflict.",
+  "mergeResolution": "Main's dashboard transport survives alone (dashboard.go, sse.go identical to main; decideLiveTransport and live.transport gone; consumers read config.dashboard). INFRA-639's replay_*.go, api.go, run-step.sh identical to main; run.go and stack.sh are main's plus this PR's additions. Gaps: tables.go reads no legacy live.transport, and common.sh defines sha256_of/joined_sha256 twice.",
+  "failOpen": "lock_names_other_run (cluster.sh:811) treats a failed read as 'not another run', with no retry, so every stop/kill/remove path acts on a read error: runner_wait's deadline stop, the disk watcher (on purpose, :1285-1286), the EXIT trap's typing_stop, runner_step_remove, the replay dump removal, stop_copy/scale_to, database drops, run_replay's rm. down fails closed (kube_lock_get dies). Against the architect's rule: request fail closed or retry-then-closed. The daemons' start-up read removal is accepted: nothing depended on it.",
+  "ci": "CI at 6ac30872 queued (lint, typecheck, test, envoy-go) at 01:40Z on a merge ref from before #2422; the PR is now conflicting. Not read as green.",
+  "roundFiveFindings": "All seven fixed and accepted on their threads.",
+  "thermonuclear": "deep-review: CHANGES at 6ac30872 (M1 fail-open, M2 legacy transport, Minor duplicate helpers); code-quality: CHANGES at 6ac30872 (same two, plus three exempt long streams, two switches in use_run, BUNDLE_META). Both ran go vet, go test ./loadtest, cluster.test.sh (pass; deep-review saw case (w) fail once under CPU contention, then pass), run-step.test.sh, common.test.sh.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/loadtest/cluster/cluster.sh:811", "description": "The lock guard fails open on a failed lock read, with no retry, so an API error lets a dead run TERM or remove in another run's copy. Read through kube_read (one retry) and, when it still fails, act on nothing and say so; drop the fail-open sentence in pg_disk_watch."},
+    {"severity": "important", "file": "packages/envoy/loadtest/tables.go:482", "description": "liveTransport reads only config.dashboard; this PR's own runs from 4e33cee7 to 9701e56b recorded the transport only in live.transport (every step sse on 9b92ac14), so re-rendering them labels SSE steps live and drops the column, and README:1426 is false for them."},
+    {"severity": "important", "file": "PR", "description": "The branch conflicts with main again (#2422 reflowed packages/envoy/AGENTS.md); merge main."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/common.sh:336", "description": "sha256_of and joined_sha256 defined twice after the merge (72-76 and 336-340)."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/cluster/cluster.sh:196", "description": "Three long streams (2800, 2809, 2944) bypass the guarded helpers because those are fixed to kube's 300 s limit; give the helper a duration and route them through it."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/cluster/cluster.sh:646", "description": "use_run skips the lock comparison two ways (any-run and the _* prefix); have the daemons pass any-run and drop the prefix clause."}
+  ]
+}

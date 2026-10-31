@@ -23,7 +23,13 @@ commands:
   refs-shape       check the references answers of the LGA issues against production's shape
   refs-fetch       write a TSV of every seeded issue's references answer (status, ETag, sha256, bytes)
   run              one load step against the stack in stack.json; writes summary.json and profiles
+  plan-docs        print, without a stack, the documents a step's in-window edits and uploads write
+                   the most versions to (the run's own plan of the same flags, seed.json)
   tables           render TABLES.md and pprof tops from step directories
+  seed-finish      after seed: wait for the outbox and the block-index backfill, vacuum, install the commit-time trigger
+  cgroup-merge     reduce a cluster sampler's cgroup.jsonl to a step directory's cgroup.json
+  curves           CURVES.md, curves.csv, KNEES.md, refine.txt and TREND.md from cluster step directories
+  codepaths        CODEPATHS.md and codepaths.json: a replay step's CPU and memory by code path beside the outage
   series-sessions  print the session count of the series step at a load factor
   trigger-sql      print the commit-time trigger SQL (commit-trigger.sql)
   box-busy         print the box's busy fraction over the next 5 s, from /proc/stat
@@ -65,8 +71,18 @@ func main() {
 		err = runRefsFetch(os.Args[2:])
 	case "run":
 		err = runLoad(os.Args[2:])
+	case "plan-docs":
+		err = runPlanDocs(os.Args[2:])
 	case "tables":
 		err = runTables(os.Args[2:])
+	case "seed-finish":
+		err = runSeedFinish(os.Args[2:])
+	case "cgroup-merge":
+		err = runCgroupMerge(os.Args[2:])
+	case "curves":
+		err = runCurves(os.Args[2:])
+	case "codepaths":
+		err = runCodepaths(os.Args[2:])
 	case "series-sessions":
 		err = runSeriesSessions(os.Args[2:])
 	case "replay-fetch":

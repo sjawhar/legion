@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-598",
+  "completed": "2026-10-28T09:27:09Z",
+  "plan": "dispatch://INFRA-598/artifact/plan-md",
+  "summary": "A committed packages/envoy/loadtest/cluster/cluster.sh stands up a copy of Dispatch (16 CPU/32Gi), Postgres (16 CPU/60Gi, production's major), the listener (production's image and size) and a three-pod NATS JetStream hub (INFRA-549's chart values, committed render) in the namespace it is given, plus a runner pod for loadgen; it seeds, resets before each step, samples every container's cgroup CPU and memory through kubectl exec, runs 1x,2x,3x,5x,7x,10x (10 min each), a 10x reads-only control, an hour at 10x and 1x on a 4 vCPU database, then INFRA-639's LINUX replay at F=1 for 39 minutes on 16 and 4 vCPU, collects tables and profiles, uploads results to INFRA-514 and tears down. The commit is an input (--dispatch-commit); this issue's run uses 9b92ac14. New loadgen subcommands: seed-finish, cgroup-merge, curves (knee rule, trend), codepaths (cores and memory by entry point beside the outage, with residual).",
+  "prerequisites": [
+    "dispatch://INFRA-690: a passing prove-loadtest pod-mode record (dead production pod row fixed) before the copy uses the namespace; it also refuses pod mode while ConfigMap dispatch-loadtest-lock exists.",
+    "dispatch://INFRA-639: replay source, bundle and seed parts on legion/INFRA-639 before the replay phases; this PR merges after INFRA-639's PR.",
+    "sjawhar/legion#2369 (INFRA-589): this PR merges after it; build on legion/INFRA-589 with forward merges."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: proof format, PR body, references/tools.md before installing helm or other tools, references/findings.md for problems outside the issue",
+      "dispatch: download INFRA-639's parts, upload results and raw outputs to INFRA-514, dispatch doc-edit of INFRA-514's architecture review",
+      "dispatch-first: search before posting results or findings on Dispatch",
+      "envoy: coordinate edits with the INFRA-589 and INFRA-639 implementers and report knees to the architect",
+      "asd-ste100: the PR body and messages to other roles",
+      "ce-simplify-code: the simplify pass on the diff before the PR"
+    ],
+    "test": [
+      "legion-worker: proof format and negative controls for the quick run of cluster.sh all",
+      "dispatch: read the results document, the architecture review edits and the raw outputs on INFRA-514 to check three numbers"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and references/review-threads.md for the approval of the head",
+      "dispatch: check the INFRA-514 results document and review entries against the raw outputs",
+      "asd-ste100: review text other roles read"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "INFRA-639's replay CPU fields, quiet check and prepare read /proc and the local stack; under -allow-foreign there are no pids.", "answer": "D6: loadgen cgroup-merge fills the replay block's dispatch_cpu_s, idle_cores_before, cores_full_rate and saturated from the orchestrator's 5 s cgroup samples; the quiet check uses the same samples. D8: cluster.sh replay-prepare restores the dump in the Postgres pod, boots the pinned image to migrate, waits for empty backfill tables and quiet, records schema_version, and keeps template dispatch_replay."},
+      {"finding": "'Main before the fixes' has three readings and the curves' commit is not pinned.", "answer": "D3: one pinned commit, 9b92ac14, for curves, hour and both replays (architect agreed 09:20Z); the residual names 35efd326 -> 9b92ac14; the commit is a required input of the command so INFRA-599 and fix children reuse it."},
+      {"finding": "The spec asks for real version history; INFRA-639's seed holds synthetic history contents and substitute anchors.", "answer": "Departure 1; D11 lists both in the residual; the architect decides the wording."},
+      {"finding": "The memory comparison has no defined metric.", "answer": "D6/D10: working set = memory.current - inactive_file (Cloud Monitoring's non-evictable) beside 13.8 GiB, split into heap in use by code path, heap idle, stacks, other runtime and non-Go memory from heap.txt MemStats, summing to the working set."},
+      {"finding": "'Code path' is undefined for the table.", "answer": "D10: exclusive entry-point assignment by the production profile's §2a rule (rows sum to the total), plus §2b subsystem shares extended with INFRA-512's write-path functions; outage 10-minute buckets 23:00-23:30 beside the replay's same offsets; residual = outage minus replay."},
+      {"finding": "A Dispatch crash during a step would read as overload under -allow-foreign.", "answer": "D5: after every step restartCount and lastState of every copy container are read; a restart marks the step failed and keeps it out of the curves; negative control deletes the Dispatch pod during a quick step."},
+      {"finding": "Stream replica count depends on which process creates the stream first; NATS columns read one server.", "answer": "D4: the listener (ENVOY_NATS_REPLICAS=3) always starts before Dispatch; nats stream info must show num_replicas 3 or the step refuses; NATS CPU/memory from cgroup for all three pods; /varz columns labelled pod 0."},
+      {"finding": "Knee and measured limit undefined; recording a knee in the review is real work.", "answer": "D10: a pass rule (committed >= 0.95 offered, requests >= 0.99 ok and >= 0.95 sent, p99 from arrival <= 1 s, no container >= 0.9 of its CPU limit, pool waiters median 0, no failed row); a knee is the first failing step after a passing one; limit = highest sustained rate at the limiting resource; up to two refinement steps per knee; D12 turns each knee into a Cost bullet on an existing finding or a new LT-n entry with file:line at 9b92ac14, rank and owner."},
+      {"finding": "The harness's event mix (INFRA-512's LINUX counts) differs from the root's 22:20-23:31Z all-project event types.", "answer": "D11: kept as INFRA-589's preset and listed as a difference; changing the mix is INFRA-589's lane."},
+      {"finding": "Production differences (shared database, proxy, SOCKS5, embeddings, identity, NATS shape, commit trigger) must be carried.", "answer": "D11 lists every one in the residual and table notes; no synthetic background load on the 4 vCPU database, its absence stated."},
+      {"finding": "Cloud SQL default settings for the tier are unsourced.", "answer": "D2: each value cited to Google's Cloud SQL documentation in postgres.yaml, else PostgreSQL's default and listed as a difference; SHOW ALL recorded per run; disk difference (20Gi premium-rwo vs 14.7 GiB PD_SSD) in D11 with bgwriter and checkpoint stats recorded."},
+      {"finding": "The run does not record which machine Dispatch runs on.", "answer": "D7: meta.json copy fields record the CPU model from /proc/cpuinfo in the Dispatch and Postgres containers; production's machine type is not readable by the worker (nodes are cluster-scoped), stated in D11."},
+      {"finding": "The listener image is not specified.", "answer": "D3: production's listenerImage (ae36683e) read from agent-infra main at up, resolved to its digest and recorded; --listener-image overrides."},
+      {"finding": "Unattended runs: stale lock, orphaned copy, prove-loadtest's quota fill, safe-to-evict annotation.", "answer": "D5: lock ConfigMap with holder, start and 60 s heartbeat, stale after 15 min with the down command named; down deletes all labelled objects and PVCs; runner activeDeadlineSeconds; safe-to-evict on every pod (D2); INFRA-690 makes pod mode refuse while the lock exists (architect, 09:20Z); D6 states the sampler shares the worker pod's fate and a sampler gap fails the step; raw outputs uploaded per phase (D12)."},
+      {"finding": "Reset details: Recreate strategy, NATS PVC recreation time, seed.json survival.", "answer": "D2: Dispatch and listener Recreate. D5: NATS purged through nats-box rather than PVC recreation; seed.json kept on the worker pod and copied into the runner each step; reset time recorded."},
+      {"finding": "Edits to INFRA-589's files while #2369 is open; merge order; the red commits-error test.", "answer": "D9/D13: edits limited to seed-finish's move, tables reading cgroup.json, meta fields and the commits-error exit, announced to INFRA-589's implementer first; one PR merging after #2369 and INFRA-639's PR; the commits-error case exits non-zero, taking INFRA-589's fix when it lands."},
+      {"finding": "No acceptance line has a machine check.", "answer": "Acceptance table: pod requests/limits via jsonpath, num_replicas 3, step files present, summary.json config.duration_s >= 600/3600 and the 1x/10x rates, replay inputs F=1 and 0-39 min, r4 cpu.max, code-path rows summing to the total, empty labelled listing after down, results and review read back with dispatch doc-read; plus negative controls."},
+      {"finding": "The one-hour step is ambiguous; upward trend undefined.", "answer": "D7/D10: run once now at 9b92ac14; trend = least-squares slope of 1-minute means over minutes 5-60 with 95% interval, upward when the lower bound > 0 and slope > 5% of mean per hour; reported, not judged; INFRA-599 proves root acceptance 4."},
+      {"finding": "The 4 vCPU runs have two readings.", "answer": "D7/D8: both the replay on 4 vCPU and a 1x step on 4 vCPU (departure 3; architect agreed 09:20Z)."},
+      {"finding": "Rendering the NATS chart at run time needs helm and network.", "answer": "D4: the rendered manifest is committed with its values and render-nats.sh (helm v3.20.2 via go run, chart sha256 checked, --skip-tests, images pinned); no helm at run time."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {"spec": "The replay runs on LINUX's real specs with their real open anchored comments and version history.", "plan": "Uses INFRA-639's seed: real version counts and real open anchored comments, but history versions holding the 22:55 text with a marker line, and anchors moved to a unique sentence where the logged quote is gone.", "evidence": "dispatch://INFRA-639/artifact/plan-md decisions D2 and D3; the architect ruled at 09:07Z that the replay uses INFRA-639's seed with no second replay.", "outcome": {"kind": "changed", "acceptance": ["A3's 'real ... version history' holds for version counts, not for historic version contents; both gaps are listed in the residual."]}},
+    {"spec": "Replay data read at run time from production's API read-only.", "plan": "The run reads INFRA-639's bundle and seed parts at run time from production Dispatch's API; their content was read from production's API by loadgen replay-fetch when INFRA-639 built them.", "evidence": "INFRA-639 plan measured fact 4: the seed costs about 20 CPU-hours to build.", "outcome": {"kind": "unchanged"}},
+    {"spec": "INFRA-598's spec runs the replay once on the 4 vCPU database and names no synthetic step on it.", "plan": "Adds a 1x step on the 4 vCPU database, from the root spec's acceptance 3.", "evidence": "dispatch://INFRA-514/spec acceptance 3: 'One run of tonight's step is on the 4 vCPU database'; architect agreed 09:20Z.", "outcome": {"kind": "changed", "scope": "One more 10-minute step on the 4 vCPU database."}},
+    {"spec": "Run on main before the fixes.", "plan": "Main before the fixes is commit 9b92ac14 (the #2302 merge, production's image), not 35efd326, the outage's code; the residual names the difference.", "evidence": "35efd326 has no pprof endpoint and no published image with one; no INFRA-590..596 or INFRA-512 fix is on main after 9b92ac14 (jj log); architect agreed 09:20Z.", "outcome": {"kind": "unchanged"}}
+  ]
+}

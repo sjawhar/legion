@@ -187,12 +187,14 @@ Each item below names a task and where its code is, then notes on it.
 - **Load test**: `loadtest/`
 
   the 2-core reproduction of the 2026-10-26 outage load:
-  `stack.sh` (a local Postgres, latency proxy, NATS, listener and Dispatch built from the checkout), `run-step.sh` (one named step, on a fresh reset to the seed), `run-series.sh` (0.25x to 10x), and the `loadgen` binary (seed, sessions, event and request generators, samplers, `TABLES.md`).
+  `stack.sh` (a local Postgres, latency proxy, NATS, listener and Dispatch built from the checkout), `run-step.sh` (one named step, on a fresh reset to the seed), `run-series.sh` (0.25x to 10x), and the `loadgen` binary (seed, sessions, event and request generators, samplers, `TABLES.md`, and for the cluster `cgroup-merge`, `curves` and `codepaths`).
   Every endpoint comes from the stack's `stack.json` (`guard.go`).
   The replay of LINUX's write log of 2026-10-26 22:55-23:34Z is its second request source (`replay_*.go`, `loadgen run -source replay`):
   the bundle and the seed dump are the file artifacts `loadtest/replay-2026-10-26.json` names by sha256, and one command gets them, prepares the build's template and runs a step (`loadtest/run-step.sh <name> --replay [--rate F] [--dispatch-commit REV]`);
   one bundle, inputs and rng seed send the same requests in every run, which the merge rule's three base and three head runs rest on.
-  How to run it, every column and the differences from production: `loadtest/README.md`
+  `loadtest/cluster/` runs the same load on a full-size copy of Dispatch in a Kubernetes namespace with one command, `cluster.sh all --namespace <ns> --storage-class <class> --dispatch-commit <sha> --pg-major <n> --production-repo <owner/repo> --profile quick|full`:
+  it stands the copy up, seeds it, runs the steps, collects the tables, curves and profiles, and tears it down.
+  How to run both, every column and the differences from production: `loadtest/README.md`
 
 - **Deploy/runtime**: `deploy/`
 

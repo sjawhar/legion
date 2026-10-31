@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-598",
+  "completed": "2026-10-31T03:28:30Z",
+  "round": 9,
+  "roundShape": "full round, as the architect set it: the lock guard is on every stop, kill and remove path. The change is cluster.sh, cluster.test.sh, common.sh, live.go, tables.go, tables_test.go and the README, with main 39b51494 merged (AGENTS.md only).",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "The guard's two halves were driven on the real namespace at this head (run lt-20261031t023744-bacf), not read. The normal half: up, seed and a 3-minute 1x step ran through the new guard with nothing refused - `grep -c 'could not read the lock|no longer names run'` over the whole run log is 0, and the step recorded config.dashboard sse, 1,438 live frames, 0 order violations, 3.99 events/s committed and 10,752 of 10,752 requests 2xx. The failing half: with a kubectl wrapper that lets use_run's own read through and fails every later read of the lock ConfigMap, `cluster.sh db-size 4 15Gi` got as far as scale_to and then stopped, logging `could not read the lock dispatch-loadtest-lock in loadtest after 3 tries, so whether deployment dispatch is still this run's is not known; this run stops and removes nothing` and `refusing to scale deployment dispatch to 0 … scaling it would start or stop another run's copy under it`, exit 1, after four lock reads in ten seconds (one in use_run, three in the guard, 2 s apart as LOCK_READ_TRIES and LOCK_READ_RETRY_SECONDS say); the copy was untouched - dispatch and listener still 1 replica each, Postgres still 16 CPU. The legacy-transport fix I ran both ways: TestTablesReadTheOlderLiveTransport passes here and fails against 6ac30872's tables.go, whose table prints `-` for the older steps' transport. The (aa) family's red state is the control suite against 6ac30872's cluster.sh, which stops after 16 PASS at `the seed dump streamed into postgres-0 did not go through postgres_exec`."
+  },
+  "failures": [
+    {
+      "criterion": "The architect's item 3: case (w) and the rest of cluster.test.sh green over repeated runs under CPU load",
+      "evidence": "They are not. Under four busy loops on this 3-CPU pod the suite failed on both complete runs, each on a different assertion: run 1 `FAIL: the bundle streamed into the runner did not go through runner_exec: no lock read came right before it (1448:…exec -i runner -c runner -- tar -C /work -xf -)`, run 2 `FAIL: the heartbeat of a held run patched the lock no more than before (28, was 28): the kept run's lock ages and goes stale`. Without load the same suite at the same head gives 52 PASS, 0 FAIL, exit 0. The first class is a race in this round's own new helper, and I proved the mechanism rather than guessing it: `guarded_by_lock_read` (cluster.test.sh:873) asserts that the LINE before the guarded call in the fake kubectl log is `get configmap dispatch-loadtest-lock`, but entries in that log are not one line each and the run's daemons append to it concurrently. I re-ran the suite from a copy whose cleanup keeps its scratch directory: at the failing assertion the three lines before `exec postgres-0 -c postgres -- pg_restore …` are `  echo end`, `  sleep 5` and `done` - the tail of the sampler's own exec script, logged between the guard's read and the guarded call. Three assertions use that helper (cluster.test.sh:1290, :1292, :1338) and all three are new this round (0 occurrences of the helper at 6ac30872, 5 here), so this is new flakiness, not inherited. It needs no load to fire: load only makes the interleaving likely, and CI's envoy-go runs this suite on a shared runner. Remedy, for the implementer to choose: compare the guarded call with the previous ENTRY of the log rather than the previous line (the fake kubectl could write one line per call, or mark its entries), or stop the daemons around those three assertions. The second class is the held-run heartbeat assertion, which counts the lock patches of a hold within a fixed window and fails when the 60 s cycle does not tick inside it under load; its remedy is a wait proportional to the heartbeat's period rather than a fixed one. Neither is a defect of the product: both of the behaviours they assert I drove live above."
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "Review round 6: the lock guard retries its read and then fails closed, and the normal path is unaffected",
+      "surface": "GKE namespace loadtest, from this Legion worker pod",
+      "command": "cluster.sh up … && seed && step 1x 1 --duration 3m (run lt-20261031t023744-bacf); then PATH=<a kubectl that fails every lock read after the first> cluster.sh db-size --namespace loadtest 4 15Gi; then down. Log /legion/scratch/tmp/t598/run9.log",
+      "observed": "The normal cycle refused nothing: no `could not read the lock` and no `no longer names run` line anywhere in the run's log, the step wrote config.dashboard sse with 1,438 live frames and 0 order violations, 3.99 events/s committed, 10,752/10,752 requests 2xx, and down left an empty listing with the lock gone. With the lock read failing after use_run's own, db-size stopped inside scale_to after three guard reads 2 s apart (four reads in ten seconds), logged `could not read the lock dispatch-loadtest-lock in loadtest after 3 tries … this run stops and removes nothing` and `refusing to scale deployment dispatch to 0`, exited 1, and left dispatch and listener at 1 replica and Postgres at 16 CPU",
+      "headSha": "72fa9e56d86629481bbf5f516281395f3983dd92",
+      "negativeControl": "The failing-read run is itself the control, and its first form is a second one: a kubectl that fails every lock read, use_run's included, makes db-size die at that first read (`kubectl could not read ConfigMap dispatch-loadtest-lock in loadtest`) before it reaches the guard, also touching nothing"
+    },
+    {
+      "criterion": "Older step directories keep their recorded transport, and the round's suites and checks",
+      "surface": "the branch's Go and shell suites, run at this head and against 6ac30872",
+      "command": "cd packages/envoy && go test -count=1 -run TestTablesReadTheOlderLiveTransport ./loadtest/ here and with 6ac30872's tables.go in a scratch tree; bash loadtest/cluster/cluster.test.sh here and with 6ac30872's cluster.sh; bash loadtest/run-step.test.sh; bash loadtest/common.test.sh; go test -p 2 -parallel 4 -count=1 ./loadtest/; uv run --with pyyaml bash .github/scripts/check-ci-images.sh tree",
+      "observed": "TestTablesReadTheOlderLiveTransport ok here and FAIL against 6ac30872's tables.go, whose rendered table shows `older-sse` and `older-ws` with `-` for the transport. cluster.test.sh unloaded: 52 PASS, 0 FAIL, exit 0, including the new case `a guarded write, kill or removal whose every read of the lock fails stops after 3 tries 2 s apart, touching nothing`. The control against 6ac30872's cluster.sh stops after 16 PASS at `the seed dump streamed into postgres-0 did not go through postgres_exec`, the (aa) family red before the fix. run-step.test.sh, common.test.sh and go test ./loadtest/ all exit 0; check-ci-images.sh tree exits 0",
+      "headSha": "72fa9e56d86629481bbf5f516281395f3983dd92",
+      "negativeControl": "Both controls above are red states measured here rather than quoted: the Go test against the previous tables.go, and the whole suite against the previous cluster.sh"
+    }
+  ],
+  "notes": [
+    "CI is unread at the code head 32592e51, which the architect asked me to name: at 02:45Z lint, typecheck, test and envoy-go were all queued and pr-title had one cancelled and one successful run. The reviewer must read all five there. If envoy-go is red with one of the two assertions named in failures, that is the flakiness above and not a product defect - and that is the reason it matters enough to fail this round rather than note it.",
+    "The load I used is heavier than a CI runner's: four busy loops on a 3-CPU pod, which is how I reached 2 of 2 rather than a rare miss. The `guarded_by_lock_read` race needs no load at all, though - any write by the sampler between the guard's read and the guarded call breaks it - so I would not read the heavy load as the whole story.",
+    "The namespace is released: down printed an empty listing, the lock answers NotFound, and no cluster.sh process of mine runs. The reference-seed rerun can take it."
+  ]
+}

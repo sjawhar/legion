@@ -1,0 +1,14 @@
+kind: Added
+body: |-
+  `cluster.sh up --stored-order-source <sha>` builds INFRA-707's `envoy-dispatch stored-order`
+  from the Dispatch commit under test, adding INFRA-707's two files when that tree lacks them, and
+  every step and replay runs the check after its window while Dispatch still runs; a mismatched
+  or refused document keeps its rows in the step directory; `stored-order.json` and
+  `STORED-ORDER.md` carry the checker's `unchecked` count when its summary line has one.
+  `cluster.sh up --browsertype-commit
+  <sha>` and `step --typing` or `replay --typing` type into the step's busiest documents with
+  INFRA-707's `browsertype -protect 'Revision token'`, and `up` refuses a driver without
+  `-protect`. `loadgen plan-docs` names the documents a step's own writes plan the most versions
+  for. `cluster.sh replay-prepare` and `replay` run INFRA-639's replay of the 2026-10-26 outage on
+  the copy.
+time: 2026-10-29T21:00:00Z

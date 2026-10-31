@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/pprof/profile"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -33,11 +34,22 @@ type sample struct {
 	PGTotal    int                `json:"pg_total"`
 	Goroutines int                `json:"goroutines"`
 	PoolWait   int                `json:"pool_acquire_goroutines"`
-	HeapInuse  float64            `json:"heap_inuse"`
-	HeapAlloc  float64            `json:"heap_alloc"`
-	HeapSys    float64            `json:"heap_sys"`
-	NATS       map[string]float64 `json:"nats"`
-	InWindow   bool               `json:"in_window"`
+	// HeapLiveBytes and HeapLiveObjects are the heap read this sample carries, if any: the sums of
+	// /debug/pprof/heap's inuse_space and inuse_objects, the runtime's sampled estimate of the live
+	// heap at its last GC, not runtime.MemStats HeapInuse. The read runs on its own
+	// (sampler.readHeaps) and lands in the first sample that looks for it once it has ended.
+	// HeapAt is when it ended (zero when the sample carries none), and HeapInWindow applies
+	// InWindow's rule to HeapAt, so the window holds a read by its own time, not its sample's.
+	HeapLiveBytes   float64 `json:"heap_live_bytes"`
+	HeapLiveObjects float64 `json:"heap_live_objects"`
+	// MemStatsHeapInuse is an older run's heap read (samples.json `heap_inuse`): runtime.MemStats
+	// HeapInuse from /debug/pprof/heap?debug=1. A run now never writes it; it is read only to
+	// render an older step directory, under its own label.
+	MemStatsHeapInuse float64            `json:"heap_inuse,omitzero"`
+	HeapAt            time.Time          `json:"heap_at,omitzero"`
+	HeapInWindow      bool               `json:"heap_in_window,omitempty"`
+	NATS              map[string]float64 `json:"nats"`
+	InWindow          bool               `json:"in_window"`
 	// FailedReads names the reads of this sample that failed: readPostgres, readGoroutines,
 	// readHeap, readNATS. Their values above stay 0 (NATS empty) and enter no statistic.
 	FailedReads []string `json:"failed_reads,omitempty"`
@@ -53,9 +65,10 @@ const (
 )
 
 // sampler takes a sample every 5 s: CPU and RSS of each stack process and of loadgen from /proc,
-// Postgres connections, Dispatch's goroutines and pool waiters, its heap every 15 s, and NATS
-// /varz. A failed Postgres, pprof or NATS read is marked in its sample (sample.FailedReads). At each
-// sample it also checks that every stack process is alive (checkAlive).
+// Postgres connections, Dispatch's goroutines and pool waiters, and NATS /varz. Dispatch's heap is
+// read on its own every 15 s (readHeaps), so that a slow read of a large heap delays no sample. A
+// failed Postgres, pprof or NATS read is marked in its sample (sample.FailedReads). At each sample
+// it also checks that every stack process is alive (checkAlive).
 type sampler struct {
 	pids    map[string]int // by name; "postgres" is the postmaster
 	pprof   string
@@ -235,12 +248,19 @@ func boxBusy(ctx context.Context, window time.Duration) (float64, bool) {
 
 // loop samples every 5 s until ctx ends. A failed read is marked in its sample and logged as
 // readErrors does, one count each for the Postgres, the pprof and the NATS reads. A read that
-// failed once ctx had ended is neither marked nor counted, as poll does.
+// failed once ctx had ended is neither marked nor counted, as poll does. The heap reads run in
+// readHeaps; each sample takes the one that has ended since the last sample, if any, in place of
+// reading the heap itself. A heap read that ends once the last sample is taken is lost.
 func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.Logger) {
 	var pg *pgx.Conn
 	pgErrs := readErrors{name: "sampler: postgres", lg: lg}
 	pprofErrs := readErrors{name: "sampler: pprof", lg: lg}
 	natsErrs := readErrors{name: "sampler: nats", lg: lg}
+	heaps, heapsDone := make(chan heapRead, 1), make(chan struct{})
+	go func() {
+		defer close(heapsDone)
+		s.readHeaps(ctx, heaps)
+	}()
 	defer func() {
 		if pg != nil {
 			pg.Close(context.Background())
@@ -248,13 +268,15 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 		pgErrs.done()
 		pprofErrs.done()
 		natsErrs.done()
+		<-heapsDone // loop returns only once ctx has ended, which ends readHeaps
 	}()
+	inWindow := func(at time.Time) bool { return !at.Before(winStart) && !at.After(winEnd.Add(5*time.Second)) }
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	self := os.Getpid()
-	for n := 0; ; n++ {
+	for {
 		sm := sample{At: time.Now(), CPUTicks: map[string]float64{}, RSSKiB: map[string]float64{}, PGConns: map[string]int{}, NATS: map[string]float64{}}
-		sm.InWindow = !sm.At.Before(winStart) && !sm.At.After(winEnd.Add(5*time.Second))
+		sm.InWindow = inWindow(sm.At)
 		// failed marks and counts a failed read, unless it failed because ctx ended.
 		failed := func(read string, errs *readErrors, err error) {
 			if ctx.Err() != nil {
@@ -300,10 +322,15 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 		if sm.Goroutines, sm.PoolWait, err = goroutineCounts(s.pprof); err != nil {
 			failed(readGoroutines, &pprofErrs, err)
 		}
-		if n%3 == 0 {
-			if sm.HeapInuse, sm.HeapAlloc, sm.HeapSys, err = heapStats(s.pprof); err != nil {
-				failed(readHeap, &pprofErrs, err)
+		select {
+		case h := <-heaps:
+			sm.HeapAt, sm.HeapInWindow = h.at, inWindow(h.at)
+			if h.err != nil {
+				failed(readHeap, &pprofErrs, h.err)
+			} else {
+				sm.HeapLiveBytes, sm.HeapLiveObjects = h.bytes, h.objects
 			}
+		default:
 		}
 		if v, err := natsVarz(s.natsMon); err != nil {
 			failed(readNATS, &natsErrs, err)
@@ -324,6 +351,40 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+	}
+}
+
+// heapReadEvery is how often readHeaps starts a heap read; heapReadTimeout bounds one read. The
+// runtime walks every heap record to build the profile, so a read takes longer as the heap grows.
+const (
+	heapReadEvery   = 15 * time.Second
+	heapReadTimeout = 2 * time.Minute
+)
+
+// heapRead is one ended read of Dispatch's heap: when it ended, and its values or why it failed.
+type heapRead struct {
+	at             time.Time
+	bytes, objects float64
+	err            error
+}
+
+// readHeaps reads Dispatch's heap at once, then at each heapReadEvery slot after, one read at a
+// time: a slot that falls while a read is in flight, or waits for a sample to take it, is skipped.
+// It hands each ended read to out, and returns once ctx has ended.
+func (s *sampler) readHeaps(ctx context.Context, out chan<- heapRead) {
+	for next := time.Now(); sleepUntil(ctx, next); {
+		var h heapRead
+		h.bytes, h.objects, h.err = heapLive(ctx, s.pprof)
+		h.at = time.Now()
+		select {
+		case out <- h:
+		case <-ctx.Done():
+			return
+		}
+		next = next.Add(heapReadEvery)
+		if behind := time.Since(next); behind > 0 {
+			next = next.Add(behind.Truncate(heapReadEvery) + heapReadEvery)
 		}
 	}
 }
@@ -360,9 +421,13 @@ func (s *sampler) all() []sample {
 
 var shortClient = &http.Client{Timeout: 10 * time.Second}
 
-// getOK GETs url with client; an answer other than 200 is an error.
-func getOK(client *http.Client, url string) (io.ReadCloser, error) {
-	resp, err := client.Get(url)
+// getOK GETs url with client, until ctx ends; an answer other than 200 is an error.
+func getOK(ctx context.Context, client *http.Client, url string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +444,7 @@ func getOK(client *http.Client, url string) (io.ReadCloser, error) {
 // profile names no total.
 func goroutineCounts(pprof string) (total, poolWait int, err error) {
 	url := pprof + "/debug/pprof/goroutine?debug=1"
-	body, err := getOK(shortClient, url)
+	body, err := getOK(context.Background(), shortClient, url)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -426,43 +491,44 @@ func goroutineCounts(pprof string) (total, poolWait int, err error) {
 	return total, poolWait, nil
 }
 
-// heapStats reads Dispatch's HeapInuse, HeapAlloc and HeapSys from /debug/pprof/heap?debug=1; an
-// error when the read fails or the profile names no HeapInuse.
-func heapStats(pprof string) (inuse, alloc, sys float64, err error) {
-	url := pprof + "/debug/pprof/heap?debug=1"
-	body, err := getOK(&http.Client{Timeout: 30 * time.Second}, url)
+// heapLive reads Dispatch's live heap from /debug/pprof/heap, the binary profile, within
+// heapReadTimeout and until ctx ends: the sums of its inuse_space and inuse_objects samples, which
+// the runtime has already scaled from its sampled records to estimates of the whole heap. It never
+// reads ?debug=1: that text formats every heap record, grew past 500 MB, and its reads took 29% of
+// Dispatch's CPU in the r16 replay. An error when the read fails, the profile does not parse, or it
+// has no inuse_space or inuse_objects.
+func heapLive(ctx context.Context, pprof string) (bytes, objects float64, err error) {
+	url := pprof + "/debug/pprof/heap"
+	body, err := getOK(ctx, &http.Client{Timeout: heapReadTimeout}, url)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, err
 	}
 	defer body.Close()
-	sc := bufio.NewScanner(body)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	haveInuse := false
-	for sc.Scan() {
-		line := sc.Text()
-		if v, ok := strings.CutPrefix(line, "# HeapInuse = "); ok {
-			inuse, err = strconv.ParseFloat(v, 64)
-			haveInuse = err == nil
-		} else if v, ok := strings.CutPrefix(line, "# HeapAlloc = "); ok {
-			alloc, _ = strconv.ParseFloat(v, 64)
-		} else if v, ok := strings.CutPrefix(line, "# HeapSys = "); ok {
-			sys, _ = strconv.ParseFloat(v, 64)
-		}
+	p, err := profile.Parse(body)
+	if err != nil {
+		return 0, 0, fmt.Errorf("GET %s: %w", redactURL(url), err)
 	}
-	if err := sc.Err(); err != nil {
-		return 0, 0, 0, fmt.Errorf("GET %s: %w", redactURL(url), err)
+	bi, err := valueIndex(p, "inuse_space")
+	if err != nil {
+		return 0, 0, fmt.Errorf("GET %s: %w", redactURL(url), err)
 	}
-	if !haveInuse {
-		return 0, 0, 0, fmt.Errorf("GET %s: no HeapInuse", redactURL(url))
+	oi, err := valueIndex(p, "inuse_objects")
+	if err != nil {
+		return 0, 0, fmt.Errorf("GET %s: %w", redactURL(url), err)
 	}
-	return inuse, alloc, sys, nil
+	var b, o int64
+	for _, s := range p.Sample {
+		b += s.Value[bi]
+		o += s.Value[oi]
+	}
+	return float64(b), float64(o), nil
 }
 
 // natsVarz reads NATS's CPU, memory, connections, message counts, slow consumers and subscriptions
 // from /varz; an error when the GET fails, answers other than 200 or holds no JSON.
 func natsVarz(mon string) (map[string]float64, error) {
 	url := mon + "/varz"
-	body, err := getOK(shortClient, url)
+	body, err := getOK(context.Background(), shortClient, url)
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +629,13 @@ type resourcesSummary struct {
 	PoolAcquireGoroutines stat               `json:"pool_acquire_goroutines"`
 	PGConnsTotal          stat               `json:"pg_conns_total"`
 	PGConnsByState        map[string]stat    `json:"pg_conns_by_state"`
-	HeapInuseMiB          stat               `json:"heap_inuse_mib"`
+	// HeapLiveMiB is the in-window heap reads' heap_live_bytes in MiB: the heap profile's in-use
+	// bytes, a sampled estimate of the live heap.
+	HeapLiveMiB stat `json:"heap_live_mib"`
+	// MemStatsHeapInuseMiB is an older run's summary.json `heap_inuse_mib`, runtime.MemStats
+	// HeapInuse, a different metric from HeapLiveMiB. A run now never writes it; its presence marks
+	// an older summary, whose heap the tables and curves show under its own label.
+	MemStatsHeapInuseMiB *stat `json:"heap_inuse_mib,omitempty"`
 	// NATSOutMsgsPerS and NATSInMsgsPerS are NATS's messages out and in per second, from the
 	// first to the last in-window /varz read that worked; null when fewer than two worked.
 	// NATSSlowConsumers is the last such read's count; null when none worked.
@@ -580,8 +652,8 @@ type resourcesSummary struct {
 	XIDReadError string   `json:"xid_read_error,omitempty"`
 	// PGReadErrors counts the in-window samples whose pg_stat_activity read failed, a failed
 	// connect included; PprofReadErrors the in-window reads of Dispatch's goroutine and heap
-	// profiles that failed; NATSReadErrors the in-window /varz reads that failed. A failed read
-	// enters no statistic above.
+	// profiles that failed (a heap read by when it ended, sample.HeapInWindow); NATSReadErrors the
+	// in-window /varz reads that failed. A failed read enters no statistic above.
 	PGReadErrors    int `json:"pg_read_errors"`
 	PprofReadErrors int `json:"pprof_read_errors"`
 	NATSReadErrors  int `json:"nats_read_errors"`
@@ -591,8 +663,9 @@ type resourcesSummary struct {
 // no table shows the NATS reads.
 func (r *resourcesSummary) failedReads() int { return r.PGReadErrors + r.PprofReadErrors }
 
-// summarizeResources reduces the in-window samples; ops is committed events plus requests sent
-// in the window, over durationS.
+// summarizeResources reduces the in-window samples, and the heap reads that ended in the window
+// whatever sample carries them; ops is committed events plus requests sent in the window, over
+// durationS.
 func summarizeResources(ss []sample, ops int, durationS float64) *resourcesSummary {
 	var win []sample
 	for _, s := range ss {
@@ -624,6 +697,16 @@ func summarizeResources(ss []sample, ops int, durationS float64) *resourcesSumma
 	var gor, pw, pgTot, heap []float64
 	var natsOK []sample
 	pgState := map[string][]float64{}
+	for _, s := range ss {
+		if !s.HeapInWindow {
+			continue
+		}
+		if slices.Contains(s.FailedReads, readHeap) {
+			res.PprofReadErrors++
+		} else if s.HeapLiveBytes > 0 {
+			heap = append(heap, s.HeapLiveBytes/1048576)
+		}
+	}
 	for _, s := range win {
 		for k, v := range s.RSSKiB {
 			res.RSSMiBMax[k] = max(res.RSSMiBMax[k], v/1024)
@@ -633,11 +716,6 @@ func summarizeResources(ss []sample, ops int, durationS float64) *resourcesSumma
 		} else {
 			gor = append(gor, float64(s.Goroutines))
 			pw = append(pw, float64(s.PoolWait))
-		}
-		if slices.Contains(s.FailedReads, readHeap) {
-			res.PprofReadErrors++
-		} else if s.HeapInuse > 0 {
-			heap = append(heap, s.HeapInuse/1048576)
 		}
 		if slices.Contains(s.FailedReads, readNATS) {
 			res.NATSReadErrors++
@@ -656,7 +734,7 @@ func summarizeResources(ss []sample, ops int, durationS float64) *resourcesSumma
 	for k, v := range pgState {
 		res.PGConnsByState[k] = mkStat(v)
 	}
-	res.Goroutines, res.PoolAcquireGoroutines, res.PGConnsTotal, res.HeapInuseMiB = mkStat(gor), mkStat(pw), mkStat(pgTot), mkStat(heap)
+	res.Goroutines, res.PoolAcquireGoroutines, res.PGConnsTotal, res.HeapLiveMiB = mkStat(gor), mkStat(pw), mkStat(pgTot), mkStat(heap)
 	if total := b.SysTotal - a.SysTotal; total > 0 {
 		res.SysBusyFrac = (b.SysBusy - a.SysBusy) / total
 	}
