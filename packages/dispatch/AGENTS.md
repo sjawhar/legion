@@ -821,8 +821,10 @@ code selects a machine login (a direct record link can never approve one). A sec
 is an `<a>` to the broker's own page, the `approve_url` the broker names on the pending row and
 `brokerPage.ts` takes only as an absolute `http:` or `https:` URL (anything else, a
 `javascript:` URL among them, reads as absent, since the body is the broker's word relayed
-verbatim); a broker too old to name one leaves the row unlinked, reading "Decided on the secrets
-broker." Below that link each row shows the session the
+verbatim; the check itself is `lib/external-href.ts`, shared with the issue header's external
+links); from a broker too old to name one the row keeps the `<Link>` it had before that page
+existed, to `/credentials/<record>`, the only place such a request can be decided, since that
+broker serves no page of its own. Below that link each row shows the session the
 broker's `session` field names (LEGION-587: `{request, enrollment}`, either null): each id as an
 `AgentName` - its name, its running state and its live link - followed by the full id in text,
 because the id is an unsigned claim (`session.ts`) and `session:<8>…` alone would let another id

@@ -990,10 +990,12 @@ test("a pending credential request naming only the request's session id shows it
   }
 });
 
-// A broker older than its approval page names no `approve_url`, so Dispatch has nowhere to send
-// the approver: the row is listed and counted as any other, links nowhere, and says where the
-// request is decided.
-test("a pending secret request with no approve_url is listed unlinked, saying it is decided on the secrets broker", async ({
+// A broker older than its approval page names no `approve_url`, and serves no page of its own:
+// the row is listed and counted as any other, and keeps the link it had before that page
+// existed, to the record's own Dispatch page, where such a request is still decided. A Dispatch
+// from this rollout step runs against such a broker whenever Dispatch's pin moved first, or the
+// broker's apply was stopped or rolled back.
+test("a pending secret request with no approve_url is listed, counted, and links to the record's own Dispatch page", async ({
   browser,
 }) => {
   const alice = await asUser(browser, "alice");
@@ -1013,8 +1015,9 @@ test("a pending secret request with no approve_url is listed unlinked, saying it
     const requests = page.getByRole("region", { name: "Credential requests" });
     const row = requests.getByRole("listitem").filter({ hasText: "OLD_BROKER_KEY" });
     await expect(row).toContainText("Secret request");
-    await expect(row).toContainText("Decided on the secrets broker.");
-    await expect(requests.getByRole("link")).toHaveCount(0);
+    const link = requests.getByRole("link");
+    await expect(link).toHaveCount(1);
+    await expect(link).toHaveAttribute("href", "/credentials/record-old-broker");
     await expect(page.getByText(/^Needs you 1$/).first()).toBeVisible();
   } finally {
     await alice.close();

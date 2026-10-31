@@ -59,19 +59,19 @@ test("renders every pending credential request, linking a secret row to its brok
       .getByRole("link", { name: /Machine login.*worker-7\.example\.com/s })
       .getAttribute("href")
   ).toBe("/credentials/machine");
-  expect(screen.queryByText("Decided on the secrets broker.")).toBeNull();
   expect(screen.getAllByText("No session named.")).toHaveLength(2);
 });
 
 // A broker older than its own approval page names none, and an approve_url that is not an
-// absolute http(s) URL is no page to send anyone to: either row links nowhere and says where the
-// request is decided.
-test("a secret row with no usable approve_url is unlinked and says it is decided on the secrets broker", () => {
+// absolute http(s) URL is no page to send anyone to: either row keeps the link it had before
+// that page existed, to the record's own Dispatch page, the only place such a request is
+// decided.
+test("a secret row with no usable approve_url links to the record's own Dispatch page", () => {
   for (const approve_url of [undefined, "javascript:alert(1)", "/approve/req-1"]) {
     const view = renderSection({ requests: [pendingSecretRow({ approve_url })], status: "listed" });
     expect(screen.getByText("ANTHROPIC_API_KEY")).toBeDefined();
-    expect(screen.getByText("Decided on the secrets broker.")).toBeDefined();
-    expect(screen.queryByRole("link")).toBeNull();
+    const row = screen.getByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s });
+    expect(row.getAttribute("href")).toBe("/credentials/req-1");
     view.unmount();
   }
 });

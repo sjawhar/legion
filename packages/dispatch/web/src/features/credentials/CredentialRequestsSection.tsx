@@ -23,7 +23,8 @@ const rowLinkClass = `flex flex-wrap items-center gap-2 rounded-lg text-sm outli
  *  the code-lookup route, so its line links to the code-entry page rather than trying to deep-link
  *  the specific pending request. A secret request is decided on the secrets broker's own page, so
  *  its line is a plain link there, leaving Dispatch in the same tab; from a broker that names no
- *  page (one older than it), the line links nowhere and says where the request is decided. */
+ *  page (one older than it), the line keeps the link it had before that page existed, to the
+ *  record's own Dispatch page, which is where such a request is still decided. */
 function PendingRowLine({ row }: { row: CredentialPendingRow }): ReactNode {
   const summary = (
     <>
@@ -44,10 +45,9 @@ function PendingRowLine({ row }: { row: CredentialPendingRow }): ReactNode {
   const page = brokerPage(row.approve_url);
   if (page === null) {
     return (
-      <div className="flex flex-wrap items-center gap-2 text-sm">
+      <Link className={rowLinkClass} to={`/credentials/${row.record_id}`}>
         {summary}
-        <span className={textMutedOnCanvas}>Decided on the secrets broker.</span>
-      </div>
+      </Link>
     );
   }
   return (
