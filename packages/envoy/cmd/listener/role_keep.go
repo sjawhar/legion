@@ -57,6 +57,15 @@ const roleKeepPublishWindow = 2 * time.Second
 // answers no receipt still ends rather than outliving the claim it serves.
 const roleKeepDrainWindow = 60 * time.Second
 
+// roleKeepClaimWindow is how long one drain's claim of a kept copy holds that role's lane against
+// the other drains of the deployment (roleKeepCursor.Claiming). It is roleKeepDrainWindow because
+// that is the whole of a drain's life: a claim younger than it may still belong to a drain that
+// is forwarding that copy right now, which another drain must not forward a second time, and a
+// claim older than it belongs to a drain whose context has ended, so the copy it claimed is free
+// for the next drain to forward. A drain that ends on a forward it could not make does not wait
+// this out: it releases its claim (releaseRoleKeepClaim).
+const roleKeepClaimWindow = roleKeepDrainWindow
+
 // roleKeepHolderWindow bounds the holder resolution a keep makes after it stored its copy
 // (drainAfterKeep): a claim read, the holder's session read, and at most one release of a lapsed
 // claim. It answers no caller - the keep's own answer is written by then - so it ends rather than
@@ -73,12 +82,21 @@ const roleKeptDeliveryStatus = "kept"
 // when the copy could not be kept, beside the answer each gives when nothing was kept.
 const roleKeepFailedLine = "listener kept role message publish failed"
 
-// roleKeepCursor is the body of a role's drain cursor: the stream sequence on that role's kept
-// subject up to which its copies have been claimed by a drain, and so forwarded, dropped as
-// expired or passed over. It is the listener's own small body rather than an envelope, published
-// with bus.Client.PublishCursorAt.
+// roleKeepCursor is the body of a role's drain cursor: the two numbers that say how far that
+// role's kept lane has been drained. Kept is the stream sequence on the role's kept subject the
+// lane is finished with - every copy up to it was forwarded, dropped as expired or passed over -
+// and the walk starts at the copy after it. Claiming is a copy one drain has claimed and not yet
+// confirmed delivered, 0 when none is outstanding: a drain writes it before it forwards that
+// copy and clears it with the same write that moves Kept past the copy, so a drain that ends
+// between the two leaves Kept short of the copy and the next drain reads that copy again. Until
+// it is older than roleKeepClaimWindow, measured against the time the stream stored the cursor
+// carrying it, a claim is also the lane's lock: the drain that reads it leaves the lane alone,
+// so the copy is forwarded a second time only once the drain that claimed it can no longer be
+// forwarding it. It is the listener's own small body rather than an envelope, published with
+// bus.Client.PublishCursorAt.
 type roleKeepCursor struct {
-	Kept uint64 `json:"kept"`
+	Kept     uint64 `json:"kept"`
+	Claiming uint64 `json:"claiming"`
 }
 
 // roleKeepGuards holds one guard per role, so two drains of one role inside this listener do not
@@ -240,26 +258,45 @@ func runKeptRoleDrain(ctx context.Context, cfg listenerDeliveryHandlerConfig, ro
 // inside roleKeepWindow and that beforeForward allows to the holder's agent subject exactly as a
 // live role send forwards it (roleForwardDedupePrefix, contracts.AgentSubject).
 //
-// Each copy is claimed before anything is done with it: the cursor is advanced to that one copy
-// (claimKeptRoleCopy) under the compare-and-swap of the cursor's own last sequence, and only the
-// drain whose claim landed then forwards that copy, drops it as expired, or passes over it. That
-// is what keeps two listeners draining one role from handing one copy to two holders: the loser of
-// a claim stops there, where a cursor written once at the end of the walk lets both of them
-// forward everything they read. What it costs is the copy of a drain that dies between its claim
-// and its forward: that one copy reaches nobody, rather than two holders. It is also why a copy
-// past the window is counted expired once (envoy_role_kept_expired_total) however many drains walk
-// the lane: the one that claimed it counts it.
+// Every step the drain takes with a copy it writes the role's cursor for, under the
+// compare-and-swap of the cursor's own last sequence (writeRoleKeepCursor), and that write is
+// what decides which drain owns the copy: the loser of it stops, where a cursor written once at
+// the end of the walk let two listeners forward everything they read.
+//
+// A copy nothing will be forwarded for - one no read can decode, one past roleKeepWindow, one
+// beforeForward refuses - is finished in one write, to {kept: its sequence, claiming: 0}, before
+// its line, its counter and its delivery outcome, so a drain that lost that write neither counts
+// nor logs a copy another drain reports; it is why a copy past the window is counted expired once
+// (envoy_role_kept_expired_total) however many drains walk the lane.
+//
+// A copy that will be forwarded takes three: the cursor is written to {kept: unchanged, claiming:
+// its sequence}, the copy is forwarded, and the cursor is written to {kept: its sequence,
+// claiming: 0}. What the claim buys is that a copy still reaches exactly one holder: a drain that
+// reads a claim younger than roleKeepClaimWindow leaves the lane to the drain holding it and
+// forwards nothing, and a drain whose own claim the cursor refused stops where it is. What the
+// unmoved kept buys is that no copy is lost whatever ends the drain - a process killed, a forward
+// that failed, a context that ran out - because the walk starts at kept + 1, so a copy claimed
+// and never confirmed is simply the next copy a drain reads: the next one of all, where the drain
+// released its claim on its way out (releaseRoleKeepClaim), and the next one past
+// roleKeepClaimWindow where nothing was left to release it. What that costs is one more copy when
+// a drain ends between its forward and its confirm: the repeat carries the same stable id
+// (bus.ForwardMsgID of the forward's dedupe key and the agent subject), so for the same holder the
+// stream's duplicate window keeps one stored copy and the holder's own dedupe_key drops the
+// second, and only a holder that changed meanwhile sees the copy reach two holders, once, on a
+// failure.
 //
 // now is the clock a copy's age is measured against, time.Now in the listener: a test moves it
 // rather than keeping a copy for an hour, since the age is taken from the stream's own store time,
-// which no caller may choose.
+// which no caller may choose. An outstanding claim's age is measured the same way, against the
+// time the stream stored the cursor that carries it.
 //
 // A forward that reached the server and drew no receipt (bus.ErrReceiptTimeout) counts as
-// forwarded and the walk goes on: its copy is stored on the holder's agent subject, which a
-// returning session replays. Any other forward failure ends the drain, with the rest of the lane
-// left to the role's next claim. A claim the stream refused because another listener's drain has
-// the lane (bus.ErrCursorMoved) is nothing wrong: that listener owns this role's lane now, and
-// this drain stops.
+// forwarded and the walk goes on, and that copy is confirmed: its copy is stored on the holder's
+// agent subject, which a returning session replays. Any other forward failure ends the drain and
+// is returned, with its copy released for the role's next drain and the rest of the lane behind
+// it. A cursor write the stream refused because another listener's drain has the lane
+// (bus.ErrCursorMoved) is nothing wrong: that listener owns this role's lane now, and this drain
+// stops.
 func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, holder string, entry session.SessionEntry, now func() time.Time) error {
 	guard := cfg.roleKeepDrains.guard(role)
 	guard.Lock()
@@ -278,11 +315,22 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role,
 		return fmt.Errorf("read role %s's kept lane: %w", role, err)
 	}
 	cursorSubject := bus.KeptRoleCursorSubject(role)
-	cursorSeq, from, err := readRoleKeepCursor(ctx, cfg.client, cursorSubject)
+	cursorSeq, cursor, written, err := readRoleKeepCursor(ctx, cfg.client, cursorSubject)
 	if err != nil {
 		return fmt.Errorf("read role %s's kept-lane cursor: %w", role, err)
 	}
-	if from >= last.Sequence {
+	if cursor.Kept >= last.Sequence {
+		return nil
+	}
+	// A copy another drain holds a claim of is that drain's to forward, so this one leaves the
+	// lane to it rather than forwarding the copy a second time; the claim is read only here,
+	// where it can be judged against the drain that wrote it, so now is asked for once per copy
+	// in the walk below and once more only while a claim is outstanding.
+	if cursor.Claiming != 0 && now().Sub(written) < roleKeepClaimWindow {
+		cfg.logger.LogEvent(slog.LevelDebug, "listener kept role drain left the lane to the drain holding a claim",
+			slog.String("role", role),
+			slog.String("session_id", holder),
+			slog.Uint64("claiming", cursor.Claiming))
 		return nil
 	}
 
@@ -293,7 +341,7 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role,
 	seen := func(key, recipient string) bool {
 		return cfg.dedupeCache.Seen(key, recipient) || cfg.attemptCache.Seen(key, recipient)
 	}
-	kept := from
+	kept := cursor.Kept
 	for scanned, forwarded := 0, 0; scanned < roleKeepScanMax && forwarded < roleKeepDrainMax; scanned++ {
 		stored, err := cfg.client.NextStoredMessage(ctx, keptSubject, kept+1)
 		if errors.Is(err, nats.ErrMsgNotFound) {
@@ -302,49 +350,49 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role,
 		if err != nil {
 			return fmt.Errorf("read role %s's kept lane after %d: %w", role, kept, err)
 		}
-		cursorSeq, err = claimKeptRoleCopy(ctx, cfg.client, cursorSubject, cursorSeq, stored.Sequence)
-		if err != nil {
-			if errors.Is(err, bus.ErrCursorMoved) {
-				cfg.logger.LogEvent(slog.LevelDebug, "listener kept role drain lost the cursor to another listener",
-					slog.String("role", role),
-					slog.String("session_id", holder))
+		item, report, forwardable := judgeKeptRoleCopy(cfg, role, holder, entry, stored, now, seen)
+		if !forwardable {
+			var owned bool
+			cursorSeq, owned, err = writeRoleKeepCursor(ctx, cfg, role, holder, cursorSubject, cursorSeq, roleKeepCursor{Kept: stored.Sequence})
+			if err != nil {
+				return err
+			}
+			if !owned {
 				return nil
 			}
-			return fmt.Errorf("advance role %s's kept-lane cursor to %d: %w", role, stored.Sequence, err)
-		}
-		kept = stored.Sequence
-		var item contracts.Envelope
-		if err := json.Unmarshal(stored.Data, &item); err != nil {
-			// A copy no read can decode reaches no holder however often it is read, so the
-			// cursor stays past it rather than every later claim's drain stopping on it.
-			cfg.logger.Error("listener kept role message cannot be decoded",
-				slog.String("role", role),
-				slog.Uint64("sequence", stored.Sequence),
-				slog.String("error", err.Error()))
+			kept = stored.Sequence
+			report()
 			continue
 		}
-		if age := now().Sub(stored.Time); age > roleKeepWindow {
-			// No role label: a role token names a tree role of one issue, so a deployment
-			// sees unboundedly many of them and each would be a series of its own, kept for
-			// the process's life. The role is on the log line below.
-			cfg.roleKeptExpired.Inc()
-			cfg.logger.DeliveryLog(slog.LevelWarn, "listener dropped a kept role message older than the keep window",
-				holder, item.Topic, item.EventID, "expired",
-				slog.String("role", role),
-				slog.String("age", age.String()),
-				slog.String("dedupe_key", item.DedupeKey))
-			continue
+		var owned bool
+		cursorSeq, owned, err = writeRoleKeepCursor(ctx, cfg, role, holder, cursorSubject, cursorSeq, roleKeepCursor{Kept: kept, Claiming: stored.Sequence})
+		if err != nil {
+			return err
 		}
-		if !keptRoleForwardAllowed(cfg, role, holder, entry, item, seen) {
-			continue
+		if !owned {
+			return nil
 		}
 		forward := item
 		forward.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
 		keptAt := stored.Time.UnixMilli()
 		forward.KeptAt = &keptAt
 		if err := forwardKeptRoleMessage(cfg, subject, forward, storedOnly); err != nil {
+			// This drain is ending with the copy claimed and unforwarded, so it releases the
+			// claim: the cursor goes back to what it was before the claim, and the role's next
+			// drain reads this copy again at once rather than waiting the claim out. A release
+			// that cannot be written leaves the claim, which the next drain takes over once it
+			// is older than roleKeepClaimWindow; either way the copy is not lost.
+			releaseRoleKeepClaim(ctx, cfg, role, holder, cursorSubject, cursorSeq, kept)
 			return fmt.Errorf("forward role %s's kept message %s to %s: %w", role, item.EventID, holder, err)
 		}
+		cursorSeq, owned, err = writeRoleKeepCursor(ctx, cfg, role, holder, cursorSubject, cursorSeq, roleKeepCursor{Kept: stored.Sequence})
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return nil
+		}
+		kept = stored.Sequence
 		forwarded++
 		cfg.logger.DeliveryLog(slog.LevelInfo, "listener forwarded a kept role message to the role's new holder",
 			holder, item.Topic, item.EventID, "delivered",
@@ -355,31 +403,81 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role,
 	return nil
 }
 
-// claimKeptRoleCopy claims the copy stored at sequence for this drain: it advances role's cursor
-// to that copy alone, under the compare-and-swap of the cursor message's own last sequence
-// (bus.Client.PublishCursorAt, cursorSeq, 0 for a role whose lane has never been drained), and
-// returns the sequence the new cursor was stored at, which the next claim names. A claim the
-// stream refused wraps bus.ErrCursorMoved: another listener's drain advanced the cursor first and
-// owns this role's lane.
-func claimKeptRoleCopy(ctx context.Context, client *bus.Client, cursorSubject string, cursorSeq, sequence uint64) (uint64, error) {
-	body, err := json.Marshal(roleKeepCursor{Kept: sequence})
-	if err != nil {
-		return cursorSeq, fmt.Errorf("encode the kept-lane cursor at %d: %w", sequence, err)
+// judgeKeptRoleCopy judges one copy of role's kept lane for holder, before any cursor is written
+// for it: it decodes the copy, measures its age against roleKeepWindow and applies beforeForward
+// (keptRoleForwardAllowed). It reports the decoded copy, whether the drain forwards it, and, when
+// it does not, what that copy is owed - its line, its counter and its delivery outcome - which the
+// drain runs only once the cursor write has given it the copy, so two drains never report one copy
+// twice. now is called once per copy, whatever the verdict.
+func judgeKeptRoleCopy(cfg listenerDeliveryHandlerConfig, role, holder string, entry session.SessionEntry, stored bus.StoredMessage, now func() time.Time, seen func(key, recipient string) bool) (contracts.Envelope, func(), bool) {
+	var item contracts.Envelope
+	if err := json.Unmarshal(stored.Data, &item); err != nil {
+		// A copy no read can decode reaches no holder however often it is read, so the cursor
+		// is moved past it rather than every later claim's drain stopping on it.
+		return item, func() {
+			cfg.logger.Error("listener kept role message cannot be decoded",
+				slog.String("role", role),
+				slog.Uint64("sequence", stored.Sequence),
+				slog.String("error", err.Error()))
+		}, false
 	}
-	return client.PublishCursorAt(ctx, cursorSubject, body, cursorSeq)
+	if age := now().Sub(stored.Time); age > roleKeepWindow {
+		return item, func() {
+			// No role label: a role token names a tree role of one issue, so a deployment
+			// sees unboundedly many of them and each would be a series of its own, kept for
+			// the process's life. The role is on the log line below.
+			cfg.roleKeptExpired.Inc()
+			cfg.logger.DeliveryLog(slog.LevelWarn, "listener dropped a kept role message older than the keep window",
+				holder, item.Topic, item.EventID, "expired",
+				slog.String("role", role),
+				slog.String("age", age.String()),
+				slog.String("dedupe_key", item.DedupeKey))
+		}, false
+	}
+	if allowed, report := keptRoleForwardAllowed(cfg, role, holder, entry, item, seen); !allowed {
+		return item, report, false
+	}
+	return item, nil, true
 }
 
-// keptRoleForwardAllowed judges one claimed copy to the role's new holder, whose session entry is
-// entry, by beforeForward - the rule the role lane and the publish route both apply before they
-// forward - and reports whether the drain may forward it. The drain is the third forward path and
-// reads the same record of what the holder already took as the lane does (seen), so an echo of a
-// message the holder itself sent, a copy it already took and a payload its delivery modes do not
-// take are refused here as they are there, each under the lane's own line and count. The copy is
-// passed over: its claim has moved the cursor past it, so no later drain offers it again.
-func keptRoleForwardAllowed(cfg listenerDeliveryHandlerConfig, role, holder string, entry session.SessionEntry, item contracts.Envelope, seen func(key, recipient string) bool) bool {
+// writeRoleKeepCursor writes cursor as role's drain cursor for this drain, under the
+// compare-and-swap of the cursor message's own last sequence (bus.Client.PublishCursorAt,
+// cursorSeq, 0 for a role whose lane has never been drained). It returns the sequence the new
+// cursor was stored at, which the drain's next write names, and whether this drain still owns the
+// role's lane: a write the stream refused because the cursor moved (bus.ErrCursorMoved) means
+// another listener's drain owns the lane, which is nothing wrong, so it is logged at debug and the
+// drain stops. Every other failure is the error it is.
+func writeRoleKeepCursor(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, holder, cursorSubject string, cursorSeq uint64, cursor roleKeepCursor) (uint64, bool, error) {
+	body, err := json.Marshal(cursor)
+	if err != nil {
+		return cursorSeq, false, fmt.Errorf("encode role %s's kept-lane cursor at %d: %w", role, cursor.Kept, err)
+	}
+	next, err := cfg.client.PublishCursorAt(ctx, cursorSubject, body, cursorSeq)
+	if err != nil {
+		if errors.Is(err, bus.ErrCursorMoved) {
+			cfg.logger.LogEvent(slog.LevelDebug, "listener kept role drain lost the cursor to another listener",
+				slog.String("role", role),
+				slog.String("session_id", holder))
+			return cursorSeq, false, nil
+		}
+		return cursorSeq, false, fmt.Errorf("advance role %s's kept-lane cursor to kept %d claiming %d: %w", role, cursor.Kept, cursor.Claiming, err)
+	}
+	return next, true, nil
+}
+
+// keptRoleForwardAllowed judges one copy to the role's new holder, whose session entry is entry,
+// by beforeForward - the rule the role lane and the publish route both apply before they forward -
+// and reports whether the drain may forward it, and what a copy it may not is owed. The drain is
+// the third forward path and reads the same record of what the holder already took as the lane
+// does (seen), so an echo of a message the holder itself sent, a copy it already took and a
+// payload its delivery modes do not take are refused here as they are there, each under the lane's
+// own line and count. The copy is passed over, and the report is the drain's to run once its
+// cursor write has moved the lane past the copy, so no later drain offers it again and no drain
+// that lost that write reports it.
+func keptRoleForwardAllowed(cfg listenerDeliveryHandlerConfig, role, holder string, entry session.SessionEntry, item contracts.Envelope, seen func(key, recipient string) bool) (bool, func()) {
 	verdict := beforeForward(item, holder, entry, seen)
 	if verdict.kind == forwardAllowed {
-		return true
+		return true, nil
 	}
 	outcome := deliveryOutcome{sessionID: holder}
 	switch verdict.kind {
@@ -410,27 +508,44 @@ func keptRoleForwardAllowed(cfg listenerDeliveryHandlerConfig, role, holder stri
 		}
 		outcome.exceptionReason = "delivery_failed"
 	}
-	applyDeliveryOutcome(cfg, item, outcome)
-	return false
+	return false, func() { applyDeliveryOutcome(cfg, item, outcome) }
 }
 
-// readRoleKeepCursor reads a role's drain cursor and returns both numbers the drain needs: the
-// cursor message's own stream sequence, which its compare-and-swap write must name, and the kept
-// sequence its body names, where the walk starts. A role whose lane has never been drained holds
-// no cursor (nats.ErrMsgNotFound), and both are 0.
-func readRoleKeepCursor(ctx context.Context, client *bus.Client, subject string) (cursorSeq, kept uint64, err error) {
+// readRoleKeepCursor reads a role's drain cursor and returns what the drain needs of it: the
+// cursor message's own stream sequence, which its compare-and-swap write must name, the cursor
+// body itself - the sequence the lane is finished with, where the walk starts, and the claim one
+// drain holds, 0 for none - and the time the stream stored it, which is how old that claim is. A
+// role whose lane has never been drained holds no cursor (nats.ErrMsgNotFound): the sequence is
+// 0, the body is its zero value and the time is the zero time, which no claim is judged against
+// since the body claims nothing.
+func readRoleKeepCursor(ctx context.Context, client *bus.Client, subject string) (cursorSeq uint64, cursor roleKeepCursor, written time.Time, err error) {
 	stored, err := client.LastStoredMessage(ctx, subject)
 	if errors.Is(err, nats.ErrMsgNotFound) {
-		return 0, 0, nil
+		return 0, roleKeepCursor{}, time.Time{}, nil
 	}
 	if err != nil {
-		return 0, 0, err
+		return 0, roleKeepCursor{}, time.Time{}, err
 	}
-	var cursor roleKeepCursor
 	if err := json.Unmarshal(stored.Data, &cursor); err != nil {
-		return 0, 0, fmt.Errorf("decode the cursor stored at %d: %w", stored.Sequence, err)
+		return 0, roleKeepCursor{}, time.Time{}, fmt.Errorf("decode the cursor stored at %d: %w", stored.Sequence, err)
 	}
-	return stored.Sequence, cursor.Kept, nil
+	return stored.Sequence, cursor, stored.Time, nil
+}
+
+// releaseRoleKeepClaim gives up the claim this drain holds on one copy, so the role's next drain
+// reads that copy again at once: it writes the cursor the drain's claim replaced, kept where the
+// lane was finished and nothing claimed, under the same compare-and-swap every other write of the
+// cursor makes. It is the end of a drain that claimed a copy it will not forward after all, and
+// answers nobody: a release the cursor refused is a claim another drain has taken over already,
+// and a release that failed leaves a claim the next drain takes over once roleKeepClaimWindow has
+// passed, so both are logged at debug and neither changes what the drain returns.
+func releaseRoleKeepClaim(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, holder, cursorSubject string, cursorSeq, kept uint64) {
+	if _, _, err := writeRoleKeepCursor(ctx, cfg, role, holder, cursorSubject, cursorSeq, roleKeepCursor{Kept: kept}); err != nil {
+		cfg.logger.LogEvent(slog.LevelDebug, "listener kept role drain could not release its claim",
+			slog.String("role", role),
+			slog.String("session_id", holder),
+			slog.String("error", err.Error()))
+	}
 }
 
 // forwardKeptRoleMessage forwards one kept copy and waits for its outcome, as the publish route

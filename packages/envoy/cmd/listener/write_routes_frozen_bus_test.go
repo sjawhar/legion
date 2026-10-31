@@ -199,12 +199,12 @@ func TestTheWriteRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *testing.
 // role's holder are role-bucket calls the claimant's registration write does not reach, so each
 // is frozen on its own here: the relay passes everything up to the first protocol line naming the
 // role bucket and swallows that line and every one after it. For the claim's read that is the
-// direct get of the claim; for the claim's write it is the conditional create, which nats.go
-// publishes with headers (HPUB) after the read and the claimant's interest write have answered,
-// so the write itself is what meets the silent bus, and the rollback that follows a write that did
-// not answer must not take the request past its budget either. The negative control is a hard claim
-// of another role (role-store-control) by the same claimant on the same rig before the freeze: it
-// is served.
+// direct get of the claim, published to $JS.API.DIRECT.GET; for the claim's write it is the
+// hard claim's unconditional publish of the claim to its own subject, which nats.go sends after
+// the read and the claimant's interest write have answered, so the write itself is what meets the
+// silent bus, and the rollback that follows a write that did not answer must not take the request
+// past its budget either. The negative control is a hard claim of another role
+// (role-store-control) by the same claimant on the same rig before the freeze: it is served.
 func TestAClaimWhoseRoleStoreStopsAnsweringIsAnsweredInsideTheBudget(t *testing.T) {
 	const claimant = "ses_role_store_claimant"
 	for _, freeze := range []struct {
@@ -212,7 +212,7 @@ func TestAClaimWhoseRoleStoreStopsAnsweringIsAnsweredInsideTheBudget(t *testing.
 	}{
 		{"the claim's read", "KV_" + bus.RoleClaimBucket, `{"session_id":"` + claimant + `","role":"role-store-read"}`},
 		{"a soft claim's read", "KV_" + bus.RoleClaimBucket, `{"session_id":"` + claimant + `","role":"role-store-soft","soft":true}`},
-		{"the claim's write", "HPUB $KV." + bus.RoleClaimBucket + ".", `{"session_id":"` + claimant + `","role":"role-store-write"}`},
+		{"the claim's write", "PUB $KV." + bus.RoleClaimBucket + ".", `{"session_id":"` + claimant + `","role":"role-store-write"}`},
 	} {
 		t.Run(freeze.name, func(t *testing.T) {
 			t.Parallel()
