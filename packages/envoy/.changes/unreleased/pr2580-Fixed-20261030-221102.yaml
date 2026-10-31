@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'Dispatch''s `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES` descriptions now state the real bound between the warning `envoy nats reconnect hook failed; it is retried` and the error `envoy nats reconnect hooks have not succeeded`: Dispatch reconciles the stream on its first connection, retrying until that reconcile succeeds, the minute runs from that first connection to NATS, not from the first retry, and `stall_ms` on both lines is how long the reconcile has been due.'
+time: 2026-10-30T22:11:02.6341001Z
+custom:
+    Issue: pr2580
