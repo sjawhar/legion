@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-31T04:54:48Z",
+  "completed": "2026-10-31T08:54:52Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -260,6 +260,14 @@
       "observed": "Build and vet clean; the guides check passes 3 of 3; GitHub reports the PR MERGEABLE.",
       "headSha": "3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5",
       "negativeControl": "Before the split, the guides check refused packages/envoy/AGENTS.md's mention-rule bullet at 83 screen rows (limit 50)."
+    },
+    {
+      "criterion": "CI red at 9e5642ed (ci-ok, from main's broker claims test that #2598 fixes): a fresh run on new main; confirmation round.",
+      "surface": "The merged tree's Go build and vet and the guide layout check",
+      "command": "cd packages/envoy && go build ./... && go vet -p 1 ./...; bun test scripts/semantic-line-breaks.guides.test.ts",
+      "observed": "Build and vet clean; guides 3 of 3; the PR's own diff is byte-identical (fingerprint unchanged, 0 of 112 files differ).",
+      "headSha": "25206ba7ab966c710745e882522af7bfb99dcadf",
+      "negativeControl": "At 9e5642ed's merge base (main before #2598), envoy-go failed TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (run 41170407259)."
     }
   ],
   "filesChanged": [
@@ -406,7 +414,8 @@
     "Four hub tests (main's) settle the relay feed's seed before measuring (57c4a697), because this PR starts a hub generation at the first subscribe; no assertion weakened.",
     "refreshHeldClaims records a refreshed claim only over the one it snapshotted (a test-exposed race, not a product defect: the row's claim only moves forward, so no sweep sees a live queued attempt as free).",
     "Forward merge at ae4d4fee (main 21b40359): AGENTS.md and cmd/dispatch/README.md take #2422's one sentence per line with this PR's content; round-shape.py lists docs and one test only (confirmation round).",
-    "Forward merge at 3d5c31a9 (main f4ec92ee, #2474): scripts/e2e/README.md in one-sentence-per-line layout with this PR's passages, its audit fallback corrected to the /ws/live replay; packages/envoy/AGENTS.md's mention-rule bullet split for the 50-row limit."
+    "Forward merge at 3d5c31a9 (main f4ec92ee, #2474): scripts/e2e/README.md in one-sentence-per-line layout with this PR's passages, its audit fallback corrected to the /ws/live replay; packages/envoy/AGENTS.md's mention-rule bullet split for the 50-row limit.",
+    "Forward merge at 25206ba7 (main 1a9095e6, #2598) for a fresh CI run; the PR's own diff unchanged."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -415,7 +424,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 20,
+  "round": 21,
   "answersTest": "2a896bca00f230e3d82defaf1fb578e8c81c29cb",
   "answersReview": "d8b5a38fcddc4e3a4c504d787c6371812805bec0"
 }
