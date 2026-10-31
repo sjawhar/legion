@@ -406,19 +406,19 @@ func refuseSymlinkedLayout(root, dir string) error {
 // exist holds no `.jj`, so it is passed over, as refuseSymlinkedLayout does. The walk costs a
 // handful of os.Lstat calls once per clone, which is why nothing here is cached.
 func refuseEnclosingWorkspace(dir string) error {
-	for {
-		enclosing := filepath.Join(dir, ".jj")
+	for above := dir; ; {
+		enclosing := filepath.Join(above, ".jj")
 		switch _, err := os.Lstat(enclosing); {
 		case err == nil:
-			return fmt.Errorf("refusing to run jj in %s: %s is a Jujutsu repository, and this jj command creates a repository of its own, so jj would open and write that enclosing repository instead of creating one; the directory the daemon provisions under must not sit inside a Jujutsu repository — under `runtime: tmux` that directory is legion.yaml's state_dir, which a relative value resolves against the configuration file's own directory, so a legion.yaml kept inside a checkout puts the shared clone under that checkout's .jj", dir, enclosing)
+			return fmt.Errorf("refusing to run jj in %s: %s is a Jujutsu repository, and this jj command creates a repository of its own, so jj would open and write that one instead of creating it; the directory the daemon provisions under must sit inside no Jujutsu repository — under `runtime: tmux` it is legion.yaml's state_dir, which a relative value resolves against the configuration file's own directory, so a legion.yaml kept inside a checkout puts the shared clone under that checkout's .jj", dir, enclosing)
 		case !errors.Is(err, fs.ErrNotExist):
-			return fmt.Errorf("refusing to run jj in %s: %w", dir, err)
+			return fmt.Errorf("refusing to run jj in %s: read %s: %w", dir, enclosing, err)
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
+		parent := filepath.Dir(above)
+		if parent == above {
 			return nil
 		}
-		dir = parent
+		above = parent
 	}
 }
 
