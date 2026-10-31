@@ -2862,7 +2862,7 @@ func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			valid, err := pmdoc.ValidateDocument(before, "BlockIndex")
+			valid, err := pmdoc.ValidateDocument(before, "BlockIndexes")
 			if err != nil {
 				t.Fatal(err)
 			}

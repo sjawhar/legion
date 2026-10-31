@@ -412,8 +412,8 @@ func quotePreconditionBlock(tree *batchTree, quote string, occurrence *int) ([]s
 	return []string{blockID}, nil
 }
 
-// requireBlock refuses a precondition naming a block the tree does not carry, as pmdoc.BlockRange
-// refuses it, over the batch's one validation of that tree.
+// requireBlock refuses a precondition naming a block the tree does not carry, as
+// pmdoc.ValidDocument.BlockRange refuses it, over the batch's one validation of that tree.
 func requireBlock(tree *batchTree, blockID string) error {
 	valid, err := tree.validated("BlockRange")
 	if err != nil {

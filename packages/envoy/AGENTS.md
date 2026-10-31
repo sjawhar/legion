@@ -351,7 +351,7 @@ An ask block's row and a comment's or an ask's anchor key their block id by `blo
 Markdown a caller writes is stored as its rendering, so a write whose rendering reads back as another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocument` for a whole document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` for an insert):
 `ParseForWrite` reads back the whole document a spec, an upload or a version writes (`400 INVALID_MARKDOWN`).
 An `insert` takes one of two paths.
-A fragment of only table rows anchored in a table's row goes to `pmdoc.InsertTableRows` (`docs/edits.go:859`), which the route tries first;
+A fragment of only table rows anchored in a table's row goes to `pmdoc.ValidDocument.InsertTableRows` (`docs/edits.go:859`), which the route tries first;
 the table-row paragraph under the reading rules below says which fragments are rows.
 It returns before any read-back, so a table-row insert is not read back, and it can leave a live document its own markdown reads back otherwise:
 a row inserted under an aligned column is stored without alignment and reads back with the column's, and a row whose cells the upload path refuses for reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
@@ -509,12 +509,14 @@ Websocket admission still uses `loadTree`, because it needs the raw stored updat
 
 A read of a write transaction's fork goes through one reader (`readFork`, `treeOfUnshared`):
 the fork has one reader at a time, the request goroutine that holds it, so `applyLive`'s reads before and after its write, `applyMargin`'s, `docTree`'s, `heldTree`'s and the version capture's each read it through `pmdoc.ReadUnshared`, which hands back a `pmdoc.ValidDocument`.
+`startTree` reads it through the same reader when `current` holds no tree, which is what `applyLive` leaves when the document is outside the schema (`treeOfUnshared`, `docs/mutation.go:1486-1494`).
 `applyLive` and `applyMargin` render that value (`documentMarkdownValid`), which does not validate the tree again;
 `docTree`, `heldTree` and the version capture take its `Node()` and go on as they did, so the version capture's own render still validates.
-Two reads inside a write are not this reader: the repair read an edit makes when the fork's tree needs its block ids stamped (`editTree`, `treeOf`) and `rewriteLive`'s read inside its own transaction (`treeOfTransaction`), both of which read through `pmdoc.Read`.
+Three reads inside a write are not this reader: the unconditional edit's repair read, made when the fork's tree needs its block ids stamped (`editTree`, `treeOf`, `docs/mutation.go:1444`), goes through `pmdoc.Read`, while the conditional edit's repair read (`docs/mutation.go:1356`) and `rewriteLive`'s read inside its own transaction both go through `treeOfTransaction`, that is `pmdoc.ReadInTransaction` (`docs/tree.go:200-208`).
 A document edit carries one validation through its whole batch (`batchTree`):
-the first step that needs a validated tree pays for it, every later pmdoc call over the same tree takes it (`pmdoc.ValidDocument`'s `QuoteFinder`, `Splice`, `BlockIndexes`, `BlockBoundary`, `BlockRange`, `BlockDescendantIDs`, `DeleteBlock`, `DeleteTextblock`, `InsertTableRows`, `TokenJSON`), the blocks a write changed are found in one walk and read by every refusal that needs them (`matchedBlocks`), and the batch's verdict validates the tree it wrote once and hands it to `pmdoc.UpdateDocument`.
-Those reads have one form, the method: a caller holding a plain tree validates it first (`pmdoc.ValidateDocument`) and reads it through the value that gives.
+the first step that needs a validated tree pays for it and the batch's own reads of that tree take it (`pmdoc.ValidDocument`'s `QuoteFinder`, `Splice`, `BlockIndexes`, `BlockBoundary`, `BlockRange`, `BlockDescendantIDs`, `DeleteBlock`, `DeleteTextblock`, `InsertTableRows`, `TokenJSON`), the blocks a write changed are found in one walk and read by every refusal that needs them (`matchedBlocks`), and the batch's verdict validates the tree it wrote once and hands it to `pmdoc.UpdateDocument`.
+Two pmdoc calls over that same tree take a plain `*pmdoc.Node` and validate it for themselves: `pmdoc.MoveBlock` (`docs/edits.go:1150`, `pmdoc/blocks.go:581`) and `pmdoc.FindHeading` (`docs/edits.go:1357`, `pmdoc/find.go:310`).
+A caller holding a plain tree validates it first (`pmdoc.ValidateDocument`) and reads it through the value that gives, and a plain function is still called where no validated value is at hand: the accept path's advice asks whether deleting a block would leave its holder readable (`pmdoc.DeleteBlock`, `docs/accept.go:139`), and `checkEditPrecondition`'s token encodes a tree it holds as a `*pmdoc.Node` (`pmdoc.EncodeTokenJSON`, `docs/edits.go:209`).
 A conditional edit encodes its tree once: the token `checkEditPrecondition` computed is the batch's own `before`, which is exact because a document token carries no block identity, so the stamp between them cannot change it.
 
 A read of a resident room outside a write never walks the live tree.
@@ -758,7 +760,7 @@ A batch that leaves the document's semantic identity unchanged
 — mints no version, named or not, and the response carries `changed: false` with `unchanged_ops` naming each operation that changed nothing (`docs.EditOutcome`).
 Every refusal names its operation index and its anchor:
 `docs` dresses quote, heading-anchor and cross-block misses (`ErrQuoteNotFound`, `ErrAnchorAmbiguous`, `ErrQuoteSpansBlocks`), and `isEditRefusal` keeps the service's internal prose off them.
-`delete` takes `find` or `block`; a `find` covering a textblock's whole text removes that block (`pmdoc.DeleteTextblock`:
+`delete` takes `find` or `block`; a `find` covering a textblock's whole text removes that block (`pmdoc.ValidDocument.DeleteTextblock`:
 it also drops a list, list item, or blockquote it empties, hoists a nested list into the place of a bullet whose text goes, and refuses a bullet with other content with `ErrListItemContent` naming `delete {block:"<item id>"}`;
 `pmdoc.DeleteBlock` serves `block` and reports any emptied container's content rule as `INVALID_OP`;
 both leave an emptied footnote definition holding one empty paragraph, which both parsers read back as the definition, so its reference stays a reference).
@@ -795,7 +797,7 @@ Since `BlocksGainingText` reads the same span, a replacement whose old and new c
 A splice cuts a text node only where a range's edge falls between characters:
 `slice16` answers an edge inside a pair with an error of the package's own (a `500`, never the `ErrSchema` verdict on the write), and a quote's ambiguity context rounds outward to whole characters (`context16`).
 
-Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`) splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range fitting (`pmdoc.Splice`).
+Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`) splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range fitting (`pmdoc.ValidDocument.Splice`).
 A non-empty replacement fitted into a typed block stays inside it, and a fit never replaces the typed block it lands in:
 a callout takes what its content rule allows, a code block included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any block at this step, since `Validate` lets an ask hold other blocks, which concurrent browser edits can leave there.
 The one exception is a replacement holding exactly one block of the typed block's own type under its id, at any depth, which is that block rewritten:
@@ -1678,7 +1680,7 @@ that ask is answered or resolved, or the decision repaired by hand, before the d
 A decision that never held a question never had a row, so the common case passes that guard untouched.
 When no such edit exists - a delete here would leave a decision holding this one unreadable, or a decision needs words written rather than blocks deleted - it names no delete and no ask edit of another decision, and says the decision is repaired in the document editor.
 An ask no paragraph of which holds text is weighed on that question instead of its content rule:
-no document edit repairs it, since an insert anchored on one of its blocks lands beside the decision rather than in it (`pmdoc.BlockBoundary` reads the document-level block holding the anchor) and a delete may not leave a decision asking nothing, so an ask edit carrying a question is what repairs it.
+no document edit repairs it, since an insert anchored on one of its blocks lands beside the decision rather than in it (`pmdoc.ValidDocument.BlockBoundary` reads the document-level block holding the anchor) and a delete may not leave a decision asking nothing, so an ask edit carrying a question is what repairs it.
 Such an edit is written into the block whatever its content rule says, the question's paragraphs followed by every bullet list the block holds, each the node the document already holds (`askBlockChildren`);
 every paragraph it replaces holds no text, and one holding what is no text - an image, a link whose text is empty - is refused instead, quoted, naming the two places the question is written without losing it:
 an upload of the document as a new version, which carries such a block and is the path an agent has, and the document editor, where a person writes it.
