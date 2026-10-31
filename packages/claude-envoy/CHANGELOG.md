@@ -1,5 +1,27 @@
 # Changelog
 
+## [main@1d3e69553791] - 2026-10-31
+
+### Fixed
+
+- The `dispatch` command (`dist/dispatch.js`), the MCP server's start notice and its Dispatch reply name the lost `DISPATCH_URL` when `DISPATCH_TOKEN_FILE` is set and nothing names the server: `DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for`, where they named a missing envoy.json. When the chosen file is missing, its dangling link and the unread OpenCode-era user file follow, the old file last, so the session hook still prints the old file's advice.
+
+## [main@d7e1daaaaf70] - 2026-10-31
+
+### Added
+
+- The plugin ships `claude-envoy:outside-message` and `claude-envoy:plain-words`, so a standalone
+  Claude Code session and a Legion phase worker on the Claude Code backend read the same rules for
+  text that reaches a person outside the company as an Oh My Pi session does.
+
+### Changed
+
+- The `dispatch` and `dispatch-writing-specs` skills this plugin links tell a session to write
+  each ask or comment id whole in a reference, taking it from `dispatch read`'s `Ask id:` or
+  from the page URL, because the command accepts a prefix while a person's link does not. The
+  `dispatch` skill said an ask or comment id could be an 8-hex prefix, and a reference built
+  from one opens nothing for the person who clicks it.
+
 ## [main@e65900f4438b] - 2026-10-30
 
 ### Added
