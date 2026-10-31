@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-636",
+  "completed": "2026-10-31T20:55:00Z",
+  "round": 1,
+  "reviewedHead": "3675b8e686e7bc82845f4c05cff84b1319b967d8 (code), acd571e2b85f560394421a817d17597a98adeda1 (handoff head)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 4,
+  "minor": 5,
+  "ci": "Required set (rulesets): ci-ok, pr-title; no branch protection. CI head 3675b8e6: ci-ok success, pr-title success; compare 3675b8e6...acd571e2 handoffsOnly true, 1 file.",
+  "thermonuclear": "deep-review: Verdict CHANGES at acd571e2 (3 Medium); code-quality: Verdict CHANGES at acd571e2. Findings 1 and 2 reproduced by the reviewer: red at acd571e2, green at base dbdf9318c059.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/issue_patch.go:474-487", "description": "Close/reopen undercounts last_seq: loadIssue now runs before the write phase and only len(appended) (the asks' events) is added, so an anchor_refreshed event the asks' document write queues is missed. Repro at head: response last_seq=18, issue reads 19, issue.closed payload last_seq=18; base 19/19/19."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/issue_patch.go:321-335", "description": "Write advice read before the close's withdrawal (and the reopen's restoration) is queued: a session closing an issue is told your_open_asks lists the asks its own close withdrew (2 at head, 0 at base); a reopen leaves out the restored ones."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/refs/item_blocks.go:394-397,699-727", "description": "A comment edit plans its block index from an unlocked read; IndexOwedItemBlocks takes only the item row and state row, no owner lock, and the edit no longer holds the comment row in its read phase, so the reconciliation can index r+1 between the edit's plan and its write phase, and the edit then writes r+1 again from the stale plan."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/approval_ask.go:55-124", "description": "MoveApprovalAsk returns its event only when not queued (its one production caller is queued and discards it); RewriteApprovalAsk's queued branch has no production caller. A mode-dependent zero result is a silent trap."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/write_queue.go:29-48", "description": "queueWrite's nil-ledger mode serves two callers (issue_claim.go:507, reviews.go:296) and duplicates docs.write/execStep, with different sealed-queue behaviour."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/owner.go:97-139", "description": "requireOpenOwnerStatus repeats ownerOpenStatus's refusal table; its 'spelled once' comment is now false (same for requireOpenIssue/issueOpenStatus)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/events/thread_logins.go:38-56", "description": "Dead code after the cutover: IssueThreadLogins (no caller), refs.IndexBlocks (tests only), store.WriteBatch.Len (no caller); QueueVersion duplicates writeVersionTx's sequence."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/issue_parent.go:133-184", "description": "lockIssueRows/lockPatchRows/lockPatchRowsAndParent take owner advisory locks now; names still say rows."},
+    {"severity": "minor", "file": "go.work.sum", "description": "135 unrelated /go.mod checksum lines from a workspace module-graph load; no go.mod changed. Restore to base."}
+  ],
+  "proseFixedByReviewer": "Commit 46b6b6ca: changelog fragments renamed pr2468-*, Issue: pr2468, issue keys removed from bodies, rollback added to the rollout note; owner-row comments corrected in comment_create.go, closed_version_blocks.go, refs/blocks.go, copied_asks.go, service.go, packages/envoy/AGENTS.md; replies.go lock-order sentence; ledger.go PendingAnchor.Event builder timing.",
+  "notRaised": "api/messages.go and docs/ask_blocks.go passing 1000 lines: no repository rule sets a file-size limit.",
+  "previousHandoff": "acd571e2b85f560394421a817d17597a98adeda1"
+}
