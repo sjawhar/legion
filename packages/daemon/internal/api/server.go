@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -75,6 +76,9 @@ type Options struct {
 	// refuses it either, since refusing calls with no relaunch under way would stall agents that
 	// work today.
 	PluginRelaunchable bool
+	// SessionStore is the configured store every registration records with its claim.
+	// The empty value is the historical file store for non-Kubernetes callers.
+	SessionStore ompsessions.StoreKind
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
@@ -168,6 +172,7 @@ type server struct {
 	// project and dispatchProject are Options.Project and Options.DispatchProject.
 	project         string
 	dispatchProject string
+	sessionStore    ompsessions.StoreKind
 	operatorSet     bool
 	operatorHash    [sha256.Size]byte
 	controller      ControllerStore
@@ -224,6 +229,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		bootTokens:         opts.BootTokens,
 		project:            opts.Project,
 		dispatchProject:    opts.DispatchProject,
+		sessionStore:       opts.SessionStore,
 		controller:         opts.Controller,
 		designGate:         opts.DesignGate,
 		controllerLaunched: opts.ControllerLaunched,
@@ -250,6 +256,9 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		stopping:           opts.Stopping,
 		drained:            opts.Drained,
 		decisions:          opts.Decisions,
+	}
+	if s.sessionStore == "" {
+		s.sessionStore = ompsessions.StoreVolume
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))

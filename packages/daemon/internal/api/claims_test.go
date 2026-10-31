@@ -55,6 +55,20 @@ func TestRegisterIssuesASecretWhoseHashIsStoredBeforeTheResponse(t *testing.T) {
 	}
 }
 
+func TestRegisterRecordsTheConfiguredSessionStore(t *testing.T) {
+	h := newHarness(t)
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Controller: h.store, SessionStore: "cloudsql-iam",
+	}).Handler
+	token, boot := h.launch("LEGION-208", claim.RoleArchitect)
+
+	h.registered(boot, "ses_architect")
+
+	if got := h.stored(token).SessionStore; got != "cloudsql-iam" {
+		t.Fatalf("registered claim's session store = %q, want cloudsql-iam", got)
+	}
+}
+
 // A claim's registration records the plugin contract it declared, shows it on the claim row, and
 // the operator's claim list shows it too; a claim never registered shows pluginContract 0.
 func TestRegisterRecordsThePluginContractAndTheOperatorViewShowsIt(t *testing.T) {

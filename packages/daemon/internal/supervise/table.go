@@ -134,6 +134,7 @@ type RequestRegister struct {
 	Generation     uint64
 	Session        string
 	SessionFile    string
+	SessionStore   string
 	CapabilityHash []byte
 	// PluginContract is the contract the registering process's plugin declared, 0 when it
 	// declared none.
@@ -1041,7 +1042,7 @@ func spawn(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx
 // (staleRegistration): the agent that just registered is not the one that relaunch starts.
 func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
-	m.claim.Session, m.claim.SessionFile = r.Session, r.SessionFile
+	m.claim.Session, m.claim.SessionFile, m.claim.SessionStore = r.Session, r.SessionFile, r.SessionStore
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
 	m.claim.PluginContract = r.PluginContract
 	if r.PluginContract == m.deps.PluginContract {
@@ -1067,7 +1068,7 @@ func register(m *Machine, ctx context.Context, ev Event) error {
 // daemon's is relaunched at once and refused the same way register's is (staleRegistration).
 func reregister(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
-	m.claim.SessionFile = r.SessionFile
+	m.claim.SessionFile, m.claim.SessionStore = r.SessionFile, r.SessionStore
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
 	m.claim.PluginContract = r.PluginContract
 	if r.PluginContract == m.deps.PluginContract {
