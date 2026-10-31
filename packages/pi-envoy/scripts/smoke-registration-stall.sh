@@ -17,8 +17,14 @@
 # go stale the moment either moves and this smoke would measure against a budget the tree no
 # longer has.
 #
-# Manual only, like scripts/smoke-delivery.sh and scripts/smoke-btw.sh: it needs a live listener
-# and a configured model provider, and is never wired into CI. See scripts/README.md.
+# The listener is the operator's (ENVOY_URL and ENVOY_TOKEN_FILE), or `--local-stack` builds
+# natsd and the listener from this checkout with `go build` and runs both on loopback ports of
+# its own, as scripts/smoke-replay.sh does, so the run needs no deployment and no bearer. Its one
+# remaining live dependency is then the model provider the real `omp` pane turns on, which the
+# pane inherits from the caller's environment.
+#
+# Manual only, like scripts/smoke-delivery.sh and scripts/smoke-btw.sh: it needs a model provider
+# and is never wired into CI. See scripts/README.md.
 set -euo pipefail
 
 readonly wedge_at=3
@@ -35,24 +41,6 @@ refuse() {
 note() {
   printf '[%s] %s\n' "$(date -u +%H:%M:%SZ)" "$1"
 }
-
-# The operator supplies the listener: this repository is public and names no deployment.
-envoy_url="${ENVOY_URL:-}"
-[[ -n "$envoy_url" ]] ||
-  refuse "ENVOY_URL is required: set it to the base URL of the live Envoy listener to smoke"
-token_file="${ENVOY_TOKEN_FILE:-}"
-[[ -n "$token_file" ]] ||
-  refuse "ENVOY_TOKEN_FILE is required: set it to a readable file holding the listener bearer token"
-[[ -r "$token_file" ]] ||
-  refuse "ENVOY_TOKEN_FILE (${token_file}) is not a readable file"
-omp_bin="${OMP_BIN:-/opt/omp/bin/omp}"
-[[ -x "$omp_bin" ]] ||
-  refuse "OMP_BIN (${omp_bin}) is not an executable omp binary"
-readonly envoy_url token_file omp_bin
-
-for required in curl jq; do
-  command -v "$required" >/dev/null 2>&1 || refuse "${required} is required"
-done
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
@@ -88,6 +76,7 @@ control=0
 plugin=""
 heartbeat_ms=""
 base_rev=""
+local_stack=0
 while (($# > 0)); do
   case "$1" in
     --arm)
@@ -110,6 +99,10 @@ while (($# > 0)); do
       base_rev="${2:-}"
       shift 2 || refuse "--base-rev needs a revision"
       ;;
+    --local-stack)
+      local_stack=1
+      shift
+      ;;
     *)
       refuse "unknown argument: $1"
       ;;
@@ -130,7 +123,39 @@ else
   [[ -z "$base_rev" ]] || refuse "--base-rev applies only to --arm stall --control"
 fi
 [[ -n "$plugin" ]] || plugin="${repo_root}/packages/pi-envoy/extensions/envoy.ts"
-readonly arm control heartbeat_ms base_rev
+readonly arm control heartbeat_ms base_rev local_stack
+
+# The listener this run smokes: the operator's, or one the run builds from this checkout and
+# starts on loopback ports of its own (--local-stack), which needs no deployment and no bearer.
+# This repository is public and names no deployment, so without --local-stack the operator
+# supplies both. --local-stack ignores whatever the caller's environment names, and keeps it out
+# of the pane too: the pane's listener is the one this run started.
+envoy_url="${ENVOY_URL:-}"
+token_file="${ENVOY_TOKEN_FILE:-}"
+if ((local_stack == 1)); then
+  [[ -z "$envoy_url" && -z "$token_file" ]] &&
+    note "--local-stack: this run builds and starts its own listener" ||
+    note "--local-stack: ignoring ENVOY_URL (${envoy_url:-unset}) and ENVOY_TOKEN_FILE (${token_file:-unset}); this run builds and starts its own listener"
+  envoy_url=""
+  token_file=""
+else
+  [[ -n "$envoy_url" ]] ||
+    refuse "ENVOY_URL is required without --local-stack: set it to the base URL of the live Envoy listener to smoke"
+  [[ -n "$token_file" ]] ||
+    refuse "ENVOY_TOKEN_FILE is required without --local-stack: set it to a readable file holding the listener bearer token"
+  [[ -r "$token_file" ]] ||
+    refuse "ENVOY_TOKEN_FILE (${token_file}) is not a readable file"
+fi
+omp_bin="${OMP_BIN:-/opt/omp/bin/omp}"
+[[ -x "$omp_bin" ]] ||
+  refuse "OMP_BIN (${omp_bin}) is not an executable omp binary"
+readonly token_file omp_bin
+
+required=(curl jq)
+((local_stack == 0)) || required+=(go)
+for tool in "${required[@]}"; do
+  command -v "$tool" >/dev/null 2>&1 || refuse "${tool} is required"
+done
 
 # What the pane's refresh interval will be: DEFAULT_HEARTBEAT_MS as the tree declares it, unless
 # the operator shortened it, which is what every "one refresh interval" budget below is measured
@@ -161,6 +186,22 @@ scratch=""
 base_plugin=""
 pane_pid=""
 pane_fd=""
+nats_pid=""
+listener_pid=""
+
+# stop_pid PID: TERM, then KILL after 5 s. Best effort, for the services --local-stack started.
+stop_pid() {
+  local pid=${1:-} i
+  [[ -n "$pid" ]] || return 0
+  kill -TERM "$pid" 2>/dev/null || return 0
+  for ((i = 0; i < 25; i++)); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
 cleanup() {
   local status=$?
   if [[ -n "$pane_pid" ]]; then
@@ -168,23 +209,84 @@ cleanup() {
     wait "$pane_pid" 2>/dev/null || true
   fi
   [[ -z "$pane_fd" ]] || exec {pane_fd}>&- || true
+  stop_pid "$listener_pid"
+  stop_pid "$nats_pid"
   [[ -z "$base_plugin" ]] || rm -f "$base_plugin"
   [[ -z "$scratch" ]] || rm -rf "$scratch"
   return "$status"
 }
 trap cleanup EXIT INT TERM
 
-scratch="$(mktemp -d "/tmp/smoke-registration-stall-${arm}.XXXXXX")"
+# Everything this run writes goes under $TMPDIR: a hard-coded /tmp fills a container's own disk.
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/smoke-registration-stall-${arm}.XXXXXX")"
 readonly fixture_log="${scratch}/fixture.log"
 readonly pane_log="${scratch}/pane.log"
 readonly sessions_json="${scratch}/sessions.json"
 readonly header_file="${scratch}/auth-header"
 : >"$fixture_log"
-# The bearer goes through a 0600 file, never argv, which /proc exposes to every local user.
-(
-  umask 077
-  printf 'Authorization: Bearer %s\n' "$(cat "$token_file")" >"$header_file"
-)
+# The bearer goes through a 0600 file, never argv, which /proc exposes to every local user. With
+# --local-stack there is no bearer, and every call below goes without the header.
+auth_header=()
+if [[ -n "$token_file" ]]; then
+  (
+    umask 077
+    printf 'Authorization: Bearer %s\n' "$(cat "$token_file")" >"$header_file"
+  )
+  auth_header=(-H "@${header_file}")
+fi
+
+# --local-stack: natsd and the listener built from this checkout, on loopback ports of their own,
+# exactly as scripts/smoke-replay.sh and packages/envoy-client/test/envoy-stack.ts start them. The
+# trap above stops both.
+nats_port=""
+if ((local_stack == 1)); then
+  read -r ephemeral_low _ </proc/sys/net/ipv4/ip_local_port_range
+  port_floor=10000
+  ((ephemeral_low > port_floor + 1000)) ||
+    refuse "the kernel's ephemeral range starts at ${ephemeral_low}, leaving no ports below it above ${port_floor}"
+  pick_port() {
+    local candidate i
+    for ((i = 0; i < 200; i++)); do
+      candidate=$((port_floor + RANDOM % (ephemeral_low - port_floor)))
+      (exec 3<>"/dev/tcp/127.0.0.1/${candidate}") 2>/dev/null && continue
+      printf -v "$1" '%s' "$candidate"
+      return 0
+    done
+    refuse "no free loopback port below ${ephemeral_low}"
+  }
+  mkdir -p "${scratch}/bin"
+  note "building natsd and the listener from ${repo_root}/packages/envoy"
+  (cd -- "${repo_root}/packages/envoy" &&
+    go build -o "${scratch}/bin/natsd" ./internal/testnats/cmd/natsd &&
+    go build -o "${scratch}/bin/listener" ./cmd/listener) ||
+    refuse "go build of natsd or the listener failed (the reason is above)"
+  pick_port nats_port
+  pick_port listener_port
+  env -i PATH="$PATH" HOME="${scratch}/nats-home" \
+    "${scratch}/bin/natsd" -p "$nats_port" -js -store_dir "${scratch}/nats-store" \
+    >"${scratch}/natsd.log" 2>&1 &
+  nats_pid=$!
+  for _ in $(seq 150); do
+    grep -q 'Server is ready' "${scratch}/natsd.log" && break
+    sleep 0.2
+  done
+  grep -q 'Server is ready' "${scratch}/natsd.log" ||
+    refuse "natsd did not start: $(tail -n 5 "${scratch}/natsd.log")"
+  envoy_url="http://127.0.0.1:${listener_port}"
+  env -i PATH="$PATH" HOME="${scratch}/listener-home" PORT="$listener_port" \
+    ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID="smoke-registration-stall-$$" \
+    NATS_URLS="nats://127.0.0.1:${nats_port}" "${scratch}/bin/listener" \
+    >"${scratch}/listener.log" 2>&1 &
+  listener_pid=$!
+  for _ in $(seq 300); do
+    curl -fsS --max-time 2 "${envoy_url}/healthz" | jq -e '.status == "healthy"' >/dev/null 2>&1 && break
+    sleep 0.2
+  done
+  curl -fsS --max-time 2 "${envoy_url}/healthz" | jq -e '.status == "healthy"' >/dev/null 2>&1 ||
+    refuse "the listener did not become healthy at ${envoy_url}: $(tail -n 5 "${scratch}/listener.log")"
+  note "local stack: natsd (pid ${nats_pid}) on nats://127.0.0.1:${nats_port}, listener (pid ${listener_pid}) at ${envoy_url}"
+fi
+readonly envoy_url nats_port
 
 if [[ "$arm" == "stall" && "$control" == 1 ]]; then
   # The base plugin only resolves from the directory it shipped in: it imports `../src/...` and
@@ -208,14 +310,14 @@ list_sessions() {
   listener_gets=$((listener_gets + 1))
   http_code="$(curl -sS -o "$sessions_json" -w '%{http_code}' \
     --connect-timeout "$curl_connect_timeout" --max-time "$curl_max_time" \
-    -H "@${header_file}" "${envoy_url}/v1/sessions" 2>/dev/null)" || http_code="000"
+    "${auth_header[@]}" "${envoy_url}/v1/sessions" 2>/dev/null)" || http_code="000"
 }
 
 delete_session() {
   listener_deletes=$((listener_deletes + 1))
   http_code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
     --connect-timeout "$curl_connect_timeout" --max-time "$curl_max_time" \
-    -H "@${header_file}" "${envoy_url}/v1/sessions/$1" 2>/dev/null)" || http_code="000"
+    "${auth_header[@]}" "${envoy_url}/v1/sessions/$1" 2>/dev/null)" || http_code="000"
 }
 
 # This run's own row among the listener's hundreds of live ones, left in `row_json` (empty when it
@@ -261,12 +363,20 @@ start_pane() {
   printf '{"type":"prompt","id":"p1","message":"Reply with the single word ok."}\n' >&"$pane_fd"
   local -a pane_env=(
     "ENVOY_URL=${envoy_url}"
-    "ENVOY_TOKEN_FILE=${token_file}"
     "STALL_FIXTURE_LOG=${fixture_log}"
     "STALL_FIXTURE_WEDGE_AT=${wedge}"
   )
+  local -a pane_unset=()
+  if ((local_stack == 1)); then
+    # The listener this run started takes no bearer, and its NATS is the one it started too: a
+    # bearer or a broker the caller's environment names must not reach the pane.
+    pane_env+=("ENVOY_NATS_URL=nats://127.0.0.1:${nats_port}")
+    pane_unset=(-u ENVOY_TOKEN -u ENVOY_TOKEN_FILE)
+  else
+    pane_env+=("ENVOY_TOKEN_FILE=${token_file}")
+  fi
   [[ -z "$heartbeat_ms" ]] || pane_env+=("ENVOY_HEARTBEAT_MS=${heartbeat_ms}")
-  env "${pane_env[@]}" "$omp_bin" --mode rpc --no-ui \
+  env "${pane_unset[@]}" "${pane_env[@]}" "$omp_bin" --mode rpc --no-ui \
     --cwd "$scratch" --session-dir "$scratch" --no-skills --no-rules --no-extensions --no-tools \
     -e "${script_dir}/stall-fixture.ts" -e "$plugin" \
     <"$fifo" >"$pane_log" 2>&1 &
