@@ -116,6 +116,13 @@ func assertEffects(t *testing.T, pool *pgxpool.Pool, want []effect) {
 	}
 }
 
+// effects is the outbox as these tests compare it: every row in id order, its payload decoded.
+// A supervise start carries an assignment the workflow mints fresh at each start
+// (record.SuperviseRequest.Assignment, INFRA-338), so two runs of the same events never write the
+// same one and a comparison of two runs would fail on that id alone. Every such id is replaced
+// here by one sentinel, which keeps what these tests check — that a start carries an assignment
+// at all, beside its op, role, task, generation and phase — and drops only the value no run can
+// repeat.
 func effects(t *testing.T, pool *pgxpool.Pool) []effect {
 	t.Helper()
 	rows, err := pool.Query(context.Background(), `select kind, issue, payload from outbox order by id`)
@@ -133,6 +140,10 @@ func effects(t *testing.T, pool *pgxpool.Pool) []effect {
 		if err != nil {
 			t.Fatalf("decode outbox: %v", err)
 		}
+		if start, ok := payload.(record.SuperviseRequest); ok && start.Assignment != "" {
+			start.Assignment = mintedAssignment
+			payload = start
+		}
 		got = append(got, effect{kind: row.Kind, issue: row.Issue, payload: payload})
 	}
 	if err := rows.Err(); err != nil {
@@ -140,6 +151,9 @@ func effects(t *testing.T, pool *pgxpool.Pool) []effect {
 	}
 	return got
 }
+
+// mintedAssignment stands for the assignment a start minted, whatever it was (effects).
+const mintedAssignment = "<minted>"
 
 func assertSlots(t *testing.T, pool *pgxpool.Pool, want []record.Slot) {
 	t.Helper()
