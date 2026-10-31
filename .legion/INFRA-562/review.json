@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-562",
+  "completed": "2026-10-31T14:08:01Z",
+  "round": 16,
+  "scope": "Narrowed by the INFRA-63 architect: only the merge 14e833d4 of main cc3a30bb (nothing beyond the branch's own diff; claims_doc_test.go equal to main's), and ci-ok plus pr-title green at 14e833d4, naming the run.",
+  "reviewedHead": "e289f8770b5ae458478e5f306356958f9ab7e4bf",
+  "codeHead": "14e833d4c21d2a4681b122e0a9875b3097fff5f0",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "scopeResults": {
+    "merge": "Holds. git show --remerge-diff 14e833d4: the one conflict is packages/envoy/internal/broker/oauth/claims_doc_test.go, resolved to main's file (blob b02751d4 at both 14e833d4 and cc3a30bb), so the branch no longer touches it. Against round 15's approved head f15627d9, the branch's diff (without .legion and docs/solutions) differs only in that file leaving it; every other file's patch is identical. Retro's commits above the approval are ab2868f6 (two docs/solutions files) and 727fc573 (removes .legion/INFRA-562/), both allowed.",
+    "migrations": "At main@origin ff93d6c4, main's highest is 0149_event_horizon; this PR's 0150-0153 share no version."
+  },
+  "ci": "CI run 41197170644 at 14e833d4: lint, test and envoy-go success. typecheck (job 124529575273) and pr-title (job 124525576204) failed at actions/checkout: 'remote error: upload-pack: not our ref 25cba70ac8b2', meaning the pull request's merge ref moved under the run as main advanced. No code was checked. The run was still in progress at 14:07Z, so ci-ok cannot be green. GitHub now reports CONFLICTING: git merge-tree of 14e833d4 with main ff93d6c4 conflicts in packages/envoy/cmd/dispatch/AGENTS.md alone (text). With no merge ref, a rerun cannot check out either. TestAppendsOnDifferentIssuesDoNotWaitForEachOther did not fail.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/dispatch/AGENTS.md",
+      "description": "The required checks ci-ok and pr-title cannot pass at 14e833d4. typecheck and pr-title failed at checkout on a vanished merge ref, and the PR now conflicts with main ff93d6c4 in this file (a text-only conflict), so GitHub builds no merge ref to run CI on. Merge main forward, keeping both sides of the AGENTS.md text, and push once without skip-checks. Main now also carries #2594 (3b0ae77e); the branch's byte-identical copy of delivery_live_hub_test.go should merge clean. The next round checks the merge by fingerprint and ci-ok plus pr-title at its head."
+    }
+  ]
+}
