@@ -1102,10 +1102,10 @@ creates or what the document holds (`packages/envoy/cmd/dispatch/README.md`, "Tw
 once"), and the surface shows `Reload to edit`. A tab admitted writable whose numbers the fleet
 stops admitting - a build of another version joins or rolls away - has its socket closed by the
 server's 15 s re-check with code `4412` (`DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE` in
-`packages/contracts`), once the message the server has in flight on it is out, which it waits at
-most a second for; a tab too slow to take the frame in that second gets none and reads the end as
-`1006`. `connection.ts` reads neither code, so the provider reconnects on both, the reconnect
-presents the same numbers, and its admission - read-only now - decides the line again.
+`packages/contracts`), or with `1006` when the tab is too slow to take that frame
+(`packages/envoy/cmd/dispatch/README.md`, "Two builds at once", for the rule). `connection.ts`
+reads neither code, so the provider reconnects on both, the reconnect presents the same numbers,
+and its admission - read-only now - decides the line again.
 A closed issue's document is admitted read-only
 too, and names no reload, which cannot make it editable: `ProofDocument` shows the line only for a
 read-only admission that came while the issue was open (`closedAdmission` records whether it was

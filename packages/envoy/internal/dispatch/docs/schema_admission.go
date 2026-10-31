@@ -203,10 +203,8 @@ func (s *Service) recheckSchemaAdmissions(ctx context.Context) error {
 
 // errSchemaRevoked is the cause a re-check cancels a revoked socket's request context with. ygo
 // reads CloseCode off the cause and sends the peer that close frame before it closes the
-// connection, with gorilla's WriteControl: a message of ygo's already going out is never cut into,
-// and the frame waits up to a second for the end of it (provider/websocket's closeFrameTimeout). A
-// peer that slow takes no close frame at all and reads the connection's end as 1006, on which its
-// provider reconnects just the same.
+// connection; what that send waits for and what a peer too slow to take it reads instead are in
+// cmd/dispatch/README.md, "Two builds at once".
 var errSchemaRevoked error = schemaRevoked{}
 
 // schemaRevoked is that cause's type: an error whose CloseCode ygo sends.

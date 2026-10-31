@@ -81,11 +81,25 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		}
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is open in this Dispatch process, or its last editor left it less than two minutes ago, so Dispatch refused the rebuild. A rebuild discards every edit made after saved version %d. Stop. Ask a person whether to rebuild the document after two minutes", ErrDocumentLive, artifactID, latest)
 	}
+	// The pre-load is only how a history that loads, which this refuses, is told from one that
+	// does not: the rebuild's source is the latest saved version or the supplied markdown, never
+	// the stored updates. So a load that fails because the history does not load is that same
+	// answer, and the rebuild goes on, as it does for a history that loads into nothing a reader
+	// can use. That is every ErrDocumentUnloadable: a state that does not decode, and one ygo
+	// refuses from its clocks, which will not even merge, so Load itself fails rather than
+	// returning an update validateUpdate can refuse (mergedThrough). The load error is then what
+	// the report names as the history's fault. Any other load failure is the store's, not the
+	// document's, and the caller may retry past it.
+	var validationErr error
 	loaded, err := s.persistence.Load(ctx, artifactID)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrDocumentUnloadable):
+		validationErr = err
+	case err != nil:
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
+	default:
+		validationErr = validateUpdate(loaded.Update)
 	}
-	validationErr := validateUpdate(loaded.Update)
 	if validationErr == nil {
 		latest, err := savedVersionNumber(ctx, tx, artifactID)
 		if err != nil {
