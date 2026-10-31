@@ -14,9 +14,11 @@ import (
 // then, which the oracle's own reading of "a row composed before the hand-over" mistook for a
 // telling to another tree; 48 adopted a queued root into a tree whose architect already ran, and
 // nothing told that architect what the root had kept while it waited (workflow's Adopt now writes
-// it a catch-up); 69 told one decision twice to its architect in the same sweep. They run at 300
-// steps because that is where each reaches it.
-var keptLongRegressionSeeds = []int64{11, 48, 69, 73, 96, 125, 311, 363, 365, 366, 367, 388, 414, 432, 459, 475, 479}
+// it a catch-up); 69 told one decision twice to its architect in the same sweep; 427 dropped a
+// re-held copy of a catch-up while the row it copies was publishing, so the decisions the copy
+// claimed were named again (DropCatchUps now keeps every row of a telling one of whose rows is
+// leased). They run at 300 steps because that is where each reaches it.
+var keptLongRegressionSeeds = []int64{11, 48, 69, 73, 96, 125, 311, 363, 365, 366, 367, 388, 414, 427, 432, 459, 475, 479}
 
 // keptShortRegressionSeeds are the seeds whose runs at the default length found faults earlier in
 // this work — a decision told twice, one told to an architect owed nothing, one left kept at

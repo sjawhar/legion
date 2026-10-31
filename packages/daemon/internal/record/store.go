@@ -752,10 +752,14 @@ func keptMarks(kept KeptDecisions) ([]string, []time.Time) {
 	return refs, at
 }
 
+// ClaimKeptDecisions claims for outbox row what it names of what tree is owed and nothing else
+// claims or holds (keptNameable). A row is claimed or held, never both: a hold the claim overrides
+// is one keptNameable found void (its holder serves another tree than the row's issue now), and
+// the claim clears it, so no later release of that hold can touch this claim.
 func (s *Postgres) ClaimKeptDecisions(ctx context.Context, tx pgx.Tx, tree string, kept KeptDecisions, row int64) error {
 	if len(kept.Decisions) > 0 {
 		refs, at := keptMarks(kept)
-		if _, err := tx.Exec(ctx, `update parked_decisions kept set claimed_by = $4
+		if _, err := tx.Exec(ctx, `update parked_decisions kept set claimed_by = $4, held_by_claim = null, held_by_delivery = null
 			from unnest($2::text[], $3::timestamptz[]) as named (ref, at), issues owner
 			where owner.key = kept.issue and owner.tree = $1 and kept.ref = named.ref
 			and kept.at = named.at and `+keptNameable, tree, refs, at, row); err != nil {
@@ -763,7 +767,8 @@ func (s *Postgres) ClaimKeptDecisions(ctx context.Context, tx pgx.Tx, tree strin
 		}
 	}
 	if kept.Approved > 0 {
-		if _, err := tx.Exec(ctx, `update readmitted_approvals set claimed_by = $4 from issues owner
+		if _, err := tx.Exec(ctx, `update readmitted_approvals set claimed_by = $4, held_by_claim = null, held_by_delivery = null
+			from issues owner
 			where owner.key = readmitted_approvals.issue and readmitted_approvals.issue = $1
 			and approved_version = $2 and latest_version = $3 and `+approvalNameable,
 			tree, kept.Approved, kept.Latest, row); err != nil {
@@ -806,7 +811,7 @@ func (s *Postgres) ReleaseHeldDecisions(ctx context.Context, tx pgx.Tx, token cl
 		refs = append(refs, mark.Ref)
 	}
 	trees, err := releasedTrees(ctx, tx, `with released as (
-		update parked_decisions set claimed_by = null, held_by_claim = null, held_by_delivery = null
+		update parked_decisions set held_by_claim = null, held_by_delivery = null
 		where held_by_claim = $1 and held_by_delivery = $3 and ref = any($2::text[]) returning issue
 	)`, string(token), refs, delivery)
 	if err != nil {
@@ -894,10 +899,11 @@ func (s *Postgres) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, tree stri
 			return fmt.Errorf("tell the decisions named to %s: %w", tree, err)
 		}
 		// What the teller named of an issue that has left its tree since the row was composed is
-		// not this architect's to be told: the row's claim and hold go instead, so the tree the
-		// issue stands in now names it. The old architect hearing it as well is the lesser fault,
-		// and the telling that reached it is one this row has already made.
-		if _, err := tx.Exec(ctx, `update parked_decisions kept set claimed_by = null, held_by_claim = null, held_by_delivery = null
+		// not this architect's to be told: the row's claim goes instead, so the tree the issue
+		// stands in now names it. The old architect hearing it as well is the lesser fault, and the
+		// telling that reached it is one this row has already made. Only this row's own claim is
+		// cleared: a row is claimed or held, never both, and no other claim or hold is this row's.
+		if _, err := tx.Exec(ctx, `update parked_decisions kept set claimed_by = null
 			from unnest($2::text[], $3::timestamptz[]) as named (ref, at), issues owner
 			where owner.key = kept.issue and owner.tree <> $1 and kept.ref = named.ref
 			and kept.at = named.at and kept.claimed_by = $4`, tree, refs, at, row); err != nil {
@@ -1727,10 +1733,16 @@ func (s *Postgres) DropStatusWrites(ctx context.Context, tx pgx.Tx, issue string
 }
 
 func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string, now time.Time) error {
+	// A catch-up that carries kept decisions and one of whose telling's rows (itself, the row it
+	// copies, or a copy of either) is under a live lease is kept: that row may be publishing now,
+	// and the decisions this one claims are that telling's to settle.
 	if _, err := tx.Exec(ctx, `delete from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'
 		and not exists (select 1 from processed_events where source = $3
 			and event_id = $4 || coalesce((outbox.payload->>'resend_of')::bigint, outbox.id))
-		and not (payload->'catch_up'->'kept' is not null and lease_token <> '' and lease_until > $5)`,
+		and not (payload->'catch_up'->'kept' is not null and exists (select 1 from outbox live
+			where live.kind = outbox.kind and live.issue = outbox.issue
+			and coalesce((live.payload->>'resend_of')::bigint, live.id) = coalesce((outbox.payload->>'resend_of')::bigint, outbox.id)
+			and live.lease_token <> '' and live.lease_until > $5))`,
 		string(OutboxKindNotice), issue, KeptToldSource, outboxKeyPrefix, now); err != nil {
 		return fmt.Errorf("drop the queued catch-ups of %s: %w", issue, err)
 	}

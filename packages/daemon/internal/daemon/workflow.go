@@ -438,9 +438,10 @@ func (w *workflowRuntime) phaseHolds(ctx context.Context, key string, queuedFor 
 // rootHears answers supervise's Deps.RootHears from the issue record: a root architect's task of a
 // run names no phase, so no phase ever drops it, and it waits on the claim until that claim next
 // runs — which a park, a hand back to `todo` or a linger can put generations later. The decisions
-// such a task names were forgotten when the claim queued it (the outbox's settleKept), so sending
-// it while the tree has nobody to act on it would spend a person's decision on an architect no run
-// of the root owns. The answer is the workflow's one reading of that question
+// such a task names are held by its delivery and told when the turn that takes it starts
+// (store's holdKeptDecisions, tellKeptDecisions), so sending it while the tree has nobody to act on
+// it would spend a person's decision on an architect no run of the root owns. The answer is the
+// workflow's one reading of that question
 // (workflow.ArchitectHears), which the hand-over of a released decision reads too, in a short
 // read-only transaction of its own: a root that hears is one that is its tree's root, runs, does
 // not linger and does not wait in `todo` for its slot.
@@ -509,11 +510,14 @@ func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d sup
 		stays.Decisions, left = nil, nil
 		for _, mark := range named.Decisions {
 			if !slices.Contains(holds, mark.Ref) {
-				// The row this mark named is not this delivery's any more: told by a catch-up
-				// whose publish reached the architect first, replaced by a newer decision on the
-				// same reference, or released to the tree its issue moved to by an earlier send.
-				// Whatever it was, something else answers the person, and this task names it no
-				// longer: naming it again is the second telling the rule forbids.
+				// The row this mark named is not this delivery's any more, and only these take a
+				// row a delivery holds: a newer decision on the same reference replaced it, an
+				// earlier send released it to the tree its issue moved to, or that tree's start or
+				// catch-up claimed or told it once its issue left (this delivery's hold is void
+				// there). Either way something else answers the person, and this task names it no
+				// longer. (A row this delivery's own confirmation told is put back when that
+				// confirmation is taken back, so it is held again here; no other delivery takes a
+				// row this one holds.)
 				continue
 			}
 			issue, err := w.records.Issue(scoped, tx, mark.Issue)

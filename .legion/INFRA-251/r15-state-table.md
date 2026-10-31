@@ -119,3 +119,32 @@ store.
   it. There is no subtree walk left: `linger.handedOverSubtrees` is gone, as are
   `Store.MoveKeptDecisions`, `ReKeepDeliveredDecisions` and `HeldKeptDecisions`, and the calls
   `admit.Admission.readmit` made to the first two.
+
+## Round 17: ownership (review 5722761728)
+
+- **Claimed or held, never both.** `ClaimKeptDecisions` clears the void hold it overrides, and every
+  hold release (`releaseKeptDecisions` at retirement and for a confirmation's leftovers,
+  `ReleaseHeldDecisions` at the send-time drop) clears only `held_by_*`. `ForgetKeptDecisions`'
+  second statement clears only its own row's claim. A claim is settled only by the start or
+  catch-up that owns it, so a hold release can no longer erase a claim that counts and leave
+  `HandOverKept` nothing to hand over.
+- **A delivery takes only what it owns.** `holdKeptDecisions` takes a row only if it is claimed by
+  one of this claim's delivered start rows (`claims.delivered_rows`, written first in the same
+  transaction) or already held by this claim; a rewrite of an old tree's delivery (a take-back after a
+  death) no longer steals a row the tree its issue moved to has claimed or held.
+- **A taken-back confirmation puts back what it told.** When the machine writes a confirmed delivery
+  back unconfirmed (`refused` after a turn of the agent's own confirmed it in flight, `lateRefused`,
+  `takesBackConfirmed`, the take-back after a death), the delivery's write re-inserts, held by it,
+  every mark it names whose row no longer stands while its issue still stands in the claim's tree
+  (`insert ... on conflict (issue, ref) do nothing`, so a newer decision keeps its row). Of the two
+  fixes offered (put back on the write back, or tell only when the confirmed turn ends) this is the
+  smaller: one statement in the delivery's own write, the confirmation-time tell unchanged, and the
+  architect's ruled behaviour on a failed confirmation write unchanged. The worst case is a second
+  telling to the same architect, which the property oracle allows once for a taken-back task.
+- **A telling's copies are kept while any row of it is leased.** The full sweep found seed 427: a
+  catch-up's publish got a receipt timeout and its re-hold copy took its claims; the original row's
+  finish was lost, so it ran and published again, and a ready inside that publish dropped the copy
+  (not leased itself), released its claims and named them in a fresh catch-up, after the original
+  had told them. `DropCatchUps` now keeps a catch-up carrying kept decisions when any row of the same
+  telling (the same `coalesce(resend_of, id)`) is under a live lease, not only when it is leased
+  itself. With the guard reverted seed 427 fails again ("told 2 times"); it is pinned.

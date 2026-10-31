@@ -29,8 +29,8 @@ func restoredRootTask() Claim {
 
 // A root architect's held task is not confirmed by the question a restart left (askFirst) while
 // its root has nobody to hear it: the agent is in a turn, but that turn is its own — nothing sent
-// this task, and the decisions it names were forgotten when the claim queued it, so a confirmation
-// would retire it unsent and lose them. The task stays pending and unconfirmed through that turn
+// this task, and the decisions it names are told by its confirmation, so a confirmation would tell
+// them to a turn that never read them. The task stays pending and unconfirmed through that turn
 // and is prompted once the root has an architect to hear it again.
 func TestAStreamingAgentDoesNotConfirmARootArchitectsHeldTask(t *testing.T) {
 	restored := restoredRootTask()
