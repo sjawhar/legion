@@ -1523,7 +1523,7 @@ func TestStalePluginLeavesAClaudeWorkerBelowTheContractToItsRound(t *testing.T) 
 	m.Wait()
 
 	if c := rig.claimOf(claim.RoleImplementer); c.State != supervise.StateReady {
-		t.Fatalf("the Claude Code worker is %s outside every round, want it left running for the operator's drain", c.State)
+		t.Fatalf("the Claude Code worker is %s outside every round, want it left running for the round over its pod", c.State)
 	}
 	if resumes := rig.rt.CallsOf("Resume"); len(resumes) != 0 {
 		t.Fatalf("the boot pass and the sweep started %d processes, want none: no launch of this deployment installs its plugin", len(resumes))

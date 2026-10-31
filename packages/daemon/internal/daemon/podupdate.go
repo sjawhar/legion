@@ -386,7 +386,9 @@ func (s *supervision) podWentWithoutItsRound(ctx context.Context, issue string, 
 // A claim that blocks the round has a session — an agent has run for it, and may hold unpushed
 // work. A claim with no session has never had a worker and blocks nothing. A failed or
 // operator-suspended claim blocks until the operator acts, which is this issue's own rule, and
-// the notice below is what tells the operator.
+// the notice below is what tells the operator. A worker whose plugin has no ready_for_update op
+// is asked like any other and answers by ending the turn its task starts (supervise's
+// answerByTurnEnd), so no claim of the round is one the operator must act on for its contract.
 func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []supervise.Claim, pod, reasons string, now time.Time) {
 	round := supervise.PodRound(pod)
 	blocking := blockingClaims(group)
@@ -403,11 +405,6 @@ func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []s
 	if opened == nil {
 		return
 	}
-	// A worker whose plugin has no ready_for_update op is asked all the same, and the end of the
-	// turn its task started is its answer (askForUpdate, turnEnded in internal/supervise). Such a
-	// round finishes by itself, so nothing is told to the operator for that cause and a contract
-	// change needs no drain: the pod is replaced like any other, and the claim comes back in its
-	// own session on the new image.
 	if now.Sub(*opened) >= s.cfg.PodUpdateNotice {
 		s.tellUpdateStalled(ctx, updateStall{
 			issue: issue, round: round, pod: pod, reasons: reasons, group: group,

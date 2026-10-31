@@ -336,6 +336,52 @@ func TestPodUpdateTakesNoForeignTurnsEndAsTheAnswerBelowTheContract(t *testing.T
 	}
 }
 
+// A turn the daemon itself cut is no answer, whatever the claim's contract, because the worker
+// was stopped where it stood and may never have reached its push. Two shapes, and the second is
+// the one a roll meets: the same configuration change that drifts a pod restarts the daemon, and
+// a restarted daemon has no memory of the abort an earlier one sent. Each refusal takes the
+// ask's clock back, so the next sweep asks again rather than the round waiting out the re-task
+// bound.
+func TestPodUpdateTakesNoCutTurnsEndAsTheAnswerBelowTheContract(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		restart bool
+	}{
+		{name: "the daemon that cut the turn is the one that sees it end"},
+		{name: "the daemon restarted after the cut and never saw the turn start", restart: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			h := updateHarness(t, PodUpdateContract-1)
+			h.reach(StateReady)
+			h.openUpdate(testRound, testReasons)
+			h.wantPrompts(1)
+			h.must(StreamTurnStart{Claim: h.token})
+
+			// A start takes over this claim's phase — CI settled red on the head — and the
+			// worker's tool calls are cancelled, its push among them.
+			// Quiesce answers ErrQuiesceHeld: the start waits for the cut turn to end, which is
+			// this test's next event.
+			if err := h.m.Quiesce(h.ctx, 1); !errors.Is(err, ErrQuiesceHeld) {
+				t.Fatalf("quiesce the turn = %v, want the start held for the interrupted turn", err)
+			}
+			if testCase.restart {
+				h.restart()
+			}
+			h.must(StreamTurnEnd{Claim: h.token})
+
+			c := h.claim()
+			if c.UpdateSignalledAt != nil {
+				t.Errorf("UpdateSignalledAt = %v, want nil: the daemon cut this turn and cannot read its end as a push",
+					c.UpdateSignalledAt)
+			}
+			if c.UpdateTaskedAt != nil {
+				t.Errorf("UpdateTaskedAt = %v, want nil: the ask's clock goes back so the next sweep asks again",
+					c.UpdateTaskedAt)
+			}
+		})
+	}
+}
+
 // Once the worker has answered, the next task is held rather than sent: it would be lost with the
 // process. The round's end releases it.
 func TestPodUpdateHoldsTheNextTaskUntilTheRoundEnds(t *testing.T) {

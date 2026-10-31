@@ -191,7 +191,7 @@ Do these three steps now:
 2. Call the `+"`legion`"+` tool with op: "ready_for_update" and round: "%s".
 3. End your turn.
 
-Your `+"`legion`"+` tool can have no "ready_for_update" operation. Then do step 1 and step 3 only. The daemon reads the end of this turn as your answer.
+If your `+"`legion`"+` tool has no "ready_for_update" operation, do step 1 and step 3 only. End your last message with a line that starts with WAITING and names this round, so your own plugin does not continue the turn. The daemon reads the end of this turn as your answer.
 
 %s The daemon holds your next task until your process runs again. Do not start new work now.`, first, reasons, round, consequence)
 }
@@ -890,6 +890,10 @@ const unansweredAsksWarn = 3
 // says nothing about the turn: the claim stays working, the question stays armed, and the next
 // sweep asks again. Taken as "not streaming", it would end a turn still running and set the claim
 // idle, and the sweep would then send the task into the busy agent every interval.
+//
+// A turn that is over is ended through turnEnded, which clears askFirst itself once it has read
+// it: the mark is how a decision at that end tells a turn this daemon saw begin from one it is
+// only hearing the end of (answerByTurnEnd).
 func (m *Machine) askTurnOver(ctx context.Context, ev Event) error {
 	if !m.askFirst {
 		return nil
@@ -910,8 +914,9 @@ func (m *Machine) askTurnOver(ctx context.Context, ev Event) error {
 			"claim", m.claim.Token, "unanswered", m.unansweredAsks)
 		return nil
 	}
-	m.askFirst, m.unansweredAsks = false, 0
+	m.unansweredAsks = 0
 	if streaming {
+		m.askFirst = false
 		return nil
 	}
 	m.log.Info("supervise: the turn an earlier daemon saw start is over")
@@ -1190,21 +1195,39 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 // in its own session. Before this, the round could never complete over one, and the operator
 // drained the pod by hand.
 //
-// Four things must hold, and each is the claim as it stands at the end of this turn rather than
+// Five things must hold, and each is the claim as it stands at the end of this turn rather than
 // when the round opened. The claim is in a round and has not answered it. Its process runs a
 // plugin that cannot answer — a claim that can is counted only by its own call, since it can
 // end a turn for any reason at all. The delivery this turn confirmed is an ask of that same
 // round (updatesRound), so the worker read the words that asked it to push: a turn an Envoy
 // message or a person's steer started read nothing of the round and says nothing about the
-// branch. And the turn ended on its own: a turn the daemon interrupted (Quiesce, read before
-// interruptOver clears it) was cut while the worker worked, and counting it would delete a disk
-// holding work the worker never got to push, which is the one harm this round exists to stop.
+// branch.
+//
+// The last two are about turns this daemon cannot vouch for, and each costs the round one more
+// ask rather than a disk. A start waits to take over this claim's phase (m.interrupt, read
+// before interruptOver clears it), whether or not its abort was sent: a turn that abort cut was
+// cut while the worker worked, and counting it would delete a disk holding work the worker never
+// got to push, which is the one harm this round exists to stop. And this daemon saw the turn
+// start (askFirst, which turnEnded clears after this runs): a turn restored from an earlier
+// daemon's record is one this daemon never saw begin and whose abort it has no memory of — an
+// earlier daemon's Quiesce leaves the round's ask confirmed and the claim working, and the
+// restored machine would otherwise read the agent's "the turn is over" as the answer.
+//
+// A refusal for either takes the ask's own clock back (UpdateTaskedAt), so the next sweep asks
+// again at once rather than at the re-task bound hours away. The ask itself is retired by the
+// turn's own settlement, as every confirmed delivery is.
 func (m *Machine) answerByTurnEnd() {
 	p := m.claim.Pending
 	if m.claim.UpdateRound == "" || m.claim.UpdateSignalledAt != nil || !CannotAnswerUpdate(m.claim) {
 		return
 	}
-	if m.interrupt != nil || !updatesRound(p, m.claim.UpdateRound) || p.ConfirmedAt.IsZero() {
+	if !updatesRound(p, m.claim.UpdateRound) || p.ConfirmedAt.IsZero() {
+		return
+	}
+	if m.interrupt != nil || m.askFirst {
+		m.log.Warn("supervise: this daemon cannot vouch for the turn the update task started, so its end is no answer; the round asks again",
+			"round", m.claim.UpdateRound, "takenOver", m.interrupt != nil, "restoredTurn", m.askFirst)
+		m.claim.UpdateTaskedAt = nil
 		return
 	}
 	at := m.deps.Clock.Now()
@@ -1722,13 +1745,8 @@ func (m *Machine) dropUpdateTask(ctx context.Context) error {
 // askForUpdate gives the claim the round's task, when this claim is one the round asks and the ask
 // is due. openPodUpdate says which those are.
 //
-// Every claim the round reaches is asked, whatever plugin contract it records. A running process
-// below PodUpdateContract has no ready_for_update op to call, and the task says what it does
-// instead: push, and end the turn this task starts, which the daemon reads as the answer
-// (UpdateTask, turnEnded). Asking it is what lets a pod be replaced for a contract change with
-// no drain and no operator, which is the whole of this round's promise. A suspended claim is
-// asked and revived too, whatever contract it last recorded: the revive launches it onto this
-// daemon's plugin, and the process that comes up answers the task waiting for it.
+// A claim below PodUpdateContract is asked too, and answers by ending the turn
+// (answerByTurnEnd).
 func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time.Time) error {
 	if m.claim.UpdateSignalledAt != nil {
 		return nil

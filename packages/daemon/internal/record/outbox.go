@@ -351,8 +351,8 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // neither a slot nor a place in the waiting line, which it took out of the workflow; its reason
 // names the status the root stood at. An update-stalled notice names an issue whose pod the
 // daemon opened an update round over and cannot replace: a worker has not answered within
-// `pod_update_notice_hours`, or one of them runs a plugin that can never answer, which only an
-// operator's drain releases (the daemon's reconcilePodUpdates). When admission sends each is its
+// `pod_update_notice_hours`, a turn that will not end holds the replacement, or the replacement
+// itself keeps failing (the daemon's reconcilePodUpdates). When admission sends each is its
 // rule (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
 const (
 	TriageNotice         NoticeKind = "triage"
