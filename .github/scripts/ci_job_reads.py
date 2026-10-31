@@ -472,6 +472,11 @@ GATES = [
         (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.test.ts:7,48-50 and gen-go.ts:520"),
     ) + biome(at("contracts", "Lint contracts")) + bun_job("contracts") + CI_SELF),
 
+    gate("conflicts_script", "conflicts-script", reads=reads(
+        ("scripts/conflicts/**", f"{at('conflicts-script', 'Lint the conflict measurement script')}, typecheck (tsc -p scripts/conflicts) "
+                                 "and test (__tests__/ and __fixtures__/); its modules import only one another, node: and bun:"),
+    ) + biome(at("conflicts-script", "Lint the conflict measurement script")) + bun_job("conflicts-script") + CI_SELF),
+
     gate("envoy_plugin", "envoy-plugin", reads=reads(
         ("packages/envoy-plugin/**", f"{at('envoy-plugin', 'Lint envoy plugin')}, typecheck, test and pack in packages/envoy-plugin"),
         (CONTRACTS_SRC, "packages/envoy-plugin/tsconfig.json paths @legion/contracts -> ../contracts/src/index.ts; bun resolves it to src (exports.bun)"),

@@ -1,0 +1,21 @@
+kind: Changed
+body: |-
+    A Dispatch migration added from now on is named for the UTC moment its author created it,
+    `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`), with its census under the same timestamp, instead
+    of the next free number: two pull requests open at once each took the next number, nothing
+    conflicted in git, and the clash showed only once one of them merged. The numbered versions
+    keep the numbers they landed with, a timestamp orders after every number, and a migration that
+    merges below one a database has already applied still runs there exactly once, since the
+    runner applies every version `schema_migrations` does not record. A migration must therefore
+    not depend on its order relative to one written in a concurrent pull request: a deployed
+    database applies each one as the release carrying it deploys, so it can apply them in the
+    other order than a fresh database does. `schema_migrations.version` is now a `bigint`, which a
+    14-digit version needs; a database that has the table as an `integer` keeps it until the first
+    boot whose set holds a timestamped migration, which widens it once, in the locked transaction
+    the runner creates the table in, so the previous release's health probe keeps answering during
+    this one's roll. Roll this release out before any release that carries a timestamped
+    migration. `schema_version` in `/healthz` is unchanged, the highest version applied rather
+    than proof that every version below it is applied; the auto-deployer's rollback guard now
+    compares the whole set of versions `schema_migrations` records, and records it in
+    `compose/.env` as `ENVOY_IMAGE_SCHEMA=<tag>:<max>-<count>-<digest>`.
+time: 2026-10-29T20:55:14.000000000Z
