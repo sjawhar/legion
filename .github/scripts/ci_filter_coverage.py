@@ -851,6 +851,36 @@ def check_push_workflows(data, filters: dict, problems: list) -> list:
     return report
 
 
+def declared_reads(data) -> list:
+    """Every read pattern ci_job_reads.py declares, each with where it is: a gate's reads, or a
+    RULES row's (a row's Runs declare go commands, not patterns)."""
+    reads = [(r.glob, f"gate {g.filter} reads") for g in data.GATES for r in g.reads]
+    return reads + [(read.glob, f"the RULES row for {source} reads")
+                    for source, entries in data.RULES.items()
+                    for read in entries if isinstance(read, Read)]
+
+
+def check_dead_patterns(data, filters: dict, expander: Expander, problems: list) -> None:
+    """A pattern that matches no file of the repository names nothing the run can select or
+    cover. The other rules here pass over such a pair: a filter and a declared read that both
+    name a path that does not exist agree with each other, and the gate's read expands to no file
+    to hold the filter to, so a change to the files they mean starts no job, on the pull request
+    and again on main. Judged over repo_files() with the Expander the rest of the check uses, so
+    a pattern is held to exactly the files a dorny/paths-filter run sees. A `!` pattern is exempt:
+    it names what to leave out, and leaving nothing out is no fault."""
+    for name in sorted(filters):
+        for pattern in dict.fromkeys(filters[name]):
+            if pattern.startswith("!") or expander.expand(pattern):
+                continue
+            problems.append(f"::error file={WORKFLOW}::filter {name} has {pattern}, which matches no file in the "
+                            f"repository, so no change ever selects on it; correct the path or drop the pattern")
+    for pattern, where in dict.fromkeys(declared_reads(data)):
+        if expander.expand(pattern):
+            continue
+        problems.append(f"::error file=.github/scripts/ci_job_reads.py::{where} {pattern}, which matches no file in "
+                        f"the repository, so it holds its filter to nothing; correct the path or drop the read")
+
+
 def main() -> int:
     problems: list = []
     document = yaml.safe_load((REPO / WORKFLOW).read_text())
@@ -861,6 +891,7 @@ def main() -> int:
     unreduced = check_table(document, data, filters, set(files), problems)
     check_ci_ok(document, problems)
     expander = Expander(files)
+    check_dead_patterns(data, filters, expander, problems)
     session = Session()
     report = []
     fallback = None  # module_trees_and_go_files(files), once a gate needs it

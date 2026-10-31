@@ -10,7 +10,7 @@ Environment or secret-scrub evidence (for example "`LEGION_*`/`DISPATCH_*`/`ENVO
 
 ## Forward merges
 
-For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`. Update the `E2E` head SHA with `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` when the fingerprint is equal.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`. Update the `E2E` head SHA with `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` when the fingerprint is equal, except in a parent's last round, where you run a full test round (`skill://legion-worker/references/pr-body.md`).
 
 ## Workspace restrictions
 
