@@ -28,7 +28,8 @@ same step before and after its change, and compares the two rows.
 | `sample.go` | The 5 s sampler: CPU, RSS, Postgres connections, goroutines, pool waiters, heap, NATS `/varz`. The transaction-id probe. |
 | `lockprobe.go` | The 20 ms sampler of the commit-order lock |
 | `locksampler.go` | The 1 s sampler of every ungranted lock in `pg_locks` |
-| `pgpoll.go` | The poll loop of the lock probes (`pollPG`), and the error policy of the probes' reads, which the 5 s sampler shares: failed reads are counted, the first three are logged, and so is their total past three |
+| `xactsampler.go` | The 10 ms sampler of `pg_stat_activity` that times how long each Dispatch transaction holds a transaction id (`-xact-interval`) |
+| `pgpoll.go` | The poll loop of the lock probes and the transaction-id hold sampler (`pollPG`), and the error policy of the probes' reads, which the 5 s sampler shares: failed reads are counted, the first three are logged, and so is their total past three |
 | `live.go` | The dashboard live sockets' reader of `GET /ws/live` event frames, and the live frame latencies |
 | `sse.go` | The reader of `GET /api/v1/events`, the dashboard's stream on a Dispatch build that serves no `/ws/live` (The dashboard stream, below) |
 | `dashboard.go` | The probe that chooses between the two, once, before the window |
@@ -142,7 +143,7 @@ the key stays the same across steps. `stack.sh` stops each process by the pid in
 ```bash
 packages/envoy/loadtest/run-step.sh <name> --events <per s> --sessions <n> --requests <per s> \
   [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>] \
-  [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed 1] [--out <dir>]
+  [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed 1] [--xact-interval 10ms] [--out <dir>]
 ```
 
 A replay step takes `--replay` and the replay's flags instead (The replay, below).
@@ -169,6 +170,7 @@ value.
 | `--human` | `0.1` | The share of writes that a person makes, 0 to 1. |
 | `--live` | `max(1, round(requests/30))` | Dashboard streams, each subscribed to the event feed as a dashboard tab is: 2 at 60 req/s, 20 at 600 req/s. They open `GET /ws/live`, or `GET /api/v1/events` against a build that serves no live socket (The dashboard stream, below). |
 | `--rng-seed` | `1` | The seed of the event and request schedules. |
+| `--xact-interval` | `10ms` | The interval of the transaction-id hold sampler (Transaction-id holds, below). `0` turns it off, for a control step without its reads. |
 | `--out` | `$LOADTEST_ROOT/runs/<name>` | The step directory. It must not exist, or it must be empty. |
 
 Rates are used as given. `0` is a real zero. The event and request schedules are open-loop Poisson
@@ -282,8 +284,8 @@ series directory.
   1,000 at 10x. That is 400·f up to 1x, and 400 + 600·(f − 1)/9 above it.
   `loadgen series-sessions <f>` prints the value.
 - The series passes every other step flag to each step: `--duration`, `--warmup`, `--grace`,
-  `--event-mix`, `--route-mix`, `--human`, `--rng-seed`. It refuses `--events`, `--sessions`,
-  `--requests`, `--live` and `--out`, because it sets them.
+  `--event-mix`, `--route-mix`, `--human`, `--rng-seed`, `--xact-interval`. It refuses `--events`,
+  `--sessions`, `--requests`, `--live` and `--out`, because it sets them.
 - With the default window, a step takes about 5 minutes and a series about 30 minutes.
 - `run-series.sh` runs the setup (one build of the checkout), the start, the seed and the migration
   check once, before the series directory exists, and reads the build's commit and dirty flag once
@@ -1289,7 +1291,7 @@ divided by 100 ticks per second and by the seconds between the two samples.
 | `heap in use MiB p50 / max` | MiB | Dispatch's `HeapInuse` from `/debug/pprof/heap?debug=1`, read every 15 s. | `resources.heap_inuse_mib` |
 | `goroutines p50 / max` | count | Dispatch's goroutines, from `/debug/pprof/goroutine?debug=1`. | `resources.goroutines` |
 | `goroutines waiting for a pool connection p50 / max` | count | Dispatch's goroutines with a pgx pool `Acquire` frame (puddle) in their stack. | `resources.pool_acquire_goroutines` |
-| `Postgres connections max` | count | The highest number of `pg_stat_activity` rows for database `dispatch`. It includes up to 4 connections of `loadgen`: the sampler, the lock probe, the ungranted-lock sampler and the transaction-id probe. | `resources.pg_conns_total.max` |
+| `Postgres connections max` | count | The highest number of `pg_stat_activity` rows for database `dispatch`. It includes up to 5 connections of `loadgen`: the sampler, the lock probe, the ungranted-lock sampler, the transaction-id hold sampler and the transaction-id probe. | `resources.pg_conns_total.max` |
 | `connections waiting on a lock p50` | count | The p50 of `dispatch` connections with state `active` and wait event type `Lock`, over the samples that saw at least one. `0` when no sample saw one. An advisory lock wait has this type. | `resources.pg_conns_by_state["active\|Lock"]` |
 | `Dispatch CPU-s per operation` | CPU-seconds | Dispatch's mean cores divided by the operation rate. An operation is a committed write or a sent request in the window. `-` when the commit rows were not read. | `resources.dispatch_cpu_s_per_op` |
 
@@ -1330,15 +1332,16 @@ commits.
 | `what the holder was doing (share of held samples)` | text, percent | Up to four holder states, most frequent first, each with its share of held samples. A state is `<state> (<wait event type>:<wait event>)`, or `active: <query>` with the query cut to 70 characters. `idle in transaction (Client:ClientRead)` means that Postgres waits for Dispatch to send the next statement. | `commit_order_lock.holder_doing` (up to 12 entries) |
 
 **The failed-reads mark.** `(<n> failed reads)`, or `(1 failed read)`, after the step name, in this
-table and in the ungranted-locks table, means that n of that probe's reads of `pg_locks` failed: a
-failed query, or a failed connect, which counts as one and leaves the probe with no sample.
-`commit_order_lock.errors` and `ungranted_locks.errors` count them, and `run.log` shows the first
-three of each probe and their total. The probe's samples miss those reads, so its shares are over
-the reads that worked, and a row with no sample reads `-`, not 0: a probe that failed is never
-shown as a lock nobody held. `TABLES.md` repeats this under the table when a row has the mark. The
-transaction-ids table uses the mark `(1 failed read)` for its probe (Transaction ids, below). None
-of these probes feeds the committed, receipt or delivery columns, so a failed read marks its own
-table and does not fail the step.
+table, the ungranted-locks table and the transaction-id holds table, means that n of that probe's
+reads (of `pg_locks`; of `pg_stat_activity` for the transaction-id hold sampler) failed: a failed
+query, or a failed connect, which counts as one and leaves the probe with no sample.
+`commit_order_lock.errors`, `ungranted_locks.errors` and `xid_holds.errors` count them, and
+`run.log` shows the first three of each probe and their total. The probe's samples miss those
+reads, so its shares are over the reads that worked, and a row with no sample reads `-`, not 0: a
+probe that failed is never shown as a lock nobody held. `TABLES.md` repeats this under the table
+when a row has the mark. The transaction-ids table uses the mark `(1 failed read)` for its probe
+(Transaction ids, below). None of these probes feeds the committed, receipt or delivery columns, so
+a failed read marks its own table and does not fail the step.
 
 When the event-lock change removes the commit-order lock, this table reads 0 by construction. No
 backend can hold or wait for a lock that Dispatch does not take. The ungranted-locks table
@@ -1423,6 +1426,42 @@ step whose sampler took no sample has `-` in every cell.
 | --- | --- | --- | --- |
 | `step` | name | The step name, with the mark `(1 failed read)` when the transaction-id probe's connect or one of its two reads failed (Commit-order lock, above). | `config.step`, `resources.xid_read_error` |
 | `transaction ids per s` | transaction ids per second | The transaction ids that Postgres assigned per second in the window, in all databases of the server. The transaction-id probe reads the next transaction id (`pg_snapshot_xmax(pg_current_snapshot())`) at the window start and at the window end. It divides the difference by the seconds between the two reads. The probe assigns no transaction id itself. `-` with the mark when a read failed (`resources.xid_read_error` holds the error, and `run.log` shows it); `-` alone when `resources` is null. | `resources.xids_per_s` |
+
+### Transaction-id holds
+
+The transaction-id hold sampler reads `pg_stat_activity` every `--xact-interval` (10 ms by default)
+from the window start to the window end, over a direct Postgres connection, not through the proxy.
+Each read lists the client backends of database `dispatch` that are in a transaction (`xact_start`
+set), the sampler's own backend excluded: the pid, `xact_start`, whether `backend_xid` is set, the
+state and the first 80 characters of the statement. It reads no `pg_locks`. `--xact-interval 0`
+turns the sampler off, for a control step against a step with it on; the row then reads `off`.
+
+One transaction is one pid and `xact_start`. It ends at the first read that does not show it. A
+transaction counts when a read showed it with a transaction id (`backend_xid` set) and it ended in
+the window: one still open at the last read has no known end and is not counted. A transaction
+gets its id at its first write and keeps it to its end, so the hold leaves out the reads before the
+first write, which `transaction ms` and the idle time without an id include.
+
+A read sees a transaction only while it is open. A hold shorter than the interval is seen with a
+chance of about its length over the interval, so the sampler misses many short holds:
+`xid holders / committed events` falls as holds shorten, and the percentiles are over the holds
+that a read saw.
+
+| Column | Unit | What it shows | Source |
+| --- | --- | --- | --- |
+| `step` | name | The step name, with the mark `(<n> failed reads)` when the sampler had failed reads (Commit-order lock, above). | `config.step`, `xid_holds.errors` |
+| `interval ms (samples/s)` | ms, reads per second | The interval, then the reads per second that the sampler made: the reads minus one, divided by the seconds from the first read to the last. Below 1,000 / interval, slow reads made it skip slots (`pgpoll.go`). `off` when `--xact-interval 0` turned the sampler off. | `xid_holds.interval_ms`, `xid_holds.samples_per_s` |
+| `xid holders / committed events` | count | The transactions counted (above), then the committed writes of the window. | `xid_holds.xid_holders`, `xid_holds.committed_events` (`events.committed`) |
+| `xid hold ms` | ms, p50 / p99 / max | From the transaction's first read with a transaction id to its last, plus one interval. A hold that one read saw is one interval. | `xid_holds.xid_hold_ms` |
+| `transaction ms` | ms, p50 / p99 / max | From `xact_start` to the transaction's last read. | `xid_holds.xact_ms` |
+| `idle in transaction with xid ms` | ms, p50 / p99 / max | The transaction's reads in state `idle in transaction` with a transaction id, times the interval: Postgres waited for Dispatch's next statement while the transaction held its id. | `xid_holds.idle_in_xact_with_xid_ms` |
+| `idle in transaction without xid ms` | ms, p50 / p99 / max | The same, without a transaction id: before the transaction's first write. | `xid_holds.idle_in_xact_without_xid_ms` |
+| `longest xid holders: hold ms, last statement` | ms, text | The five longest holds, longest first, each with the transaction's statement at its last read, whitespace collapsed. `(none)` is an empty statement. | `xid_holds.longest_xid_holders[]`: `xid_hold_ms`, `xact_ms`, `last_query` |
+
+Each value of the four ms columns is one transaction counted. `xid_holds.samples` is the number of
+reads and `xid_holds.errors` the failed reads; each statistic also has its p90. A step whose
+sampler made no read has `-` in every cell. A `summary.json` written by a `loadgen` without the
+sampler has `xid_holds` null, and its row is all `-`.
 
 ### Requests by route
 

@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-636",
+  "completed": "2026-10-31T10:20:00Z",
+  "verdict": "fail",
+  "failed": 1,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's own command for proof entry 1 on this pod against a real Postgres 16.2 (DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:16230/postgres, the load harness's pgserver cluster): cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 ./internal/dispatch/api/ ./internal/dispatch/docs/ -run TestXidWindow -count=1 -v. All 27 TestXidWindow* pass at 5e6203b5e9cdbc0cee6c8a27eac44096f2b2b1b7 (api 21 in 81.786s, docs 6 in 12.138s); the handoff and the PR body say 26, I count 27 (21 api + 3 rig + 3 docs routes). The proof's own negative control re-ran green too: TestXidWindowRigCatchesAGapAfterTheFirstWrite, which asserts the rig reports a 20 ms sleep after the first write as an XID WINDOW VIOLATION. Proof entry 4 (the smoke) I drove independently rather than re-running its throwaway client: a write-route battery over HTTP against the harness's Dispatch on the seeded database (below). Proof entry 2 (the hold bar) I re-drove at half load only, two runs per build, and its direction and order of magnitude reproduce (xid hold p99 406-655 ms at head against 4204-10661 ms on main). Proof entry 3 (the frame bar against before-INFRA-591) did NOT reproduce at p99 from the write's response: see unproven below. I could not re-run proofs 2 and 3 at the scale their acceptance names (five runs per side, half and full load): the round ends here because CI is red."
+  },
+  "failures": [
+    {
+      "criterion": "The repository's CI is green at the head under test: ci-ok, the check main's ruleset requires, condenses every lane of ci.yaml (.github/scripts/ci-ok.sh).",
+      "evidence": "Two lanes are RED at the code head d8e26d369559dec7546883c821a802e3c3f9cd3b, both on one test: dispatch-multiprocess https://github.com/sjawhar/legion/actions/runs/41181775173/job/124487999519 (FAIL github.com/sjawhar/envoy/cmd/dispatch 490.660s) and dispatch-memory https://github.com/sjawhar/legion/actions/runs/41181775173/job/124487999599 (FAIL ... 1308.703s). The test is TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument, packages/envoy/cmd/dispatch/shutdown_test.go:113, 'the title change never queued behind the issue lock'. Reproduced in this pod at the branch head 5e6203b5e9cdbc0cee6c8a27eac44096f2b2b1b7: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:16230/postgres?sslmode=disable go test ./cmd/dispatch/ -run TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument -count=1 -v -> FAIL (20.24s), same message. Negative control, the same test on a git-archive export of the base 772004c826beaf95a2d919528df2f4695897f3d8 against the same Postgres -> ok github.com/sjawhar/envoy/cmd/dispatch 23.980s. So the change caused it. Cause, read in the code: the test holds the issue ROW from a session of its own (lockIssue) and then waits for the PATCH's own statement, shutdown_test.go:130 renameLock = `select parent_key from issues where key = $1 for no key update`, which is exactly what api/issue_parent.go lockIssueRows ran at base; at head lockIssueRows is store.LockOwnersAndRead with `select parent_key from issues where key = $1` (issue_parent.go:148), so that SQL text no longer exists anywhere in the tree and a PATCH no longer waits on the issue row in its read phase at all. Repairing the string alone will not do: the gate has to hold the new serialization point (the owner advisory lock through store.LockOwner on store.IssueOwner, or the write phase's own `for no key update` in events.lockEventOwner). The red test is the repository's own; no new test was written for this defect."
+    }
+  ],
+  "unproven": [
+    {
+      "criterion": "Acceptance 2, frame bar: the live stream at half of tonight's load is no slower than before INFRA-591 at p50 and p99.",
+      "evidence": "Measured on a like-for-like triple this round that is stronger than the implementer's series h, but on two runs per build, not the five per side the acceptance names. before-INFRA-591 is decision D2's definition, the first parent of #2392's merge commit, 0be366cf8a2dbc6dc9999c342f0a9d2dab2306cf; it already carries /ws/live (packages/envoy/internal/dispatch/api/live_socket.go), unlike the implementer's c210f10d, so no beforews-backport.patch is needed and all three builds ran on ONE seed, ONE harness (this branch's loadgen) and one pod. The seed was made with that oldest build, so its migration level is 148 and every build passes the harness's migration check. 0.5x = --events 2 --sessions 200 --requests 30 --live 1 --xact-interval 10ms, 180 s window. Per run, p50/p99 ms: live_frame_ms_from_created_at before 1054.8/24046.3 and 522.2/13860.9; main 772004c826be 1039.1/18077.2 and 1453.0/23268.8; head 447.0/12886.2 and 634.6/9874.3 - head faster than before-591 at p50 and p99 on this metric. live_frame_ms_from_write_response before 26.7/236.8 and 28.0/240.1; main 231.4/4989.0 and 315.9/14492.3; head 15.6/724.7 and 18.9/687.2 - head faster than before-591 at p50 (the implementer's series h found the opposite at p50) and about three times SLOWER at p99 (about 700 ms against about 240 ms). So on two runs the bar holds on one named metric and misses at p99 on the other, and the implementer's and this round's measurements disagree on which percentile misses. This needs the acceptance's own five runs per side at 0.5x and at 1x before anyone calls it met or missed; nothing here settles it. Raw runs: /legion/scratch/tmp/dispatch-loadtest/runs/t-{before,base,head}-0.5x-r{1,2}."
+    },
+    {
+      "criterion": "Acceptance 2, hold bar, at full load (1x) and over five runs per side.",
+      "evidence": "Not run this round. At 0.5x, two runs per build, xid_holds.xid_hold_ms p50/p99/max: before-591 70.0/15778.3/17534.1 and 59.1/5946.6/9327.0; main 772004c826be 61.7/4204.0/6842.3 and 72.2/10661.3/16382.5; head 10.0/655.0/1128.2 and 17.0/406.3/928.4. Head's p99 is 6 to 26 times lower than main's, which reproduces the implementer's claimed 11.5x at 0.5x in direction and order of magnitude. Every run offered and committed 351 of 351 events and reported live_order_violations 0. box_busy_before 1-2 percent on every run; pod uid 2bff33b4-df74-4b92-80fc-f952e75acd1d; nothing else of mine ran during a step."
+    },
+    {
+      "criterion": "Acceptance 1 for the two background passes the scope widened to that no xid-window test covers.",
+      "evidence": "The 27 TestXidWindow* tests cover every write route and settlement, the edit-notice sweep and the task-progress reconciliation. The plan's D5 scope also names the block-index backfill and the decided-wording restoration, and no TestXidWindow* names either. Not a failure of acceptance 1, which speaks of write routes, but no test pins those two."
+    }
+  ],
+  "passed": [
+    {
+      "criterion": "Acceptance 1: each changed write route takes its transaction id only for its database statements, with no statement-free gap over the D6 threshold inside the window.",
+      "surface": "Dispatch's real HTTP handlers and document service against Postgres 16.2, traced by pgx and polled in pg_stat_activity every 0.5 ms (internal/dispatch/store/storetest/xidwindow.go)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:16230/postgres?sslmode=disable GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 ./internal/dispatch/api/ ./internal/dispatch/docs/ -run TestXidWindow -count=1 -v",
+      "observed": "27 of 27 pass at 5e6203b5e9cdbc0cee6c8a27eac44096f2b2b1b7; api 81.786s, docs 12.138s.",
+      "headSha": "5e6203b5e9cdbc0cee6c8a27eac44096f2b2b1b7",
+      "negativeControl": "TestXidWindowRigCatchesAGapAfterTheFirstWrite and TestXidWindowRigJudgesAWriteThePollerNeverSaw/a_20_ms_sleep_after_the_write: a 20 ms sleep after the first write is reported as an XID WINDOW VIOLATION naming that write. Both pass, so the rig refuses a gap it is given."
+    },
+    {
+      "criterion": "No write route changed what it answers, and no concurrent write to one issue or one document is lost: the differential battery.",
+      "surface": "the harness's Dispatch over HTTP on the seeded database (1000 issues, 2310 documents, 20781 versions), the same stack reset from one seed template for each build, with the invariants read back from Postgres",
+      "command": "bash /legion/scratch/tmp/tester/run-battery.sh head HEAD then bash /legion/scratch/tmp/tester/run-battery.sh base 772004c826be, then diff the two reports",
+      "observed": "The two reports are identical apart from their timestamp line. 28 write cases: plain, anchored and reply comments, an anchor that matches nothing (404 TARGET_NOT_FOUND), an unknown reply_to (400 INVALID_COMMENT), an empty body (400 INVALID_COMMENT), a spec edit (200, version 2), an edit whose find is absent (404 TARGET_NOT_FOUND), empty ops (200, version null), an unknown op (400 INVALID_OP), an upload (201), an oversize upload (413 CAP_EXCEEDED), a duplicate issue title (409 POSSIBLE_DUPLICATE), an ask open and two answers, an idempotency key repeated (201 replay) and reused with another body (422 KEY_REUSED), a close (200) then a comment and an upload on the closed issue (both 409 ISSUE_CLOSED), a status patch (200) and a bad status (400 INVALID_STATUS). The per-transaction EVENT ORDER of the issue's log is identical on both builds (issue.created, comment.created, comment.created, artifact.version, artifact.created, ask.opened, comment.created, issue.updated), which is the thing the write queue had to keep. Concurrency, identical on both builds: 12 comments posted at once to one issue, 12 accepted, 12 stored, event seq 1..13 with 13 distinct values; 8 insert edits sent at once to ONE document, 8 accepted, all 8 inserted paragraphs present in the document afterwards, versions 1..9 with 9 distinct numbers - no lost update; 4 requests under one idempotency key at once, 1 accepted and 3 refused 409, exactly 1 comment stored. Instance-wide afterwards on both: no duplicate (issue_key, seq), (artifact_id, seq) or (project_key, seq); no issue whose event seq has a gap; no document whose version numbers have a gap.",
+      "headSha": "5e6203b5e9cdbc0cee6c8a27eac44096f2b2b1b7",
+      "negativeControl": "The battery's own refusal cases are the control: the same build refuses an anchor quote that is not in the document (404 TARGET_NOT_FOUND), a reuse of an idempotency key with another body (422 KEY_REUSED) and every write to a closed issue (409 ISSUE_CLOSED), each with the same code as the base build."
+    },
+    {
+      "criterion": "Acceptance 3: the .dispatch/architecture/ files for the components it changes say what is now true.",
+      "surface": "the repository's architecture notes",
+      "command": "git diff 772004c826be 5e6203b5e9cd -- .dispatch/architecture/",
+      "observed": "Four files changed: dispatch-api.md and dispatch-docs.md each gain a paragraph on the read phase and the write phase, dispatch-store.md one on store/ownerlock.go and the 0x4F574E52 namespace, dispatch-events.md rewrites the append paragraph for Broker.QueueAppend and the horizon's self-proof and names the relay's 2 ms window. I read each claim against the code it names: the namespace constant (store/ownerlock.go:17), lockArtifactOwner, LockOwnersAndRead's two statements, and the queued owner row lock carrying pg_current_xact_id before the insert (events/broker.go:312-342).",
+      "headSha": "5e6203b5e9cdbc0cee6c8a27eac44096f2b2b1b7",
+      "negativeControl": "dispatch-events.md's depends_on gains dispatch-store, which the new text needs because the append now names store.LockOwner and store.WriteBatch; without that edge the note would cite a package it declares no edge to."
+    }
+  ],
+  "ciAtHead": {
+    "head": "d8e26d369559dec7546883c821a802e3c3f9cd3b",
+    "read": "2026-10-31T10:05Z, GitHub check-runs of that commit",
+    "failure": ["dispatch-multiprocess", "dispatch-memory"],
+    "success": ["lint", "typecheck", "docs / build", "pr-title", "ci-filters", "envoy-session-stall", "worker-image / build", "broker-multiprocess", "dispatch-browser-multiprocess", "envoy-e2e-local", "envoy-go-race", "envoy-go-race-api", "envoy-go-race-docs", "envoy-go-race-pmdoc", "envoy-infra-go", "envoy-smoke", "listener-server-change", "pi-legion"],
+    "stillRunningWhenRead": ["dispatch", "envoy-go"],
+    "skipped": ["ci-images", "claude-envoy", "contracts", "envoy-client", "envoy-plugin", "pi-envoy", "pi-shared", "worker-image / attest"]
+  },
+  "podCouldNotRun": [
+    "Nothing was skipped for the pod this round beyond what I did not reach: I ran only ./cmd/dispatch/ (one test) and ./internal/dispatch/api/ and ./internal/dispatch/docs/ under -run TestXidWindow. The full api, docs and rest-of-module suites and the -race run were not run in the pod this round; CI's envoy-go-race, envoy-go-race-api, envoy-go-race-docs and envoy-go-race-pmdoc are green at the code head and envoy-go was still running when I read it."
+  ]
+}

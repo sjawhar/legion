@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // parseIssuePriority decodes the tri-state `priority` field of an issue write. Absent →
@@ -255,7 +256,74 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The project's owner lock comes before its row's update: every writer of a projects row
+	// takes it first (an event append, a mapping write, the default assignee's PUT), so none of
+	// them holds the row while it waits on the lock this create holds, and none closes a cycle
+	// with the mapping check below.
+	//
+	// The create's read phase (INFRA-636): the spec's parse, render and encoding (SeedText), its
+	// task count, its reference index and the advice all run here, before the update of the
+	// project's next_number - the create's first write, which every later statement follows - so
+	// none of that work holds the transaction's id. The issue's key is read now, in the statement
+	// after the lock: next_number is written by an issue create alone, under the project's owner
+	// lock this one holds, so the update below takes exactly this number. The spec's id is taken
+	// in the same read, before its row is written (gen_random_uuid assigns no transaction id), so
+	// the document's writes, which name it, are queued here with its version, its task count and
+	// its index, and run in the write phase after the artifact's insert. An issue created without
+	// a spec gets an empty primary document.
 	var number int
+	var artifactID string
+	if err := store.LockOwnerAndRead(r.Context(), tx, store.ProjectOwner(input.Project), `
+		select next_number, gen_random_uuid()::text from projects where key = $1
+	`, []any{input.Project}, &number, &artifactID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	key := fmt.Sprintf("%s-%d", input.Project, number)
+	actorJSON, err := encodeJSON(actor)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	var markdown string
+	if input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
+		markdown = *input.Spec
+	}
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
+	markdown, err = s.deps.Docs.SeedText(documentCtx, artifactID, markdown, actor)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	specVersion, err := ledger.QueueVersion(r.Context(), artifactID, markdown, []model.Actor{actor}, nil)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The count is queued after the version's insert, so it names that version (LEGION-542).
+	if err := docs.RecordTaskProgressMarkdown(documentCtx, tx, artifactID, markdown); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	specChanges, err := s.deps.Docs.IndexDocumentReferences(documentCtx, artifactID, specVersion.Number, markdown)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	var parentRef *string
+	if parentKey != "" {
+		parentRef = &parentKey
+	}
+	// A new issue is in triage (the column's default), and its row - its labels and its parent -
+	// is not written yet (writeAdviceBefore).
+	advice := s.writeAdviceBefore(
+		r.Context(), tx, "POST /api/v1/issues", key, actor, model.IssueStatusTriage,
+		adviceIssueRow{parent: parentRef, labels: labels},
+	)
+
+	// The write phase: the statements from here on run back to back.
+	var written int
 	var projectDefaultAssignee *string
 	if err := tx.QueryRow(r.Context(), `
 		update projects
@@ -266,8 +334,12 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		-- key, so this is one index probe inside a statement the create runs anyway), and null for
 		-- a project with no default or one whose default has gone stale.
 		returning next_number - 1, (select email from people where email = projects.default_assignee)
-	`, input.Project).Scan(&number, &projectDefaultAssignee); err != nil {
+	`, input.Project).Scan(&written, &projectDefaultAssignee); err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	if written != number {
+		s.writeHandlerError(w, fmt.Errorf("project %s numbered issue %d under its owner lock, not the %d it read", input.Project, written, number))
 		return
 	}
 	// The project's stored default is the chain's last step, and this update already holds the
@@ -284,16 +356,6 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	key := fmt.Sprintf("%s-%d", input.Project, number)
-	actorJSON, err := encodeJSON(actor)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	var parent any
-	if parentKey != "" {
-		parent = parentKey
-	}
 	if err := lockProjectRankAllocation(r.Context(), tx, input.Project); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -309,7 +371,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if _, err := tx.Exec(r.Context(), `
 		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee, repo)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee, repo); err != nil {
+	`, key, input.Project, number, input.Title, parentRef, actorJSON, labels, priority, issueRank, assignee, repo); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -345,46 +407,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var artifactID string
-	if err := tx.QueryRow(r.Context(), `
-		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
-		values ($1, $2, 'spec', 'spec.md', 'doc', true, $3)
-		returning id::text
-	`, key, input.Project, actorJSON).Scan(&artifactID); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	// An issue created without a spec gets an empty primary document.
-	var markdown string
-	if input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
-		markdown = *input.Spec
-	}
-	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
-	defer ledger.Discard()
-	markdown, err = s.deps.Docs.SeedText(documentCtx, artifactID, markdown, actor)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	authors, err := encodeJSON([]model.Actor{actor})
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	if _, err := tx.Exec(r.Context(), `
-		insert into artifact_versions (artifact_id, number, markdown, authors, doc_update_version)
-		values ($1, 1, $2, $3, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
-	`, artifactID, markdown, authors); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	// The version row exists now, so the count names it (LEGION-542).
-	if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifactID, markdown); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	specChanges, err := s.deps.Docs.IndexDocumentReferences(documentCtx, artifactID, 1, markdown)
-	if err != nil {
+		insert into artifacts (id, issue_key, project_key, slug, name, kind, is_primary, created_by)
+		values ($1, $2, $3, 'spec', 'spec.md', 'doc', true, $4)
+	`, artifactID, key, input.Project, actorJSON); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -406,18 +432,14 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event("issue.created", actor, payload))
+	// The issue.created event and its stamp of the spec's new edges follow the spec's queued
+	// writes: the stamp needs the index's edges written, and the document's pending-settlement row
+	// comes before the event.
+	event, err := s.queueStampedEvent(r.Context(), tx, ledger, issueOwner(key).event("issue.created", actor, payload), "artifact", artifactID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := refs.Stamp(r.Context(), tx, "artifact", artifactID, event.ID); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	advice := s.writeAdvice(
-		r.Context(), tx, "POST /api/v1/issues", key, actor, "", issue.Status,
-	)
 	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -426,7 +448,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// closer that indexes its ask blocks and repairs block ids; queue it now that the
 	// transaction is durable.
 	s.deps.Docs.ScheduleSettlement(artifactID)
-	s.publish(event)
+	s.publish(*event)
 	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		advice.documentBlocks = readDocumentBlocks(markdown)
 	}
@@ -465,9 +487,10 @@ func (s *server) respondWithExistingExternalIssue(
 	}
 	defer adviceReadTx.Rollback(r.Context())
 	var existingStatus string
-	if err := adviceReadTx.QueryRow(r.Context(), `
-		select status from issues where key = $1 for no key update
-	`, existingKey).Scan(&existingStatus); err != nil {
+	// The owner lock, then the read in a statement of its own (store.LockOwnerAndRead).
+	if err := store.LockOwnerAndRead(r.Context(), adviceReadTx, store.IssueOwner(existingKey), `
+		select status from issues where key = $1
+	`, []any{existingKey}, &existingStatus); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -477,7 +500,7 @@ func (s *server) respondWithExistingExternalIssue(
 		return
 	}
 	advice := s.writeAdvice(
-		r.Context(), adviceReadTx, "POST /api/v1/issues", existingKey, actor, "", existingStatus,
+		r.Context(), adviceReadTx, "POST /api/v1/issues", existingKey, actor, "", existingStatus, "",
 	)
 	if err := adviceReadTx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)

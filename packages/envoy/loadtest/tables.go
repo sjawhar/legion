@@ -216,6 +216,7 @@ func renderTables(steps []stepData) string {
 	liveTable(&md, steps)
 	ungrantedTable(&md, steps)
 	xidTable(&md, steps)
+	xidHoldsTable(&md, steps)
 	routesTable(&md, steps)
 	replayTable(&md, steps)
 	return md.String()
@@ -468,6 +469,53 @@ func xidTable(md *markdown, steps []stepData) {
 	if marked {
 		md.line("\n(1 failed read): the probe's connect or one of its two reads failed; summary.json `resources.xid_read_error` holds the error.")
 	}
+}
+
+func xidHoldsTable(md *markdown, steps []stepData) {
+	md.line("\n## Transaction-id holds\n")
+	md.line("Dispatch's transactions sampled in pg_stat_activity over the whole window, at the interval of each row (off: `-xact-interval 0`). ms p50 / p99 / max over the transactions seen holding a transaction id.\n")
+	columns := []string{"step", "interval ms (samples/s)", "xid holders / committed events", "xid hold ms", "transaction ms",
+		"idle in transaction with xid ms", "idle in transaction without xid ms", "longest xid holders: hold ms, last statement"}
+	md.header(columns...)
+	marked := false
+	triple := func(s stat) string {
+		if s.N == 0 {
+			return "-"
+		}
+		return fmt.Sprintf("%s / %s / %s", num(s.P50, 0), num(s.P99, 0), num(s.Max, 0))
+	}
+	for _, s := range steps {
+		x := s.sum.XIDHolds
+		switch {
+		case x == nil: // a summary.json from a loadgen without the sampler
+			md.emptyRow(s.label(), len(columns))
+			continue
+		case x.IntervalMs == 0:
+			cells := []string{s.label(), "off"}
+			for range len(columns) - 2 {
+				cells = append(cells, "-")
+			}
+			md.row(cells...)
+			continue
+		}
+		marked = marked || x.Errors > 0
+		if x.Samples == 0 {
+			md.emptyRow(withFailedReads(s.label(), x.Errors), len(columns))
+			continue
+		}
+		var longest []string
+		for _, h := range x.LongestXIDHolders {
+			longest = append(longest, fmt.Sprintf("%s %s", num(h.HoldMs, 0), mdCell(h.Query)))
+		}
+		longestText := "-"
+		if len(longest) > 0 {
+			longestText = strings.Join(longest, "; ")
+		}
+		md.row(withFailedReads(s.label(), x.Errors), fmt.Sprintf("%s (%s)", num(x.IntervalMs, 0), num(x.SamplesPerS, 0)),
+			num(float64(x.XIDHolders), 0)+" / "+num(float64(x.CommittedEvents), 0), triple(x.XIDHoldMs), triple(x.XactMs),
+			triple(x.IdleInXactWithXIDMs), triple(x.IdleInXactNoXIDMs), longestText)
+	}
+	failedReadsNote(md, marked, "the sampler's read of pg_stat_activity", "`xid_holds.errors`")
 }
 
 func routesTable(md *markdown, steps []stepData) {

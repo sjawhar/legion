@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -11,22 +12,18 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// decidedWordingRestore is the statement that gives a decided ask back the wording its decision
-// was given on, where a task of an earlier release wrote a document's rewording into the row
-// (LEGION-651): an answered or resolved ask with an ask.edited after its latest ask.answered or
-// ask.resolved, and no ask.opened between, gets that edit's previous wording - the first such
-// edit's - wherever its row asks something else. An answer changed after the edit is a decision on
-// the edited wording, so its ask is left as it is, as is a field an older event did not record.
-// The statement is idempotent: a row it restored asks its first edit's previous wording, so it
-// writes it no more. $1 names the asks it may restore, through their primary key, for a
-// settlement; null, it reads every decided ask, at boot. Either way it reads events through
-// events_ask_payload_id (migration 0030) and returns each ask it restored: its id, its document
-// and block (both null for an ask no block holds) and the restored wording.
-const decidedWordingRestore = `
+// decidedWordingEdits finds the wording a decided ask's decision was given on, where a task of an
+// earlier release wrote a document's rewording into the row (LEGION-651): an answered or resolved
+// ask with an ask.edited after its latest ask.answered or ask.resolved, and no ask.opened between,
+// gets that edit's previous wording - the first such edit's - wherever its row asks something else
+// (decidedWordingDiffers). An answer changed after the edit is a decision on the edited wording, so
+// its ask is left as it is, as is a field an older event did not record. $1 names the asks it may
+// restore, through their primary key; null, it reads every decided ask, at boot. Either way it
+// reads events through events_ask_payload_id (migration 0030).
+const decidedWordingEdits = `
 	with decided as (
 		select a.id,
 			(select max(d.id) from events d
@@ -42,19 +39,47 @@ const decidedWordingRestore = `
 			select 1 from events o
 			where o.type = 'ask.opened' and o.payload->>'id' = d.id::text and o.id > d.decision and o.id < e.id)
 		order by d.id, e.id
-	)
+	)`
+
+// decidedWordingColumns is the wording an ask a gets back from its first edit's previous wording
+// f: the question the edit recorded, and options, multiple and urgency, each the row's own where
+// the edit recorded none.
+const decidedWordingColumns = `
+	f.wording->>'question', coalesce(f.wording->'options', a.options),
+	coalesce((f.wording->>'multiple')::boolean, a.multiple), coalesce(f.wording->>'urgency', a.urgency)`
+
+// decidedWordingDiffers holds for an ask a whose row asks something other than its first edit's
+// previous wording f.
+const decidedWordingDiffers = `
+	a.id = f.id
+	and f.wording ? 'question'
+	and (a.question, a.options, a.multiple, a.urgency) is distinct from (` + decidedWordingColumns + `)`
+
+// decidedWordingPlan reads each ask decidedWordingRestore would give back its decided wording,
+// writing nothing: its id, its document and block (both null for an ask no block holds) and the
+// wording.
+const decidedWordingPlan = decidedWordingEdits + `
+	select a.id::text, a.block_artifact_id::text, a.block_id, ` + decidedWordingColumns + `
+	from asks a join first_edit f on a.id = f.id
+	where ` + decidedWordingDiffers + `
+	order by a.id`
+
+// decidedWordingRestore is the statement that gives each ask $1 names back its decided wording
+// (decidedWordingEdits), returning the ids it restored. It is idempotent: a row it restored asks
+// its first edit's previous wording, so it writes it no more.
+const decidedWordingRestore = decidedWordingEdits + `
 	update asks a
-	set question = f.wording->>'question',
-		options = coalesce(f.wording->'options', a.options),
-		multiple = coalesce((f.wording->>'multiple')::boolean, a.multiple),
-		urgency = coalesce(f.wording->>'urgency', a.urgency)
+	set (question, options, multiple, urgency) = (` + decidedWordingColumns + `)
 	from first_edit f
-	where a.id = f.id
-		and f.wording ? 'question'
-		and (a.question, a.options, a.multiple, a.urgency) is distinct from
-			(f.wording->>'question', coalesce(f.wording->'options', a.options),
-			 coalesce((f.wording->>'multiple')::boolean, a.multiple), coalesce(f.wording->>'urgency', a.urgency))
-	returning a.id::text, a.block_artifact_id::text, a.block_id, a.question, a.options, a.multiple, a.urgency`
+	where ` + decidedWordingDiffers + `
+	returning a.id::text`
+
+// errDecidedWordingsMoved refuses a restoration whose update restored other asks than its plan
+// read: a decided ask's row or events changed in between, which only a writer holding no owner
+// lock of the asks can do - a task of an earlier release during a rolling deploy, at boot. The
+// restoration rolls back; the boot logs it and goes on, and each document's next settlement
+// restores its own asks (restoreDocumentDecidedWordings).
+var errDecidedWordingsMoved = errors.New("the decided asks to restore changed between their plan and their restoration")
 
 // restoredWording is one ask decidedWordingRestore gave back its decided wording.
 type restoredWording struct {
@@ -80,10 +105,13 @@ const decidedWordingRollbackTimeout = 5 * time.Second
 // it marked owed. cmd/dispatch runs it once at boot; a task of the earlier release still running
 // during a rolling deploy can reword one again, which the next settlement of its document on this
 // release restores (restoreDocumentDecidedWordings), writing the decided wording back in that same
-// settlement. Its update holds the restored asks' rows while it takes the copy locks, which waits
-// on no holder of one: a settlement takes its own document's ask rows before its copy lock and
-// before its own pending row, an answer or a resolution its ask's row before SettleCopiesOf, and
-// neither waits on another ask's row once it holds the copy lock.
+// settlement. It reads what it restores, plans the questions' references, takes the copy locks and
+// reads the owed documents before it writes anything, holding no ask's row; then it restores them,
+// writes their references and marks the documents owed back to back, and commits. Its update
+// restores exactly the asks it read or the restoration is refused (errDecidedWordingsMoved). A
+// settlement takes its own document's owner lock before its copy lock and an answer or a
+// resolution its ask's owner lock before SettleCopiesOf, so none of them waits on a lock this
+// holds once it holds the copy lock.
 func (s *Service) RestoreDecidedWordings(ctx context.Context) (restored, copies int, err error) {
 	ctx = store.WithTransactionTracking(ctx)
 	tx, err := s.store.Pool.Begin(ctx)
@@ -95,12 +123,16 @@ func (s *Service) RestoreDecidedWordings(ctx context.Context) (restored, copies 
 		defer cancel()
 		_ = tx.Rollback(rollbackCtx)
 	}()
-	wordings, err := s.restoreWordings(ctx, tx, nil)
+	queued, ledger := queueWrites(ctx, tx)
+	wordings, err := s.restoreWordings(queued, tx, nil)
 	if err != nil {
 		return 0, 0, err
 	}
-	owed, copies, err := owedSettlementsOfRestored(ctx, tx, wordings)
+	owed, copies, err := owedSettlementsOfRestored(queued, tx, wordings)
 	if err != nil {
+		return 0, 0, err
+	}
+	if err := ledger.runQueue(ctx, nil); err != nil {
 		return 0, 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -170,7 +202,7 @@ func (s *Service) restoreDocumentDecidedWordings(ctx context.Context, tx pgx.Tx,
 			blocks[ask.ID] = blockID
 		}
 	}
-	// decidedWordingRestore reads a null $1 as every decided ask, so an empty list never reaches it.
+	// decidedWordingPlan reads a null $1 as every decided ask, so an empty list never reaches it.
 	if len(decided) == 0 {
 		return nil, nil
 	}
@@ -187,20 +219,26 @@ func (s *Service) restoreDocumentDecidedWordings(ctx context.Context, tx pgx.Tx,
 		ask.Multiple = wording.wording.Multiple
 		ask.Urgency = wording.wording.Urgency
 		rows[blockID] = ask
+		if ask.BlockArtifactID != nil {
+			recordAskBlock(ctx, tx, *ask.BlockArtifactID, ask)
+		}
 		asks = append(asks, ask)
 	}
 	logRestoredWordings(restored)
 	return asks, nil
 }
 
-// restoreWordings runs decidedWordingRestore over the decided asks ids names, or every decided ask
-// when ids is nil, and indexes each restored question's references again, as every write of an
-// ask's question does (refs.ReplaceCounted); no event carries the change, as none does for
-// refs.RebuildAll's.
+// restoreWordings gives the decided asks ids names, or every decided ask when ids is nil, their
+// decided wording back, and indexes each restored question's references again, as every write of
+// an ask's question does (refs.ReplaceCounted); no event carries the change, as none does for
+// refs.RebuildAll's. Which asks it restores and their references are read and planned where it is
+// called (decidedWordingPlan, planReplaceCounted); the restoration and the references go through
+// write. The restoration names the planned asks and refuses to have restored any other set
+// (errDecidedWordingsMoved).
 func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) ([]restoredWording, error) {
-	rows, err := tx.Query(ctx, decidedWordingRestore, ids)
+	rows, err := tx.Query(ctx, decidedWordingPlan, ids)
 	if err != nil {
-		return nil, fmt.Errorf("restore decided asks' wordings: %w", err)
+		return nil, fmt.Errorf("read the decided asks' wordings to restore: %w", err)
 	}
 	restored, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (restoredWording, error) {
 		var wording restoredWording
@@ -215,12 +253,42 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 		return wording, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("read the restored decided asks: %w", err)
+		return nil, fmt.Errorf("read the decided asks' wordings to restore: %w", err)
 	}
-	for _, wording := range restored {
-		if _, err := refs.ReplaceCounted(ctx, tx, "ask", wording.ask, wording.wording.Question, s.serverURL); err != nil {
+	if len(restored) == 0 {
+		return nil, nil
+	}
+	planned := make([]string, len(restored))
+	steps := make([]WriteStep, len(restored))
+	for index, wording := range restored {
+		planned[index] = wording.ask
+		_, step, err := planAskReferences(ctx, tx, wording.ask, wording.wording.Question, s.serverURL)
+		if err != nil {
 			return nil, fmt.Errorf("index the restored question of ask %s: %w", wording.ask, err)
 		}
+		steps[index] = step
+	}
+	slices.Sort(planned)
+	if err := write(ctx, tx, func(b *store.WriteBatch) error {
+		b.Queue("restore decided asks' wordings", decidedWordingRestore, planned).Query(func(rows pgx.Rows) error {
+			written, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			if err != nil {
+				return fmt.Errorf("restore decided asks' wordings: %w", err)
+			}
+			slices.Sort(written)
+			if !slices.Equal(written, planned) {
+				return fmt.Errorf("%w: planned %v, restored %v", errDecidedWordingsMoved, planned, written)
+			}
+			return nil
+		})
+		for _, step := range steps {
+			if err := step(b); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return restored, nil
 }

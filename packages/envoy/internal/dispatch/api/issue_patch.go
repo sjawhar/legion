@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -150,7 +151,11 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	// A close withdraws the issue's open asks and a reopen restores them, writing their blocks
-	// into the issue's documents, which reach their rooms through the ledger's commit.
+	// into the issue's documents, which reach their rooms through the ledger's commit. That
+	// document work runs before the patch's first write, holding no transaction id (INFRA-636); its
+	// writes, the asks' and every event this patch appends are queued on the ledger and run, in the
+	// order made, after the patch's own row writes, which stay inline because their results steer
+	// it (a component or blocker refusal, a taken external link).
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
 
@@ -175,11 +180,11 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A PATCH locks every issue row it names in one key order before it reads any of them: the
-	// issue, its current parent when a status change or a reparent appends to it, the proposed
-	// parent and the rank neighbours (lockPatchRows, lockPatchRowsAndParent). It never holds one
-	// of those rows while waiting for another that a second write holds. Validation, the
-	// dependency walk and the rank reads below are plain reads of rows already held.
+	// A PATCH takes the owner lock of every issue it names in one lock order before it reads any
+	// of them: the issue, its current parent when a status change or a reparent appends to it, the
+	// proposed parent and the rank neighbours (lockPatchRows, lockPatchRowsAndParent). It never
+	// holds one of those locks while waiting for another that a second write holds. Validation, the
+	// dependency walk and the rank reads below are plain reads of issues whose locks it holds.
 	named := make([]string, 0, 3)
 	if parent != nil {
 		named = append(named, *parent)
@@ -313,6 +318,34 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		set("repo", repo)
 	}
 	changed := len(sets) > 0 || componentsProvided || input.BlockedBy != nil
+	// The advice is read here, before the patch's first write, so its queries hold no transaction
+	// id (INFRA-636), and it is read for the row as the patch leaves it: its status, its labels and
+	// its parent (writeAdviceBefore). Nothing the patch writes after this changes what it reads.
+	afterRow := adviceIssueRow{parent: before.Parent, labels: before.Labels}
+	afterStatus := before.Status
+	if input.Status != nil {
+		afterStatus = status
+	}
+	if parentProvided {
+		afterRow.parent = parent
+	}
+	if input.Labels != nil || input.LabelsAdd != nil {
+		afterRow.labels = labels
+	}
+	advice := s.writeAdviceBefore(r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, afterStatus, afterRow)
+	// The close's and the reopen's document work (prepareWithdrawal, prepareRestoration): it reads
+	// the asks, which none of the patch's row writes below touches, and queues its writes.
+	var closingAsks, reopenedAsks []model.Ask
+	switch {
+	case closing:
+		closingAsks, err = s.prepareWithdrawal(documentCtx, tx, key, actor)
+	case reopening:
+		reopenedAsks, err = s.prepareRestoration(documentCtx, tx, key, actor)
+	}
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if changed {
 		sets = append(sets, "updated_at = "+issueUpdatedNow)
 		if _, err := tx.Exec(r.Context(), `update issues set `+strings.Join(sets, ", ")+` where key = $1`, args...); err != nil {
@@ -385,9 +418,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 	if !changed {
-		advice := s.writeAdvice(
-			r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", before.Status,
-		)
+		// Nothing was written, so the row the advice read is the stored one.
 		if err := ledger.Commit(r.Context()); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -403,7 +434,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	parentChanged := parentProvided && !stringPointersEqual(before.Parent, afterParent)
 	// Every owner this transaction appends to must be in one LockOwners call before the
 	// first append: the issue itself, the status-change parent, and both ends of a reparent.
-	// lockPatchRowsAndParent already holds each of those rows, so LockOwners re-locks them in that order.
+	// lockPatchRowsAndParent already holds each of those owner locks, so LockOwners returns at once.
 	owners := []model.Event{issueOwner(key).event("", actor, nil)}
 	ownerKeys := map[string]bool{key: true}
 	addOwner := func(parentKey *string) {
@@ -426,35 +457,40 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The asks' events come before the status event, and their document writes before either.
+	// The asks' rows and events come before the status event, and their document writes, queued
+	// above, before either.
 	var withdrawn []model.Ask
-	events := []model.Event{}
+	appended := []*model.Event{}
 	switch {
 	case closing:
-		withdrawn, events, err = s.withdrawIssueAsksTx(documentCtx, tx, key, actor)
+		withdrawn, appended, err = s.recordWithdrawnAsksTx(documentCtx, tx, ledger, key, closingAsks, actor)
 	case reopening:
-		_, events, err = s.restoreIssueAsksTx(documentCtx, tx, key, actor)
+		appended, err = s.recordRestoredAsksTx(documentCtx, tx, ledger, key, reopenedAsks, actor)
 	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// Read once every event so far is in, the document writes' own included, so the response's
-	// last_seq and open asks are what a read of the issue answers.
+	// The row as the patch's inline writes left it. Its last_seq counts the events queued so far,
+	// the asks', which the write phase appends before the status event, as a read of the issue
+	// answers once the patch has committed.
 	after, err := s.loadIssue(r.Context(), tx, key)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	after.LastSeq += len(appended)
 	eventType := "issue.updated"
 	if statusChanged && after.Status == "done" {
 		eventType = "issue.closed"
 	}
 	after.LastSeq++
 	// What the write changed, the issue's ancestors, and, for a status move, whose Replies count
-	// it can move, all read in this transaction. A retitle keeps the issue's child_of and
-	// blocked_by edges but moves the excerpt they show, so it names their targets; a blocked_by
-	// change moves the count of each blocker it added or removed, so it names those.
+	// it can move. A retitle keeps the issue's child_of and blocked_by edges but moves the excerpt
+	// they show, so it names their targets; a blocked_by change moves the count of each blocker it
+	// added or removed, so it names those. A close or a reopen names the logins with a row on the
+	// issue's open asks once the asks' rows are written, which the event's insert reads
+	// (events.IssueLoginsOf); any other status move names nobody.
 	changedFields := issueChangedFields(before, after)
 	edgeChanges, err := issueEdgeChanges(r.Context(), tx, before, after, slices.Contains(changedFields, "title"))
 	if err != nil {
@@ -466,30 +502,31 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	var logins *events.Logins
 	if statusChanged {
-		payload.ThreadLogins, err = issueThreadLogins(r.Context(), tx, key, slices.Contains(changedFields, "closed_at"))
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
+		if slices.Contains(changedFields, "closed_at") {
+			logins = events.IssueLoginsOf(key)
+		} else {
+			payload.ThreadLogins = []string{}
 		}
 	}
-	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, payload))
+	event, err := s.queueLoggedEvent(r.Context(), tx, ledger, issueOwner(key).event(eventType, actor, payload), logins, "", "")
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	events = append(events, event)
+	appended = append(appended, event)
 	if previousClaim != nil {
-		released, err := s.appendEvent(r.Context(), tx, claimEvent("issue.released", key, actor, after, previousClaim, "closed"))
+		released, err := s.queueEvent(r.Context(), tx, ledger, claimEvent("issue.released", key, actor, after, previousClaim, "closed"))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		after.LastSeq++
-		events = append(events, released)
+		appended = append(appended, released)
 	}
 	if statusChanged && after.Parent != nil {
-		childEvent, err := s.appendEvent(r.Context(), tx, issueOwner(*after.Parent).event(
+		childEvent, err := s.queueEvent(r.Context(), tx, ledger, issueOwner(*after.Parent).event(
 			"child.status",
 			actor,
 			map[string]any{"child_key": after.Key, "from": before.Status, "to": after.Status},
@@ -498,33 +535,31 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		events = append(events, childEvent)
+		appended = append(appended, childEvent)
 	}
 	if parentChanged {
 		if before.Parent != nil {
-			removedEvent, err := s.appendEvent(r.Context(), tx, issueOwner(*before.Parent).event(
+			removedEvent, err := s.queueEvent(r.Context(), tx, ledger, issueOwner(*before.Parent).event(
 				"child.removed", actor, map[string]any{"child_key": after.Key},
 			))
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
-			events = append(events, removedEvent)
+			appended = append(appended, removedEvent)
 		}
 		if after.Parent != nil {
-			addedEvent, err := s.appendEvent(r.Context(), tx, issueOwner(*after.Parent).event(
+			addedEvent, err := s.queueEvent(r.Context(), tx, ledger, issueOwner(*after.Parent).event(
 				"child.added", actor, map[string]any{"child_key": after.Key},
 			))
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
-			events = append(events, addedEvent)
+			appended = append(appended, addedEvent)
 		}
 	}
-	advice := s.writeAdvice(
-		r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", after.Status,
-	)
+	// The advice read before the first write describes after: its status, labels and parent.
 	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -536,7 +571,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		// lets the pool refuse a refresh run while a transaction is still open.
 		s.deps.Docs.SetIssueClosed(outlivingTheClient(r), key, after.ClosedAt != nil)
 	}
-	s.publish(events...)
+	s.publish(appendedEvents(appended...)...)
 	if closing {
 		// The rooms are closed now, so no browser of this process writes another ask block
 		// into them; the sweep catches the ones written since the close forked each document.

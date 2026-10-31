@@ -860,8 +860,9 @@ func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
 				closed := make(chan error, 1)
 				go func() {
 					issueKey := fmt.Sprintf("DOC-%d", number)
-					// The close waits on the issue row the write holds until the write commits.
-					if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = $1`, issueKey); err != nil {
+					// The close takes the issue's owner lock, as a PATCH does, so it waits on the
+					// write that holds it until the write commits.
+					if err := closeIssueUnderItsOwnerLock(ctx, database, issueKey); err != nil {
 						closed <- err
 						return
 					}
@@ -890,6 +891,23 @@ func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// closeIssueUnderItsOwnerLock closes issueKey in a transaction that takes the issue's owner lock
+// first, as the issue PATCH does.
+func closeIssueUnderItsOwnerLock(ctx context.Context, database *store.Store, issueKey string) error {
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+	if err := store.LockOwner(ctx, tx, store.IssueOwner(issueKey)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `update issues set closed_at = now() where key = $1`, issueKey); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // goroutinesIn counts the goroutines whose stacks name every one of functions.

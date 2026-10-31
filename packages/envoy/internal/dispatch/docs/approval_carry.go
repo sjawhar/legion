@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // A human's answer to a decision block carries his approval forward. He approved the document at
@@ -84,57 +86,74 @@ type approvedVersion struct {
 
 // carryApproval carries a human's approval to version, just written from rendered, when the
 // answer he gave a decision block is the whole change since the version he approved (the rule
-// above). It returns the events it appended - the open approval request's ask.answered, when one
-// is open, then artifact.approved - and nothing when the version carries no approval. It reads
-// rendered.tree and never changes it: the tree is the live document's.
-func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID string, version model.Version, rendered renderedTree) ([]model.Event, error) {
+// above). It hands sink the events it appends - the open approval request's ask.answered, when one
+// is open, then artifact.approved - and appends nothing when the version carries no approval. It
+// reads rendered.tree and never changes it: the tree is the live document's. Every read and the
+// rule run where it is called, the ask rows and the request as the transaction's queued writes
+// leave them (loadAskBlocks, openApprovalAsk); the answer and the review are written through
+// write, so a transaction whose writes are queued runs them in its write phase, after the version
+// they carry to.
+func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID string, version model.Version, rendered renderedTree, sink func(model.Event)) error {
 	nodes, readable := askNodes(rendered.tree)
 	if len(nodes) == 0 || !readable {
-		return nil, nil
+		return nil
 	}
 	// Every version write runs this, and a document keeps its ask blocks for the rest of its life:
 	// the rows are read only once a carry is possible at all, which needs an approval of the
 	// document by someone.
 	if approvedByAnyone, err := LatestApprovedReview(ctx, tx, artifactID); err != nil || approvedByAnyone == nil {
-		return nil, err
+		return err
 	}
 	rows, err := loadAskBlocks(ctx, tx, artifactID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	blocks, backed := rowBackedBlocks(nodes, rows)
 	if !backed {
-		return nil, nil
+		return nil
 	}
 	review, err := s.carriedReview(ctx, tx, artifactID, version.Number, rendered.markdown, blocks)
 	if err != nil || review == nil {
-		return nil, err
+		return err
 	}
 
 	reason := fmt.Sprintf(carryReason, review.Version)
-	var events []model.Event
 	var askID *string
-	open, err := OpenApprovalAsk(ctx, tx, artifactID)
+	// The request as the version write's own move left it (moveApprovalAsk), which names this
+	// version already.
+	open, err := openApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if open != nil {
-		answered, err := answerApprovalAsk(ctx, tx, s.events, open, review.Actor, reason)
-		if err != nil {
-			return nil, err
+		if err := answerApprovalAsk(ctx, tx, s.events, artifactID, open, review.Actor, reason, sink); err != nil {
+			return err
 		}
-		events = append(events, answered)
 		askID = &open.ID
 	}
 	artifact, err := reviewedArtifact(ctx, tx, artifactID)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	_, event, err := WriteReview(ctx, tx, s.events, artifact, version.Number, "approved", review.Actor, &reason, askID)
-	if err != nil {
-		return nil, err
+	if err := write(ctx, tx, func(b *store.WriteBatch) error {
+		return QueueReview(b, s.events, artifact, version.Number, "approved", review.Actor, &reason, askID, func(_ model.ArtifactReview, event model.Event) {
+			sink(event)
+		})
+	}); err != nil {
+		return err
 	}
-	return append(events, event), nil
+	// The carry's own approval is this document's newest review from here on, and no read of the
+	// table sees it until the write phase runs, so a read of the newest review later in this
+	// transaction (supersededApprovalAdvice) takes it off the ledger.
+	recordPendingReview(ctx, tx, artifactID, model.ArtifactReview{
+		ArtifactID: artifactID,
+		Version:    version.Number,
+		State:      "approved",
+		Actor:      review.Actor,
+		Reason:     &reason,
+		AskID:      askID,
+	})
+	return nil
 }
 
 // carriedReview is the review version number of artifactID, whose markdown is markdown and whose
@@ -410,38 +429,44 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 	return tree, true, nil
 }
 
-// answerApprovalAsk answers the open approval request ask with Approve in actor's name, giving
-// reason as the answer's text, as a human's answer through the answer route is written, and
-// appends its ask.answered event on the ask's owner. The write names the open state it answers
-// from: a request that is no longer open is an error, not a second answer.
-func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ask *model.Ask, actor model.Actor, reason string) (model.Event, error) {
+// answerApprovalAsk answers the open approval request ask of artifactID with Approve in actor's
+// name, giving reason as the answer's text, as a human's answer through the answer route is
+// written, and hands sink the ask.answered event it appends on the ask's owner. The write names the
+// open state it answers from: a request that is no longer open is an error, not a second answer,
+// which the update's callback returns, so the write phase stops there. The update and the append
+// are one step (write); the event carries the row as the step leaves it, after the move this
+// version write queued before it, which set the request's edited_at (rewriteApprovalAsk). Where
+// the step is queued, the ledger records the request closed, so nothing later in the transaction
+// answers it again.
+func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, ask *model.Ask, actor model.Actor, reason string, sink func(model.Event)) error {
 	answer := model.AskAnswer{User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason, At: time.Now().UTC()}
 	encoded, err := json.Marshal(answer)
 	if err != nil {
-		return model.Event{}, fmt.Errorf("encode approval answer: %w", err)
+		return fmt.Errorf("encode approval answer: %w", err)
 	}
-	answered, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1 and state = 'open'`, ask.ID, encoded)
-	if err != nil {
-		return model.Event{}, fmt.Errorf("answer approval ask: %w", err)
-	}
-	if answered.RowsAffected() != 1 {
-		return model.Event{}, fmt.Errorf("answer approval ask %s: it is no longer open", ask.ID)
-	}
-	ask.State = "answered"
-	ask.Answer = &answer
-	payload, err := events.AskEventPayload(ctx, tx, *ask, model.ReferenceChanges{})
-	if err != nil {
-		return model.Event{}, err
-	}
-	event, err := broker.Append(ctx, tx, model.Event{
-		IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
-		Type: "ask.answered", Actor: actor,
-		Payload: model.AskAnsweredEventPayload{AskEventPayload: payload},
+	recordPendingApproval(ctx, tx, artifactID, pendingApproval{ask: ask, closed: true})
+	return write(ctx, tx, func(b *store.WriteBatch) error {
+		answered := *ask
+		answered.State = "answered"
+		answered.Answer = &answer
+		b.Queue("answer approval ask", `update asks set state = 'answered', answer = $2 where id = $1 and state = 'open'`, ask.ID, encoded).Exec(func(tag pgconn.CommandTag) error {
+			if tag.RowsAffected() != 1 {
+				return fmt.Errorf("answer approval ask %s: it is no longer open", ask.ID)
+			}
+			ask.State = answered.State
+			ask.Answer = answered.Answer
+			return nil
+		})
+		// The ask's thread_logins are read by the event's insert, after the answer's update.
+		if err := broker.QueueAppendWithLogins(b, model.Event{
+			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
+			Type: "ask.answered", Actor: actor,
+			Payload: model.AskAnsweredEventPayload{AskEventPayload: model.NewAskEventPayload(answered, model.ReferenceChanges{})},
+		}, events.ThreadLoginsOf(ask.ID), sink); err != nil {
+			return fmt.Errorf("append approval ask answer: %w", err)
+		}
+		return nil
 	})
-	if err != nil {
-		return model.Event{}, fmt.Errorf("append approval ask answer: %w", err)
-	}
-	return event, nil
 }
 
 // CutDecisionBlocks is markdown rendered again with every ask block left out, wherever it stands,

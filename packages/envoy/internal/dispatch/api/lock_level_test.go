@@ -9,6 +9,7 @@ import (
 	"maps"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,30 +20,48 @@ import (
 // lock. See lockDocumentRoom in internal/dispatch/docs/persistence.go.
 var ownerLockTables = []string{"issues", "artifacts", "projects", "asks"}
 
+// ownerRowTables are the tables whose rows are owners (store.LockOwner): an issue, a document no
+// issue owns, a project. A writer serialises on the owner's advisory lock, and the only row lock
+// on these tables is the write phase's own.
+var ownerRowTables = []string{"issues", "artifacts", "projects"}
+
+// writePhaseOwnerRowLocks are the functions allowed to lock an owner row, keyed by the file that
+// declares them: the events' lockEventOwner, which takes the row `for no key update` when the
+// transaction appends, under the owner's advisory lock it takes first.
+var writePhaseOwnerRowLocks = map[string][]string{
+	"internal/dispatch/events/broker.go": {"lockEventOwner"},
+}
+
 var (
 	sqlWhitespace   = regexp.MustCompile(`\s+`)
 	forUpdateClause = regexp.MustCompile(`\bfor update\b`)
+	rowLockClause   = regexp.MustCompile(`\bfor (?:update|no key update|share|key share)\b`)
 	ownerLockTable  = regexp.MustCompile(`\b(?:` + strings.Join(ownerLockTables, "|") + `)\b`)
+	ownerRowTable   = regexp.MustCompile(`\b(?:` + strings.Join(ownerRowTables, "|") + `)\b`)
 )
 
-// TestNoForUpdateOnOwnerTables enforces the prohibition the room lock's rule states: no statement
-// in this module locks issues, artifacts, projects or asks `for update`. It is the prohibition
-// only. A weaker level on those tables is legal and deliberate - `for no key update` where a
-// writer must serialise against other writers of the same row, `for key share` on an artifact
-// whose anchors are being reconciled (api/anchors.go), `for share` on the asks a table edit
-// checks (docs/mutation.go) - and none of them blocks the key share a foreign key takes. Only
-// `for update` does, and under it a durable writer holding the room lock deadlocks against
-// whoever holds the owner row.
+// TestNoForUpdateOnOwnerTables enforces two prohibitions over every statement of this module.
 //
-// Its reach is the statement as this scan can assemble it: a `for update` spelled in a string
+// The first is the one the room lock's rule states: no statement locks issues, artifacts,
+// projects or asks `for update`. Under it a foreign key's `for key share` waits, and a durable
+// writer holding the room lock then deadlocks against whoever holds the owner row.
+//
+// The second is the owner lock's: no statement takes any row lock - `for update`, `for no key
+// update`, `for share` or `for key share` - on issues, artifacts or projects, outside the write
+// phase's own owner-row lock (writePhaseOwnerRowLocks). A writer serialises on its owner's
+// advisory lock (store.LockOwner), which assigns no transaction id; a row lock does, so one taken
+// in a transaction's read phase would hold that id across everything the read phase does, and an
+// owner row locked by a writer that skips the advisory lock no longer excludes the read phase of
+// one that takes it. A missed owner-row lock, or a new one, reds here. Weaker levels on asks are
+// outside the second rule: `for no key update` on the ask rows a settlement reconciles
+// (docs/ask_blocks.go), whose writers do not all hold the owner's lock.
+//
+// Its reach is the statement as this scan can assemble it: a lock clause spelled in a string
 // literal, or in a chain of literals and package-level constants, `var`s included, resolved to
 // a fixpoint so a constant written from another constant carries the inner text too. That is
-// how every owner-table lock in this module is written, seventeen statements in all - eleven a
-// plain `select ... for no key update`, three a plain `for key share` or `for share` at the
-// weaker levels named above, and three a row shape welded in from constants at the ask reads:
-// api/asks.go's `select `+askRowColumns+askRowFrom+` where a.id = $1 for no key update of a`,
-// whose askRowColumns is docs.AskColumns plus its own columns, docs/ask_blocks.go's
-// `select `+AskColumns, and docs/approval_ask.go's `select `+AskColumns+` ... for no key update`.
+// how every owner-table lock in this module is written - lockEventOwner's three plain
+// `select ... for no key update`, and the ask reads with a row shape welded in from constants,
+// docs/ask_blocks.go's `select `+AskColumns+` ... for no key update`.
 //
 // An operand the scan cannot resolve - a call, a runtime value - contributes its own string
 // literals instead, joined by a space and padded at both ends. A clause those literals spell is
@@ -50,21 +69,22 @@ var (
 // reds. The padding is a space rather than a boundary, so a clause that forms across the splice
 // reds too: "select key from issues for" + strings.Join([]string{"update"}, "") does. A keyword
 // split mid-word never forms, so strings.Repeat("for up", 1) + "date" is outside that reach, and
-// keeping such a site off `for update` is a review matter rather than a guarantee this check
+// keeping such a site off a row lock is a review matter rather than a guarantee this check
 // makes.
 //
-// `for update` elsewhere is untouched: doc_checkpoints, comments, message_deliveries,
-// comment_mentions, comment_deliveries, user_issue_state and architecture_sources all use it. A
-// targeted message's own row is taken `for no key update` (message_delivery.go), so the session's
-// reply, whose foreign key takes it `for key share`, never waits on it.
+// Row locks elsewhere are untouched: doc_checkpoints is read plainly under the document lock, and
+// message_deliveries, comment_mentions, comment_deliveries, user_issue_state, repo_projects and
+// architecture_sources still use `for update`. A targeted message's own row is taken `for no key
+// update` (message_delivery.go), so the session's reply, whose foreign key takes it `for key
+// share`, never waits on it.
 //
 // The match is statement-scoped and conservative, and it prints the statement rather than naming
-// a table, because which row a statement locks is a property of the whole statement. `for update`
-// with no `of` locks rows in every table of the FROM, so an owner table reached through a join is
-// really locked and that red is a true positive; Postgres refuses `for update` on the nullable
+// a table, because which row a statement locks is a property of the whole statement. A lock
+// clause with no `of` locks rows in every table of the FROM, so an owner table reached through a
+// join is really locked and that red is a true positive; Postgres refuses a lock on the nullable
 // side of an outer join, so `left join artifacts ... for update` cannot exist in working code.
 // Two shapes can red without a real offence, and each has its own tell in the printed statement.
-// `for update of <alias>` where the alias names a table outside this rule and an owner table is
+// A lock `of <alias>` where the alias names a table outside this rule and an owner table is
 // merely joined beside it: the tell is the `of <alias>` the statement carries, which names the
 // row the lock really takes. A statement concatenated with an expression this scan cannot
 // resolve, whose own string literals are folded in - a literal that never reaches the query can
@@ -77,26 +97,37 @@ func TestNoForUpdateOnOwnerTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var offences []string
+	var forUpdates, rowLocks []string
 	seen := map[string]struct{}{}
 	for _, source := range sources {
-		for _, statement := range sqlStatements(source.file, constants) {
-			if !locksOwnerTableForUpdate(statement) {
-				continue
-			}
-			offence := filepath.ToSlash(source.path) + ": " + statement
+		path := filepath.ToSlash(source.path)
+		for _, located := range sqlStatementsByFunction(source.file, constants) {
+			offence := path + ": " + located.statement
 			if _, repeat := seen[offence]; repeat {
 				continue
 			}
-			seen[offence] = struct{}{}
-			offences = append(offences, offence)
+			if locksOwnerTableForUpdate(located.statement) {
+				seen[offence] = struct{}{}
+				forUpdates = append(forUpdates, offence)
+				continue
+			}
+			if locksOwnerRow(located.statement) && !writePhaseOwnerRowLock(path, located.function) {
+				seen[offence] = struct{}{}
+				rowLocks = append(rowLocks, offence)
+			}
 		}
 	}
-	if len(offences) > 0 {
-		t.Fatalf("`for update` is refused on %s:\n\t%s\n"+
+	if len(forUpdates) > 0 {
+		t.Errorf("`for update` is refused on %s:\n\t%s\n"+
 			"Take a weaker level - unless this transaction deletes the row or changes a key "+
 			"column, which the weaker levels do not cover: then revisit the rule at lockDocumentRoom.",
-			strings.Join(ownerLockTables, ", "), strings.Join(offences, "\n\t"))
+			strings.Join(ownerLockTables, ", "), strings.Join(forUpdates, "\n\t"))
+	}
+	if len(rowLocks) > 0 {
+		t.Errorf("a row lock on %s is refused outside the write phase's owner-row lock (events.lockEventOwner):\n\t%s\n"+
+			"Take the owner's advisory lock (store.LockOwner, LockOwners, LockOwnerShared or TryLockOwners) "+
+			"and read the row plainly in the statement after it.",
+			strings.Join(ownerRowTables, ", "), strings.Join(rowLocks, "\n\t"))
 	}
 }
 
@@ -106,6 +137,23 @@ func TestNoForUpdateOnOwnerTables(t *testing.T) {
 // concatenated from constants, so the clause and its table routinely sit apart.
 func locksOwnerTableForUpdate(statement string) bool {
 	return forUpdateClause.MatchString(statement) && ownerLockTable.MatchString(statement)
+}
+
+// locksOwnerRow reports whether one normalised statement takes a row lock of any level with an
+// owner table in it, matched as locksOwnerTableForUpdate matches.
+func locksOwnerRow(statement string) bool {
+	return rowLockClause.MatchString(statement) && ownerRowTable.MatchString(statement)
+}
+
+// writePhaseOwnerRowLock reports whether function, declared in the file at path, is one the
+// owner-row rule allows (writePhaseOwnerRowLocks).
+func writePhaseOwnerRowLock(path, function string) bool {
+	for file, functions := range writePhaseOwnerRowLocks {
+		if strings.HasSuffix(path, "/"+file) && slices.Contains(functions, function) {
+			return true
+		}
+	}
+	return false
 }
 
 // moduleSource is one non-test Go file of the module with the tree both scans below read. The
@@ -224,20 +272,47 @@ func stringConstants(sources []moduleSource) (map[string]string, error) {
 // concatenation of literals and known constants - lowercased with its whitespace collapsed, so
 // a clause split across lines or constants reads as one statement.
 func sqlStatements(file *ast.File, constants map[string]string) []string {
-	var statements []string
-	ast.Inspect(file, func(node ast.Node) bool {
-		expression, ok := node.(ast.Expr)
-		if !ok {
-			return true
+	located := sqlStatementsByFunction(file, constants)
+	statements := make([]string, len(located))
+	for index, statement := range located {
+		statements[index] = statement.statement
+	}
+	return statements
+}
+
+// locatedStatement is one statement sqlStatements finds, with the name of the function declared
+// at the top level of the file that holds it, its function literals included; empty for one
+// outside any function, such as a constant's value.
+type locatedStatement struct {
+	function  string
+	statement string
+}
+
+// sqlStatementsByFunction is sqlStatements with the function each statement is in.
+func sqlStatementsByFunction(file *ast.File, constants map[string]string) []locatedStatement {
+	var statements []locatedStatement
+	for _, declared := range file.Decls {
+		function := ""
+		if fn, ok := declared.(*ast.FuncDecl); ok {
+			function = fn.Name.Name
 		}
-		text, ok := literalText(expression, file.Name.Name, constants)
-		if !ok {
-			return true
-		}
-		statements = append(statements, sqlWhitespace.ReplaceAllString(strings.ToLower(text), " "))
-		// The whole concatenation is one statement; its parts are not statements of their own.
-		return false
-	})
+		ast.Inspect(declared, func(node ast.Node) bool {
+			expression, ok := node.(ast.Expr)
+			if !ok {
+				return true
+			}
+			text, ok := literalText(expression, file.Name.Name, constants)
+			if !ok {
+				return true
+			}
+			statements = append(statements, locatedStatement{
+				function:  function,
+				statement: sqlWhitespace.ReplaceAllString(strings.ToLower(text), " "),
+			})
+			// The whole concatenation is one statement; its parts are not statements of their own.
+			return false
+		})
+	}
 	return statements
 }
 

@@ -776,7 +776,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	// walks `reply_to` up to the head of the thread, so a reply anywhere under an ask stores
 	// that ask's `ask_id` - the column every ask read, the Inbox row and the ask card select
 	// on - instead of a bare `reply_to` none of them can see. The comment it answers is
-	// already loaded and locked, so the climb starts there rather than re-reading it.
+	// already loaded under its owner's lock, so the climb starts there rather than re-reading it.
 	thread, err := s.threadHeadOf(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID), comment)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -790,7 +790,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, replyBlockInAskThread)
 			return
 		}
-		block, err = s.replyBlockOf(r.Context(), tx, refs.ItemComment, comment.ID, *input.ReplyToBlock, "reply_to_block", "INVALID_COMMENT")
+		block, err = s.replyBlockOf(r.Context(), tx, nil, refs.ItemComment, comment.ID, *input.ReplyToBlock, "reply_to_block", "INVALID_COMMENT")
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

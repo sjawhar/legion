@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -37,13 +38,15 @@ type Target struct {
 }
 
 // ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. Every write that indexes a body goes through it or one of its
-// variants, so no producer can reconcile the graph without holding what moved: replaceRefs itself
+// that source appends has to name. A write that indexes a body at once goes through it, or,
+// for a comment's or an issue message's write, ReplaceCountedItem, which indexes its blocks as
+// well; one that decides before it writes plans the same reconciliation (PlanReplace,
+// PlanReplaceFrom) and the same index (PlanItemIndex), resolves what they move (CountedChanges)
+// and applies both in its write phase. replaceRefs, which reconciles without saying what moved,
 // is unexported. It names the targets whose edges it inserted or deleted, which is all a first
-// write of a body moves; an edit whose event names what it moved goes through ReplaceCountedEdit
-// (ReplaceCountedItemEdit for a comment), and a document's version through
-// ReplaceDocumentCounted, since a kept edge's excerpt can move too. A comment's or an issue
-// message's first write goes through ReplaceCountedItem, which indexes its blocks as well.
+// write of a body moves; an edit whose event names what it moved also names the targets
+// EditedTargets adds, and a document's version the excerpts it moved (ExcerptsMoved), since a
+// kept edge's excerpt can move too.
 func ReplaceCounted(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -56,27 +59,12 @@ func ReplaceCounted(
 	return CountedChanges(ctx, tx, changed)
 }
 
-// ReplaceCountedEdit is ReplaceCounted for an edit of an ask's question from previous to body. It
-// names the targets whose edges the edit inserted or deleted and those whose excerpt it moved
-// (editedHeadTargets).
-func ReplaceCountedEdit(
-	ctx context.Context,
-	tx pgx.Tx,
-	fromKind, fromID, previous, body, serverURL string,
-) (model.ReferenceChanges, error) {
-	found := text.Extract(body, serverURL)
-	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, nil)
-	if err != nil {
-		return model.ReferenceChanges{}, err
-	}
-	return CountedChanges(ctx, tx, append(changed, editedHeadTargets(previous, body, found)...))
-}
-
-// editedHeadTargets is what an edit of an ask's question or a comment's body from previous to body,
-// which cites found, moves although its edges stay. Every edge such a source writes shows the head
-// of its text as its excerpt (Edges, excerptRunes), so when the edit moves that head, the panel of
-// every target the source still cites changes: each of found is returned then, and none otherwise.
-func editedHeadTargets(previous, body string, found []text.Ref) []Target {
+// EditedTargets is what an edit of an ask's question or a comment's body from previous to body
+// moves beside the edges it inserts or deletes, found being body's references. Every edge such a
+// source writes shows the head of its text as its excerpt (Edges, excerptRunes), so when the edit
+// moves that head, the panel of every target the source still cites changes although its edge
+// stays: those targets are named too. An edit that keeps the head moves none.
+func EditedTargets(previous, body string, found []text.Ref) []Target {
 	if text.HeadRunes(previous, excerptRunes) == text.HeadRunes(body, excerptRunes) {
 		return nil
 	}
@@ -88,75 +76,120 @@ func editedHeadTargets(previous, body string, found []text.Ref) []Target {
 	return targets
 }
 
-// ReplaceDocumentCounted is ReplaceCounted for a document's version, written at versionAt, whose
-// mentions are found (a new edge takes versionAt as its created_at). It also stores the excerpt of
-// each mention the version writes (RecordExcerpts), or, with excerpts nil (a version with no
-// rendering to cut them from), marks them owed (ClearExcerpts). A document mention shows the block
-// holding it as its excerpt, so a target whose kept edge now stores another block is named beside
-// the ones whose edges the version inserted or deleted, and so is each of moved, the targets the
-// same write moved elsewhere - the version's blocks and their mentions (IndexBlocks) - so its event
-// names them all.
-func ReplaceDocumentCounted(
-	ctx context.Context,
-	tx pgx.Tx,
-	artifactID string,
-	version int,
-	versionAt time.Time,
-	found []text.Ref,
-	moved []Target,
-	excerpts map[Target]model.GraphExcerpt,
-) (model.ReferenceChanges, error) {
-	changed, err := replaceRefs(ctx, tx, "artifact", artifactID, found, &versionAt)
-	if err != nil {
-		return model.ReferenceChanges{}, err
-	}
-	changed = append(changed, moved...)
-	if excerpts == nil {
-		if err := ClearExcerpts(ctx, tx, artifactID); err != nil {
-			return model.ReferenceChanges{}, err
-		}
-		return CountedChanges(ctx, tx, changed)
-	}
-	recorded, err := RecordExcerpts(ctx, tx, artifactID, version, excerpts)
-	if err != nil {
-		return model.ReferenceChanges{}, err
-	}
-	return CountedChanges(ctx, tx, append(changed, recorded...))
-}
-
 // replaceRefs reconciles the Dispatch references written by one source with found: targets no
 // longer mentioned are deleted, new ones inserted with insertedAt as created_at (nil: now()), and
 // an edge that persists keeps its created_at and source_seq. It returns the targets whose inbound
-// edges moved — deleted or inserted, oldest state first — so ReplaceCounted and its variants can
-// resolve the ones a reader refreshes by name (CountedChanges).
+// edges moved — deleted or inserted, oldest state first — so ReplaceCounted can resolve the ones
+// a reader refreshes by name (CountedChanges). It is PlanReplace and Queue back to back, the
+// queued statements run at once as a batch of their own.
 func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
+	replacement, err := PlanReplace(ctx, tx, fromKind, fromID, found, insertedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		replacement.Queue(b)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return replacement.Changed(), nil
+}
+
+// Replacement is one source's references reconciled with found, the references its text now
+// cites, as replaceRefs reconciles them. It is planned against the edges the source holds
+// (PlanReplace, PlanReplaceFrom), so the targets it moves are known before anything is written,
+// and written by Queue, which puts its statements on a write phase's batch: a writer that decides
+// everything first and writes last plans in its read phase and queues in its write phase.
+type Replacement struct {
+	fromKind, fromID string
+	kinds, ids       []string
+	insertedAt       *time.Time
+	changed          []Target
+	held             []Target
+}
+
+// PlanReplace plans the reconciliation of fromKind/fromID's references with found against the
+// edges q holds for the source (HeldTargets).
+func PlanReplace(ctx context.Context, q Queryer, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) (Replacement, error) {
+	held, err := HeldTargets(ctx, q, fromKind, fromID)
+	if err != nil {
+		return Replacement{}, err
+	}
+	return PlanReplaceFrom(held, fromKind, fromID, found, insertedAt), nil
+}
+
+// HeldTargets is the targets of the edges q holds for one source, read with the predicate the
+// reconciling delete visits them by.
+func HeldTargets(ctx context.Context, q Queryer, fromKind, fromID string) ([]Target, error) {
+	held, err := scanTargets(q.Query(ctx, `
+		select to_kind, to_id from refs where from_kind = $1 and from_id = $2
+	`, fromKind, fromID))
+	if err != nil {
+		return nil, fmt.Errorf("read references: %w", err)
+	}
+	return held, nil
+}
+
+// PlanReplaceFrom plans the reconciliation against held, the targets the source holds: those a
+// caller read (HeldTargets), or the Held of its own earlier replacement of the source that is not
+// written yet. The targets it moves are the held ones found no longer names, in held's order, then
+// those found names that held lacks, in found's order: what the delete and the insert return.
+func PlanReplaceFrom(held []Target, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) Replacement {
 	kinds, ids := refTargets(found)
-	changed, err := scanTargets(tx.Query(ctx, `
+	cited := make(map[Target]struct{}, len(kinds))
+	after := make([]Target, len(kinds))
+	for index := range kinds {
+		after[index] = Target{Kind: kinds[index], ID: ids[index]}
+		cited[after[index]] = struct{}{}
+	}
+	stored := make(map[Target]struct{}, len(held))
+	changed := []Target{}
+	for _, target := range held {
+		stored[target] = struct{}{}
+		if _, kept := cited[target]; !kept {
+			changed = append(changed, target)
+		}
+	}
+	for _, target := range after {
+		if _, kept := stored[target]; !kept {
+			changed = append(changed, target)
+		}
+	}
+	return Replacement{fromKind: fromKind, fromID: fromID, kinds: kinds, ids: ids, insertedAt: insertedAt, changed: changed, held: after}
+}
+
+// Changed is the targets whose inbound edges the replacement moves (PlanReplaceFrom).
+func (r Replacement) Changed() []Target {
+	return r.changed
+}
+
+// Held is the targets the source holds once the replacement is written.
+func (r Replacement) Held() []Target {
+	return r.held
+}
+
+// Queue queues the replacement's writes on a write phase's batch: the delete of the edges found no
+// longer names and the insert of the new ones. A surviving edge keeps its created_at and
+// source_seq.
+func (r Replacement) Queue(b *store.WriteBatch) {
+	b.Queue("clear references", `
 		delete from refs
 		where from_kind = $1 and from_id = $2
 		  and not exists (
 		    select 1 from unnest($3::text[], $4::text[]) as target(kind, id)
 		    where target.kind = refs.to_kind and target.id = refs.to_id
 		  )
-		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids))
-	if err != nil {
-		return nil, fmt.Errorf("clear references: %w", err)
+	`, r.fromKind, r.fromID, r.kinds, r.ids)
+	if len(r.kinds) == 0 {
+		return
 	}
-	if len(kinds) == 0 {
-		return changed, nil
-	}
-	added, err := scanTargets(tx.Query(ctx, `
+	b.Queue("write reference", `
 		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
 		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
 		from unnest($3::text[], $4::text[]) as target(kind, id)
 		on conflict (from_kind, from_id, to_kind, to_id) do nothing
-		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids, insertedAt))
-	if err != nil {
-		return nil, fmt.Errorf("write reference: %w", err)
-	}
-	return append(changed, added...), nil
+	`, r.fromKind, r.fromID, r.kinds, r.ids, r.insertedAt)
 }
 
 func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
@@ -213,33 +246,50 @@ func refTargets(found []text.Ref) ([]string, []string) {
 // Stamp records eventID as the write that introduced every edge of one source that has no
 // provenance yet: the source's own refs and, for a document, a comment or a message, the mentions
 // its blocks hold. It runs after the source's event is appended, in the same transaction, and
-// leaves edges that survived a reconcile untouched.
+// leaves edges that survived a reconcile untouched. Its statements run at once, as a batch of
+// their own.
 func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int64) error {
-	if _, err := tx.Exec(ctx, `
-		update refs set source_seq = $3
-		where from_kind = $1 and from_id = $2 and source_seq is null
-	`, fromKind, fromID, eventID); err != nil {
-		return fmt.Errorf("stamp references: %w", err)
+	return store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		queueStamp(b, fromKind, fromID, &eventID)
+		return nil
+	})
+}
+
+// QueueStamp queues Stamp on a write phase's batch, right after the source's event, whose id the
+// statements take as store.LatestEventID: the id the event's insert took, which nothing in Go
+// reads before they are sent.
+func QueueStamp(b *store.WriteBatch, fromKind, fromID string) {
+	queueStamp(b, fromKind, fromID, nil)
+}
+
+// queueStamp queues Stamp's statements with eventID, or with store.LatestEventID when it is nil.
+func queueStamp(b *store.WriteBatch, fromKind, fromID string, eventID *int64) {
+	refsID, refsArgs := store.LatestEventID, []any{fromKind, fromID}
+	blocksID, blocksArgs := store.LatestEventID, []any{fromID}
+	if eventID != nil {
+		refsID, refsArgs = "$3", append(refsArgs, *eventID)
+		blocksID, blocksArgs = "$2", append(blocksArgs, *eventID)
 	}
+	b.Queue("stamp references", `
+		update refs set source_seq = `+refsID+`
+		where from_kind = $1 and from_id = $2 and source_seq is null
+	`, refsArgs...)
 	var blockRefs string
 	switch fromKind {
 	case "artifact":
-		blockRefs = `update block_refs set source_seq = $2 where artifact_id = $1 and source_seq is null`
+		blockRefs = `update block_refs set source_seq = ` + blocksID + ` where artifact_id = $1 and source_seq is null`
 	case string(ItemComment), string(ItemMessage):
 		// An item's blocks are keyed by its uuid; an id that is none names no item and holds no
 		// block mention.
 		if uuid.Validate(fromID) != nil {
-			return nil
+			return
 		}
 		tables, _ := ItemKind(fromKind).tables()
-		blockRefs = `update ` + tables.refs + ` set source_seq = $2 where ` + tables.item + ` = $1::uuid and source_seq is null`
+		blockRefs = `update ` + tables.refs + ` set source_seq = ` + blocksID + ` where ` + tables.item + ` = $1::uuid and source_seq is null`
 	default:
-		return nil
+		return
 	}
-	if _, err := tx.Exec(ctx, blockRefs, fromID, eventID); err != nil {
-		return fmt.Errorf("stamp block references: %w", err)
-	}
-	return nil
+	b.Queue("stamp block references", blockRefs, blocksArgs...)
 }
 
 // CountedChangeLimit bounds the targets of one kind (issue, ask, artifact, block) an event names,

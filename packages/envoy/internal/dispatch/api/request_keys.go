@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -64,7 +65,8 @@ import (
 //     its key commits nothing more: its next commit is refused.
 //   - A write that also delivers to sessions keeps its own recovery point (Brandur Leach,
 //     "Implementing Stripe-like Idempotency Keys in Postgres"): it commits what it made into the
-//     row in its own transaction (bindRequestKeyRecovery), and a repeat that finds that point is
+//     row in its own transaction (bindRequestKeyRecovery, or queueRequestKeyRecovery where that
+//     transaction sends its writes as one batch), and a repeat that finds that point is
 //     answered by its route's keyedReplay - whatever delivery is still owed put on its way, then
 //     what it made read again - rather than from the stored bytes or KEY_COMMITTED, however its
 //     first request ended: the single-session send, the broadcast, an issue message and a comment,
@@ -1121,29 +1123,66 @@ type recoveryPoint interface {
 	messageRecovery | broadcastRecovery | commentRecovery
 }
 
+// requestKeyRecoveryUpdate is the one statement a recovery point is bound with, run at once
+// (bindRequestKeyRecovery) or queued in a write phase (queueRequestKeyRecovery). It writes the
+// point only while the key is still this request's: a row another attempt took over, answered or
+// bound already matches nothing, and no row affected is that refusal.
+const requestKeyRecoveryUpdate = `
+	update request_keys set recovery = $4
+	where login = $1 and idempotency_key = $2 and attempt = $3 and status is null and recovery is null
+`
+
+// requestKeyRecoveryArgs are requestKeyRecoveryUpdate's arguments for point under the keyed request
+// ctx carries; keyed is false for a request without a key, which binds nothing.
+func requestKeyRecoveryArgs[T recoveryPoint](ctx context.Context, point T) (args []any, keyed bool, err error) {
+	claim, ok := ctx.Value(requestKeyClaimKey{}).(requestKeyClaim)
+	if !ok {
+		return nil, false, nil
+	}
+	encoded, err := json.Marshal(point)
+	if err != nil {
+		return nil, false, fmt.Errorf("encode a recovery point: %w", err)
+	}
+	return []any{claim.login, claim.key, claim.attempt, encoded}, true, nil
+}
+
 // bindRequestKeyRecovery commits point as the recovery point of the keyed request ctx carries, in
 // tx, the transaction that commits what the request made, so the two commit together or not at all.
 // A request without a key binds nothing. A request whose key a repeat has taken over is refused
 // (errRequestKeyTakenOver), and its transaction must roll back: the repeat makes the write instead.
+// A transaction that writes in two phases queues the same statement in its write phase instead
+// (queueRequestKeyRecovery), since this one would take a transaction id in the read phase.
 func bindRequestKeyRecovery[T recoveryPoint](ctx context.Context, tx pgx.Tx, point T) error {
-	claim, ok := ctx.Value(requestKeyClaimKey{}).(requestKeyClaim)
-	if !ok {
-		return nil
+	args, keyed, err := requestKeyRecoveryArgs(ctx, point)
+	if err != nil || !keyed {
+		return err
 	}
-	encoded, err := json.Marshal(point)
-	if err != nil {
-		return fmt.Errorf("encode a recovery point: %w", err)
-	}
-	tag, err := tx.Exec(ctx, `
-		update request_keys set recovery = $4
-		where login = $1 and idempotency_key = $2 and attempt = $3 and status is null and recovery is null
-	`, claim.login, claim.key, claim.attempt, encoded)
+	tag, err := tx.Exec(ctx, requestKeyRecoveryUpdate, args...)
 	if err != nil {
 		return fmt.Errorf("commit a recovery point: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return errRequestKeyTakenOver
 	}
+	return nil
+}
+
+// queueRequestKeyRecovery is bindRequestKeyRecovery for a transaction whose writes go out as one
+// pipelined batch (INFRA-636): the same statement, queued at the place the write makes it, whose
+// refusal the batch reports as it reads that statement's result. The refusal comes back from the
+// write phase rather than before it, so the statements queued after it have run by then and the
+// transaction the caller abandons rolls them back with this one.
+func queueRequestKeyRecovery[T recoveryPoint](ctx context.Context, b *store.WriteBatch, point T) error {
+	args, keyed, err := requestKeyRecoveryArgs(ctx, point)
+	if err != nil || !keyed {
+		return err
+	}
+	b.Queue("commit a recovery point", requestKeyRecoveryUpdate, args...).Exec(func(tag pgconn.CommandTag) error {
+		if tag.RowsAffected() == 0 {
+			return errRequestKeyTakenOver
+		}
+		return nil
+	})
 	return nil
 }
 

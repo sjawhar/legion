@@ -1460,11 +1460,12 @@ func refreshLiveAnchors(t *testing.T, service *Service, artifactID string) ([]an
 	if err := service.refreshAnchors(joined, tx, artifactID, tree, model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("refresh anchors: %v", err)
 	}
-	refreshed := slices.Clone(ledger.events)
+	// The refresh's events are appended in the transaction's write phase, at Commit (INFRA-636),
+	// so they are read off the ledger once that phase has run.
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit refresh: %v", err)
 	}
-	return rows, refreshed
+	return rows, slices.Clone(ledger.events)
 }
 
 // refreshedAnchor is the row id and the anchor an anchor refresh event announces.

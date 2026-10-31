@@ -293,12 +293,12 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		if state == "changes_requested" {
 			selected = docs.ApprovalOptionRequestChanges
 		}
-		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
+		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, nil, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		events = append(events, answeredEvents...)
+		events = append(events, appendedEvents(answeredEvents...)...)
 		askID = &answered.ID
 	}
 	review, event, err := docs.WriteReview(r.Context(), tx, s.deps.Events, artifact, version, state, actor, reason, askID)
@@ -535,7 +535,7 @@ func (s *server) renewApprovalAsk(
 		summary = openSummary
 	}
 	// Every version write moves the open request to its version (docs.MoveApprovalAsk) under the
-	// owner row this request holds, so the turn read here is the one every read reports.
+	// owner lock this request holds, so the turn read here is the one every read reports.
 	waitingOn, err := askWaitingOn(ctx, tx, open.ID)
 	if err != nil {
 		return nil, err
@@ -571,7 +571,7 @@ func (s *server) renewApprovalAsk(
 
 // handBackApprovalAsk returns the open approval request to the human at version and appends its
 // ask.handed_back event. It records version as the one handed back and the thread's newest reply as
-// the one this hand-back answered (waitingOnExpression). The caller holds the owner row every reply
+// the one this hand-back answered (waitingOnExpression). The caller holds the owner lock every reply
 // takes before it inserts, so no reply commits between that read and this transaction's commit, and
 // a reply that inserts after it gets a later created_at (the insert time, migration 0065), sorts
 // after the one recorded and decides the turn, however early its own transaction began. The

@@ -217,6 +217,10 @@ func TestAnEditRefreshesItsAnchorsOncePerTransaction(t *testing.T) {
 	if passes := counter.count.Load(); passes != anchorRefreshPasses {
 		t.Fatalf("anchor reads = %d, want %d: one refresh pass per edit", passes, anchorRefreshPasses)
 	}
+	// The refresh's events are appended in the transaction's write phase, at Commit.
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the edit: %v", err)
+	}
 
 	refreshes := 0
 	for _, event := range ledger.events {
@@ -256,6 +260,10 @@ func TestAnEditAnnouncesEachChangedAnchorOnce(t *testing.T) {
 	if _, err := service.SnapshotVersion(joinedCtx, artifactID, alice); err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
+	// The refresh's update and event run in the transaction's write phase, at Commit.
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the edit: %v", err)
+	}
 
 	refreshes := 0
 	for _, event := range ledger.events {
@@ -267,7 +275,7 @@ func TestAnEditAnnouncesEachChangedAnchorOnce(t *testing.T) {
 		t.Fatalf("ask.anchor_refreshed events = %d, want exactly 1", refreshes)
 	}
 	var encoded []byte
-	if err := tx.QueryRow(ctx, `select anchor from asks where id = $1`, askID).Scan(&encoded); err != nil {
+	if err := service.store.Pool.QueryRow(ctx, `select anchor from asks where id = $1`, askID).Scan(&encoded); err != nil {
 		t.Fatalf("read refreshed ask: %v", err)
 	}
 	var refreshed model.Anchor

@@ -79,7 +79,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if validationErr == nil {
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
 	}
-	// The owner row before the room lock the write below takes, as every writer that takes both
+	// The owner's lock before the room lock the write below takes, as every writer that takes both
 	// does (lockDocumentRoom). Held, it also keeps the open asks the replacement must keep, and
 	// the approval request the version moves, from changing under this transaction.
 	owner, open, err := lockArtifactOwner(ctx, tx, artifactID)

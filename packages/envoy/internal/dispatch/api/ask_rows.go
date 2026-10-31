@@ -32,7 +32,7 @@ var askRowFrom = `from asks a
 
 // newestReply selects the newest comment in the thread of the ask aliased a: the one that
 // committed last, since a comment's created_at is when its insert ran (migration 0065) and every
-// comment insert first takes the owner row. lastReplyJoin reads it for every ask read, and a
+// comment insert first takes the owner's lock. lastReplyJoin reads it for every ask read, and a
 // hand-back records its id, so both agree on which reply is newest.
 const newestReply = `select c.id, c.author, c.created_at, c.turn from comments c
 			where c.ask_id = a.id
