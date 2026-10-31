@@ -946,16 +946,23 @@ func (e *ErrRoleHeld) Error() string {
 // succeeds only if the role is unheld, already held by sessionID, or held by
 // a session listed in supersedable; any other holder returns *ErrRoleHeld
 // and leaves the claim untouched. Callers decide what "supersedable" means —
-// the listener passes the ids it has established are no longer live, so a
-// resumed session can recover a role its dead predecessor held without ever
-// taking one from a live peer.
+// the listener passes the ids it has established may lose the role: a holder
+// whose session entry the session bucket no longer has, and the claimant's
+// own declared predecessor when the bucket says that predecessor is gone,
+// when it carries the claimant's own client instance id, or when either it
+// or the claimant carries no client instance id. So a resumed session can
+// recover a role its own earlier session held without ever taking one from a
+// live peer, or from a live session of another client instance.
 func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, supersedable ...string) (Interest, error) {
 	return r.SetRoleWithPrevious(context.Background(), sessionID, machineID, role, "", soft, supersedable...)
 }
 
 // SetRoleWithPrevious records the session ID that a successful soft claim
-// continues. The predecessor is provenance only after the listener has
-// evaluated the existing soft-claim rules.
+// continues. The predecessor is provenance only: the listener has already
+// evaluated the soft-claim rules against it, and a predecessor it decided may
+// not lose the role reaches this call as provenance with no place in
+// supersedable, so this call answers *ErrRoleHeld naming the holder exactly as
+// it does for any other live holder.
 //
 // Each bucket call waits no longer than ctx (bus.Bounded): POST /v1/roles/set passes its request's
 // own context. A call ctx abandoned may still land after this answer. The claim's create or update
