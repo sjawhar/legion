@@ -166,10 +166,14 @@ export default defineConfig({
           // path (`keyed-writes`, `keyed-send`) runs here and in Firefox too: each engine has its own
           // way of failing a request, aborting one, keeping a tab's storage across a reload and
           // asking before it unloads, and a write must land once through all of them.
+          // `heavy-document-writes` carries no browser at all - it writes the same heavy bodies
+          // through the API - and runs in this project and in Firefox because it ran in both
+          // inside `heavy-bodies.e2e.ts`, before that row moved into a file of its own
+          // (sjawhar/legion#2519): the move leaves every row where it ran.
           {
             name: "webkit",
             testMatch:
-              /(collab-cursor|deep-links|heavy-bodies|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits)\.e2e\.ts/,
+              /(collab-cursor|deep-links|heavy-bodies|heavy-document-writes|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits)\.e2e\.ts/,
             use: { ...devices["Desktop Safari"] },
           },
           // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
@@ -191,12 +195,13 @@ export default defineConfig({
           // link), a body's Mermaid diagram draws through the engine's SVG parser, shadow DOM and
           // the ELK layout running in it, and a long body's formatting arrives from a Web Worker whose
           // chunk, deadline and late paint the engine schedules its own way. Those specs, the whole
-          // deep-links spec, the one-socket invariant (`live-socket`, which holds in every engine) and
-          // the keyed write path run in Firefox too.
+          // deep-links spec, the one-socket invariant (`live-socket`, which holds in every engine),
+          // the keyed write path and `heavy-document-writes` (for the reason the WebKit project
+          // above gives) run in Firefox too.
           {
             name: "firefox",
             testMatch:
-              /(code-line-replace|deep-links|heavy-bodies|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|picture-link-click)\.e2e\.ts/,
+              /(code-line-replace|deep-links|heavy-bodies|heavy-document-writes|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|picture-link-click)\.e2e\.ts/,
             use: { ...devices["Desktop Firefox"] },
           },
 

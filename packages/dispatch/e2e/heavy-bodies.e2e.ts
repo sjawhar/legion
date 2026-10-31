@@ -1,4 +1,7 @@
-import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
+// What a heavy body costs a reader's own thread, in the surfaces that draw one: the Conversation,
+// the Inbox's ask card and a hover card. The same shapes written as documents through the API are
+// `heavy-document-writes.e2e.ts`, and both specs read the bodies from `heavy-bodies.ts`, so the
+// two measure the very same bytes (sjawhar/legion#2519).
 import { type BrowserContext, expect, type Locator, type Page, test } from "@playwright/test";
 
 // `markdownWorkerThreshold` comes from the module that carries it and imports nothing: the
@@ -6,15 +9,25 @@ import { type BrowserContext, expect, type Locator, type Page, test } from "@pla
 // The two shortest rows below sit one character under it, so they prove the body the page parses
 // on its own thread stays inside the same bound as the ones the worker takes.
 import { markdownWorkerThreshold } from "../web/src/features/refs/markdown-worker-threshold";
+import { type FakeSession, setLiveSessions } from "./agents";
 import {
   createAsk,
   createComment,
   createIssue,
-  createIssueArtifact,
   createMessage,
   createProject,
+  publishAgentStreamFrame,
 } from "./api";
-import { sql } from "./psql";
+import {
+  bracketRun,
+  calloutBracketRun,
+  lazyQuote,
+  markerChain,
+  nestedThenBlankLines,
+  nestedThenTextLines,
+  padTo,
+  plainList,
+} from "./heavy-bodies";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -29,6 +42,11 @@ declare global {
     /** How far the reader's own scroll moved the page, once `scrollOnTheFirstBatch` has run it;
      *  0 until then. */
     __heavyBodiesReaderScrolled?: number;
+    /** Every sample the streamed turn's recorder has taken, in order. */
+    __heavyBodiesStreamSamples?: StreamSample[];
+    /** Told by the row that the turn's last frame is about to go out, so every sample after it
+     *  is recorded with the turn over. */
+    __heavyBodiesTurnEnded?: () => void;
   }
 }
 
@@ -49,53 +67,6 @@ const longestGapMs = 1_000;
  * `markdown-parse.worker.ts`; nothing else here depends on how the worker is built.
  */
 const workerChunk = /markdown-parse\.worker[^/]*\.js(\?.*)?$/;
-
-/** `head` followed by `filler` repeated, cut to exactly `length` characters. */
-function padTo(head: string, filler: string, length: number): string {
-  const padding = filler.repeat(Math.ceil((length - head.length) / filler.length));
-  return (head + padding).slice(0, length);
-}
-
-/** `count` list items, each nested one level deeper than the last by its indentation. */
-function nestedByIndentation(count: number): string {
-  let body = "";
-  for (let item = 0; item < count; item += 1) {
-    body += `${"  ".repeat(item)}- a\n`;
-  }
-  return body;
-}
-
-/**
- * A heavy shape at the count the document write row writes, and the same shape at half that
- * count. That row times both writes, so what a body costs and what half of it costs are read
- * side by side; one generator spells the two, so the small body stays the large one's own shape
- * however either is changed (sjawhar/legion#2519).
- */
-function atBothSizes(
-  shape: (count: number) => string,
-  count: number
-): { full: string; half: string } {
-  return { full: shape(count), half: shape(Math.round(count / 2)) };
-}
-
-/** 8,000 list items, and 4,000 of them: the shape a reader meets most, and the one no parse fix
- *  brings under a second on the page's own thread. */
-const plainListSizes = atBothSizes((items) => "- x\n".repeat(items), 8_000);
-const plainList = plainListSizes.full;
-const nestedThenBlankLines = padTo(nestedByIndentation(100), "\n", DISPATCH_BODY_MAX);
-const nestedThenTextLines = padTo(nestedByIndentation(100), "x\n", DISPATCH_BODY_MAX);
-const lazyQuote = `> x\n${"x\n".repeat(15_998)}`;
-const lazyListItem = `- x\n${"x\n".repeat(15_998)}`;
-const bracketRunSizes = atBothSizes((pairs) => "[".repeat(pairs) + "]".repeat(pairs), 15_000);
-const bracketRun = bracketRunSizes.full;
-const calloutBracketRun = `:::callout[${"[".repeat(15_000)}${"]".repeat(14_989)}`;
-const markerChain = `${"- ".repeat(15_999)}x`;
-/** 49 items nested on one line, which Go accepts (49 lists and 49 items is 98 of its 100
- *  blocks), then blank lines to the cap, and the same markers padded to half of it. */
-const nested49ThenBlankLinesSizes = atBothSizes(
-  (length) => padTo(`${"- ".repeat(49)}x\n`, "\n", length),
-  DISPATCH_BODY_MAX
-);
 
 /** How many items `- x\n` repeated to one character under the worker's threshold spells: the
  *  last one is cut short of its newline and is a list item all the same. Derived, so the row
@@ -141,6 +112,21 @@ function deepestNesting(element: Locator, selector: string): Promise<number> {
  *  without shipping 30,000 characters into an assertion message. */
 function textLength(element: Locator): Promise<number> {
   return element.evaluate((node) => node.textContent?.length ?? 0);
+}
+
+/** The characters standing in `element` itself rather than inside a block a paint attached:
+ *  a body's own literal text, which a reader is shown while the worker owes its formatting and
+ *  which a paint replaces rather than stands behind. */
+function looseTextLength(element: Locator): Promise<number> {
+  return element.evaluate((node) => {
+    let loose = 0;
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        loose += child.textContent?.length ?? 0;
+      }
+    }
+    return loose;
+  });
 }
 
 /** The card ends with its body formatted: nothing is still waiting on the worker, and the parser
@@ -516,217 +502,6 @@ test("a hover card of a comment of 8,000 list items draws without holding the ma
   }
 });
 
-interface HeavyDocument {
-  /** The body an agent writes as a document of its own. */
-  readonly body: string;
-  /** What the row is called, in its assertions and in its annotations. */
-  readonly name: string;
-  /** The one shape whose first write in a server process pays for the memory it touches rather
-   *  than for the parse, which the row writes once before it measures anything (the table's own
-   *  comment below). */
-  readonly warm?: true;
-}
-
-/** A row carries `half` where its write is the parse: the same shape at half the count its body
- *  holds, built by the one generator that built the body (`atBothSizes`). The write row times
- *  that write too and holds the body's own write against it, so a parse that grows faster than
- *  the body it reads is caught whatever the node costs a write. Which rows carry one, and why
- *  the others carry none, is on the write row. */
-type DocumentRow =
-  | (HeavyDocument & { readonly half?: string; readonly stored: true })
-  | (HeavyDocument & { readonly half?: undefined; readonly stored: false });
-
-/** Each heavy shape written as an issue document through the API, with the verdict Go gives it:
- *  stored, or refused as invalid markdown because it nests past `pmdoc/nesting.go`'s bound.
- *
- *  `warm` names the one shape whose cost is the parse itself rather than anything the write does
- *  with it, and whose first parse in a server process costs far more than its later ones. Its 49
- *  markers hold 50 blocks open down every one of the ~31,900 blank lines under them, and
- *  goldmark records a `lineStat` for each block on each line
- *  (`goldmark@v1.8.6/parser/parser.go:1106`), so the slice it appends into grows with the depth
- *  times the lines - about 3.1 million entries and ~75 MB for a body at the cap. Touching that
- *  much fresh memory for the first time in a process is page faults, not parsing: the same write
- *  is 316-343 ms once the process has done it and up to about 1.3 s the first time. The row
- *  writes such a body once to warm the process, records that first write's time, and holds the
- *  bound against the second, which is the steady state a reader's writes meet. */
-const documentRows: readonly DocumentRow[] = [
-  {
-    body: plainListSizes.full,
-    half: plainListSizes.half,
-    name: "8,000 list items",
-    stored: true,
-  },
-  { body: lazyQuote, name: "a quote followed by lines without its marker", stored: true },
-  { body: lazyListItem, name: "a list item followed by lines without its marker", stored: true },
-  {
-    body: bracketRunSizes.full,
-    half: bracketRunSizes.half,
-    name: "15,000 opening brackets then 15,000 closing ones",
-    stored: true,
-  },
-  {
-    body: nested49ThenBlankLinesSizes.full,
-    half: nested49ThenBlankLinesSizes.half,
-    name: "49 list markers on one line then blank lines",
-    stored: true,
-    warm: true,
-  },
-  {
-    body: nestedThenBlankLines,
-    name: "100 list items nested by indentation then blank lines",
-    stored: false,
-  },
-  { body: markerChain, name: "15,999 list markers on one line", stored: false },
-  { body: calloutBracketRun, name: "a callout opener holding 15,000 brackets", stored: false },
-];
-
-/**
- * Resolves once no document on this server owes a settlement, which is the server with no
- * settlement of an earlier write of this row queued and none running. A durable document write
- * records the settlement it owes in `doc_settlements_pending` within its own transaction, and
- * the settlement that has read every update deletes that row in the transaction committing its
- * writes (`packages/envoy/internal/dispatch/docs/persistence.go`, `clearSettlementPending`), so
- * an empty table is that server. The harness runs one worker against one database
- * (`e2e/playwright.config.ts`) and `resetDatabase` empties it before each row, so every row of
- * that table is this row's own.
- */
-async function everySettlementFinished(what: string): Promise<void> {
-  await expect
-    .poll(() => sql("select count(*) from doc_settlements_pending"), {
-      intervals: [200],
-      message: `${what}: a settlement queued before this write never finished`,
-      timeout: 60_000,
-    })
-    .toBe("0");
-}
-
-/**
- * One write at a time, with the server otherwise idle. Each write queues its own document's
- * settlement, which the server runs two seconds later (the document service's own default
- * `settle`, `packages/envoy/internal/dispatch/docs/service.go`; `e2e/run-server.sh` sets no
- * `DISPATCH_TEST_SETTLE_DELAY`), and that settlement costs about what the write did, so writes
- * made back to back each land on the settlement of the write before them. `write` therefore
- * waits for every settlement already queued to finish before it starts its clock, the warming
- * write and the half-size write included, and what the bounds below hold is one write alone.
- *
- * So what a write costs while another document of the same server settles beside it is not
- * measured here: measured with these writes back to back it reached 1,322 ms, which
- * sjawhar/legion#2519 names under Not proven / risk.
- *
- * Two bounds hold each body, and the row asserts both of them. The absolute bound is that the
- * write answers in under 1,000 ms: it is asserted on every row, stored or refused, under no
- * condition, and it is never skipped, widened or stood down for a slow node, because a second is
- * what the writer waits and CI's runners are where that is judged. The second bound is
- * linearity: for each shape whose write is its parse, the row writes that same shape at half its
- * count, times that write exactly as it times the body, and holds the body's write to no more
- * than 3.5x it, so a parse whose cost grows faster than the body it reads reds this row on any
- * node, the fast ones CI runs on included, where the body alone would still answer in time.
- * Both numbers and the ratio between them are annotated before either bound is asserted, so a
- * run that reds reports what the body cost beside its half, whichever of the two bounds it was.
- * The absolute bound is asserted first, because a write the node itself stalled - 1,986 ms for a
- * body that costs 750 ms here - is no measurement of how the cost grows, and reading linearity
- * out of one would name a regression that is not there.
- *
- * The body is written before its half, so what the absolute bound measures is what it has always
- * measured - the first write of that shape in a server process, with nothing but a settlement
- * drain before it. That first write pays for the memory its shape touches, about 200 ms on this
- * pod whichever size pays it, so the half that follows runs warm and a linear path reads around
- * 2x: 1.22x to 3.11x over twenty runs of this row here, every one of which held this bound, and
- * 3.4x to 3.6x where the node stalled the body's write past 1,100 ms and red the absolute bound
- * first - against the 1.99x the same halving costs the server-side write path at this head and
- * 2.06x at `main@origin` (sjawhar/legion#2519). The bound is 3.5x: above every ratio twenty runs
- * have shown, with room for a two-core node's jitter, and below the 4x a parse quadratic in its
- * body costs - nearer 5x once that warm-up is counted into it - so the bound still names the
- * regression this row was written for.
- *
- * The ratio is asserted on the three rows whose write is its parse: the 8,000 items, the bracket
- * run and the 49 markers, whose bodies cost 630-1,000 ms here. The two lazy rows carry no half
- * body, because their whole write is 88-274 ms, nearly all of it the round trip and the
- * document's own row, so a ratio over them measures jitter - 1.05x, 1.65x, 1.73x and 2.64x for
- * one and the same shape, measured while they carried one - and nothing of a parse. A refused
- * body is further from the claim still: two of the three are turned away before any parse of
- * them finishes (20-41 ms for the 15,999 markers, 6-18 ms for the callout, on a pod that is not
- * stalling), and the third, 100 items nested by indentation, is parsed before its nesting is
- * refused (406-1,746 ms here) but is refused at every size, so no reader ever stores it. Every
- * row keeps the absolute bound all the same.
- */
-test("a document write of each heavy body answers in under a second, stored or refused", async () => {
-  // Twelve writes - one of every body, the warming write, and a half-size one after each of the
-  // three bodies held to the ratio - each waiting out the settlement the write before it queued,
-  // two seconds and the settlement's own run, take the row from about 7 s to about 29 s, past
-  // the default deadline.
-  test.setTimeout(120_000);
-  const issue = await seedIssue("Heavy documents");
-
-  /** Writes one body as a document of its own, with no settlement of an earlier write running
-   *  beside it, and answers what the write cost and refused. */
-  async function write(body: string, name: string): Promise<{ refusal: unknown; took: number }> {
-    await everySettlementFinished(name);
-    const started = performance.now();
-    const refusal = await createIssueArtifact(issue.key, { content: body, name }, agent).then(
-      () => undefined,
-      (error: unknown) => error
-    );
-    return { refusal, took: performance.now() - started };
-  }
-
-  for (const [index, row] of documentRows.entries()) {
-    // A document takes far more than a comment does, so each row is held to the comment cap: the
-    // browser rows above and this one then read the very same shapes.
-    expect(
-      row.body.length,
-      `${row.name}: the row is longer than a comment's body cap`
-    ).toBeLessThanOrEqual(DISPATCH_BODY_MAX);
-    if (row.warm === true) {
-      // The first parse of this shape in a server process pays for the memory it touches, not for
-      // the parsing (the table above): write it once, record that, and hold the bound against the
-      // write after it, which is what every later writer of such a body meets.
-      const first = await write(row.body, `heavy-${index}-first.md`);
-      expect(first.refusal, `${row.name}: the warming write was refused`).toBeUndefined();
-      test.info().annotations.push({
-        description: `${Math.round(first.took)} ms`,
-        type: `${row.name}: the first write of this shape in a fresh server`,
-      });
-    }
-    const { refusal, took } = await write(row.body, `heavy-${index}.md`);
-    let half: number | undefined;
-    if (row.half !== undefined) {
-      // This row's own shape at half its count, written and timed as the body above it was, and
-      // waited out the same way: the two together are the growth the ratio holds.
-      const smaller = await write(row.half, `heavy-${index}-half.md`);
-      expect(smaller.refusal, `${row.name}: the half-size body was refused`).toBeUndefined();
-      half = smaller.took;
-    }
-    // Both numbers and the ratio between them, so a reader of a CI run sees the shape of the
-    // cost and not only that the row passed.
-    test.info().annotations.push({
-      description:
-        half === undefined
-          ? `${Math.round(took)} ms`
-          : `${Math.round(half)} ms at half this shape, ${Math.round(took)} ms whole, ` +
-            `${(took / half).toFixed(2)}x`,
-      type: `${row.name}: what the write cost`,
-    });
-
-    if (row.stored) {
-      expect(refusal, `${row.name}: the write was refused`).toBeUndefined();
-    } else {
-      expect(refusal, `${row.name}: the write was accepted`).toBeInstanceOf(Error);
-      const message = refusal instanceof Error ? refusal.message : "";
-      expect(message, row.name).toContain(" failed: 400 ");
-      expect(message, row.name).toContain('"code":"INVALID_MARKDOWN"');
-    }
-    expect(took, `${row.name}: the write took ${Math.round(took)} ms`).toBeLessThan(1_000);
-    if (half !== undefined) {
-      expect(
-        took,
-        `${row.name}: ${Math.round(took)} ms for the body and ${Math.round(half)} ms for half ` +
-          `of it, ${(took / half).toFixed(2)}x`
-      ).toBeLessThanOrEqual(half * 3.5);
-    }
-  }
-});
-
 /** How long one measurement must hold before a row reads it as where the page has come to rest. */
 const AT_REST_MS = 600;
 
@@ -1052,6 +827,232 @@ test("a comment of 8,000 list items still ends formatted when the parse worker's
       asked,
       "the page never asked for a markdown-parse.worker chunk, so none was refused"
     ).toBe(true);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The one surface where a body grows under a paint: the live session view, where a streaming
+// turn arrives whole with every frame. A reader who opens it mid-turn gets a first render that
+// is the turn's own text, pending on the worker; the answer to it is painted in batches across
+// tasks, and the next frame lands while that paint is still attaching them. The element belongs
+// to that paint until it ends - nothing but the paint that replaces it, or the unmount, stops
+// one - so the arriving frame writes nothing into it. Written there, its text would stand in
+// front of the blocks still arriving behind it, and that is what the reader would read until
+// that frame's own answer and its whole paint had landed: the regression this change has now
+// repeated twice (sjawhar/legion#2519, `useRenderedMarkdown`).
+//
+// A poll cannot see it. The state lasts one paint batch, so a 60 ms poll lands between them and
+// finds a body that looks whole. The page records it instead, from a `MutationObserver`
+// installed before the page's own scripts: on every mutation, the characters of the newest
+// assistant turn's own text nodes and the blocks beside them. Neither number alone is the
+// defect - a pending body is all text and no blocks, a painted one is all blocks and no text -
+// so what the row counts is the samples holding both.
+//
+// The shape is the whole trick, and a row that shrinks it proves nothing. At 4,000 paragraphs
+// and 80 ms a frame, this row reds in all three engines at the code before the fix - 36 of 142
+// recorded samples held both in Chromium, 27 of 96 in WebKit, 17 of 156 in Firefox, the widest
+// standing 63,864 characters in front of 250 blocks. At 900 paragraphs with 150 ms frames the
+// pull request measured it green at both heads: that paint is two batches and no frame lands
+// inside one.
+
+/** The paragraphs the turn already holds when the reader opens it. Each frame after that is the
+ *  whole turn again, one paragraph longer. */
+const streamedParagraphs = 4_000;
+/** Frames the session publishes while the reader watches, and the gap between them. */
+const streamedFrames = 60;
+const streamedFrameGapMs = 80;
+/** The turn's last frame, the one that ends it, adds one paragraph like the frames before it. */
+const wholeTurnParagraphs = streamedParagraphs + streamedFrames + 1;
+
+/** Loose text shorter than this is not a frame standing in front of a body: a paint attaches
+ *  blocks, never prose, so what this passes over is whitespace and nothing a reader reads. The
+ *  text of one of these frames is some 60,000 characters. */
+const looseTextIsAFrame = 100;
+
+/** The session the turn streams from. Seeded with no `last_seen`, so the fake Envoy answers
+ *  every read of it with the current time and the row never meets an aged-out session. */
+const streamingSession: FakeSession = {
+  capabilities: ["steer"],
+  dir: "/workspaces/streaming",
+  machine_id: "streaming-host",
+  roles: [],
+  session_id: "019a1c07-6d4b-7e80-bf39-4a1b5c8d9e07",
+  title: "A session mid-turn",
+};
+
+/** What the recorder took of the newest assistant turn's body on one mutation of the page. */
+interface StreamSample {
+  /** The `p` and `li` under it: the blocks a paint has attached so far. */
+  readonly blocks: number;
+  /** The characters in the text nodes directly under it, which is where a frame's own text
+   *  would stand. */
+  readonly raw: number;
+  /** Whether the turn was still streaming when this was taken. */
+  readonly streaming: boolean;
+}
+
+/** `count` paragraphs, `paragraph 0` to `paragraph <count - 1>`, joined by blank lines. */
+function streamedBody(count: number): string {
+  return Array.from({ length: count }, (_, index) => `paragraph ${index}`).join("\n\n");
+}
+
+/** One snapshot of the one turn: every frame carries the same message id, so each replaces the
+ *  turn's whole text, and `seq` orders the snapshots. */
+function turnFrame(seq: number, paragraphs: number, streaming: boolean): object {
+  return {
+    kind: "message",
+    message: {
+      at: 1_000,
+      id: "a-turn-a-reader-opened-while-it-streamed",
+      parts: [{ text: streamedBody(paragraphs), type: "text" }],
+      role: "assistant",
+      streaming,
+    },
+    seq,
+    v: 1,
+  };
+}
+
+/**
+ * Installs the recorder before the page's own scripts, so nothing of the first render happens
+ * unwatched. It watches the document rather than its element, which a script running this early
+ * can still find nothing of, and reads the newest assistant turn's body on every mutation
+ * anywhere in the page: the body itself is not in the document yet when this runs.
+ */
+async function recordTheStreamedTurn(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const samples: StreamSample[] = [];
+    let streaming = true;
+    window.__heavyBodiesStreamSamples = samples;
+    window.__heavyBodiesTurnEnded = () => {
+      streaming = false;
+    };
+    const take = (): void => {
+      const turns = document.querySelectorAll('[data-testid="agent-message-assistant"]');
+      const body = turns[turns.length - 1]?.querySelector(".dispatch-markdown") ?? null;
+      if (body === null) {
+        return;
+      }
+      let raw = 0;
+      for (const child of body.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          raw += child.textContent?.length ?? 0;
+        }
+      }
+      samples.push({ blocks: body.querySelectorAll("p, li").length, raw, streaming });
+    };
+    new MutationObserver(take).observe(document, {
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  });
+}
+
+/** Waits until `at`, so the frames keep their cadence whatever each publish costs: a publish
+ *  that overran its slot is followed at once by the next rather than pushing every one after
+ *  it back. */
+function sleepUntil(at: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, Math.max(0, at - Date.now()));
+  return promise;
+}
+
+test("a reader who opens the live view while a long turn streams is never shown a frame's text in front of the body", async ({
+  browser,
+}) => {
+  const session = streamingSession.session_id;
+  await setLiveSessions([streamingSession]);
+  await publishAgentStreamFrame(
+    session,
+    { frames: [turnFrame(1, streamedParagraphs, true)], session_id: session, v: 1 },
+    "replay"
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await recordTheStreamedTurn(page);
+    await page.goto(`/agents/${session}/live`);
+    const turns = page.getByTestId("agent-message-assistant");
+    // The replay in the page is the viewer attached: a frame published before that reaches
+    // nobody. The turn is the reader's own text here, with its paint still to come.
+    await expect(turns).toHaveCount(1);
+    const turn = turns.last();
+
+    const firstFrameAt = Date.now();
+    for (let frame = 0; frame < streamedFrames; frame += 1) {
+      await sleepUntil(firstFrameAt + frame * streamedFrameGapMs);
+      await publishAgentStreamFrame(
+        session,
+        turnFrame(frame + 2, streamedParagraphs + frame + 1, true)
+      );
+    }
+    // Every sample after this is the turn over, so the guard below reads only what the
+    // streaming window left.
+    await page.evaluate(() => window.__heavyBodiesTurnEnded?.());
+    await publishAgentStreamFrame(
+      session,
+      turnFrame(streamedFrames + 2, wholeTurnParagraphs, false)
+    );
+
+    const body = markdownBody(turn);
+    await expect(body.locator("p")).toHaveCount(wholeTurnParagraphs);
+    await expectSettled(turn);
+    expect(
+      await looseTextLength(body),
+      "the turn ended with text of its own standing beside the body's blocks"
+    ).toBe(0);
+
+    const samples = await page.evaluate(() => window.__heavyBodiesStreamSamples ?? []);
+    const inFront = samples.filter((sample) => sample.blocks > 0 && sample.raw > looseTextIsAFrame);
+    // A body under construction: blocks in it, and not yet the turn's own. A sample holding the
+    // whole turn is a paint that has landed, which says nothing about the window.
+    const partBuilt = samples.filter(
+      (sample) => sample.streaming && sample.blocks > 0 && sample.blocks < wholeTurnParagraphs
+    );
+    const sawAFrameText = samples.filter((sample) => sample.raw > looseTextIsAFrame);
+    // Both counts are the run's evidence, kept on the result even when it passes: a runner too
+    // fast or too slow to reach the window is read here rather than as a silently empty green.
+    test.info().annotations.push({
+      description:
+        `${samples.length} samples, ${partBuilt.length} of them a part-built body mid-stream, ` +
+        `${sawAFrameText.length} holding a frame's text`,
+      type: "recorded while the turn streamed",
+    });
+    const worst = inFront.reduce((held, sample) => (sample.raw > held.raw ? sample : held), {
+      blocks: 0,
+      raw: 0,
+      streaming: false,
+    } satisfies StreamSample);
+    expect(
+      inFront.length,
+      `the reader saw the frame's raw text in front of a body already holding blocks: ` +
+        `${inFront.length} of ${samples.length} recorded samples held both, the widest ` +
+        `${worst.raw} characters in front of ${worst.blocks} blocks`
+    ).toBe(0);
+    // The window the row is about was driven at all, which is two things and not one: the
+    // reader saw a body under construction, and the reader saw a frame's text. A green run
+    // means neither of them stood in front of the other; a run that measured neither is no
+    // evidence of that, and on a node faster than this pod - one that paints 4,000 paragraphs
+    // in two batches, where no frame can land inside one - this row would otherwise stay green
+    // for as long as it is in the suite while proving nothing (the pull request measured
+    // exactly that at 900 paragraphs and 150 ms frames, green at both heads). Either guard
+    // failing names the shape as outgrown by the node, not the change as broken: raise the
+    // paragraph count. One sample is as loose as each asks for; three runs of each engine on a
+    // two-core pod left 19 to 102 part-built samples.
+    expect(
+      partBuilt.length,
+      `nothing painted while the turn streamed, so this row measured none of the window it is ` +
+        `about: no part-built body in ${samples.length} recorded samples`
+    ).toBeGreaterThan(0);
+    expect(
+      sawAFrameText.length,
+      `no frame's text ever reached the element, so this row measured none of the window it is ` +
+        `about: no sample over ${looseTextIsAFrame} characters in ${samples.length} recorded ` +
+        `samples`
+    ).toBeGreaterThan(0);
   } finally {
     await alice.close();
   }
