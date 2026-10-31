@@ -41,7 +41,7 @@ versions. Never add the module to the root `go.work`.
 | `nats/` | The schema types every NATS component shares, whatever its cloud, importing no cloud package: `RulesArgs`, `nats:Rules`, one direction's permissions of a NATS user, which `aws:User` and `gcp:Permissions` take (`rules.go`). A type shared by components of more than one cloud lives here, never in one cloud's package, so a single-cloud consumer's SDK shows no other cloud's types; `gcp/imports_test.go` fails if the `gcp` package compiles any `aws` package. |
 | `aws/` | `aws:NatsService` (`natsservice.go`) and `aws:WebhookListener` (`webhooklistener.go`): their resources, refusals and outputs, with the goldens of their container definitions in `testdata/`. `fargate.go` holds what both register identically: each child's options, its tags, the log group and the task definition's base. |
 | `aws/rendering/` | What the AWS components render, with no Pulumi in it: the container definitions, the NATS start script, the listener's environment and read policy, the metric filters and the alarms' text. Its own tests hold `ListenerEnv.Check`'s refusals; `aws/`'s pin its texts, building each component from one example. |
-| `gcp/` | `gcp:NatsHub` (`natshub.go`, which also holds `authorization`, the users rendering both hubs share) and its VM's cloud-config, with the secret fetcher's, the listener's seed script's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`); `gcp:Dispatch` (`dispatch.go`, `dispatch_cloud.go`, `dispatch_kube.go`; `dispatch.go` also holds `podPriorityClass`, the priority-class rule `gcp:ClusteredNatsHub` shares) and its Kubernetes and Serve renderings, golden-tested in `testdata/dispatch-*.golden`; `gcp:ClusteredNatsHub`: its inputs, refusals and sizing (`clusteredhub.go`, with its pods' Autopilot size rule in `clusteredhub_autopilot.go`), its Kubernetes provider, the `nats` chart with the transform that protects its StatefulSet, its NetworkPolicy and its PodMonitoring (`clusteredhub_kube.go`), and its tailnet hosts (`clusteredhub_tailnet.go`, golden-tested in `testdata/clustered-hub-*.golden`), with the chart's archive vendored for its render test (`testdata/nats-2.15.1.tgz`); and `tailnet_service.go`, a Tailscale Service host's parts (the tailscale container's environment, the serve configs, the advertiser and preStop scripts, the probes), functions of the Service's name and ports, which every multi-pod Tailscale Service host reuses rather than writing its own. |
+| `gcp/` | `gcp:NatsHub` (`natshub.go`, which also holds `authorization`, the users rendering both hubs share) and its VM's cloud-config, with the secret fetcher's, the listener's seed script's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`); `gcp:Dispatch` (`dispatch.go`, `dispatch_cloud.go`, `dispatch_kube.go`; `dispatch.go` also holds `podPriorityClass`, the priority-class rule `gcp:ClusteredNatsHub` shares) and its Kubernetes and Serve renderings, golden-tested in `testdata/dispatch-*.golden`, with its front door and the Tailscale Service `svc:<hostname>` it declares itself in `dispatch_frontdoor.go` (`newDispatchTailscaleService`), its one resource outside Google Cloud and the cluster, which is why it requires a `tailscale` provider wherever it builds the front door; `gcp:ClusteredNatsHub`: its inputs, refusals and sizing (`clusteredhub.go`, with its pods' Autopilot size rule in `clusteredhub_autopilot.go`), its Kubernetes provider, the `nats` chart with the transform that protects its StatefulSet, its NetworkPolicy and its PodMonitoring (`clusteredhub_kube.go`), and its tailnet hosts (`clusteredhub_tailnet.go`, golden-tested in `testdata/clustered-hub-*.golden`), with the chart's archive vendored for its render test (`testdata/nats-2.15.1.tgz`); and `tailnet_service.go`, a Tailscale Service host's parts (the tailscale container's environment, the serve configs, the advertiser and preStop scripts, the probes), functions of the Service's name and ports, which every multi-pod Tailscale Service host reuses rather than writing its own. |
 | `docs/` | Each component's operator document beside the module's README: `nats-hub.md` for `gcp:NatsHub`, and for how `gcp:ClusteredNatsHub` runs, updates and is watched beside it. It lives outside the component's package so that an edit to it cuts no release, which a file in a package the plugin compiles does (see Release contract). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The tests' harness: the mock engine a component's unit tests run on (`Mocks`, `Construct`, `mocks.go`), and the live tests' plugin build and pulumi CLI. |
@@ -68,9 +68,11 @@ versions. Never add the module to the root `go.work`.
   `WebhookListenerArgs.validate`.
 
 - **Component-built Kubernetes providers.** `gcp:Dispatch` requires the consumer's `gcp` and
-  `random` providers before registering anything, then builds a Kubernetes provider from its
-  cluster's exec-plugin kubeconfig; with `clusterOnly` it requires the `gcp` provider alone and
-  builds no Kubernetes provider, since it registers no `RandomPassword` and no Kubernetes object.
+  `random` providers before registering anything, and a `tailscale` provider too wherever it
+  builds the front door, which is where it declares its own Tailscale Service, then builds a
+  Kubernetes provider from its cluster's exec-plugin kubeconfig; with `clusterOnly` it requires
+  the `gcp` provider alone and builds no Kubernetes provider, since it registers no
+  `RandomPassword`, no tailnet resource and no Kubernetes object.
   Every Kubernetes child uses that explicit provider and depends on the cluster; none falls back
   to a default Kubernetes provider. `gcp:ClusteredNatsHub` takes
   the cluster's `kubeconfig` as a secret input and builds its own provider, `<name>-kubernetes`,
@@ -143,12 +145,13 @@ versions. Never add the module to the root `go.work`.
   (`TestDispatchRefusesASeedInTheComponentName`); its resolver refuses a seed in every plain
   string input the component carries (`gcp.dispatchSeededInput`, one row each in
   `TestDispatchRefusesAnNKeySeedInAPlainInput`, `azureFederationAudience` among them);
-  `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret` and the Azure embedder's Pulumi
-  inputs `azureEmbedEndpoint`, `azureEmbedDeployment`, `azureEmbedKeySecret`, `azureTenantId` and
-  `azureClientId` are checked for a seed once they resolve, before any child takes them
-  (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
-  `TestConstructRefusesASeedInADispatchInput`, `TestConstructRefusesASeedInAnAzureInput`); the two
-  credentials `tailnetAuthKey` and
+  `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`, `databaseWaitsFor` and the Azure
+  embedder's Pulumi inputs `azureEmbedEndpoint`, `azureEmbedDeployment`, `azureEmbedKeySecret`,
+  `azureTenantId` and `azureClientId` are checked for a seed once they resolve, before any child
+  takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
+  `TestConstructRefusesASeedInADispatchInput`, `TestConstructRefusesASeedInAnAzureInput`,
+  `TestDispatchRefusesASeedInDatabaseWaitsFor`, whose value reaches no resource and whose
+  dependencies alone order the Cloud SQL instance); the two credentials `tailnetAuthKey` and
   `signInClientSecret` are also refused blank or whitespace-only then, through the one rule both
   run (`gcp.refuseDispatchSecret`, `TestDispatchRefusesABlankSecretOnceItResolves`), since neither
   can work blank. No secret value is a `gcp:Dispatch` input beyond those two: the broker relay
