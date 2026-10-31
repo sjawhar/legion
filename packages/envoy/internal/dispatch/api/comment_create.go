@@ -21,8 +21,10 @@ type commentInput struct {
 	Body    string             `json:"body"`
 	Anchor  *model.AnchorInput `json:"anchor"`
 	ReplyTo *string            `json:"reply_to"`
-	// ReplyToBlock is the id of the block of comment ReplyTo the reply answers ("b2"), checked
-	// against that comment before reply_to climbs to the thread's head.
+	// ReplyToBlock is the id of the block the reply answers ("b2"), read from the item the same
+	// request names (namedReplyBlock): a block of comment ReplyTo, checked against that comment
+	// before reply_to climbs to the thread's head, or, with AskID in place of ReplyTo, a part of
+	// that ask.
 	ReplyToBlock *string `json:"reply_to_block"`
 	AskID        *string `json:"ask_id"`
 	Mentions     []struct {

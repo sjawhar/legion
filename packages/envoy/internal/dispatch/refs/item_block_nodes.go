@@ -212,9 +212,9 @@ func messageBlockText(blocks []itemblocks.Block, position int, sum, excerpt stri
 	return excerpt
 }
 
-// itemBlockParent is the block node nodeID, a reply's replies_to_block (ItemBlockNode's
-// '<item kind>/<item id>#<block id>'), as the reply's parent: a block of an item in the reply's
-// own thread, so addressed under the reply's owner.
+// itemBlockParent is the block node nodeID, a reply's replies_to_block ('<item kind>/<item
+// id>#<block id>', read by ParseItemBlockNode), as the reply's parent: a block of an item in the
+// reply's own thread, so addressed under the reply's owner.
 func itemBlockParent(issueKey *string, project, slug, nodeID string) *model.NodeParent {
 	kind, itemID, blockID, _ := ParseItemBlockNode(nodeID)
 	return &model.NodeParent{Kind: "block", ID: nodeID, Ref: BlockRef(itemRef(string(kind), issueKey, project, slug, itemID), blockID)}

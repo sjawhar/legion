@@ -2,9 +2,10 @@
 --
 -- An ask is a collection of blocks too, as 0142's comments and messages are, but its blocks are
 -- not a body split by the document parser: each part is a text of its own, read from the ask's
--- row by refs.AskParts — its question, then each of its options as "<label> — <description>",
--- then the answer it holds now — and its id is kept across writes by the same alignment a
--- comment's blocks take (internal/dispatch/itemblocks). A part is a graph node: its node id is
+-- row by refs.AskParts — its question, then each of its options as "<label> — <description>"
+-- (its label alone when it has no description), then the answer it holds now — and its id is
+-- kept across writes by the same alignment a comment's blocks take (internal/dispatch/itemblocks).
+-- A part is a graph node: its node id is
 -- `ask/<ask id>#<part id>` (`ask/<uuid>#b2`), its storage kind in graph_edges and refs.to_kind
 -- is `ask_block`, a kind a build without these tables skips as unknown. A part is part_of its
 -- ask, a mention written inside it is an edge out of it, and a reply whose request names the
