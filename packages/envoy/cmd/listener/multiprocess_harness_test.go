@@ -28,6 +28,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -178,6 +179,9 @@ type mpLaneRelay struct {
 	// byte in either direction, as a route that drops packets leaves a dial: the TCP connection is
 	// accepted, and nats.go waits out its connect timeout for an INFO that never comes.
 	blackhole chan struct{}
+	// drops holds, per client name, the subject prefix of the requests the relay drops on that
+	// name's connections (dropRequests).
+	drops map[string]string
 }
 
 // mpLaneLink is one connection through the relay: the pod's socket, the server's, and the client
@@ -188,6 +192,8 @@ type mpLaneLink struct {
 	mu   sync.Mutex
 	name string
 	seen []byte
+	// pending is what the pod has sent that does not yet make a whole protocol frame (forward).
+	pending []byte
 }
 
 func startMPLaneRelay(t *testing.T, uri string) *mpLaneRelay {
@@ -277,8 +283,10 @@ func (r *mpLaneRelay) relay(client net.Conn) {
 				return
 			}
 			r.pass(link)
-			if _, writeErr := server.Write(buffer[:n]); writeErr != nil {
-				return
+			if out := link.forward(buffer[:n], r.dropFor(link.lane())); len(out) > 0 {
+				if _, writeErr := server.Write(out); writeErr != nil {
+					return
+				}
 			}
 		}
 		if err != nil {
@@ -345,6 +353,69 @@ func (r *mpLaneRelay) blackholeNew() (heal func()) {
 		r.mu.Unlock()
 		close(hole)
 	})
+}
+
+// dropRequests drops, from now on, every PUB or HPUB frame the pod sends on a connection named
+// name whose subject starts with prefix, as a server that never answers those requests leaves
+// them: the requester waits out its own timeout. Every other frame passes. The returned func
+// stops the dropping, however often it is called.
+func (r *mpLaneRelay) dropRequests(name, prefix string) (stop func()) {
+	r.mu.Lock()
+	if r.drops == nil {
+		r.drops = map[string]string{}
+	}
+	r.drops[name] = prefix
+	r.mu.Unlock()
+	return sync.OnceFunc(func() {
+		r.mu.Lock()
+		if r.drops[name] == prefix {
+			delete(r.drops, name)
+		}
+		r.mu.Unlock()
+	})
+}
+
+// dropFor is the subject prefix dropped on connections named name, empty when none is.
+func (r *mpLaneRelay) dropFor(name string) string {
+	if name == "" {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.drops[name]
+}
+
+// forward takes what the pod sent and returns the whole protocol frames of it to send on, without
+// each PUB or HPUB frame whose subject starts with drop when drop is not empty. A frame not yet
+// whole waits in pending for the rest, so the frames stay whole whenever dropping starts.
+func (l *mpLaneLink) forward(data []byte, drop string) []byte {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pending = append(l.pending, data...)
+	var out []byte
+	for {
+		end := bytes.Index(l.pending, []byte("\r\n"))
+		if end < 0 {
+			return out
+		}
+		size := end + 2
+		fields := strings.Fields(string(l.pending[:end]))
+		if len(fields) >= 3 && (strings.EqualFold(fields[0], "PUB") || strings.EqualFold(fields[0], "HPUB")) {
+			total, err := strconv.Atoi(fields[len(fields)-1])
+			if err == nil {
+				size += total + 2
+			}
+			if len(l.pending) < size {
+				return out
+			}
+			if drop != "" && strings.HasPrefix(fields[1], drop) {
+				l.pending = l.pending[size:]
+				continue
+			}
+		}
+		out = append(out, l.pending[:size]...)
+		l.pending = l.pending[size:]
+	}
 }
 
 // gate is the open gate of a cut connection name, nil while connections under that name pass.

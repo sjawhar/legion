@@ -744,3 +744,86 @@ func mpLinesMatching(output, needle string) string {
 	}
 	return strings.Join(kept, "\n")
 }
+
+// The active pod's receive connection is lost again while its reconnect hooks are still running
+// from the reconnect before. The relay drops every JetStream stream-info request of the role claim
+// bucket on that connection, which the listener's KV rewatch hook - the first of its reconnect
+// hooks - makes first, so the hook waits out its 10 s request timeout and fails, and keeps failing
+// on every retry. The connection is cut
+// until the pod notices, then healed, so nats.go reconnects in place and the hooks start; a
+// second later, with the rewatch still waiting, the connection is cut again on a route that drops
+// its packets, its reconnect dials hanging, while the lease connection goes on renewing. The
+// holder must release the lease on its own bound and the standby must take it over: every message
+// reaches its session once, and every message published after the second cut within 15 s of it
+// and in publish order. At 9c247139 the client ran its reconnect hooks on nats.go's callback
+// goroutine, so the disconnect of the second cut waited behind the hanging rewatch, the receive
+// signal read up for as long as the hooks took, and the take-over came long past 15 s.
+func TestTwoPodsReceiveConnectionLostWhileItsReconnectHooksHangHandsOverWithin15s(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
+	mpWaitActive(t, a, 30*time.Second)
+	b := mpStartPod(t, binary, uri, "pod-b")
+	mpWaitStandby(t, b, 30*time.Second)
+	serving := mpStartServingPort(t)
+	sessions := []string{"ses_mp_hookhang_one", "ses_mp_hookhang_two"}
+	for _, sessionID := range sessions {
+		a.registerPort(t, serving, sessionID)
+	}
+	publisher := mpConnectPublisher(t, uri)
+	receive := mpReceiveConnection(a.instance)
+	named := `name="` + receive + `"`
+	reconnects := func() int {
+		return strings.Count(mpLinesMatching(a.Output.String(), named), "envoy nats reconnected")
+	}
+	hookFailures := func() int {
+		return strings.Count(mpLinesMatching(a.Output.String(), named), "envoy nats reconnect hook failed")
+	}
+
+	stop := publisher.every(100*time.Millisecond, sessions...)
+	mpEventually(t, 10*time.Second, "the first messages to arrive", func() bool { return len(publisher.all()) >= 20 })
+	undrop := a.lanes.dropRequests(receive, "$JS.API.STREAM.INFO.KV_"+bus.RoleClaimBucket)
+	t.Cleanup(undrop)
+	before := reconnects()
+	var healFirst func()
+	publisher.quiesce(t, serving, func() { healFirst = a.lanes.cut(receive) })
+	t.Cleanup(func() { healFirst() })
+	mpEventually(t, 10*time.Second, a.instance+" to notice the first cut", func() bool {
+		return strings.Contains(mpLinesMatching(a.Output.String(), named), "envoy nats disconnected")
+	})
+	healFirst()
+	mpEventually(t, 10*time.Second, a.instance+" to reconnect in place", func() bool { return reconnects() > before })
+	failedBefore := hookFailures()
+	time.Sleep(time.Second)
+	if hookFailures() != failedBefore {
+		t.Fatalf("%s's reconnect hooks failed within a second of the reconnect, so the row does not cut while they run:\n%s",
+			a.instance, mpLinesMatching(a.Output.String(), named))
+	}
+	if record := publisher.stored(t, bus.ListenerStateBucket, bus.ListenerLeaseKey(mpMachine)); record["holder"] != a.instance || record["released"] == true {
+		t.Fatalf("after the reconnect in place the lease record names %v (released %v), want %s holding it",
+			record["holder"], record["released"], a.instance)
+	}
+
+	var unhole, heal func()
+	cut := time.Now()
+	unhole = a.lanes.blackholeNew()
+	heal = a.lanes.cut(receive)
+	t.Cleanup(func() { unhole(); heal() })
+	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
+	taken := time.Since(cut)
+	time.Sleep(5 * time.Second) // publish on past the take-over
+	stop()
+	if hookFailures() == failedBefore {
+		t.Fatalf("%s's reconnect hooks had not failed by the end of the row, so the rewatch did not hang:\n%s",
+			a.instance, mpLinesMatching(a.Output.String(), named))
+	}
+
+	all := publisher.since(time.Time{})
+	serving.awaitAll(t, all, mpHardBound+10*time.Second)
+	serving.requireOnce(t, all)
+	messages := publisher.since(cut)
+	serving.requireWithin(t, messages, mpHardBound, cut)
+	serving.requireOrder(t, messages)
+	t.Logf("%s took the lease %s after the second cut, with %s's rewatch hanging; %d messages after it", b.instance,
+		taken.Round(time.Millisecond), a.instance, len(messages))
+}
