@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-31T02:36:00Z",
+  "completed": "2026-10-31T15:10:42Z",
   "proof": [
+    {
+      "criterion": "Tester round 9: cluster.test.sh's new assertions are deterministic under CPU load (test-only change)",
+      "surface": "cluster.test.sh under the tester's loader (4 busy loops on the pod's 2 CPUs), one run at a time on pod legion-infra-infra-598, and GitHub CI's envoy-go at the merged head",
+      "command": "loop of 10: timeout 5400 bash loadtest/cluster/cluster.test.sh with 4 `while :; do :; done` loops beside it (08:28-15:10Z), each result uploaded to dispatch://INFRA-598/artifact/cluster-test-under-load-1f054857-sequential-txt; CI run 41191574478 at 183c0d7f",
+      "observed": "10 of 10 runs exit 0, 52 PASS, 0 FAIL, 2230-3082 s each; sampled memory peak 2.56 GiB over 9696 samples; CI envoy-go pass, its 'One-run-at-a-time test for loadtest/run-step.sh' and 'Test loadtest/cluster/cluster.sh' steps success; lint, typecheck, test, pr-title pass",
+      "headSha": "183c0d7f8d12",
+      "negativeControl": "at 32592e51 under the same kind of load the tester saw 'the bundle streamed into the runner did not go through runner_exec: no lock read came right before it' and 'the heartbeat of a held run patched the lock no more than before (28, was 28)'; an earlier attempt of mine with 5 suites side by side plus 4 loops on 2 CPUs overloaded the pod (each hit its 2 h bound after 19 PASS, 0 FAIL), so the proof ran one suite at a time as the tester did"
+    },
     {
       "criterion": "Review round 6: every stop, kill or removal fails closed after a retried lock read; older step directories keep their recorded transport; main merged (AGENTS.md re-layout)",
       "surface": "cluster.sh under cluster.test.sh's fakes (lock reads failing always, or only once), the loadgen Go tests, and the repository's CI check scripts, at the merged head",
