@@ -2,61 +2,49 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T22:40:00Z",
-  "round": 10,
-  "testedCodeHead": "bf6318c01ed9",
-  "scope": "INFRA-63 architect, 2026-10-30T20:38Z and 21:57Z: a full round covering review round 3's items and the merge with main's #2392 (per-issue event writes, no database-wide event lock); read ci-ok and the four required checks at the code head",
+  "completed": "2026-10-31T04:05:00Z",
+  "round": 11,
+  "testedCodeHead": "b9bbf075daa7",
+  "scope": "INFRA-63 architect, 2026-10-31T02:52Z: review round 4's two defects, each against the commit before 4f2e3319; the seven no-behaviour changes (the two-process file, the docs package, the browser coedit spec); the merge with main; ci-ok and the four required checks",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's multiprocess command at bf6318c0: ok 1148.109s, 133 PASS, 0 FAIL. Re-ran its browser coedit spec on main's two-process harness: 2 of 2 passed."
+    "how": "Re-ran at b9bbf075: the two-process file (ok 1170.099s), the docs package (ok 1598.978s), the browser coedit spec (2 of 2), and both defect tests 3 of 3. Reproduced both defect tests failing at a3bda21a."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The merge with main keeps both sides: items 1-6 and D10 across two processes, main's close-time ask withdrawal, and every awareness red test",
-      "surface": "two real envoy-dispatch binaries on one Postgres 17 (go test -tags multiprocess ./cmd/dispatch)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 60m -v ./cmd/dispatch",
-      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1148.109s, 133 PASS, 0 FAIL: the seven spec tests, TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoomUntilItsReopen, and all seven awareness red tests. After 200 alternating keystrokes every counter is 0 on A and B. In docs/copied_asks.go and duty/exclusive.go the conflict resolution touches only the lock-enumeration comments. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6534858795",
-      "headSha": "bf6318c01ed9",
-      "negativeControl": "The seven spec tests fail at aa50b68c (round 1)"
+      "criterion": "Review round 4, defect 1: a read's copy taken before a replica recover is never installed as the room's rendered copy, so reads never miss a committed edit",
+      "surface": "the docs package's Service with a real Postgres; the round-10 concurrent-read test on two real binaries for the outside read path",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test -count=3 -run TestAReadStartsNoReplicaBehindACommitARecoverTookAway ./internal/dispatch/docs",
+      "observed": "PASS 3 of 3 at head. A replica recover cannot be forced from outside the process, so the Service-level test is the surface for this defect. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6538659289",
+      "headSha": "b9bbf075daa7",
+      "negativeControl": "At a3bda21a (parent of 4f2e3319), with only the afterReadCopy test seam added and no fix, it fails 2 of 2: 'replica_read_start_test.go:89: a read of the room answers …' without the committed paragraph, and :98 after a further commit"
     },
     {
-      "criterion": "The merge under load: concurrent closes and reopens with ask withdrawal across both processes, alongside agent writes, under per-issue event writes",
-      "surface": "two real envoy-dispatch binaries; throwaway test TestProbeR10ConcurrentClosesWithAsks",
-      "command": "go test -tags multiprocess -run TestProbeR10ConcurrentClosesWithAsks ./cmd/dispatch",
-      "observed": "Twelve issues, each with an open decision block and an editor on the other process, closed at once, six through A and six through B, while agents wrote to two other issues through both. Every close answered 200 within 1.13 s and every agent write succeeded. Every block reads state=\"resolved\", and every editor was closed and reconnected readonly. A concurrent reopen answered within 0.45 s, and every editor reconnected read-write. Each issue's events are contiguous in seq.",
-      "headSha": "bf6318c01ed9",
-      "negativeControl": "Before this change (aa50b68c), a close through B left the room on A open (round 1)"
+      "criterion": "Review round 4, defect 2: a reader who is in the room again keeps its presence through its late departure, including a reconnect onto the other process",
+      "surface": "the docs package's two Services; and two real envoy-dispatch binaries driven by raw document sockets (throwaway TestProbeR11ReconnectOnTheOtherProcessSurvivesTheLateDeparture)",
+      "command": "go test -count=3 -run TestAReaderInTheRoomAgainKeepsItsStateThoughARemovalRacesItsReturn ./internal/dispatch/docs; go test -tags multiprocess -count=2 -run TestProbeR11 ./cmd/dispatch",
+      "observed": "The defect test passes 3 of 3 at head. On real binaries, bob's tab drops on B and returns on A within milliseconds at clock 2 or 3. Carol on A and dave on B still show him 2 s later in all 24 trials (2 runs of 12).",
+      "headSha": "b9bbf075daa7",
+      "negativeControl": "At a3bda21a, with the test unchanged, it fails 2 of 2: ':78 task A's relay no longer lists alice … though she is in its room' and ':82' bob's reader holds nothing after 2 min. The real-binary test also passes at a3bda21a, because the race window is not reached from outside without the test's ordering hook."
     },
     {
-      "criterion": "Review round 3: a departing reader's removal carries its client's clock",
-      "surface": "two real envoy-dispatch binaries: twenty readers on A leave at once while others join and leave (tombstones purging), five rounds; plus the implementer's docs test",
-      "command": "go test -tags multiprocess -run TestProbeR10ManyReadersLeaveAtOnce ./cmd/dispatch (throwaway); go test -count=5 -run TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode ./internal/dispatch/docs",
-      "observed": "At head, bob on B holds none of the twenty 2 s later in every round: 4 runs in workspace mode, 1 with GOWORK=off. The implementer's test passes 5 of 5.",
-      "headSha": "bf6318c01ed9",
-      "negativeControl": "At 09e42b20, before the fix, the throwaway test fails 2 of 2: 'two seconds after twenty readers left A at once, bob on B still holds 1 of them'"
-    },
-    {
-      "criterion": "Review round 3 (4f15d975): a read of a room that has taken no edit copies it once, the copy becomes the room's rendered copy, and every read stays correct",
-      "surface": "two real envoy-dispatch binaries; throwaway test TestProbeR10ReadsOfAnUnwrittenRoomStayCorrect",
-      "command": "go test -tags multiprocess -run TestProbeR10ReadsOfAnUnwrittenRoomStayCorrect ./cmd/dispatch",
-      "observed": "A cold agent write loads the room. Six readers (3 on A, 3 on B) loop GET /text while alice on A and bob on B open it and type 40 keystrokes. Of 948 concurrent reads, none was wrong. Afterwards A's API, B's API and both editors hold beta plus 20 a and 20 b.",
-      "headSha": "bf6318c01ed9",
-      "negativeControl": "Every one of the 948 reads would have failed on text without the agent's edit, or on a 'beta' prefix missing; none did"
-    },
-    {
-      "criterion": "Browser: readers on two processes see each other's edits, cursors and presence within one second, through a reconnect, and every document socket's first message names the document",
-      "surface": "Chromium on main's two-process harness",
-      "command": "cd packages/dispatch && DATABASE_URL=… bun run e2e:multiprocess -- zz-tabs.multiprocess coedit.multiprocess --repeat-each=2",
-      "observed": "4 passed. Six tabs (three per process) see the other five carets within 1 s over 4 rounds, including after one tab's socket is cut and reconnects. Each of the 7 document sockets' first byte is 36, the length of the document's id. coedit.multiprocess passes 2 of 2.",
-      "headSha": "bf6318c01ed9",
+      "criterion": "The seven no-behaviour changes changed no behaviour",
+      "surface": "two real envoy-dispatch binaries; the docs package; Chromium on main's two-process harness",
+      "command": "go test -tags multiprocess -count=1 ./cmd/dispatch; go test -count=1 ./internal/dispatch/docs; cd packages/dispatch && bun run e2e:multiprocess -- zz-tabs.multiprocess coedit.multiprocess --repeat-each=2",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1170.099s; ok github.com/sjawhar/envoy/internal/dispatch/docs 1598.978s; 4 browser tests passed. coedit.multiprocess passed 2 of 2. Six tabs see the other five carets within 1 s over 4 rounds, through a reconnect. All 7 document sockets' first message names the document.",
+      "headSha": "b9bbf075daa7",
       "negativeControl": "coedit.multiprocess fails on a0f877c5, the harness without this change (round 1)"
+    },
+    {
+      "criterion": "The merge with main 8a72cf79 keeps both sides: the branch's code on top of main is unchanged",
+      "surface": "the merge's diff against both parents",
+      "command": "jj diff --from 8a72cf79 --to b9bbf075 and --from 6fa26c74 --to 88f5b001, for each file both main and the branch changed",
+      "observed": "Main brought 16 commits, not only #2422. cmd/dispatch/main.go: the branch's 40 changed lines on top of main are the same before and after the merge, and main's #2553 changes are kept. infra/gcp/dispatch.go: only dispatchConnectionsPerPod 89 to 91. Migrations 0150-0152: header comments reflowed, no SQL statement changed. The three guides take #2422's one-sentence-per-line layout with the branch's text.",
+      "headSha": "b9bbf075daa7",
+      "negativeControl": "Any SQL or code line changed by the resolution would show in the before/after diff counts; none did."
     }
   ],
-  "notes": [
-    "Census entry 4: my round-8 short-message test is now a row ('three bytes of an integer that never ends') of the table test TestADocumentSocketWhoseFirstMessageNamesNoDocumentIsClosedThroughARealUpgrade, which passes in both build modes.",
-    "Migrations 0150-0152 will overlap INFRA-562's #2387; whichever lands later renumbers. The architect said not to fail the round for it."
-  ],
-  "ci": "At bf6318c0, read 2026-10-30T22:33Z: lint success; pr-title success (one earlier run cancelled); typecheck skipped (no TypeScript it reads changed); test in progress; ci-ok not posted yet; broker-multiprocess and changes success; the other lanes queued. GitHub was recomputing the merge state."
+  "ci": "At b9bbf075, read 2026-10-31T04:00Z: lint success; pr-title success (one earlier run cancelled); typecheck skipped; test queued; ci-ok not posted yet; no lane failed, 16 queued or running. GitHub reads the PR MERGEABLE (BLOCKED). Migrations 0150-0152 overlap #2387; the architect said not to fail the round for it."
 }
