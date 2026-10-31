@@ -278,10 +278,16 @@ A deployment turns it on with `runtime.kubernetes.test_postgres: true`, a key of
   `emptyDir` the daemon mounts there and covers inside every role namespace, so no role can write
   or corrupt the cluster while its tests use it, and it dies with the pod — every issue starts on
   an empty cluster.
-- The DSN's user is `legion_test`, created `LOGIN CREATEDB NOSUPERUSER` after the start; `initdb`'s
-  superuser is the container's own OS user (`legion`). A test gets `create database` and `drop
-  database` and not the cluster superuser, because a superuser can `COPY … TO PROGRAM` and so run
-  commands as the server's process.
+- The DSN's user is `legion_test`, created `LOGIN CREATEDB CREATEROLE NOSUPERUSER` after the
+  start; `initdb`'s superuser is the container's own OS user (`legion`). A test gets `create
+  database`, `drop database` and `create role` and not the cluster superuser, because a superuser
+  can `COPY … TO PROGRAM` and so run commands as the server's process. `CREATEROLE` is there
+  because a suite that makes a role and then connects as it — CI's Postgres lets it, since every
+  login there is a test login — would otherwise fail in the pod alone. So that the role it makes
+  can log in, `pg_hba.conf` trusts every role on loopback, and the line before that rejects the
+  cluster's superuser over TCP: a test that creates a role and connects as it works in the pod as
+  it does in CI, and no login over the DSN's port — the superuser's own name included — reaches
+  the superuser, so the trust the created roles need cannot be turned into `COPY … TO PROGRAM`.
 - `ensure` is idempotent and cheap when the server is up: it returns after one `pg_isready` on the
   DSN's port, and otherwise initialises and starts under `flock -o`. The `-o` closes the lock's
   descriptor in the child, without which the server inherits it and every later `ensure` waits on

@@ -18,9 +18,13 @@
 # server, it finds it listening. `ensure` is idempotent and holds a lock over the work all the same.
 #
 # initdb's superuser is the OS user (`id -un`, legion). The DSN names another role, created after
-# the server is up with LOGIN CREATEDB NOSUPERUSER, because a superuser can run
+# the server is up with LOGIN CREATEDB CREATEROLE NOSUPERUSER, because a superuser can run
 # `copy … to program '…'`, which runs as the server process — in the roles container's own
-# namespace, where every role's tokens live.
+# namespace, where every role's tokens live. CREATEROLE is there because this repository's own
+# suites create a login role and connect as it (packages/envoy/internal/broker/store/iam_test.go,
+# packages/envoy/internal/dispatch/store/census_test.go), and a test that passes in CI and fails in
+# the pod is what sends an agent to the deployment's sessions database; measured on 18, a CREATEROLE
+# non-superuser can neither make a superuser, nor grant itself one, nor grant pg_execute_server_program.
 set -eu
 
 name=legion-testpg
@@ -117,8 +121,23 @@ answering() {
 	pg_isready -q -h 127.0.0.1 -p "$port" || [ $? -ne 2 ]
 }
 
+# holders: true when some process other than this one has $1 as its working directory. The
+# postmaster chdirs into the data directory and its backends inherit that, so this is what tells a
+# server whose backends are still alive from one that is really gone. A /proc entry that vanishes
+# between the glob and the readlink, and one this user may not read, are both skipped: neither can
+# be a backend of a cluster this user started.
+holders() {
+	target=$(cd "$1" 2> /dev/null && pwd -P) || return 1
+	for entry in /proc/[0-9]*; do
+		[ "${entry#/proc/}" != "$$" ] || continue
+		cwd=$(readlink "$entry/cwd" 2> /dev/null) || continue
+		[ "$cwd" != "$target" ] || return 0
+	done
+	return 1
+}
+
 # super runs psql as the initdb superuser over the local socket, the one route pg_hba.conf admits
-# it on: the superuser has no host line, so nothing that reaches 127.0.0.1 can be it.
+# it on: every host line rejects the superuser, so nothing that reaches 127.0.0.1 can be it.
 super() {
 	psql -X -q -h "$sockets" -p "$port" -U "$superuser" "$@"
 }
@@ -139,25 +158,41 @@ start() {
 			--no-sync > "$log" 2>&1 ||
 			die "initdb failed; $log holds its output"
 		# initdb's own pg_hba.conf trusts every user on every address this server listens on.
-		# This one admits the superuser on the socket alone and the DSN's role on loopback, and
-		# rejects the rest, so a connection that arrives over TCP cannot be the superuser.
+		# This one keeps the superuser on the socket alone and rejects it on every host line,
+		# so a connection that arrives over TCP can never be the superuser, and trusts every
+		# other role on loopback, so a login role a test creates can connect as itself.
 		printf '%s\n' \
 			"local all  $superuser  trust" \
-			"host  all  $user  127.0.0.1/32 trust" \
+			"host  all  $superuser  all  reject" \
+			"host  all  all  127.0.0.1/32 trust" \
 			"host  all  all  0.0.0.0/0 reject" > "$data/pg_hba.conf" ||
 			die "writing $data/pg_hba.conf failed"
 	fi
 	# This process holds the lock and no server answers, so a postmaster.pid or socket lock left
 	# here names a server that died with its PID namespace; postgres would test that PID in this
-	# namespace, where it may be a live process.
-	answering || rm -f "$data/postmaster.pid" "$sockets/.s.PGSQL.$port.lock"
+	# namespace, where it may be a live process. A postmaster that is gone can still have live
+	# backends, which hold the data directory as their working directory and would write it
+	# beside a new server, so the files are cleared only when no process is in there.
+	if [ -f "$data/postmaster.pid" ] || [ -e "$sockets/.s.PGSQL.$port.lock" ]; then
+		if ! answering; then
+			! holders "$data" ||
+				die "a process still runs in $data, so the server that left $data/postmaster.pid is not gone: refusing to clear it"
+			rm -f "$data/postmaster.pid" "$sockets/.s.PGSQL.$port.lock"
+		fi
+	fi
 	# A throwaway cluster trades durability for speed: nothing in it survives the pod. 100
 	# connections cover a package's parallel tests, and 256MB of shared buffers their fixtures.
 	# huge_pages and dynamic_shared_memory_type are the pod's: gVisor serves no huge pages, and
 	# each role mounts its own 64 MiB /dev/shm, too small for the posix segments the default
-	# picks. jit off keeps LLVM out of a test's plan times.
+	# picks. jit off keeps LLVM out of a test's plan times. The WAL settings bound the cluster's
+	# share of the pod's 10Gi ephemeral-storage limit, which every role is evicted over:
+	# wal_level=minimal writes no WAL for a table built in the transaction that made it (and
+	# needs max_wal_senders=0, since no walsender can serve that level), max_wal_size=1GB is the
+	# checkpoint distance that caps the recycled segments, min_wal_size=80MB keeps the floor at
+	# five segments rather than the 1GB default's worth, and wal_keep_size=0 retains nothing for
+	# a replica this cluster will never have.
 	"$bin/pg_ctl" --pgdata "$data" --log "$log" --wait --timeout 120 \
-		--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB -c huge_pages=off -c dynamic_shared_memory_type=mmap -c jit=off" \
+		--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB -c huge_pages=off -c dynamic_shared_memory_type=mmap -c jit=off -c wal_level=minimal -c max_wal_senders=0 -c max_wal_size=1GB -c min_wal_size=80MB -c wal_keep_size=0" \
 		start >> "$log" 2>&1 ||
 		die "pg_ctl start failed; $log holds its output"
 	# vector in template1 reaches every database a test makes from it, so a suite that needs
@@ -165,11 +200,14 @@ start() {
 	# `create extension if not exists vector` of its own is a no-op the DSN's role may run.
 	super -d template1 -c 'create extension if not exists vector' >> "$log" 2>&1 ||
 		die "create extension vector in template1 failed; $log holds its output"
-	# The DSN's role: it may log in and make databases, and it is no superuser, so nothing that
-	# holds the DSN can `copy … to program` as the server's own process.
+	# The DSN's role: it may log in, make databases and make roles, and it is no superuser, so
+	# nothing that holds the DSN can `copy … to program` as the server's own process. CREATEROLE
+	# is what lets a suite that creates its own login role run here as it does in CI; on 18 it
+	# cannot hand out SUPERUSER or a role it does not hold itself, such as
+	# pg_execute_server_program.
 	super -tA -d postgres -c "select 1 from pg_roles where rolname = '$user'" 2>> "$log" |
 		grep -q 1 ||
-		super -d postgres -c "create role $user login createdb nosuperuser" >> "$log" 2>&1 ||
+		super -d postgres -c "create role $user login createdb createrole nosuperuser" >> "$log" 2>&1 ||
 		die "create role $user failed; $log holds its output"
 	if [ "$database" != postgres ]; then
 		super -tA -d postgres -c "select 1 from pg_database where datname = '$database'" 2>> "$log" |
