@@ -672,6 +672,22 @@ func TestOperatorClaimGolden(t *testing.T) {
 	golden(t, "operator-claim.json", operatorClaim())
 }
 
+func TestForgetSessionOperatorClaimGolden(t *testing.T) {
+	golden(t, "operator-forget-session.json", OperatorClaim{
+		Token:                "legion-legion-legion-208-architect",
+		Tree:                 "LEGION-208",
+		Issue:                "LEGION-208",
+		Role:                 claim.RoleArchitect,
+		Generation:           4,
+		State:                "failed",
+		ForgottenSession:     "ses_architect",
+		ForgottenSessionFile: "/sessions/ses_architect.jsonl",
+		Budgets:              BudgetsView{LaunchFailures: 3},
+		UncertainStreak:      0,
+		PluginContract:       38,
+	})
+}
+
 // What the list route answers: a queued claim carries no locator and no delivery yet.
 func TestOperatorClaimsGolden(t *testing.T) {
 	golden(t, "operator-claims.json", OperatorClaims{Claims: []OperatorClaim{

@@ -3,17 +3,15 @@
 # applies both with apply.sh; to change the model a role uses, edit its line under modelRoles and
 # run apply.sh again (README.md beside this file).
 #
-# Every model turn runs on the anthropic provider models.yml routes through the gateway, a retry on
-# another model included (retry below). Oh My Pi falls back from a failing provider without a word,
-# so enabledModels holds every session's own model, and any it falls back to, to anthropic, and each
-# provider a pod could reach without the gateway is disabled: Bedrock twice (a node's instance role
-# is its key), Google and the local servers Oh My Pi uses with no key, as
-# scripts/e2e/lib/install-model-gateway.sh does for the tmux proofs, and OpenAI. enabledModels names
-# the standard models one by one rather than by a pattern, so no new session starts on one of
-# the -legion aliases models.yml keeps until the gateway retires them. Records merge key by key
-# across settings layers, so every role Legion's prompts reach is named: the shipped review, oracle
-# and deep-worker agents' @review, @oracle and @deep (the planner's plan-reviewer and
-# plan-gap-analyst run on @review and @oracle), and the bundled scout's @smol and reviewer's @slow.
+# Every model turn runs on the anthropic provider models.yml routes through the gateway, including a
+# retry on another model (retry below). Oh My Pi falls back from a failing provider without a word,
+# so enabledModels holds every configured role model and any model it falls back to. Each provider a
+# pod could reach without the gateway is disabled: Bedrock twice (a node's instance role is its key),
+# Google and the local servers Oh My Pi uses with no key, as scripts/e2e/lib/install-model-gateway.sh
+# does for the tmux proofs, and OpenAI. Records merge key by key across settings layers, so every
+# role Legion's prompts reach is named: the shipped review, oracle and deep-worker agents' @review,
+# @oracle and @deep (the planner's plan-reviewer and plan-gap-analyst run on @review and @oracle),
+# and the bundled scout's @smol and reviewer's @slow.
 enabledModels:
   - anthropic/claude-fable-5
   - anthropic/claude-fable-5-1

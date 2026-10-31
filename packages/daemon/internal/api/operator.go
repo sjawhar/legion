@@ -38,17 +38,24 @@ type DeliverRequest struct {
 	Task string `json:"task"`
 }
 
+// ForgetSessionRequest names the claim's recorded session that the operator is abandoning.
+type ForgetSessionRequest struct {
+	Session string `json:"session"`
+}
+
 // OperatorClaim is a claim as the operator sees it: everything the supervisor holds about it but
 // its two hashes.
 type OperatorClaim struct {
-	Token       claim.Token `json:"token"`
-	Tree        string      `json:"tree"`
-	Issue       string      `json:"issue"`
-	Role        claim.Role  `json:"role"`
-	Generation  uint64      `json:"generation"`
-	State       string      `json:"state"`
-	Session     string      `json:"session"`
-	SessionFile string      `json:"sessionFile"`
+	Token                claim.Token `json:"token"`
+	Tree                 string      `json:"tree"`
+	Issue                string      `json:"issue"`
+	Role                 claim.Role  `json:"role"`
+	Generation           uint64      `json:"generation"`
+	State                string      `json:"state"`
+	Session              string      `json:"session"`
+	SessionFile          string      `json:"sessionFile"`
+	ForgottenSession     string      `json:"forgottenSession,omitempty"`
+	ForgottenSessionFile string      `json:"forgottenSessionFile,omitempty"`
 	// Locator is the claim's process, the runtime's nested shape; none while nothing runs.
 	Locator         *runtime.Locator `json:"locator,omitempty"`
 	Budgets         BudgetsView      `json:"budgets"`
@@ -286,6 +293,56 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 // failed claim that is not an architect's, naming who retries it (supervise's operatorRetry).
 func retryEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
 	return supervise.RequestOperatorRetry{Claim: c.Token}, true
+}
+
+// forgetSession clears a recorded session only when the operator names that exact session and the
+// claim has no live process. The session store is deliberately untouched.
+func (s *server) forgetSession(w http.ResponseWriter, r *http.Request) {
+	var req ForgetSessionRequest
+	if !s.readBody(w, r, &req, nil) {
+		return
+	}
+	if !requireFields(w, field{"session", req.Session}) {
+		return
+	}
+	token := claim.Token(r.PathValue("token"))
+	m, ok := s.supervisor.Machine(token)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorBody("no claim "+string(token)))
+		return
+	}
+	c := m.Claim()
+	if req.Session != c.Session {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
+			"forget-session refused: %s records session %s; pass --session %s to start fresh", c.Token, c.Session, c.Session)))
+		return
+	}
+	if !forgettable(c.State) {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
+			"forget-session refused: %s is %s; suspend, fail, or retire it before starting fresh", c.Token, c.State)))
+		return
+	}
+	if s.beforeForgetSessionHandle != nil {
+		s.beforeForgetSessionHandle()
+	}
+	ctx, decided := s.decision(r, token)
+	defer decided()
+	if s.stopped(w, "forget-session") {
+		return
+	}
+	if err := m.Handle(ctx, supervise.RequestForgetSession{Claim: token, Session: req.Session}); err != nil {
+		s.operatorFailure(w, "forget-session", token, err)
+		return
+	}
+	s.log.Info("api: operator forgot session", "claim", token, "session", c.Session, "sessionFile", c.SessionFile)
+	s.operatorDone(r, token)
+	view := operatorView(m.Claim())
+	view.ForgottenSession, view.ForgottenSessionFile = c.Session, c.SessionFile
+	writeJSON(w, http.StatusOK, view)
+}
+
+func forgettable(state supervise.ClaimState) bool {
+	return state == supervise.StateQueued || state == supervise.StateSuspended || state == supervise.StateFailed || state == supervise.StateRetired
 }
 
 // retryClaim is the operator's retry of a failed claim. A failed phase worker whose issue the

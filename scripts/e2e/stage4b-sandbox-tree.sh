@@ -281,6 +281,12 @@ session_db_container=legion-e2e4b-db-$$
 # that keeps an Oh My Pi session, runs before then: the daemon launches each one, and it starts
 # later. So a run stopped earlier has no session in a database to copy (collect_transcripts).
 session_db_ready=
+# Both container names hold the driver's pid, which the kernel hands out again, so a container of
+# either name can be an earlier run's, still working. Every container this run starts carries this
+# run's own id as the label legion.dev/e2e-run, and the teardown removes a container only when it
+# carries this id (remove_run_container), never by name alone.
+run_container_label=legion.dev/e2e-run
+run_container_id=$$-$(date +%s%N)
 profile=legion-e2e4b-$$-$(date +%s)
 state=$work/state
 # The HOME the controller's Oh My Pi runs under, so its profile lives in the work directory
@@ -291,6 +297,10 @@ daemon_log=$evidence/logs/daemon.log
 check=setup
 TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 ok=
+# Set by the signal traps below to the signal's own name, so the teardown can say that the run was
+# stopped rather than that the checkpoint it cut failed. Only a trap sets it: a command of the run
+# that exits 143 or 130 by itself is a failure, as it always was.
+signalled=
 was_blocked= # set by blocked: the run stopped on a prerequisite, so it did not run, and did not fail
 torn_down=
 snapshotted=
@@ -2739,8 +2749,21 @@ collect_transcripts() {
 remove_negative_config() {
   [ -z "$negative_config_pod" ] || roles_exec "$negative_config_pod" rm -f "$negative_config_workspace/.omp/config.yml"
 }
+# remove_run_container NAME removes the container NAME with its volumes, but only while NAME is
+# this run's own: the container carries run_container_id as its legion.dev/e2e-run label. The two
+# names hold the driver's pid, and a pid the kernel hands out again names an earlier run's
+# container, which may still be serving that run; the label, not the name, says whose it is. A
+# name no container has, a container with no such label and a docker that cannot answer each leave
+# the host as it is.
+remove_run_container() {
+  local name=$1 id owner
+  read -r id owner < <(docker inspect -f "{{.Id}} {{index .Config.Labels \"$run_container_label\"}}" "$name" 2>/dev/null) || return 0
+  [ "$owner" = "$run_container_id" ] || return 0
+  # By id, not by name: between the two calls the name can move to another container.
+  docker rm -f -v "$id" >/dev/null 2>&1 || return 0
+}
 cleanup() {
-  local status=$? p teardown_failed=""
+  local status=$? p exit_status teardown_failed=""
   # A second signal must not cut the teardown short, and a closed output must not end it.
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
@@ -2783,7 +2806,8 @@ cleanup() {
     fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
-  docker rm -f -v "$pg_container" "$session_db_container" >/dev/null 2>&1
+  remove_run_container "$pg_container"
+  remove_run_container "$session_db_container"
   rm -rf "$work"
   # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
   # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
@@ -2792,6 +2816,17 @@ cleanup() {
   # failure while done cleans the smoke main (smoke_main_cleaning) is the fixture's teardown, not the
   # workflow under test, and the verdict says so, unless a teardown check failed or a production
   # guard recorded a violation: then the ordinary failure stands.
+  # The status the run exits with is settled before any of it is printed, since the line for a
+  # signal names it: a failed teardown check makes it 1, as it always has, while the verdict below
+  # still reads the status the checkpoints left.
+  exit_status=$status
+  [ -z "$teardown_failed" ] || exit_status=1
+  # A signal is what the run did not choose, and the checkpoint it cut was still running: the line
+  # below says so, above a verdict that would otherwise read as that checkpoint's own failure. Only
+  # a trap sets signalled, so a command of the run that exits 143 or 130 by itself is the failure it
+  # always was.
+  [ -z "$signalled" ] ||
+    echo "stage 4b e2e: $signalled stopped the run (exit $exit_status) while check $check was running: the checkpoint it cut neither failed nor passed, so the run is no verdict on the change, and the checkpoints before it stand"
   if [ -z "$ok" ] && [ -z "$was_blocked" ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
     bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
     if [ -n "$smoke_main_cleaning" ] && [ -z "$teardown_failed" ] && [ ! -s "$evidence/pane-endpoint-violation.txt" ]; then
@@ -2807,14 +2842,13 @@ cleanup() {
     echo "stage 4b e2e: FAIL (check $check)"
   fi
   echo "evidence: $evidence (transcript.log, logs/daemon.log, pod-watch.json, pods/, transcripts/, the namespace snapshots)"
-  [ -z "$teardown_failed" ] || status=1
-  exit "$status"
+  exit "$exit_status"
 }
 trap cleanup EXIT
 trap 'echo "CHECK $check: FAIL: line $LINENO exited $?: $BASH_COMMAND" >&2' ERR
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'signalled=SIGHUP; exit 129' HUP
+trap 'signalled=SIGINT; exit 130' INT
+trap 'signalled=SIGTERM; exit 143' TERM
 
 # ---- the production audit (checkpoint production-audit) --------------------------------------------
 
@@ -3060,6 +3094,38 @@ case "$port_session_db" in
 esac
 [ "$port_session_db" != "$port_daemon" ] && [ "$port_session_db" != "$port_worker_stream" ] ||
   fail "LEGION_E2E_SESSION_DB_PORT $port_session_db is the daemon's API port or its worker stream's: the lane's three ports are three"
+# The development switches are read from the operator's environment alone, against this script and
+# the file a switch names, so they are refused here, above the run's first write anywhere: a
+# mistyped STAGE4B_UNTIL used to reach ensure_project below, which creates the run's project in
+# production Dispatch, before the run refused the value.
+if [ -n "$until" ]; then
+  # A name no checkpoint has would run the whole proof as a development run.
+  grep -qxF -e "begin $until" -e "begin \"$until\"" "$root/scripts/e2e/stage4b-sandbox-tree.sh" ||
+    fail "STAGE4B_UNTIL=$until names no checkpoint of this driver"
+  note "STAGE4B_UNTIL=$until: a development run, never the proof"
+fi
+if [ -n "$skip_controller" ]; then
+  [ -n "$until" ] || fail "STAGE4B_SKIP_CONTROLLER is for a development run: set STAGE4B_UNTIL too"
+  note "STAGE4B_SKIP_CONTROLLER=$skip_controller: controller's checks are skipped; it only takes tree 3 out"
+fi
+if [ -n "$design_gate" ]; then
+  [ "$design_gate" = root-issues ] || fail "STAGE4B_DESIGN_GATE=$design_gate: the one policy it arms is root-issues"
+  [ -n "$until" ] || fail "STAGE4B_DESIGN_GATE is for a development run: set STAGE4B_UNTIL too"
+  # Only tree 1 exists under the switch, so a checkpoint past spec-posted, which drives trees 2 to
+  # 4, cannot run.
+  sed -n '1,/^begin spec-posted$/s/^begin //p' "$root/scripts/e2e/stage4b-sandbox-tree.sh" | grep -qxF "$until" ||
+    fail "STAGE4B_DESIGN_GATE runs tree 1 alone, so STAGE4B_UNTIL must be spec-posted or a checkpoint before it, not $until"
+  note "STAGE4B_DESIGN_GATE=$design_gate: the design gate is armed and tree 1 runs alone"
+fi
+if [ -n "$pod_file" ]; then
+  # The run's every pod carries the deployment's block, and the checkpoints after this one rely on
+  # the operator route's pod (its token audience, its route ConfigMap), so the run stops here.
+  [ "$until" = deployment-pod-block ] || fail "LEGION_E2E_POD_FILE is for a development run stopped at it: set STAGE4B_UNTIL=deployment-pod-block"
+  jq -e 'type == "object" and ((.volumes // []) | type == "array") and ((.volume_mounts // []) | type == "array") and ((.env // {}) | type == "object")' "$pod_file" >/dev/null 2>&1 ||
+    fail "LEGION_E2E_POD_FILE=$pod_file is not a JSON object with volumes, volume_mounts and env in runtime.kubernetes.pod's shape"
+  jq -cS . "$pod_file" >"$pod_block" || fail "could not copy LEGION_E2E_POD_FILE=$pod_file into the run"
+  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block, copied into the run as $pod_block (sha256 $(sha256sum "$pod_block" | cut -d' ' -f1); service account $(jq -r '.service_account // "the namespace default"' "$pod_block"), $(jq '.volumes // [] | length' "$pod_block") volumes)"
+fi
 # The production services, each a fully-qualified host (a bare alias resolves through whatever
 # search domain the box or the pod has) and no path. A refusal names the variable, never its value.
 fqdn='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
@@ -3154,34 +3220,6 @@ jq -n --arg revision "$revision" --arg image "$image" \
   --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugins: {envoy: $envoy, legion: $legion}, started: $started}' >"$evidence/run.json"
 note "source $revision; image $image; plugins $(jq -r '.plugins.envoy + " and " + .plugins.legion' "$evidence/run.json")"
 note "daemon bind $bind, advertise_host $host: API http://$host:$port_daemon, worker stream tcp://$host:$port_worker_stream; runtime identity context $runtime_context in $runtime_kubeconfig; operator context $operator"
-if [ -n "$until" ]; then
-  # A name no checkpoint has would run the whole proof as a development run.
-  grep -qxF -e "begin $until" -e "begin \"$until\"" "$root/scripts/e2e/stage4b-sandbox-tree.sh" ||
-    fail "STAGE4B_UNTIL=$until names no checkpoint of this driver"
-  note "STAGE4B_UNTIL=$until: a development run, never the proof"
-fi
-if [ -n "$skip_controller" ]; then
-  [ -n "$until" ] || fail "STAGE4B_SKIP_CONTROLLER is for a development run: set STAGE4B_UNTIL too"
-  note "STAGE4B_SKIP_CONTROLLER=$skip_controller: controller's checks are skipped; it only takes tree 3 out"
-fi
-if [ -n "$design_gate" ]; then
-  [ "$design_gate" = root-issues ] || fail "STAGE4B_DESIGN_GATE=$design_gate: the one policy it arms is root-issues"
-  [ -n "$until" ] || fail "STAGE4B_DESIGN_GATE is for a development run: set STAGE4B_UNTIL too"
-  # Only tree 1 exists under the switch, so a checkpoint past spec-posted, which drives trees 2 to
-  # 4, cannot run.
-  sed -n '1,/^begin spec-posted$/s/^begin //p' "$root/scripts/e2e/stage4b-sandbox-tree.sh" | grep -qxF "$until" ||
-    fail "STAGE4B_DESIGN_GATE runs tree 1 alone, so STAGE4B_UNTIL must be spec-posted or a checkpoint before it, not $until"
-  note "STAGE4B_DESIGN_GATE=$design_gate: the design gate is armed and tree 1 runs alone"
-fi
-if [ -n "$pod_file" ]; then
-  # The run's every pod carries the deployment's block, and the checkpoints after this one rely on
-  # the operator route's pod (its token audience, its route ConfigMap), so the run stops here.
-  [ "$until" = deployment-pod-block ] || fail "LEGION_E2E_POD_FILE is for a development run stopped at it: set STAGE4B_UNTIL=deployment-pod-block"
-  jq -e 'type == "object" and ((.volumes // []) | type == "array") and ((.volume_mounts // []) | type == "array") and ((.env // {}) | type == "object")' "$pod_file" >/dev/null 2>&1 ||
-    fail "LEGION_E2E_POD_FILE=$pod_file is not a JSON object with volumes, volume_mounts and env in runtime.kubernetes.pod's shape"
-  jq -cS . "$pod_file" >"$pod_block" || fail "could not copy LEGION_E2E_POD_FILE=$pod_file into the run"
-  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block, copied into the run as $pod_block (sha256 $(sha256sum "$pod_block" | cut -d' ' -f1); service account $(jq -r '.service_account // "the namespace default"' "$pod_block"), $(jq '.volumes // [] | length' "$pod_block") volumes)"
-fi
 read_bearers
 pass
 
@@ -3329,7 +3367,8 @@ while IFS= read -r line; do note "$line"; done <<<"$built"
 # The build's source is the run's recorded source, or the tree changed between the two.
 [ "$(sed -n 's/^source: //p' <<<"$built")" = "$(jq -r .revision "$evidence/run.json")" ] ||
   fail "the tree changed between prerequisites ($(jq -r .revision "$evidence/run.json")) and the build ($(sed -n 's/^source: //p' <<<"$built"))"
-docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
+docker run -d --name "$pg_container" --label "$run_container_label=$run_container_id" \
+  --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=legion \
   -p "127.0.0.1::5432" mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4 >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
@@ -3339,7 +3378,7 @@ until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" p
 # that keeps sessions in a database), so a role's conversation outlives the issue pod whose disk
 # dies with it. It binds the devbox's private address, not loopback, since the pods dial it as they
 # dial the worker stream.
-session_db_start "$host" --cpus 2 --memory 4g
+session_db_start "$host" --cpus 2 --memory 4g --label "$run_container_label=$run_container_id"
 session_db_ready=1
 note "container $session_db_container: database sessions on $host:$port_session_db ($session_db_image), which every pod reads through the providers Secret's $session_dsn_key (the URL is in an owner-only file, not printed)"
 mkdir -p "$state"
