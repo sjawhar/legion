@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-607",
+  "completed": "2026-10-31T09:20:00Z",
+  "proof": [
+    {
+      "criterion": "Forward merge of main 1a9095e6 (no rebase) gives PR #2391 a CI run on a main whose broker/oauth claims test passes, with the PR's own diff unchanged",
+      "surface": "jj diff fingerprints of the PR's own diff at 3390b679 and 04e390bf; go build/vet and the broker/oauth claims test at the merge head; semantic-line-breaks on the two re-laid docs",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go build ./... && go vet ./... && go vet -tags multiprocess ./cmd/dispatch/ && (cd infra && go vet ./... && go test ./gcp/ -run Connections) && go test -p 1 ./internal/broker/oauth/ -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries; bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md",
+      "observed": "no conflict; fingerprints identical (plain d0a8917d2479, normalised fbb6758c71d8) at both heads; main changed only packages/envoy/AGENTS.md of this PR's files and its layout check passes; build and vet clean, go.work.sum unchanged; the claims test that failed envoy-go at 3390b679 passes; migrations 0150-0156, connections 90. PR comment 6541436301.",
+      "headSha": "04e390bf6e613f7ec9f07473c3ccc0ec25e588f1",
+      "negativeControl": "at 3390b679 (merge ref with main before #2598) envoy-go failed TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries in run 41172450499; at 04e390bf, which carries #2598, the same test passes"
+    }
+  ],
+  "filesChanged": [
+    "04e390bf (forward merge of main 1a9095e6, no conflict): no file of this PR's own diff changed"
+  ]
+}
