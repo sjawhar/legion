@@ -2,46 +2,41 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-31T04:30:00Z",
-  "round": 19,
-  "headTested": "783a30cc69908f4fea54a798c54a8c495a7f765b",
-  "handoffHead": "301ea207c8390eca745f442c2744e0fbacf2bd25",
+  "completed": "2026-10-31T07:50:00Z",
+  "round": 20,
+  "headTested": "3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5",
+  "handoffHead": "5c53eb2b79682cadc46b34655a5e34e8aa863966",
   "roundShape": {
-    "verdict": "confirmation round (forward-merge re-check 72a07b4954ff → 783a30cc6990: the PR's own diff differs only in two docs and one new test, so bare gates only)",
+    "verdict": "confirmation round (forward-merge re-check 783a30cc6990 → 3d5c31a9da84: fingerprint unchanged, bare gates only)",
     "tool": "round-shape.py v3 (dispatch://INFRA-598/artifact/round-shape-py), run from the workspace with 2406",
-    "oldHead": "72a07b4954ff7f3191d375d898a3b6a7f8b3246f",
-    "newHead": "783a30cc69908f4fea54a798c54a8c495a7f765b",
+    "oldHead": "783a30cc69908f4fea54a798c54a8c495a7f765b",
+    "newHead": "3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5",
     "differingFiles": [
       "packages/envoy/AGENTS.md (doc)",
-      "packages/envoy/cmd/dispatch/README.md (doc)",
-      "packages/envoy/internal/dispatch/api/comment_mention_refresh_race_test.go (test, new)"
+      "scripts/e2e/README.md (doc)"
     ],
     "equalOnlyAfterNormalisation": []
   },
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round18-tar-gz (RESULTS.md); round 18's behaviour evidence stands",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round20-partial-md; round 18's behaviour evidence stands",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the committed regression test: 10 of 10 pass at head, and 3 of 3 fail with refreshHeldClaims' old record condition (go -overlay). The committed file is byte-identical to the test I attached in round 18, apart from trailing whitespace, which I compared with it stripped."
+    "how": "Re-ran the implementer's build and vet of packages/envoy at 3d5c31a9 (clean). GitHub reads the PR MERGEABLE."
   },
-  "failures": [
-    {
-      "criterion": "The pull request merges into main (the architect's standing instruction: complete failing on a conflict).",
-      "evidence": "Read at about 04:25Z, after the lanes went green: gh pr view 2406 reads CONFLICTING / DIRTY at 301ea207 against main d7e1daaa. Main's #2474 (d7e1daaa, 'lay out the root guide, the live-proof README and the Kubernetes guide one sentence per line') changed scripts/e2e/README.md, which this PR also changes; it is the only file both sides changed. That is a docs-only conflict, so the next forward merge is a confirmation round if it resolves it as text."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Confirmation round at 783a30cc: the committed refreshHeldClaims regression test, the build step, and the named CI lanes.",
-      "surface": "internal/dispatch/api against Postgres 16; go build and go vet of packages/envoy; tsc in the touched TypeScript packages; GitHub checks at 783a30cc",
-      "command": "go test ./internal/dispatch/api/ -run '^TestARefreshThatLosesToAKeyedRepeatKeepsTheRepeatsClaim$' -count=10; the same with -overlay ov/old-only.json -count=3; (cd packages/envoy && go build ./... && go vet ./...); (cd packages/contracts && bun run typecheck); (cd packages/dispatch && bun run typecheck); gh api repos/sjawhar/legion/commits/783a30cc.../check-runs",
-      "observed": "The regression test passes 10 of 10. Build and vet: no output, exit 0. tsc in contracts and dispatch: no errors. At 783a30cc lint, typecheck, test, pr-title, dispatch, envoy-go and envoy-go-race-api are all success (dispatch was the last, at 04:22Z), and no check failed.",
-      "headSha": "783a30cc6990",
-      "negativeControl": "With the old record condition (`if _, waiting := m.claims[claim.key]; waiting`), the regression test fails 3 of 3."
+      "criterion": "Confirmation round at 3d5c31a9: the PR's own diff changed only in docs, the build step passes, and the named CI lanes are green.",
+      "surface": "round-shape.py over the two heads; go build and go vet of packages/envoy; tsc in the touched TypeScript packages; GitHub checks at 3d5c31a9",
+      "command": "python3 round-shape.py 783a30cc69908f4fea54a798c54a8c495a7f765b 3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5 2406; (cd packages/envoy && go build ./... && go vet ./...); (cd packages/contracts && bun run typecheck); (cd packages/dispatch && bun run typecheck); gh api repos/sjawhar/legion/commits/3d5c31a9.../check-runs",
+      "observed": "round-shape.py lists 2 differing files, both docs, and nothing equal only after normalisation. Build and vet exit 0. tsc is clean in both packages. At 3d5c31a9 lint, typecheck, test, pr-title, dispatch and envoy-go-race-api are success. envoy-go is failure on one test only, TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (internal/broker/oauth), which this PR does not touch (see notes).",
+      "headSha": "3d5c31a9da84",
+      "negativeControl": "The envoy-go failure reproduces without this PR: the same test fails at main 1d35c80b and at the merge base f4ec92ee, and passes at cf152eb4, the parent of main's #2474 (d7e1daaa)."
     }
   ],
   "notes": [
-    "packages/envoy/infra is not touched by this PR, so the infra module's vets do not apply.",
-    "Every red test (5) stays in the suite unmodified; it ran green in envoy-go at 783a30cc."
+    "envoy-go red at 3d5c31a9 is main's defect, not this PR's. Main's #2474 (d7e1daaa) put blank lines between the items of the list under '#### The Dispatch identity the broker can issue' in docs/kubernetes.md. documentedClaims (claims_doc_test.go:156-194) stops at the first blank line, so it reads only 'session'. GitHub shows envoy-go failure on d7e1daaa itself. I reported it to the controller with this evidence; it answered that sjawhar/legion#2598 (INFRA-588) fixes it and lands first, after which #2406's envoy-go passes on the merge ref with no change here. #2598 was still open at 07:45Z. envoy-go is not in main's required set (lint, typecheck, test, pr-title).",
+    "The pod was recreated during this round. The round-shape, build and tsc results were recorded on Dispatch (round20-partial) before CI finished, and the CI reads were made afterwards.",
+    "packages/envoy/infra is not touched, so its vets do not apply. No load run in this round."
   ]
 }
