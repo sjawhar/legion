@@ -19,15 +19,17 @@ import {
 import { type DocumentBlock, splitBlocks } from "./document-blocks";
 
 /**
- * One block of the change: the block as it stands in `before`, in `after`, or in both, and the
+ * One block of the change: the block as it stands in `before`, in `after`, or in both, the
  * heading of the section a change sits in (the nearest heading before it, which may be folded
- * away or outside the view).
+ * away or outside the view), and the marked words a changed block draws.
  */
 interface ChangeEntry {
   kind: ChangeKind;
   before: DocumentBlock | undefined;
   after: DocumentBlock | undefined;
   heading: string | undefined;
+  /** What a changed block's marks draw, and nothing at all on a block of any other kind. */
+  words: KeyedWordPart[];
 }
 
 /** A word run of a changed block, under the key its mark renders with: `same` is unmarked,
@@ -62,8 +64,25 @@ function entryHeading(
   return pair.before === undefined ? undefined : sectionHeading(beforeBlocks, pair.before);
 }
 
+/** The key the entry at `index` renders under, and which its words' keys hang off: its place in
+ *  the change, which folding and unfolding leaves alone. */
+function blockKey(index: number): string {
+  return `block:${index}`;
+}
+
+/** A changed block's words under the keys their marks render with: what `before` lost in a `del`,
+ *  what `after` gained in an `ins`. */
+function keyedWords(before: string, after: string, key: string): KeyedWordPart[] {
+  return changedWords(before, after).map((part, index) => ({
+    ...part,
+    key: `${key}:word:${index}`,
+  }));
+}
+
 /** The two block lists paired up on their whole source (`change-set.ts`, which the reading pane's
- *  approval marks pair their rendered text with), each pair carrying its blocks and its heading. */
+ *  approval marks pair their rendered text with), each pair carrying its blocks, its heading and,
+ *  for a changed pair, its marked words. A pair is diffed word by word here, once per pair of
+ *  versions, so that opening a fold only lays out rows the view already holds. */
 function changeEntries(
   beforeBlocks: readonly DocumentBlock[],
   afterBlocks: readonly DocumentBlock[]
@@ -71,12 +90,20 @@ function changeEntries(
   return pairBlocks(
     beforeBlocks.map((block) => block.source),
     afterBlocks.map((block) => block.source)
-  ).map((pair) => ({
-    kind: pair.kind,
-    before: pair.before === undefined ? undefined : beforeBlocks[pair.before],
-    after: pair.after === undefined ? undefined : afterBlocks[pair.after],
-    heading: entryHeading(pair, beforeBlocks, afterBlocks),
-  }));
+  ).map((pair, index) => {
+    const before = pair.before === undefined ? undefined : beforeBlocks[pair.before];
+    const after = pair.after === undefined ? undefined : afterBlocks[pair.after];
+    return {
+      kind: pair.kind,
+      before,
+      after,
+      heading: entryHeading(pair, beforeBlocks, afterBlocks),
+      words:
+        pair.kind === "changed" && before !== undefined && after !== undefined
+          ? keyedWords(before.source, after.source, blockKey(index))
+          : [],
+    };
+  });
 }
 
 /**
@@ -106,33 +133,15 @@ function foldedEntries(entries: readonly ChangeEntry[]): boolean[] {
   return folded;
 }
 
-/** A changed block's words under the keys their marks render with: what `before` lost in a `del`,
- *  what `after` gained in an `ins`. */
-function keyedWords(before: string, after: string, key: string): KeyedWordPart[] {
-  return changedWords(before, after).map((part, index) => ({
-    ...part,
-    key: `${key}:word:${index}`,
-  }));
-}
-
-/** The entry's rendered row: the text it shows and, for a changed block, its marked words. */
-function blockRow(entry: ChangeEntry, key: string): ChangeRow {
-  if (entry.kind === "changed" && entry.before !== undefined && entry.after !== undefined) {
-    return {
-      key,
-      kind: "block",
-      change: "changed",
-      source: entry.after.source,
-      words: keyedWords(entry.before.source, entry.after.source, key),
-    };
-  }
+/** The entry's rendered row: the text it shows and, for a changed block, the words it diffed. */
+function blockRow(entry: ChangeEntry, index: number): ChangeRow {
   const block = entry.after ?? entry.before;
   return {
-    key,
+    key: blockKey(index),
     kind: "block",
     change: entry.kind,
     source: block === undefined ? "" : block.source,
-    words: [],
+    words: entry.words,
   };
 }
 
@@ -156,7 +165,7 @@ function buildRows(entries: readonly ChangeEntry[], opened: ReadonlySet<number>)
       rows.push({ key: `heading:${index}`, kind: "heading", source: entry.heading });
       shownHeading = entry.heading;
     }
-    rows.push(blockRow(entry, `block:${index}`));
+    rows.push(blockRow(entry, index));
     const block = entry.after ?? entry.before;
     if (block?.kind === "heading") shownHeading = block.source;
   };

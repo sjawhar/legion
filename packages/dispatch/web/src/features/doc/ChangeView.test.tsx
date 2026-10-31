@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { fireEvent, render, within } from "@testing-library/react";
 
 import { ChangeView } from "./ChangeView";
+import * as changeSet from "./change-set";
 
 /**
  * The marks a block carries, in order: `del` for what the earlier version held, `ins` for what
@@ -188,6 +189,50 @@ test("two versions that hold the same text show the document, unmarked and unfol
     expect(card.querySelector("ins, del")).toBeNull();
     expect(within(card).queryByRole("button")).toBeNull();
   } finally {
+    view.unmount();
+  }
+});
+
+test("opening a fold diffs no changed block the view already diffed", () => {
+  const version = (first: string, middle: string, last: string): string =>
+    `${first}\n\nA.\n\nB.\n\nC.\n\nD.\n\n${middle}\n\nE.\n\nF.\n\nG.\n\nH.\n\n${last}\n`;
+  const changedWords = spyOn(changeSet, "changedWords");
+  const view = render(
+    <ChangeView
+      after={version("First changed.", "Middle changed.", "Last changed.")}
+      before={version("First.", "Middle.", "Last.")}
+    />
+  );
+  try {
+    const card = within(view.container).getByTestId("change-view");
+    // One word diff per changed pair, and none for the blocks both versions hold.
+    const diffed = changedWords.mock.calls.length;
+    expect(diffed).toBe(3);
+
+    const folds = within(card).getAllByRole("button");
+    expect(folds.map((fold) => fold.textContent)).toEqual([
+      "Show 2 unchanged blocks",
+      "Show 2 unchanged blocks",
+    ]);
+    fireEvent.click(folds[0]);
+    expect(changedWords.mock.calls.length).toBe(diffed);
+    fireEvent.click(within(card).getByRole("button", { name: "Show 2 unchanged blocks" }));
+    expect(changedWords.mock.calls.length).toBe(diffed);
+    expect(blocks(view.container).map(([change]) => change)).toEqual([
+      "changed",
+      "unchanged",
+      "unchanged",
+      "unchanged",
+      "unchanged",
+      "changed",
+      "unchanged",
+      "unchanged",
+      "unchanged",
+      "unchanged",
+      "changed",
+    ]);
+  } finally {
+    changedWords.mockRestore();
     view.unmount();
   }
 });
