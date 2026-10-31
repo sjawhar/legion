@@ -2,38 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-841",
-  "completed": "2026-10-30T23:45:00Z",
-  "round": 2,
-  "decision": "changes_requested",
+  "completed": "2026-10-31T00:20:00Z",
+  "round": 3,
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 3,
-  "roundOneFindings": "All three fixed in 6b9377f42e78: the deadline reset is gone and the repaired reconcile is bounded by repairedReconcileWait = reconcileWait + 30 s (the bus's maxBackoff, internal/bus/recovery.go:309), proven by the tester's 32 s sleep probe; the repair callback and the copied loop are replaced by dispatchStart.awaitReconciled and awaitHookFailure; the HookedConnectionEvents assertion is deleted.",
+  "roundTwoFindings": "All four fixed in ec52456102: the final check is testnats.AwaitStreamCopies(t, cluster.JetStream(t), bus.Stream, 3), which needs Replicas == 3 and three settled copies (internal/testnats/streams.go:40-43, 57-62); awaitReconciled's timeout reports HookStall(), the stall and the last failed run's error (internal/bus/nats.go:553-569); awaitHookFailure fails on HookedConnectionEvents() >= 1, which moves only on a successful run (internal/bus/recovery.go:216-217) of the publisher's one hook (nats.go:422-424); the four comments match the code.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:238-241",
-      "description": "A second assertion that cannot fail: awaitReconciled (:236) returns only once reconciledFor(s.boot) held on this stream, resolveWith(t, overrides) resolves the same boot, and the keeper only raises, so the Errorf never fires while its message claims to report copies. Replace it with testnats.AwaitStreamCopies(t, cluster.JetStream(t), bus.Stream, 3) (internal/testnats/streams.go:57), which checks the three settled copies the test's doc promises."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:104-108",
-      "description": "awaitReconciled's timeout names the wrong error: reconcileFailure returns the first logged failure, which after a repair is always the expected pre-repair 'peer offline' WARN, not what blocks the reconcile now. Report the client's HookStall() (stall and the last run's error, internal/bus/nats.go:560-568) in the fatal instead."
+      "severity": "minor",
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:124-125",
+      "description": "awaitHookFailure's timeout prints hooked events, which there is always 0 since :121-122 fails first on any success. The value is true and consistent with the timeout; judged not a defect, no change asked."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:121,126-130",
-      "description": "awaitHookFailure copies awaitReconciled's own-reconcile check. HookedConnectionEvents() >= 1 alone says the server accepted the start, since the reconcile is the publisher's only hook and ConnectOwningStream registers it first (internal/bus/nats.go:423, 532-538); fatal on that and drop the second reconciledFor."
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:179",
+      "description": "reconcileFailure returns a hookFailure; the name is accurate for this publisher, whose only hook is the reconcile. Judged not a defect, no rename asked."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:30-34,39,59-61,217-220",
-      "description": "Comments: reconcileWait also bounds awaitHookFailure's wait for a logged failure; the package comment's added sentence and connectDispatchStream's field list repeat the type and constant docs; the test doc says 'within repairedReconcileWait of the restart', but the deadline starts once cluster.AwaitReady returns."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/solutions/testing/a-cmd-test-of-a-background-connect-builds-its-client-with-mains-options-and-reads-failures-from-the-log-pr2362.md:38-42",
-      "description": "Fixed by the reviewer in 60fa08227392: the active solution doc said the helper reads either logged failure as a refusal; it now says a retried failure no longer ends startDispatchStream and only awaitHookFailure reads a refusal."
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:102-103",
+      "description": "awaitReconciled's timeout does not print Connected(); the two cases where that would matter do not arise in these tests. Judged not a defect."
     }
   ]
 }
