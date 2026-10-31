@@ -49,6 +49,14 @@ type SessionEntry struct {
 	// build; both empty for a session whose plugin predates the fields.
 	Plugin        string `json:"plugin,omitempty"`
 	PluginVersion string `json:"plugin_version,omitempty"`
+	// ClientInstanceID identifies the client instance that registered this session: one Oh My
+	// Pi Envoy extension instance, one Claude Code channel-server process, each minting the id
+	// at its own start and sending it on every registration. A soft claim that names this
+	// session as its predecessor takes the role only when the claimant carries the same id, or
+	// when either side carries none: the same conversation continues inside the instance that
+	// held it, while another instance's live session keeps its role however it is named. Empty
+	// for a client that predates the field.
+	ClientInstanceID string `json:"client_instance_id,omitempty"`
 }
 
 // HostOrMachine is the session's real machine for display: Host when the registering plugin

@@ -92,6 +92,60 @@ func TestSessionRegistry_PutAndGetKeepsThePluginAndItsVersion(t *testing.T) {
 	}
 }
 
+// The stored entry keeps the client instance that registered the session, so a soft claim naming
+// a predecessor can read whose instance that predecessor belongs to.
+func TestSessionRegistry_PutAndGetKeepsTheClientInstanceID(t *testing.T) {
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+
+	entry := SessionEntry{Port: 13381, MachineID: "test-machine", ClientInstanceID: "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"}
+	if err := reg.Put("ses_instance", entry); err != nil {
+		t.Fatalf("put failed: %v", err)
+	}
+
+	got, err := reg.Get("ses_instance")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	if got.ClientInstanceID != "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a" {
+		t.Fatalf("got %+v, want the registered client instance id", got)
+	}
+}
+
+// A re-registration carrying no client instance id clears the one stored: the handler builds the
+// entry fresh from each subscribe body, so a client that predates the field (or one that stopped
+// sending it) leaves the session with the empty id that keeps the old soft-claim rule, rather
+// than with another instance's id it no longer belongs to.
+func TestSessionRegistry_PutWithoutClientInstanceIDClearsTheStoredOne(t *testing.T) {
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+
+	registered := SessionEntry{Port: 13381, MachineID: "test-machine", ClientInstanceID: "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"}
+	if err := reg.Put("ses_instance_cleared", registered); err != nil {
+		t.Fatalf("first put failed: %v", err)
+	}
+
+	// The same process heartbeating again (same port, so no claim arbitration intervenes),
+	// this time with no id in its payload.
+	if err := reg.Put("ses_instance_cleared", SessionEntry{Port: 13381, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("second put failed: %v", err)
+	}
+
+	got, err := reg.Get("ses_instance_cleared")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	if got.ClientInstanceID != "" {
+		t.Fatalf("got %+v, want the stored client instance id cleared by a registration without one", got)
+	}
+}
+
 func TestSessionRegistry_GetNotFound(t *testing.T) {
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
