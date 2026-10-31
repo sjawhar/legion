@@ -400,7 +400,7 @@ stored subject, and no sweep calls the listener.
 nats.js keeps nothing for a client that is disconnected, so a message published while this
 session's NATS connection, or one of its subscriptions, is down never reaches that subscription.
 The notification stream (`ENVOY_NOTIFICATIONS`, 72 hours) keeps what it captures, and the session
-reads that back from its listener, `POST /v1/replay` (the "Listener API" table of
+reads that back from its listener, `POST /v1/replay` (the "Listener API" list of
 `packages/envoy/AGENTS.md`), through the shared engine `@legion/envoy-client/replay`
 (`createReplayEngine`, whose doc comments state its rules, and which words the cards);
 `src/missed-messages.ts` holds this package's transcript entries. The live path is unchanged in

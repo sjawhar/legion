@@ -256,10 +256,11 @@ func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bo
 		switch verdict {
 		case servePortConsumerRelays:
 			// The session's consumer holds this message after all - its entry moved to consumer
-			// delivery while the push waited - and the relay of that consumer pushes it, which
-			// target answers only while that relay would push rather than skip this message
-			// (relayAcksOnAnAttempt). The attempt the path that handed this push over recorded is
-			// cleared and no dedupe key is recorded: only a real push writes what the relay reads
+			// delivery while the push waited - and the relay of that consumer delivers it. Clearing
+			// the attempt the path that handed this push over recorded is what tells that relay so:
+			// it holds the message while the record stands and pushes it once the record is gone
+			// (session_relay.go's holdWhilePushedElsewhere). No dedupe key is recorded: only a real
+			// push writes what the relay reads as a copy the session already has
 			// (session.SessionEntry.ConsumerRelaysStored).
 			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
 				sessionID:    push.sessionID,
@@ -275,6 +276,11 @@ func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bo
 			})
 			return true, nil
 		case servePortGone:
+			// Back to the durable, which delivers the message again under the session's new state.
+			// A redelivery the durable path then skips because the session's consumer holds the
+			// message (session.SessionEntry.ConsumerRelaysStored) loses nothing: clearing the
+			// attempt leaves the message to the relay of that consumer, which is holding it
+			// unacked until exactly that record is gone (session_relay.go).
 			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
 				sessionID: push.sessionID,
 				log: func(logger *logging.Logger) {
@@ -355,15 +361,12 @@ func (w *servePortWorkers) target(push servePortPush) (session.SessionEntry, ser
 		interest = store.Interest{SessionID: push.sessionID}
 	}
 	// The copy the session's consumer may hold is this message as it is stored (storedSubject).
-	// A push the relay of that consumer would ack unpushed, on the attempt the path that handed
-	// this push over recorded, is resolved against no stored copy instead: the relay delivers
-	// nothing it skips, so this worker is the only delivery left and finishes its push
-	// (relayAcksOnAnAttempt).
-	storedSubject := push.storedSubject()
-	if relayAcksOnAnAttempt(w.cfg.followedTopicRules(), push.sessionID, entry, push.item) {
-		storedSubject = ""
-	}
-	result, err := w.cfg.deliverer.Resolve(push.item, interest, &entry, storedSubject, push.storedSeq)
+	// A session whose entry moved to consumer delivery under this push is relayed from there, and
+	// the relay of that consumer holds the message unacked while this push is in flight rather
+	// than acking it on the attempt the handing-over path recorded (session_relay.go's
+	// holdWhilePushedElsewhere): dropping the push below hands the message to that relay rather
+	// than losing it.
+	result, err := w.cfg.deliverer.Resolve(push.item, interest, &entry, push.storedSubject(), push.storedSeq)
 	switch {
 	case err != nil:
 		return entry, servePortGone

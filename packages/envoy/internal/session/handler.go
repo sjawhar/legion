@@ -58,6 +58,10 @@ func reasonFor(err error) HandleAgentReason {
 type HandleAgentResult struct {
 	Delivered bool
 	Skipped   bool
+	// Relayed is set with Delivered and Skipped for a message the session's own consumer holds,
+	// which the relay of that consumer delivers (DeliveryResult.Relayed): the caller pushes
+	// nothing and records nothing about it, neither an attempt nor a dedupe key.
+	Relayed bool
 	// Push is set by ResolveStoredAgentMessage for a serving-port session this listener owns, with its
 	// entry: the caller pushes the message to the session's port (Deliverer.Push). HandleAgentMessage
 	// makes that push itself, and never sets it.
@@ -164,5 +168,5 @@ func delivered(delivery DeliveryResult) HandleAgentResult {
 	if delivery.Push {
 		return HandleAgentResult{Push: true, Entry: delivery.Entry}
 	}
-	return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped}
+	return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped, Relayed: delivery.Relayed}
 }
