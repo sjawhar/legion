@@ -1,7 +1,10 @@
 // AskGate: before a root session's scoped Dispatch write executes, one model call judges it
-// against AskGate's rules (rules.md) and answers `allow` or `revise`. `askgate.ts` is the entry
-// that binds Oh My Pi's completion call and buildSessionContext; everything else lives here so the
-// tests drive it through a fake `pi`, a fake `ctx` and stubs.
+// against AskGate's charter (rules.md) and answers `allow` or `revise`, and a call that opens a
+// new ask for a person also gets the rules check (`rules-check.ts`, below). `askgate.ts` is the
+// entry that binds Oh My Pi's completion call and buildSessionContext; the new asks a call opens
+// are read in `@legion/envoy-client/askgate-new-asks`, which the `dispatch` CLI reads too, the
+// breaker's counting in `breaker.ts` and the text both checks share in `text.ts`; everything
+// else lives here so the tests drive it through a fake `pi`, a fake `ctx` and stubs.
 //
 // What this is not: AskGate reviews the writes of a cooperating agent, and it is no sandbox. A
 // process running as the same user defeats it. It can remove the record or a marker, turn the
@@ -37,8 +40,12 @@
 //     backslash at the end of a line continues the command, as bash reads it. The one
 //     here-document has a quoted delimiter (`'EOF'` or `"EOF"`), before or after the one `2>&1`.
 //     The one pipe stage is `head` or `tail`, alone or with `-n N`, `-nN` or `-N`, which reads the
-//     output after the CLI has its words. Nothing else: no assignment, other statement, other
-//     pipe, `;`, `||`, `&`, other redirect or comment.
+//     output after the CLI has its words. One shell comment may stand where the command's line
+//     ends — after its last word and after every `2>&1`, here-document opener and `head` or
+//     `tail` stage, which is where bash reads one — and only when its words are override flags
+//     alone (`# --advisor-rebuttal '<line>'`, the form a rebutted command is handed back in),
+//     read as those overrides and no part of what runs (`overrideComment`). Nothing else: no
+//     assignment, other statement, other pipe, `;`, `||`, `&`, other redirect or other comment.
 //     The subcommand is `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
 //     `summary` is what the person approves), `issue` with `--spec` or `--spec-file`, or
 //     `artifact` unless its literal `--name` and literal `--path` both show it is no markdown
@@ -113,27 +120,43 @@
 // records the mode it ran under as `verdictMode`.
 //
 // Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped 5 s under the runner's own ceiling for a
-// tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) and raced from
-// handler entry. A ceiling that leaves under 10 s, and an OMP_ASKGATE_TIMEOUT_MS that is no
-// positive integer, throw when the gate binds: the entry then refuses each write the gate would
-// review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off. A deadline
-// under 30 s binds, and logs one warning that names the ceiling, the deadline and the key to raise:
-// at the default ceiling the deadline is 25 s, which a review of a long session often exceeds, and a
-// review that times out lets the write post.
+// tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) — the room the
+// handler still needs once that deadline passes, for the aborted call's usage report and for the
+// entry — and raced from handler entry. The Dispatch decision record is no part of that room: it
+// runs after the handler has returned. A ceiling that leaves under 10 s, and an
+// OMP_ASKGATE_TIMEOUT_MS that is no positive integer, throw when the gate binds: the entry then
+// refuses each write the gate would review (`loadFailureGate`), since only `askgate.enabled:
+// false` turns AskGate off. A deadline under 30 s binds, and logs one warning that names the
+// ceiling, the deadline and the key to raise: at the default ceiling the deadline is 25 s, which a
+// review of a long session often exceeds, and a review that times out lets the write post.
 //
 // Per gated call, in order:
 //   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON, or
 //     `--advisor-rebuttal '<one line>'` among a `dispatch` command's flags. The key is stripped
 //     on the outer `write` event (before the device validates its arguments), the flag from the
-//     `bash` command whatever the gate decides (the CLI would refuse it), and the call runs
-//     unasked; the agent is told its rebuttal was recorded and removed before sending. At most
-//     64 unspent device rebuttals are remembered.
+//     `bash` command whatever the gate decides (the CLI would refuse it) and put back as a shell
+//     comment where the command's line ends (`keepOverrideVisible`), so the agent's record of its
+//     call still shows it; that command sent again reads the comment as the same override and
+//     comes back the same. Each override is written as quoted words the shell expands nothing in,
+//     and the gate reads the commented command back as the same call before it hands it over: an
+//     override it cannot write that way is removed instead, and the acknowledgement says so. The
+//     call runs unasked, and the agent is told the override as it sent it and that its rebuttal
+//     was recorded. A device's record lacks the field, and its note says AskGate removed it. At
+//     most 64 unspent device rebuttals are remembered.
 //   - halted: three consecutive failures to reach a verdict (no model, timeout, every model of the
 //     chain erroring, no parsable answer) stop the gate for the session, with one UI notice. The
 //     halt, the count, the breaker and the rebuttals reset on session_switch and session_branch.
-//   - breaker: two revises on one target (the device plus its issue/ask/artifact/project
-//     values) send the third attempt unasked, and say so; the second revise already warns that
-//     it will. An allow, a rebuttal or a trip resets the target.
+//   - breaker: two refusals of one thing on one target (the device plus its issue/ask/artifact/
+//     project values) send the third attempt at it unasked, and say so; the second refusal
+//     already warns that it will. A thing is each new ask a call opens, or the call as a whole
+//     when it opens none; an upload is each ask block of its document and the upload itself (its
+//     name and the digest of the text the gate reviewed), never the call as a whole (`callKeys`).
+//     A refusal counts only things of the call it refused (`refusalThings`): a rules refusal the
+//     asks it matched, a charter refusal each thing of any other call, and of an upload the asks
+//     the rules check judged, or the upload itself where it judged none. Only a refusal counts: a
+//     warn-mode charter revise sends the call, so it never advances the breaker, while a rules
+//     match refuses in either mode and always does. An allow, a rebuttal or a trip resets the
+//     target, every thing on it.
 //   - no-model-role / skipped: neither `@askgate` (modelRoles.askgate) nor `@default` resolves, or
 //     the session's primary model is on another provider than the gate's. Nothing is rendered or
 //     sent. With no model role the call is refused in both modes, naming the roles to set; it never
@@ -150,6 +173,28 @@
 //     {"decision":"allow"} or {"decision":"revise","reason":"…"}. The reason reaches the agent
 //     verbatim but for a tag-opening `<` (see `agentFacing`), capped at 8 KiB, and is recorded
 //     as `deliveredReason`.
+//   - rules: a call that opens a new ask for a person gets a second model call beside the charter
+//     call, on the same chain, deadline, transcript and stop, which judges only those asks and
+//     only against two rules (rule-check.md): an ask whose own recommendation is to change
+//     nothing, and an ask for the person's hands where the agent did not try the access it has.
+//     A new ask (`@legion/envoy-client/askgate-new-asks`) is a `dispatch ask`, each `:::ask{`
+//     opener a `dispatch doc-edit` insert, a `dispatch issue` spec or a markdown `dispatch
+//     artifact` upload writes, and each block a doc-edit retypes into an ask. For a retype the
+//     gate reads the block's own text from Dispatch, and for an upload the ids the version it
+//     replaces already holds, so a re-upload judges only the asks it adds; each read goes
+//     through the Dispatch the call's own directory configures (`Deps.dispatchClient`, the
+//     directory `readArgs` names lazily). When the answer names an ask that matches `no_change`
+//     or `untried_access`, AskGate refuses the call in every mode, naming each matching ask and
+//     putting the charter's revise reason after the rules reason; no marker is minted for it. A
+//     rules call that fails, times out or gives no verdict changes nothing; three of those in a
+//     row write one line to the host's plain log (`runtimeLogger`), show one UI notice where
+//     there is a UI, and add the same note to that call's own result. A rules verdict, a
+//     session_switch or a session_branch resets that count. The rules reason never feeds the
+//     charter request, and only the charter call moves the halt count. The entry adds `rule`,
+//     `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleError`, `ruleModel`, `ruleLatencyMs`,
+//     `ruleTextMissing`, `ruleAsksCut` and `ruleAsksPartial`, and its `usage` and `promptBytes`
+//     sum both calls. The two calls run side by side, so `charterLatencyMs` and `ruleLatencyMs`
+//     say what each cost of the gate's whole `latencyMs`.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
 // usage, the aborted one included. That record is what lets a write out unreviewed: when the
@@ -165,6 +210,29 @@
 // before the session is sealed. No verdict is not permission: block mode refuses either, warn mode
 // lets it go, and neither counts toward the halt. OMP_ASKGATE_DUMP names a file each gate's system
 // and user prompts are appended to, owner-only and never through a symlink.
+// A gated call whose rules check ran, and one the agent sent anyway, is also published to Dispatch
+// (`decision-record.ts`): the entry above reaches only this machine's disk, and the session that
+// counts the rule decisions over a fortnight holds a Dispatch token and nothing else. That write
+// carries no ask text and no quote, and never changes the decision. It runs after the handler has
+// returned, so no review is ever cut short to pay for it: the handler hands it to the session's
+// recorder, whose write runs until Dispatch has answered it or the session's shutdown cuts it,
+// and keeps the wait for it in a pending set. A record that cannot be written — an error, or the
+// shutdown's cut — writes one line to the host's plain log (`runtimeLogger`) and appends one
+// `advisor-gate-record` entry carrying `toolCallId`, `tool` and `recordError`; the `advisor-gate`
+// entry it belongs to is written already, so `askgate-report.ts` counts the gated call from that
+// one and the follow-up as a record not confirmed. At shutdown the handler waits for what is still
+// pending, before the markers are released, so a record still lands before the session is sealed;
+// what ends that wait is the cut the entry owns (`askgate.ts`, `RECORD_CUT_DELAY_MS`). The records
+// of one session are written one at a time, and each carries the time the gate made it, which is
+// what the reader counts by.
+// The order, per call: the override is put back as a comment before the review, so the
+// acknowledgement the review renders says where it went and the mint reads the command that
+// finally runs; then, once the decision settles, the halt count, the rules count, the block
+// reset, the entry, the marker, that record started, the notes. The mint comes only where the
+// decision does not block, so no refused call ever leaves a marker; a call whose own tool ended
+// while the gate still held it — its review is the await such an end falls in — is minted none
+// either, since nothing of it runs any more, and its entry says `mintSkipped: "call-ended"`. The
+// record starts after the mint, so it carries the decision the call finally got.
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -178,10 +246,36 @@ import {
   operandPath,
   uploadIsDocument,
 } from "@legion/envoy-client/askgate-marker";
+import type { DispatchSession } from "../../src/dispatch-session";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
+import { Breaker, breakerKey, callKeys, refusalThings } from "./breaker";
+import type { DecisionRecorder } from "./decision-record";
+import ruleCheckRules from "./rule-check.md" with { type: "text" };
+import ruleCheckSystem from "./rule-check-system.md" with { type: "text" };
 import rules from "./rules.md" with { type: "text" };
+import {
+  type Answer,
+  matchLines,
+  RULE_FAILURE_OUTCOMES,
+  type RuleName,
+  type RuleOutcome,
+  type RulesCheck,
+  renderRuleRefusal,
+  runRulesCheck,
+  type Usage,
+  type Walked,
+} from "./rules-check";
+import {
+  agentFacing,
+  byteLength,
+  clipBytes,
+  escaped,
+  escapeXml,
+  lastLineJson,
+  renderTemplate,
+} from "./text";
 
 const SCOPED_DEVICES = [
   "dispatch_ask",
@@ -217,14 +311,15 @@ const INLINE_FLAGS = ["--content", "--content-file"];
 const INDIRECT_FLAGS = ["--name-file", "--path-file"];
 /** Flags under which a `dispatch` command sends nothing. */
 const NO_SEND_FLAGS = ["--dry-run", "--help"];
-const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to"] as const;
 const REBUTTAL_KEY = "advisor_rebuttal";
 const REBUTTAL_FLAG = "--advisor-rebuttal";
 export const DRY_RUN_TIMEOUT_MS = 10_000;
 const GATE_TIMEOUT_MS = 90_000;
 // The runner refuses a tool_call handler that outlives extensionHandlers.toolCallTimeoutMs, so the
 // gate's deadline stays this far under it: room for the aborted call to report its usage
-// (ABORT_GRACE_MS) and for the record. Below MIN_DEADLINE_MS a verdict is hopeless and the gate does not bind.
+// (ABORT_GRACE_MS) and for the entry. The decision record is started as the handler returns and
+// awaited by nothing of the call, so it costs the deadline nothing. Below MIN_DEADLINE_MS a
+// verdict is hopeless and the gate does not bind.
 const CEILING_MARGIN_MS = 5_000;
 const ABORT_GRACE_MS = 2_000;
 const MIN_DEADLINE_MS = 10_000;
@@ -235,7 +330,10 @@ const WARN_DEADLINE_MS = 30_000;
 const RECOMMENDED_CEILING_MS = 120_000;
 // The runner gives a session_shutdown handler 2 s (SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS) and then seals
 // the session, dropping any later entry: gates abandoned there get a shorter grace, and the handler
-// waits at most SHUTDOWN_WAIT_MS for their records.
+// waits at most SHUTDOWN_WAIT_MS for their entries and for the decision records they start. The
+// entry's own handler cuts a record still pending RECORD_CUT_DELAY_MS after the shutdown began,
+// which falls inside that wait, so the `advisor-gate-record` entry of a record that could not land
+// is appended while the handler still holds the session.
 const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
 /**
@@ -251,15 +349,19 @@ const UNREVIEWED_OUTCOMES: ReadonlyArray<GateEntry["outcome"]> = [
 ];
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 const GATE_ARGS_MAX_BYTES = 64 * 1024;
-// A revise reason carries a rewritten ask question of up to ASK_QUESTION_MAX (2,000) UTF-16 units,
-// up to about 6,000 UTF-8 bytes, with the failure names and quoted words on top. The cap holds a
-// full-length rewrite whole: a clip falls at its end, where the options and recommendation sit.
-const GATE_REASON_MAX_BYTES = 8 * 1024;
 // The output of a `dispatch` run the gate quotes in a failure.
 const GATE_PRINTED_MAX_BYTES = 2 * 1024;
-const GATE_BREAKER_REVISES = 2;
 const GATE_HALT_AFTER_FAILURES = 3;
+/** Rules calls in a row without a rules verdict that bring the session's one notice and log line. */
+const RULE_NOTICE_AFTER_FAILURES = 3;
 export const ADVISOR_GATE_ENTRY_TYPE = "advisor-gate";
+/**
+ * The follow-up entry of a decision whose Dispatch record was never written: the `advisor-gate`
+ * entry of the call is in the session already, and the record runs after the handler returned, so
+ * what the record lost is recorded under its own type. `askgate-report.ts` reads `advisor-gate`
+ * entries alone and passes over these.
+ */
+export const ADVISOR_GATE_RECORD_ENTRY_TYPE = "advisor-gate-record";
 /**
  * The model roles the gate asks, in order: `askgate` when it is configured, else `default`, so a
  * session with no askgate role runs the gate on its own default model. The role used keys its
@@ -275,31 +377,39 @@ const MODES = ["warn", "block"] as const;
 /** The custom entry type the experiments extension records a session's arms under. */
 const EXPERIMENTS_ENTRY_TYPE = "experiments";
 const XD_PATH = /^xd:\/\/([a-z_]+)$/;
-// Room kept for a clip marker (` … [elided N bytes]`, at most 32 bytes) and the window's elision line.
-const CLIP_MARKER_BYTES = 32;
+// Room kept for the transcript window's elision line.
 const WINDOW_MARKER_BYTES = 64;
 const SEPARATOR = "\n\n";
 
 export type Mode = (typeof MODES)[number];
 type Input = Record<string, unknown>;
-export type Usage = {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  cost: number;
-};
+
+/** Both model calls' spend on one entry; undefined when neither was billed. */
+function addUsage(a: Usage | undefined, b: Usage | undefined): { usage: Usage } | undefined {
+  if (a === undefined) return b === undefined ? undefined : { usage: b };
+  if (b === undefined) return { usage: a };
+  return {
+    usage: {
+      input: a.input + b.input,
+      output: a.output + b.output,
+      cacheRead: a.cacheRead + b.cacheRead,
+      cacheWrite: a.cacheWrite + b.cacheWrite,
+      cost: a.cost + b.cost,
+    },
+  };
+}
 export interface GateEntry {
   advisor: "AskGate";
   tool: string;
   path: string;
   toolCallId: string;
   /**
-   * `revise`: the call was not passed as sent (a revise verdict; in block mode a call given up
-   * without a verdict, a literal call whose file the gate could not read, or a gated write the
-   * CLI found no marker for, `unmarked`; in any mode no model role or a gate that did not load). A
-   * call was refused exactly when this is `revise` and either `verdictMode` is `block` or
-   * `outcome` is `no-model-role` or `load-failed`.
+   * `revise`: the call was not passed as sent (a revise verdict; a new ask a rule matched, in
+   * either mode; in block mode a call given up without a verdict, a literal call whose file the
+   * gate could not read, or a gated write the CLI found no marker for, `unmarked`; in any mode no
+   * model role or a gate that did not load). A call was refused exactly when this is `revise` and
+   * either `verdictMode` is `block`, `outcome` is `no-model-role` or `load-failed`, or `rule` is
+   * set.
    */
   decision: "allow" | "revise";
   outcome:
@@ -325,8 +435,15 @@ export interface GateEntry {
   /** The answer's tail when it held no verdict. */
   raw?: string;
   latencyMs: number;
+  /**
+   * The revises the gate answered on this call's target, the warn-mode ones included, since the
+   * breaker last reset it (an allow, a rebuttal or a trip there), this call included when it is one.
+   */
   revisesForKey: number;
   argsDigest: string;
+  /** The call's breaker target in readable form: the tool, then each of the issue, ask, artifact, project and reply it names. */
+  target?: string;
+  /** Bytes of every prompt sent: the charter call's and, for a call that opens a new ask, the rules call's. */
   promptBytes?: number;
   /**
    * On every entry that asked the model: the call's arguments exactly as the model saw them (JSON,
@@ -339,8 +456,67 @@ export interface GateEntry {
   failedModels?: Array<{ model: string; error: string }>;
   /** The deadline this call raced: OMP_ASKGATE_TIMEOUT_MS or 90 s, clamped under the runner's handler ceiling. */
   deadlineMs?: number;
-  /** Every attempt's spend, the aborted one included. */
+  /** Every attempt's spend of both calls, the aborted one included. */
   usage?: Usage;
+  /** The rule the first new ask that matched broke. Set exactly when the rules check refused the call. */
+  rule?: RuleName;
+  /** That ask's number in the rules request, from 1. */
+  ruleAsk?: number;
+  /** The words of that ask the rules call quoted. */
+  ruleQuote?: string;
+  /**
+   * How the rules check ended, on each call that opens a new ask and reached the model call, and
+   * `unjudged` on an upload whose read failed with every opener carrying an id: no model call.
+   */
+  ruleOutcome?: RuleOutcome;
+  /** The provider's error text, `timeout` or `no-verdict`, on a rules call that gave no verdict. */
+  ruleError?: string;
+  /** `provider/id` that answered the rules call (or, with no answer, the last one asked). */
+  ruleModel?: string;
+  /** The rules check's own time, its document read included. */
+  ruleLatencyMs?: number;
+  /** The charter call's own time, on the clock `ruleLatencyMs` uses, so the two concurrent calls' shares of `latencyMs` can be told apart. */
+  charterLatencyMs?: number;
+  /** An ask's text could not be read, so the rules call judged that ask without it. */
+  ruleTextMissing?: true;
+  /** New asks the rules request clipped to their share of its bounds; it lists every one. */
+  ruleAsksCut?: number;
+  /**
+   * An upload whose stored version the gate could not read: the rules call judged only the
+   * openers that carry no id, the ones no stored version can already hold, or, with
+   * `ruleOutcome` `unjudged`, none of them.
+   */
+  ruleAsksPartial?: true;
+  /**
+   * On an `unmarked` entry whose write carried an ask, so the host started a Dispatch decision
+   * record of it (`decision-record.ts`): that record's own id, `<toolCallId>#<the CLI ledger
+   * line's place in the call>`. One tool call can log several unmarked writes and be a gated call
+   * of its own, so this, and never the tool call id, is what ties the `advisor-gate-record`
+   * follow-up of a record that failed to this entry.
+   */
+  recordId?: string;
+  /**
+   * Why this call's marker was not minted, though its decision let the write out: `call-ended`,
+   * the call's own tool having ended while the gate still held it, so no command of it can run.
+   */
+  mintSkipped?: "call-ended";
+}
+/**
+ * The follow-up entry of a call whose decision reached no Dispatch record: which call it belongs
+ * to, and what stopped the record. The decision itself stands, in the `advisor-gate` entry
+ * written before the record began. The core writes one for a gated call, the host (envoy.ts) one
+ * for an unmarked write, which names the entry by its `recordId`.
+ */
+export interface GateRecordEntry {
+  toolCallId: string;
+  tool: string;
+  /**
+   * On an unmarked write's follow-up, written by the host: the `recordId` of the `advisor-gate`
+   * entry this loss belongs to. A gated call's follow-up, written by the core, carries none: its
+   * tool call id names its one entry.
+   */
+  recordId?: string;
+  recordError: string;
 }
 /** A model as the gate passes it around: the fork's full Model, of which the core reads only these. */
 export type GateModel = { provider: string; id: string };
@@ -370,8 +546,17 @@ interface Deps {
   env: Record<string, string | undefined>;
   home: string;
   now: () => number;
-  /** Where the gate's notices and its bind-time warning go besides the session's UI: the host's logger. */
+  /**
+   * Where the gate's bind-time warning and its notice for an ignored OMP_ASKGATE go besides the
+   * session's UI: the host's logger, whose warnings the host shows again at each session start.
+   */
   logger: { warn(message: string): void };
+  /**
+   * The host's plain log, for a warning a gated call raises while the session runs (the rules
+   * check failing three times in a row). `logger`'s warnings are shown again at every later
+   * session start, which a warning about one session's calls must not be.
+   */
+  runtimeLogger: { warn(message: string): void };
   /** The session's envoy.json, whose `askgate.enabled` is the switch: named in the notice for an OMP_ASKGATE the gate ignores. */
   configFile: string;
   /** Appends to a file; serves OMP_ASKGATE_DUMP. */
@@ -401,6 +586,20 @@ interface Deps {
    * other arm never changes a session's mode (`setRecordMode` in the entry).
    */
   recordCheckMode: (mode: Mode) => void;
+  /**
+   * The session's Dispatch as the directory a call runs in configures it, every request ending with
+   * that call's stop; undefined when the session has no Dispatch configuration. The rules check
+   * reads a retyped block's text and an upload's current ask ids through it, and the decision
+   * record writes through it.
+   */
+  dispatchClient: (directory: string, signal: AbortSignal) => DispatchSession | undefined;
+  /**
+   * The session's decision recorder, shared with the host's record of unmarked writes: the gate
+   * builds none of its own. Two recorders would each upload the session's document under its name,
+   * and an upload of a name Dispatch knows stores a new version of that document, so the later
+   * upload would drop the records the other one wrote.
+   */
+  recordDecision: DecisionRecorder;
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
@@ -443,7 +642,6 @@ export type Message = { role: string } & Record<string, unknown>;
 /** The module's one object guard: transcript and entry data are untyped JSON. */
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-const byteLength = (text: string) => Buffer.byteLength(text, "utf8");
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** OMP_ASKGATE as a mode: `warn` or `block`, else undefined, which leaves the mode to the session. */
@@ -853,15 +1051,52 @@ function scanWord(text: string, from: number): { end: number; value: string; unr
  * a `2>&1` and a `| head` or `| tail` stage, each with the blanks before it, since the dry-run's
  * stdout must be the CLI's JSON alone. `leadingCd` is that `cd`'s path when the `cd` opens the
  * whole call, which is where Oh My Pi's bash tool looks for one to take as the call's directory
- * (`extractLeadingCdTarget` at the pin). */
+ * (`extractLeadingCdTarget` at the pin). `lineEnd` is where the command's own line ends as bash
+ * reads it: after its last word and after any `2>&1`, here-document opener and `| head` or
+ * `| tail` stage. It is the end of the line bash reads, not of the line of text: a newline inside
+ * a quoted value is part of a word, and a line continuation between two tokens is removed before
+ * bash reads the line, so a head written over several lines of text still ends in one place, and
+ * never inside a here-document's body. That one place is where bash reads a comment as a comment,
+ * and the head decides it once, here: it is where `keepOverrideVisible` writes the override
+ * comment and where this reads one back (`comment`), so writer and reader never disagree about
+ * where a comment may stand.
+ * `comment` is that one override comment (`overrideComment`): where it starts, with the blanks
+ * before it, where it ends, and its words, which `scopedCommand` reads as overrides and no part
+ * of the command runs. */
 interface DispatchHead {
   words: Word[];
   at: number;
   end: number;
+  lineEnd: number;
   cdEnd?: number;
   leadingCd?: string;
   drop: Array<[number, number]>;
   heredoc?: true;
+  comment?: { span: [number, number]; words: Word[] };
+}
+
+/**
+ * The comment that ends a command's own line when it holds override flags alone, the form
+ * `keepOverrideVisible` hands a rebutted command back in (`# --advisor-rebuttal '<line>'`), so the
+ * gate reads its own output again as the rebuttal it carries. Its words must be literal, and each
+ * one part of an override `splitRebuttal` takes. Returns where the comment starts, with the blanks
+ * before it, where it ends, and its words; undefined for any other comment. Where a comment may
+ * stand is `dispatchCommandHead`'s one answer, and this is asked for the comment standing there
+ * alone.
+ */
+function overrideComment(
+  command: string,
+  token: { start: number; end: number }
+): DispatchHead["comment"] | undefined {
+  const words: Word[] = [];
+  for (const inner of shellTokens(command.slice(token.start + 1, token.end))) {
+    if (!isWord(inner) || inner.unread.length > 0) return undefined;
+    words.push({ raw: inner.raw, value: inner.value });
+  }
+  if (words.length === 0 || splitRebuttal(words).removed.size !== words.length) return undefined;
+  let start = token.start;
+  while (start > 0 && (command[start - 1] === " " || command[start - 1] === "\t")) start--;
+  return { span: [start, token.end], words };
 }
 
 const isWord = (token: ShellToken | undefined): token is WordToken => token?.kind === "word";
@@ -872,6 +1107,7 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   if (hasControlCharacter(command)) return undefined;
   const tokens = shellTokens(command);
   let index = 0;
+  // The blank lines before the call, which bash runs as no command.
   while (isOp(tokens[index], "\n")) index++;
   let cdEnd: number | undefined;
   let leadingCd: string | undefined;
@@ -902,10 +1138,13 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   )
     return undefined;
   // After its words: at most one `2>&1` and one here-document with a quoted delimiter, in either
-  // order, then at most one `| head` or `| tail` stage, then the end of the line.
+  // order, then at most one `| head` or `| tail` stage, then at most one override comment, then
+  // the end of the line.
   const drop: Array<[number, number]> = [];
   let stderr = false;
   let heredoc: HeredocToken | undefined;
+  const last = words[words.length - 1];
+  let lineEnd = last.end;
   for (let token = tokens[index]; token !== undefined; token = tokens[++index]) {
     const before = tokens[index - 1]?.end ?? 0;
     if (
@@ -921,26 +1160,43 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
       if (heredoc !== undefined || !token.literal) return undefined;
       heredoc = token;
     } else break;
+    lineEnd = token.end;
   }
   if (isOp(tokens[index], "|")) {
     const before = tokens[index - 1]?.end ?? 0;
     const stage: WordToken[] = [];
     for (let token = tokens[++index]; isWord(token); token = tokens[++index]) stage.push(token);
     if (!headOrTail(stage)) return undefined;
-    drop.push([before, stage[stage.length - 1].end]);
+    lineEnd = stage[stage.length - 1].end;
+    drop.push([before, lineEnd]);
+  }
+  // One shell comment may stand where the command's line ends (`lineEnd`), and only when its
+  // words are override flags alone (`overrideComment`), the form a rebutted command is handed
+  // back in. The token the head ends on is that comment or nothing of the gate's: a `#` on a
+  // later line has the newline operator that ends the head before it, while a line continuation
+  // between the head's tokens ends no line and leaves what follows it on the head's own. A `#`
+  // anywhere else is no override comment, and the call is then outside the grammar. The comment
+  // is no word of the command, so `commandArgv` and the dry run leave it out, as bash does.
+  let comment: DispatchHead["comment"] | undefined;
+  const commented = tokens[index];
+  if (commented?.kind === "comment") {
+    comment = overrideComment(command, commented);
+    if (comment === undefined) return undefined;
+    index++;
   }
   // Nothing else runs: only newlines (blank lines) are left, the here-document's body included.
   if (tokens.slice(index).some((token) => !isOp(token, "\n"))) return undefined;
   if (heredoc !== undefined && !heredoc.closed) return undefined;
-  const last = words[words.length - 1];
   return {
     words: words.map(({ raw, value, start, end }) => ({ raw, value, start, end })),
     at: words[0].start,
     end: last.end,
+    lineEnd,
     ...(cdEnd === undefined ? {} : { cdEnd }),
     ...(leadingCd === undefined ? {} : { leadingCd }),
     drop,
     ...(heredoc === undefined ? {} : { heredoc: true as const }),
+    ...(comment === undefined ? {} : { comment }),
   };
 }
 
@@ -1010,7 +1266,7 @@ export interface ScopedCommand {
   label: string;
   command: string;
   dryRunScript: string;
-  rebuttal?: string;
+  rebuttal?: Rebuttal;
   readsFile: boolean;
   /** Each file the CLI will read (`fileOperands`, the list its own check reads), in argv order. */
   fileInputs: readonly FileOperand[];
@@ -1037,28 +1293,46 @@ export interface ScopedCommand {
 }
 
 /**
+ * An override the agent sent: the line the entry records, and the override as the agent wrote it.
+ * The gate keeps the override out of what the call hands its program, and the surface decides what
+ * the agent reads back: a command's flags go back as one shell comment where its line ends
+ * (`keepOverrideVisible`), so dispatch never sees them and the agent's record of the call still
+ * shows them; a device's field is removed before the call runs, so the record lacks it. The
+ * acknowledgement quotes `sent` either way, so the agent sees what it sent and where it went.
+ */
+type Rebuttal = { line: string; sent: string };
+
+/**
  * An override among a write's flags: `--advisor-rebuttal <line>` or `--advisor-rebuttal=<line>`; a
  * value that starts with `--` is the next flag, as the CLI reads it. A blank line is no override.
- * `removed` holds the indexes of the words it took.
+ * `removed` holds the indexes of the words it took. Every override is removed and every one is
+ * kept: `sent` is each one's words as written (one space between flag and value), in order, and
+ * `line` each one's line, joined with "; ", so a call that carries the flag twice loses neither
+ * from the agent's record of it, the acknowledgement or the entry.
  */
-function splitRebuttal(flags: readonly Word[]): { rebuttal?: string; removed: Set<number> } {
-  let rebuttal: string | undefined;
+function splitRebuttal(flags: readonly Word[]): { rebuttal?: Rebuttal; removed: Set<number> } {
+  const lines: string[] = [];
+  const sent: string[] = [];
   const removed = new Set<number>();
   for (let index = 0; index < flags.length; index++) {
-    const { value } = flags[index];
-    const next = flags[index + 1]?.value;
-    const line =
-      value === REBUTTAL_FLAG && next !== undefined && !next.startsWith("--")
-        ? next
-        : value.startsWith(`${REBUTTAL_FLAG}=`)
-          ? value.slice(REBUTTAL_FLAG.length + 1)
-          : undefined;
+    const { value, raw } = flags[index];
+    const next = flags[index + 1];
+    const spaced = value === REBUTTAL_FLAG && next !== undefined && !next.value.startsWith("--");
+    const line = spaced
+      ? next.value
+      : value.startsWith(`${REBUTTAL_FLAG}=`)
+        ? value.slice(REBUTTAL_FLAG.length + 1)
+        : undefined;
     if (line === undefined || !line.trim()) continue;
-    rebuttal = line.trim();
+    lines.push(line.trim());
+    sent.push(spaced ? `${raw} ${next.raw}` : raw);
     removed.add(index);
-    if (value === REBUTTAL_FLAG) removed.add(++index);
+    if (spaced) removed.add(++index);
   }
-  return { ...(rebuttal === undefined ? {} : { rebuttal }), removed };
+  return {
+    ...(lines.length === 0 ? {} : { rebuttal: { line: lines.join("; "), sent: sent.join(" ") } }),
+    removed,
+  };
 }
 
 /**
@@ -1099,18 +1373,29 @@ function fileInputs(
 /**
  * The `bash` command as a scoped `dispatch` call, or undefined for any other command. Only the
  * literal grammar of one call is read (`dispatchCommandHead`). A call in any other form is no
- * scoped call: it runs, and the CLI refuses a gated write in it, which carries no marker.
+ * scoped call: it runs, and the CLI refuses a gated write in it, which carries no marker. The
+ * override comment that may stand where the call's line ends is read as overrides after the call's own
+ * flags, and is left out of `command` and of the dry run, as an override flag is: the gate puts
+ * every override back as one comment (`keepOverrideVisible`), so a rebutted command it handed
+ * back, sent again, carries the same rebuttal and comes back the same.
  */
 export function scopedCommand(command: unknown): ScopedCommand | undefined {
   if (typeof command !== "string") return undefined;
   const found = dispatchCommandHead(command);
   if (found === undefined) return undefined;
-  const { words: all, at, cdEnd, leadingCd, end, heredoc, drop } = found;
+  const { words: all, at, cdEnd, leadingCd, end, heredoc, drop, comment } = found;
+  // Every position `found` names lies before the comment, so it holds in the text without it.
+  const text =
+    comment === undefined
+      ? command
+      : `${command.slice(0, comment.span[0])}${command.slice(comment.span[1])}`;
   const lead = cliProgramLength(all);
   const program = all.slice(0, lead);
   const [name, ...flags] = all.slice(lead);
   if (name === undefined || !reviewedWrite(name.value, flags)) return undefined;
-  const { rebuttal, removed } = splitRebuttal(flags);
+  // Each comment word is part of an override (`overrideComment`), and none is the value of a flag
+  // before it, since each override starts with `--`: `removed` takes them all.
+  const { rebuttal, removed } = splitRebuttal([...flags, ...(comment?.words ?? [])]);
   const kept = flags.filter((_, index) => !removed.has(index));
   const words = [...program, name, ...kept];
   const positioned: Word[] = [];
@@ -1141,19 +1426,19 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   // is safe for every command.
   const before =
     cdEnd === undefined
-      ? command.slice(0, at)
-      : `${command.slice(0, cdEnd)} >/dev/null${command.slice(cdEnd, at)}`;
+      ? text.slice(0, at)
+      : `${text.slice(0, cdEnd)} >/dev/null${text.slice(cdEnd, at)}`;
   let after = "";
   let from = end;
   for (const [start, stop] of drop) {
-    after += command.slice(from, start);
+    after += text.slice(from, start);
     from = stop;
   }
-  after += command.slice(from);
+  after += text.slice(from);
   return {
     tool: `dispatch_${name.value.replaceAll("-", "_")}`,
     label: `dispatch ${name.value}`,
-    command: `${command.slice(0, at)}${commandHead}${command.slice(end)}`,
+    command: `${text.slice(0, at)}${commandHead}${text.slice(end)}`,
     dryRunScript: `${before}${[...program.map((word) => word.raw), name.raw, ...kept.map((word) => word.raw), "--dry-run"].join(" ")}${after}`,
     ...(rebuttal === undefined ? {} : { rebuttal }),
     readsFile: files.inputs.length > 0,
@@ -1165,7 +1450,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
     ...(leadingCd !== undefined && /^\/+$/.test(leadingCd)
       ? { cdToSessionDirectory: true as const }
       : {}),
-    dirScript: cdEnd === undefined ? "pwd -P" : `${command.slice(0, cdEnd)} >/dev/null && pwd -P`,
+    dirScript: cdEnd === undefined ? "pwd -P" : `${text.slice(0, cdEnd)} >/dev/null && pwd -P`,
   };
 }
 
@@ -1327,7 +1612,7 @@ export function nonLiteralCause(
     return { cause: "commands", detail: other.op === "\n" ? "a new line" : other.op };
   const assignment = prefix.find((token) => ASSIGNMENT.test(token.raw));
   if (assignment !== undefined)
-    return { cause: "assignment", detail: snippet(assignment.raw.split("=", 1)[0] + "=") };
+    return { cause: "assignment", detail: snippet(`${assignment.raw.split("=", 1)[0]}=`) };
   let stderr = 0;
   let docs = 0;
   for (const token of own) {
@@ -1359,7 +1644,10 @@ export function causeNote({ cause, detail }: { cause: NonLiteralCause; detail: s
     commands: `The bash call has more than one command (${detail === "a new line" ? detail : `\`${detail}\``}). Send the write in a bash call of its own.`,
     assignment: `The call sets a variable (\`${detail}\`). Remove the assignment, and write the value into the command.`,
     redirect: `The call has the redirect \`${detail}\`. Remove it. To send text from a file, use \`--<field>-file <path>\`.`,
-    other: `AskGate does not read \`${detail}\`. Write each word as plain text or in quotes.`,
+    other:
+      detail === "#"
+        ? "AskGate reads a `#` comment only where the command's line ends, after everything that runs (its words, any `2>&1`, a here-document opener and a `| head` or `| tail` stage), and only when its words are override flags alone (`# --advisor-rebuttal '<line>'`, the form AskGate hands a rebutted command back in). Remove the comment, or keep only such an override in it."
+        : `AskGate does not read \`${detail}\`. Write each word as plain text or in quotes.`,
   };
   return `AskGate note: the dispatch CLI found no AskGate marker for this write, because the call is not in the literal form that AskGate reads. ${fix[cause]} Then send it as \`dispatch <command> <words…>\`, in a bash call of its own; the CLI's message above gives the full literal form.`;
 }
@@ -1499,14 +1787,11 @@ function readReviewedFile(source: string): Buffer {
 function startedInBackground(details: unknown): boolean {
   return isRecord(details) && isRecord(details.async) && details.async.state === "running";
 }
-function breakerKey(toolName: string, input: Input): string {
-  let key = toolName;
-  for (const k of BREAKER_KEYS) if (input[k] !== undefined) key += `\u0000${k}=${String(input[k])}`;
-  return key;
-}
-
-/** Splits a top-level REBUTTAL_KEY off a device's JSON arguments; anything else comes back unchanged. */
-function extractRebuttal(content: string): { rebuttal?: string; content: string } {
+/**
+ * Splits a top-level REBUTTAL_KEY off a device's JSON arguments, its `sent` the key and the value
+ * as the agent gave it; anything else comes back unchanged.
+ */
+function extractRebuttal(content: string): { rebuttal?: Rebuttal; content: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
@@ -1516,19 +1801,10 @@ function extractRebuttal(content: string): { rebuttal?: string; content: string 
   if (!isRecord(parsed) || !(REBUTTAL_KEY in parsed)) return { content };
   const { [REBUTTAL_KEY]: value, ...rest } = parsed;
   if (typeof value !== "string" || !value.trim()) return { content };
-  return { rebuttal: value.trim(), content: JSON.stringify(rest) };
-}
-
-/** `text` cut to at most `max` UTF-8 bytes, marker included. */
-function clipBytes(text: string, max: number): string {
-  const size = byteLength(text);
-  if (size <= max) return text;
-  // A cut inside a multi-byte character decodes to U+FFFD; drop it.
-  const head = Buffer.from(text, "utf8")
-    .subarray(0, Math.max(0, max - CLIP_MARKER_BYTES))
-    .toString("utf8")
-    .replace(/\uFFFD$/, "");
-  return `${head} … [elided ${size - byteLength(head)} bytes]`;
+  return {
+    rebuttal: { line: value.trim(), sent: `"${REBUTTAL_KEY}": ${JSON.stringify(value)}` },
+    content: JSON.stringify(rest),
+  };
 }
 
 function renderArgs(input: Input): string {
@@ -1547,11 +1823,6 @@ function textOf(content: unknown): string {
   }
   return parts.join("\n");
 }
-
-const escapeXml = (text: string) =>
-  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-/** Untrusted text escaped, then cut to `max` bytes: no transcript text can close or open a tag. */
-const escaped = (text: string, max = Number.POSITIVE_INFINITY) => clipBytes(escapeXml(text), max);
 
 function renderAssistant(content: unknown): string {
   const parts: string[] = [];
@@ -1640,53 +1911,12 @@ export function renderTranscript(messages: readonly Message[], capBytes: number)
 export function parseVerdict(
   text: string
 ): { decision: "allow" | "revise"; reason?: string } | undefined {
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
-  while (lines.length > 0 && lines[lines.length - 1].startsWith("```")) lines.pop();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(lines.at(-1) ?? "");
-  } catch {
-    return undefined;
-  }
-  if (!isRecord(parsed)) return undefined;
+  const parsed = lastLineJson(text);
+  if (parsed === undefined) return undefined;
   if (parsed.decision === "allow") return { decision: "allow" };
   if (parsed.decision === "revise" && typeof parsed.reason === "string" && parsed.reason.trim())
     return { decision: "revise", reason: parsed.reason.trim() };
   return undefined;
-}
-
-/** Revise reasons per target since its last allowed call. */
-class Breaker {
-  readonly #reasons = new Map<string, string[]>();
-  revised(key: string, reason: string): void {
-    const reasons = this.#reasons.get(key) ?? [];
-    reasons.push(reason);
-    this.#reasons.set(key, reasons);
-  }
-  tripped(key: string): boolean {
-    return this.reasons(key).length >= GATE_BREAKER_REVISES;
-  }
-  reset(key: string): void {
-    this.#reasons.delete(key);
-  }
-  clear(): void {
-    this.#reasons.clear();
-  }
-  reasons(key: string): readonly string[] {
-    return this.#reasons.get(key) ?? [];
-  }
-}
-
-/** `{{name}}` placeholders replaced in one pass, values pasted verbatim (never re-scanned, never read as `$` patterns); a placeholder with no value throws. */
-export function renderTemplate(template: string, values: Record<string, string>): string {
-  return template.replace(/\{\{(\w+)\}\}/g, (_, name: string) => {
-    if (!Object.hasOwn(values, name))
-      throw new Error(`AskGate prompt template names {{${name}}}, which has no value`);
-    return values[name];
-  });
 }
 
 /**
@@ -1719,36 +1949,38 @@ function renderRequest(
   });
 }
 
-/**
- * The one transform for text handed to the agent (a model's reason, the agent's own rebuttal): verbatim,
- * except that a `<` which could start a tag (before a letter, `/`, `!` or `?`) becomes `&lt;`, then capped
- * at 8 KiB (GATE_REASON_MAX_BYTES). The two defects are disjoint. A frame closed or a harness tag opened needs a tag-opening `<`,
- * and this rule stops it. Full escaping also turned `&&`, `->` and a `> ` quote line into entities, so a fix
- * sent back verbatim posted `&gt;` and a check for the quote failed; those now pass through unchanged. Text
- * rendered into the gate's own prompt is escaped in full instead (`escaped`). Nothing between here and
- * delivery decodes entities: warn joins the text into a developer message as-is, block's Error message
- * becomes the tool result as-is.
- */
-const agentFacing = (text: string) =>
-  clipBytes(text.replace(/<(?=[A-Za-z/!?])/g, "&lt;"), GATE_REASON_MAX_BYTES);
 // What the agent reads after each gated call: silence only for an allow or a fail-open, since a
-// pass it cannot see is indistinguishable from a gate that broke.
-// The breaker keys on the target alone (`breakerKey`: the tool and its issue, ask, artifact, project
-// or reply), not on the text, so after the second revise the next write to that target goes out
-// unreviewed whether or not its text changed.
+// pass it cannot see is indistinguishable from a gate that broke. The breaker counts the refusals
+// of one thing on a target, the call or one of its new asks, not every revise there, so the
+// warning and the pass speak of this call's refusals and never of the target's count.
 const SECOND_REVISE =
-  "This is the second revise on this target: the next write to it, changed or not, is sent without review and recorded.";
-/** How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the command. */
-type Override = { name: string; how: string; what: string; note?: string };
+  "This is the second refusal of this call on its target: a third unchanged resend is sent without review and recorded.";
+/**
+ * How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the
+ * command. `how` completes a charter revise; `again` completes the rules refusal's "send the call
+ * again with"; `fate` completes both refusals' "an override is always sent and recorded, and",
+ * saying what becomes of the override on that surface; `note` follows either refusal. Whether the
+ * override survived the call the agent reads back is no fact of the surface but of the one call,
+ * and the acknowledgement is told it (`kept`).
+ */
+type Override = {
+  how: string;
+  what: string;
+  again: string;
+  fate: string;
+  note?: string;
+};
 const DEVICE_OVERRIDE: Override = {
-  name: REBUTTAL_KEY,
   how: `"${REBUTTAL_KEY}": "<one line>" added to the JSON`,
   what: "field",
+  again: `\`"${REBUTTAL_KEY}": "<one line>"\` in its JSON`,
+  fate: "the field is removed before the call runs",
 };
 const COMMAND_OVERRIDE: Override = {
-  name: REBUTTAL_FLAG,
   how: `${REBUTTAL_FLAG} '<one line>' added to its flags`,
   what: "flag",
+  again: `\`${REBUTTAL_FLAG} '<one line>'\``,
+  fate: "the flag is kept as a shell comment where the command's line ends, so dispatch never sees it",
 };
 /** Oh My Pi runs the tool_call hooks of a whole batch before any call of it, so the dry run reads a
  * named file before a sibling call of the same batch changes it. */
@@ -1764,7 +1996,7 @@ const FILE_OVERRIDE: Override = {
 const DRY_RUN_RAN =
   "To read this call AskGate ran the command it names with `--dry-run`, which sends nothing; the write itself was not sent.";
 const renderRevise = (reason: string, second: boolean, override: Override) =>
-  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${override.what === "flag" ? `\n${DRY_RUN_RAN}` : ""}${override.note ? `\n${override.note}` : ""}${second ? `\n${SECOND_REVISE}` : ""}`;
+  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and ${override.fate}.${override.what === "flag" ? `\n${DRY_RUN_RAN}` : ""}${override.note ? `\n${override.note}` : ""}${second ? `\n${SECOND_REVISE}` : ""}`;
 /** The refusal block mode returns for a call given up without a verdict, by cause. */
 const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
   abandoned:
@@ -1794,12 +2026,91 @@ const UNKEYED_REFUSAL =
 const UNKEYED_NOTE = `<advisor-gate advisor="AskGate" outcome="unkeyed">\nAskGate minted no marker for this Dispatch write: it could not read the arguments the dispatch CLI gets from the command that runs. The call ran, and the CLI posts it with a warning that it went out unreviewed.\n</advisor-gate>`;
 // A comment or message cannot be edited or deleted, so its only fix is one more post; the note says so,
 // rather than offering an edit the agent cannot make (two lanes resent whole comments chasing one).
-const renderWarn = (reason: string, second: boolean) =>
-  `<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix: an ask with \`dispatch edit-ask\` or \`dispatch resolve-ask --kind retracted\`, a document with \`dispatch doc-edit\`. A comment or message cannot be edited, so post one reply carrying only the correction, and only when the original would mislead its reader. Or state your rebuttal in your next step.${second ? `\n${SECOND_REVISE}` : ""}\n</advisor-gate>`;
-const renderRebuttalAck = (rebuttal: string, override: Override) =>
-  `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${override.name} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that ${override.what} removed before sending.\n</advisor-gate>`;
+// The warn note never says a third resend goes unreviewed: a warn revise sends the call, so it
+// refuses nothing and the breaker, which counts refusals, does not move for it.
+const renderWarn = (reason: string) =>
+  `<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix: an ask with \`dispatch edit-ask\` or \`dispatch resolve-ask --kind retracted\`, a document with \`dispatch doc-edit\`. A comment or message cannot be edited, so post one reply carrying only the correction, and only when the original would mislead its reader. Or state your rebuttal in your next step.\n</advisor-gate>`;
+// Oh My Pi records a call as the gate returns it. Told only that its override was "removed",
+// agents read their call back, found no override and reported a rebuttal they never wrote, and a
+// note naming the removal did not stop it (tester round 6 and the round after, 6 of 9 sessions).
+// So a command keeps its flag as a shell comment (`keepOverrideVisible`), and the acknowledgement
+// says where; a device's JSON cannot carry the field, and neither can a command whose override
+// the gate could not write as a comment it reads back, so those say AskGate removed it.
+const renderRebuttalAck = ({ line, sent }: Rebuttal, override: Override, kept: boolean) =>
+  `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYou sent this call with ${agentFacing(sent)}. AskGate recorded your rebuttal "${agentFacing(line)}", and the call was sent without review. ${
+    kept
+      ? "dispatch does not take that flag, so it stays a shell comment where the command's line ends, after everything that runs: it is in your record of the call, and dispatch never saw it."
+      : `${override.what === "flag" ? "dispatch" : "The device"} does not take that ${override.what}, so AskGate removed it before the call ran: your record of the call lacks it because AskGate removed it, not because you left it out.`
+  }\n</advisor-gate>`;
+/**
+ * A value written as one quoted word of the literal grammar: single-quoted, in which bash takes
+ * every character as text, or — the value holds a `'` — double-quoted, which is as literal while
+ * the value holds no `$`, backtick or `\`. Undefined when no such word exists: a value holding
+ * both a `'` and one of those (`'\''` is a backslash, which the grammar refuses to read), or a
+ * newline, which would end the comment and leave what follows to run.
+ *
+ * Every word is quoted, the flag's own name included, so that bash takes every character of the
+ * comment as text where the comment stands. The quoting is no safety of its own: written where a
+ * single-quoted value is still open, the first quote of the first word would close that value and
+ * the next would open one around the agent's line, which would then stand outside every quote and
+ * run. What makes the comment safe is the place it is written in, the end of the command's line
+ * (`lineEnd`), which is the one place bash reads it as a comment at all.
+ */
+function literalWord(value: string): string | undefined {
+  if (value.includes("\n")) return undefined;
+  if (!value.includes("'")) return `'${value}'`;
+  return /["$`\\]/.test(value) ? undefined : `"${value}"`;
+}
+/**
+ * The override the agent sent, as the words of the comment that carries it: each word quoted so
+ * that bash takes every character of it as text where the comment stands, at the end of the
+ * command's line, and in a form the gate's own grammar reads back as the same override. Only the
+ * quoting changes; the words the CLI would have seen are the agent's own. Undefined when one of
+ * them cannot be written that way, and the override is then removed instead of kept.
+ */
+function overrideWords(sent: string): string | undefined {
+  const words: string[] = [];
+  for (const token of shellTokens(sent)) {
+    if (!isWord(token) || token.unread.length > 0) return undefined;
+    const word = literalWord(token.value);
+    if (word === undefined) return undefined;
+    words.push(word);
+  }
+  return words.length === 0 ? undefined : words.join(" ");
+}
+/**
+ * The command with the override the gate took out put back as a shell comment, and whether it went
+ * in, which the acknowledgement says. The comment stands where the command's line ends
+ * (`lineEnd`), the one place the head takes a comment of the call as well: after the last word,
+ * any `2>&1`, any here-document opener and any `| head` or `| tail` stage. Only there does bash
+ * read it as a comment, and nowhere else is it safe — inside a multi-line quoted value its own
+ * first quote would close that value's, handing the CLI other arguments and leaving what the
+ * rebuttal holds to the shell.
+ *
+ * So the gate reads its own output back before it hands it over, through the same grammar it
+ * writes for: the commented command must read as the same command, text for text, carrying the
+ * same rebuttal. That is the gate's own tokenizer reading the gate's own output, so it proves the
+ * grammar takes back what was written, not that bash and the tokenizer agree. Where it does not,
+ * the command goes back without the comment rather than changed, and the acknowledgement says the
+ * flag was removed.
+ */
+function keepOverrideVisible(
+  input: Input,
+  rebuttal: Rebuttal | undefined
+): { input: Input; kept: boolean } {
+  const { command } = input;
+  if (rebuttal === undefined || typeof command !== "string") return { input, kept: false };
+  const head = dispatchCommandHead(command);
+  const words = overrideWords(rebuttal.sent);
+  if (head === undefined || words === undefined) return { input, kept: false };
+  const commented = `${command.slice(0, head.lineEnd)} # ${words}${command.slice(head.lineEnd)}`;
+  const read = scopedCommand(commented);
+  if (read?.command !== command || read.rebuttal?.line !== rebuttal.line)
+    return { input, kept: false };
+  return { input: { ...input, command: commented }, kept: true };
+}
 const renderBreakerAck = () =>
-  `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt on this target after two revises: sent without review and recorded.\n</advisor-gate>`;
+  `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt after two refusals of this call on its target: sent without review and recorded.\n</advisor-gate>`;
 /**
  * What the agent is told when its Dispatch write went out with no verdict. Every such outcome
  * says so: a pass the agent cannot see reads the same as a gate that is working, and a headless
@@ -1931,7 +2242,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         `extensionHandlers.toolCallTimeoutMs is ${ceiling} ms, which leaves no room for a verdict (it needs at least ${MIN_DEADLINE_MS + CEILING_MARGIN_MS} ms)`
       );
     // A short deadline is no off switch: the gate binds, and says once how to give it more time. The
-    // ceiling is read again on each call (`askModel`); this is the deadline the session starts with.
+    // ceiling is read again on each call (`decide`); this is the deadline the session starts with.
     const deadlineAtBind = Math.min(timeoutMs, ceiling - CEILING_MARGIN_MS);
     if (deadlineAtBind < WARN_DEADLINE_MS) {
       const raise = [
@@ -1955,14 +2266,28 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // The system role holds only the gate's own text and its rules; the agent's system prompt and
     // transcript are data about the agent under review, escaped into the user message.
     const system = `${systemTemplate.trim()}\n\n${rules.trim()}`;
+    // The rules call's system role holds its own frame and the two rules, nothing of the charter's.
+    const ruleSystem = `${ruleCheckSystem.trim()}\n\n${ruleCheckRules.trim()}`;
     const dumpPath = deps.env.OMP_ASKGATE_DUMP;
     // The fork binds this factory once per process and keeps the binding across /new, /resume
     // and a branch switch, so the per-session state below resets on session_switch and
     // session_branch: a halt, a count, revise reasons or a rebuttal never outlive their session.
-    const rebuttals = new Map<string, string>();
+    const rebuttals = new Map<string, Rebuttal>();
     const breaker = new Breaker();
+    // The host's own recorder, one per process: the gate's records and the records of the writes
+    // the gate never saw go into one document per session, and the recorder holds each session's
+    // document across the switches the state below resets on.
+    const recordDecision = deps.recordDecision;
     let failures = 0;
+    /** Rules calls in a row that ended without a rules verdict. */
+    let ruleFailures = 0;
     let halted = false;
+    /**
+     * The wait for every decision record still running, each started by a handler that has
+     * returned: shutdown waits for these after the handlers, so a record that fails still appends
+     * its entry while the session takes entries. Each drops itself when it settles.
+     */
+    const records = new Set<Promise<void>>();
     // Set once the session starts shutting down (only dispose emits session_shutdown): a scoped call
     // that reaches the gate after that asks no model and takes the shutdown branch at once.
     let closing = false;
@@ -1975,9 +2300,56 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // makes after it finished, from its own timer or thread, never reaches a gate: both eval bridges
     // refuse a call from a finished cell ("Run no longer active", "No active Python tool bridge
     // session").
-    /** Why a waiting gate was given up: the user or the runner ended its call or run, or the session shut down. */
-    type Abandon = (cause: "abandoned" | "shutdown", graceMs?: number) => void;
+    /** Why a waiting gate was given up: its own deadline, the user or the runner ending its call or run, or the session shutting down. */
+    type Cause = "timeout" | "abandoned" | "shutdown";
+    /** Why a waiting gate was given up by something other than its own deadline. */
+    type GivenUpCause = Exclude<Cause, "timeout">;
+    type Abandon = (cause: GivenUpCause, graceMs?: number) => void;
+    /** Each waiting gated call's one stop, by its tool call id. */
     const inflight = new Map<string, Abandon>();
+    /**
+     * Everything one gated call waits on — its dry run, its document read, the charter call and the
+     * rules call — shares one signal, one `inflight` entry and one deadline, so its tool's end, a
+     * stopped run or a shutdown stops all of it at once. The first cause wins.
+     */
+    type Stop = {
+      readonly signal: AbortSignal;
+      readonly stopped: Promise<Cause>;
+      cause?: Cause;
+      graceMs: number;
+      /** Starts the call's deadline, once the model calls are about to go out. */
+      arm(ms: number): void;
+      /** Ends the call: its timer, its entry in `inflight`, and anything of it still running. */
+      close(): void;
+    };
+    const openStop = (toolCallId: string): Stop => {
+      const controller = new AbortController();
+      const { promise: stopped, resolve } = Promise.withResolvers<Cause>();
+      let timer: Timer | undefined;
+      const stopWith = (cause: Cause, graceMs = ABORT_GRACE_MS) => {
+        if (handle.cause !== undefined) return;
+        handle.cause = cause;
+        handle.graceMs = graceMs;
+        resolve(cause);
+        controller.abort();
+      };
+      const handle: Stop = {
+        signal: controller.signal,
+        stopped,
+        graceMs: ABORT_GRACE_MS,
+        arm: (ms) => {
+          timer = setTimeout(() => stopWith("timeout"), ms);
+        },
+        close: () => {
+          clearTimeout(timer);
+          if (inflight.get(toolCallId) === stopWith) inflight.delete(toolCallId);
+          // Nothing reads an answer after the decision: a call still in flight is abandoned.
+          controller.abort();
+        },
+      };
+      inflight.set(toolCallId, stopWith);
+      return handle;
+    };
     /**
      * The markers minted for each call (`mintFor`), by tool call id: each goes once its call ends,
      * is refused, or the session shuts down. A marker the CLI consumed is gone already, and its
@@ -2042,7 +2414,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       return { content: [...content, { type: "text", text: note }] };
     };
     /**
-     * The session changed, so nothing of the one before it stands: its halt, its count, its
+     * The session changed, so nothing of the one before it stands: its halt, its counts, its
      * revise reasons, its unspent rebuttals and the notes its calls are owed. Its markers stay: a
      * call whose own result has not come, or a job still in the background, may not have run its
      * CLI yet. Each goes on its own call's end event below, or at shutdown.
@@ -2053,20 +2425,38 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       notices.clear();
       causes.clear();
       failures = 0;
+      ruleFailures = 0;
       halted = false;
     };
     pi.on("session_switch", reset);
     pi.on("session_branch", reset);
+    /**
+     * The calls whose handler is still running, by tool call id: the shutdown waits on each of
+     * them, and a call that ends while the gate still holds it goes into `ended`.
+     */
+    const handling = new Map<string, Promise<ToolCallResult>>();
+    /**
+     * The calls whose own tool ended while the gate was still deciding them: no command of such a
+     * call runs any more, so the gate mints it no marker (`mintFor`), which would otherwise stand
+     * for two hours with nothing to consume it. Only an id the gate is handling is kept, and the
+     * handler drops it when it returns, so the set never holds more ids than calls in flight.
+     */
+    const ended = new Set<string>();
+    const callEnded = (toolCallId: string) => {
+      if (handling.has(toolCallId)) ended.add(toolCallId);
+    };
     // A marker goes only once the command that consumes it has run, whichever session is current
     // then. A result that reports a backgrounded job's start comes before the shell runs it
     // (`startedInBackground`), and nothing later names that call's id, so its marker is kept until
     // `session_shutdown`; each mint sweeps the markers older than MARKER_MAX_AGE_MS.
     pi.on("tool_execution_end", (event: { toolCallId: string; result?: unknown }) => {
       inflight.get(event.toolCallId)?.("abandoned");
+      callEnded(event.toolCallId);
       if (isRecord(event.result) && startedInBackground(event.result.details)) return;
       releaseMarker(event.toolCallId);
     });
     pi.on("tool_result", (event: ToolResultEvent): ToolResultResult => {
+      callEnded(event.toolCallId);
       if (!startedInBackground(event.details)) releaseMarker(event.toolCallId);
       return deliverCause(event, deliverNotice(event));
     });
@@ -2075,17 +2465,73 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       if (event.messages?.findLast((m) => m.role === "assistant")?.stopReason !== "aborted") return;
       for (const abandon of inflight.values()) abandon("abandoned");
     });
+    /**
+     * A decision Dispatch never took: one line to the host's plain log, and one
+     * `advisor-gate-record` entry naming the call and what stopped the record. The call's own
+     * `advisor-gate` entry was written before the record began and stands as it is.
+     */
+    const noteRecordFailure = (entry: GateEntry, recordError: string) => {
+      try {
+        deps.runtimeLogger.warn(
+          `AskGate did not record the decision of ${entry.tool} (${entry.toolCallId}) on Dispatch: ${recordError}`
+        );
+        pi.appendEntry(ADVISOR_GATE_RECORD_ENTRY_TYPE, {
+          toolCallId: entry.toolCallId,
+          tool: entry.tool,
+          recordError,
+        } satisfies GateRecordEntry);
+      } catch {
+        // The session is sealed or its file is gone: there is nothing left to tell, and the call
+        // itself was answered long before this record ran.
+      }
+    };
+    /**
+     * Publishes one decision to Dispatch, started as the handler returns and awaited by nothing of
+     * the call: the review's deadline pays none of it. The recorder's write runs until Dispatch
+     * has answered it or the session's shutdown cuts it, and a session's records are written one
+     * at a time, each carrying the time the gate made it.
+     */
+    const startRecord = (entry: GateEntry, ctx: GateCtx) => {
+      const done = (async () => {
+        let recordError: string | undefined;
+        try {
+          recordError = await recordDecision.record({
+            entry,
+            sessionId: ctx.sessionManager.getSessionId(),
+            directory: ctx.cwd,
+            // One record per gated call, so the call's own id tells this record from the
+            // session's others: what the reader de-duplicates a replayed write by.
+            id: entry.toolCallId,
+          });
+        } catch (error) {
+          recordError = messageOf(error);
+        }
+        // The recorder answers why, the shutdown's cut included.
+        if (recordError !== undefined) noteRecordFailure(entry, recordError);
+      })();
+      records.add(done);
+      void done.finally(() => records.delete(done));
+    };
     // A gate still waiting at shutdown (left running past a normal end) would bill to its deadline and
     // record into a sealed session. Abandon it, and hold shutdown until its entry is written; a gated
     // call that starts after this point asks no model (`closing`). Either way the entry reads
     // `shutdown`, and block mode refuses the call as it refuses any call given up without a verdict.
-    const handling = new Set<Promise<ToolCallResult>>();
+    // The handlers are waited for first, since each starts its decision record as it returns, then
+    // the records themselves — this session's and the host's of the writes the gate never saw,
+    // which share the one recorder. Nothing here cuts those records: the entry's own handler owns
+    // the cut and its delay (`askgate.ts`), which falls inside this wait, so a record that could
+    // not land appends its entry while this handler still holds the session.
     pi.on("session_shutdown", async () => {
       closing = true;
       for (const abandon of inflight.values()) abandon("shutdown", SHUTDOWN_GRACE_MS);
       const { promise: waited, resolve: stopWaiting } = Promise.withResolvers<void>();
       const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
-      await Promise.race([Promise.allSettled([...handling]), waited]);
+      const settled = (async () => {
+        await Promise.allSettled([...handling.values()]);
+        await Promise.allSettled([...records]);
+        await recordDecision.settled();
+      })();
+      await Promise.race([settled, waited]);
       clearTimeout(timer);
       // After the wait, so a call that settled during it leaves no marker behind.
       for (const toolCallId of markers.keys()) releaseMarker(toolCallId);
@@ -2103,6 +2549,24 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           `AskGate paused for this session after ${failures} consecutive calls without a verdict; Dispatch writes now go out unchecked.`,
           "warning"
         );
+    };
+
+    /**
+     * A rules verdict resets the count of rules calls in a row without one. The call that brings the
+     * count to three writes one log line, which is the record in a session whose UI no reader sees,
+     * shows the notice where there is a UI, and returns it as a note for that call's own result.
+     * The line goes to the host's plain log (`runtimeLogger`), never to `logger`, whose warnings the
+     * entry shows again at every later session start.
+     */
+    const settleRules = (outcome: RuleOutcome | undefined, ctx: GateCtx): string | undefined => {
+      if (outcome === "match" || outcome === "none") ruleFailures = 0;
+      if (outcome === undefined || !RULE_FAILURE_OUTCOMES.includes(outcome)) return undefined;
+      ruleFailures++;
+      if (ruleFailures !== RULE_NOTICE_AFTER_FAILURES) return undefined;
+      const notice = `AskGate's rule check failed ${ruleFailures} times in a row, so the new asks of those ${ruleFailures} calls were not checked against the two rules. The check still runs on each new ask, and refuses a match again as soon as it answers.`;
+      deps.runtimeLogger.warn(notice);
+      if (ctx.hasUI) ctx.ui.notify(notice, "warning");
+      return `<advisor-gate advisor="AskGate">\n${notice}\n</advisor-gate>`;
     };
 
     /** The outer `write xd://<device>` event: strip a rebuttal before the device validates its arguments. */
@@ -2204,61 +2668,37 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       return undefined;
     };
 
-    /** What one model walk answered: the answer, and the fields every entry that reached the model records. */
-    type Called = Pick<
-      GateEntry,
-      "promptBytes" | "model" | "deadlineMs" | "failedModels" | "usage" | "reviewedText"
-    >;
-    type Asked =
-      | { kind: "no-model-role" }
-      | { kind: "skipped"; reason: string }
-      | { kind: "asked"; answer: Answer; called: Called };
     /**
-     * One review by the gate's model: resolves the role, skips a session whose primary is on another
-     * provider, appends both prompts to OMP_ASKGATE_DUMP, and walks the role's chain on the primary's
-     * provider under the call's deadline (raced from `started`). `user` is rendered only once the
-     * model is known, so a skipped session reads nothing of its transcript. Every check of a Dispatch
-     * write that asks the model goes through here.
+     * One call to the gate's model: appends its prompts to OMP_ASKGATE_DUMP under `label`, then walks
+     * `chain` under the call's one stop, which its deadline is armed on. The charter check and the
+     * rules check each make one of these, on the same chain and the same stop, so a session is asked
+     * on one provider and both calls end together. `user` is rendered here, once the gate knows it
+     * will ask.
      */
-    const askModel = async (
+    const walk = async (
       ctx: GateCtx,
-      call: { toolCallId: string; started: number },
-      prompt: { system: string; user: () => string; reviewedText: string }
-    ): Promise<Asked> => {
-      const resolved = resolveRole(ctx);
-      if (resolved === undefined) return { kind: "no-model-role" };
-      const { role, model } = resolved;
-      // A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
-      if (ctx.model?.provider !== model.provider)
-        return { kind: "skipped", reason: `primary on ${ctx.model?.provider ?? "no model"}` };
+      call: { toolCallId: string; stop: Stop },
+      prompt: { system: string; user: () => string; label: string },
+      chain: readonly GateModel[]
+    ): Promise<Walked> => {
+      // Timed from here, so a walk's own share of the gate's latency covers its render as well as its call.
+      const began = deps.now();
       const user = prompt.user();
       const promptBytes = byteLength(prompt.system) + byteLength(user);
       if (dumpPath)
         deps.appendFile(
           dumpPath,
-          `===== AskGate ${call.toolCallId} system =====\n${prompt.system}\n===== AskGate ${call.toolCallId} user =====\n${user}\n\n`
+          `===== AskGate ${call.toolCallId}${prompt.label} system =====\n${prompt.system}\n===== AskGate ${call.toolCallId}${prompt.label} user =====\n${user}\n\n`
         );
-      // Raced from handler entry, so the render above counts against the runner's ceiling too.
-      const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
       const sessionId = ctx.sessionManager.getSessionId();
-      // A model that answers with an error hands the request to the next one in the role's chain, inside
-      // the same deadline. Only models on the primary's provider are asked: the transcript stays there.
-      const chain = [
-        model,
-        ...deps.fallbackModels(ctx, model, role).filter((next) => next.provider === model.provider),
-      ];
       const failedModels: Array<{ model: string; error: string }> = [];
       const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
       let billed = false;
       let answer: Answer = { kind: "error", reason: "no model asked" };
-      let asked = model;
+      let asked = chain[0];
       for (const next of chain) {
         asked = next;
-        answer = await ask(
-          { ctx, model: next, system: prompt.system, user, sessionId },
-          call.toolCallId,
-          Math.max(0, deadlineMs - (deps.now() - call.started))
-        );
+        answer = await ask({ ctx, model: next, system: prompt.system, user, sessionId }, call.stop);
         if (answer.usage) {
           billed = true;
           for (const k of Object.keys(usage) as Array<keyof Usage>) usage[k] += answer.usage[k];
@@ -2267,43 +2707,162 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         failedModels.push({ model: `${next.provider}/${next.id}`, error: answer.reason });
       }
       return {
-        kind: "asked",
         answer,
         called: {
           promptBytes,
-          reviewedText: prompt.reviewedText,
           model: `${asked.provider}/${asked.id}`,
-          deadlineMs,
           ...(failedModels.length > 0 ? { failedModels } : {}),
           ...(billed ? { usage } : {}),
         },
+        elapsedMs: deps.now() - began,
       };
     };
 
-    const decide = async (
-      event: ToolCallEvent,
-      ctx: GateCtx,
-      started: number,
-      base: Base,
-      key: string,
-      rebuttal: string | undefined,
-      override: Override,
-      upload = false
-    ): Promise<Decision> => {
+    /**
+     * What the charter's answer is to the entry: the outcome it records, the fields that outcome
+     * carries, what it does to the halt count, and the revise reason when it gave one. Read once
+     * per call, since a rules refusal records the charter's own outcome beside the rule it matched.
+     */
+    type Charter = {
+      outcome: GateEntry["outcome"];
+      fields: Partial<GateEntry>;
+      effect: Decision["effect"];
+      reason?: string;
+    };
+    const readCharter = (
+      answer: Answer,
+      verdict: { decision: "allow" | "revise"; reason?: string } | undefined
+    ): Charter => {
+      if (answer.kind === "error")
+        return { outcome: "error", fields: { reason: answer.reason }, effect: "failure" };
+      if (answer.kind === "timeout") return { outcome: "timeout", fields: {}, effect: "failure" };
+      // Abandoned or shut down: no verdict came back, which is the gate's stop and not its failure.
+      if (answer.kind !== "answer") return { outcome: answer.kind, fields: {}, effect: "none" };
+      if (verdict === undefined)
+        return {
+          outcome: "no-verdict",
+          fields: { raw: answer.text.slice(-2000) },
+          effect: "failure",
+        };
+      if (verdict.decision === "allow" || verdict.reason === undefined)
+        return { outcome: "verdict", fields: {}, effect: "verdict" };
+      return {
+        outcome: "verdict",
+        fields: { reason: verdict.reason },
+        effect: "verdict",
+        reason: verdict.reason,
+      };
+    };
+
+    /**
+     * One gated call, as the review and each of its branches read it: the call and the session it
+     * came from, when the handler took it, what its entry already holds, its breaker key, the
+     * rebuttal it carries, the surface an override is written on and whether this call's override
+     * stayed on the command the agent reads back (`keepOverrideVisible`; a device's field never
+     * does), the one stop everything the call waits on is raced against, the directory its command
+     * runs in, and whether its dry run showed an upload (which the charter request names).
+     */
+    type GatedCall = {
+      event: ToolCallEvent;
+      ctx: GateCtx;
+      started: number;
+      base: Base;
+      key: string;
+      rebuttal: Rebuttal | undefined;
+      override: Override;
+      kept: boolean;
+      stop: Stop;
+      directory: () => Promise<string | undefined>;
+      upload: boolean;
+    };
+
+    /**
+     * A call whose new ask a rule matched: refused in every mode, the charter's revise reason
+     * after the rules reason. The charter's own outcome stays on the record and alone moves the
+     * halt count. The rules reason is never kept for the breaker, so it never feeds the charter
+     * request. `keys` is the call's own breaker keys, read once for the trip check and the count.
+     */
+    const ruleRefusal = (
+      call: GatedCall,
+      keys: () => readonly string[],
+      ruled: RulesCheck,
+      charter: Charter,
+      called: Partial<GateEntry>
+    ): Decision => {
+      const { event, base, key, override } = call;
+      const { matches } = ruled;
+      const rulesReason = [
+        ...matchLines(matches, ruled.names),
+        ...(ruled.reason === "" ? [] : [ruled.reason]),
+      ].join("\n");
+      // The refusal is the rules check's in either mode, so it counts on the asks that check
+      // refused, and a charter revise beside it adds its reason only: a rules refusal counts the
+      // same in warn and block mode.
+      const tripsNext = breaker.refused(
+        key,
+        refusalThings(event.toolName, keys(), ruled),
+        charter.reason
+      );
+      const delivered = [
+        agentFacing(rulesReason),
+        ...(charter.reason === undefined
+          ? []
+          : [agentFacing(`AskGate's charter check also answered revise: ${charter.reason}`)]),
+      ].join("\n");
+      const [first] = matches;
+      return {
+        fields: {
+          decision: "revise",
+          outcome: charter.outcome,
+          ...charter.fields,
+          deliveredReason: delivered,
+          revisesForKey: base.revisesForKey + 1,
+          rule: first.rule,
+          ruleAsk: first.ask,
+          ruleQuote: first.quote,
+          ...called,
+        },
+        result: {
+          block: true,
+          reason: renderRuleRefusal(
+            delivered,
+            matches.map((match) => match.rule),
+            tripsNext,
+            override,
+            SECOND_REVISE
+          ),
+        },
+        effect: charter.effect,
+      };
+    };
+
+    const decide = async (call: GatedCall): Promise<Decision> => {
+      const { event, ctx, started, base, key, rebuttal, override, kept, stop, directory, upload } =
+        call;
       // Before any path that lets the write out: a session with no model role refuses in both
       // modes, and a rebuttal, a halt, a breaker trip or a shutdown is no exception, since none
       // of them is a review and the gate cannot review anything at all here.
-      if (resolveRole(ctx) === undefined) return noModelRole;
+      const resolved = resolveRole(ctx);
+      if (resolved === undefined) return noModelRole;
       if (rebuttal !== undefined) {
         breaker.reset(key);
         return {
-          fields: { decision: "allow", outcome: "rebuttal", rebuttal },
-          result: { additionalContext: renderRebuttalAck(rebuttal, override) },
+          fields: { decision: "allow", outcome: "rebuttal", rebuttal: rebuttal.line },
+          result: { additionalContext: renderRebuttalAck(rebuttal, override, kept) },
           effect: "none",
         };
       }
       if (halted) return pass("halted");
-      if (breaker.tripped(key)) {
+      // The call's breaker keys, read from its own reviewed arguments as the rules check reads its
+      // asks: a parse of the arguments, which costs no model call and no Dispatch read. Only the
+      // breaker needs them, so they are read where it asks, and never for a target it holds
+      // nothing on. A refusal counts some of these same keys, so a call it warns of trips here.
+      let keys: string[] | undefined;
+      const thisCallKeys = () => (keys ??= callKeys(event.toolName, event.input));
+      // A tripped breaker sends the call unasked only where one of its own keys was refused
+      // enough times here. Any other call on the same target is something the gate has refused
+      // too few times or never, so the review runs and every count stays where it is.
+      if (breaker.tripped(key, thisCallKeys)) {
         breaker.reset(key);
         return {
           fields: { decision: "allow", outcome: "breaker" },
@@ -2313,122 +2872,181 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
 
       if (closing) return givenUp(base.verdictMode, "shutdown");
+      const { role, model } = resolved;
+      // A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
+      if (ctx.model?.provider !== model.provider)
+        return pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
+      // Raced from handler entry, so each render of this call counts against the runner's ceiling too.
+      const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
+      stop.arm(Math.max(0, deadlineMs - (deps.now() - started)));
+      // A model that answers with an error hands the request to the next one in the role's chain, inside
+      // the same deadline. Only models on the primary's provider are asked: the transcript stays there.
+      const chain = [
+        model,
+        ...deps.fallbackModels(ctx, model, role).filter((next) => next.provider === model.provider),
+      ];
+      // Both calls read one rendering of the agent under review, the newer of them reusing it.
+      let rendered: { primarySystemPrompt: string; transcript: string } | undefined;
+      const agentContext = () =>
+        (rendered ??= {
+          primarySystemPrompt: ctx.getSystemPrompt().join("\n\n"),
+          transcript: renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES),
+        });
       // The arguments as the model sees them, cut at GATE_ARGS_MAX_BYTES, also go in the entry, so a
       // later read of the review has the text the model judged, not the command or a mutable file.
       const args = renderArgs(event.input);
-      const reviewed = await askModel(
+      const walked = { toolCallId: event.toolCallId, stop };
+      // The charter call starts first (its request is rendered and started before this returns); a call
+      // that opens a new ask also gets the rules call, beside it on the same chain, deadline and stop.
+      const charterRun = walk(
         ctx,
-        { toolCallId: event.toolCallId, started },
+        walked,
         {
           system,
-          reviewedText: args,
-          user: () =>
-            renderRequest(
-              ctx.getSystemPrompt().join("\n\n"),
-              renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES),
+          label: "",
+          user: () => {
+            const { primarySystemPrompt, transcript } = agentContext();
+            return renderRequest(
+              primarySystemPrompt,
+              transcript,
               base.path,
               args,
-              breaker.reasons(key),
+              breaker.charterReasons(key),
               upload
-            ),
+            );
+          },
+        },
+        chain
+      );
+      const rulesRun = runRulesCheck(
+        {
+          now: deps.now,
+          env: deps.env,
+          dispatchClient: deps.dispatchClient,
+          walk: (prompt) => walk(ctx, walked, prompt, chain),
+        },
+        {
+          toolName: event.toolName,
+          tool: base.path,
+          input: event.input,
+          directory,
+          system: ruleSystem,
+          context: agentContext,
+          signal: stop.signal,
         }
       );
-      if (reviewed.kind === "no-model-role") return noModelRole;
-      if (reviewed.kind === "skipped") return pass("skipped", { reason: reviewed.reason });
-      const { answer, called } = reviewed;
-      if (answer.kind === "error")
-        return pass("error", { reason: answer.reason, ...called }, "failure");
-      if (answer.kind !== "answer")
-        return answer.kind === "timeout"
-          ? pass("timeout", called, "failure")
-          : givenUp(base.verdictMode, answer.kind, called);
-      const verdict = parseVerdict(answer.text);
-      if (!verdict)
-        return pass("no-verdict", { raw: answer.text.slice(-2000), ...called }, "failure");
-      if (verdict.decision === "allow" || verdict.reason === undefined) {
+      const [charterWalk, ruled] = await Promise.all([charterRun, rulesRun]);
+      const { answer } = charterWalk;
+      const verdict = answer.kind === "answer" ? parseVerdict(answer.text) : undefined;
+      const charter = readCharter(answer, verdict);
+      const called: Partial<GateEntry> = {
+        ...charterWalk.called,
+        deadlineMs,
+        reviewedText: args,
+        charterLatencyMs: charterWalk.elapsedMs,
+        // Both calls' prompts and spend are the gated call's own.
+        promptBytes: (charterWalk.called.promptBytes ?? 0) + (ruled?.promptBytes ?? 0),
+        ...(addUsage(charterWalk.called.usage, ruled?.usage) ?? {}),
+        ...(ruled === undefined
+          ? {}
+          : {
+              ruleOutcome: ruled.outcome,
+              ruleLatencyMs: ruled.latencyMs,
+              ...(ruled.model === undefined ? {} : { ruleModel: ruled.model }),
+              ...(ruled.error === undefined ? {} : { ruleError: ruled.error }),
+              ...(ruled.textMissing ? { ruleTextMissing: true as const } : {}),
+              ...(ruled.asksCut > 0 ? { ruleAsksCut: ruled.asksCut } : {}),
+              ...(ruled.asksPartial ? { ruleAsksPartial: true as const } : {}),
+            }),
+      };
+      if (ruled !== undefined && ruled.matches.length > 0)
+        return ruleRefusal(call, thisCallKeys, ruled, charter, called);
+      // No rule matched, or the rules check ended without a verdict: the charter decides, as it did
+      // before there was one.
+      if (charter.outcome === "abandoned" || charter.outcome === "shutdown")
+        return givenUp(base.verdictMode, charter.outcome, called);
+      if (charter.outcome !== "verdict")
+        return pass(charter.outcome, { ...charter.fields, ...called }, charter.effect);
+      if (charter.reason === undefined) {
+        // The charter passed the call, but its new asks were never judged: no verdict is not
+        // permission, so block mode refuses it as it refuses any call given up.
+        if (ruled?.outcome === "abandoned" || ruled?.outcome === "shutdown")
+          return givenUp(base.verdictMode, ruled.outcome, called);
         breaker.reset(key);
         return pass("verdict", called, "verdict");
       }
-      breaker.revised(key, verdict.reason);
-      const second = breaker.reasons(key).length === GATE_BREAKER_REVISES;
+      // A warn-mode revise sends the call as the agent wrote it: it refused nothing, so it is no
+      // loop to break and no count of refusals moves. Its reason is kept all the same, since the
+      // next charter request on this target carries the reasons already given. A block-mode one
+      // refuses the call, which counts on each of its things.
+      const refused = base.verdictMode === "block";
+      const tripsNext = breaker.refused(
+        key,
+        refused ? refusalThings(event.toolName, thisCallKeys(), ruled) : [],
+        charter.reason
+      );
       return {
         fields: {
           decision: "revise",
           outcome: "verdict",
-          reason: verdict.reason,
-          deliveredReason: agentFacing(verdict.reason),
+          ...charter.fields,
+          deliveredReason: agentFacing(charter.reason),
           revisesForKey: base.revisesForKey + 1,
           ...called,
         },
-        result:
-          base.verdictMode === "block"
-            ? { block: true, reason: renderRevise(verdict.reason, second, override) }
-            : { additionalContext: renderWarn(verdict.reason, second) },
+        result: refused
+          ? { block: true, reason: renderRevise(charter.reason, tripsNext, override) }
+          : { additionalContext: renderWarn(charter.reason) },
         effect: "verdict",
       };
     };
 
-    /** The model call raced against the deadline and against its tool ending without it. */
-    type Answer =
-      | { kind: "answer"; text: string; usage?: Usage }
-      | { kind: "error"; reason: string; usage?: Usage }
-      | { kind: "timeout" | "abandoned" | "shutdown"; usage?: Usage };
-    const ask = async (
-      req: Omit<CompleteRequest, "signal">,
-      toolCallId: string,
-      remainingMs: number
-    ): Promise<Answer> => {
-      const controller = new AbortController();
-      const { promise: stopped, resolve: stop } = Promise.withResolvers<
-        "timeout" | "abandoned" | "shutdown"
-      >();
-      const timer = setTimeout(() => stop("timeout"), remainingMs);
-      let graceMs = ABORT_GRACE_MS;
-      inflight.set(toolCallId, (cause, grace = ABORT_GRACE_MS) => {
-        graceMs = grace;
-        stop(cause);
-      });
+    /** One model call of a gated call, raced against that call's one stop: its deadline, its tool's end, a stopped run or the shutdown. */
+    const ask = async (req: Omit<CompleteRequest, "signal">, stop: Stop): Promise<Answer> => {
       try {
-        const call = deps.complete({ ...req, signal: controller.signal });
+        const call = deps.complete({ ...req, signal: stop.signal });
         // Promise.race subscribes to the completion, so a late rejection is handled.
-        const first = await Promise.race([call, stopped]);
+        const first = await Promise.race([call, stop.stopped]);
         if (typeof first !== "string") {
           return first.error !== undefined
             ? { kind: "error", reason: first.error, usage: first.usage }
             : { kind: "answer", text: first.text, usage: first.usage };
         }
-        controller.abort();
-        // The aborted request was billed for what it sent; give it a moment to report that.
+        // The stop aborted the request, which was billed for what it sent; give it a moment to report that.
         const { promise: grace, resolve: graceOver } = Promise.withResolvers<undefined>();
-        const graceTimer = setTimeout(graceOver, graceMs);
+        const graceTimer = setTimeout(graceOver, stop.graceMs);
         const settled = await Promise.race([call.catch(() => undefined), grace]);
         clearTimeout(graceTimer);
         return { kind: first, usage: settled?.usage };
       } catch (error) {
         return { kind: "error", reason: messageOf(error) };
-      } finally {
-        clearTimeout(timer);
-        inflight.delete(toolCallId);
       }
     };
 
     /**
      * A scoped command's arguments as the CLI's own --dry-run prints them (`args`), what the model
-     * reviews (`review`: those arguments, and an upload's `--path` text as `content`), and each
-     * file the argv names with the digest of the bytes the gate read; or why there are none; or
-     * `unscoped`: an upload whose resolved name and path make no markdown document.
+     * reviews (`review`: those arguments, and an upload's `--path` text as `content`), each file
+     * the argv names with the digest of the bytes the gate read, and the physical directory the
+     * command runs in (`directory`, read once, when a read first needs it, and undefined when it
+     * cannot be told); or why there are none; or `unscoped`: an upload whose resolved name and
+     * path make no markdown document.
      */
     type DryRun =
-      | { args: Input; review: Input; files: FileDigest[] }
+      | {
+          args: Input;
+          review: Input;
+          files: FileDigest[];
+          directory: () => Promise<string | undefined>;
+        }
       | { failure: string }
       | { unreadable: UnreadableCommand }
-      | { cause: "abandoned" | "shutdown" }
+      | { cause: GivenUpCause }
       | { unscoped: true };
     const readArgs = async (
       scoped: ScopedCommand,
       input: Input,
       ctx: GateCtx,
-      toolCallId: string
+      stop: Stop
     ): Promise<DryRun> => {
       // The bash tool's own resolution: `~` is home, a bare `/` is the session's directory, and a
       // relative path resolves against it.
@@ -2442,38 +3060,36 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // CDPATH search. So the dry run runs without it, and its `cd` reaches the directory the
       // command reaches.
       const { CDPATH: _cdpath, ...env } = deps.env;
-      /** Runs one script as the dry run runs: in `cwd`, under the limit, abandoned with the call. */
+      /**
+       * Why this call was given up, as a read here can see it: its tool's end or the session's
+       * shutdown, and undefined while it was not given up. Never its own deadline, which `decide`
+       * arms once every read below has returned: a deadline here would mean the gate had armed it
+       * over a read it still waits on, and a read that took that for "not stopped" would hand the
+       * call's own arguments to a review whose time is already spent. So it throws, and the
+       * handler records the call as an error and lets it run.
+       */
+      const abandoned = (): GivenUpCause | undefined => {
+        if (stop.cause === "timeout")
+          throw new Error("the gate's deadline fired while its dry run was still reading");
+        return stop.cause;
+      };
+      /** Runs one script as the dry run runs: in `cwd`, under the limit, stopped with the call. */
       const runScript = async (
         script: string
-      ): Promise<{ run: DryRunResult } | { cause: "abandoned" | "shutdown" }> => {
-        // Abandoned like a waiting model call: the run's stop or the session's shutdown kills it.
-        const controller = new AbortController();
-        let cause: "abandoned" | "shutdown" | undefined;
-        inflight.set(toolCallId, (given) => {
-          cause = given;
-          controller.abort();
+      ): Promise<{ run: DryRunResult } | { cause: GivenUpCause }> => {
+        // Stopped like a waiting model call: the run's stop or the session's shutdown kills it.
+        const run = await deps.dryRun(script, {
+          cwd,
+          env,
+          timeoutMs: DRY_RUN_TIMEOUT_MS,
+          signal: stop.signal,
         });
-        try {
-          const run = await deps.dryRun(script, {
-            cwd,
-            env,
-            timeoutMs: DRY_RUN_TIMEOUT_MS,
-            signal: controller.signal,
-          });
-          return cause === undefined ? { run } : { cause };
-        } finally {
-          inflight.delete(toolCallId);
-        }
+        const cause = abandoned();
+        return cause === undefined ? { run } : { cause };
       };
       /** The script's stdout, or why it gave none: a stop, the limit, or an exit other than 0. */
-      const stdoutOf = async (
-        script: string,
-        what: string
-      ): Promise<
-        | { stdout: string; stderr: string }
-        | { failure: string }
-        | { cause: "abandoned" | "shutdown" }
-      > => {
+      type Ran = { stdout: string; stderr: string } | { failure: string } | { cause: GivenUpCause };
+      const stdoutOf = async (script: string, what: string): Promise<Ran> => {
         const ran = await runScript(script);
         if ("cause" in ran) return ran;
         const { run } = ran;
@@ -2484,6 +3100,37 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           return { failure: `${what} exited ${run.exitCode ?? "on a signal"}: ${printed}` };
         }
         return { stdout: run.stdout, stderr: run.stderr };
+      };
+      // Where the command runs is the CLI's process.cwd(): the physical directory after the
+      // command's own `cd`, which bash names (the `cd`, then `pwd -P`, run as the dry run runs), so
+      // the gate asks bash for it rather than guessing. A relative file operand resolves there, and
+      // the rules check reads a document as that directory's Dispatch configuration names it; the
+      // script runs once, and only for a read that needs it. A call with no `cd`, or with a leading
+      // `cd /` and no directory of its own (`cdToSessionDirectory`), runs in the tool's directory.
+      const hostDirectory = scoped.cdToSessionDirectory === true && raw === undefined;
+      const probes = scoped.changesDirectory === true && !hostDirectory;
+      let reached: Promise<Ran> | undefined;
+      const reach = () => {
+        reached ??= stdoutOf(scoped.dirScript, `${scoped.label}'s directory`);
+        return reached;
+      };
+      // `pwd` ends its line with a newline; nothing else is trimmed, since a directory's name may
+      // end in a blank.
+      const withoutNewline = (stdout: string) =>
+        stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
+      const commandDirectory = async (): Promise<string | undefined> => {
+        if (!probes) {
+          try {
+            // A child shell's process.cwd() is physical even when the tool's cwd used a symlink.
+            return fs.realpathSync(cwd);
+          } catch {
+            return undefined;
+          }
+        }
+        const ran = await reach();
+        if (!("stdout" in ran)) return undefined;
+        const reachedDirectory = withoutNewline(ran.stdout);
+        return path.isAbsolute(reachedDirectory) ? reachedDirectory : undefined;
       };
       if (scoped.unsafeFile !== undefined)
         return {
@@ -2520,12 +3167,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           }
         }
         // A leading `cd /` in a call that names no directory runs in the session's own directory
-        // (`cdToSessionDirectory`), which `base` already is; any other `cd` is the probe's.
-        const hostDirectory = scoped.cdToSessionDirectory === true && raw === undefined;
-        const firstRelative =
-          scoped.changesDirectory === true && !hostDirectory ? relativeFile : undefined;
+        // (`cdToSessionDirectory`), which `base` already is; any other `cd` is the probe's, which
+        // `commandDirectory` reads again without running it twice.
+        const firstRelative = probes ? relativeFile : undefined;
         if (firstRelative !== undefined) {
-          const reached = await stdoutOf(scoped.dirScript, `${scoped.label}'s directory`);
+          const reached = await reach();
           if ("cause" in reached) return reached;
           if (!("stdout" in reached))
             return {
@@ -2539,7 +3185,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 },
               },
             };
-          base = reached.stdout.endsWith("\n") ? reached.stdout.slice(0, -1) : reached.stdout;
+          base = withoutNewline(reached.stdout);
           if (!path.isAbsolute(base))
             return {
               unreadable: {
@@ -2618,7 +3264,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // An upload's dry run prints its `--path`, not its text: the model reviews the bytes the
       // gate read from that path, which the marker binds and the CLI uploads.
       if (!scoped.upload || typeof args.path !== "string" || args.content !== undefined)
-        return { args, review: args, files };
+        return { args, review: args, files, directory: commandDirectory };
       if (uploadText === undefined)
         return {
           unreadable: {
@@ -2627,7 +3273,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             file: { flag: "--path", path: args.path, reason: "was not read before review" },
           },
         };
-      return { args, review: { ...args, content: uploadText }, files };
+      return { args, review: { ...args, content: uploadText }, files, directory: commandDirectory };
     };
 
     /** The fields every entry of a call carries; a gated call fills in its target's revise count and the digest. */
@@ -2681,7 +3327,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       const started = deps.now();
       let base: Base | undefined;
       let decision: Decision;
-      // A `dispatch` command with its override flag removed, which runs whatever the gate decides.
+      // A `dispatch` command with its override flag removed and put back as a shell comment,
+      // which runs whatever the gate decides.
       let revised: Input | undefined;
       // What the call's dry run printed and the digests of the files the gate read, which a
       // marker for the command it ran binds.
@@ -2719,49 +3366,76 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         if (event.toolName === "bash") {
           const scoped = scopedCommand(event.input.command);
           if (scoped === undefined) return undefined;
+          // The surface an override of this call is written on, whether it carries one or not:
+          // both refusals say what becomes of one sent on it.
+          const override = scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE;
+          // Whether the override this call carries stayed on the command the agent reads back,
+          // which the acknowledgement says.
+          let kept = false;
           if (scoped.rebuttal !== undefined) {
-            revised = { ...event.input, command: scoped.command };
+            // The comment goes on before the review, so the acknowledgement the review renders
+            // says where the override went, and the mint reads the command that finally runs.
+            const back = keepOverrideVisible(
+              { ...event.input, command: scoped.command },
+              scoped.rebuttal
+            );
+            revised = back.input;
+            kept = back.kept;
           }
           base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
           // Before the dry run and before any path that lets the write out: with no model role
           // the gate can review nothing, and every one of those paths would otherwise allow.
           if (resolveRole(ctx) === undefined) decision = noModelRole;
           else {
-            const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
-            // An upload its dry run shows is no markdown document passes as an ungated call
-            // does, with no entry and no marker, which the CLI needs for no such upload; an
-            // override flag on it is still removed, since the CLI would refuse it.
-            if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
-            if ("cause" in run) decision = givenUp(mode, run.cause);
-            else if ("unreadable" in run) {
-              if (halted) decision = pass("halted");
-              else if (ctx.model?.provider !== resolveRole(ctx)?.model.provider)
-                decision = pass("skipped", {
-                  reason: `primary on ${ctx.model?.provider ?? "no model"}`,
+            // One stop for everything this call waits on: its dry run, its document read and
+            // both model calls.
+            const stop = openStop(event.toolCallId);
+            try {
+              const run = await readArgs(scoped, event.input, ctx, stop);
+              // An upload its dry run shows is no markdown document passes as an ungated call
+              // does, with no entry and no marker, which the CLI needs for no such upload; an
+              // override flag on it is still removed, since the CLI would refuse it, and put
+              // back as a comment, so the agent's record of the call still shows it.
+              if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
+              // A read given up: its tool ended, or the session is shutting down. Never this
+              // call's own deadline, which is armed only once the model calls go out.
+              if ("cause" in run) decision = givenUp(mode, run.cause);
+              else if ("unreadable" in run) {
+                if (halted) decision = pass("halted");
+                else if (ctx.model?.provider !== resolveRole(ctx)?.model.provider)
+                  decision = pass("skipped", {
+                    reason: `primary on ${ctx.model?.provider ?? "no model"}`,
+                  });
+                else decision = unreadableCall(run.unreadable, checks);
+              }
+              // The CLI refuses arguments it cannot parse before it sends anything, so the
+              // command runs.
+              else if ("failure" in run) decision = pass("error", { reason: run.failure });
+              else {
+                dryRun = { args: run.args, files: run.files };
+                const { key, label } = breakerKey(scoped.tool, run.review);
+                base = {
+                  ...base,
+                  revisesForKey: breaker.revises(key),
+                  argsDigest: createHash("sha256").update(JSON.stringify(run.review)).digest("hex"),
+                  target: label,
+                };
+                decision = await decide({
+                  event: { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.review },
+                  ctx,
+                  started,
+                  base,
+                  key,
+                  rebuttal: scoped.rebuttal,
+                  override,
+                  kept,
+                  stop,
+                  directory: run.directory,
+                  upload: scoped.upload === true,
                 });
-              else decision = unreadableCall(run.unreadable, checks);
-            }
-            // The CLI refuses arguments it cannot parse before it sends anything, so the
-            // command runs.
-            else if ("failure" in run) decision = pass("error", { reason: run.failure });
-            else {
-              dryRun = { args: run.args, files: run.files };
-              const key = breakerKey(scoped.tool, run.review);
-              base = {
-                ...base,
-                revisesForKey: breaker.reasons(key).length,
-                argsDigest: createHash("sha256").update(JSON.stringify(run.review)).digest("hex"),
-              };
-              decision = await decide(
-                { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.review },
-                ctx,
-                started,
-                base,
-                key,
-                scoped.rebuttal,
-                scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE,
-                scoped.upload === true
-              );
+              }
+            } finally {
+              stop.close();
             }
           }
         } else {
@@ -2769,13 +3443,33 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           const rebuttal = rebuttals.get(event.toolCallId);
           rebuttals.delete(event.toolCallId);
           if (!scopedDevice(event.toolName, event.input)) return undefined;
-          const key = breakerKey(event.toolName, event.input);
+          const { key, label } = breakerKey(event.toolName, event.input);
           base = {
             ...identity(event, mode),
-            revisesForKey: breaker.reasons(key).length,
+            revisesForKey: breaker.revises(key),
             argsDigest: createHash("sha256").update(JSON.stringify(event.input)).digest("hex"),
+            target: label,
           };
-          decision = await decide(event, ctx, started, base, key, rebuttal, DEVICE_OVERRIDE);
+          const stop = openStop(event.toolCallId);
+          try {
+            // A device call runs in the session's own directory; it has no `cd` of its own.
+            decision = await decide({
+              event,
+              ctx,
+              started,
+              base,
+              key,
+              rebuttal,
+              override: DEVICE_OVERRIDE,
+              // A device's field is removed before the call runs, always.
+              kept: false,
+              stop,
+              directory: async () => ctx.cwd,
+              upload: false,
+            });
+          } finally {
+            stop.close();
+          }
         }
       } catch (error) {
         // Fail open: the runner turns a thrown handler into a refusal. A throw here is the
@@ -2789,6 +3483,14 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       } catch {
         // The halt notice is best effort.
       }
+      let rulesNotice: string | undefined;
+      try {
+        rulesNotice = settleRules(decision.fields.ruleOutcome, ctx);
+      } catch {
+        // The rules notice is best effort too.
+      }
+      // A refused call runs nothing, so it keeps no command of the gate's: a rules refusal is the
+      // agent's own command refused, whatever the charter's outcome was.
       if (decision.result?.block) revised = undefined;
       // The first gated call says once that the OMP_ASKGATE it ignored is not the switch.
       if (ignoredModeNotice !== undefined) {
@@ -2801,12 +3503,23 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           // The notice is best effort; the logger has it.
         }
       }
+      // The marker the CLI needs to post a literal write that will run, minted below. A call whose
+      // own tool ended while the gate still held it — its review is the await such an end falls
+      // in, and a marker stands for two hours — gets none: nothing of that call runs any more, so
+      // no marker is owed, and the entry says the mint was skipped. The outcome is unchanged
+      // either way.
+      const mints = event.toolName === "bash" && base !== undefined && !decision.result?.block;
+      const mintSkipped =
+        mints && ended.has(event.toolCallId) ? ("call-ended" as const) : undefined;
+      const entry: GateEntry = {
+        ...(base ?? identity(event, mode)),
+        ...decision.fields,
+        latencyMs: deps.now() - started,
+        ...(mintSkipped === undefined ? {} : { mintSkipped }),
+      };
+      let refusal: ToolCallResult;
       try {
-        pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
-          ...(base ?? identity(event, mode)),
-          ...decision.fields,
-          latencyMs: deps.now() - started,
-        } satisfies GateEntry);
+        pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, entry);
       } catch (error) {
         // A write no review stands behind posts only when the record of that is written: the
         // record is the whole account of what went out unreviewed. So a record that fails
@@ -2814,54 +3527,73 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         // posts; a call already refused keeps its own refusal.
         if (decision.fields.decision === "allow" && decision.fields.outcome !== "verdict") {
           notices.delete(event.toolCallId);
-          return {
+          refusal = {
             block: true,
             reason: recordFailureRefusal(messageOf(error), deps.configFile),
           };
         }
       }
-      // The marker the CLI needs to post a literal write that will run, minted once its record is
-      // written (a write whose record failed is refused above). A review, or a pass the gate took
-      // over the dry run's arguments (a rebuttal, a breaker trip, a halt, another provider), binds
-      // those arguments and the files' digests; a call no verdict stands behind is argv-only.
-      if (event.toolName === "bash" && base !== undefined && !decision.result?.block) {
+      // A review, or a pass the gate took over the dry run's arguments (a rebuttal, a breaker
+      // trip, a halt, another provider), binds those arguments and the files' digests; a call no
+      // verdict stands behind is argv-only. The mint reads the command the handler finally
+      // returns, the override comment put back, whose argv is what bash hands the CLI. A call
+      // this entry already refused mints nothing: no command of it runs.
+      let minted: ToolCallResult;
+      if (refusal === undefined && mints && mintSkipped === undefined) {
         const { outcome } = decision.fields;
         const bound =
           dryRun !== undefined && !UNREVIEWED_OUTCOMES.includes(outcome) ? dryRun : null;
-        const minted = mintFor(
+        minted = mintFor(
           event.toolCallId,
           (revised ?? event.input).command,
           bound,
           outcome,
           checks
         );
-        if (minted?.block) {
-          notices.delete(event.toolCallId);
-          return minted;
-        }
-        if (minted?.additionalContext !== undefined)
-          decision.result = {
-            ...decision.result,
-            additionalContext: [decision.result?.additionalContext, minted.additionalContext]
-              .filter((note) => note !== undefined)
-              .join("\n"),
-          };
       }
+      // The entry above reaches only this machine's disk, so a rules decision also goes to
+      // Dispatch, where a session with no access to this machine counts it (`decision-record.ts`).
+      // Started here and awaited by nothing of the call: the review's deadline pays none of it, and
+      // whatever that write costs or loses, the decision above and the call's result stand. It is
+      // started for a call this entry failed too, as it is for one whose own refusal stands: what
+      // the write did is the record's own account, which the session's disk no longer holds. It
+      // starts after the mint, since the record carries the decision the call finally got: a call
+      // a failed entry or a refusing mint sent back never posted, so the record says `revise`,
+      // whatever the verdict above was.
+      const sentBack = refusal !== undefined || minted?.block === true;
+      startRecord(sentBack ? { ...entry, decision: "revise" } : entry, ctx);
+      if (refusal !== undefined) return refusal;
+      if (minted?.block) {
+        notices.delete(event.toolCallId);
+        return minted;
+      }
+      if (minted?.additionalContext !== undefined)
+        decision.result = {
+          ...decision.result,
+          additionalContext: [decision.result?.additionalContext, minted.additionalContext]
+            .filter((note) => note !== undefined)
+            .join("\n"),
+        };
       // The same note goes on the call's own result (`deliverNotice`), which every caller reads:
       // a call an eval cell made has no loop sink for `additionalContext`, and a note the agent
-      // never sees reads like a gate that is working.
-      if (decision.result?.additionalContext !== undefined)
-        rememberNotice(event.toolCallId, decision.result.additionalContext);
+      // never sees reads like a gate that is working. The rules notice rides there too, on this
+      // call alone, never on the session-start notices a later session would repeat.
+      const owed = [decision.result?.additionalContext, rulesNotice].filter(
+        (note): note is string => note !== undefined
+      );
+      if (owed.length > 0) rememberNotice(event.toolCallId, owed.join("\n"));
       return revised === undefined ? decision.result : { ...decision.result, input: revised };
     };
 
     pi.on("tool_call", async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {
       const done = handleCall(event, ctx);
-      handling.add(done);
+      handling.set(event.toolCallId, done);
       try {
         return await done;
       } finally {
-        handling.delete(done);
+        handling.delete(event.toolCallId);
+        // The id is kept only while the gate holds the call (`ended`).
+        ended.delete(event.toolCallId);
       }
     });
   };

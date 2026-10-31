@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -30,7 +31,8 @@ const excerptRunes = 240
 // Query selects one node's edges. Direction "in" reads edges pointing at the node (Kind, ID
 // are its to_kind, to_id: ref_key for artifacts); "out" reads edges it writes (from_kind,
 // from_id: the uuid for artifacts). Kinds narrows edge types; Since keeps mentions whose
-// source_seq is greater, which excludes every structural edge.
+// source_seq is greater, and Through those whose source_seq is at or below it; either excludes
+// every structural edge.
 //
 // A document's read also lists the edges at its current blocks: on "in", every edge pointing at
 // one of them, and on "out", every link one of them holds; each such edge names that block as
@@ -49,6 +51,11 @@ type Query struct {
 	// inbound `replies_to` edges are its own clarification thread, which its card renders.
 	ExcludeKinds []string
 	Since        *int64
+	// Through bounds a Since read at a safe horizon of the event log (events.Horizon), at or
+	// below which every event is final: event ids are not commit order, so a caller that moved
+	// its since past a returned edge's source_seq would never be shown an edge whose event
+	// drew a lower id and committed later.
+	Through *int64
 	// WholeDocuments, on a document's "in" read, lists the items and documents that cite it or
 	// one of its current blocks, and no block: a citing document is listed by its own edges.
 	WholeDocuments bool
@@ -333,6 +340,10 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 		args = append(args, *query.Since)
 		sql.WriteString(" and source_seq > $" + strconv.Itoa(len(args)))
 	}
+	if query.Through != nil {
+		args = append(args, *query.Through)
+		sql.WriteString(" and source_seq <= $" + strconv.Itoa(len(args)))
+	}
 	sql.WriteString(" order by created_at desc, kind, other_kind, other_id, at_block")
 	rows, err := q.Query(ctx, sql.String(), args...)
 	if err != nil {
@@ -595,20 +606,27 @@ func anchorVersion(alias string) string {
 // loadAskNodes resolves ask nodes. An ask is made by its author. Its last change is its own edit
 // (edited_at: its wording, a block ask's settlement, an approval request's version move), by the
 // editor the latest ask.edited event names; an answer or a resolution is no change of it. It
-// belongs to the document it is written on: the one its anchor names, at the anchored version; a
-// block ask's document, at the version that first held its block when Dispatch knows it
-// (blockFirstVersion); an approval request's document, at the version it named when it opened
-// (written_version); the document that owns it, at the version current when it was written
-// (written_version). An ask written on no document belongs to its issue.
+// belongs to the document it is written on: the one its anchor names, when the anchor's
+// artifact_id casts to a uuid, at the anchored version; a block ask's document, at the version
+// that first held its block when Dispatch knows it (blockFirstVersion); an approval request's
+// document, at the version it named when it opened (written_version); the document that owns it,
+// at the version current when it was written (written_version). An ask written on no document
+// belongs to its issue.
+//
+// An artifact_id that casts to no uuid names no document, so such an anchor falls through to the
+// branch below - the ask's block document, at that branch's version - exactly as an anchor
+// carrying no artifact_id at all does, and as both search arms link the same ask. The version and
+// the document therefore always come from one branch.
 //
 // The edit lookup repeats events_ask_payload_id's type list (migration 0030), so the planner can
 // prove the partial index serves it.
 func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
+	anchorArtifact := store.CastableUUID(`k.anchor->>'artifact_id'`)
 	rows, err := q.Query(ctx, `
 		select k.id::text, k.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, ''), k.question,
 		       k.author, k.created_at, k.edited_at, edit.edited_by, `+documentColumns("doc")+`,
 		       case
-		         when k.anchor->>'artifact_id' is not null then `+anchorVersion("k")+`
+		         when `+anchorArtifact+` is not null then `+anchorVersion("k")+`
 		         when k.block_artifact_id is not null then case when first.known then first.version end
 		         else k.written_version
 		       end
@@ -616,7 +634,7 @@ func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string
 		left join issues i on i.key = k.issue_key
 		left join artifacts a on a.id = k.artifact_id
 		left join artifacts doc on doc.id = case
-		  when k.anchor->>'artifact_id' is not null then (k.anchor->>'artifact_id')::uuid
+		  when `+anchorArtifact+` is not null then `+anchorArtifact+`
 		  when k.block_artifact_id is not null then k.block_artifact_id
 		  when k.kind = 'approval' then (k.approval->>'artifact_id')::uuid
 		  else k.artifact_id

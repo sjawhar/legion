@@ -1570,16 +1570,17 @@ func TestNewRefusesAnAgentSecretsOptionNoPodCouldRun(t *testing.T) {
 	}
 }
 
-// operatorPod is an operator's runtime.kubernetes.pod: a variable, a Secret volume, a ConfigMap
-// volume mounted by sub_path into the profile's agent directory, a projected ServiceAccount token
-// alone in its volume, an existing share by its PersistentVolumeClaim mounted read-only, an NFS
-// export mounted writable, and the account the pods run as.
+// operatorPod is an operator's runtime.kubernetes.pod: a variable, a Secret volume at mode 0440
+// (default_mode), a ConfigMap volume mounted by sub_path into the profile's agent directory, a
+// projected ServiceAccount token alone in its volume, an existing share by its
+// PersistentVolumeClaim mounted read-only, an NFS export mounted writable, and the account the pods
+// run as.
 func operatorPod() Pod {
 	expiry := int64(3600)
 	return Pod{
 		Env: map[string]string{"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml"},
 		Volumes: []corev1.Volume{
-			{Name: "operator-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-operator-creds"}}},
+			{Name: "operator-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-operator-creds", DefaultMode: new(int32(0o440))}}},
 			{Name: "operator-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator"},
 				Items:                []corev1.KeyToPath{{Key: "models.yml", Path: "models.yml"}},
