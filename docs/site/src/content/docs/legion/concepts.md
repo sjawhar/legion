@@ -241,7 +241,8 @@ Legion uses GitHub's own review mechanisms rather than labels:
   role the phase again. From retro the implementer keeps its turn, is told the same way, and is
   handed the implementing task after it; a retro completion that reaches the daemon after the move
   reports the assignment retro handed it while the phase holds the implementing one, so it is
-  refused `HANDOFF_STALE_ASSIGNMENT` and made again in the implementing task's own turn. The
+  refused `HANDOFF_STALE_ASSIGNMENT`; the implementer fixes the red in the implementing task's own
+  turn and completes that work with a handoff of its own, never retro's commit. The
   implementer pushes and completes without waiting for CI: a red that settled while
   it was still implementing sends the work back the moment it completes, so no tester round runs
   on code CI already found broken. Once the issue awaits its merge, only a red of the head's own
