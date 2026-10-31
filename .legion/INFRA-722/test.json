@@ -2,87 +2,79 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-722",
-  "completed": "2026-10-31T00:05:00Z",
-  "round": 4,
+  "completed": "2026-10-31T11:45:00Z",
+  "round": 5,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's browser suite at this head on the real stack (`cd packages/dispatch && bun run e2e -- e2e/document-and-comment-read-alike.e2e.ts --project=chromium` -> 8 passed (37.5s), every row by name). Verified each of its round-4 claims independently rather than by repeating it: the merged engine by running the differential and an old-against-new engine fuzz myself over 53,246 documents against the main commit the merge brought in; the lower-case declaration by measuring it in five positions at the base and at this head; the two neighbour shapes and the four census refusals by driving each through POST /api/v1/issues; the source-offset fix by a throwaway test of itemblocks.Split with a negative control at the head before the fix; the three locks by removing each reading in a copy of the head tree and running the whole pmdoc suite. Every proof entry carries all six required fields.",
-    "roundsVerified": "Rounds 1-3's entries were verified in those rounds. This round re-checked everything the merge with #2518 moved, since the merge moved both the base and the engine."
+    "how": "Re-ran the implementer's browser suite at this head on the real stack (8 passed (32.8s), every row by name). Verified its round-5 claims independently rather than by repeating them, with rigs rebuilt from scratch after the pod was replaced: the one rule for a typed block's ending blank lines by generating my own 457-member family - the one round 4 lacked, with the blank line written both bare and carrying the quote's own marker - and reading it with binaries and engines built at the merged base, at review round 2's head and at this head; the kind-6 finding and the quoted forms the same way; the differential by running it myself over 53,385 documents; the 916 by reading them at this head; the three locks by removing each reading in a copy of the head tree and running the whole pmdoc suite.",
+    "roundsVerified": "Rounds 1-4's entries were verified in those rounds. This round re-measured everything review 5720094674's three findings moved, plus the gates the merge could have moved."
   },
   "failures": [],
   "failed": 0,
   "resolvedSinceLastRound": [
-    "CI runs again and has settled green: run 41109200497 at code head 51a234b7 is `completed/success`, every job green (changes, ci-filters, ci-ok, claude-envoy, contracts, dispatch, dispatch-browser-multiprocess, dispatch-memory, dispatch-multiprocess, docs/build, envoy-client, envoy-e2e-local, envoy-go, envoy-go-race, envoy-go-race-docs, envoy-infra-go, envoy-plugin, envoy-session-stall, envoy-smoke, lint, listener-server-change, pi-envoy, pi-legion, pi-shared, test, worker-image/build), with broker-multiprocess, ci-images, typecheck and worker-image/attest skipped. No red is left to name an owner for: the two reds of round 3's head were main's, and the newer main this round merged carries their fixes - envoy-go and envoy-go-race, which failed only TestRoutesTablePinsEveryRegisteredRoute from sjawhar/legion#2478's unbumped pin, and pi-envoy's card-delivery rows from #2278, are all green here.",
-    "The lower-case declaration is no longer a reading difference anywhere. Measured in five positions at the main commit this branch merged and at this head, identically at both: `x <!a> y` inside a paragraph is read alike and stored, and `<!a>` as its own line - alone, after a paragraph, lazy under a quote, under a list item, under a footnote definition - is refused by the long-standing `block HTML is not accepted by Proof`, the same rule `<div>` meets. So this change neither refuses it nor reads it otherwise; #2518 moved it and the branch's own refusal no longer names it.",
-    "The two neighbour shapes round 3 left as silent misreads are refused by name at the document write boundary: the nested-list form (28 of 40 in the tester's own corpus, the rest read alike) and the unclosed-typed-block form (28 of 40), each by its own reason.",
-    "The reviewer's source-offset finding is fixed, with a negative control: see the proof entry below."
+    "Review finding 1, the regression, is closed and I own the miss. The reviewer's five quoted forms - a lone `>`, `>` and spaces, one and two blank lines, closed and unclosed - are read alike at the merged base, were refused at review round 2's head 51a234b7, and are read alike again here. Over my whole 457-member family: 0 documents that `cc0334716bb1` read alike are refused at this head, where round 2's head refused 157 of them. My round-4 corpus missed this because it wrote the blank line inside a quote bare, which ends the quote; the corpus now writes it both ways, 8 marker forms deep, at one and two quote depths.",
+    "Review finding 2, the closing-fence blank line, is closed by one named rule. `- a` + a typed block ending with a paragraph and a blank line, with a quote holding a list, and the architect's quote form - all three DIVERGENT at the merged base and at round 2's head - are refused here, each by the same reason, `a blank line at the end of a typed block in a list item, above its closing fence or with the block itself, which the browser editor reads as a blank line spacing the item`. Across the family, 157 members move from stored-and-divergent to refused and none moves the other way.",
+    "Review finding 3, the kind-6 exemption, is closed. `- a\\n\\n  \\t<div x\\n`, which review round 2 measured as stored with Go reading the text and the browser reading an html node, is refused here by `browserBlockHTML` naming line 3; `> \\t<div x` likewise. The three lines the reviewer kept - `> \\t<!-- c -->`, `> \\t<!x>`, `> \\t<?x?>` - are still refused, and their untabbed forms still refused by the same rule, which is the reviewer's corrected reason.",
+    "The architect's quote form from round 4 (my 21 documents) is refused by name, so the finding I raised then is closed by the folded rule."
   ],
   "proof": [
     {
-      "criterion": "Contract change census: every refusal the pull request's census names is driven through the client a person writes with, and each must refuse only its own shape",
-      "surface": "POST /api/v1/issues on the real stack (Go server and production SPA built from this checkout, Postgres 17 + pgvector), and POST /api/v1/issues/{key}/comments for the same text as a comment",
+      "criterion": "Review finding 1's gate: no document the merged base reads as the browser is refused here, over a corpus that holds the quote-wrapped and `>`-blank forms the regression lived in",
+      "surface": "ParseForWrite against the headless browser engine, document by document, with binaries and engines built at the merged base cc0334716bb1, at review round 2's head 51a234b7 and at this head",
+      "command": "bun $TMPDIR/t722/gen5.ts spread5.jsonl; bun run-eng.ts (three ENG_TREE values); PROBE_IN=... PROBE_OUT=... $TMPDIR/t722/pmdoc.<rev>.test -test.run 'TestZZProbe$'",
+      "observed": "457 documents - five holders (bullet and ordered items at the top level, in a quote, in two quotes) x eight blank-line forms (empty, spaces, a lone `>`, `>` and one to four spaces, `>` and a tab, `> >` at two levels) x fourteen block endings, plus review 5720094674's nine measured documents and fourteen kind-6 lines. Read alike at cc0334716bb1 and refused here: 0. Moved from divergent to refused: 157. Refused at both: 66. Read alike at both: 207. Stored at this head where Go and the browser disagree: 27, every one of them the `blank-before-body` set recorded under findings.",
+      "headSha": "2944c141bcc57d47e34a10572713cee0c0f8d991",
+      "negativeControl": "The same family read with the binary of review round 2's head leaves 157 members refused that cc0334716bb1 reads alike - the regression the reviewer found - so the gate bites and a 0 here is a comparison."
+    },
+    {
+      "criterion": "Contract change census: both refusals the pull request now names are driven through the client a person writes with, each refusing only its own shape, and the quoted forms the earlier rule refused are stored again",
+      "surface": "POST /api/v1/issues on the real stack (Go server and production SPA built from this checkout, Postgres 17 + pgvector), and POST /api/v1/issues/{key}/comments for the same text",
       "command": "cd packages/dispatch && source $TMPDIR/bp-harness/env.sh && bun run e2e -- <the tester's own throwaway spec> --project=chromium",
-      "observed": "8 passed. `browserBlockHTML`: `> </a\\t>\\n> ===\\n` -> 400 INVALID_MARKDOWN naming line 1 and both readings; `typedCodeBlankInItem`: `- a` + a typed block whose indented code ends in a whitespace-only line shorter than the code -> 400 naming that shape; `typedListBlankInItem`: a list then a blank line before the block's end -> 400 naming `a blank line between a list a typed block in a list item ends with and the block's own end`; `unclosedTypedCodeBlankInItem`: the unclosed form -> 400 naming `indented code in a typed block no fence closes, in a list item ... with nothing in the document past the block`. The same text as a comment is stored in every one of the four cases, which is right: a comment is read by the browser alone.",
-      "headSha": "8b0a472c64b7e942b6a82427081b28680b450fda",
-      "negativeControl": "One near-miss per entry, each stored: `> </a\\t>` alone; the same typed block with a blank line and text instead; the same list with no blank line before the block's end; the same unclosed block with no short whitespace line. So each refusal fires on the difference and not on the shape."
+      "observed": "15 passed. `browserBlockHTML` refuses `> </a\\t>\\n> ===\\n` naming line 1 and both readings, and `- a\\n\\n  \\t<div x\\n` naming line 3. `typedEndBlankInItem` refuses the blank above the closing fence, the paragraph form, the architect's quote form and the block-itself form, each by the same named reason. Four quoted forms are stored, and the fifth - code, a lone `>`, then the closing fence - is still refused. A comment of the same text is stored in all fifteen cases, which is right: a comment is read by the browser alone.",
+      "headSha": "2944c141bcc57d47e34a10572713cee0c0f8d991",
+      "negativeControl": "Three near-misses, each stored: `> </a\\t>` alone, the same typed block with no blank line at all, and the same block with a blank line and text outside the item. And one the other way: `- a\\n\\n  <div x\\n`, the same kind-6 line without the tab, is refused by the plain block-HTML rule, so the tab is not what the refusal turns on."
     },
     {
-      "criterion": "The reviewer's source-offset finding: ParseWithSourceStarts promises offsets into the caller's own markdown, and its one caller (itemblocks.Split) cuts the caller's body at them, so a U+0000 must not move the cut",
-      "surface": "itemblocks.Split, the split behind an item's blocks, driven over 17 bodies holding U+0000 in a paragraph, a heading, a code fence, a quote, a table cell, between blocks and alone",
-      "command": "GOWORK=off go test ./internal/dispatch/itemblocks/ -run TestZZTesterSplitCutsAtTheCallersOwnBytes -count=1 (a throwaway test of the tester's own, since removed)",
-      "observed": "Green at this head. Every block's Text is exactly body[From:To], every word of the body is in some block, and - the check that matters - the same body with each U+0000 written as one ordinary byte splits into the same blocks, type for type and text for text, including seven bodies whose blocks are not separated by blank lines, where cutting at the parser's starts and cutting at blank lines differ.",
-      "headSha": "8b0a472c64b7e942b6a82427081b28680b450fda",
-      "negativeControl": "The same test against the head before this round, 46aa74d3, fails: `\"\\x00\\x00\\x00\\n# h\\nbody\\n\": 1 blocks, but 3 with each NUL written as x`. A body opening with NULs collapsed into one block there, so the finding was real and the fix is what closes it. (No route carries a raw U+0000 to this code today - the API answers 400 NUL_CHARACTER first - so the defect was in the contract rather than on a surface.)"
-    },
-    {
-      "criterion": "A2 differential against the main commit this branch merged, after the merge with #2518's engine",
+      "criterion": "A2 differential against the merged base, over a corpus that includes the quote-wrapped and `>`-blank variants",
       "surface": "pmdoc/gen/differential.sh, which reads one corpus at two revisions and reads each rendering back with Go and with the browser engine",
       "command": "PMDOC_DIFF_SHARDS=2 bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base e65900f4438b987f2dd38b8b51c1ab33ad3fc644 --corpus $TMPDIR/t722/corpus --out $TMPDIR/t722/diff",
-      "observed": "53,246 documents (38,304 generated tables, 12,880 html-flow documents, 900 block-HTML indentation documents, 690 NUL, empty-item and fence documents, 320 item-spread documents of the family the round's three new refusals turn on, plus this package's own corpus): regressions 0, misreads 0, engine-tree regressions 0, head panics 0, lost fixed points 0, newly refused by the writer 0, and the new gate `engine readings Go's schema refuses` 0; fixed 4,960. Churn 25 and engine-tree churn 55 are the one class the pull request names - the `\\-|-|-` escape the renderer no longer needs plus the code-span fixture - and no churn row's head rendering fails to read back. Of 584 documents the base stores and this head refuses, 0 are documents the base read as the engine.",
-      "headSha": "8b0a472c64b7e942b6a82427081b28680b450fda",
+      "observed": "53,385 documents (38,304 generated tables, 12,880 html-flow documents, 900 block-HTML indentation documents, 690 NUL, empty-item and fence documents, the 457-member family above, plus this package's own corpus): regressions 0, misreads 0, engine-tree regressions 0, head panics 0, lost fixed points 0, newly refused by the writer 0, engine readings Go's schema refuses 0; fixed 4,960. Churn 25 and engine-tree churn 55 are the one class the pull request names and no churn row's head rendering fails to read back. Of 684 documents the base stores and this head refuses, 0 are documents the base read as the browser.",
+      "headSha": "2944c141bcc57d47e34a10572713cee0c0f8d991",
       "negativeControl": "The same report carries 8 `lost fixed point of a misread` rows, documents the base stored as a misread and this head refuses, so the comparison reads both sides rather than reporting an empty run."
     },
     {
-      "criterion": "D4 engine, old against new across the merge: no reading the engine got right is lost",
-      "surface": "The engine of the main commit this branch merged against this head's engine, each judged against Go's reading at this head",
-      "command": "bun $TMPDIR/t722/run-eng-base.ts over the differential's own corpus, compared with the differential's head-engine and head-Go dumps",
-      "observed": "53,246 documents: unchanged 43,693; the new engine agrees with the reader where the old did not 1,369; changed where neither agrees with the reader 4,620 (documents Go refuses, in the main); the old engine threw on 3,564 and the new engine on none. **0 documents where the old engine agreed with the Go reader and the new one does not.**",
-      "headSha": "8b0a472c64b7e942b6a82427081b28680b450fda",
-      "negativeControl": "The 3,564 the old engine threw on are bodies holding a block of HTML, which drew nothing at all before this change; every one of them draws at this head, which is what moves 1,369 of them into agreement with the reader."
+      "criterion": "The 916 fuzzed callout documents read alike or are refused by a named reason at this head",
+      "surface": "ParseForWrite against the headless browser engine over the LF text the document write path reads",
+      "command": "bun $TMPDIR/t722/run-eng.ts $TMPDIR/r916/corpus-lf.jsonl; PROBE_IN=... PROBE_OUT=... $TMPDIR/t722/pmdoc.head.test -test.run 'TestZZProbe$'",
+      "observed": "916 documents: 880 read alike, 32 refused by one named reason (a footnote definition inside a typed block holding a block other than a paragraph), 4 read otherwise - the pre-existing short-body-row padding the pull request names. This is the table the pull request body carries, measured at this head rather than taken from it.",
+      "headSha": "2944c141bcc57d47e34a10572713cee0c0f8d991",
+      "negativeControl": "The same corpus at the branch's fork point reads 320 documents otherwise, measured in round 1, so an 880 here is a comparison."
     },
     {
-      "criterion": "A1/D3/D6 reading at this head: Go reads each shape as the browser engine does, or refuses it by name",
-      "surface": "ParseForWrite against the headless browser engine, document by document, with a binary built from this head",
-      "command": "bun $TMPDIR/p722/h/run-eng.ts <corpus> <corpus>.eng; PROBE_IN=<corpus>.eng PROBE_OUT=<corpus>.go $TMPDIR/t722/pmdoc.head.test -test.run 'TestZZProbe$'; bun $TMPDIR/t722/classify.ts <corpus>.eng <corpus>.go",
-      "observed": "38,304 tables: 37,012 alike, 620 refused by name, 672 differing only by the short body row goldmark pads and the headless engine does not, 0 other divergences. 12,880 html documents: 5,676 alike, 7,204 refused by name, 0 divergent, where round 3 had 54. 900 indentation documents: 120 alike, 780 refused by name, 0 divergent, where round 3 had 40. 690 NUL, empty-item and fence documents: 689 alike, 1 refused, 0 divergent. 320 item-spread documents: 172 alike, 127 refused by name across the three new reasons, 21 divergent, every one of them the quote form recorded under findings. The engine threw on none of the 53,094.",
-      "headSha": "8b0a472c64b7e942b6a82427081b28680b450fda",
-      "negativeControl": "The same 21 quote-form documents read DIVERGENT against a binary and an engine built from the base e65900f4, and the rest of the item-spread corpus moves from divergent to refused between the two, so a `0 divergent` in the other corpora is a comparison and not an empty run."
-    },
-    {
-      "criterion": "The three readings the spec's last \"Also in scope\" names are still each locked at this head, after the merge that rewrote list_spacing.go",
+      "criterion": "The three readings the spec's last \"Also in scope\" names are still each locked, after a round that rewrote the list-spacing rule and a forward merge",
       "surface": "The whole pmdoc suite, run against the workspace's testdata, with each reading removed in a copy of the head tree",
-      "command": "bash $TMPDIR/t722/mutate.sh (git archive 51a234b7; the suite run with no -run filter, log $TMPDIR/t722/mutate4.log)",
+      "command": "bash $TMPDIR/t722/mutate.sh (git archive 59873e78; the suite run with no -run filter, log $TMPDIR/t722/mutate5.log)",
       "observed": "m0 baseline exit=0 failures=0; m1 (`asHeldBefore` returns `l`) fails `TestIndentedCodesHeldLineInATypedBlockIsRefusedBesideAnEmptyItem`; m2 (the `keptLast` delete removed) fails `TestATypedBlocksBlankLineInAnItemIsRefusedBesideAnEmptyItem`; m3 (`fenceEndsEmptyAttr` never set) fails `TestAFencedBlockEndingAtTheDocumentsOwnWhitespaceLineHoldsNoneOfIt` and `TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent`.",
-      "headSha": "8b0a472c64b7e942b6a82427081b28680b450fda",
+      "headSha": "2944c141bcc57d47e34a10572713cee0c0f8d991",
       "negativeControl": "The baseline run of the same suite from the same tree, with nothing removed, passes, so each failure is the mutation's and not the harness's."
     },
     {
       "criterion": "D12 reader-facing at this head: the implementer's own rows on the real stack",
-      "surface": "Dispatch issue page in Chromium on the real stack - the spec editor, the past version view and a Conversation comment - plus getIssueArtifactText and POST /api/v1/issues",
+      "surface": "Dispatch issue page in Chromium - the spec editor, the past version view and a Conversation comment - plus getIssueArtifactText and POST /api/v1/issues",
       "command": "cd packages/dispatch && source $TMPDIR/bp-harness/env.sh && bun run e2e -- e2e/document-and-comment-read-alike.e2e.ts --project=chromium",
-      "observed": "8 passed (37.5s) at this head, every row by name, the refusal row and the NUL row included.",
-      "headSha": "8b0a472c64b7e942b6a82427081b28680b450fda",
+      "observed": "8 passed (32.8s) at this head, every row by name, the refusal row and the NUL row included.",
+      "headSha": "2944c141bcc57d47e34a10572713cee0c0f8d991",
       "negativeControl": "Row 6 is itself a refusal: a spec whose quoted closing tag ends in a tab is refused as invalid markdown, naming the line; it passes only when the write is refused."
     }
   ],
   "ci": {
-    "head": "8b0a472c64b7e942b6a82427081b28680b450fda (handoff-only, `skip-checks: true`)",
-    "codeHead": "51a234b7cde7ebb5126ec1f2aacd8b0aedc1f4c9",
-    "read": "GitHub, 2026-10-30T22:11Z and again at 23:53Z: CI run 41109200497 at code head 51a234b7 is settled `completed/success`, 26 jobs green and 4 skipped (broker-multiprocess, ci-images, typecheck, worker-image/attest), none failed; PR Title 41131412031 success. Nothing was re-run and nothing was waited for. This is the first settled run at a code head of this branch since the conflict, and it names no owner for any red, because there is none.",
-    "staticLanes": "The package suites are CI's and are read there, not repeated: dispatch, dispatch-multiprocess, dispatch-browser-multiprocess, dispatch-memory, envoy-go, envoy-go-race, envoy-go-race-docs, envoy-e2e-local, envoy-smoke, envoy-session-stall, pi-envoy, pi-shared, pi-legion, contracts, envoy-client, envoy-plugin, claude-envoy, lint and test are all green in that run."
+    "head": "2944c141bcc57d47e34a10572713cee0c0f8d991 (handoff-only, `skip-checks: true`)",
+    "codeHead": "59873e78a7a17778215cfd483a2ab83c6723518b (the forward merge; the code commit under it is 19833ea3)",
+    "read": "GitHub, 2026-10-31T11:37Z: CI run 41190374835 at the code head is still `queued` after two hours - 10 jobs success (changes, lint, docs, contracts, claude-envoy, envoy-client, envoy-plugin, dispatch-browser-multiprocess, listener-server-change, worker-image/build), 2 in progress, 15 queued, 4 skipped, **none failed**. A lane still running is read as running: nothing was waited for and no lane was re-run. The reviewer reads the settled run at the head it approves; at this reading there is no red to name an owner for. No run exists for 19833ea3 itself, which was pushed while the branch was conflicting.",
+    "staticLanes": "The package suites are CI's and are read there. The implementer also ran them locally at the merge head (packages/dispatch 2963 pass, packages/proof-editor 271 pass, both typechecks and biome clean); I did not repeat them."
   },
   "findings": [
-    "A third silent misread of the family the census closes, pre-existing and left open: where a quote stands between the typed block and the indented code, the item is tight in Go and spread in the browser. `- a\\n  :::callout{#c1 kind=\"note\" title=\"T\"}\\n  > x\\n  >     code\\n     \\n  :::\\n` and 20 more of my 320-document item-spread corpus, across bullet, ordered and star items and every shape of the short whitespace line. Measured DIVERGENT at the main commit this branch merged and DIVERGENT at this head, so it is no regression, and the implementer declared the carve-out in round 3 ('the refusal does not look through a quote or a list inside the typed block'). The list half of that carve-out is now refused (typedListBlankInItem); the quote half is not. The two the reviewer called critical are closed; this is the same class with a quote in the way. The architect decides whether it joins them, goes to INFRA-719 with the rest of the whitespace-after-indented-code family, or stays declared.",
-    "The pull request body's `Not proven / risk` list is stale and incomplete at this head: it still says the head conflicts with main and that CI, the engine fuzz and the differential have not run (all three have, and CI is green), and it still lists the two neighbour shapes as silent misreads, which this round refuses. It does not list the quote form above. That line is the reviewer's to write, so the next review round owns it; the merger quotes it, so it should not reach READY as it stands."
+    "One residual divergence of the same family, in the mirror position the new rule does not cover: a blank or whitespace-only line directly after a typed block's OPENING fence in a list item. `- a\\n  :::callout{#c1 kind=\"note\" title=\"T\"}\\n\\n  - x\\n  :::\\n` and 26 more of my 457-member family (every holder, every blank form, bare and quote-marker alike) are stored with the item tight in Go and spread in the browser - `list_item(spread=false)` against `list_item(spread=true)`, the block's own content identical. Measured DIVERGENT at main e65900f4 and DIVERGENT at this head, so no regression and nothing this round moved: the rule the reviewer asked for is worded for a blank line at the END of the block, and this is one at its start. It is the last member of the family I can find that is neither read alike nor refused. The architect decides whether it joins the rule, goes to INFRA-719 with the rest of the whitespace-after-indented-code family, or is recorded as known.",
+    "The pull request body's `Not proven / risk` is current at this head and names the derivation risk honestly ('a container the family does not generate could still be read tight here and spread in the browser'). The 27 documents above are exactly such a container, so that line is where they belong if the architect leaves them."
   ]
 }
