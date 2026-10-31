@@ -10,7 +10,7 @@ body: |-
     reports it. Without it a turn that outlived its phase could complete the phase's next entry: a
     tester still working when CI sent the issue to implementing, and an implementing round sent it
     back to testing, reported a completion the daemon took for the new testing phase, since every
-    phase entry of one run carries that run. Migration 0064 adds the three columns, each
+    phase entry of one run carries that run. Migration 0067 adds the three columns, each
     `text not null default ''`; there is no backfill, and a worker with no assignment on either
     side — every one live at the upgrade, a resumed worker, and the implementer at a production
     check's look, none of which hand out an assignment — is accepted as before.

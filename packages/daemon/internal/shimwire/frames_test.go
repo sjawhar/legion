@@ -58,16 +58,16 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 		{"agent_end", `{"type":"agent_end"}`, AgentEnd{}},
 		{
 			// Oh My Pi's own, measured against the pinned binary: it follows the agent_end of the
-			// turn the prompt ran, and sessionSettled is false while a background job that turn
-			// started is still going.
+			// turn the prompt ran. Its line carries `status` and `sessionSettled` besides, which
+			// the daemon reads nothing of and the decode drops.
 			"prompt_result",
-			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":true,"status":"completed"}`,
-			PromptResult{ID: "d1.XYZ", AgentInvoked: true, Status: "completed"},
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":true}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: true},
 		},
 		{
 			"prompt_result of a prompt that ran no turn",
-			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":false,"status":"error","error":"no model"}`,
-			PromptResult{ID: "d1.XYZ", AgentInvoked: false, Status: "error", Error: "no model"},
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":false,"error":"no model"}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: false, Error: "no model"},
 		},
 		{"shutdown", `{"type":"shutdown"}`, Shutdown{}},
 		{

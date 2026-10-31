@@ -3,7 +3,7 @@ body: |-
     A start no longer takes a phase over from the role still at work in it. When CI goes red the
     daemon starts the implementer at once, as at every other phase change: it aborts no turn and
     waits for none to end, and the role whose phase ended keeps its turn, its jobs, its process and
-    its session. The `quiesce` field of a supervise start goes with it, and migration 0062 strips
+    its session. The `quiesce` field of a supervise start goes with it, and migration 0065 strips
     the key from every start still queued, so a row an earlier release wrote still decodes. The RPC
     abort goes too — `runtime.Conn.Abort`, the stream's `abort` frame and the Claude Code bridge's
     interrupt — since a suspension, a stop and a kill go through `Conn.Shutdown` and the runtime.

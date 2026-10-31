@@ -335,7 +335,7 @@ func (c *ciRedClaimant) endTurn() {
 	t.Helper()
 	c.sh.send(shimwire.AgentEnd{})
 	if c.turn != "" {
-		c.sh.send(shimwire.PromptResult{ID: c.turn, AgentInvoked: true, Status: "completed", SessionSettled: true})
+		c.sh.send(shimwire.PromptResult{ID: c.turn, AgentInvoked: true})
 	}
 	c.turn = ""
 	testwait.Eventually(t, fmt.Sprintf("the %s out of its turn", c.role), func() bool {

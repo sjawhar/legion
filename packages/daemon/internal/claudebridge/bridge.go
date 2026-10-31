@@ -409,12 +409,20 @@ func (b *bridge) deliver(d delivery) {
 	b.startRun(d.content, "")
 }
 
+// beginRun marks a turn running and tells the daemon it began. prompt is the request id of the
+// daemon's prompt that started it, and "" for a turn nothing of the daemon's did — an Envoy
+// delivery's, or one Claude Code started by itself — which is why it is written rather than
+// assumed to be clear already.
+func (b *bridge) beginRun(prompt string) {
+	b.inRun, b.promptRun = true, prompt
+	b.emit(shimwire.AgentStart{})
+}
+
 // startRun tells the daemon a turn of the bridge's own starts and sends its first message. prompt
 // is the request id of the daemon's prompt that started it, and "" for a turn nothing of the
 // daemon's did.
 func (b *bridge) startRun(message, prompt string) {
-	b.inRun, b.promptRun = true, prompt
-	b.emit(shimwire.AgentStart{})
+	b.beginRun(prompt)
 	b.step(message)
 }
 
@@ -466,8 +474,7 @@ func (b *bridge) systemInit() {
 		return
 	}
 	b.log.Printf("Claude Code started a turn of its own")
-	b.inRun = true
-	b.emit(shimwire.AgentStart{})
+	b.beginRun("")
 }
 
 // contentBlock is one block of a stream-json message's content.

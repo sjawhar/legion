@@ -279,17 +279,14 @@ type AgentEnd struct{}
 // either as `data.agentInvoked: false` on its response — it finished locally and started no turn
 // — or as this frame, always written after that response.
 //
-// AgentInvoked is false for a prompt that ran no turn of its own. Status is Oh My Pi's own word
-// for how the work ended (`completed`, `aborted`, `error`), and Error its reason when it has one.
-// SessionSettled is whether the session had nothing left running when the prompt ended; it is
-// false while a background job the turn started is still going, which is exactly the case this
-// frame was taken up for.
+// AgentInvoked is false for a prompt that ran no turn of its own, and Error is Oh My Pi's reason
+// when the work ended in one. Oh My Pi's own prompt_result carries more than these three fields —
+// `status`, its word for how the work ended, and `sessionSettled` among them — which nothing in
+// the daemon reads; the decode drops them.
 type PromptResult struct {
-	ID             string `json:"id"`
-	AgentInvoked   bool   `json:"agentInvoked"`
-	Status         string `json:"status,omitempty"`
-	Error          string `json:"error,omitempty"`
-	SessionSettled bool   `json:"sessionSettled,omitempty"`
+	ID           string `json:"id"`
+	AgentInvoked bool   `json:"agentInvoked"`
+	Error        string `json:"error,omitempty"`
 }
 
 // Shutdown asks the shim to end the wrapped process: SIGTERM, then SIGKILL if it is still running

@@ -39,7 +39,7 @@ func TestTheAssignmentColumnsArriveEmptyWith0067(t *testing.T) {
 	_, err := store.Pool().Exec(ctx,
 		"update phases set assignment = 'A1' where issue = 'LEGION-208' and role = 'tester'")
 	if err == nil || !strings.Contains(err.Error(), "assignment") {
-		t.Fatalf("stamping a phases row's assignment before 0064 = %v, want the column to be unknown", err)
+		t.Fatalf("stamping a phases row's assignment before 0067 = %v, want the column to be unknown", err)
 	}
 	t.Logf("before the migration the assignment write is refused: %v", err)
 	if _, err := store.Migrate(ctx); err != nil {
@@ -56,10 +56,10 @@ func TestTheAssignmentColumnsArriveEmptyWith0067(t *testing.T) {
 	} {
 		var got string
 		if err := store.Pool().QueryRow(ctx, read.query).Scan(&got); err != nil {
-			t.Fatalf("read %s after 0064: %v", read.what, err)
+			t.Fatalf("read %s after 0067: %v", read.what, err)
 		}
 		if got != "" {
-			t.Fatalf("%s carries assignment %q after 0064, want it empty: no backfill, so a worker live at the release is compared with nothing", read.what, got)
+			t.Fatalf("%s carries assignment %q after 0067, want it empty: no backfill, so a worker live at the release is compared with nothing", read.what, got)
 		}
 	}
 
@@ -76,7 +76,7 @@ func TestTheAssignmentColumnsArriveEmptyWith0067(t *testing.T) {
 			"select assignment from pending_task_deliveries where delivery_id = 'outbox:7'"},
 	} {
 		if _, err := store.Pool().Exec(ctx, write.write); err != nil {
-			t.Fatalf("stamp %s after 0064: %v", write.what, err)
+			t.Fatalf("stamp %s after 0067: %v", write.what, err)
 		}
 		var got string
 		if err := store.Pool().QueryRow(ctx, write.read).Scan(&got); err != nil {

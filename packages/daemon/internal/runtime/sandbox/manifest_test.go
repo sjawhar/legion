@@ -2151,19 +2151,22 @@ func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
 	}
 	spec := claudeWorkerSpec(t)
 	claude := envOf(workerOf(t, r, spec))
-	for name, want := range map[string]string{
-		"CLAUDE_CONFIG_DIR":                    scratchRoot + "/state/" + string(spec.Role) + "/claude",
-		"CLAUDE_CODE_DISABLE_CRON":             "1",
-		"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "",
+	for name, expect := range map[string]struct {
+		want  string
+		owned bool
+	}{
+		"CLAUDE_CONFIG_DIR":                    {want: scratchRoot + "/state/" + string(spec.Role) + "/claude", owned: true},
+		"CLAUDE_CODE_DISABLE_CRON":             {want: "1", owned: true},
+		"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": {want: "", owned: false},
 	} {
-		if claude[name] != want {
-			t.Errorf("a Claude worker is told %s=%q, want %q", name, claude[name], want)
+		if claude[name] != expect.want {
+			t.Errorf("a Claude worker is told %s=%q, want %q", name, claude[name], expect.want)
 		}
 		if omp := envOf(workerOf(t, r, workerSpec(t))); omp[name] != "" {
 			t.Errorf("an Oh My Pi worker is told %s=%q, want nothing", name, omp[name])
 		}
-		if owned := runtimeOwned[name]; owned != (want != "") {
-			t.Errorf("runtimeOwned[%s] = %t, want %t: the runtime owns the names it sets and no other", name, owned, want != "")
+		if owned := runtimeOwned[name]; owned != expect.owned {
+			t.Errorf("runtimeOwned[%s] = %t, want %t: the runtime owns the names it sets and no other", name, owned, expect.owned)
 		}
 	}
 }

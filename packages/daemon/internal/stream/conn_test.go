@@ -320,8 +320,8 @@ func TestAPromptResultNamesTheDeliveryItsRequestIDCarries(t *testing.T) {
 	}
 	p.send(shimwire.AgentEnd{})
 	p.send(shimwire.PromptResult{ID: "a-request-no-prompt-carried", AgentInvoked: true})
-	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: true, Status: "completed"})
-	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: false, Status: "error", Error: "no model"})
+	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: true})
+	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: false, Error: "no model"})
 	want := []Event{
 		TurnEnd{Claim: testClaim},
 		PromptResult{Claim: testClaim, DeliveryID: "delivery-1", AgentInvoked: true},

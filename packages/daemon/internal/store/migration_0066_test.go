@@ -24,7 +24,7 @@ func TestTheOutboxTakesThePhaseEndedKindWith0066(t *testing.T) {
 	}
 	err := queue("phase_ended")
 	if err == nil || !strings.Contains(err.Error(), "outbox_kind_check") {
-		t.Fatalf("queueing a phase_ended row before 0063 = %v, want the kind constraint to refuse it: it is the row the migration exists for", err)
+		t.Fatalf("queueing a phase_ended row before 0066 = %v, want the kind constraint to refuse it: it is the row the migration exists for", err)
 	}
 	t.Logf("before the migration the phase-ended row is refused: %v", err)
 	if _, err := store.Migrate(ctx); err != nil {
@@ -36,7 +36,7 @@ func TestTheOutboxTakesThePhaseEndedKindWith0066(t *testing.T) {
 		"auto_merge_disable", "ready_merge", "check_compare", "check_look", "check_bound", "phase_ended",
 	} {
 		if err := queue(kind); err != nil {
-			t.Fatalf("queue a %s row after 0063: %v", kind, err)
+			t.Fatalf("queue a %s row after 0066: %v", kind, err)
 		}
 	}
 	t.Logf("after the migration the outbox takes all seventeen kinds, phase_ended among them")

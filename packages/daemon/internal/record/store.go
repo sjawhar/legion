@@ -1,6 +1,7 @@
 package record
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -1344,25 +1345,24 @@ func (s *Postgres) UnfinishedLanes(ctx context.Context, tx pgx.Tx, project strin
 	}
 	defer rows.Close()
 	lanes := []LaneKey{}
+	seen := map[LaneKey]bool{}
 	for rows.Next() {
 		var issue, kind string
 		if err := rows.Scan(&issue, &kind); err != nil {
 			return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 		}
 		key := LaneKey{Issue: issue, Lane: LaneOf(OutboxKind(kind))}
-		if key.Lane == "" || slices.Contains(lanes, key) {
+		if key.Lane == "" || seen[key] {
 			continue
 		}
+		seen[key] = true
 		lanes = append(lanes, key)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 	}
 	slices.SortFunc(lanes, func(a, b LaneKey) int {
-		if a.Issue != b.Issue {
-			return strings.Compare(a.Issue, b.Issue)
-		}
-		return strings.Compare(string(a.Lane), string(b.Lane))
+		return cmp.Or(strings.Compare(a.Issue, b.Issue), strings.Compare(string(a.Lane), string(b.Lane)))
 	})
 	return lanes, nil
 }

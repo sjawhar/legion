@@ -7,8 +7,10 @@ import { SQL } from "bun";
  * reached, for that session's next assistant message, and which tool call was open when it
  * arrived. The source is the project's Oh My Pi session store, whose connection URL the file
  * `OMP_SESSION_SQL_DSN_FILE` names; each session is its `omp_session_files.content` row followed
- * by its `omp_session_files_parts` rows in `start_offset` order, and every read is scoped by
- * `path`, the primary key of both tables, since a scan of the parts table takes minutes.
+ * by its `omp_session_files_parts` rows in `start_offset` order, which is the shape
+ * `packages/daemon/internal/ompsessions/ompsessions.go` defines and reads back, and every read is
+ * scoped by `path`, the primary key of both tables, since a scan of the parts table takes
+ * minutes.
  *
  * Nothing it prints carries the connection URL, a credential or an exception's text: its lines
  * hold a role name, a session id, a tool name, an instant and a count, and a failure is a fixed
@@ -77,7 +79,7 @@ arrival are the ones whose own span holds that instant, not the ones open where 
 
 Exit status: 0 when the measurement ran, whatever it found; 2 when it could not run.`;
 
-export interface Options {
+interface Options {
   readonly sinceMs: number;
   readonly thresholdMs: number;
   readonly includeSubagents: boolean;
@@ -89,7 +91,7 @@ export interface Options {
 class UsageError extends Error {}
 
 /** One Envoy message's arrival in a session, and what became of it. */
-export interface Arrival {
+interface Arrival {
   /** The role the session had claimed, the session's id, and a subagent's name. */
   readonly session: string;
   readonly at: number;
@@ -106,7 +108,7 @@ export interface Arrival {
   readonly longest?: { readonly toolName: string; readonly ms: number };
 }
 
-export interface Measurement {
+interface Measurement {
   readonly sessions: number;
   readonly sessionsWithArrivals: number;
   readonly arrivals: readonly Arrival[];
@@ -168,7 +170,7 @@ function parseDuration(value: string): number {
   return Number(match[1]) * unit;
 }
 
-export function parseArguments(argv: readonly string[]): Options | "help" {
+function parseArguments(argv: readonly string[]): Options | "help" {
   const flags = readFlags(argv);
   if (flags.help === true) return "help";
   const since = flags.since;
@@ -187,7 +189,7 @@ export function parseArguments(argv: readonly string[]): Options | "help" {
 }
 
 /** The instant the session at this path was launched, or null when its name carries none. */
-export function launchedAt(path: string): number | null {
+function launchedAt(path: string): number | null {
   const match = LAUNCHED_AT.exec(path);
   if (match === null) return null;
   const at = Date.parse(`${match[1]}T${match[2]}:${match[3]}:${match[4]}.${match[5]}Z`);
@@ -195,7 +197,7 @@ export function launchedAt(path: string): number | null {
 }
 
 /** The sessions to measure: launched inside the window, and named as the options ask. */
-export function sessionsInScope(
+function sessionsInScope(
   paths: readonly string[],
   options: Options,
   now: number
@@ -217,7 +219,7 @@ function sessionLabel(path: string, role: string | undefined): string {
   return `${role ?? "no role claimed"} ${id}${subagent}`;
 }
 
-export interface SessionMeasurement {
+interface SessionMeasurement {
   readonly arrivals: readonly Arrival[];
   readonly unparsed: number;
 }
@@ -248,7 +250,7 @@ interface PendingArrival {
  * off the record's position instead would find every wait unheld, since the call that held it
  * has closed by then. The arrivals no assistant message follows are the ones nothing answered.
  */
-export function measureSession(path: string, text: string): SessionMeasurement {
+function measureSession(path: string, text: string): SessionMeasurement {
   const calls: ToolCall[] = [];
   const running = new Map<string, ToolCall>();
   const measured: PendingArrival[] = [];
@@ -323,16 +325,12 @@ export function measureSession(path: string, text: string): SessionMeasurement {
 }
 
 /** The store, read one session at a time: every statement is scoped by `path`. */
-export interface SessionStore {
+interface SessionStore {
   paths(): Promise<readonly string[]>;
   text(path: string): Promise<string>;
 }
 
-export async function measure(
-  store: SessionStore,
-  options: Options,
-  now: number
-): Promise<Measurement> {
+async function measure(store: SessionStore, options: Options, now: number): Promise<Measurement> {
   const paths = sessionsInScope(await store.paths(), options, now);
   const arrivals: Arrival[] = [];
   let sessionsWithArrivals = 0;
@@ -346,7 +344,7 @@ export async function measure(
   return { sessions: paths.length, sessionsWithArrivals, arrivals, unparsedLines };
 }
 
-export function formatDuration(ms: number): string {
+function formatDuration(ms: number): string {
   const whole = Math.round(ms / 1000);
   const hours = Math.floor(whole / 3600);
   const minutes = Math.floor((whole % 3600) / 60);
@@ -365,7 +363,7 @@ function describe(arrival: Arrival): string {
 }
 
 /** The report, line by line, so a reader and a test see the same run. */
-export function report(measurement: Measurement, options: Options): string[] {
+function report(measurement: Measurement, options: Options): string[] {
   const { arrivals } = measurement;
   const answered = arrivals.filter((arrival) => arrival.waitMs !== null);
   const over = answered
@@ -421,7 +419,7 @@ export function report(measurement: Measurement, options: Options): string[] {
   return lines;
 }
 
-export interface LiveStore extends SessionStore {
+interface LiveStore extends SessionStore {
   close(): Promise<void>;
 }
 
