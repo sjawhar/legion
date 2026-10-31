@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "completed": "2026-10-31T02:30:00Z",
+  "completed": "2026-10-31T03:10:00Z",
   "stateTable": [
     "Kept-decision hand-over: one rule, with the generation dimension",
     "",
@@ -97,6 +97,7 @@
   ],
   "deviations": [
     "main merged forward (9311aed0, main df771175) because the red `test` job is main's new check-ci-images gate meeting this branch's devbox proof, and its fix (an EXCEPTIONS entry) needs a file only main has. Fingerprint before 1962bcaa7553772a771ad67bcd067c7c182e15cce0e6c21443e26dab8992e812 at b7a78e76, after 2e6a86ac5a21bf11be90fd61d10a16404b02d4a3ef4e6054359c4559e1d69957 at the pure merge.",
+    "After the push GitHub reported #2163 CONFLICTING against main 39b51494 (#2576, #2577, #2422 changed prompts and skills). Merged forward again (086b89c46a11); the one conflict, packages/daemon/internal/prompts/go/architect-root.md line 7, keeps main's new accepting clause and this branch's `decided` sentence. Fingerprint before b11db14fd315dee5c62b9493732fec19a8e5ca618ec9f7922dbf4a272dde3a96 at e97449e9, after c120d11d27fb82a227526caeb26d775655e114e4f67343619ee4b2f59ce63c30 at the merge. main's commits touch only prompt and skill markdown in packages/daemon; internal/prompts and pi-legion's skills-guard (13 pass) pass at the merge, check-ci-images tree and check-private-names pass.",
     "The 500x300 sweep ran at b7a78e76, before the merge; the merge carries main's code only, and the pinned seeds and default run pass at the head.",
     "The property oracle's hand-over boundary now reads the outbox id sequence (every row composed before the hand-over), not max(id) of the live outbox, which drops below a finished row.",
     "The listener rollout case the reviewer judged out of scope remains."
@@ -116,5 +117,6 @@
     "A refused or denied catch-up keeps its decisions unclaimed; quiesce ends a refusal as it ends in real life, by relaunching the architect, whose ready names them. The architect agreed to keep that ending (B), on condition that a decision never vanishes silently: lingerExpired logs each decision still owed.",
     "A decision counts as told when told once to the architect of the tree its issue stood in at that telling. After a child's hand-over, what was still kept or held is owed to the child's architect; one extra telling to the old tree, by a row composed before the hand-over, is allowed."
   ],
-  "sweep": "500 seeds x 300 steps passed (1287.3 s) at b7a78e76 after the four seeds it first found (363, 366, 388, 479, an oracle-boundary fault) were fixed and pinned; every failing seed so far is in TestKeptDecisionsRegressionSeeds."
+  "sweep": "500 seeds x 300 steps passed (1287.3 s) at b7a78e76 after the four seeds it first found (363, 366, 388, 479, an oracle-boundary fault) were fixed and pinned; every failing seed so far is in TestKeptDecisionsRegressionSeeds.",
+  "mergeHead": "086b89c46a1111259c52ea7bcbd0c116f0451d24"
 }
