@@ -337,6 +337,10 @@ The Envoy plugin ships these skills in its `dist/skills`:
 
 - `envoy`
 
+- `outside-message`
+
+- `plain-words`
+
 The build has none of the operator's model configuration, so it leaves those agents' models unresolved (`--skip-agent-models`).
 It then checks every image-site row of the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi would find each
 — `omp setup python --check`, the `chromium` on `PATH` (or the browser a `PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the profile's lock, the tools listed below on `PATH` with `go version` running, and the `claude-code` row's claude-envoy root and Claude Code pin, as the Claude lane held them, with the `npm` that installs from the pin and the `node` that checks the installed version on `PATH`.
