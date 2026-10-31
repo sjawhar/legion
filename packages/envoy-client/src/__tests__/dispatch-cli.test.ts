@@ -1506,6 +1506,20 @@ describe("cliRefusals", () => {
     expect(requests).toEqual([]);
   });
 
+  // The whole line is pinned, not its `dispatch: ` prefix: `opencode` was an accepted host until
+  // it was removed, so the refusal naming it, and naming omp and claude as the ones left, is the
+  // user-visible behaviour that removal produces. A prefix-only assertion passes again the moment
+  // the host comes back, or the message stops naming the hosts it accepts.
+  test("a host the command does not accept is refused by name, with the two it accepts", async () => {
+    const { code, stdout } = await run(["projects"], {
+      DISPATCH_HOST: "opencode",
+      DISPATCH_SESSION_ID: "ses-1",
+    });
+    expect(code).toBe(2);
+    expect(stdout).toBe('dispatch: DISPATCH_HOST is "opencode", not omp or claude.\n');
+    expect(requests).toEqual([]);
+  });
+
   test("a session state the CLI cannot read is a refusal (exit 2)", async () => {
     const corrupt = join(stateDir, "sessions", "ses-1");
     mkdirSync(corrupt, { recursive: true });
