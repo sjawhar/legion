@@ -216,8 +216,8 @@ func acceptSpliceRefusal(err error) error {
 }
 
 // refuseAcceptedCodeThatReshapes refuses an accept whose code changes how a block around the code
-// reads back (pmdoc.BlockShapeError), in the words of the other accept refusals: the block, why,
-// and what the person accepting can do, since they cannot move the code as the edit route's
+// reads back (pmdoc.ReadBackBlock's Shape), in the words of the other accept refusals: the block,
+// why, and what the person accepting can do, since they cannot move the code as the edit route's
 // refusal (refuseCodeThatReshapesItsBlock) advises. The block named is the typed block holding
 // the code when the document-level block that reads back otherwise is the one holding the code,
 // and otherwise that block, such as the list of a task item that a suggestion running out of the
@@ -292,9 +292,9 @@ func changedBlocks(before, after *pmdoc.Node, match pmdoc.Range) (first, last, l
 // which is the one operation that made it.
 type blockReadBacks map[*pmdoc.Node]pmdoc.BlockReadBack
 
-// read is the parser's refusal of block's markdown (pmdoc.BlockReadError), and shape what that
-// markdown reads back as where it is not blocks of the same shape (pmdoc.BlockShapeError); both
-// read one read-back of the block.
+// read is the parser's refusal of block's markdown, and shape what that markdown reads back as
+// where it is not blocks of the same shape (pmdoc.ReadBackBlock); both read one read-back of the
+// block.
 func (backs blockReadBacks) read(block *pmdoc.Node) error { return backs.of(block).Read }
 
 func (backs blockReadBacks) shape(block *pmdoc.Node) error { return backs.of(block).Shape }

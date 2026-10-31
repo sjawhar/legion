@@ -456,9 +456,11 @@ func readInline(markdown string, inline parser.Parser, context parser.Context, b
 }
 
 // BlockReadBack is what one rendering and parse of a document-level block says of it: Read is the
-// parser's refusal of its markdown (BlockReadError) and Shape what that markdown reads back as
-// when it is not blocks of the same kinds nested the same way (BlockShapeError). A write runs both
-// checks over the blocks it changed (docs' refuseUnreadableReplacement and
+// parser's refusal of its markdown, nil where the parser reads it back, and Shape what that
+// markdown reads back as when it is not blocks of the same kinds nested the same way - the first
+// block that reads back as another - nil where it reads back so. What a textblock holds is not
+// compared, and every Shape verdict is ErrSchema, as the parser's own refusals are. A write runs
+// both checks over the blocks it changed (docs' refuseUnreadableReplacement and
 // refuseReshapedReplacement, refuseUnreadableAccept and refuseReshapedAccept), and a caller that
 // takes the two from one read-back renders and parses each block once rather than once a check:
 // the block a write lands in can hold the whole document's text, and a one-word edit of a
@@ -492,23 +494,8 @@ func ReadBackBlock(block *Node) BlockReadBack {
 	return BlockReadBack{}
 }
 
-// BlockReadError is the parser's refusal of a document-level block's markdown, or nil when the
-// parser reads it back (ReadBackBlock).
-func BlockReadError(block *Node) error {
-	return ReadBackBlock(block).Read
-}
-
-// BlockShapeError says what a document-level block's markdown reads back as when that is not
-// blocks of the same kinds nested the same way - the first block that reads back as another - or
-// is nil when it reads back so, or the parser's refusal of the markdown (ReadBackBlock). What a
-// textblock holds is not compared. Every verdict it gives is ErrSchema, as the parser's own
-// refusals are.
-func BlockShapeError(block *Node) error {
-	return ReadBackBlock(block).Shape
-}
-
-// readsBackAs is a block's markdown reading back as blocks of another shape (BlockShapeError):
-// a refusal, so it is ErrSchema, worded as what reads back.
+// readsBackAs is a block's markdown reading back as blocks of another shape (ReadBackBlock's
+// Shape): a refusal, so it is ErrSchema, worded as what reads back.
 type readsBackAs string
 
 func (reason readsBackAs) Error() string { return string(reason) }

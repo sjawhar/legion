@@ -81,7 +81,7 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 		err = loadableHistory(result.Update)
 	}
 	if err != nil {
-		a.service.failRoom(room, err)
+		a.service.failRoomLoad(room, load, err)
 		return nil, err
 	}
 	load.readHead(result.Version)
@@ -142,6 +142,55 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 	}
 	_, err := a.store.Compact(ctx, room, compactKeep)
 	return err
+}
+
+// applyRoom is ygo's Apply on room, with the failure handling of a load that failed after LoadDoc
+// answered. LoadDoc judges a stored history by the item count its header declares and leaves the
+// decode to ygo (loadableHistory), which decodes it into the room it is loading and fails that
+// load on a history it refuses (sjawhar/ygo v1.51.3-sami.4, provider/websocket/server.go,
+// loadRoomDoc), where the adapter never sees it: the error reaches this caller instead, and the
+// room is failed from here, as a history the adapter itself refused fails it
+// (sjawhar/legion#2519). Every load this service starts goes through an Apply, so this is where
+// each one's failure is met; a browser's socket reads the history in its admission check
+// (loadTree), which fails the room on a history that does not decode before ygo loads it.
+func (s *Service) applyRoom(ctx context.Context, room string, mutate func(*crdt.Doc, func(func(*crdt.Transaction)))) error {
+	err := s.srv.Apply(ctx, room, mutate)
+	if err != nil {
+		s.failUnfinishedLoad(ctx, room, err)
+	}
+	return err
+}
+
+// failUnfinishedLoad fails room when err is ygo's refusal of the room's load. A refusal made
+// before ygo reached the room (ErrInjectRefused: allowInject), one answering a caller whose own
+// context ended, and a transaction that produced nothing (ErrNoChanges) are no load's failure;
+// every other refusal of an Apply that found the room loading is that load's, since ygo answers
+// each caller waiting on a room's barrier with the load's own error. The record the load began
+// (beginRoomLoad) says which load that was: an instance stands in its place once the load has
+// gone through onLoadDocument, and a load that hook refused carries its own mark (refuse), so
+// what is left unfinished is a load ygo failed on its own.
+func (s *Service) failUnfinishedLoad(ctx context.Context, room string, err error) {
+	if errors.Is(err, websocket.ErrInjectRefused) || errors.Is(err, websocket.ErrNoChanges) || ctx.Err() != nil {
+		return
+	}
+	value, ok := s.roomLoads.Load(room)
+	if !ok {
+		return
+	}
+	load := value.(*roomLoad)
+	if !load.unfinished() {
+		return
+	}
+	s.failRoomLoad(room, load, err)
+}
+
+// failRoomLoad is one room load's failure: the room fails, so the next access to it reloads the
+// document rather than meeting the half-loaded one (failRoom), and the record the load began goes
+// with it. No instance will take that record (keepInstance), and nothing else takes it out: it is
+// the document the load never made that releases it (roomLoads).
+func (s *Service) failRoomLoad(room string, load *roomLoad, cause error) {
+	s.roomLoads.CompareAndDelete(room, load)
+	s.failRoom(room, cause)
 }
 
 // validateUpdate decodes a stored history, or an update about to replace one, as the room will
@@ -422,7 +471,19 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 	return nil
 }
 
-func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
+func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) (err error) {
+	// A refusal of this hook is this service's own answer to the load - the document is being
+	// rebuilt, the room has already failed, the store did not answer - and the load it fails is
+	// not one to fail the room for a second time (failUnfinishedLoad), so the room's load record
+	// carries it.
+	defer func() {
+		if err == nil {
+			return
+		}
+		if value, held := s.roomLoads.Load(room); held {
+			value.(*roomLoad).refuse()
+		}
+	}()
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
 	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.1,
 	// provider/websocket/inject.go:517-525) and closes the channel awaitRoomRecovery waits on

@@ -210,6 +210,9 @@ type roomLoad struct {
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
 	instance *roomInstance
+	// refused is set where the load's own hook refused it (refuse), which leaves no instance
+	// either but is this service's answer rather than a load the room failed under.
+	refused bool
 }
 
 // beginRoomLoad records that room is loading, before the load reads the store: every version
@@ -260,6 +263,23 @@ func (load *roomLoad) start() *roomInstance {
 	load.appended = nil
 	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: through}, loadedHead: load.head}
 	return load.instance
+}
+
+// refuse records that the hook this load runs through refused it (onLoadDocument), so the load's
+// failure is this service's own answer and not one to fail the room for.
+func (load *roomLoad) refuse() {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	load.refused = true
+}
+
+// unfinished reports a load that failed before it could leave an instance behind, and failed on
+// nothing this service answered: ygo refused the history LoadDoc handed it, decoding it into the
+// room it was loading, and the hook that starts the instance never ran (failUnfinishedLoad).
+func (load *roomLoad) unfinished() bool {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	return load.instance == nil && !load.refused
 }
 
 // tookResidentVersion records version, which this process has just made durable for room outside

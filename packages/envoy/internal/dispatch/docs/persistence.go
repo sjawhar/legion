@@ -856,8 +856,11 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // check of each update the service broadcasts (Server.BroadcastUpdate) takes no pending queue at
 // all: it is the check ygo's bundled stores run, since the room has already applied the update
 // (reearth/ygo#268, in the pinned fork).
-// TestTheStoreTakesOneBrowserUpdateItsRoomTook and TestASettlementStampsMoreBlocksThanYgosDefaultQueue
-// are updates the store's check refuses at ygo's default queue.
+// TestTheStoreTakesOneBrowserUpdateItsRoomTook is an update the store decodes itself under this
+// queue (appendUpdate) and a check at ygo's default would refuse;
+// TestASettlementStampsMoreBlocksThanYgosDefaultQueue is one nothing decodes alone any more - the
+// store reads its header (refuseUpdateItemCap) and ygo's check of the broadcast takes no queue -
+// and a check at that default would refuse it, failing the room.
 const maxUpdateItems = 1 << 20
 
 // updateItems is the number of items a V1 update of one client declares in its header: the
@@ -893,14 +896,12 @@ func itemCapError(update []byte, err error) error {
 // it. The count comes from the update's header (updateItems), which names it exactly for the one
 // client a server-encoded update is written by. An update of several clients declares no single
 // count, and one whose header does not read is no update at all: both are decoded to be judged,
-// as every update was (itemCapError).
+// and ygo's own refusal of such an update stands as it is - the cap is a count this header never
+// declared, so no decode of one of them ever reached it (itemCapError).
 func refuseUpdateItemCap(update []byte) error {
 	items, named := updateItems(update)
 	if !named {
-		if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
-			return itemCapError(update, err)
-		}
-		return nil
+		return crdt.ApplyUpdateV1(newDocumentCopy(), update, nil)
 	}
 	if items > maxUpdateItems {
 		return fmt.Errorf("%w: its %d items exceed the %d one document update can hold", ErrDocumentTooLarge, items, maxUpdateItems)

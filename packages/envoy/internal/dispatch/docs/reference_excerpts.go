@@ -74,7 +74,7 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 	// block-index reconciliation (RunBlockIndexReconciliation) indexes the blocks and the
 	// mentions they hold out of the request.
 	if blocks := len(rendered.offsets); rendered.tree != nil && blocks > deferBlockIndexBlocks {
-		slog.Info("dispatch: a document version left its blocks to the settlement: it holds more blocks than a write indexes in its own request",
+		slog.Info("dispatch: a document version left its blocks to the block-index reconciliation: it holds more blocks than a write indexes in its own request",
 			"artifact", artifactID, "version", version, "blocks", blocks, "bound", deferBlockIndexBlocks)
 		rendered = renderedTree{}
 	}

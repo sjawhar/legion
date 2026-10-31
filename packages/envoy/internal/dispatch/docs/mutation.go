@@ -1287,7 +1287,7 @@ func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snap
 }
 
 func (s *Service) warmLiveDocument(ctx context.Context, artifactID string) error {
-	err := s.srv.Apply(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+	err := s.applyRoom(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return err
 	}
@@ -1776,7 +1776,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		}
 		var readErr error
 		var behind bool
-		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		err = s.applyRoom(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
 			if cursor := s.cursorOf(live); cursor != nil && refuseRoomBehindHead(room, cursor, head) != nil {
 				behind = true
 				return

@@ -46,6 +46,7 @@ import type {
   Effects,
   Event,
   Extension,
+  ParseContext,
   State,
   Token,
   TokenizeContext,
@@ -54,7 +55,6 @@ import {
   blocksAround,
   directivesAround,
   maxBlockNesting,
-  parseRecord,
   recordContinued,
   recordDirectivesAround,
 } from "./block-nesting.js";
@@ -122,6 +122,35 @@ interface DirectiveBlock {
 }
 
 /**
+ * Per parse, what this module follows across the lines of one document. Only this module reads or
+ * writes it: the depths the lines of a parse stand inside, which the two modules count
+ * differently over the same lines, are ./block-nesting.ts's record, written once per line through
+ * `recordDirectivesAround` and `recordContinued` and read through `directivesAround` and
+ * `blocksAround` (sjawhar/legion#2519).
+ */
+interface DirectiveParse {
+  /** The depth of the innermost directive container that is open and not closed. */
+  openDirectives: number;
+  /**
+   * The line on which the continuation of a closed directive container, still on the container
+   * stack, last ran: every container around it went on there. It is 0 once that block exits.
+   */
+  reachedClosedDirective: number;
+}
+
+const parses = new WeakMap<ParseContext, DirectiveParse>();
+
+/** The record of `context`'s parse, made on the first call. */
+function directiveParse(context: TokenizeContext): DirectiveParse {
+  let parse = parses.get(context.parser);
+  if (parse === undefined) {
+    parse = { openDirectives: 0, reachedClosedDirective: 0 };
+    parses.set(context.parser, parse);
+  }
+  return parse;
+}
+
+/**
  * How many directive containers may stand inside one another. An opener standing inside this many
  * open directive containers does not open; the document service refuses a typed block nested that
  * deep.
@@ -180,7 +209,7 @@ function tokenizeLazyContentEnd(
 
   function start(code: Code): State | undefined {
     if (markdownLineEnding(code)) return nok(code);
-    const record = parseRecord(self);
+    const record = directiveParse(self);
     if (record.reachedClosedDirective === self.now().line) return ok(code);
     if (record.openDirectives <= directivesAround(self)) return nok(code);
     self.parser.lazy[self.now().line] = true;
@@ -644,7 +673,7 @@ function tokenizeDirectiveContainerStart(
     opener._nestDepth = blocks;
     if (someContainerEnded(self, opener)) self.parser.lazy[block.line] = true;
     // A start that micromark ran inside `effects.check` runs again at once, after any exits.
-    parseRecord(self).openDirectives = depth;
+    directiveParse(self).openDirectives = depth;
     return ok(code);
   }
 }
@@ -687,7 +716,7 @@ function tokenizeDirectiveContainerContinuation(
 
   function start(code: Code): State | undefined {
     if (block.closed) {
-      parseRecord(self).reachedClosedDirective = self.now().line;
+      directiveParse(self).reachedClosedDirective = self.now().line;
       return nok(code);
     }
     recordDirectivesAround(self, block.depth);
@@ -705,7 +734,7 @@ function tokenizeDirectiveContainerContinuation(
     block.closed = true;
     recordDirectivesAround(self, block.depth - 1);
     recordContinued(self, block.blocks - 1);
-    parseRecord(self).openDirectives = block.depth - 1;
+    directiveParse(self).openDirectives = block.depth - 1;
     if (blockQuoteOpenInside(self.events, block)) self.parser.lazy[self.now().line] = true;
     state._closeFlow = true;
     return ok(code);
@@ -771,7 +800,7 @@ function tokenizeClosingFence(
 
 function exitDirectiveContainer(this: TokenizeContext, effects: Effects): undefined {
   const block = directiveState(this).directive;
-  const record = parseRecord(this);
+  const record = directiveParse(this);
   record.openDirectives = Math.min(record.openDirectives, block.depth - 1);
   if (block.closed) record.reachedClosedDirective = 0;
   effects.exit("directiveContainer");

@@ -70,12 +70,13 @@ export const maxBlockNesting = 100;
 
 /**
  * Per parse, what the document tokenizer has found of the containers around its lines: the depths
- * recorded for the line it is on, and the directive containers ./directive-container.ts follows
- * across lines. The two modules count different containers over the same lines, so one record
- * holds both counts: a continuation records its depth once per line, and every start, here or
- * there, reads what the line stands inside.
+ * recorded for the line it is on. The two modules that count containers - this one and
+ * ./directive-container.ts - count different containers over the same lines, so one record holds
+ * both counts: a continuation records its depth once per line, and every start, here or there,
+ * reads what the line stands inside. What a directive container follows across lines is that
+ * module's own, which nothing here reaches (sjawhar/legion#2519).
  */
-export interface ParseRecord {
+interface ParseRecord {
   /** The line `blocks` and `directives` were last recorded on. */
   line: number;
   /**
@@ -92,22 +93,15 @@ export interface ParseRecord {
    * it.
    */
   directives: number;
-  /** The depth of the innermost directive container that is open and not closed. */
-  openDirectives: number;
-  /**
-   * The line on which the continuation of a closed directive container, still on the container
-   * stack, last ran: every container around it went on there. It is 0 once that block exits.
-   */
-  reachedClosedDirective: number;
 }
 
 const parses = new WeakMap<ParseContext, ParseRecord>();
 
 /** The record of `context`'s parse, made on the first call. */
-export function parseRecord(context: TokenizeContext): ParseRecord {
+function parseRecord(context: TokenizeContext): ParseRecord {
   let record = parses.get(context.parser);
   if (record === undefined) {
-    record = { line: 0, blocks: 0, directives: 0, openDirectives: 0, reachedClosedDirective: 0 };
+    record = { line: 0, blocks: 0, directives: 0 };
     parses.set(context.parser, record);
   }
   return record;

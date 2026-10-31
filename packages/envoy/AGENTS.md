@@ -575,10 +575,11 @@ A helper that walks the room inside `Server.Apply` outside a transaction, as an 
 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason:
 whether the service builds the decoder (`newDocumentCopy`:
-the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's check of each update it appends) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
+the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's decode of an update it appends: a browser's, which no document here encoded (`appendUpdate`), and one whose header names no single client's item count (`refuseUpdateItemCap`)) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
 ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 In a room, which keeps what it parks across updates, the queue is also the most the room's peers can park, about ten times ygo's default.
-`TestTheStoreTakesOneBrowserUpdateItsRoomTook` and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates a check at ygo's default queue refuses, which fails the room;
+`TestTheStoreTakesOneBrowserUpdateItsRoomTook` is a browser's update the store decodes itself, which a check at ygo's default queue refuses, failing the room;
+`TestASettlementStampsMoreBlocksThanYgosDefaultQueue` is a server-encoded one the store judges by its header alone (`refuseUpdateItemCap`), which such a check would refuse the same way;
 `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`, `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
 A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's edit, a read outside any transaction - stays resident until it has been idle for a minute (`roomIdleTimeout`), when ygo's idle sweeper evicts it.
@@ -713,7 +714,7 @@ the empty halves a block replacement leaves of the textblock it lands in, which 
 One the accept left unchanged whose spread already read back otherwise before it, such as a spread its markdown never carried, keeps that spread.
 Every other block, mark and node stays as it was.
 An empty replacement keeps the paragraph it empties, which is not written beside other blocks.
-Outside an ask it then runs, over every document-level block it changed, `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison (`refuseReshapedAccept`: `pmdoc.BlockShapeError`).
+Outside an ask it then runs, over every document-level block it changed, `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison (`refuseReshapedAccept`: the read-back's `Shape`).
 Both write a table without the empty cells its colspans and rowspans add, which the read-back of the whole document below writes, so an accept across many tables costs no more there than the cells those tables hold.
 Both verdicts come from one rendering and parse of each block (`pmdoc.ReadBackBlock`), which the checks of one write share through a `blockReadBacks` map, so a block two or three of them read — the block a write lands in can hold the whole document's text — is read back once rather than once a check.
 A replace shares one the same way (`refuseUnreadableReplacement`, `refuseReshapedReplacement`, `refuseCodeThatReshapesItsBlock`).
