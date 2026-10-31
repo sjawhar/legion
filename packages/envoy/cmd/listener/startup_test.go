@@ -274,6 +274,14 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 // listener: a group per machine makes NATS hand the message to one member of each machine's
 // group, and a holder whose plugin does not dedupe by event id acts on it once per machine. The
 // messages go straight onto the lane, as an operator's or an earlier listener's do.
+//
+// One group also means each message has one chance: the listener NATS gives it is the only one
+// that will forward it, and that listener is usually not the machine the holder registered on.
+// This test registers the holder on the first machine alone and then reads, from each listener's
+// own log, which machine forwarded each published event id. It requires every published id to
+// have been forwarded by exactly one machine, the second machine to have forwarded some of them,
+// and the holder to have received every one exactly once: a message the machine the holder is
+// not on took and dropped would be a delivery missing here, not a duplicate.
 func TestARoleMessageReachesItsHolderOnceAcrossTwoMachines(t *testing.T) {
 	const (
 		holderID = "ses_two_machines_holder"
@@ -304,6 +312,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoMachines(t *testing.T) {
 	// first machine took when NATS hands it a message, and resolution falls through to the role
 	// and session buckets themselves, so whichever machine takes a message resolves the holder.
 
+	published := map[string]string{}
 	publish := func(dedupeKey string) {
 		t.Helper()
 		item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, dedupeKey)
@@ -311,6 +320,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoMachines(t *testing.T) {
 		if err := client.Publish(item); err != nil {
 			t.Fatalf("publish %s onto the role lane: %v", dedupeKey, err)
 		}
+		published[item.EventID] = item.DedupeKey
 	}
 	for index := range messages {
 		publish("publish.two-machines-" + strconv.Itoa(index))
@@ -321,6 +331,9 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoMachines(t *testing.T) {
 		case frame := <-frames:
 			if !strings.HasPrefix(frame.DedupeKey, roleForwardDedupePrefix) {
 				t.Fatalf("the holder received dedupe key %q, want one prefixed %s", frame.DedupeKey, roleForwardDedupePrefix)
+			}
+			if published[frame.EventID] == "" {
+				t.Fatalf("the holder received event %s, which this test did not publish", frame.EventID)
 			}
 			keys[frame.DedupeKey]++
 		case <-time.After(10 * time.Second):
@@ -340,20 +353,35 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoMachines(t *testing.T) {
 	if len(keys) != messages {
 		t.Fatalf("the holder received %d distinct dedupe keys over %d frames, want %d", len(keys), messages, messages)
 	}
-	roleForwards := func(p *listenerProcess) int {
-		return countRecords(p, "listener role forwarded", func(record map[string]any) bool {
-			return record["topic"] == contracts.RoleTopicPrefix+role
+	// Which machine forwarded which event, from each listener's own records.
+	forwardedBy := func(p *listenerProcess) map[string]bool {
+		events := map[string]bool{}
+		countRecords(p, "listener role forwarded", func(record map[string]any) bool {
+			if record["topic"] != contracts.RoleTopicPrefix+role {
+				return false
+			}
+			id, _ := record["event_id"].(string)
+			events[id] = true
+			return true
 		})
+		return events
 	}
-	byFirst, bySecond := roleForwards(first), roleForwards(second)
-	if byFirst+bySecond != messages {
-		t.Fatalf("the two machines logged %d + %d role forwards, want %d in all", byFirst, bySecond, messages)
+	byFirst, bySecond := forwardedBy(first), forwardedBy(second)
+	for eventID, dedupeKey := range published {
+		onFirst, onSecond := byFirst[eventID], bySecond[eventID]
+		if onFirst == onSecond {
+			t.Fatalf("%s (%s) was forwarded by machine-one: %t and by machine-two: %t, want exactly one of them", dedupeKey, eventID, onFirst, onSecond)
+		}
 	}
-	// Both machines must be members of the one group, or a count of one delivery each proves
-	// nothing: a second machine that never joined the lane also forwards none. NATS spreads a
-	// group's messages over its members; all 32 on one has probability 2^-31.
-	if byFirst == 0 || bySecond == 0 {
-		t.Fatalf("the first machine forwarded %d and the second %d of %d: one of them is not a member of the listeners' one role-lane queue group", byFirst, bySecond, messages)
+	if len(byFirst)+len(bySecond) != messages {
+		t.Fatalf("the two machines forwarded %d + %d events, want %d in all", len(byFirst), len(bySecond), messages)
+	}
+	// The holder registered on machine-one alone, so machine-two forwarding some of the messages
+	// is what proves a listener delivers to a holder that is not on its machine. It also proves
+	// machine-two is a member of the one group: one that never joined forwards none either. NATS
+	// spreads a group's messages over its members; all 32 on one has probability 2^-31.
+	if len(byFirst) == 0 || len(bySecond) == 0 {
+		t.Fatalf("machine-one forwarded %d and machine-two %d of %d: one of them is not a member of the listeners' one role-lane queue group", len(byFirst), len(bySecond), messages)
 	}
 }
 

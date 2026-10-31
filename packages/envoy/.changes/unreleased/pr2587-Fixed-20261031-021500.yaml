@@ -1,0 +1,30 @@
+kind: Fixed
+body: |-
+    A role message published onto the role lane reaches its holder once, not once per machine
+    running a listener. Every listener's role lane now subscribes `notifications.role.>` in one
+    queue group, `envoy-listener-role-lane` (`bus.ListenerRoleQueue`), where each listener used to
+    have a group of its own machine's, so NATS handed one publish to a member of every machine's
+    group and each of them forwarded its own copy to the holder's agent subject, under one
+    `event_id` and one forward dedupe key. A receiver that dedupes by `event_id` dropped the extra
+    copies; one that does not acted on the message once per machine. The forward is a core-NATS
+    request to the holder's agent subject and the holder is read from the shared role and session
+    buckets, so any listener can make it, the holder's own machine included or not.
+
+    The NATS grant entry moves with it: a listener's, Dispatch's and a host's user now subscribe
+    `notifications.role.> envoy-listener-role-lane` instead of
+    `notifications.role.> envoy-listener-<machine id>`. Deploy the hub's rendered users first and
+    the listeners after them: a listener of this release whose server still carries only the old
+    entry has its role subscription refused and ends its start, and a running listener of an
+    earlier release keeps the subscription it already opened, since NATS checks a subscription
+    when it is opened. While the two releases run together they are two queue groups, so a holder
+    can receive one copy from each until every listener carries this release - the state this
+    release ends, not one it creates.
+
+    The one listener NATS gives a role message is now the only one that forwards it, so a
+    resolution or forward failure is one `delivery_failed` or `receipt_timeout` exception for that
+    message rather than one per machine, and no other machine's copy stands in for it; the role
+    lane has no retry either way. The live-topics lane keeps its own per-machine group,
+    `envoy-listener-live-<machine id>`, since it delivers to the sessions on its own machine.
+time: 2026-10-31T02:15:00.000000000Z
+custom:
+    Issue: pr2587
