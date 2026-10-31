@@ -2245,8 +2245,13 @@ it, or streams, restores or removes the replay dump in `postgres-0`, `cluster.sh
 and leaves all of it alone when the run there is not its own, saying which copy it left. That
 guard fails closed: a read of the lock that fails is tried three times, 2 s apart, and once
 every try has failed the run stops and removes nothing there either, since a lock it cannot read
-may name another run. A step that ends because its wait found the lock renamed therefore stops
-no typing job and deletes no token of the run that holds the namespace now.
+may name another run; the note that says so carries the words of that last failed read, which is
+all anyone is told about it. Failing closed is to act on nothing this time, not to stop
+watching: a step's disk watcher and its wait on the runner job, the two that keep polling,
+record nothing and stop no job at a poll where no read of the lock answered and read it again at
+the next poll, while a lock that names another run ends them. A step that ends because its wait
+found the lock renamed therefore stops no typing job and deletes no token of the run that holds
+the namespace now.
 
 ## What this harness does not do
 

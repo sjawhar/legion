@@ -131,10 +131,14 @@
 # reading not even the lock; (z) the daemons write their pidfile without reading the lock, so
 # both start although every read of the lock fails, while that same failure stops up itself at
 # its first write into the copy; (aa) a guarded write, kill or removal whose every read of the
-# lock fails stops after 3 tries 2 s apart, touching nothing of the copy and saying so, and one
-# whose read answers after a failed try acts; the replay's three long writes (the seed dump
-# streamed into postgres-0, its pg_restore, the bundle into the runner) go through those
-# guarded helpers, each with a bound of its own.
+# lock fails stops after 3 tries 2 s apart, touching nothing of the copy and saying so in the
+# words of that last failed read, and one whose read answers after a failed try acts; the
+# replay's three long writes (the seed dump streamed into postgres-0, its pg_restore, the bundle
+# into the runner) go through those guarded helpers, each with a bound of its own; (bb) a poll
+# whose every read of the lock failed stops nothing and records nothing, and the disk watcher
+# and the runner-job wait keep polling and read the lock again at the next one, where an answer
+# has them act; (cc) copy_exec, the one option parse of runner_exec and postgres_exec, takes -t
+# and -i in either order and ends at the first argument that is neither.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -2897,8 +2901,10 @@ pass "the daemons write their pidfile without reading the lock, so both start al
 # this run's copy from the copy of the run that holds the namespace now. A read that fails says
 # nothing about whose that copy is, so it may not pass for this run's: the guard reads again, 3
 # tries 2 s apart, and once every try has failed it stops its caller, which then kills, removes
-# and writes nothing there and says why. A read that answers after one that failed is an answer,
-# and the caller acts on it.
+# and writes nothing there and says why, in the words of that last failed read: the guard is the
+# only one who saw them, and without them the note says a read failed and not what the API
+# server answered. A read that answers after one that failed is an answer, and the caller acts
+# on it.
 reset_fake
 export LOADTEST_CLUSTER_ROOT=$tmp/root-lockclosed
 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
@@ -2923,6 +2929,8 @@ closed_out=$tmp/guard-closed.out
     fail "runner_stop TERMed the runner job step-closed although it could not read the lock: $(cat "$fake/runner-stops")"
   grep -qF "could not read the lock dispatch-loadtest-lock in $ns after 3 tries" "$closed_out" ||
     fail "runner_stop did not say that no read of the lock answered: $(cat "$closed_out")"
+  grep -qF 'The connection to the server 10.0.0.1:443 was refused' "$closed_out" ||
+    fail "runner_stop's note does not carry what the failed read of the lock said: $(cat "$closed_out")"
   grep -qF 'the runner pod' "$closed_out" ||
     fail "runner_stop did not name the pod it left alone: $(cat "$closed_out")"
   tries=$(($(grep -c 'get configmap dispatch-loadtest-lock' "$fake/kubectl.log" || true) - reads))
@@ -2958,4 +2966,110 @@ closed_out=$tmp/guard-closed.out
 run_cluster down --namespace "$ns"
 ((RC == 0)) || fail "down exited $RC: $(cat "$tmp/out")"
 rm -f -- "$fake/lock-get-fails"
-pass "a guarded write, kill or removal whose every read of the lock fails stops after 3 tries 2 s apart, touching nothing of the copy and saying so, and one whose read answers after a failed try acts"
+pass "a guarded write, kill or removal whose every read of the lock fails stops after 3 tries 2 s apart, touching nothing of the copy, saying so and carrying what that read said, and one whose read answers after a failed try acts"
+
+# (bb) A lock no read answered is "act on nothing this time", never "stop watching". Failing
+# closed is right either way, but the two cases are not the same: a lock that names another run
+# says this run's copy is gone, while a lock the API server would not answer for says nothing at
+# all -- and the step whose volume is filling, or whose job is past its deadline, is still
+# running here. So the two guarded paths that come back, a step's disk watcher and its wait on
+# the runner job, record nothing and stop nothing at a poll whose every read of the lock failed,
+# and read the lock again at the next poll, where a read that answers decides it. Ending there
+# instead would leave the watcher watching nothing while Postgres fills the volume, and would
+# end the step at its deadline with the job it never stopped still sending load.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-lockunknown
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) || fail "up exited $RC: $(cat "$tmp/out")"
+unknown_run=$(jq -r .data.run "$fake/lock.json")
+unknown_dir=$LOADTEST_CLUSTER_ROOT/$unknown_run/steps/pgunknown
+unknown_out=$tmp/lock-unknown.out
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  NS=$ns
+  set_run "$unknown_run"
+  mkdir -p "$unknown_dir" "$RUN_DIR/logs"
+  self=$BASHPID
+  self_start=$(proc_start "$self")
+  # The first three reads of the lock fail, which is one whole copy_is_ours (its 3 tries), and
+  # every read after them answers the lock, which names this run. The naps the fake sleep
+  # returns from at once are the guard's 2 s between tries, the watcher's 30 s poll and the
+  # wait's 15 s poll, so no assertion below waits on a clock.
+  export FAKE_FAST_SLEEP="2 15 30" FAKE_LOCK_GET_FAIL=1 FAKE_LOCK_GET_FAIL_TIMES=3 FAKE_RC_UNTIL_STOP=1
+  export FAKE_PG_DF_SEQ=$fake/df-seq
+  # The volume is under the threshold at every reading, so the watcher is about to act at its
+  # first poll, where no read of the lock answers.
+  df_seq "$pg_size $pg_used_high $pg_free_high"
+  rm -f -- "$fake/lock-get-fails"
+  : >"$fake/sleep.log"
+  pg_disk_watch pgunknown "$unknown_dir" step-pgunknown "$unknown_dir/.pg-disk.jsonl" "$self" "$self_start" 2>"$unknown_out"
+  grep -qF "could not read the lock dispatch-loadtest-lock in $ns after 3 tries" "$unknown_out" ||
+    fail "the disk watcher did not say that no read of the lock answered: $(cat "$unknown_out")"
+  [ "$(grep -cx 30 "$fake/sleep.log")" -ge 2 ] ||
+    fail "the disk watcher took $(grep -cx 30 "$fake/sleep.log") poll(s): it stopped watching at the poll whose every read of the lock failed instead of reading again at the next one"
+  jq -e '[.reasons[] | select(.kind == "pg_disk")] | length == 1' "$unknown_dir/step-failed.json" >/dev/null 2>&1 ||
+    fail "the disk watcher recorded no pg_disk failure at the poll whose read of the lock answered: $(cat "$unknown_dir/step-failed.json" 2>/dev/null)"
+  grep -qx 'step-pgunknown' "$fake/runner-stops" ||
+    fail "the disk watcher stopped no runner job at the poll whose read of the lock answered: $(cat "$fake/runner-stops" 2>/dev/null)"
+  # The wait on a runner job at its deadline: the stop it was refused because no read of the
+  # lock answered is tried again at the next poll, and the job's .rc is polled on meanwhile.
+  rm -f -- "$fake/lock-get-fails" "$fake/runner-stops" "$fake/rc-polls"
+  : >"$fake/sleep.log"
+  wait_rc=0
+  wait_out=$(runner_wait step-pgunknown 0 "$RUN_DIR/logs" "$self" "$self_start" 2>"$unknown_out") || wait_rc=$?
+  ((wait_rc == 0)) ||
+    fail "a wait whose deadline fell on a poll where no read of the lock answered ended with status $wait_rc, giving up the step instead of trying the stop again at its next poll: $(cat "$unknown_out")"
+  [ "$wait_out" = timeout ] ||
+    fail "that wait printed '$wait_out', not the timeout its caller reads past the deadline: $(cat "$unknown_out")"
+  grep -qx 'step-pgunknown' "$fake/runner-stops" ||
+    fail "that wait stopped no job at the poll whose read of the lock answered: $(cat "$fake/runner-stops" 2>/dev/null)"
+  grep -qF "could not read the lock dispatch-loadtest-lock in $ns after 3 tries" "$unknown_out" ||
+    fail "that wait did not say why it stopped no job at the deadline whose reads all failed: $(cat "$unknown_out")"
+  [ "$(grep -cx 15 "$fake/sleep.log")" -ge 1 ] ||
+    fail "that wait polled no more after the deadline it stopped nothing at: it must keep polling the job's .rc"
+  [ "$(cat "$fake/rc-polls" 2>/dev/null)" -ge 2 ] ||
+    fail "that wait read the job's .rc $(cat "$fake/rc-polls" 2>/dev/null) time(s) after the deadline it stopped nothing at"
+)
+run_cluster down --namespace "$ns"
+((RC == 0)) || fail "down exited $RC: $(cat "$tmp/out")"
+rm -f -- "$fake/lock-get-fails"
+pass "a poll whose every read of the lock failed stops nothing and records nothing, and the disk watcher and the runner-job wait read the lock again at their next poll, where an answer has the watcher record pg_disk and both stop the job"
+
+# (cc) One option parse for both guarded execs. runner_exec and postgres_exec are one copy_exec,
+# which reads the lock for the pod it is given and then runs kubectl: -t SECONDS and -i come in
+# either order, the parse ends at the first argument that is neither, and the bound a -t gives
+# is kube_for's, which no kubectl call records (it is timeout's own argument).
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-copyexec
+copyexec_calls=$tmp/kube-for.log
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  NS=$ns
+  set_run lt-20261030t101010-cafe
+  write_lock "$RUN" "$(utc_now)"
+  kube_for() { printf '%s\n' "$*" >>"$copyexec_calls"; }
+  : >"$copyexec_calls"
+  runner_exec -i -t 900 tar -C /work -xf - </dev/null ||
+    fail "runner_exec -i -t 900 returned non-zero although the lock names this run"
+  runner_exec -t 900 -i tar -C /work -xf - </dev/null ||
+    fail "runner_exec -t 900 -i returned non-zero although the lock names this run"
+  runner_exec rm -rf /work/steps/x ||
+    fail "runner_exec with no option returned non-zero although the lock names this run"
+  postgres_exec -t 3600 -i sh -c 'cat >"$1"' sh /tmp/dump </dev/null ||
+    fail "postgres_exec -t 3600 -i returned non-zero although the lock names this run"
+  mapfile -t copyexec_got <"$copyexec_calls"
+  copyexec_want=(
+    '900 exec -i runner -c runner -- tar -C /work -xf -'
+    '900 exec -i runner -c runner -- tar -C /work -xf -'
+    '300 exec runner -c runner -- rm -rf /work/steps/x'
+    '3600 exec -i postgres-0 -c postgres -- sh -c cat >"$1" sh /tmp/dump'
+  )
+  for i in "${!copyexec_want[@]}"; do
+    [ "${copyexec_got[i]:-}" = "${copyexec_want[i]}" ] ||
+      fail "copy_exec call $((i + 1)) reached kube_for as '${copyexec_got[i]:-}', not '${copyexec_want[i]}'"
+  done
+)
+rm -f -- "$fake/lock.json"
+pass "copy_exec takes -t and -i in either order, stops its parse at the first argument that is neither, and gives kube_for the bound, the pod and its container"

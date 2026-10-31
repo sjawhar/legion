@@ -164,8 +164,9 @@ type liveSummary struct {
 	Frames int `json:"live_frames"`
 	// Transport is how a step of an older run's streams followed the event feed: ws, sse or
 	// none. Only a summary.json written before the dashboard probe moved to config.dashboard
-	// holds one; this harness reads it (liveTransport) and never writes it.
-	Transport string `json:"transport"`
+	// holds one; this harness reads it (liveTransport) and never writes it, so a summary.json
+	// this build writes carries no transport key at all (omitempty), never an empty one.
+	Transport string `json:"transport,omitempty"`
 	// OrderViolations counts frames whose event id is not above the previous frame's on the same
 	// connection.
 	OrderViolations int `json:"live_order_violations"`
