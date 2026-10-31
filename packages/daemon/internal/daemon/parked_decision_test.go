@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -465,30 +464,17 @@ func TestARetriedStartDeliversItsTaskOnce(t *testing.T) {
 	}
 }
 
-// forgetFailsOnce is the record store with its first ForgetKeptDecisions failing, as a database
-// error (or the daemon dying) between a start's delivery and its forget's commit leaves it.
-type forgetFailsOnce struct {
-	record.Store
-	failed bool
-}
-
-func (s *forgetFailsOnce) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept record.KeptDecisions, row int64) error {
-	if !s.failed {
-		s.failed = true
-		return errors.New("tester: the forget's transaction did not commit")
-	}
-	return s.Store.ForgetKeptDecisions(ctx, tx, root, kept, row)
-}
-
-// A start row whose task named kept decisions is delivered, and its forget (with the delivered
-// mark it writes) fails, so the row retries. If the architect's turn on that task ends and the
-// delivery is retired before the retry, the retry must not deliver the task again: the architect
-// was told each decision once already.
+// A start row whose task named kept decisions is delivered, and the row runs again: its finish was
+// lost (a crash, or a settlement that did not commit). If the architect's turn on that task ends
+// and the delivery is retired before the retry, the retry must not deliver the task again: the
+// architect was told each decision once already, and the confirmation of that turn told it.
+// (Before decisions were held by the delivery, the injected failure was the start's own forget;
+// a delivered start now forgets nothing, so the row's lost finish is the failure that remains.)
 func TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
 	store := record.NewStore()
-	records := &forgetFailsOnce{Store: store}
+	records := store
 	issue := record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION",
 		Tree: "LEGION-1", Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, store, issue)
@@ -499,6 +485,7 @@ func TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn(t *testing.T) {
 		t.Fatalf("keep the decision: %v", err)
 	}
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.Store = keptClaimStore{Store: outboxTreeStore(t, pool, issue.Key)}
 	token, err := claim.NewToken("legion", issue.Key, claim.RoleArchitect)
 	if err != nil {
 		t.Fatalf("claim token: %v", err)
@@ -519,8 +506,8 @@ func TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn(t *testing.T) {
 	start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: 1,
 		Task: "a person decided on the tree: " + ref, Kept: &record.KeptDecisions{Decisions: []record.DecisionMark{{Ref: ref, At: at}}}}, time.Now())
 	start.ID = 72
-	if err := runner.execute(ctx, start); err == nil {
-		t.Fatal("the start's first run finished; want its failed forget to retry the row")
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("the start's first run: %v", err)
 	}
 	launch := machine.Claim().Generation
 	for _, ev := range []supervise.Event{

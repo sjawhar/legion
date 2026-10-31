@@ -164,6 +164,28 @@ func TestAQueuedRootAdoptedIntoALiveTreeOwesItsDecisionToThatTreesArchitect(t *t
 	}
 }
 
+// The same adoption, into a tree whose architect already runs: no ready follows the adoption, so
+// the adoption itself must write that architect a catch-up naming what the adopted root kept while
+// it waited for its slot, or the decision waits for a relaunch that may never come.
+func TestAnAdoptionIntoATreeWhoseArchitectRunsWritesItACatchUp(t *testing.T) {
+	pool := migratedPool(t)
+	admission := quiet(t, 1)
+	const tree, queued = "LEGION-168", "LEGION-214"
+	seedOpenTree(t, pool, tree)
+	putIssue(t, pool, queuedRoot(queued, tree, "B", 1))
+	ask := "dispatch://LEGION-214/ask/ask-1"
+	keepParkedDecision(t, pool, queued, queued, ask)
+
+	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
+	if got := issue(t, pool, queued); got.Tree != tree {
+		t.Fatalf("%s = %#v, want it adopted into the live tree of %s", queued, got, tree)
+	}
+	if told := namings(t, pool, tree); timesNamed(told, ask) != 1 {
+		t.Fatalf("after the adoption the architect of %s was told %q, want %s named once by a catch-up the adoption writes: "+
+			"its architect already runs, and no ready is coming", tree, told, ask)
+	}
+}
+
 // A linger's end hands a child and the grandchild below it to Legion, each with a fence of its
 // own, and admission re-admits them in whichever order their Dispatch events arrive. Whatever that
 // order, the decisions a person made on the grandchild are the grandchild's architect's to be
