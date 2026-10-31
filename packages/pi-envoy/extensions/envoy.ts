@@ -2967,10 +2967,12 @@ export default function envoyExtension(pi: PiApi): void {
       (error: unknown) => ({ error })
     );
     if (!owns()) return false;
-    if (registration === undefined) {
-      establishedSession = host;
-      ensureHeartbeat(context);
-    }
+    if (registration === undefined) establishedSession = host;
+    // Armed whether or not this registration was accepted: a registration the listener refuses
+    // (`503 consumer_error|no_grant`, `409 not_requested|invalid_session_id`) leaves the session
+    // with no consumer and so no inbound at all, and the heartbeat is the path that asks again,
+    // which is what the session was told (`tellInboundUnavailable`).
+    ensureHeartbeat(context);
 
     // The nested move has its own queue and its own deadline: it is fenced by `roleMoves`, not
     // by this pass.
