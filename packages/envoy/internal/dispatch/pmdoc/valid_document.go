@@ -9,18 +9,20 @@ import "fmt"
 //
 // Most of what this type answers has no other form: a caller holding a plain tree validates it
 // first (ValidateDocument) and reads it through the value that gives. Where an exported function
-// still takes a plain tree (BlockPathsAndTableRows, TableRows, TableDescendantIDs,
-// RenderWithBlockOffsets, EncodeTokenJSON, DeleteBlock, Update, FindQuote, NewQuoteFinder), it is
-// that validation in front of the same core as its method twin, so the two answer alike. MoveBlock
-// takes a plain tree and has no twin: it validates the tree for itself.
+// still takes a plain tree beside a twin here (BlockPathsAndTableRows, TableRows,
+// TableDescendantIDs, RenderWithBlockOffsets, EncodeTokenJSON, DeleteBlock, FindQuote and
+// NewQuoteFinder, and Update, whose twin UpdateDocument takes this value rather than being a method
+// on it), it is that validation in front of the same core, so the two answer alike. An exported
+// function with no twin here (MoveBlock, FindHeading, the table edits) validates the tree for
+// itself.
 //
-// The zero ValidDocument holds no tree, and each method answers for it what its plain counterpart
-// answers for a nil tree: Splice the invalid-splice refusal spliceShape gives, which it reads
-// before any tree, TokenJSON the nil node EncodeTokenJSON(nil) refuses, RenderWithBlockOffsets the
-// nil document the renderer refuses either way, QuoteFinder a finder answering FindQuote's
-// refusal of a nil document, and UpdateDocument, which takes the value rather than being a method
-// on it, updateShape's. A method with no plain counterpart refuses with the words ValidateDocument
-// refuses a tree that is no document with (wantsDocument).
+// The zero ValidDocument holds no tree, and Node returns nil. Splice refuses it with the
+// invalid-splice error spliceShape gives, which it reads before any tree. A method with a plain twin
+// answers what that twin answers for a nil tree: TokenJSON the nil node EncodeTokenJSON(nil)
+// refuses, RenderWithBlockOffsets the nil document the renderer refuses, QuoteFinder a finder
+// answering FindQuote's refusal of a nil document, and so on; UpdateDocument answers updateShape's
+// refusal. Every other method refuses with the words ValidateDocument refuses a tree that is no
+// document with (wantsDocument).
 type ValidDocument struct {
 	doc *Node
 }

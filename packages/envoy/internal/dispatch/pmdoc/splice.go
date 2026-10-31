@@ -34,8 +34,8 @@ func (d ValidDocument) Splice(r Range, with *Node) (*Node, error) {
 	return ascend(doc, selection, r, with)
 }
 
-// spliceShape refuses a splice whose document, replacement or range cannot be read, before either
-// tree is validated: the check both readers run before they part.
+// spliceShape refuses a splice whose document, replacement or range cannot be read: Splice's first
+// check, which it runs before it validates the replacement.
 func spliceShape(doc *Node, r Range, with *Node) error {
 	if doc == nil || with == nil || doc.Type != "doc" || with.Type != "doc" || r.From > r.To {
 		return fmt.Errorf("%w: invalid splice", ErrSchema)
