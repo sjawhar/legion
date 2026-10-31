@@ -2,48 +2,97 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-592",
-  "completed": "2026-10-30T11:24:56Z",
+  "completed": "2026-10-31T05:58:55Z",
   "proof": [
     {
-      "criterion": "Which Go wait held a write transaction idle in the 1x burst (architect, round 7): no write waits on admission, a writer gate or a pool while it holds its transaction; the idle time is document work inside the transaction (INFRA-636's #2468)",
-      "surface": "The real envoy-dispatch binary of the tester's local merge of #2392 7d09eefb into b18e2678 (32ea5013, build-info clean) on INFRA-589's 2-core stack (lt3), under the 1x load",
-      "command": "LOADTEST_SRC=/legion/scratch/tmp/infra-592-tester/m2392 run-step.sh r9-1x-{a,b,c,d} and r10-1x-{e,f,g} --events 4 --sessions 400 --requests 60, each beside stall-sampler.sh (every 0.25 s: pg_stat_activity for a dispatch-requests backend idle in transaction over 1 s, then 0.5 s; on each find, GET /debug/pprof/goroutine?debug=2)",
-      "observed": "7 waits caught, 0.50-1.41 s idle in transaction (transactions 0.58-3.86 s old), after issueOpen (a live fork's injection check) or a doc_updates fold. In every dump the write goroutines are runnable or in IO wait on Postgres, in MarkQuote -> applyLive -> forkLive/warmFork/coldFork, refreshAnchors, IndexDocumentReferences, writeAdvice; 117 goroutines waited in admission.(*gate).acquire, every one in the middleware before its handler (admitted <- trackTransactions <- accesslog), 0 in a writer gate, 0 in a pool acquire. The 1x runs refused 0 reads and 5, 5, 0, 1, 0, 0, 0 writes (at most 0.7%); the g6-1x-b burst (214 reads) did not recur in 7 runs. Evidence: dispatch://INFRA-592/artifact/infra-592-implementer-round7-tar-gz",
-      "headSha": "b18e2678e2b6e6691e3d7e3743a61bc25266aaa6",
-      "negativeControl": "The sampler is not blind to the case it rules out: the same dumps show 117 request goroutines blocked in admission.(*gate).acquire (outside any transaction) and the r9-1x-b samples show the rooms pool with 5 waiters, so a write waiting on admission or a pool would have appeared in its stack"
+      "criterion": "F1: a slow body or slow reader holds no admission unit or pinned connection past a bound (review thread PRRT_kwDORFy7ds6x9bQ3)",
+      "surface": "Real envoy-dispatch binary built from the head on INFRA-589's local stack (Postgres via 1 ms proxy, NATS, listener)",
+      "command": "stack.sh reset; python3 /legion/scratch/tmp/infra-592/trickle.py <dispatch port> LGA-1 13 (13 raw sockets each send a PATCH /api/v1/issues/LGA-1 with Content-Length 100000 and one body byte every 2 s; a normal PATCH at 5 s and at 67 s)",
+      "observed": "normal write at 5 s: 429 OVERLOADED in 1.04 s (the tricklers hold all 12 write units); at 60.0 s twelve tricklers answered 400 REQUEST_BODY_UNREADABLE (access log status=400 elapsed_ms=60000-60002), the 13th 429 after its bounded drain; normal write at 67 s served by the handler in 0.01 s. TestATricklingBodyDoesNotHoldItsWriteUnitWithoutEnd and TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading pass",
+      "headSha": "07c21242d329404f87acf44d6d3b03af9f5fce92",
+      "negativeControl": "At b18e2678 both tests fail: 'status=429 ... want 200 once their units went back at the body read bound' and '1 request-pool connections were still held 10s after the client stopped reading'"
     },
     {
-      "criterion": "Every request-only refusal of the gated write routes answers before the writer gate, TURN_REQUIRES_ASK for a comment with a turn and no ask_id or reply_to included (tester round 5)",
-      "surface": "Real envoy-dispatch binary on INFRA-589's local stack (lt3: Postgres via 1 ms proxy, NATS, listener), built from the head (build-info b18e2678, dirty false)",
-      "command": "stack.sh setup/start/reset; bash /legion/scratch/tmp/infra-592/r8-refusals.sh (the tester's r6-refusals.sh, output path changed): eight invalid requests with no gate held, then again while a comment edit holds the spec's writer gate (psql holds the comment row)",
-      "observed": "while the gate is held (held edit 200 in 14.2 s), all eight answer 400 in 0.005-0.023 s: INVALID_COMMENT x3, TURN_REQUIRES_ASK 0.0056 s, INVALID_ANCHOR x3, INVALID_URL; 0 ERROR lines in Dispatch's log; the red tests TestAnAnchoredCommentWithATurnIsRefusedBeforeTheWriterGate (a9f861bf) and TestACommentEditRefusedForItsInputWaitsOnNoWriterGate pass unmodified",
-      "headSha": "b18e2678e2b6e6691e3d7e3743a61bc25266aaa6",
-      "negativeControl": "At bb5628b3 the same script answered 'turn without ask_id' 400 TURN_REQUIRES_ASK after 12.05 s behind the held gate (tester round 5, r6-refusals.out)"
+      "criterion": "F2/F7/F8: the settlement deadline never fails a room it wrote into; the warm-up reads on the settlements pool and reports its error; settlement code split into docs/settlement.go",
+      "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL)",
+      "command": "go test -count=3 -run 'TestASettlementWithoutItsPoolWarmsNoColdRoomThroughTheRequestPool|TestASettlementPastItsDeadlineAfterWritingIntoTheRoomKeepsTheRoomResident|Settle' ./internal/dispatch/docs/; go test ./internal/dispatch/docs/",
+      "observed": "both new tests pass 3 of 3; docs package ok (1214-1251 s)",
+      "headSha": "07c21242d329404f87acf44d6d3b03af9f5fce92",
+      "negativeControl": "Before: 'the settlement took 1 request-pool connection(s), want none' and 'the room failed with check content updates since version: timeout: context already done: context deadline exceeded'"
     },
     {
-      "criterion": "The forward merges of main's #2376, #2480, #2508 and #2478 keep both behaviours and this PR's invariants; connections re-derived",
-      "surface": "go build/vet/test against a real Postgres 16 (UTF-8 cluster); bun test; check-ci-filters.sh",
-      "command": "cd packages/envoy && go build ./... && go vet ./...; (cd infra && go vet ./... && go vet -tags natslive ./core/ && go test -run ConnectionsPer ./gcp/); go test ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/... ./internal/dispatch/api/; cd packages/envoy-client && bun test && bun run typecheck; bunx biome check packages/envoy-client/; packages/contracts bun run typecheck; check-ci-filters.sh",
-      "observed": "build and vet ok; ConnectionsPerProcess 87 = dispatchConnectionsPerPod 87 (this PR adds no migration; main's highest 0147); docs ok (1295 s), pmdoc ok; api passes but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (refuses this pod's byte-order collation); envoy-client 1166 pass 0 fail, typecheck and biome clean; contracts typecheck clean; filters: 25 gates covered; after #2508/#2478 at b18e2678: build and vet ok, cmd/dispatch, events, outbox, store ok, envoy-client 1169 pass 0 fail, ConnectionsPerProcess still 87",
-      "headSha": "b18e2678e2b6e6691e3d7e3743a61bc25266aaa6",
-      "negativeControl": "Before the resolution, #2376's session_answers.go failed to compile against this PR's writeHandlerError(w, r, err), and #2480's upload_memory_test.go failed go vet on the ungated joinedWrite; #2478's getAppInstallation did not compile against writeHandlerError(w, r, err) before its resolution"
+      "criterion": "F3/F13/F10: a pinned read waits on no eviction needing a request connection; a pin is refused every other guarded pool; store pools split",
+      "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL)",
+      "command": "go test -count=3 -run 'TestAPinnedReadOfAFailedRoomDoesNotWaitForItsEviction$' ./internal/dispatch/docs/; go test -run 'TestAPinnedContextIsRefusedTheOtherPools$' ./internal/dispatch/store/; go test ./internal/dispatch/store/",
+      "observed": "both pass; store ok",
+      "headSha": "07c21242d329404f87acf44d6d3b03af9f5fce92",
+      "negativeControl": "With each fix line reverted: 'a pinned read of a failed room's text waited for the failed room's recovery' and 'Query on the background pool under a held pin: <nil>, want ErrNestedAcquire'"
     },
     {
-      "criterion": "Excess load refused early with a retryable status, connection waits bounded, 1x served, at the merged head",
-      "surface": "INFRA-589's 2-core load reproduction (lt3), Dispatch built from the head (build_commit b18e2678, dirty false)",
-      "command": "run-step.sh r8-1x and r8-1x-b --events 4 --sessions 400 --requests 60; run-step.sh r8-10x --events 40 --sessions 1000 --requests 600",
-      "observed": "1x r8-1x-b: 100.0% of 59.7 req/s 2xx, 0 refusals, 3.99/3.99 events/s committed; r8-1x: 98.6%, 150 reads and 11 writes refused 429 OVERLOADED (wait_exceeded bursts, inside the 0-223/0-55 band measured without #2392), 3.93 events/s; 0 goroutines waiting for a connection in both. 10x: 88,980 reads and 6,843 writes refused 429 OVERLOADED (read refusal p50 21 ms, p99 142 ms), 17.1% of 596 req/s served, 1.79 events/s committed, 0 connection failures, at most 11 goroutines waiting",
-      "headSha": "b18e2678e2b6e6691e3d7e3743a61bc25266aaa6",
-      "negativeControl": "Before (merge-base 2df3353c, PR body tables): 2x-10x 0.0-55 successful reads/s and 3,485-20,174 goroutines waiting for a connection"
+      "criterion": "F4/F9: a route's admission weight counts every request connection it takes; route settings on the rows",
+      "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL)",
+      "command": "go test -count=5 -run TestAnEditHoldsNoMoreConnectionsThanItsRouteWeighs ./internal/dispatch/api/",
+      "observed": "passes 5 of 5",
+      "headSha": "07c21242d329404f87acf44d6d3b03af9f5fce92",
+      "negativeControl": "Before: 'an edit adding 5 decision blocks held 5 request-pool connections, want at most its route's weight 1'"
+    },
+    {
+      "criterion": "F5/F15: the writer gate is released at commit; patchIssue goes through gatedWrite",
+      "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL)",
+      "command": "go test -count=2 -run 'TestAnAskCreateReleasesItsDocumentsGateBeforeItsRelatedCheck|TestACommentCreateReleasesItsDocumentsGatesBeforeItsMentionDeliveries|TestAnIssueCloseWhoseDocumentsMovedWhileItWaitedIsGatedAgain' ./internal/dispatch/api/",
+      "observed": "all pass",
+      "headSha": "07c21242d329404f87acf44d6d3b03af9f5fce92",
+      "negativeControl": "Before: 'status=409 DOCUMENT_CHANGED ... want 200' and two 'still unanswered 15s into the write before it, which has committed already'"
+    },
+    {
+      "criterion": "F6/F12/F14: a timed-out commit is 500 COMMIT_OUTCOME_UNKNOWN logged at ERROR, never DATABASE_BUSY; raw pools answer ErrPoolBusy; a gone client is logged 499; one router helper",
+      "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL)",
+      "command": "go test ./internal/dispatch/store/ ./internal/dispatch/admission/ ./internal/dispatch/accesslog/ ./internal/dispatch/routes/ ./internal/dispatch/identity/ ./cmd/dispatch/; the new tests in store, api and admission",
+      "observed": "all ok",
+      "headSha": "07c21242d329404f87acf44d6d3b03af9f5fce92",
+      "negativeControl": "Before: 'status=503 body={\"code\":\"DATABASE_BUSY\",...}, want 500 COMMIT_OUTCOME_UNKNOWN', 'context deadline exceeded ... want ErrPoolBusy', 'status=200 ... want one carrying status=499'"
+    },
+    {
+      "criterion": "Horizon.Behind(safe): the live relay and the hub re-read for the horizon they read through (architect item from INFRA-607's reviewer)",
+      "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL)",
+      "command": "go test -count=10 -run TestHorizonBehindAnswersTheSafeItsCallerReadThrough ./internal/dispatch/events/; go test -count=10 -run TestAHubRereadsTheGapAnotherReaderProvedWhileItRead ./internal/dispatch/api/",
+      "observed": "both pass 10 of 10",
+      "headSha": "07c21242d329404f87acf44d6d3b03af9f5fce92",
+      "negativeControl": "With the old rule: 'Behind(6) is false while the committed event 9, which that reader did not read, stands above it' and 'the hub's event cursor = 3 after 30s, want it at 5'"
+    },
+    {
+      "criterion": "Excess load refused early with a retryable status, connection waits bounded, 1x served, recovery after the drop, at the head with main's #2392",
+      "surface": "INFRA-589's 2-core load reproduction, a fresh stack seeded by the head (build_commit 07c21242, dirty false)",
+      "command": "run-step.sh f-1x --events 4 --sessions 400 --requests 60; f-10x --events 40 --sessions 1000 --requests 600; f-recovery --events 4 --sessions 1000 --requests 60 --schedule 10x:180s,0.5x:120s --recovery-ref-p99 139 (LOADTEST_ROOT=/legion/scratch/tmp/infra-592/lt)",
+      "observed": "1x: 100.0% of 59.7 req/s 2xx, 0 read refusals and 5 writes 429 OVERLOADED, 3.97/3.99 events/s, 0 goroutines waiting. 10x: 91,509 reads and 6,431 writes refused 429 OVERLOADED (read refusal p99 168 ms), 4.08 events/s committed, 0 connection failures, at most 10 waiting. Recovery: 100% success and every event committed in every window from 10 s after the drop; p99-within-2x from 100 s",
+      "headSha": "07c21242d329404f87acf44d6d3b03af9f5fce92",
+      "negativeControl": "Before (merge-base 2df3353c): 2x-10x 0.0-55 successful reads/s, 3,485-20,174 goroutines waiting, never recovered within 120 s"
+    },
+    {
+      "criterion": "The whole Go suites and CI filters at the head",
+      "surface": "go test against a real Postgres 16 (UTF-8, DISPATCH_TEST_DATABASE_URL); .github/scripts/check-ci-filters.sh",
+      "command": "go test ./internal/dispatch/api/ ./internal/dispatch/events/ ./cmd/dispatch/ at 07c21242; the merge worker's full docs/store/admission/loadtest/api run after the #2392 merge; check-ci-filters.sh",
+      "observed": "api: every test but TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (refuses this pod's byte-order collation); events ok, cmd/dispatch ok; docs, store, admission, events, loadtest ok; filters: 28 gates covered; ConnectionsPerProcess 89 = dispatchConnectionsPerPod 89",
+      "headSha": "07c21242d329404f87acf44d6d3b03af9f5fce92",
+      "negativeControl": "envoy-go at b18e2678 failed TestRoutesTablePinsEveryRegisteredRoute (147 rows, pin 146), fixed in 0a111c90 and on main by #2551"
     }
   ],
-  "filesChanged": [],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/{body_drain,server,request_keys,routes_table,suggestions,asks,comment_create,comment_actions,artifacts,artifact_rebuild,issue_patch,issue_ask_repair,document_writers,event_stream_relay,delivery_live_hub_intake,references}.go",
+    "packages/envoy/internal/dispatch/docs/{settlement(new),settlement_slots,service,roomstate,writergate,marks,edit_notices}.go",
+    "packages/envoy/internal/dispatch/store/{pool,pools(new),pin,acquire}.go",
+    "packages/envoy/internal/dispatch/{admission/answer,accesslog/accesslog,routes/router,routes/devsignin,identity/identity,events/horizon,processes/processes}.go",
+    "packages/envoy/cmd/dispatch/conn_age.go",
+    "packages/envoy-client/src/dispatch-http.ts",
+    "tests beside each, docs (AGENTS.md, cmd/dispatch/README.md, cmd/dispatch/AGENTS.md, .dispatch/architecture/dispatch-api.md, dispatch-store.md) and changelog fragments"
+  ],
   "trickyParts": [
-    "No code change this round: the burst's idle-in-transaction time is document work done in Go between a write's statements, the case INFRA-636's #2468 ('a write holds its transaction id only for its database statements, not while it does document work') removes",
-    "A local three-way merge of #2468 (8b265c32) onto the #2392 merge conflicts in 37 files, so the 1x gate with #2468 merged is measured once #2468 or this PR is on main"
+    "The settlement split hid a return from the copy-lock guard; the stamp's commit is now its own branch in settlePass (3f0ed1df)",
+    "#2392's horizon pool is a RawPool outside the nested-acquire guard; one call site (GET /api/v1/references?since=) takes it while pinned, bounded at 1 s and on a pool whose statements take no locks",
+    "TestAReconnectCatchesUpWhatTheListenerMissed is fixed on main by sjawhar/legion#2594 (open), per the architect; this PR keeps main's version"
   ],
   "deviations": [
-    "The g6-1x-b burst itself (5.4 s idle) was not reproduced; the classification rests on 7 shorter waits of the same shape"
+    "1x at the head refused 5 writes (0.7%) in one run; recovery's p99-within-2x rule holds from 100 s, success and commits from 10 s"
   ],
   "openQuestions": []
 }
