@@ -802,11 +802,14 @@ jobs:
             # The pmdoc race job: the closure of `go test -race ./internal/dispatch/pmdoc/...`,
             # and the Bun install its tests need. pmdoc's tests run pmdoc/gen, which imports the
             # proof editor (internal/dispatch/pmdoc/update_test.go:236-239,
-            # render_readback_test.go:32), so the editor's package is here too.
+            # render_readback_test.go:32), so the editor's package is here too, and
+            # heavy_bodies_test.go:10 reads the body cap every writer of a comment meets
+            # (contracts.DispatchBodyMax), so the contracts package is too.
             envoy_go_race_pmdoc:
               - '.github/workflows/ci.yaml'
               - *bun_install
               - *go_workspace
+              - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/cputest/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
               - 'packages/envoy/internal/dispatch/docs/docstest/*'
