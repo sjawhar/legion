@@ -502,7 +502,7 @@ func issueUpdated(key string) model.Event {
 
 // A write on one issue must never wait for an open write on another: Append locks only its
 // owner's row (Broker.Append). The second write here must commit while the first is still open,
-// with no backend ever seen waiting on a lock.
+// and its own backend must never queue behind a lock the first holds.
 func TestAppendsOnDifferentIssuesDoNotWaitForEachOther(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
@@ -521,17 +521,23 @@ func TestAppendsOnDifferentIssuesDoNotWaitForEachOther(t *testing.T) {
 
 	// The deadline is a ceiling on a hang, not a measure of speed: a write that waits for the
 	// open one waits until that one ends, which is only after this test gives up on it.
-	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	const writeDeadline = 5 * time.Second
+	writeCtx, cancel := context.WithTimeout(ctx, writeDeadline)
 	defer cancel()
+	// The second write runs on one connection it holds for its whole transaction, so every lock
+	// Append takes is taken on that backend and the watch below sees each of them.
+	backends := make(chan uint32, 1)
 	written := make(chan error, 1)
 	var second model.Event
 	go func() {
 		tx, err := database.Pool.Begin(writeCtx)
 		if err != nil {
+			backends <- 0
 			written <- err
 			return
 		}
 		defer tx.Rollback(context.Background())
+		backends <- tx.Conn().PgConn().PID()
 		if second, err = broker.Append(writeCtx, tx, issueUpdated("PP-2")); err != nil {
 			written <- err
 			return
@@ -539,29 +545,24 @@ func TestAppendsOnDifferentIssuesDoNotWaitForEachOther(t *testing.T) {
 		written <- tx.Commit(writeCtx)
 	}()
 
-	// Lock waits are counted for as long as the second write runs, while the first stays open:
-	// a write that queued behind any lock of the first's would show here even if it then got
-	// through before the deadline.
-	poll := time.NewTicker(10 * time.Millisecond)
-	defer poll.Stop()
-	waits := 0
-	for running := true; running; {
-		select {
-		case err := <-written:
-			if err != nil {
-				t.Fatalf("append on PP-2 while PP-1's write is open: %v (backends seen waiting on a lock: %d)", err, waits)
-			}
-			running = false
-		case <-poll.C:
-			count, err := storetest.CountLockWaits(ctx, database, "%")
-			if err != nil {
-				t.Fatal(err)
-			}
-			waits = max(waits, count)
-		}
+	// What says the two writes wait for each other is PP-2's own backend queued behind a lock
+	// PP-1's open write holds, directly or behind an earlier waiter
+	// (storetest.WaitForQueuedBehind). A count of every backend of this database waiting on any
+	// lock answers a different question, and storetest.CountLockWaits' own callers pass a
+	// statement pattern for that reason: with the pattern "%" it also reports a waiter neither
+	// write made - an autovacuum worker, a background settlement, another fixture's setup - and
+	// fails on it, which is what took this test red on main at 4ca6415a8. The watch runs until
+	// the write answers, so a write that queued and then got through before the deadline is
+	// caught too; its own ceiling is above the write's, so the write's answer, not the watch, is
+	// what ends it.
+	pid := <-backends
+	answer, answered := storetest.WaitForQueuedBehind(t, open, pid, written, 2*writeDeadline)
+	if !answered {
+		t.Fatalf("backend %d, the append on PP-2, queued behind a lock PP-1's open write holds; "+
+			"an append must wait for no lock of another owner's write", pid)
 	}
-	if waits != 0 {
-		t.Fatalf("append on PP-2 committed, but %d backend(s) waited on a lock while PP-1's write was open", waits)
+	if answer != nil {
+		t.Fatalf("append on PP-2 while PP-1's write is open: %v", answer)
 	}
 	var visible bool
 	if err := database.Pool.QueryRow(ctx, `select exists (select 1 from events where id = $1)`, second.ID).Scan(&visible); err != nil {
