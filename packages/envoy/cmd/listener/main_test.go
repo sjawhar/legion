@@ -1534,6 +1534,7 @@ func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[st
 	if err != nil {
 		t.Fatalf("failed to create session registry: %v", err)
 	}
+	waitForSessions(t, sessions)
 	// Each session's row is written to the interest bucket as stored, not through Upsert, which
 	// drops a topic reaching a private stream subject: a test seeding one models a row an earlier
 	// build stored.
@@ -1600,6 +1601,19 @@ func waitForRegistry(t *testing.T, registry *store.Registry) {
 	defer cancel()
 	if err := registry.WaitForCacheReady(ctx); err != nil {
 		t.Fatalf("wait for the registry's caches: %v", err)
+	}
+}
+
+// waitForSessions is waitForRegistry for the session registry: GET /v1/sessions answers the
+// refilling 503 until the session copy has completed a read of its bucket, so a test that seeds
+// rows with Put and then lists them waits here first. A test that asserts the refusal itself puts
+// the copy where it cannot answer after this wait, never before it.
+func waitForSessions(t *testing.T, sessions *session.SessionRegistry) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sessions.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("wait for the session registry's cache: %v", err)
 	}
 }
 
@@ -1681,6 +1695,7 @@ func TestSessionsHandler_IncludesTitle(t *testing.T) {
 		t.Fatalf("failed to put session entry: %v", err)
 	}
 	waitForRegistry(t, registry)
+	waitForSessions(t, sessions)
 
 	handler := sessionsHandler(registry, sessions)
 	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
