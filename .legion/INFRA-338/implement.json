@@ -2,30 +2,30 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-338",
-  "completed": "2026-10-31T04:10:00Z",
+  "completed": "2026-10-31T07:05:00Z",
   "proof": [
     {
       "criterion": "A1. A test starts an Oh My Pi role session as Legion configures it, in a pod layout and in a tmux pane layout, for a worker, an architect and the controller. async.enabled and bash.autoBackground.enabled are on, and PI_CONFIG_FILES names no Legion overlay.",
       "surface": "the real pinned Oh My Pi binary every Legion pod runs (/opt/omp/bin/omp, omp/18.12.2, the build .omp-pin names), started under the environment each layout gives a role: a pod through podsafety.Apply, a pane through tmux.PaneVariables",
       "command": "cd packages/daemon && LEGION_TEST_OMP=/opt/omp/bin/omp go test -count=1 -run TestEveryRolesOhMyPiHasAsyncAndAutoBackgroundOnInAPodAndInAPane -v ./internal/runtime/tmux/",
       "observed": "6 subtests pass: implementer, architect and controller, each in a pod and in a pane. Each asserts PI_CONFIG_FILES is exactly the operator's overlay and the role's own, and reads both keys with `omp config get <key> --json`, requiring each to be on and to equal the same binary's read under HOME and PATH alone.",
-      "headSha": "f5f24d9ba86d71e199a43ef27b43476b75528320",
+      "headSha": "83c0ad832e1c6da865a6eedd72c06198a2715870",
       "negativeControl": "the deleted overlay's two keys written into a throwaway settings file named in PI_CONFIG_FILES: the same binary answers {\"key\":\"async.enabled\",\"value\":false} and {\"key\":\"bash.autoBackground.enabled\",\"value\":false}, against true for both with no PI_CONFIG_FILES. An overlay that came back fails both the value leg and the list leg."
     },
     {
-      "criterion": "A2. A test starts deep-worker from a role session, and the task call returns before the subagent ends; a test of the agent files shows that no agent that Legion ships sets blocking: true.",
-      "surface": "the agent files the plugin ships, read as Oh My Pi reads them, through packages/pi-legion's own shipped-agents test",
-      "command": "cd packages/pi-legion && bun test src/shipped-agents.test.ts",
-      "observed": "26 pass, 0 fail. The new case `%s declares no blocking field` runs over every .md in agents/ and asserts the frontmatter has no `blocking` property at all.",
-      "negativeControl": "`blocking: true` put back into agents/oracle.md: the case fails, `oracle.md's frontmatter / Expected path: not \"blocking\" / Received value: true`; `blocking: false` fails the same way, so the assertion is over the field, not its value.",
-      "headSha": "f5f24d9ba86d71e199a43ef27b43476b75528320"
+      "criterion": "A2. A test starts deep-worker from a role session, and the task call returns before the subagent ends. A message sent to the role while the subagent runs is in the role's context at its next model turn, within 30 seconds of the message's arrival. A test of the agent files shows that no agent that Legion ships sets blocking: true.",
+      "surface": "the real pinned Oh My Pi (/opt/omp/bin/omp, omp/18.12.2) in a role session configured as Legion configures one — the pi-legion package root loaded so agents/ is discovered, a stand-in daemon and a stand-in gateway, real NATS, and no settings overlay of Legion's, so the pin's own --mode rpc defaults decide; and the agent files the plugin ships, read as Oh My Pi reads them",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:24222 bun test extensions/legion-background-subagent-omp.test.ts; and cd packages/pi-legion && bun test src/shipped-agents.test.ts",
+      "observed": "The background-subagent case passes: the subagent's own model request reached the stand-in 19 ms before the parent's first agent_end, and that agent_end came 36 ms before the stand-in released the held request, so the task call returned before the subagent ended; a message published on notifications.agent.<session id> while the request was still held was read 23 ms later in the next model turn, against A2's 30 s bound; and the job's completion woke the role 54 ms after the release, in a turn nothing prompted. The subagent is told from the parent by deep-worker's own system prompt rather than by request order, and `deep` is mapped in modelRoles, without which it would die `No model selected` while the parent still reported the job complete. shipped-agents.test.ts is 26 pass, 0 fail, its `%s declares no blocking field` case over every .md in agents/.",
+      "negativeControl": "Dropping the `deep` model role times the case out waiting for the subagent's own request — the false green it refuses. Putting `blocking: true` back on deep-worker times it out waiting for the role's request after the task call, the regression it locks; the same literal in agents/oracle.md fails shipped-agents.test.ts by name, and `blocking: false` fails it the same way. Publishing the message after the release instead of during it fails the ordering assertion.",
+      "headSha": "83c0ad832e1c6da865a6eedd72c06198a2715870"
     },
     {
       "criterion": "A3. A Claude Code role's environment, under each runtime, has no CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and still has CLAUDE_CODE_DISABLE_CRON=1; a bridge test shows a turn Claude Code starts by itself reaching the daemon as agent_start and agent_end, and a result during the daemon's prompt not ending that prompt's turn; a claude-envoy test ends a turn while a background task runs and earns no reminder.",
       "surface": "the real pinned Claude Code 2.1.310 (the version packages/daemon/docker/claude-code/package-lock.json pins), run under claudelaunch.Argv's own flags: live against the pod's model gateway for the stream measurement, and against the stand-in harness of packages/claude-envoy/tests/legion-phase-hook-claude.test.ts for the hook",
       "command": "cd packages/claude-envoy && LEGION_TEST_CLAUDE=<the pinned binary> bun test tests/legion-phase-hook-claude.test.ts; and cd packages/daemon && go test -count=1 ./internal/claudebridge/ ./internal/claudelaunch/ ./internal/runtime/...",
       "observed": "3 pass in claude-envoy, including `a turn that ends with a background task running earns no reminder, and the task's result starts the next turn`; the Go packages are green. The bridge's two fixtures under internal/claudebridge/testdata are streams measured live from that binary: a background task finishing after a turn starts a fresh turn beginning with a `system`/`init` line and ending with a `result`, and one finishing during a turn emits only `task_updated`, `task_notification` and `background_tasks_changed` and no `result` at all, so it cannot end the daemon's prompt early. The Stop hook's own payload was measured too and carries `background_tasks`, the array the reminder now reads.",
-      "headSha": "f5f24d9ba86d71e199a43ef27b43476b75528320",
+      "headSha": "83c0ad832e1c6da865a6eedd72c06198a2715870",
       "negativeControl": "live, with CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 in the environment, the same prompt gives one init and one result and the Bash call carries no run_in_background: no second turn exists; without it the second init...result pair appears, line for line as the fixture. In the hook test, dropping the backgroundWork input from the Stop branch makes the reminder fire again."
     },
     {
@@ -33,7 +33,7 @@
       "surface": "the whole Legion daemon, booted by the function `legion start` calls, over a real PostgreSQL and a real nats-server with the fake runtime, driven only through its worker stream and its HTTP routes (scripts/e2e/ci-red-no-takeover.sh with packages/daemon/internal/daemon/ci_red_no_takeover_live_test.go)",
       "command": "LEGION_TEST_PG_DSN=<a scratch database> bash scripts/e2e/ci-red-no-takeover.sh",
       "observed": "`ci red no takeover e2e: PASS in 44s`, five steps: the tester working the assignment its phase handed it; CI red prompting the implementer its fix task while the tester's turn ran on, with the tester still working the delivery it confirmed before the red, the daemon sending its connection nothing at all over 3s, and the runtime asked for no suspension; one phase-ended message on the tester's role topic and the architect's checks-red notice on its own; the old turn's completion refused 409 HANDOFF_STALE_ASSIGNMENT with the record unmoved, then the same completion accepted in the new assignment's turn; and a phase-ended publish answered 404 unclaimed finishing the row undelivered while the start still acted.",
-      "headSha": "f5f24d9ba86d71e199a43ef27b43476b75528320",
+      "headSha": "83c0ad832e1c6da865a6eedd72c06198a2715870",
       "negativeControl": "the driver made to expect the start to wait for the outgoing turn (the pre-change behaviour): `FAIL ci_red_no_takeover_live_test.go:445: the daemon sent the implementer \"{\\\"type\\\":\\\"negotiate_protocol\\\",…}\" while its turn ran, want nothing at all`."
     },
     {
@@ -41,7 +41,7 @@
       "surface": "the daemon's own store on a real PostgreSQL, migrated version by version",
       "command": "cd packages/daemon && LEGION_TEST_PG_DSN=<a scratch database> go test -count=1 ./internal/store/",
       "observed": "ok. TestTheSuperviseMigrationStripsTheQuiesceKeyFromQueuedRows: before 0065 the start carrying quiesce is refused `decode outbox row 1: json: unknown field \"quiesce\"`; after it both rows run as record.SuperviseRequest values. TestTheOutboxTakesThePhaseEndedKindWith0066 and TestTheAssignmentColumnsArriveEmptyWith0067 pass beside it.",
-      "headSha": "f5f24d9ba86d71e199a43ef27b43476b75528320",
+      "headSha": "83c0ad832e1c6da865a6eedd72c06198a2715870",
       "negativeControl": "each migration test is built on its own refusal read before the migration: the strict decode failure for 0065, `violates check constraint \"outbox_kind_check\"` for 0066, and the unknown-column write for 0067."
     },
     {
@@ -49,7 +49,7 @@
       "surface": "the daemon's HTTP completion route and the real supervise machine, in the live proof above and in the API route tests",
       "command": "cd packages/daemon && LEGION_TEST_PG_DSN=<a scratch database> go test -count=1 ./internal/api/ ./internal/supervise/",
       "observed": "ok. In the live run the refusal reads `409 HANDOFF_STALE_ASSIGNMENT — … handed the tester phase testing again, and this completion is of the assignment before it; nothing was recorded`, the record stayed in testing, and the same completion was taken once the new assignment's task started its turn.",
-      "headSha": "f5f24d9ba86d71e199a43ef27b43476b75528320",
+      "headSha": "83c0ad832e1c6da865a6eedd72c06198a2715870",
       "negativeControl": "the refusal fires only when both sides are non-empty and differ: TestTheAssignmentColumnsArriveEmptyWith0067 shows every row recorded before the migration carrying an empty value on each side, which the route reads as nothing to compare, so no worker live at the release is refused."
     },
     {
@@ -57,7 +57,7 @@
       "surface": "the real supervise machine driven through RequestDeliver and the stream's frames, and a real Oh My Pi session through packages/pi-shared's omp harness",
       "command": "cd packages/daemon && go test -count=1 -run 'TestABackgroundResultsTurnIsNotTheTasksTurn|TestATasksTurnRetiresItOnceWhicheverOfItsEndAndItsResultComesFirst|TestAnAcknowledgementThatLandsInsideItsOwnTurnStillAwaitsItsResult' -v ./internal/supervise/; and cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts",
       "observed": "every case passes; the pi-legion file is 10 pass, 0 fail, including `a turn that ends while the session waits on its own background job gets no reminder, and the job's result wakes it`. Today's code failed A7 before the change, which is why Oh My Pi's prompt_result is now carried as a shimwire frame: measured on the pinned binary, prompt_result arrives after the agent_end of the turn its prompt ran, and a background-result turn ends with none behind it, so the delivery's retire waits for the result rather than for any turn's end.",
-      "headSha": "f5f24d9ba86d71e199a43ef27b43476b75528320",
+      "headSha": "83c0ad832e1c6da865a6eedd72c06198a2715870",
       "negativeControl": "with `&& !m.resultPending()` removed from settle, the machine confirms and retires on a self-started turn and the case fails: `the background result's turn took the task: the claim holds none`. On the Oh My Pi side, the job started with async false instead of true makes the reminder fire: `Your turn ended with your Legion phase still open`."
     },
     {
@@ -65,7 +65,7 @@
       "surface": "the prompt text the daemon embeds and ships to every pane, the staged skills, the agent files, and a fresh buildLegionPlugin output of packages/claude-envoy",
       "command": "cd packages/daemon && go test -count=1 -run TestNoPartKeepsItsWorkInTheForegroundAndEveryDispatchNamesWait -v ./internal/prompts/; and cd packages/pi-legion && bun test src/skills-guard.test.ts",
       "observed": "both pass. The Go test walks both embed trees, which is what reaches go/claude-mechanics.md, a part Compose never joins; the TypeScript case covers skills/, packages/pi-legion/agents/ and a fresh plugin tree built by scripts/build.ts --out.",
-      "headSha": "f5f24d9ba86d71e199a43ef27b43476b75528320",
+      "headSha": "83c0ad832e1c6da865a6eedd72c06198a2715870",
       "negativeControl": "a retired literal appended to go/claude-mechanics.md fails the Go test by name; the backticks removed from both `wait`s in roles/planner.md fails its second predicate; the same two breaks in skills/legion-oracle/SKILL.md fail the TypeScript case twice, once for the staged skill and once for the fresh plugin's copy, which proves the plugin tree is really read."
     },
     {
@@ -73,7 +73,7 @@
       "surface": "the INFRA deployment's own Oh My Pi session store, read through the file OMP_SESSION_SQL_DSN_FILE names, as every INFRA role pod reaches it",
       "command": "bun scripts/sessions/message-wait.ts --since 24h",
       "observed": "`verdict: 385 arrivals measured, 41 waited 10m00s or more, 38 of those with a bash or task call open. A9 holds only while that last count is 0.` Legion's overlay is still on in production, so the measurement fails as it must before the deploy; each wait line names the calls open at the arrival and the call that took the longest part of the wait.",
-      "headSha": "f5f24d9ba86d71e199a43ef27b43476b75528320",
+      "headSha": "83c0ad832e1c6da865a6eedd72c06198a2715870",
       "negativeControl": "the arrival record's customType changed to one no session holds: the same 127 sessions are read and 0 arrivals are measured, so a run that measures nothing is distinguishable in the output from a run that finds nothing."
     }
   ],
@@ -120,6 +120,9 @@
     "Nothing stops the outgoing role's running turn from writing the shared working copy once its phase ends. The approved spec decided this is text, not a mechanism, and both the phase-ended message and the worker prompt now carry it.",
     "The forward merge was needed: GitHub reported the pull request CONFLICTING. Seven files conflicted, the branch's diff changed, so this head needs a full test round rather than a bare re-check. The fingerprints and every resolution are on the pull request.",
     "In this pod `internal/testpg`'s teardown fails one random test per run with `drop test database: ERROR: permission denied to terminate process (SQLSTATE 42501)`, because the role lacks pg_signal_backend; every such failure named here passed when re-run alone. `internal/runtime/tmux`'s TestNewRefusesLaunchersItCannotRun needs tmux on a fixed PATH this pod has not got. The nine internal/daemon tests docs/solutions/testing/…INFRA-388.md names were skipped as that document says.",
-    "At the branch's base commit, 16 tests of packages/claude-envoy/tests/answers-hook.test.ts fail because the committed dist/session-hook.js predates the `answers` mode its src/ gained; main's rebuild workflow has since written it, and the forward merge brought that fix in."
+    "At the branch's base commit, 16 tests of packages/claude-envoy/tests/answers-hook.test.ts fail because the committed dist/session-hook.js predates the `answers` mode its src/ gained; main's rebuild workflow has since written it, and the forward merge brought that fix in.",
+    "Round 2 answers the tester's two failures. The head carried no CI because GitHub reported the pull request CONFLICTING and so built no merge ref: main had moved again, and had adopted a semantic-line-breaks layout for its guides, rewriting several tables as lists. Four prose files conflicted (AGENTS.md, docs/kubernetes.md, scripts/e2e/README.md, skills/AGENTS.md); each was resolved by taking main's version whole and re-applying this change's own edits into main's new shape. GitHub now reports MERGEABLE. One clause the re-application fixed beyond the merge: scripts/e2e/README.md's Stage 4a pod-baseline check still said the overlay is mode 444 and that `omp config get` reads bash.autoBackground.enabled as false, both of which describe the overlay this change deletes and which runtime/sandbox/live_operator_test.go had already dropped.",
+    "A2's first two sentences had no test, which the plan's departures did not cover, so the regression lock was missing rather than the behaviour. The case added in round 2 cost two traps worth recording: deep-worker declares model [\"@deep\"], a role writeStandinProfile does not map, so without a modelRoles entry the subagent dies in under a second with `No model selected` while the parent still reports the job complete — a false green for any case that checks the parent alone; and the subagent's own model request must be told from the parent's by deep-worker's system prompt, never by request order, since the host also sends label, self-check and skill routing-hint requests. The parent's first agent_end also carries isTerminal false while the job is pending, so a wait filtered on that flag never fires.",
+    "Two pod replacements during this issue lost unpushed work. The second lost a commit that had never been pushed, and the operator's rescue branch carried only the working copy's edits, so the A2 test had to be written twice. Every round now pushes to legion/INFRA-338 as soon as a commit exists."
   ]
 }
