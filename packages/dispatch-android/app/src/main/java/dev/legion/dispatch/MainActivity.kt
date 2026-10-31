@@ -22,10 +22,12 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.browser.customtabs.CustomTabsIntent
 
 /**
- * The dashboard in a WebView. The app adds nothing to the page: it signs in, renders and navigates
- * exactly as a phone browser would, and links that leave Dispatch open in the browser.
+ * The dashboard in a WebView. The app adds nothing to the page: it renders and navigates exactly
+ * as a phone browser would, and links that leave Dispatch open in the browser. Sign-in runs in a
+ * Custom Tab (startSignIn), since Google refuses it inside a WebView.
  */
 class MainActivity : ComponentActivity() {
     private lateinit var webView: WebView
@@ -88,6 +90,17 @@ class MainActivity : ComponentActivity() {
             promptForServer()
             return
         }
+        val data = intent?.data
+        if (data?.scheme == SIGN_IN_SCHEME) {
+            // The browser's sign-in handed the session back: redeem it here, in the WebView's own
+            // cookie store. A handoff with no sign-in in flight is not ours to redeem.
+            val handoff = data.getQueryParameter("handoff")
+            val verifier = DispatchServer.takeSignInVerifier(this)
+            if (handoff != null && verifier != null) {
+                webView.loadUrl("$base/auth/app?handoff=${Uri.encode(handoff)}&verifier=${Uri.encode(verifier)}")
+                return
+            }
+        }
         val path = intent?.getStringExtra(InboxNotifier.EXTRA_PATH) ?: "/"
         webView.loadUrl(base + path)
     }
@@ -136,12 +149,6 @@ class MainActivity : ComponentActivity() {
         with(view.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
-            // Google refuses OAuth in an embedded WebView, which it recognises by the "; wv" token
-            // and the "Version/x" marker in the user agent; sign-in through a Google-federated
-            // pool needs both gone.
-            userAgentString = userAgentString
-                .replace("; wv)", ")")
-                .replace(Regex("""Version/\S+\s"""), "")
         }
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
@@ -150,15 +157,13 @@ class MainActivity : ComponentActivity() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url
                 if (url.scheme != "http" && url.scheme != "https") return openOutside(url)
-                // A redirect, or any step of a sign-in that has already left Dispatch (the pool's
-                // page, its identity provider, the way back), stays in the app: that is how the
-                // session cookie reaches the WebView.
+                if (url.host == dispatchHost() && url.path == "/auth/start") return startSignIn(url)
+                // A redirect, or a page that has already left Dispatch, stays in the app.
                 if (request.isRedirect || Uri.parse(view.url ?: "").host != dispatchHost()) {
                     return false
                 }
                 if (url.host == dispatchHost()) return false
                 // A link a person followed out of Dispatch: a pull request, a document elsewhere.
-                // Sign-in begins on Dispatch's own /auth/start, so it is never this case.
                 return if (request.hasGesture()) openOutside(url) else false
             }
 
@@ -206,6 +211,18 @@ class MainActivity : ComponentActivity() {
 
     private fun dispatchHost(): String? = DispatchServer.host(this)
 
+    /**
+     * Signs in through a Custom Tab, the browser Google accepts. The session it ends with is the
+     * browser's, so `/auth/start?app=` has Dispatch hand it back to the app as a handoff only this
+     * install's verifier redeems (open).
+     */
+    private fun startSignIn(url: Uri): Boolean {
+        val challenge = DispatchServer.newSignInChallenge(this)
+        CustomTabsIntent.Builder().build()
+            .launchUrl(this, url.buildUpon().appendQueryParameter("app", challenge).build())
+        return true
+    }
+
     private fun openOutside(url: Uri): Boolean {
         try {
             startActivity(Intent(Intent.ACTION_VIEW, url))
@@ -217,5 +234,6 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val ACTION_CHANGE_SERVER = "dev.legion.dispatch.CHANGE_SERVER"
+        const val SIGN_IN_SCHEME = "dev.legion.dispatch"
     }
 }

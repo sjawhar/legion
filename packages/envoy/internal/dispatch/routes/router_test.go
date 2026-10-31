@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1045,6 +1046,111 @@ func TestOAuthCallbackRefusesAValueSignedForAnotherPurpose(t *testing.T) {
 			cookie := &http.Cookie{Name: oauthStateCookie, Value: tc.value(t, state)}
 			requireStateRefused(t, rig, callbackOn(rig.handler, code, state, cookie))
 		})
+	}
+}
+
+// appVerifier is the Android app's secret for one sign-in, and appVerifierChallenge its challenge.
+const appVerifier = "app-verifier-0123456789-0123456789-0123456789"
+
+func appVerifierChallenge() string {
+	sum := sha256.Sum256([]byte(appVerifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// appSignIn runs a whole sign-in the Android app started with its challenge and returns the
+// callback's answer and the handoff that answer sends the app.
+func (r *signInRig) appSignIn(t *testing.T, challenge string) (*httptest.ResponseRecorder, string) {
+	t.Helper()
+	r.issuer.SignInAs(personClaims(rigGroup))
+	authURL, stateCookie := r.start(t, "http://dispatch.test/auth/start?next=/issues/CORE-1&app="+url.QueryEscape(challenge))
+	code, state := r.issuer.Authorize(t, authURL.String())
+	response := callbackOn(r.handler, code, state, stateCookie)
+	prefix := html.EscapeString(appSignInRedirect + "?handoff=")
+	body := response.Body.String()
+	start := strings.Index(body, prefix)
+	if start < 0 {
+		return response, ""
+	}
+	escaped := body[start+len(prefix):]
+	escaped = escaped[:strings.IndexByte(escaped, '"')]
+	handoff, err := url.QueryUnescape(html.UnescapeString(escaped))
+	if err != nil {
+		t.Fatalf("unescape handoff %q: %v", escaped, err)
+	}
+	return response, handoff
+}
+
+func (r *signInRig) redeem(handoff, verifier string) *httptest.ResponseRecorder {
+	response := httptest.NewRecorder()
+	r.handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/app?handoff="+url.QueryEscape(handoff)+"&verifier="+url.QueryEscape(verifier), nil))
+	return response
+}
+
+// A sign-in the Android app started in the browser leaves no session in the browser: the callback
+// sends the browser to the app with a handoff, and the app's redeeming it with its verifier issues
+// the session cookie there and returns to the page the sign-in began on.
+func TestAppSignInHandsTheSessionToTheApp(t *testing.T) {
+	rig := newSignInRig(t, "")
+	callback, handoff := rig.appSignIn(t, appVerifierChallenge())
+	if callback.Code != http.StatusOK || handoff == "" {
+		t.Fatalf("callback: status %d body=%s, want 200 with a handoff to the app", callback.Code, callback.Body.String())
+	}
+	if cookie := sessionCookie(callback); cookie != nil {
+		t.Fatalf("the browser received a session cookie %#v", cookie)
+	}
+	redeemed := rig.redeem(handoff, appVerifier)
+	if redeemed.Code != http.StatusFound || redeemed.Header().Get("Location") != "/issues/CORE-1" {
+		t.Fatalf("redeem: status %d Location %q body=%s, want 302 to /issues/CORE-1", redeemed.Code, redeemed.Header().Get("Location"), redeemed.Body.String())
+	}
+	cookie := sessionCookie(redeemed)
+	if cookie == nil {
+		t.Fatal("redeeming the handoff issued no session cookie")
+	}
+	if whoami := rig.whoami(cookie); whoami.Code != http.StatusOK || !strings.Contains(whoami.Body.String(), `"login":"`+rigEmail+`"`) {
+		t.Fatalf("whoami: status %d body %s, want %s", whoami.Code, whoami.Body.String(), rigEmail)
+	}
+}
+
+// A handoff is refused, issuing nothing, without the verifier its challenge was made from, after
+// it lapses, and when the value is a state cookie or a session cookie instead.
+func TestAppHandoffRefusals(t *testing.T) {
+	rig := newSignInRig(t, "")
+	_, handoff := rig.appSignIn(t, appVerifierChallenge())
+	lapsed, err := signAppHandoff(testSigningKey, appHandoff{Email: rigEmail, Challenge: appVerifierChallenge(), Next: "/", Exp: time.Now().Add(-time.Second).Unix()})
+	if err != nil {
+		t.Fatalf("sign lapsed handoff: %v", err)
+	}
+	state, err := signOAuthState(testSigningKey, oauthState{State: "s", Nonce: "n", Next: "/", Exp: time.Now().Add(time.Minute).Unix(), App: appVerifierChallenge()})
+	if err != nil {
+		t.Fatalf("sign state: %v", err)
+	}
+	session, err := http.ParseSetCookie(auth.IssueSessionCookie(rigEmail, 0, testSigningKey, true))
+	if err != nil {
+		t.Fatalf("parse session cookie: %v", err)
+	}
+	for _, tc := range []struct{ name, handoff, verifier string }{
+		{name: "another verifier", handoff: handoff, verifier: appVerifier + "x"},
+		{name: "no verifier", handoff: handoff, verifier: ""},
+		{name: "lapsed", handoff: lapsed, verifier: appVerifier},
+		{name: "state cookie", handoff: state, verifier: appVerifier},
+		{name: "session cookie", handoff: session.Value, verifier: appVerifier},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := rig.redeem(tc.handoff, tc.verifier)
+			if response.Code != http.StatusBadRequest || sessionCookie(response) != nil {
+				t.Fatalf("redeem: status %d cookie %#v, want 400 and no cookie", response.Code, sessionCookie(response))
+			}
+		})
+	}
+}
+
+// An app parameter that is no code challenge starts an ordinary sign-in, which ends with the
+// session cookie in the browser.
+func TestAuthStartIgnoresAnAppParameterThatIsNoChallenge(t *testing.T) {
+	rig := newSignInRig(t, "")
+	callback, handoff := rig.appSignIn(t, "not-a-challenge")
+	if callback.Code != http.StatusFound || handoff != "" || sessionCookie(callback) == nil {
+		t.Fatalf("callback: status %d handoff %q, want 302 with a session cookie and no handoff", callback.Code, handoff)
 	}
 }
 

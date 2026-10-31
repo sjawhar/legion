@@ -1,0 +1,11 @@
+kind: Added
+body: |-
+    Dispatch hands a browser sign-in to its Android app. `GET /auth/start?app=<challenge>` (the
+    unpadded base64url SHA-256 of the app's verifier) carries the challenge through the sign-in, and
+    the callback then sets no cookie in the browser: it answers a page that sends the browser to
+    `dev.legion.dispatch://signin?handoff=…`. The new `GET /auth/app` redeems that handoff, within
+    two minutes and with the verifier its challenge was made from, for the session cookie a sign-in
+    issues, in the app's own WebView. A sign-in started without `app` is unchanged.
+time: 2026-10-31T12:00:00.000000000Z
+custom:
+    Issue: pr2582

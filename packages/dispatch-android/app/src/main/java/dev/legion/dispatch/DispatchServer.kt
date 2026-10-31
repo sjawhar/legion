@@ -2,8 +2,11 @@ package dev.legion.dispatch
 
 import android.content.Context
 import android.net.Uri
+import android.util.Base64
 import android.webkit.CookieManager
 import java.io.IOException
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -20,6 +23,7 @@ class SignedOutException : IOException("Dispatch answered 401: the session cooki
 object DispatchServer {
     private const val PREFS = "dispatch"
     private const val KEY_URL = "server_url"
+    private const val KEY_SIGN_IN_VERIFIER = "sign_in_verifier"
     private const val SESSION_COOKIE = "dsession="
 
     val http: OkHttpClient by lazy {
@@ -69,6 +73,26 @@ object DispatchServer {
             return parseInbox(response.body?.string() ?: "[]")
         }
     }
+
+    /**
+     * Starts a sign-in in the browser: a fresh verifier is kept for [takeSignInVerifier], and the
+     * challenge made from it (RFC 7636's S256) is returned for `/auth/start?app=`.
+     */
+    fun newSignInChallenge(context: Context): String {
+        val verifier = base64Url(ByteArray(32).also { SecureRandom().nextBytes(it) })
+        prefs(context).edit().putString(KEY_SIGN_IN_VERIFIER, verifier).apply()
+        return base64Url(MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()))
+    }
+
+    /** The verifier of the sign-in in flight, which only one handoff may redeem, or null. */
+    fun takeSignInVerifier(context: Context): String? {
+        val verifier = prefs(context).getString(KEY_SIGN_IN_VERIFIER, null)
+        prefs(context).edit().remove(KEY_SIGN_IN_VERIFIER).apply()
+        return verifier
+    }
+
+    private fun base64Url(bytes: ByteArray): String =
+        Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }

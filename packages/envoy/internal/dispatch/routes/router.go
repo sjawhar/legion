@@ -264,6 +264,7 @@ func New(ctx *AppContext) (http.Handler, api.Background) {
 	// dashboard's own files, served by staticHandler, write none.
 	mux.HandleFunc("GET /auth/start", accesslog.HandlerFunc("/auth/start", r.authStart))
 	mux.HandleFunc("GET /auth/callback", accesslog.HandlerFunc("/auth/callback", r.authCallback))
+	mux.HandleFunc("GET /auth/app", accesslog.HandlerFunc("/auth/app", r.authApp))
 	mux.HandleFunc("POST /auth/logout", accesslog.HandlerFunc("/auth/logout", r.authLogout))
 	mux.HandleFunc("GET /auth/whoami", accesslog.HandlerFunc("/auth/whoami", r.authWhoami))
 	mux.HandleFunc(githubapi.Prefix, accesslog.HandlerFunc(githubapi.Prefix, r.apiGithubRest))
@@ -314,6 +315,7 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		Nonce: nonce,
 		Next:  signInNext(req.URL.Query().Get("next")),
 		Exp:   time.Now().Add(oauthStateTTL).Unix(),
+		App:   appChallenge(req.URL.Query().Get("app")),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "state")
@@ -381,11 +383,65 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "record sign-in")
 		return
 	}
+	if pending.App != "" {
+		r.handOffToApp(w, email, subject, pending)
+		return
+	}
 	if !r.issueSession(w, req, email, subject) {
 		return
 	}
 	accesslog.Note(req.Context(), accesslog.KindUser, email)
 	http.Redirect(w, req, sanitizeNext(pending.Next), http.StatusFound)
+}
+
+// appSignInRedirect is where the Android app (packages/dispatch-android) takes a handoff back
+// from the browser it signed in through.
+const appSignInRedirect = "dev.legion.dispatch://signin"
+
+// handOffToApp completes a sign-in the Android app started in the browser: rather than a cookie
+// in the browser, whose cookie store the app's WebView does not share, it sends the browser to the
+// app with a handoff the app redeems at /auth/app. The page moves on by itself and also offers a
+// link, since a browser may open another app only from a person's tap.
+func (r *router) handOffToApp(w http.ResponseWriter, email, subject string, pending oauthState) {
+	value, err := signAppHandoff(r.ctx.SigningKey, appHandoff{
+		Email:     email,
+		Subject:   subject,
+		Challenge: pending.App,
+		Next:      pending.Next,
+		Exp:       time.Now().Add(appHandoffTTL).Unix(),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "handoff")
+		return
+	}
+	target := html.EscapeString(appSignInRedirect + "?handoff=" + url.QueryEscape(value))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	fmt.Fprintf(w, `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=%s"><title>Dispatch: back to the app</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">
+<h1>Signed in</h1>
+<p><a href="%s">Open the Dispatch app</a></p>
+</body></html>
+`, target, target)
+}
+
+// authApp redeems a handoff (handOffToApp) for the session cookie a sign-in issues, in the app's
+// WebView, and returns it to the page the sign-in began on. The handoff must verify, must not
+// have lapsed, and verifier must be the one its challenge was made from.
+func (r *router) authApp(w http.ResponseWriter, req *http.Request) {
+	query := req.URL.Query()
+	handoff, ok := verifyAppHandoff(r.ctx.SigningKey, query.Get("handoff"), query.Get("verifier"), time.Now())
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid or expired app sign-in — start over at /auth/start")
+		return
+	}
+	if !r.issueSession(w, req, handoff.Email, handoff.Subject) {
+		return
+	}
+	accesslog.Note(req.Context(), accesslog.KindUser, handoff.Email)
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, req, sanitizeNext(handoff.Next), http.StatusFound)
 }
 
 // issueSession ensures the person's session generation and sets the session cookie a sign-in

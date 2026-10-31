@@ -13,10 +13,10 @@ The notification is withdrawn when the ask stops waiting on you: answered, resol
 passed to an agent, or snoozed. Tap it to open the ask. On the first Inbox read after install
 the app notifies nothing: the asks already open are the Inbox's to show.
 
-It works with no server change and no push service:
+It needs no push service: notifications work with what the server already serves.
 
-- **Session.** Native reads send the WebView's own `dsession` cookie. You sign in once, in the
-  app, and there is no token to keep. `GET /api/v1/inbox` is a human-only route that refuses a
+- **Session.** Native reads send the WebView's own `dsession` cookie. You sign in once, and there
+  is no token to keep. `GET /api/v1/inbox` is a human-only route that refuses a
   bearer, so this is also the only credential that can read it.
 - **Live.** A foreground service holds one `GET /ws/live` socket with an `events` subscription,
   the feed the dashboard reads (`packages/dispatch/web/src/api/live-socket.ts`). On an `ask.*`
@@ -51,8 +51,13 @@ later, long-press the launcher icon and pick "Dispatch server".
 ./gradlew testDebugUnitTest lintDebug   # unit tests (the Inbox diff) and Android lint
 ```
 
-## Sign-in through Google
+## Sign-in
 
-Google refuses OAuth in an embedded WebView, and recognises one by its user agent. The app
-removes the WebView markers (`; wv` and `Version/x`) from its user agent, so a sign-in pool
-federated to Google signs in as it does in Chrome.
+Google refuses sign-in inside an embedded WebView, and a passkey or security key cannot work in
+one, so the app signs in through a Custom Tab, the phone's own browser. When the dashboard sends
+you to `/auth/start`, the app opens it in the Custom Tab with `?app=<challenge>`, the SHA-256 of a
+verifier it keeps (RFC 7636's S256). At the end of the sign-in Dispatch sets no cookie in the
+browser. It sends the browser to `dev.legion.dispatch://signin?handoff=…`, and the app redeems
+the handoff at `/auth/app` with its verifier, which sets the session cookie in the WebView. A
+handoff lasts two minutes, and another app that receives it cannot redeem it without the
+verifier.
