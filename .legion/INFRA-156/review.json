@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-156",
+  "completed": "2026-10-31T21:40:00Z",
+  "decision": "approved",
+  "round": "14 (after the merge 3e6565b3 of main efed4e4d)",
+  "headReviewed": "db65ce4213e47a0566a09c8473146decbc0ff991",
+  "codeHead": "3e6565b320cd",
+  "previousReview": "5722089699 (APPROVE at 467f3ee5)",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "fingerprint": "843d32dbeb93f230... (467f3ee5) -> b7d5f7a24d974890... (db65ce42). The diff of the PR's diffs is one hunk: ProofDocument.tsx's effect dependency list, where this branch's documentRef meets #2548 (7583d8d1)'s pendingWaiter and whenSent. The resolution keeps all three, sorted with the rest; each is a value the effect reads (documentRef at :687, pendingWaiter at :640, whenSent at :511), so none is missing or extra. The tester's head adds only .legion/INFRA-156/test.json.",
+  "localRuns": "dispatch typecheck and biome clean; bun test web/src/features/doc 195 pass, 0 fail.",
+  "ci": "Not waited for, on the architect's fast path; the merger reads CI at the READY head.",
+  "migrations": "Checked just before approving: main's highest is 0149_event_horizon; 0150_block_pointer_links is free. GitHub reports MERGEABLE.",
+  "threads": "20, all resolved.",
+  "keyFindings": []
+}
