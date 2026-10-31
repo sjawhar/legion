@@ -174,6 +174,35 @@ test("a widget whose offset the block's text does not reach draws nothing", asyn
   });
 });
 
+// INFRA-575: a paragraph a version replaced by a rule or an image pairs as a changed block, and
+// its lost words arrive as a widget at an offset into a block whose text holds no run at all.
+// There is no position inside such a block to draw them at, so they are drawn before it rather
+// than dropped: an approver who is shown the changed-block bar must be shown what it lost.
+test("a widget with an offset in a block with no text of its own is drawn at that block's start", async () => {
+  await withMarksEditor(
+    "First kept.\n\n---\n\nSecond kept.",
+    ({ handle, view }) => {
+      handle.setChangeDecorations({
+        text: [{ blockIndex: 1, className: CHANGED }],
+        widgets: [
+          { blockIndex: 1, className: REMOVED_WORDS, offset: 0, text: "The plan ships today." },
+        ],
+      });
+
+      expect(drawn(view, REMOVED_WORDS)).toEqual(["The plan ships today."]);
+      // The block holds no text to stand inside, so the words stand among the blocks, before it.
+      expect(topOfDocument(view)).toEqual([
+        "p:First kept.",
+        "div:The plan ships today.",
+        "hr:",
+        "p:Second kept.",
+      ]);
+      expect(view.state.doc.textContent).toBe("First kept.Second kept.");
+    },
+    { readOnly: true }
+  );
+});
+
 test("both lists are drawn again after setMarkdown replaces the document", async () => {
   await withMarksEditor(
     "Before the replacement.",

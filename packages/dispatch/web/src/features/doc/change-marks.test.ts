@@ -1,5 +1,6 @@
 import { beforeAll, expect, test } from "bun:test";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
+import * as Y from "yjs";
 
 import { renderWithEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
 import {
@@ -9,6 +10,8 @@ import {
   REMOVED_BLOCK_CLASS,
   REMOVED_WORDS_CLASS,
 } from "./change-marks";
+import { createEditor } from "./editor";
+import { blockSchemaCache } from "./schema";
 
 /** The document the editor would render for `markdown`: `changeMarksAgainst` reads the editor's
  *  own document, and the headless engine builds the same one. */
@@ -85,6 +88,45 @@ test("a paragraph that only lost words draws them where they stood", () => {
       },
     ],
   });
+});
+
+// INFRA-575: a paragraph the version replaced by a rule pairs as a changed block, and the block
+// that replaced it holds no text for the lost words to stand inside. The approver is shown the
+// changed-block bar, so the words must reach the page too; this row runs them through the real
+// editor, which is what draws the decoration set the marks name.
+test("a paragraph replaced by a rule draws the words it lost in the editor", async () => {
+  const baseline = "# Plan\n\nThe plan ships behind a flag today.\n";
+  const lost = "The plan ships behind a flag today.";
+  const root = document.body.appendChild(document.createElement("div"));
+  const blockSchema = await blockSchemaCache.load(() => Promise.reject(new Error("no schema")));
+  const handle = await createEditor(root, {
+    awareness: null,
+    blockSchema,
+    user: { color: "#f59e0b", name: "alice" },
+    ydoc: new Y.Doc(),
+  });
+
+  try {
+    handle.setMarkdown("# Plan\n\n---\n");
+    const marks = changeMarksAgainst(baseline, handle.view.state.doc);
+    expect(marks).toEqual({
+      text: [{ blockIndex: 1, className: CHANGED_BLOCK_CLASS }],
+      widgets: [{ blockIndex: 1, className: REMOVED_WORDS_CLASS, offset: 0, text: lost }],
+    });
+
+    handle.setChangeDecorations(marks);
+
+    // The rule holds no text, so the editor draws the words before it rather than dropping them.
+    expect(
+      Array.from(
+        handle.view.dom.querySelectorAll(`.${REMOVED_WORDS_CLASS}`),
+        (element) => element.textContent
+      )
+    ).toEqual([lost]);
+  } finally {
+    handle.destroy();
+    root.remove();
+  }
 });
 
 test("a block removed since the baseline becomes a widget between the two blocks it sat between", () => {

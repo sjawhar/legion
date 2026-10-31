@@ -19,8 +19,8 @@ export interface BlockWidget {
   /** The widget is drawn before the top-level block at this index; `doc.childCount` draws it at
    *  the end of the document. */
   blockIndex: number;
-  /** Character offset into that block's own text to draw the widget at. With none, the widget is
-   *  drawn before the whole block. */
+  /** Character offset into that block's own text to draw the widget at. With none, or in a block
+   *  that holds no text of its own, the widget is drawn before the whole block. */
   offset?: number;
   text: string;
   className: string;
@@ -120,29 +120,40 @@ function positionAt(
   return undefined;
 }
 
-/** The position a widget is drawn at: the one its offset names inside the block's text, or the
- *  start of the whole block where it names none. `runsOf` is the walk of the block's inline
- *  content, shared with the rest of the set. */
-function widgetPosition(
+/** Where a widget is drawn: the document position, and whether it stands inside a block's own
+ *  text rather than among the blocks. */
+interface WidgetPlacement {
+  position: number;
+  inline: boolean;
+}
+
+/** Where a widget is drawn: the position its offset names inside the block's text, or the start
+ *  of the whole block where the block holds no text at all - a paragraph a change replaced by a
+ *  rule or an image keeps none, and the words it lost are drawn before it rather than dropped.
+ *  An offset the text of a block that does hold text does not reach names nothing. `runsOf` is
+ *  the walk of the block's inline content, shared with the rest of the set. */
+function widgetPlacement(
   doc: ProseMirrorNode,
   blocks: readonly TopLevelBlock[],
   widget: BlockWidget,
   runsOf: (blockIndex: number) => readonly TextRun[]
-): number | undefined {
+): WidgetPlacement | undefined {
   const block = blocks[widget.blockIndex];
   if (widget.offset !== undefined) {
     if (block === undefined) return undefined;
-    return positionAt(runsOf(widget.blockIndex), widget.offset, "from");
+    const runs = runsOf(widget.blockIndex);
+    if (runs.length === 0) return { inline: false, position: block.start };
+    const position = positionAt(runs, widget.offset, "from");
+    return position === undefined ? undefined : { inline: true, position };
   }
-  if (widget.blockIndex === blocks.length) return doc.content.size;
-  return block?.start;
+  if (widget.blockIndex === blocks.length) return { inline: false, position: doc.content.size };
+  return block === undefined ? undefined : { inline: false, position: block.start };
 }
 
-function widgetElement(view: EditorView, widget: BlockWidget): HTMLElement {
+function widgetElement(view: EditorView, widget: BlockWidget, inline: boolean): HTMLElement {
   // A widget drawn inside a block's text stands among that text, where only an inline element
   // belongs; one drawn before a whole block stands among the blocks.
-  const tag = widget.offset === undefined ? "div" : "span";
-  const element = view.dom.ownerDocument.createElement(tag);
+  const element = view.dom.ownerDocument.createElement(inline ? "span" : "div");
   element.className = widget.className;
   element.textContent = widget.text;
   // The widget is drawn beside the document, not in it: a caret must not walk into it and a
@@ -152,7 +163,8 @@ function widgetElement(view: EditorView, widget: BlockWidget): HTMLElement {
 }
 
 /** The set the entries draw over `doc`. An entry naming a block the document does not hold, or
- *  offsets its text does not reach, names nothing to draw and is dropped.
+ *  offsets its text does not reach, names nothing to draw and is dropped; a widget naming a
+ *  block that holds no text at all is drawn before that block instead (`widgetPlacement`).
  *
  *  Each block's inline content is walked once for the whole set, however many entries and
  *  widgets name it: a rewritten paragraph carries an entry for every run of words it gained and
@@ -185,10 +197,11 @@ function changeDecorations(doc: ProseMirrorNode, value: ChangeDecorations): Deco
     decorations.push(Decoration.inline(from, to, { class: entry.className }));
   }
   for (const widget of value.widgets) {
-    const position = widgetPosition(doc, blocks, widget, runsOf);
-    if (position === undefined) continue;
+    const placement = widgetPlacement(doc, blocks, widget, runsOf);
+    if (placement === undefined) continue;
+    const { inline, position } = placement;
     decorations.push(
-      Decoration.widget(position, (view) => widgetElement(view, widget), {
+      Decoration.widget(position, (view) => widgetElement(view, widget, inline), {
         ignoreSelection: true,
         side: -1,
       })

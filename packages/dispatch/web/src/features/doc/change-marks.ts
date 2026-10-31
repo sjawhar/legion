@@ -51,7 +51,9 @@ function blockTexts(doc: ProseMirrorNode): string[] {
  * widget is how the editor draws text a document does not hold. It stands at the offset the run
  * was removed at, which is where the surviving text closed over it, and carries
  * `REMOVED_WORDS_CLASS`; the whole block carries `CHANGED_BLOCK_CLASS` as well, which is what
- * tells the reader to compare it.
+ * tells the reader to compare it. A paragraph replaced by a block with no text of its own - a
+ * rule, an image - pairs as a changed block all the same, and the editor draws its lost words
+ * before that block, there being no text in it to stand inside.
  *
  * Nothing is marked for an absent or equal baseline, or for one the engine refuses: a reader who
  * cannot be told what changed is shown the document itself rather than a guess.
