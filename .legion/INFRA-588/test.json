@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-588",
+  "completed": "2026-10-31T17:38:00Z",
+  "round": 14,
+  "head": "adfca5059f26cecec5eae8dfa16fbad6de2ac9ac",
+  "codeHead": "d910aa0c290899e350686886399c893340fd05e2",
+  "roundNote": "Round 14 is scoped by the architect (dispatch://INFRA-588/comment/b4ff00ff, 17:25Z) to the post-READY fix d910aa0c. Three daemon tests in migrate_timestamped_test.go built on the whole embedded set, so they fail once a real timestamped migration ships (sjawhar/legion#2354 adds one next). The fix runs them on the numbered series alone, with the closing number read from migrationid.ClosedAt. Since my round 13 the branch also took a docs/comment commit (7ca2bc8b), a forward merge of main (eab7e0e2, which touches none of the pull request's own files), retro's learnings (5966a3e8) and retro's removal of .legion/ (475a0929, CI green there: lint, typecheck, test, ci-ok, pr-title). I re-ran the gates those could break: the daemon store tests, migrationid, the fold's two checks and P1.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I reproduced the implementer's probe independently on my own PostgreSQL 17.11 + pgvector (port 55434; another role's server holds 55433). I used a throwaway shipped migration 20261101090000, later than the crafted t2 20261031120000. The three tests fail at 475a0929 with the implementer's messages and pass at d910aa0c. I also added an earlier shipped timestamp (20261029090000) and a Dispatch timestamped migration with its census, and ran whole suites. Every claim holds."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The daemon's timestamped-migration tests hold once the daemon ships a real timestamped migration (the architect's scoped proof)",
+      "surface": "go test of packages/daemon/internal/store against real Postgres, in scratch worktrees of d910aa0c and 475a0929, each with a throwaway packages/daemon/internal/store/migrations/20261101090000_t588_probe.up.sql",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:55434/postgres?sslmode=disable go test ./internal/store/ -run 'Timestamped|Widens|MergedAfter|EveryTimestamped' -count=1 -v (in each worktree)",
+      "observed": "d910aa0c + probe: TestMigrateAppliesATimestampedMigrationMergedAfterALaterOne, TestMigrateAppliesEveryTimestampedMigrationOnceOnAFreshDatabase and TestTheFirstTimestampedMigrationWidensTheVersionColumn PASS. With a second, earlier probe 20261029090000 added as well, the whole ./internal/store/... passes (store 50.6 s, migrations ok), and ./internal/record -run Migration passes (6 tests)",
+      "headSha": "adfca5059f26cecec5eae8dfa16fbad6de2ac9ac",
+      "negativeControl": "475a0929 + the same probe: all three FAIL, 'schema version = 20261101090000, want the highest timestamp 20261031120000' (twice) and 'schema_version.version is bigint on a database migrated through the numbered set, want integer'"
+    },
+    {
+      "criterion": "Dispatch's migrate tests carry no such assumption (the architect's second check)",
+      "surface": "go test of the Dispatch store, pgmigrate, migrationid and cmd/dispatch's migrate, census and healthz tests, in the d910aa0c worktree with a shipped packages/envoy/internal/dispatch/store/migrations/20261101090000_t588_probe.up.sql and .census.sql",
+      "command": "DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/store/ ./internal/pgmigrate/... ./migrationid/ -count=1; go test ./cmd/dispatch -run 'Healthz|Census|Migrat' -count=1",
+      "observed": "all ok: dispatch/store 260.2 s, pgmigrate, pgmigratetest, migrationid, cmd/dispatch 12.3 s. Every other test file that reads a migration set or the version column (grep over packages/daemon and packages/envoy) either builds a synthetic set (oooSet, crafted fstest maps) or uses numbered versions only (record/store_test.go's all[:3] and siblings, which pass with the probe)",
+      "headSha": "adfca5059f26cecec5eae8dfa16fbad6de2ac9ac",
+      "negativeControl": "the same probe technique does break the daemon tests before the fix (above), so it reaches an embedded set"
+    },
+    {
+      "criterion": "Nothing else regressed since round 13 (the forward merge, the docs commit, retro)",
+      "surface": "the workspace at this head",
+      "command": "go test ./internal/store/... (daemon) and ./migrationid/ (envoy) without probes; bash -c '.github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages)'; the fold's plan step command; measure.ts P1; jj diff 5df123a5..eab7e0e2 --name-only over the pull request's own paths",
+      "observed": "daemon store ok (51.7 s), migrations ok, migrationid ok. fold-orphans exit 0; fold-plan exit 0, silent (main folded since). P1 126/80/253. The forward merge changes none of scripts/conflicts, migrationid, the daemon store, Dispatch's store.go, release-push.sh or .github/changelog-packages",
+      "headSha": "adfca5059f26cecec5eae8dfa16fbad6de2ac9ac",
+      "negativeControl": "round 13: fold-orphans exits 1 on a branch adding a daemon fragment (code unchanged since)"
+    }
+  ],
+  "observations": [
+    "CI: at 475a0929 (READY's head, before the fix) changes, lint, typecheck, test, ci-ok and pr-title are success. d910aa0c has no runs of its own. At adfca505, changes and pr-title were queued when I read them (17:36Z).",
+    "Retro's commit 475a0929 removed .legion/INFRA-588/. implement.json and this test.json are back on the branch, and retro's next pass removes them again before the new READY.",
+    "Round 11's migration, rolling-deploy and five-acceptance-check proofs and round 13's fold proofs apply. Round 7's release-order note, round 4's squash-body note and round 1's `since`-edge note still apply."
+  ]
+}
