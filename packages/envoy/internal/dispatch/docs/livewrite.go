@@ -215,16 +215,24 @@ type liveWriteOrigin struct {
 }
 
 // publishedRendering is one operation's rendering of the fork it left, kept for the room's update
-// observer (renderedReplica.changedBy): markdown, and askBlocks, the ids of the ask blocks that
-// tree holds, walked only when the operation changed the rendered markdown, since only then does
-// the observer record them. The embedded forkReadMark is the room replica's epoch and foreign
-// count as the operation's own fork read found them; the rendering is the replica's after the
-// update only while the replica still stands at both (renderedReplica says why). Its warm says
-// the operation forked warm: the zero value, a cold operation's, vouches for nothing, since a
-// cold fork was read from the store and no replica's state went into it.
+// observer (renderedReplica.changedBy): rendered, the markdown and the pmdoc.Layout the same
+// render recorded of it (replicaRendering), which the replica takes whole when it takes it, nil
+// for a cold operation, which records none; and askBlocks, the ids of the ask blocks the
+// operation's rendered tree held, walked only when the operation changed the rendered markdown,
+// since only then does the observer record them. askBlocks is never nil for an operation that
+// changed the content (askBlockIDs), so a nil askBlocks is what tells changedBy the operation saw
+// no content change: the observer then takes no rendering from it and measures the update itself
+// (renderedReplica.updateChangesMarkdown), unless the replica's markdown already equals the
+// rendered one. A margin write's publish records a rendering with no layout (applyMargin): it
+// carries no ask blocks, so the observer only ever compares its markdown.
+// The embedded forkReadMark is the room replica's epoch and foreign count as the operation's own
+// fork read found them; the rendering is the replica's after the update only while the replica
+// still stands at both (renderedReplica says why). Its warm says the operation forked warm: the
+// zero value, a cold operation's, vouches for nothing, since a cold fork was read from the store
+// and no replica's state went into it.
 type publishedRendering struct {
 	forkReadMark
-	markdown  string
+	rendered  *replicaRendering
 	askBlocks map[string]struct{}
 }
 
@@ -421,11 +429,12 @@ func (s *Service) roomBehindHead(ctx context.Context, write *liveWrite, live *cr
 // It records on write the room replica's epoch and foreign count as it finds them just before it
 // encodes the room's state (forkRead), and, for the transaction's first write (no update of its
 // own yet), takes the replica's rendering as the fork's (forkMarkdown) when the replica, once it
-// holds every logged commit (renderedReplica.hold), still stands at both. That is exact: the
-// counters were read before the encode, so a replica found at both under hold has consumed, since
-// that read, only published live writes' commits; under the writer slot those can only be this
-// write's own published updates, and it has none before its first operation's publish
-// (publishLiveWrite runs after the commit, and finishLiveWrite releases the slot only after it).
+// holds every logged commit (renderedReplica.hold), still stands at both
+// (renderedReplica.renderingAt). That is exact: the counters were read before the encode, so a
+// replica found at both under hold has consumed, since that read, only published live writes'
+// commits; under the writer slot those can only be this write's own published updates, and it
+// has none before its first operation's publish (publishLiveWrite runs after the commit, and
+// finishLiveWrite releases the slot only after it).
 // The replica therefore holds what the room held at the encode, which is the fork: the room's
 // state, and no write of the transaction's. A foreign commit the replica consumes after the read
 // moves the count, the safe way; recover draws a fresh epoch, and epochs are unique in the
@@ -480,12 +489,7 @@ func (s *Service) warmFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	write.fork, write.forkedFrom, write.forkSeq, write.cold = fork, weak.Make(room), seq, false
 	write.forkHold, write.forkCursor, write.forkRead = hold, cursor, read
 	if len(write.updates) == 0 && replica != nil {
-		if doc := replica.hold(); doc != nil {
-			if replica.standsAt(read) && replica.markdown != nil {
-				write.forkMarkdown = replica.markdown
-			}
-			replica.mu.Unlock()
-		}
+		write.forkMarkdown = replica.renderingAt(read)
 	}
 	if s.afterForkRead != nil {
 		s.afterForkRead(write.artifactID)

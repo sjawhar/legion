@@ -47,6 +47,9 @@ type renderer struct {
 	spanBudget   int
 	err          error
 	blockOffsets []BlockOffset
+	// layout, when the render records one (RenderWithLayout), is what it records of the
+	// document's top-level blocks as it writes them.
+	layout *Layout
 }
 
 // BlockOffset identifies one rendered block in byte offsets of the markdown.
@@ -118,7 +121,7 @@ func (d ValidDocument) RenderWithBlockOffsets() (string, []BlockOffset, error) {
 // renderWithBlockOffsets is the markdown of doc and its blocks' byte ranges in it, validating doc
 // first only when validate says so (renderDocument).
 func renderWithBlockOffsets(doc *Node, validate bool) (string, []BlockOffset, error) {
-	r, err := renderDocument(doc, maxSpanCells, validate)
+	r, err := renderDocument(doc, maxSpanCells, validate, false)
 	if err != nil {
 		return "", nil, err
 	}
@@ -128,14 +131,14 @@ func renderWithBlockOffsets(doc *Node, validate bool) (string, []BlockOffset, er
 // render writes doc, its tables' spans adding at most spanCells empty cells (tableGrid), after
 // validating doc.
 func render(doc *Node, spanCells int) (*renderer, error) {
-	return renderDocument(doc, spanCells, true)
+	return renderDocument(doc, spanCells, true, false)
 }
 
-// renderDocument is render, validating doc first only when validate says so: ValidDocument's
-// rendering passes false for the tree it validated once already. A nil or non-doc tree is refused
-// either way, every refusal of the renderer's own runs either way, and a panic is an ErrPanic
-// either way.
-func renderDocument(doc *Node, spanCells int, validate bool) (r *renderer, err error) {
+// renderDocument is render, validating doc first only when validate says so and recording the
+// renderer's layout as well when recordLayout says so: ValidDocument's rendering passes false for
+// the tree it validated once already. A nil or non-doc tree is refused either way, every refusal
+// of the renderer's own runs either way, and a panic is an ErrPanic either way.
+func renderDocument(doc *Node, spanCells int, validate, recordLayout bool) (r *renderer, err error) {
 	// The renderer reads back what it writes (blockKinds, parseInlineWithDefinitions).
 	defer recoverPanic(&r, &err, "rendering a document")
 	if doc == nil || doc.Type != "doc" {
@@ -155,27 +158,39 @@ func renderDocument(doc *Node, spanCells int, validate bool) (r *renderer, err e
 	// breaks the browser editor holds that markdown has no form for are written as it draws them.
 	doc = asWritten(doc)
 	if holdsOnlyAnEmptyParagraph(doc) {
-		return &renderer{spanBudget: spanCells}, nil
+		r = &renderer{spanBudget: spanCells}
+		if recordLayout {
+			r.layout = onlyAnEmptyParagraphLayout()
+		}
+		return r, nil
 	}
 	labels := definedFootnoteLabels(doc)
-	r = renderBlocks(doc, labels, false, spanCells)
+	r = renderBlocks(doc, labels, false, spanCells, recordLayout)
+	blankEmptyCode := r.wroteBlankEmptyCode
 	// An empty code block in a typed block in a spread list item is written with a line between its
 	// fences, as the writer before sjawhar/legion#1464 wrote it, except in a document holding a
 	// shape this parser reads only as the browser editor does, where that line is refused
 	// (emptyCodeWrittenBare): there the document is written again with the fences alone.
 	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
-		r = renderBlocks(doc, labels, true, spanCells)
+		r = renderBlocks(doc, labels, true, spanCells, recordLayout)
 	}
 	if r.err != nil {
 		return nil, r.err
+	}
+	if recordLayout {
+		r.layout.finish(doc, spanCells, r, blankEmptyCode)
 	}
 	return r, nil
 }
 
 // renderBlocks writes doc's blocks, an empty code block in a typed block in a spread list item as
-// its fences alone when bareEmptyCode says so, its tables' spans adding at most spanCells cells.
-func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int) *renderer {
+// its fences alone when bareEmptyCode says so, its tables' spans adding at most spanCells cells,
+// recording the layout of its top-level blocks when recordLayout says so.
+func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int, recordLayout bool) *renderer {
 	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: spanCells}
+	if recordLayout {
+		r.layout = newLayout(len(doc.Children))
+	}
 	r.blocks(doc.Children, "")
 	if r.err != nil {
 		return r
@@ -259,6 +274,8 @@ func definedFootnoteLabels(doc *Node) footnoteLabelSet {
 	return labels
 }
 
+// blocks writes the document's top-level blocks (renderBlocks), each separated from the next by a
+// blank line, recording each block's layout when the render records one.
 func (r *renderer) blocks(nodes []*Node, prefix string) {
 	otherMarkers := otherListMarkers(nodes)
 	for i, n := range nodes {
@@ -266,7 +283,11 @@ func (r *renderer) blocks(nodes []*Node, prefix string) {
 			r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n")
 		}
 		r.otherListMarker = otherMarkers[i]
+		spans := r.spanBudget
 		r.block(n, prefix)
+		if r.layout != nil {
+			r.layout.record(r, n, otherMarkers[i], spans)
+		}
 	}
 	if len(nodes) > 0 {
 		r.writeSyntax("\n")

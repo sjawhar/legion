@@ -260,22 +260,25 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if startErr != nil && !errors.Is(startErr, ErrDocOutsideSchema) {
 		return startErr
 	}
+	// beforeKnown says beforeMarkdown is known without rendering the fork, and knownPath is the
+	// count of the path it was had by, bumped when it is first needed.
 	var beforeMarkdown string
-	var known *atomic.Uint64
+	var beforeKnown bool
+	var knownPath *atomic.Uint64
 	if startErr == nil {
 		switch {
 		case write.forkMarkdown != nil:
-			beforeMarkdown, known = *write.forkMarkdown, &s.renderPaths.beforeFromReplica
+			beforeMarkdown, beforeKnown, knownPath = *write.forkMarkdown, true, &s.renderPaths.beforeFromReplica
 		case write.tree != nil:
-			beforeMarkdown, known = write.markdown, &s.renderPaths.beforeFromWrite
+			beforeMarkdown, beforeKnown, knownPath = write.markdown, true, &s.renderPaths.beforeFromWrite
 		}
 	}
 	write.forkMarkdown = nil
 	rendered := startErr != nil
 	start := func() error {
 		if !rendered {
-			if known != nil {
-				known.Add(1)
+			if beforeKnown {
+				knownPath.Add(1)
 			} else {
 				beforeMarkdown, startErr = documentMarkdown(before)
 				s.renderPaths.beforeRendered.Add(1)
@@ -309,8 +312,14 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	tree, err := s.readFork(fork)
 	var markdown string
 	var offsets []pmdoc.BlockOffset
+	var layout *pmdoc.Layout
+	// Only a warm operation's layout is ever taken (publishedRendering below).
 	if err == nil {
-		markdown, offsets, err = documentMarkdownWithOffsets(tree)
+		if op.read.warm {
+			markdown, offsets, layout, err = documentRenderingWithLayout(tree)
+		} else {
+			markdown, offsets, err = documentMarkdownWithOffsets(tree)
+		}
 	}
 	if err != nil {
 		return joinedSchemaError(err, start)
@@ -351,10 +360,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// decode check (LEGION-504).
 	before, weighedFrom = nil, nil
 	// What the room's update observer can take in place of rendering the room after this update
-	// (publishedRendering): this operation's rendering, when its fork was read warm.
+	// (publishedRendering): this operation's rendering and its layout, when its fork was read warm.
 	var rendering publishedRendering
 	if op.read.warm {
-		rendering = publishedRendering{forkReadMark: op.read, markdown: markdown}
+		rendering = publishedRendering{forkReadMark: op.read, rendered: &replicaRendering{markdown: markdown, layout: layout}}
 		if contentChanged {
 			rendering.askBlocks = askBlockIDs(tree)
 		}
@@ -454,7 +463,7 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 	if !op.write.cold {
 		room = op.write.forkedFrom
 		if op.read.warm {
-			rendering = publishedRendering{forkReadMark: op.read, markdown: rendered.markdown}
+			rendering = publishedRendering{forkReadMark: op.read, rendered: &replicaRendering{markdown: rendered.markdown}}
 		}
 	}
 	return s.recordLiveOperation(ctx, &op, actor, rendered, false, rendering, room)

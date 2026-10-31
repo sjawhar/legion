@@ -22,6 +22,16 @@ func ReadForRendering(frag *crdt.YXmlFragment) (*Node, error) {
 	return readDocument(frag, readLiveText, false)
 }
 
+// ReadBlockForRendering is ReadForRendering for one block at the document's top level, the
+// element e of the document's fragment: the node ReadForRendering reads it as, without
+// ownedValue's copy. It does not validate the block (Layout.Splice does, as Render would).
+func ReadBlockForRendering(e *crdt.YXmlElement) (*Node, error) {
+	if e == nil {
+		return nil, fmt.Errorf("%w: ReadBlockForRendering wants an element, got nil", ErrSchema)
+	}
+	return readElement(e, readLiveText, 1, false)
+}
+
 // ReadUnshared is Read for a document no other goroutine reads or writes while the call runs, and
 // which the caller drops afterwards: the read cache's fold of a history it has just decoded. The
 // tree is the caller's own, as Read's is (ownedValue). It reads each text by walking its items

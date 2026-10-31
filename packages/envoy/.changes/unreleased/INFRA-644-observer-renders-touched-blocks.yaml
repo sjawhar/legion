@@ -1,0 +1,15 @@
+kind: Changed
+body: |-
+    Dispatch's document observer now renders only the top-level blocks a browser update changed and
+    splices them into the markdown it keeps for the room, where it rendered the whole document after
+    every update. It renders the whole document when an update adds, deletes or moves a top-level
+    block, or the splice cannot prove it exact, and renders nothing for an update that changes
+    nothing the document's blocks hold. A room's first edit after its load reuses the
+    rendering the load already made instead of rendering the document again. How each update is
+    classified - whether it changed the content, and whom each ask it added is attributed to - is
+    unchanged. The room's copy of the document keeps 5 bytes more per top-level block, beside the
+    markdown it already kept. This needs the sjawhar/ygo fork's accessors Transaction.ChangedTypes
+    and Parent, which tell the observer which blocks an update changed.
+time: 2026-10-28T23:50:46.195796389Z
+custom:
+    Issue: INFRA-644
