@@ -220,7 +220,11 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 		// sign-in row; and POST /approve and POST /signin/logout each read and write a session's
 		// row. GET /signin/status spends it in its own handler, being public, and the page's
 		// stylesheet spends nothing: it is bytes of the binary, and every page is read under it.
-		if s.refuseAccountAddress(w, r) {
+		// The spend comes before the page reads anything, and its refusal is the page's own
+		// 429, under the page's headers, since a browser is told nothing about a ServiceAccount
+		// token: only the Retry-After is the one refuseAccountAddress would have written.
+		if !s.accountAddressAllows(r) {
+			s.deps.Approval.WriteRateLimited(w, retryAfterSeconds(s.accountLimiter.Every()))
 			return caller{}, false
 		}
 		session, ok := s.deps.Approval.Authenticate(w, r)
@@ -506,11 +510,13 @@ type signInStatusResponse struct {
 // signInStatus answers the broker's sign-in status to any caller. It is read from Postgres on
 // every call rather than from this process's memory, so every replica and every restart answers
 // the same thing. It spends its source address's bucket first, the one the approval page's
-// routes and the routes a ServiceAccount token authenticates share (refuseAccountAddress,
+// routes and the routes a ServiceAccount token authenticates share (accountAddressAllows,
 // DefaultAccountLimit), so no caller drives this read unmetered; the route takes no credential,
-// so nothing else bounds it.
+// so nothing else bounds it. Being JSON and public, it refuses in JSON, but names the address
+// rather than the ServiceAccount token refuseAccountAddress names: this caller sent none.
 func (s *server) signInStatus(w http.ResponseWriter, r *http.Request) {
-	if s.refuseAccountAddress(w, r) {
+	if !s.accountAddressAllows(r) {
+		refuseWithRetryAfter(w, s.accountLimiter.Every(), "too many requests from this address; try again later")
 		return
 	}
 	status, err := s.deps.Enroll.Store.SignInStatus(r.Context())

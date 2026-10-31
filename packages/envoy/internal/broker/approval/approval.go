@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -222,6 +223,18 @@ func (p *Page) sameOrigin(r *http.Request) bool {
 func refuseOrigin(w http.ResponseWriter) {
 	writeMessage(w, http.StatusForbidden, say("Refused",
 		"This request did not come from the secrets broker's own page, so nothing was changed."))
+}
+
+// WriteRateLimited answers a request the broker refused before any work because its source
+// address has spent the bucket the page's routes share with the routes a ServiceAccount token
+// authenticates, naming retryAfter seconds in Retry-After. The page answers its own refusal
+// rather than the API's JSON because the caller here is a browser: the answer has to carry the
+// headers every answer of a page route carries, and the person flooding a page never sent the
+// ServiceAccount token that refusal names.
+func (*Page) WriteRateLimited(w http.ResponseWriter, retryAfter int) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	writeMessage(w, http.StatusTooManyRequests, say("Too many requests",
+		"Too many requests have come from this address. Try again in a moment."))
 }
 
 // ContentSecurityPolicy is the policy every answer of the page carries: it loads nothing but the
