@@ -39,8 +39,11 @@ const container = "legion-e2e4b-db-4242";
 // its key, the key's hex and its content, so a key can hold `..`, `//` or a newline that no file
 // name could: session_copy's listing of the keys under a prefix as hex, one key a line, as
 // encode(convert_to(path, 'UTF8'), 'hex') gives it; the plain listing (SELECT path) as psql gives
-// it, each key raw, so a key holding a newline spans two lines; and a session's text from the row at
-// the key (session_text). It records its arguments and the SQL, and fails with DOCKER_EXIT when that
+// it, each key raw, so a key holding a newline spans two lines; a session's text from the row at
+// the key (session_text); and whether the session table exists. The shell steers the last two:
+// SESSION_TABLE=absent makes the table missing, so every other statement on it fails as psql's
+// does, SESSION_TABLE=garbled answers neither yes nor no, and SESSION_LISTING=fails fails the
+// hex listing alone. It records its arguments and the SQL, and fails with DOCKER_EXIT when that
 // is set.
 const dockerStub = `docker() {
   local sql value r k
@@ -50,6 +53,27 @@ const dockerStub = `docker() {
   [ "$DOCKER_EXIT" = 0 ] || return "$DOCKER_EXIT"
   for value; do :; done
   value=\${value#*=}
+  case $sql in
+    *"SELECT to_regclass("*)
+      case \${SESSION_TABLE:-} in
+        absent) printf 'f\\n' ;;
+        garbled) printf 'maybe\\n' ;;
+        *) printf 't\\n' ;;
+      esac
+      return 0 ;;
+    *omp_session_files*)
+      if [ "\${SESSION_TABLE:-}" = absent ]; then
+        echo 'ERROR:  relation "omp_session_files" does not exist' >&2
+        return 1
+      fi
+      case $sql in
+        *"SELECT encode("*)
+          if [ "\${SESSION_LISTING:-}" = fails ]; then
+            echo 'ERROR:  canceling statement due to statement timeout' >&2
+            return 1
+          fi ;;
+      esac ;;
+  esac
   for r in "$ROWS"/*/; do
     [ -f "$r/key" ] || continue
     k=$(cat "$r/key"; printf x)
@@ -93,7 +117,7 @@ function run(body: string, rows: Record<string, string>, dockerExit = 0): Ran {
       "bash",
       "-c",
       `set -Eeuo pipefail
-session_db_container=${container}
+session_db_container=${container} session_db_ready=1
 ${dockerStub}
 ${db("session_psql")}
 ${db("session_text")}
@@ -315,13 +339,49 @@ describe("session_copy", () => {
     expect(existsSync(r.out)).toBe(false);
   });
 
-  test("a database that does not answer the listing fails", () => {
+  test("a database with no session table yet copies nothing, makes no directory, sends no listing, and succeeds", () => {
+    const r = run(
+      `evidence="$OUT" SESSION_TABLE=absent\nsession_copy '${sessions}/' transcripts pods; echo copied`,
+      { [key]: transcript }
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("copied\n");
+    expect(existsSync(r.out)).toBe(false);
+    expect(r.sql).toContain("SELECT to_regclass(:'table') IS NOT NULL;");
+    expect(r.sql).not.toContain("SELECT encode(");
+    expect(r.args.at(-1)).toBe("table=omp_session_files");
+  });
+
+  test("a database that does not answer whether it has a session table fails", () => {
     const r = run(
       `evidence="$OUT"\nsession_copy '${sessions}/' transcripts pods`,
       { [key]: transcript },
       2
     );
     expect(r.code).toBe(1);
+    expect(r.sql).not.toContain("SELECT encode(");
+  });
+
+  test("a database that answers neither yes nor no about its session table fails, naming the answer", () => {
+    const r = run(
+      `evidence="$OUT" SESSION_TABLE=garbled\nsession_copy '${sessions}/' transcripts pods`,
+      { [key]: transcript }
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(
+      `the session database ${container} answered 'maybe' to whether it has a session table`
+    );
+    expect(existsSync(r.out)).toBe(false);
+  });
+
+  test("a database with a session table that does not answer the listing fails", () => {
+    const r = run(
+      `evidence="$OUT" SESSION_LISTING=fails\nsession_copy '${sessions}/' transcripts pods`,
+      { [key]: transcript }
+    );
+    expect(r.code).toBe(1);
+    expect(r.sql).toContain("SELECT encode(");
+    expect(existsSync(r.out)).toBe(false);
   });
 
   // An agent writes its own session rows, so these keys are an attacker's, each a way out of DIR were
@@ -812,10 +872,17 @@ collect_transcripts || echo "collect_transcripts failed $?"`,
   });
 
   // teardownRun runs the script's own cleanup, as the EXIT trap of a run whose checkpoints all
-  // passed (ok set), with the real collect_transcripts over SESSION_COPY, the stand-in for the
-  // database copy, and the rest of the teardown stubbed; the run took no lock, so the cluster's
-  // teardown is not reached. PREPARE, given the evidence directory, readies it before the run.
-  function teardownRun(sessionCopy: string, prepare?: (evidence: string) => void) {
+  // passed (ok set) after its session database started, with the real collect_transcripts over
+  // SESSION_COPY, the stand-in for the database copy, and the rest of the teardown stubbed; the run
+  // took no lock, so the cluster's teardown is not reached. PREPARE, given the evidence directory,
+  // readies it before the run. STATE replaces the variables that say how far the run got, and
+  // STATUS is the status the run exits with.
+  function teardownRun(
+    sessionCopy: string,
+    prepare?: (evidence: string) => void,
+    state = "check=controller ok=1 session_db_ready=1",
+    status = 0
+  ) {
     const at = mkdtempSync(join(dir, "teardown."));
     const evidence = join(at, "evidence");
     const profile = join(at, "profile");
@@ -827,9 +894,11 @@ collect_transcripts || echo "collect_transcripts failed $?"`,
         "bash",
         "-c",
         `set -Eeuo pipefail
+root=${JSON.stringify(join(import.meta.dir, "..", "..", ".."))}
 work=${JSON.stringify(join(at, "work"))} evidence=${JSON.stringify(evidence)} profile_agent=${JSON.stringify(profile)}
 pod_sessions_dir=${sessions} session_db_container=${container}
-check=controller ok=1 was_blocked= locked= smoke_main_cleaning=
+check_started=2026-09-30T12:00:00Z was_blocked= locked= smoke_main_cleaning=
+${state}
 pair_session= negative_config_pod= block_tree= pg_container=none
 shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid=
 mkdir -p "$work" "$evidence"
@@ -841,7 +910,7 @@ ${fn("collect_transcripts")}
 ${fn("remove_negative_config")}
 ${fn("cleanup")}
 trap cleanup EXIT
-exit 0`,
+exit ${status}`,
       ],
       { env: { PATH: process.env.PATH ?? "" } }
     );
@@ -899,6 +968,68 @@ exit 0`,
     expect(readFileSync(join(r.evidence, "transcripts", "controller", "c.jsonl"), "utf8")).toBe(
       "controller\n"
     );
+  });
+
+  test("a run refused before its session database started copies nothing from it and fails only its checkpoint", () => {
+    const r = teardownRun(
+      `session_copy() { echo "session_copy ran: $*"; return 1; }`,
+      undefined,
+      "check=prerequisites ok= session_db_ready=",
+      1
+    );
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain(
+      `   transcripts: the run stopped before its session database ${container} accepted connections, so no pod kept a session in it and none is copied`
+    );
+    expect(r.stdout).not.toContain("session_copy ran");
+    expect(r.stdout).not.toContain("CHECK transcripts");
+    expect(r.stdout).toContain("stage 4b e2e: FAIL (check prerequisites)\n");
+    // The operator's controller's sessions, which live in the run's profile, are still copied.
+    expect(readFileSync(join(r.evidence, "transcripts", "controller", "c.jsonl"), "utf8")).toBe(
+      "controller\n"
+    );
+  });
+
+  test("a checkpoint blocked before the session database started ends BLOCKED, not failed by the copy", () => {
+    const r = teardownRun(
+      `session_copy() { echo "session_copy ran: $*"; return 1; }`,
+      undefined,
+      "check=preflight ok= was_blocked=1 session_db_ready=",
+      1
+    );
+    expect(r.code).toBe(1);
+    expect(r.stdout).not.toContain("session_copy ran");
+    expect(r.stdout).not.toContain("CHECK transcripts");
+    expect(r.stdout).toContain("stage 4b e2e: BLOCKED (check preflight)");
+  });
+
+  test("a run whose session database started before any role pod opened it copies nothing and succeeds", () => {
+    const r = run(
+      `pod_sessions_dir=${sessions} evidence="$OUT" profile_agent="$OUT.profile" SESSION_TABLE=absent
+collect_transcripts && echo copied`,
+      {}
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("copied\n");
+    expect(existsSync(join(r.out, "transcripts", "pods"))).toBe(false);
+  });
+
+  // The harnesses above set session_db_ready themselves, so they cannot see the script lose the
+  // line that sets it (every pod's session then goes uncopied, with only a note) or the empty
+  // declaration that keeps `set -u` from ending the EXIT trap at collect_transcripts.
+  test("the script declares session_db_ready empty before its EXIT trap and sets it once session_db_start returns", () => {
+    const lines = readFileSync(
+      join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"),
+      "utf8"
+    ).split("\n");
+    expect(lines.filter((l) => /^session_db_ready=/.test(l))).toEqual([
+      "session_db_ready=",
+      "session_db_ready=1",
+    ]);
+    expect(lines.indexOf("session_db_ready=")).toBeLessThan(lines.indexOf("trap cleanup EXIT"));
+    const start = lines.findIndex((l) => l.startsWith("session_db_start "));
+    expect(start).toBeGreaterThan(-1);
+    expect(lines[start + 1]).toBe("session_db_ready=1");
   });
 });
 
