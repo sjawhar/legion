@@ -1,7 +1,5 @@
-import { access, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
+import { expect, type Locator, type Page, type TestInfo, test } from "@playwright/test";
 
 import {
   createAsk,
@@ -16,17 +14,23 @@ import { countDocumentSockets, documentEditor, documentTransport, typeAtEnd } fr
 import { resetDatabase } from "./seed";
 import { signIn } from "./users";
 
-const fixtureDirectory = fileURLToPath(new URL("./fixtures", import.meta.url));
-const diagramPath = join(fixtureDirectory, "diagram.png");
-const notesPath = join(fixtureDirectory, "notes.md");
 const tinyPng =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL0eAAAAABJRU5ErkJggg==";
 
-test.beforeAll(async () => {
-  await mkdir(fixtureDirectory, { recursive: true });
-  await access(diagramPath).catch(() => writeFile(diagramPath, Buffer.from(tinyPng, "base64")));
-  await writeFile(notesPath, "# Review notes\n\nThese notes replace the initial spec.\n");
-});
+// The files a row uploads are written in that row's own output directory, which Playwright gives
+// each row of each worker (`testInfo.outputPath`): two workers running these rows at once would
+// otherwise write one path in the checkout, and a run must leave no file changed under e2e/.
+async function diagramFile(testInfo: TestInfo): Promise<string> {
+  const path = testInfo.outputPath("diagram.png");
+  await writeFile(path, Buffer.from(tinyPng, "base64"));
+  return path;
+}
+
+async function notesFile(testInfo: TestInfo): Promise<string> {
+  const path = testInfo.outputPath("notes.md");
+  await writeFile(path, "# Review notes\n\nThese notes replace the initial spec.\n");
+  return path;
+}
 
 test.beforeEach(async ({ context }) => {
   await resetDatabase();
@@ -74,14 +78,15 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await openArtifacts(page, testInfo.project.name === "iphone");
 
   const upload = page.getByLabel("Upload artifact");
-  await upload.setInputFiles(diagramPath);
+  const diagramUpload = await diagramFile(testInfo);
+  await upload.setInputFiles(diagramUpload);
   await confirmUpload(page);
   const diagram = page.getByTestId("artifact-diagram-png");
   await expect(diagram).toContainText("diagram.png");
   await expect(diagram).toContainText("1 version");
   await expect(diagram.getByRole("img", { name: "diagram.png version 1" })).toBeVisible();
 
-  await upload.setInputFiles(diagramPath);
+  await upload.setInputFiles(diagramUpload);
   await confirmUpload(page);
   await expect(diagram).toContainText("2 versions");
   await expect(diagram.getByRole("link", { name: "Download version 2" })).toHaveAttribute(
@@ -116,7 +121,7 @@ test("artifacts upload, version, references, and phone layout @phone", async ({
   await page.goto(`/issues/${issue.key}`);
   await openArtifacts(page, testInfo.project.name === "iphone");
 
-  await upload.setInputFiles(notesPath);
+  await upload.setInputFiles(await notesFile(testInfo));
   await confirmUpload(page);
   const notes = page.getByTestId("artifact-notes-md");
   await expect(notes).toContainText("notes.md");
@@ -200,10 +205,10 @@ test("the artifacts tab filter narrows rows by name and kind @phone", async ({
   await openArtifacts(page, testInfo.project.name === "iphone");
 
   const upload = page.getByLabel("Upload artifact");
-  await upload.setInputFiles(diagramPath);
+  await upload.setInputFiles(await diagramFile(testInfo));
   await confirmUpload(page);
   await expect(page.getByTestId("artifact-diagram-png")).toBeVisible();
-  await upload.setInputFiles(notesPath);
+  await upload.setInputFiles(await notesFile(testInfo));
   await confirmUpload(page);
   await expect(page.getByTestId("artifact-notes-md")).toBeVisible();
 

@@ -25,10 +25,78 @@
  * harness's starters (`e2e/harness-start.ts` through `e2e/local-instance.ts` and the docs media
  * harness) import it before the listeners have reported, and the modules they import afterwards
  * must see the ports those set. It opens no socket, so importing it is safe from any process.
+ *
+ * A run of more than one Playwright worker runs one lane per worker (`e2e/run.ts`): a whole
+ * harness, with a Postgres, ports and a file-store bucket of its own. Lane `i` carries every one
+ * of its variables under `DISPATCH_E2E_LANE_<i>_<V>`, and `laneValue` below is the one place a
+ * reader picks its own: the lane's name when it is set, the plain name otherwise, so a one-lane
+ * run reads exactly what it read before lanes existed. The lane is `TEST_PARALLEL_INDEX`, which
+ * Playwright sets in each worker process and a restarted worker keeps, and which is 0 in every
+ * process that is not a worker: the config's own, `e2e/preflight.ts`, and each harness listener
+ * `e2e/run.ts` starts before Playwright, which is handed its lane's values under the plain names.
  */
 
 import { harnessProcessCount } from "./harness-processes";
 import { harnessSignIn } from "./harness-signin";
+
+/** How many Playwright workers, and so how many lanes, a run has. */
+export const workerCountVariable = "DISPATCH_E2E_WORKERS";
+/** How many lanes `e2e/run.ts` started, which it exports for the command it runs. */
+export const laneCountVariable = "DISPATCH_E2E_LANES";
+
+function count(env: NodeJS.ProcessEnv, variable: string): number | undefined {
+  const given = env[variable] ?? "";
+  if (given === "") return undefined;
+  if (!/^[1-9][0-9]*$/.test(given)) {
+    throw new Error(
+      `${variable} must be how many lanes the run has, a number from 1 up, not ` +
+        `${JSON.stringify(given)}. Leave it unset for one.`
+    );
+  }
+  return Number(given);
+}
+
+/** The lanes a run asks for: `DISPATCH_E2E_WORKERS`, where unset or empty is one. */
+export function workerCount(env: NodeJS.ProcessEnv = process.env): number {
+  return count(env, workerCountVariable) ?? 1;
+}
+
+/** The lanes a run has: the `DISPATCH_E2E_LANES` `e2e/run.ts` exported, else what this run asks
+ *  for, so a run that addresses servers a person started (`DISPATCH_E2E_REUSE_SERVERS=1`) reads
+ *  its own worker count. */
+export function laneCount(env: NodeJS.ProcessEnv = process.env): number {
+  return count(env, laneCountVariable) ?? workerCount(env);
+}
+
+/** The name lane `lane` carries `variable` under. */
+export function laneVariable(lane: number, variable: string): string {
+  return `DISPATCH_E2E_LANE_${lane}_${variable}`;
+}
+
+/** The lane the process `env` belongs to. */
+export function laneIndex(env: NodeJS.ProcessEnv = process.env): number {
+  const given = env.TEST_PARALLEL_INDEX ?? "";
+  if (given === "") return 0;
+  if (!/^(0|[1-9][0-9]*)$/.test(given)) {
+    throw new Error(
+      `TEST_PARALLEL_INDEX must be the lane's index, a number from 0 up, not ` +
+        `${JSON.stringify(given)}. Playwright sets it in each worker process; leave it unset.`
+    );
+  }
+  return Number(given);
+}
+
+/** `variable` as this process's lane names it, falling back to the plain name, which a one-lane
+ *  run and every process `e2e/run.ts` starts itself read. */
+export function laneValue(env: NodeJS.ProcessEnv, variable: string): string | undefined {
+  return env[laneVariable(laneIndex(env), variable)] ?? env[variable];
+}
+
+/** `env` as a process of lane `lane` reads it, so one process can resolve another lane's ports
+ *  and database through the same lookup its workers use (`e2e/preflight.ts`). */
+export function asLane(lane: number, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, TEST_PARALLEL_INDEX: String(lane) };
+}
 
 /** Each harness listener's port variable. */
 export const harnessVariables = {
@@ -52,7 +120,7 @@ export interface HarnessPort {
 }
 
 function harnessPort(env: NodeJS.ProcessEnv, variable: string): HarnessPort {
-  const given = env[variable] ?? "";
+  const given = laneValue(env, variable) ?? "";
   if (given === "") return { port: 0, variable };
   const port = Number(given);
   if (!/^[1-9][0-9]{0,4}$/.test(given) || port > 65535) {
@@ -111,4 +179,47 @@ export function harnessPorts(
     );
   }
   return ports;
+}
+
+/** Why a run of more than one lane refuses a variable the caller set. Each names a thing one
+ *  lane owns: a run that kept the caller's value would hand every lane the one database, the one
+ *  deployed server, or the one port, and the rows would overwrite each other's state. The port
+ *  variables are refused for the last reason, so they share it below. */
+const laneConflictReasons: Record<string, string> = {
+  DATABASE_URL:
+    "each lane runs its own Postgres, whose URL the harness hands its servers and its psql",
+  DISPATCH_E2E_PROCESSES:
+    "two-process mode is two servers on one lane's database, which one lane runs",
+  DISPATCH_E2E_REUSE_SERVERS:
+    "the servers a person started are one set of servers, which every lane would share",
+  PLAYWRIGHT_BASE_URL: "a deployed run has one server, which every lane would share",
+};
+
+/** The variables `env` sets that a run of more than one lane cannot honour, in the order a
+ *  message names them. `DISPATCH_E2E_PROCESSES` counts only at `2`: `1` is what one lane runs. */
+export function laneConflicts(env: NodeJS.ProcessEnv): readonly string[] {
+  const named = Object.keys(laneConflictReasons).filter((variable) =>
+    variable === "DISPATCH_E2E_PROCESSES"
+      ? env[variable] === "2"
+      : (env[variable] ?? "").trim() !== ""
+  );
+  const ports = Object.values(harnessVariables).filter(
+    (variable) => (env[variable] ?? "").trim() !== ""
+  );
+  return [...named, ...ports].sort();
+}
+
+/** Refuses a run of `lanes` lanes whose caller set a variable one lane owns, before anything
+ *  starts. `e2e/run.ts` calls it before it adds its own values of those variables. */
+export function refuseLaneConflicts(lanes: number, env: NodeJS.ProcessEnv = process.env): void {
+  for (const variable of laneConflicts(env)) {
+    const reason =
+      laneConflictReasons[variable] ??
+      "a port is one listener's, and each lane needs listeners of its own";
+    throw new Error(
+      `${workerCountVariable}=${lanes} runs ${lanes} lanes, each a harness of its own, so ` +
+        `${variable} must not be set: ${reason}. Unset ${variable}, or leave ` +
+        `${workerCountVariable} unset to run one lane as before.`
+    );
+  }
 }
