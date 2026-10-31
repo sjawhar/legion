@@ -207,7 +207,7 @@ func VerifyRequestObject(compact, audience string, skew time.Duration, now time.
 		}
 	}
 	if c.Peer != nil {
-		if err := validatePeerFacts(*c.Peer); err != nil {
+		if err := ValidPeerFacts(*c.Peer); err != nil {
 			return RequestObject{}, fmt.Errorf("%w: %s", ErrRequestInvalid, err)
 		}
 	}

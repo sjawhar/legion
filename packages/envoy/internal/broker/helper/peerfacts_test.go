@@ -289,3 +289,43 @@ func TestSignRequestSignsWhatTheKernelSaidAboutTheCaller(t *testing.T) {
 		t.Fatalf("the signed facts repeat what the process said about itself: %s", shown)
 	}
 }
+
+// TestSignRequestStillSignsWhenTheReadingIsOutsideWhatARecordMayCarry: the broker refuses a peer
+// claim whose strings carry a refused rune category, and it refuses the whole request with it.
+// A real session working in a directory whose name holds a zero-width joiner must still be able
+// to ask for a secret, so the helper leaves the reading out of the request rather than signing
+// one the broker will throw away the request over.
+func TestSignRequestStillSignsWhenTheReadingIsOutsideWhatARecordMayCarry(t *testing.T) {
+	r := startRig(t, "")
+	dir := shortTempDir(t)
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, "child.sock"), Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	binary := liarBinary(t, dir)
+	workDir := filepath.Join(dir, "zero\u200dwidth")
+	if err := os.Mkdir(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	child := startLiar(t, binary, workDir, filepath.Join(dir, "child.sock"))
+	if _, err := ln.AcceptUnix(); err != nil {
+		t.Fatal(err)
+	}
+	r.callerPID.Store(int64(child.Process.Pid))
+	if reg := r.call(t, Request{Op: "register", WaitSeconds: 5}); !reg.OK || reg.State != "enrolled" {
+		t.Fatalf("register the child: %+v", reg)
+	}
+	r.callerPID.Store(int64(child.Process.Pid))
+	resp := r.call(t, Request{Op: "sign-request", Secrets: []string{"DEEL_API_KEY"}, Reason: "deel sync for ACME-1"})
+	if !resp.OK || resp.RequestObject == "" {
+		t.Fatalf("sign-request from a working directory the broker would refuse: %+v", resp)
+	}
+	ro, err := record.VerifyRequestObject(resp.RequestObject, r.srv.Broker.URL, time.Minute, time.Now())
+	if err != nil {
+		t.Fatalf("the request object must still verify: %v", err)
+	}
+	if ro.Peer != nil {
+		t.Fatalf("peer = %+v, want none: the reading is outside what a record may carry", *ro.Peer)
+	}
+}

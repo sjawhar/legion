@@ -51,12 +51,16 @@ type PeerFacts struct {
 	ReadAt int64 `json:"read_at"`
 }
 
-// validatePeerFacts bounds the shape of a peer claim: a positive pid, absolute paths, three
+// ValidPeerFacts bounds the shape of a peer claim: a positive pid, absolute paths, three
 // strings no longer than a path and free of the rune categories validateReason refuses, and a
 // read at or after the start it names. It proves nothing about how the values were obtained —
 // no check here can — and is the same kind of bound validateReason puts on the reason: what an
 // approval page may be asked to render, and what the broker may be asked to store.
-func validatePeerFacts(f PeerFacts) error {
+//
+// The helper runs it over its own reading before it signs, because a claim the broker refuses
+// would refuse the whole request with it: a working directory with a zero-width joiner in its
+// name is no reason to leave a session unable to ask for a secret.
+func ValidPeerFacts(f PeerFacts) error {
 	if f.PID <= 0 {
 		return errors.New("peer pid is not a pid")
 	}

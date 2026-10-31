@@ -321,11 +321,20 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string,
 		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
 	}
 	var opts []record.SignOption
-	if factsErr != nil {
+	claim := facts.Claim()
+	boundsErr := record.ValidPeerFacts(claim)
+	switch {
+	case factsErr != nil:
 		s.Log.Warn("the kernel's facts about the asking process could not be read; its request will name none",
 			"pid", pid, "error", factsErr)
-	} else {
-		opts = append(opts, record.WithPeerFacts(facts.Claim()))
+	case boundsErr != nil:
+		// The broker refuses a claim it cannot render, and it would refuse the whole request with
+		// it. A reading of a real process that falls outside those bounds — a working directory
+		// with a zero-width joiner in its name — must not stop that session asking for a secret.
+		s.Log.Warn("the kernel's facts about the asking process are outside what a record may carry; its request will name none",
+			"pid", pid, "error", boundsErr)
+	default:
+		opts = append(opts, record.WithPeerFacts(claim))
 	}
 	compact, err := record.Sign(sess.Key, s.Broker.URL, details, reason, "", lifetimeSeconds, time.Now(), opts...)
 	if err != nil {
