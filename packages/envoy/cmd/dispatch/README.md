@@ -395,6 +395,60 @@ same `dispatch-pg` container, which runs its pinned image: pgvector on PostgreSQ
 prints the commands that dump that container's databases and restore them into a new container on
 the pinned image. The database retains the migrated schema; tests only truncate rows they create.
 
+## A large test database
+
+`go run ./cmd/dispatch-seed` fills an empty database with the data set a statement measurement is
+taken on: ten times production's row counts at `--scale 1` — 10 projects, 20,000 issues over
+parent chains and `blocked_by` links, 40,000 documents with 200,000 versions, 80,000 asks,
+370,000 comments, 60,000 messages, 1,250,000 events and a vector for half the issues, documents,
+asks, comments and messages — and the same shape times the scale at any other. It is deterministic:
+one fixed base time, one fixed random seed, and a fixed block id generator
+(`pmdoc.SetBlockIDGenerator`), so two runs at one scale write the same rows and a reading taken
+before a change and one taken after it read the same data. The text is drawn from a Zipf list of
+20,000 words, so the `tsvector` columns carry real lexemes at known frequencies.
+
+```sh
+cd packages/envoy
+go run ./cmd/dispatch-seed --database-url <url> [--scale <f>] [--no-migrate]
+```
+
+`--database-url` is required. `--scale` defaults to 1 and multiplies every row count, keeping the
+proportions and the text sizes; `--scale 0.01` is about 200 issues and is what the CI test runs.
+The command migrates the database itself with `store.Migrate`, as the other subcommands do, and
+never by booting a server, whose background loops would write to the data set it is building;
+`--no-migrate` skips that step for a database somebody else migrated from another commit, which is
+what a before-and-after measurement across two commits needs. It refuses a database that already
+holds a `projects` or an `issues` row, naming what it found: it writes fixed keys, so a second run
+over the same rows would fail halfway through.
+
+It calls the server's own indexers over what it writes — `refs.IndexBlocks` for each document's
+latest version, `refs.IndexItem` for each comment's and message's blocks — and then settles the
+state those writes leave owed, so a Dispatch server started on the seeded database rewrites
+nothing: the block index, the item blocks, the task counts, the reference excerpts and the event
+publication are all already done, and the per-owner `last_seq` counters match the seeded events, so
+the first comment, ask, message, upload or title edit written to a seeded issue does not fail the
+unique `(issue_key, seq)`. It ends with one full `search_term_stats` build for every project, so no
+measured related-terms pass is a first-use full build, and with `vacuum (analyze)`, not `analyze`:
+a freshly loaded table has no all-visible pages, so the planner avoids an index-only scan on it
+however good the statistics are.
+
+The command prints every table's row count; every figure the sizes are stated as a distribution
+rather than a count (the issues per project, the parent chain depths, the issues with three or more
+blockers, the documents with 28 versions, the markdown size bands, the anchored comments and asks,
+the open asks, the root messages, the events with a session actor, the rows with an embedding, and
+the edges of `graph_edges` by kind); a rare, a medium and a common word with the number of documents
+each is in, measured rather than assumed; and the subjects a measurement binds — the largest
+project, the heavily linked issue, the deepest parent chain, the document carrying anchored
+comments and a table-row anchor, the head of the longest mention chain, one of the large documents,
+the session ids for the agent activity read, the `model` value on every vector and the row whose
+embedding is the query vector to bind.
+
+Measurements are taken on Postgres 17 with durability on and memory pinned, and every number is
+recorded beside those settings: `fsync=on`, `synchronous_commit=on`, `full_page_writes=on`,
+`shared_buffers=2GB`, `maintenance_work_mem=1GB`, `effective_cache_size=6GB`. A cluster with the
+write settings off leaves no page all-visible, and a small `shared_buffers` decides a share-of-plan
+reading on its own. A full run at `--scale 1` takes TODO(run time).
+
 
 ## Running locally
 

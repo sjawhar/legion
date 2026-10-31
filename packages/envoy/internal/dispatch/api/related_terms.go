@@ -130,9 +130,11 @@ func refreshSearchTermStats(ctx context.Context, pool *store.Pool, project strin
 	return items, tx.Commit(ctx)
 }
 
-// refreshEverySearchTermStats is one pass of RunSearchTermStatsRefresh: every project, each in its
-// own transaction, so one project's failure leaves the others' rows fresh.
-func refreshEverySearchTermStats(ctx context.Context, pool *store.Pool) {
+// RefreshEverySearchTermStats is one pass of RunSearchTermStatsRefresh: every project, each in its
+// own transaction, so one project's failure leaves the others' rows fresh. It is exported for
+// cmd/dispatch-seed, which runs one pass at the end of a seed so that `search_term_totals` holds
+// a row for every project and no measured refresh is a first-use full build.
+func RefreshEverySearchTermStats(ctx context.Context, pool *store.Pool) {
 	started := time.Now()
 	rows, err := pool.Query(ctx, `select key from projects order by key`)
 	if err != nil {
@@ -168,7 +170,7 @@ func refreshEverySearchTermStats(ctx context.Context, pool *store.Pool) {
 // duty.RunLeased's, a ticker's: the first at the moment the call starts, then one each interval.
 func RunSearchTermStatsRefresh(ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases) {
 	duty.RunLeased(ctx, leases, searchTermStatsLease, interval, duty.TickAtStart, func(ctx context.Context) {
-		refreshEverySearchTermStats(ctx, pool)
+		RefreshEverySearchTermStats(ctx, pool)
 	})
 }
 
