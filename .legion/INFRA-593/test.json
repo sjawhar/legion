@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-593",
-  "completed": "2026-10-31T00:30:00Z",
-  "round": 10,
-  "headTested": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
-  "prHead": "8d2936fa1597508a263b2b2f56e983ca3b293f3f",
-  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-10-txt",
-  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-10-tar-gz",
+  "completed": "2026-10-31T02:10:00Z",
+  "round": 11,
+  "headTested": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
+  "prHead": "129eaa7a7c7f4fb4c7567b2b3ec9a5ff4863ef8f",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-11-txt",
+  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-11-tar-gz",
   "previousRounds": [
     "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
@@ -17,77 +17,59 @@
     "dispatch://INFRA-593/artifact/infra-593-tester-round-6-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-7-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-8-txt",
-    "dispatch://INFRA-593/artifact/infra-593-tester-round-9-txt"
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-9-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-10-txt"
   ],
   "roundShape": {
     "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3",
-    "oldHead": "b24baf7d17a8e2eba7b6222d2671cd6d876187ca",
-    "newHead": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
+    "oldHead": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
+    "newHead": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
     "differs": [
-      "docs/site/src/content/docs/dispatch/running-dispatch.md",
-      "packages/envoy/.changes/unreleased/INFRA-593-document-load-and-compaction.yaml",
-      "packages/envoy/cmd/dispatch/main.go",
-      "packages/envoy/go.mod",
-      "packages/envoy/go.sum",
-      "packages/envoy/infra/gcp/dispatch.go",
-      "packages/envoy/internal/dispatch/api/session_answers_test.go",
+      "packages/envoy/internal/dispatch/docs/decode_reason_test.go",
+      "packages/envoy/internal/dispatch/docs/fold.go",
       "packages/envoy/internal/dispatch/docs/parked_peer_update_test.go",
-      "packages/envoy/internal/dispatch/docs/refused_peer_update_test.go",
-      "packages/envoy/internal/dispatch/store/doc_compaction_owed_migration_test.go",
-      "packages/envoy/internal/dispatch/store/pool.go"
+      "packages/envoy/internal/dispatch/docs/websocket.go"
     ],
-    "equalOnlyAfterMigrationNormalisation": [
-      "packages/envoy/AGENTS.md",
-      "packages/envoy/cmd/dispatch/README.md",
-      "packages/envoy/internal/dispatch/store/migrations/NNNN_doc_compaction_owed.census.sql",
-      "packages/envoy/internal/dispatch/store/migrations/NNNN_doc_compaction_owed.up.sql"
-    ],
-    "round": "full (runtime files main.go, store/pool.go, go.mod, infra/gcp/dispatch.go)"
+    "equalOnlyAfterMigrationNormalisation": [],
+    "round": "narrow, on the architect's call (round 10's real-process evidence stands)"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its steps on real envoy-dispatch from 221f3ce3 (scenA: rows_deleted=37, young rows unchanged, text identical, a 31st upload reads back); its red-test proof (a22f0f29 byte-identical, passes on rc 845ce79c, 10/10 under -race); its Parked-test proof, which passes in most runs but fails 4 of 190 under -race (the failure below); its build and connection proof (go build/vet, infra vets, TestDispatchConnectionsPerPodIsTheServers at 91)."
+    "how": "Re-ran: the parked-update test 300/300 under -race; the wording test (passes, and fails with decodeStoredState's check removed); the cmd/dispatch and docs suites; its e2e steps (scenA rows_deleted=37, young rows unchanged, text identical). One sentence of its handoff is contradicted: 'the doubled wording is ygo's, not the pin's' (a probe of 57 cuts gave the same messages on head, sami.7 and sami.4). On 200 cuts of a real 182,086-byte stored row the rc gives no reason for 196 where sami.4, sami.7 and sami.9 give 'encoding: unexpected end of input' for all 200 (the finding below)."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "findings": [
     {
-      "criterion": "The tests this PR adds pass reliably in the required race lane: TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks (221f3ce3) runs in envoy-go-race-docs.",
-      "evidence": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<postgres> CGO_ENABLED=1 GOMAXPROCS=4 go test -race -p 2 -parallel 4 ./internal/dispatch/docs -count=10 -run '^(TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt|TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks)$' : 4 failures of the Parked test in 190 runs (2/10, 0/20, 0/30, 1/60, 1/70 of a probe copy), each 'parked_peer_update_test.go:61: once the first keystroke landed: the room's state vector is map[1302262099:2 1612693470:15 3757806369:8] but its stored rows fold to map[1612693470:15 3757806369:8]'. A throwaway probe reloaded the stored rows 300 ms after a mismatch: they then held the missing client (clock 2, versions 2), a server write of the test service's 20 ms settlement (newTestService Settle). requireStoredRowsFoldToTheRoom loads the stored rows, then reads the room's state vector; a settlement landing between them makes them differ. The product held; the test races a concurrent settlement. Remedy: service.settle = time.Hour in this test, as the package's other room tests set it, or compare against a stable room (state vector read before and after the load, retried until both agree). No new red test: the flaky test is itself the reproduction (command above)."
+      "for": "the ygo tag v1.54.1-sami.1 the PR must repin to (architect's decision)",
+      "evidence": "crdt.ApplyUpdateV1 into newDocumentCopy of one real stored row cut at 200 points: rc 845ce79c 196 'crdt: invalid update: crdt: invalid update' + 4 with the reason; sami.4, sami.7, sami.9 200 'crdt: invalid update: encoding: unexpected end of input'. The 8-byte prefix of an uploaded row: no reason on rc only. Real binaries on one corrupted seed: main logs '... encoding: unexpected end of input', head logs '... crdt: invalid update'. The PR's decodeStoredState is right (states the rc's doubled sentinel once, passes any reason through, as scenD shows); callers see the same 409. What is lost is the operator's diagnosis that a history was cut short; only the tag can restore it."
     }
   ],
-  "proofOfWhatHeld": [
+  "proof": [
     {
-      "criterion": "Architect check 1: the red test a22f0f29 passes unmodified on rc 845ce79c and still fails on sami.7 and sami.9.",
-      "surface": "internal/dispatch/docs against Postgres 16.2, the tree at 221f3ce3 and copies of it with only the replace line changed",
-      "command": "go test ./internal/dispatch/docs -run '^TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt$' -count=1 on each tree; -race -count=10 at the head",
-      "observed": "Byte-identical to a22f0f29 at 221f3ce3. PASS on 845ce79c (10/10 under -race). FAIL on sami.7 and on sami.9: 'the room reads \"after\\n\\nhello\\n\" but its other peer reads \"after\\n\\nhello world\\n\"'.",
-      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
-      "negativeControl": "sami.7 and sami.9 are the negative controls: the same test fails there."
+      "criterion": "Architect check 1: the parked-update test passes 300 times under -race, its assertion unchanged apart from the settle.",
+      "surface": "internal/dispatch/docs at 20e03351 against Postgres 16.2",
+      "command": "CGO_ENABLED=1 GOMAXPROCS=4 go test -race -p 2 -parallel 4 -count=300 ./internal/dispatch/docs -run '^TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks$'",
+      "observed": "300 PASS, 0 FAIL, 0 DATA RACE, ok 171.3 s. jj diff -r 20e03351 of the test file: 3 added lines (the settle and its comment), nothing else.",
+      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
+      "negativeControl": "At 221f3ce3, before the settle change, the same test failed 4 of 190 runs (round 10)."
     },
     {
-      "criterion": "Architect check 2: a real room's stored rows fold while a peer keystroke is parked, and the document reads back whole.",
-      "surface": "envoy-dispatch built from 221f3ce3, real process on Postgres 16.2, two browser-style peers on the document websocket (throwaway driver t593parked)",
-      "command": "bash scenP.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-10-tar-gz)",
-      "observed": "20 uploads, 21 rows backdated, this hour's sweep marked run. Peer A sends its second keystroke first; the other peer lacks it. The queue folded the 21 backdated rows into 1 118 s after the room load while it was parked. Peer A sends the first keystroke; the other peer reads 'second parked probe', 'first parked probe', then the spec. After a stop and restart the cold GET /text equals the other peer's document.",
-      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
-      "negativeControl": "The other peer did not hold the second keystroke 2 s after it was sent nor when the compaction finished; it held it only after the first was sent."
+      "criterion": "Architect check 2: the wording test fails with the check disabled, and on the real binary a refusal's line reads once, with a reason where ygo gives one.",
+      "surface": "internal/dispatch/docs at 20e03351 and a copy with decodeStoredState's check removed; envoy-dispatch main 92619d8d and head 20e03351 on copies of one corrupted database",
+      "command": "go test ./internal/dispatch/docs -run '^TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce$' on both trees; CUT=length(update)/2 and CUT=8 bash scenB5.sh one; bash scenD.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-11-tar-gz)",
+      "observed": "Head: PASS. Check removed: FAIL 'the history check = crdt: invalid update: crdt: invalid update, want \"crdt: invalid update\"'. Real binary: head's settlement line 'warm document for settlement: OnLoadDocument for room \"<id>\": crdt: invalid update' (once); callers get 409 DOCUMENT_UNLOADABLE as on main. scenD's unfoldable log keeps 'crdt: invalid update: encoding: unexpected end of input', logged once, rows as stored.",
+      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
+      "negativeControl": "The copy with the check removed is the negative control: the test fails there on the doubled wording."
     },
     {
-      "criterion": "Architect check 3: round 9's results at this head.",
-      "surface": "envoy-dispatch main 92619d8d and head 221f3ce3, real processes on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API",
-      "command": "CLEAR_PASS=1 bash scenA.sh; bash scenU4.sh; bash scenB2.sh/scenB3.sh; bash scenD.sh; bash scenC2.sh; bash scenG.sh",
-      "observed": "scenA rows_deleted=37, young rows unchanged, text identical. scenU4 schema 150, start sweep candidates=4 compacted=4 rows_deleted=31; with main killed by SIGKILL, head's queue folded main's unnamed document 121 s after a read. Failed loads: 409/503 responses byte-identical (head's settlement log now says 'crdt: invalid update: crdt: invalid update' where main says '...: encoding: unexpected end of input'). scenD left as stored, logged once, 0.31 CPU-s in 200 s. scenC2 every text exact, 12 owed, no ERROR. scenG at most 15 rows older than 2 minutes, text exactly version 118.",
-      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
-      "negativeControl": "Main 92619d8d's upload is the case doc_compaction_owed misses; only head's queue, through a read, folded it."
-    },
-    {
-      "criterion": "Architect check 4: the merge keeps the horizon pool and the compaction pool, 91 counted everywhere.",
-      "surface": "the store and infra code at 221f3ce3; the infra module's test",
-      "command": "read store/pool.go, infra/gcp/dispatch.go, the docs; (cd packages/envoy/infra && go test ./gcp/ -run TestDispatchConnectionsPerPodIsTheServers); go build/vet ./... and the infra vets",
-      "observed": "ConnectionsPerProcess = 64+4+1+13+1+2 compaction+1+2 horizon+3 = 91; Compaction() used by compaction.go, compaction_queue.go, compaction_sweep.go; Horizon() by api/event_stream_relay.go; Close closes both. dispatchConnectionsPerPod = 91 (main 89); the test passes; running-dispatch.md and the fragment say 91. Build and vets clean.",
-      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
-      "negativeControl": "Main 92619d8d's dispatchConnectionsPerPod is 89, which the PR's +2 compaction pool makes 91."
+      "criterion": "Architect check 3: the docs and cmd/dispatch suites.",
+      "surface": "packages/envoy at 20e03351 against Postgres 16.2",
+      "command": "GOMAXPROCS=4 go test -p 2 -parallel 4 -count=1 ./cmd/dispatch, then ./internal/dispatch/docs (one at a time)",
+      "observed": "cmd/dispatch ok 306.6 s. docs: every test passes; 4 failed only on reads of packages/contracts/fixtures/decision-blocks/*.md my export of packages/envoy left out, and pass once those fixtures are present.",
+      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
+      "negativeControl": "The four fixture tests fail without the fixtures (open ...: no such file) and pass with them, so their failure was the export, not the code."
     }
   ],
-  "ci": "Read on GitHub at the PR head 8d2936fa, run 41144475833, 00:19 UTC: typecheck success, pr-title success; test and envoy-go in progress; lint, dispatch, envoy-go-race and envoy-go-race-docs queued (unread as results). 221f3ce3's own run 41138452771 was cancelled by the next push."
+  "ci": "Read on GitHub at 20e03351, run 41151700282, 02:04 UTC: lint success, typecheck success, pr-title success. Unread: test and envoy-go-race-docs in progress; dispatch, envoy-go and envoy-go-race queued. The PR head 129eaa7a is a trailered handoff with no run of its own."
 }
