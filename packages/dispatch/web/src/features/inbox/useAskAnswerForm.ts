@@ -16,10 +16,12 @@ import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { isViewer } from "../refs/actor";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { answerAskInput } from "./answer-ask";
+import { useAnswerDraft } from "./answer-drafts";
 import {
   clearPendingAskThreadInvalidation,
   hasPendingAskThreadInvalidation,
 } from "./ask-thread-freshness";
+import { markAnswerOutstanding } from "./outstanding-answers";
 import { isQuestionShapedAnswer } from "./question-shaped-answer";
 
 interface UseAskAnswerFormOptions {
@@ -114,11 +116,22 @@ export function useAskAnswerForm({
   const answerFieldId = `${useId()}-answer`;
   const [selected, setSelected] = useState<string[]>([]);
   const [otherSelected, setOtherSelected] = useState(false);
-  const [answerText, setAnswerText] = useState("");
   const [questionChoice, setQuestionChoice] = useState(false);
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
   const [askChanged, setAskChanged] = useState(false);
   const [changing, setChanging] = useState(false);
+  // The reader's unsent answer, which outlives this form: the ask's own Inbox row can leave
+  // under it (withdrawn, resolved, or answered by somebody else), and the reading column then
+  // keeps the question with this text under it rather than taking both off the screen.
+  const [draftAnswer, setDraftAnswer] = useAnswerDraft(ask.id);
+  // The text of a recorded answer the reader is changing. It is this form's own and never the
+  // shared draft: an answer the server has recorded is not unsent text, so a change they cancel
+  // or walk away from leaves nothing behind for another card to show them as one
+  // (`unsentAnswer`) or for the reading column to hold the question by (`Inbox.tsx`, `paneAsk`).
+  // Cancelling is what puts the draft that stood before the change back in the box.
+  const [changeAnswer, setChangeAnswer] = useState("");
+  const answerText = changing ? changeAnswer : draftAnswer;
+  const setAnswerText = changing ? setChangeAnswer : setDraftAnswer;
   const replacing = useRef<AskAnswer | undefined>(undefined);
   const initialChangeConsumed = useRef(false);
   const submitGuard = useSubmitGuard();
@@ -149,6 +162,10 @@ export function useAskAnswerForm({
     write: (input: AnswerAskInput, bounds) => answer(ask.id, input, bounds),
     onMutate: async () => {
       if (replacing.current !== undefined) return undefined;
+      // Registered before the row goes, never a commit after it: the reading column reads this
+      // at the commit the removal below makes, and a hold arriving later would reach it once the
+      // card about to show a refusal had been unmounted with the question.
+      markAnswerOutstanding(ask.id, true);
       await queryClient.cancelQueries({ queryKey: inboxQuery().queryKey });
       const previous = queryClient.getQueryData<InboxRow[]>(inboxQuery().queryKey);
       queryClient.setQueryData<InboxRow[]>(inboxQuery().queryKey, (current) =>
@@ -188,6 +205,9 @@ export function useAskAnswerForm({
       const changed = replacing.current !== undefined;
       replacing.current = undefined;
       setChanging(false);
+      // The text is the recorded answer now, not an unsent draft: a later card for this ask
+      // starts empty, and nothing offers to copy what the server already took.
+      setAnswerText("");
       // Answered either way; with no answer to give, the card reads the ask afresh instead of
       // showing the one Dispatch would have handed back.
       setJustAnswered(updatedAsk);
@@ -207,6 +227,17 @@ export function useAskAnswerForm({
       invalidateOwnerReads();
     },
   });
+  // How long the Inbox's reading column keeps the question: while this answer is the reader's to
+  // finish - in flight, or refused with the card still holding that refusal under what they
+  // answered - and no longer. The same `pending || failed` liveness `SnoozeControl` reports its
+  // own write by, let go when the server decides the answer, when the form is reset, and when
+  // the card goes.
+  const answerLive = mutation.isPending || mutation.isError;
+  useEffect(() => {
+    if (!answerLive) return;
+    markAnswerOutstanding(ask.id, true);
+    return () => markAnswerOutstanding(ask.id, false);
+  }, [answerLive, ask.id]);
   const clarification = useKeyedWrite({
     inline: true,
     label: () => `Question back on “${ask.question}”`,
@@ -278,10 +309,14 @@ export function useAskAnswerForm({
     mutation.reset();
     setSelected(realSelected);
     setOtherSelected(realSelected.length === 0 && current.text !== null && current.text !== "");
-    setAnswerText(current.text ?? "");
+    // `changing` is still false this render, so the recorded text goes straight to the form's
+    // own state rather than through `setAnswerText` into the shared draft.
+    setChangeAnswer(current.text ?? "");
     setQuestionChoice(false);
     setChanging(true);
   };
+  // Cancelling leaves the recorded answer where it was recorded: `answerText` falls back to the
+  // draft that stood before the change, which is empty on a card the reader only read.
   const cancelChanging = () => {
     replacing.current = undefined;
     mutation.reset();
@@ -388,6 +423,11 @@ export function useAskAnswerForm({
     submitGuard.guard(() => clarification.mutate(text));
   };
   const completed = changing ? null : recordedAsk;
+  // What the reader typed and no form will ever send: the question closed under them - withdrawn,
+  // resolved, or answered by somebody else - while their answer was still a draft. The card keeps
+  // it where they can read and copy it, since the box it was in has gone. Their own answer is not
+  // this: it left as a draft the moment the server recorded it.
+  const unsentAnswer = completed !== null && justAnswered === null ? answerText : "";
 
   return {
     answerFailure: mutation.error === null ? null : answerFailure(mutation.error),
@@ -424,5 +464,6 @@ export function useAskAnswerForm({
     toggleOther,
     threadQuery,
     trimmedAnswer,
+    unsentAnswer,
   };
 }

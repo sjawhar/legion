@@ -64,6 +64,9 @@ export type DispatchReferenceRoute = IssueRoute | ProjectDocumentRoute | AgentAr
  *  `section=needs-you` only the asks waiting on the viewer are shown. */
 export interface InboxRoute {
   agent?: string;
+  /** The ask the Inbox has selected, the one its reading pane shows: an ask id. The address is
+   *  the whole memory of that selection, so a link carries the reader's place in the list. */
+  item?: string;
   section?: "needs-you";
   /** Who the listed asks are for. Absent is the page's default, the reader's own work; an empty
    *  array is the cleared filter, every question; a value is a person's lowercase email or the
@@ -871,6 +874,10 @@ export function parseInboxSearch(search: string): InboxRoute {
   if (agent !== null && agent !== "") {
     route.agent = agent;
   }
+  const item = params.get("item")?.trim() ?? "";
+  if (item !== "") {
+    route.item = item;
+  }
   if (params.get("section") === "needs-you") {
     route.section = "needs-you";
   }
@@ -897,6 +904,9 @@ export function buildInboxPath(route: InboxRoute = {}): string {
   const query = new URLSearchParams();
   if (route.agent !== undefined) {
     query.set("agent", route.agent);
+  }
+  if (route.item !== undefined) {
+    query.set("item", route.item);
   }
   if (route.section !== undefined) {
     query.set("section", route.section);
@@ -943,9 +953,11 @@ export const REPLIES_PATH = "/replies";
 export const AGENT_LIVE_PATH = "/agents/:sessionId/live";
 
 /**
- * Whether this route's page owns its scroller and so gets exactly the viewport from the shell:
- * the live agent view, whose thread scrolls while its header and composer stay put. Every other
- * page scrolls the document, which `ViewportAnchor` and the sticky composers depend on.
+ * Whether this route's page owns its scroller whatever the viewport, and so gets exactly the
+ * viewport from the shell: the live agent view, whose thread scrolls while its header and
+ * composer stay put. The Inbox joins it only while its reading pane shows (`app.tsx` pairs this
+ * with `READING_PANE_QUERY`); every other page scrolls the document, which `ViewportAnchor` and
+ * the sticky composers depend on.
  */
 export function routeFillsViewport(pathname: string): boolean {
   return matchPath(AGENT_LIVE_PATH, pathname) !== null;

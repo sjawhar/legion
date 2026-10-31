@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-575",
+  "completed": "2026-10-31T15:24:00Z",
+  "round": 2,
+  "reviewedHead": "the handoff commit this file is pushed in, above code head 7d0324c3e218ec6b6760fc1acf9f8b446b29b3e7",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 4,
+  "scope": "The architect's narrowing (dispatch://INFRA-575/comment/d7cca729, /57b6c19f, and the 07:54Z Envoy message): A1 and A3 of spec v14, the round's test items (one Enter into the note field, e2e/nav.e2e.ts:14, e2e/references.e2e.ts:26), the five defects of review 5720252758; a correctness defect anywhere blocks.",
+  "ci": "Required set (ruleset): lint, typecheck, test, pr-title. CI head 7d0324c3e218 (run 41200051658): lint, test, pr-title success, typecheck skipped (passing); the non-required `dispatch` lane still in_progress at 15:12Z; every other lane run is success, envoy-go included. compare 7d0324c3...e75ff460 is handoffs-only (2 files).",
+  "fiveDefects": {
+    "enterFromListControls": "fixed (4d610a30): Inbox.tsx:775-780; deep-review probe: Later toggle, bulk Clear and a row checkbox keep Enter; unit row passes",
+    "keysOnFirstDecisionBlock": "fixed (4d610a30): answerHand Inbox.tsx:707-715 scopes to the selected ask's card; two-block unit row passes",
+    "changeCancelFalseUnsent": "fixed (4d610a30): change-mode text is the form's own state (useAskAnswerForm.ts:131-134); probe: no unsent box, empty draft after remount",
+    "hardBreakOffsets": "fixed (4d610a30): textRuns advances by leafText (editor-change-decorations.ts:86-92); probe with two breaks marks exactly 'canary'",
+    "unboundedWordDiff": "fixed (4d610a30): maxEditLength 800 with whole-block fallback (change-set.ts:87-103); 3000 unrelated words 80 ms, was ~8 s"
+  },
+  "roundItems": "e2e/references.e2e.ts:26 re-resolves the card through askCard after the width switch; e2e/nav.e2e.ts expects only the pinned read, which matches ReadingPane (only DecisionBody reads the issue); the one-Enter note-field row (inbox-reading-pane.e2e.ts) is green in the tester's whole-project run at 7d0324c3 (936 passed, 25 skipped, 0 failed).",
+  "thermonuclear": "Both run once at e75ff460: deep-review CHANGES (2 medium correctness, 1 minor perf), code-quality CHANGES (2 prose, fast-follow items). I re-read both correctness findings in the code at the head.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/dispatch/web/src/features/inbox/pane-selection.ts", "description": "nextAfterSelected (205) stores the row after the selected one, else the row BEFORE it; step() (130-134) always treats it as the row after where the held question stood. For a held question that was the last row, j moves up and k skips the row right above (probe: rows A,B,C, C held: k -> A, j -> B)."},
+    {"severity": "important", "file": "packages/proof-editor/src/editor-change-decorations.ts", "description": "widgetPosition (133-135) returns positionAt(...) for an offset widget, which is undefined in a block with no text runs, so the widget is dropped, though the doc comment (123-125) promises the block's start. A paragraph replaced by a rule or image in the approval column shows the changed-block bar and never the removed sentence (probe: removed-words elements [])."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/inbox/ReadingPaneHead.tsx", "description": "71-72 says h, o and y look inside the selected row; with the pane on they look inside the reading column (Inbox.tsx hand())."},
+    {"severity": "minor", "file": "packages/proof-editor/src/lib.ts", "description": "setChangeDecorations' doc (206-209) says a widget is drawn before a block or at the document end, omitting the offset widget inside a block, the commonest one."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/inbox/Inbox.tsx", "description": "answerHand (711) finds the selected card by data-testid, the one production data-testid query in dispatch/web/src; key it on data-ask-card=<id> as the note-disclosure fix did. Plus stale `Inbox.tsx`/`paneAsk` pointers (Inbox.tsx:913, outstanding-answers.ts:7, useAskAnswerForm.ts:130, AskCard.test.tsx:297) and AGENTS.md:587's 'no binding carries a per-mode ternary'."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/doc/ChangeView.tsx", "description": "rows memo (207) re-runs changedWords for every changed block on each fold toggle (~90 ms per large pair); compute word parts in the entries memo."}
+  ],
+  "threads": "All 18 threads of review 5720252758 answered; 17 accepted (fixed in 4d610a30 or a59a216a), PRRT_kwDORFy7ds6yMCDE (j from a held question) unresolved: the last-row case still stands.",
+  "notes": [
+    "Not requested under the architect's narrowing: the code-quality agent's structural suggestions F2-F7 (Inbox.tsx/ProofDocument.tsx still past 1000 lines, PaneSelection exposing two refs for recordAnswered, ReadingPane's leftover PaneSubject layer and duplicated prop types, query options copied from ProofDocument, useMarkedBlocks' MutationObserver, ChangeMarks duplicating ChangeDecorations). None is a correctness defect."
+  ]
+}
