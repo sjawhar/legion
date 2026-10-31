@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-575",
+  "previousHandoff": "007466b0565747049a44b365b2e73feceb24c56f",
+  "completed": "2026-10-31T22:45:00Z",
+  "round": 11,
+  "answersTestFailures": [
+    "No test failed and no review asked for a change. READY was refused READY_HEAD_CONFLICTS: GitHub read the retro head 007466b0 as conflicting with main at 3c78856b, six paths changed on both sides. This round is the forward merge that rule calls for, the resolution of its two textual conflicts, and the proof re-run the rule requires at the merge head; no product decision changed."
+  ],
+  "proof": [
+    {
+      "criterion": "The reading pane, the change view and every other page of Dispatch behave at the forward-merge head as they did at the approved head.",
+      "surface": "The built Dispatch SPA served by the real Go Dispatch server against a real PostgreSQL 18 in this issue pod, driven in a real Chromium: the whole Chromium project of packages/dispatch/e2e.",
+      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium",
+      "observed": "953 passed, 25 skipped, 0 failed (1.4 h) at 5a069c7e1707, the nine rows of inbox-reading-pane.e2e.ts among them. The count rose from 936 to 953 because the merge brought main's own new rows in; nothing of this branch's was dropped.",
+      "headSha": "5a069c7e170784f50081f152b486d8070ad2f2f4",
+      "negativeControl": "The same command at the pre-merge head 1f9799b301a6 was 936 passed, 25 skipped, 0 failed, so the merge left every row of this change green and added main's. A merge whose resolution had been wrong would have shown in packages/dispatch/web/src/features/doc, whose rows (doc.e2e.ts, approval.e2e.ts, margin specs) are in this run."
+    },
+    {
+      "criterion": "The two textual conflicts are resolved so that both sides' behaviour stands: main's remark work and this branch's change decorations.",
+      "surface": "The repository's own fast checks at the merge head, over both packages the conflicts are in.",
+      "command": "bunx biome check packages/dispatch/ packages/proof-editor/ && (cd packages/proof-editor && bun run typecheck && bun test) && (cd packages/dispatch && bun run typecheck && bun test)",
+      "observed": "biome clean over 782 files; both typechecks clean; packages/proof-editor 242 rows and packages/dispatch 3100 rows, 0 fail. The dispatch count rose from 3074 at the pre-merge head, which is main's rows for remarkMark and the room replay.",
+      "headSha": "5a069c7e170784f50081f152b486d8070ad2f2f4",
+      "negativeControl": "Typecheck is the control that both halves of each resolution are real: dropping main's `whenSent` or `pendingWaiter` from the effect's dependency list, or this branch's `page`, fails tsc or biome's exhaustive-dependency rule, and dropping either import of lib.ts fails tsc at its first use."
+    },
+    {
+      "criterion": "The branch's own lines moved only where the conflicts were, and the pull request is mergeable again.",
+      "surface": "The unchanged-diff fingerprint of the pull request's own lines, and GitHub's own read of the head.",
+      "command": "jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum; gh pr view 2549 -R sjawhar/legion --json mergeable,mergeStateStatus",
+      "observed": "c7cd1a30ae05530c02fd00735ba7d9b95e038a022b03a2913e76900780656837 at 007466b0 and 4e4c98207e7cedd2e7ace39bdf68d4164e516bbb7541ae3d9d31933a72995eb6 at 5a069c7e: changed, as a resolution that edits the branch's own lines must be, in packages/proof-editor/src/lib.ts and packages/dispatch/web/src/features/doc/ProofDocument.tsx alone. GitHub reads the merge head MERGEABLE, where it read 007466b0 conflicting.",
+      "headSha": "5a069c7e170784f50081f152b486d8070ad2f2f4",
+      "negativeControl": "The fingerprint excludes .legion/ and docs/solutions/, so retro's five learnings and this handoff cannot make it differ; it moved because two product files did, and the forward-merge comment on the pull request names them line by line."
+    }
+  ],
+  "filesChanged": [
+    "packages/proof-editor/src/lib.ts",
+    "packages/dispatch/web/src/features/doc/ProofDocument.tsx",
+    "bun.lock"
+  ],
+  "trickyParts": [
+    "Both conflicts are the same shape: main's remark work (remarkRecordMark, remarkMark, whenSent, pendingWaiter) landed on the exact lines this branch had extended for change decorations and for the `page` gate. The resolution keeps both sides in each, and `page` stays in the effect's dependency list beside main's two new ones.",
+    "The merge's `bun install` rewrites the workspace self-versions main's bun.lock is stale on, so the lockfile must be restored from main@origin and committed without running `bun install` again - an install after the restore puts the new versions straight back, which is how the first restore commit landed empty (6a197786; 5a069c7e is the real one).",
+    "The worker image now carries PostgreSQL 18.6 with pgvector (/usr/lib/postgresql/18/bin, vector.so), so the Debian-unpack step of docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md is no longer needed; the pod's /var/run/postgresql is not writable, so the server needs -c unix_socket_directories under /legion/harness."
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "This pod was replaced mid-round: /legion/harness went with it and the first whole-project run at this head was lost at 799 green rows. The harness was rebuilt from its own setup.sh and env.sh and the run repeated whole; nothing of the branch was unpushed, so no work was lost."
+  ]
+}
