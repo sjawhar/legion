@@ -294,7 +294,7 @@ test("Change answer then Cancel leaves the recorded answer alone and no draft be
     expect(await card.findByText(/Answered by/)).toBeTruthy();
     expect(card.queryByTestId("ask-unsent-answer")).toBeNull();
     // Nor is any of it left in the draft every card for this ask reads, and the Inbox's reading
-    // column holds the question in the column by (`Inbox.tsx`, `paneAsk`).
+    // column holds the question in the column by (`pane-selection.ts`, `paneAsk`).
     expect(answerDraft(mine.id)).toBe("");
   } finally {
     view.unmount();

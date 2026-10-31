@@ -708,8 +708,9 @@ export function Inbox({
     paneShown
       ? paneSelection.id === undefined
         ? null
-        : (paneRef.current?.querySelector<HTMLElement>(`[data-testid="ask-${paneSelection.id}"]`) ??
-          null)
+        : (paneRef.current?.querySelector<HTMLElement>(
+            `[data-ask-card="${CSS.escape(paneSelection.id)}"]`
+          ) ?? null)
       : focusedRow();
   const inAnswerHand = (selector: string) =>
     answerHand()?.querySelector<HTMLElement>(selector) ?? null;
@@ -910,7 +911,7 @@ export function Inbox({
   // column is merely showing is not held - the Inbox selects the first row for the reader the
   // moment it opens, and a question the server withdraws, resolves or answers elsewhere must
   // not stay in the list on the strength of a selection nobody made. What the column does with
-  // a selected question the server takes away is `paneAsk` below.
+  // a selected question the server takes away is `paneAsk` (`pane-selection.ts`).
   const handId = anchor?.id;
   const seen =
     handId === undefined || handId === answered.current

@@ -127,7 +127,8 @@ export function useAskAnswerForm({
   // The text of a recorded answer the reader is changing. It is this form's own and never the
   // shared draft: an answer the server has recorded is not unsent text, so a change they cancel
   // or walk away from leaves nothing behind for another card to show them as one
-  // (`unsentAnswer`) or for the reading column to hold the question by (`Inbox.tsx`, `paneAsk`).
+  // (`unsentAnswer`) or for the reading column to hold the question by (`pane-selection.ts`,
+  // `paneAsk`).
   // Cancelling is what puts the draft that stood before the change back in the box.
   const [changeAnswer, setChangeAnswer] = useState("");
   const answerText = changing ? changeAnswer : draftAnswer;

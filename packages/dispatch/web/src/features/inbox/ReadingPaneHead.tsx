@@ -68,8 +68,11 @@ export interface ReadingPaneHeadProps {
  * carries the project key and the document name, "Open page" at the section, Snooze and Copy ref
  * — a project document has no assignee and no priority, so neither control applies to it.
  *
- * `h`, `o` and `y` look inside the selected row for `[data-inbox-snooze]`, `[data-inbox-owner]`
- * and the copy-ref control, so the head draws the same three controls the row drew.
+ * With the column on, `h`, `o` and `y` look inside the column rather than inside the selected
+ * row (`hand()` returns the column in `Inbox.tsx`), and the short row beside it draws no Snooze
+ * and no copy-ref control at all. So this head draws the same three controls the card row draws
+ * — `[data-inbox-snooze]`, `[data-inbox-owner]` and the copy-ref control — and the keys find
+ * them here.
  */
 export function ReadingPaneHead({
   artifact,

@@ -4,7 +4,7 @@
  *
  * It lives beside the drafts (`answer-drafts.ts`) for the same reason they do: what the reader
  * has put into an ask belongs to the ask, not to the form holding it, and the reading column
- * reads it from outside every card (`Inbox.tsx`, `paneAsk`). The column's card can be the
+ * reads it from outside every card (`pane-selection.ts`, `paneAsk`). The column's card can be the
  * document's own - a question written as a decision block, drawn by `ProofDocument` - which takes
  * no prop of the Inbox's, so the form registers itself here rather than reporting upward as
  * `SnoozeControl` and `AssignToMe` do.
