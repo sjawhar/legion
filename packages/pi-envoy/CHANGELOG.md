@@ -1,5 +1,27 @@
 # Changelog
 
+## [13.10.0] - 2026-10-31
+
+### Added
+
+- Two skills every session with Dispatch now loads: `outside-message`, which holds when the
+  operator approves text that reaches a person outside the company, the two exclusions, the four
+  steps before the ask and what the ask carries; and `plain-words`, which holds the empty verb
+  phrases to delete from any text a person reads. Neither counts toward the 2,000-word budget of
+  the three Dispatch skills.
+
+### Changed
+
+- The `dispatch` skill tells a session to write each ask or comment id whole in a reference,
+  taking it from `dispatch read`'s `Ask id:` or from the page URL, because the command accepts
+  a prefix while a person's link does not. It said an ask or comment id could be an 8-hex
+  prefix, and a reference built from one opens nothing for the person who clicks it.
+  `dispatch-writing-specs` carries the same rule where a citation is written. Three pieces of
+  text that the same skills state elsewhere pay for it: the 8-hex licence, `Decisions are
+  asks.` in the `dispatch` skill's "Structure over stream", and that skill's
+  `DOC_SERVICE_UNAVAILABLE` line. The three Dispatch skills hold 1,995 words, under the
+  2,000-word guard.
+
 ## [13.8.0] - 2026-10-30
 
 ### Added
