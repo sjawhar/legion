@@ -2,20 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-558",
-  "completed": "2026-10-31T03:40:00Z",
-  "round": 5,
-  "scope": "Narrowed by the INFRA-63 architect: the round-4 items, the merge of main, ci-ok and the four required checks; a new finding counts only as a correctness defect the round-5 change introduced.",
-  "reviewedHead": "496bece3977c7cc3f6864722ccc490d217f99ed5",
-  "codeHead": "f7632be57ad2",
+  "completed": "2026-10-31T18:26:00Z",
+  "round": 6,
+  "scope": "Narrowed at the review-round cap: the commits since f7632be5 (OnTokenAuthContext on sjawhar/ygo v1.54.1-sami.2, the 4412 cancel-cause close, admittedConn deleted, Parked in renderedReplica, the held-socket harness, the rebuild of a history ygo refuses) and the merges dca23bdf and 6176f738. A new finding counts only as a correctness defect these commits introduce; the INFRA-63 architect chose (b): request changes for the three non-defect items now, while CI is queued.",
+  "reviewedHead": "8639bb6fe15e7cb6c11756ba6e908bd78c2c3a51",
+  "codeHead": "e9defcab9e7d",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 1,
-  "ci": "Required set: lint, typecheck, test, pr-title. CI head f7632be5 (run 41161277368) is queued, with lint, typecheck and test check-runs queued. The compare f7632be5...496bece3 changes only .legion/INFRA-558/ (2 files).",
-  "items": "N1 test: TestARevokedSocketsEntryAnswersBehindEverySocketStillOpen fails at the test-only commit 4e43e662 (run in a scratch worktree) and passes with 7efbd8af. D1 no-write test: it fails with keepAliveConn.Write's closed guard removed (mutation run in a scratch worktree: the write returns nil and the page reads 6 bytes). held_durable comment: rewritten, but its new wording is wrong ('13 s old'). AGENTS.md: 0151. The census round-4 corrections are done; the remaining factual errors (a nonexistent api/delivery_live_socket.go in place of live_socket.go, stale :3828 and :2227-2232, false 'updated' marks, fragments with no disposition, the gen-go.ts path) I corrected in the PR body myself. Merge f7632be5: the README relayout (#2422) resolution keeps every PR sentence and every main sentence (word-level hunk comparison, 78 hunks each side); AGENTS.md is the same, 39 hunks each; migrations 0150-0152 are above main's 0149.",
-  "thermo": "thermonuclear-deep-review at f7632be5 over the round-5 commits and the merge: CHANGES (F1 below, reproduced with an overlay test). A census check reran each entry's command.",
+  "minor": 2,
+  "ci": "Required set (ruleset): ci-ok, pr-title. CI run 41226066399 at e9defcab has been queued since 17:45Z; pr-title is queued (one run cancelled). The compare e9defcab...8639bb6f changes only .legion/INFRA-558/ (2 files).",
+  "verified": "No correctness defect. Every token answer reads its own socket's admission from the request context (ygo peer.ctx = r.Context(); authorizeSchemaVersion reads connectionState.admission); no path matches by order or key. TestATokenIsAnsweredFromItsOwnSocketInEitherOrder fails in all six cases against the old answer(key) (rewritten for it in a scratch worktree), round 5's remove-between case included. The 4412 close goes through gorilla WriteControl under c.mu, so never mid-frame; a peer slower than 1 s gets 1006 (accepted). The D1/D2/N1 tests are replaced by TestARevokeWaitsForTheMessageTheServerHasInFlight, ...EitherOrder and TestARevokedPagesReconnectIsAdmittedBesideItsLateToken. Parked is applied once. The rebuild goes on only on ErrDocumentUnloadable; a loading history is still DOCUMENT_LOADS. 49b70f3d and 3dba8029's tests fail before their fixes. The fork tag v1.54.1-sami.2 (05a6fbf0) adds only OnTokenAuthContext over main's sami.1. The merges keep both sides.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/schema_admission.go:151", "description": "Introduced by 7efbd8af. answer now skips a revoked entry, so a revoked socket's own token, read before the revoke took effect and answered after it, takes the live socket's entry; the revoked socket's ServeHTTP then removes its unanswered entry, and the live socket's token finds none waiting and is answered read-only for the life of its socket. The mirror of N1: matching by key alone cannot tell whose token it is. Fix: give the token answer the socket's identity; the ygo fork's OnTokenAuth(room, token) gets a hook with the request (or its context), so authorizeSchemaVersion answers the connectionState's own admission, and the revoked-entry ordering goes. Add the mirror order (newer then older, revoke, the revoked socket's answer, remove newer, the live socket's answer must be writable) as a test that fails first."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/delivery/held_durable.go:429", "description": "'A hold takeHold just took is 13 s old at most' should read 'has at most 13 s left'."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/schema_admission_test.go:459", "description": "TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole still passes with cancel(errSchemaRevoked) removed (ygo's handshake timeout ends the silent page inside the test's 30 s deadline), so it proves nothing about the revoke. It must fail when the cancel is removed: bound the close to well under that timeout after the revoke, and show the negative control."},
+    {"severity": "minor", "file": "packages/contracts/src/dispatch-api.ts:3146", "description": "States the 1 s close rule again, against README.md:665's 'This is the one statement of that rule'. Point the comment at the README."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/schema_admission.go:159", "description": "The `if admission.cancel != nil` guard exists only for the &schemaAdmission{} fixtures in websocket_test.go:150, 169, 198. Give those fixtures a real cancel and remove the guard."}
   ]
 }
