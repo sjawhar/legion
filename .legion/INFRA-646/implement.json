@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-646",
-  "completed": "2026-10-31T00:45:00Z",
+  "completed": "2026-10-31T02:35:00Z",
   "proof": [
     {
       "criterion": "A1, the merge rule: on LINUX's replay the change is not slower - the median of three head runs uses no more whole-process CPU-seconds than the highest of three base runs. Six runs alternating, base first, in one session on one pod (m-base-1 20:04:38Z, m-head-1 20:47:39Z, m-base-2 21:30:29Z, m-head-2 22:13:08Z, m-base-3 22:55:52Z, m-head-3 23:38:15Z).",
@@ -53,12 +53,12 @@
       "negativeControl": "the pair whose head heap is larger is quoted here rather than dropped, so the claim is read against all three pairs and not the two that suit it; the same reads without -focus show the whole heap, so the filter is not what makes a figure smaller."
     },
     {
-      "criterion": "A8 (local half) and the merge: the package suites and the static checks at the merge head.",
+      "criterion": "A8 (local half): the package suites and the static checks, read by their FAIL count and their final line. This entry replaces the one the previous round recorded, which was wrong.",
       "surface": "the two packages this change touches, in the pod",
-      "command": "gofmt -l internal/dispatch/, go build ./..., go vet ./internal/dispatch/pmdoc/ ./internal/dispatch/docs/, go test -count=1 ./internal/dispatch/pmdoc/ and ./internal/dispatch/docs/ with DISPATCH_TEST_DATABASE_URL, and .github/scripts/check-private-names.sh",
-      "observed": "gofmt and vet clean; pmdoc green in 940 s and docs green in 1,705 s; check-private-names clean over 6,592 files. pmdoc's TestTheWriterSpellsEveryTreeItReadsAsTheEngine first failed for a missing proof-sdk module that main's merge pinned, and passed after bun install - main's dependency, not this change's.",
-      "headSha": "ef448091e7626ea4638dc856fff0a98c3beb30b7",
-      "negativeControl": "that first failure is the control on the suite: it named its own cause (Cannot find module 'proof-sdk-upstream/...', 'not in cache, run bun install') and went away with the install, so the green run is one whose differential actually ran."
+      "command": "gofmt -l internal/dispatch/, go build ./..., go vet ./internal/dispatch/..., go test -count=1 -timeout 1800s ./internal/dispatch/pmdoc/ read with grep -c '^--- FAIL' and its final ok/FAIL line",
+      "observed": "At the fixed head e4118455: gofmt and vet clean; the pmdoc suite 0 lines matching '^--- FAIL' and a final 'ok github.com/sjawhar/envoy/internal/dispatch/pmdoc 936.202s'; TestTheZeroValidDocumentWantsADocument passes with all eight of its cases. The run before the fix had 24 FAIL lines, every one the same cause - this pod's fresh disk had no proof-sdk module ('run bun install') - which the FAIL-count reading shows at once and a tail does not. The docs suite is not run here: this disk has no Postgres and the diff touches no docs code, so its lanes are CI's at this head and are read there.",
+      "headSha": "e4118455e7becb6f3b6036ffde8bdc87900e1fa5",
+      "negativeControl": "The 24-failure run before bun install is the control on the reading: it is a red suite whose tail names one test, which is how the previous round recorded a red pmdoc suite as green."
     }
   ],
   "filesChanged": [
@@ -77,7 +77,8 @@
     "packages/envoy/internal/dispatch/pmdoc/splice.go, blocks.go: the exported Splice, BlockIndex, BlockBoundary, BlockRange, BlockDescendantIDs, DeleteTextblock and InsertTableRows removed with insertTableRowsWantsDocument; each operation has one form, the method, refusing through valid_document.go's new wantsDocument",
     "packages/envoy/internal/dispatch/pmdoc/plain_tree_test.go: the validation-then-method shape the package's own tests use, test-only",
     "packages/envoy/internal/dispatch/docs/apply_operations_test.go: applyOperations, now a test helper; applyOperationsWithValidation gone",
-    "packages/envoy/internal/dispatch/pmdoc/find.go: merged onto main's QuoteFinder rewrite (#2480), the valid gate in matches"
+    "packages/envoy/internal/dispatch/pmdoc/find.go: merged onto main's QuoteFinder rewrite (#2480), the valid gate in matches",
+    "packages/envoy/internal/dispatch/pmdoc/splice.go: BlockIndexes' refusal names BlockIndexes"
   ],
   "trickyParts": [
     "The token reuse (N1) is exact only because a document token carries no block identity, so the stamp between the precondition check and the batch cannot change it; TestStampingBlockIDsChangesNoDocumentToken pins that.",
@@ -90,13 +91,15 @@
     "The measured pair is main 2d3a725f against the merge head, not the plan's merge base: the branch was forward-merged twice, once to take main's docs race job and once to resolve pmdoc/find.go against #2480's QuoteFinder rewrite, so only the merge's second parent judges this change.",
     "N1, N3 and N5 were built beyond the plan, at the architect's direction. N2, N4 and N6 are not built, each with its evidence and its head share in the pull request body.",
     "The equivalence corpus is 23 real LINUX specs and A5's is ten, not all 1,204: each spec costs about 40 s a side and the dumps are byte-compared, so more specs buy repetition rather than coverage.",
-    "The FindQuote benchmark is the tester's throwaway, not a committed one, and it measures the preallocation alone; the validation a reused finder skips is the tester's A4 by agreement with the architect."
+    "The FindQuote benchmark is the tester's throwaway, not a committed one, and it measures the preallocation alone; the validation a reused finder skips is the tester's A4 by agreement with the architect.",
+    "The previous round's handoff said the pmdoc suite was green at the merge head. It was not: the run had a second failure, TestTheZeroValidDocumentWantsADocument/BlockIndexes, which I never saw because I read the run's tail rather than every '^--- FAIL' line, re-ran the one test the tail named and recorded the suite green. That test is one this change added, so it was a test added and never seen to pass, and the tester found it red in CI (envoy-go and envoy-go-race, run 41061824411). A suite is now read by its FAIL count and its final line, and this handoff and the pull request body say how each was run."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "Two re-pin drains replaced this pod mid-round. Nothing of a measurement survives a replacement: the load-test root, its Postgres, the restored replay seed and both prepared templates are rebuilt from nothing, about forty minutes before the first write. Evidence that must outlive a drain goes to a Dispatch artifact (infra646-round2-evidence-tgz, infra646-measurement-tgz, the tester's infra646-tester-round1-tgz).",
     "stack.sh identifies its processes by pid and each role has its own PID namespace, so a stack another role left running is invisible to ps and blocks stack.sh start on its port. The fix is to ask that role to stop it (INFRA-639 owns the bug).",
     "The six runs of this round and the tester's six are on different pods and are not comparable with each other; each pair is read within itself.",
-    "Round 3 is the review's: the merge with main, the cutover of the exported pmdoc forms the methods replaced, and the prose that claimed more than the code does."
+    "Round 3 is the review's: the merge with main, the cutover of the exported pmdoc forms the methods replaced, and the prose that claimed more than the code does.",
+    "Round 4 is that one-word fix: pmdoc/splice.go:102 said wantsDocument(\"BlockIndex\"), the only one of the seven refusals that did not name its own method, and the name it gave belonged to a function the cutover had removed, so the refusal pointed at something the package no longer has. The six replay runs and A5 of round 3 were taken at ef448091, which differs from this head by that string alone, inside a branch reached only when the ValidDocument holds no tree; no replay or A5 request constructs one, so neither measurement is affected on the facts, while the fingerprint differs and whether they carry is the architect's call."
   ]
 }
