@@ -2,24 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-264",
-  "completed": "2026-10-30T19:20:00Z",
-  "round": 3,
-  "reviewedHead": "315196597d1d0d5fd7e37bfa458ad46b7b5e3453 (code head b5103ea37381, CI head)",
-  "decision": "changes_requested",
+  "completed": "2026-10-31T12:55:00Z",
+  "round": 4,
+  "reviewedHead": "6c1023be5c6ac7f238c15e42ba9ef559825e53dd (code head and CI head; my prose commit above the tester's 73ba9119, whose code head is 525d94c5)",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "scope": "Narrowed by the architect: the forward merges, the six round-2 minors, and CI at the head; new topics only for correctness or security.",
-  "roundTwoFindings": "All closed: merged with main (MERGEABLE), main added no mutating route in the range (its one new route is a GET), 0149_dpop_proofs consistent; the five code minors in a1f34c47 and the PR body's reply exception verified by both thermonuclear passes and by the reviewer's read.",
-  "ci": "CI run 41103928584 at b5103ea3: ci-filters completed failure; typecheck, docs, contracts, broker-multiprocess, envoy-e2e-local and others success; test, lint, dispatch and the race jobs still running at the time of review. Reviewer locally: go test ./internal/broker/oauth/... ./internal/brokertoken/... ./internal/ratelimit/... ./internal/broker/api/... ok, and the Dispatch scope suites ok, so the round-2 oauth failure does not reproduce.",
+  "important": 0,
+  "minor": 1,
+  "scope": "Narrowed by the architect: the round-3 fix and CI at its head; new topics only for correctness or security.",
+  "roundThreeFindings": "All closed. ci-filters: check-ci-filters.sh passes locally (28 gates, 0 uncovered) and the CI job is green at 6c1023be. The existence-oracle wording is fixed in AGENTS.md and the README. A named scope with an empty project is refused in live (Verify and Live), tested at brokertoken_test.go:193-201, and passes against a real Postgres.",
+  "merges": "46ce6038 re-applied the branch's prose onto main's semantic-line-break reflow and renumbered broker 0020->0021_oauth_pod_sessions and Dispatch 0149->0150_dpop_proofs. Both thermonuclear passes and a sentence-level check of my own found no branch content lost. 525d94c5 takes main's claims_doc_test.go whole, which is byte-identical to main.",
+  "proseFix": "6c1023be: oauthstore/store.go:70 cited 0020's expiry index; after the renumber the index is 0021's.",
+  "ci": "Run 41188050922 at 6c1023be: lint, typecheck, test and pr-title (the required set) all succeeded, as did ci-filters and every other job but envoy-go. envoy-go failed on TestAReconnectCatchesUpWhatTheListenerMissed (delivery_live_hub_test.go:776). That test is untouched by this PR. It failed the same way on legion/INFRA-592 (run 41174572955) and passes 3/3 locally, so it is a timing flake and not required. Its failed job is re-run once by the watcher ci-rerun-6c1023be once ci-ok (queued) lets the run complete.",
+  "tests": "Reviewer locally against a real Postgres: go test ./internal/broker/oauth/... ./internal/brokertoken/... and the Dispatch scope, broker-token, upload and route-class suites all pass.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 31519659 (minors: docs still claim the existence oracle closes; named scope with empty project reads unscoped; stale PR body lines)",
-    "codeQuality": "Verdict: CHANGES at 31519659 (an unreachable third closure in withinProjectScope) — declined under the architect's narrowing: structure, not correctness"
+    "deepReview": "Verdict: APPROVE at 6c1023be",
+    "codeQuality": "Verdict: APPROVE at 6c1023be"
   },
   "keyFindings": [
-    {"severity": "important", "file": ".github/workflows/ci.yaml", "description": "ci-filters is red at the code head: the changes job's filters for typecheck, test, docs, dispatch, dispatch-browser-multiprocess, dispatch-memory, dispatch-multiprocess, envoy-infra-go and listener-server-change do not match packages/envoy/internal/brokertoken/**, packages/envoy/internal/ratelimit/** or packages/envoy/internal/broker/oauthwire/**, which this PR adds or moves and those jobs read, so a later change to them would skip the jobs that test them."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": ":2844-2845 and cmd/dispatch/README.md:136-138 still say failing closed closes an existence oracle; the code comment now says it does not. Named to the implementer rather than fixed by the reviewer, so that no reviewer push cancels the CI run still in progress at b5103ea3."},
-    {"severity": "minor", "file": "packages/envoy/internal/brokertoken/brokertoken.go", "description": "Same topic as round-2 minor 4: a named scope with an empty project still reads as unscoped through callerOf and callerProject; refuse it in live as the unknown scope is refused."}
+    {"severity": "minor", "file": "packages/envoy/internal/broker/oauthstore/store.go", "description": "Stale migration citation 0020 -> 0021 after the renumber; fixed by the reviewer in 6c1023be."}
   ],
-  "declined": ["Quality: fold withinProjectScope's unreachable no-resolver closure into the fail-closed path — structure only, outside the round's narrowed scope."]
+  "declined": [
+    "Prose nits outside the architect's narrowed scope: brokertoken_test.go:179 says 'the louder of the two' over three cases, and cmd/dispatch/README.md:691 (main's line) says the notes run through 0148."
+  ]
 }
