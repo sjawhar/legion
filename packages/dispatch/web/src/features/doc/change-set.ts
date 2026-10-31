@@ -4,7 +4,9 @@ import { diffArrays, diffWordsWithSpace } from "diff";
  * How two versions of a document are paired up, block by block, and how a block that changed
  * between them differs. The change view (`ChangeView.tsx`) pairs the two versions' markdown block
  * sources; the reading pane's approval marks (`change-marks.ts`) pair the rendered blocks' text.
- * Both read the same pairing and the same word diff, so the two surfaces mark the same words.
+ * Both surfaces share the same pairing and the same word-diff functions, so the two read one
+ * rule; they do not mark the same words, because a formatting-only edit (`**bold**` added) is a
+ * change of the source the change view marks and none of the rendered text the marks pair.
  */
 
 /** How a block stands between the two versions. */

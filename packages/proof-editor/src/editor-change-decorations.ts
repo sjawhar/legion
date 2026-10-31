@@ -7,10 +7,10 @@ import { $prose } from "@milkdown/kit/utils";
 export interface TextDecoration {
   /** Index of the top-level block of the document the decoration sits in. */
   blockIndex: number;
-  /** Character offsets into that block's own text; with neither, the whole block carries the class
-   *  as a node decoration. */
-  from?: number;
-  to?: number;
+  /** Character offsets into that block's own text; with none, the whole block carries the class
+   *  as a node decoration. The two ends are one field, so a run with only one end cannot be
+   *  written. */
+  range?: { from: number; to: number };
   className: string;
 }
 
@@ -26,18 +26,21 @@ export interface BlockWidget {
   className: string;
 }
 
-interface ChangeDecorations {
+/** The whole change a host draws: the runs of text it marks, and the text it draws beside the
+ *  document. One set replaces the last one. */
+export interface ChangeDecorations {
   text: readonly TextDecoration[];
   widgets: readonly BlockWidget[];
+}
+
+interface ChangeDecorationsState extends ChangeDecorations {
   decorations: DecorationSet;
 }
 
-type ChangeDecorationsChange =
-  | { kind: "text"; text: readonly TextDecoration[] }
-  | { kind: "widgets"; widgets: readonly BlockWidget[] };
-
-const changeDecorationsKey = new PluginKey<ChangeDecorations>("dispatch-editor-change-decorations");
-const noChangeDecorations: ChangeDecorations = {
+const changeDecorationsKey = new PluginKey<ChangeDecorationsState>(
+  "dispatch-editor-change-decorations"
+);
+const noChangeDecorations: ChangeDecorationsState = {
   text: [],
   widgets: [],
   decorations: DecorationSet.empty,
@@ -170,17 +173,14 @@ function changeDecorations(doc: ProseMirrorNode, value: ChangeDecorations): Deco
   for (const entry of value.text) {
     const block = blocks[entry.blockIndex];
     if (block === undefined) continue;
-    if (entry.from === undefined || entry.to === undefined) {
-      // Neither end is the whole block; one end alone names no range at all.
-      if (entry.from === undefined && entry.to === undefined) {
-        const to = block.start + block.node.nodeSize;
-        decorations.push(Decoration.node(block.start, to, { class: entry.className }));
-      }
+    if (entry.range === undefined) {
+      const to = block.start + block.node.nodeSize;
+      decorations.push(Decoration.node(block.start, to, { class: entry.className }));
       continue;
     }
     const runs = runsOf(entry.blockIndex);
-    const from = positionAt(runs, entry.from, "from");
-    const to = positionAt(runs, entry.to, "to");
+    const from = positionAt(runs, entry.range.from, "from");
+    const to = positionAt(runs, entry.range.to, "to");
     if (from === undefined || to === undefined || from >= to) continue;
     decorations.push(Decoration.inline(from, to, { class: entry.className }));
   }
@@ -197,10 +197,6 @@ function changeDecorations(doc: ProseMirrorNode, value: ChangeDecorations): Deco
   return DecorationSet.create(doc, decorations);
 }
 
-function dispatchChange(view: EditorView, change: ChangeDecorationsChange): void {
-  view.dispatch(view.state.tr.setMeta(changeDecorationsKey, change).setMeta("addToHistory", false));
-}
-
 /**
  * Presentation-only marks a host draws over a read-only document: the runs of text a change
  * touched, and the text it removed - a whole block, or a run of words inside one - drawn where it
@@ -215,24 +211,18 @@ function dispatchChange(view: EditorView, change: ChangeDecorationsChange): void
  */
 export const editorChangeDecorationsPlugin = $prose(
   () =>
-    new Plugin<ChangeDecorations>({
+    new Plugin<ChangeDecorationsState>({
       key: changeDecorationsKey,
       state: {
         init: () => noChangeDecorations,
         apply(transaction, value) {
-          const change = transaction.getMeta(changeDecorationsKey) as
-            | ChangeDecorationsChange
-            | undefined;
+          const change = transaction.getMeta(changeDecorationsKey) as ChangeDecorations | undefined;
           if (change === undefined) {
             if (!transaction.docChanged) return value;
             if (value.text.length === 0 && value.widgets.length === 0) return value;
             return { ...value, decorations: changeDecorations(transaction.doc, value) };
           }
-          const next: ChangeDecorations =
-            change.kind === "text"
-              ? { ...value, text: change.text }
-              : { ...value, widgets: change.widgets };
-          return { ...next, decorations: changeDecorations(transaction.doc, next) };
+          return { ...change, decorations: changeDecorations(transaction.doc, change) };
         },
       },
       props: {
@@ -242,12 +232,10 @@ export const editorChangeDecorationsPlugin = $prose(
     })
 );
 
-/** Draws `decorations` over the document, in place of whatever was drawn before. */
-export function setTextDecorations(view: EditorView, decorations: readonly TextDecoration[]): void {
-  dispatchChange(view, { kind: "text", text: decorations });
-}
-
-/** Draws `widgets` beside the document, in place of whatever was drawn before. */
-export function setBlockWidgets(view: EditorView, widgets: readonly BlockWidget[]): void {
-  dispatchChange(view, { kind: "widgets", widgets });
+/** Draws `decorations` over and beside the document, in place of whatever was drawn before. An
+ *  empty set draws nothing. */
+export function setChangeDecorations(view: EditorView, decorations: ChangeDecorations): void {
+  view.dispatch(
+    view.state.tr.setMeta(changeDecorationsKey, decorations).setMeta("addToHistory", false)
+  );
 }

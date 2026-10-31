@@ -2801,6 +2801,47 @@ test("a question the reader was answering keeps its text in the column, closed, 
   }
 });
 
+test("j from a question held past its row steps on from where that row stood", async () => {
+  const narrow = widenToReadingPane();
+  const first = inboxIssue("ask-a", "CORE-1", "Which approach?");
+  const second = inboxIssue("ask-b", "CORE-2", "Which format?");
+  const third = inboxIssue("ask-c", "CORE-3", "Which owner?");
+  let served = [first, second, third];
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const getAsk = mockAskReads(served);
+  const getIssue = mockIssueReads();
+  const { queryClient, unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    fireEvent.keyDown(document.body, { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    // Typed and unsent: the column keeps the middle question once its row goes.
+    fireEvent.change(within(screen.getByTestId("inbox-pane")).getByLabelText("Your answer"), {
+      target: { value: "Whichever the mirror already holds." },
+    });
+
+    served = [first, third];
+    await act(async () => {
+      queryClient.setQueryData<AskRead>(["ask-thread", "ask-b"], retracted(second));
+      await queryClient.refetchQueries({ queryKey: ["inbox"] });
+    });
+    await waitFor(() => expect(rowIds()).toEqual(["ask-a", "ask-c"]));
+    expect(selectedIds()).toEqual([]);
+
+    // The held question stood between the two rows left, so `j` goes to the row after it, not
+    // back to the top of the list.
+    fireEvent.keyDown(document.body, { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-c"]));
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
 test("the keys act on the selected row and the pane: Enter, 1-9, x, h and Escape", async () => {
   const narrow = widenToReadingPane();
   const first = inboxIssue("ask-a", "CORE-1", "Which approach?", {

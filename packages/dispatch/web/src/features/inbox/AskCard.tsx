@@ -707,6 +707,10 @@ export function AskCard({
                 aria-controls={`${answerFieldId}-disclosure`}
                 aria-expanded={ownWordsOpen}
                 className={`min-h-11 text-sm font-medium ${textSecondaryOnSurface}`}
+                // The Inbox's Enter opens this disclosure to reach the answer box behind it,
+                // and finds the control by this handle, as it finds the box by
+                // `data-ask-answer` and an option by `data-ask-option` (`Inbox.tsx`).
+                data-ask-note-disclosure=""
                 onClick={() => setOwnWordsOpen((open) => !open)}
                 type="button"
               >

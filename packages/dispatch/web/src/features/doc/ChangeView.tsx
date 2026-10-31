@@ -141,12 +141,8 @@ function blockRow(entry: ChangeEntry, key: string): ChangeRow {
  * per folded run (holding its blocks when the reader opened it), and, above a change whose
  * section heading no visible block above it already shows, that heading.
  */
-function buildRows(
-  entries: readonly ChangeEntry[],
-  fold: boolean,
-  opened: ReadonlySet<number>
-): ChangeRow[] {
-  const folded = fold ? foldedEntries(entries) : entries.map(() => false);
+function buildRows(entries: readonly ChangeEntry[], opened: ReadonlySet<number>): ChangeRow[] {
+  const folded = foldedEntries(entries);
   const rows: ChangeRow[] = [];
   let shownHeading: string | undefined;
   let run = 0;
@@ -187,7 +183,6 @@ function buildRows(
 export interface ChangeViewProps {
   before: string;
   after: string;
-  fold?: boolean;
 }
 
 const INSERTED = `no-underline ${diffAddedBg} ${diffAddedText}`;
@@ -200,18 +195,17 @@ const DELETED = `line-through ${diffRemovedBg} ${diffRemovedText}`;
  * holds is struck through where it stood, and a block only `after` holds is marked as added.
  *
  * Each block carries its standing as `data-change`, so a reader of the DOM - a test, a style -
- * names a change without reading its marks. With `fold` (the default) every run of unchanged
- * blocks longer than two hides behind one control, one block of context on each side of each
- * change, and the heading of the section a change sits in is drawn above it when the text above
- * does not already show it; `fold={false}` shows every block, in order.
+ * names a change without reading its marks. Every run of unchanged blocks longer than two hides
+ * behind one control, one block of context on each side of each change, and the heading of the
+ * section a change sits in is drawn above it when the text above does not already show it.
  */
-export function ChangeView({ after, before, fold = true }: ChangeViewProps): ReactNode {
+export function ChangeView({ after, before }: ChangeViewProps): ReactNode {
   const [opened, setOpened] = useState<ReadonlySet<number>>(() => new Set<number>());
   const entries = useMemo(
     () => changeEntries(splitBlocks(before), splitBlocks(after)),
     [after, before]
   );
-  const rows = useMemo(() => buildRows(entries, fold, opened), [entries, fold, opened]);
+  const rows = useMemo(() => buildRows(entries, opened), [entries, opened]);
   const toggle = (run: number): void =>
     setOpened((current) => {
       const next = new Set(current);

@@ -173,29 +173,6 @@ test("the heading of the section a change sits in is drawn while the heading its
   }
 });
 
-test("fold={false} shows every block, with no control and nothing folded", () => {
-  const body = "# Plan\n\nIntro.\n\n## Rollout\n\nAlpha.\n\nBeta.\n\nGamma.\n\n";
-  const view = render(
-    <ChangeView after={`${body}Delta changed.\n`} before={`${body}Delta.\n`} fold={false} />
-  );
-  try {
-    const card = within(view.container).getByTestId("change-view");
-    expect(blocks(view.container)).toEqual([
-      ["unchanged", "# Plan"],
-      ["unchanged", "Intro."],
-      ["unchanged", "## Rollout"],
-      ["unchanged", "Alpha."],
-      ["unchanged", "Beta."],
-      ["unchanged", "Gamma."],
-      ["changed", "Delta changed."],
-    ]);
-    expect(within(card).queryByRole("button")).toBeNull();
-    expect(within(card).queryByTestId("change-section")).toBeNull();
-  } finally {
-    view.unmount();
-  }
-});
-
 test("two versions that hold the same text show the document, unmarked and unfolded", () => {
   const document = "# Plan\n\nAlpha.\n\nBeta.\n\nGamma.\n\nDelta.\n";
   const view = render(<ChangeView after={document} before={document} />);

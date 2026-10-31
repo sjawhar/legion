@@ -130,9 +130,7 @@ export function VersionView({
       // rather than racing the warm-up and marking nothing.
       await warmMarkdownRenderer().catch(() => undefined);
       if (!mounted) return;
-      const marks = changeMarksAgainst(changeBaseline, editor.view.state.doc);
-      editor.setTextDecorations(marks.text);
-      editor.setBlockWidgets(marks.widgets);
+      editor.setChangeDecorations(changeMarksAgainst(changeBaseline, editor.view.state.doc));
     };
     mount().catch((error: unknown) => {
       // A version the parser refuses must say so; an empty read-only editor looks like an

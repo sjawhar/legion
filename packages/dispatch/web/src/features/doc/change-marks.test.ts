@@ -38,8 +38,7 @@ test("a word changed inside a paragraph marks that paragraph, the added words an
       {
         blockIndex: 1,
         className: ADDED_WORDS_CLASS,
-        from: text.indexOf("canary"),
-        to: text.indexOf("canary") + "canary".length,
+        range: { from: text.indexOf("canary"), to: text.indexOf("canary") + "canary".length },
       },
     ],
     // The word the paragraph lost is drawn at the offset its replacement now stands at.
@@ -64,7 +63,7 @@ test("a changed pair too far apart to diff is drawn as the whole block, struck t
   expect(changeMarksAgainst(`# Plan\n\n${before}\n`, doc)).toEqual({
     text: [
       { blockIndex: 1, className: CHANGED_BLOCK_CLASS },
-      { blockIndex: 1, className: ADDED_WORDS_CLASS, from: 0, to: after.length },
+      { blockIndex: 1, className: ADDED_WORDS_CLASS, range: { from: 0, to: after.length } },
     ],
     widgets: [{ blockIndex: 1, className: REMOVED_WORDS_CLASS, offset: 0, text: before }],
   });

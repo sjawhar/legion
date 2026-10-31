@@ -15,11 +15,9 @@ export function ArtifactDocument({
   highlightTerm,
   isClosed,
   owner,
-  onAskAnswered,
   onToolbarChange,
   onVersionChange,
   showDiff,
-  surface = "page",
   version,
 }: {
   artifact: Artifact;
@@ -29,11 +27,8 @@ export function ArtifactDocument({
   isClosed: boolean;
   owner: MarginOwner;
   showDiff: boolean;
-  onAskAnswered?(askId: string): void;
   onToolbarChange?(toolbar: DocumentToolbar | undefined): void;
   onVersionChange: (version: number | null) => void;
-  /** Where the document is drawn; `ProofDocument`'s `surface`, passed through. */
-  surface?: "page" | "pane";
   version: number | undefined;
 }): ReactNode {
   const user = useQuery(whoAmIQuery());
@@ -84,13 +79,11 @@ export function ArtifactDocument({
       highlight={highlight}
       highlightTerm={highlightTerm}
       isClosed={isClosed}
-      onAskAnswered={onAskAnswered}
       onToolbarChange={onToolbarChange}
       owner={owner}
       showDiff={showDiff}
       key={artifact.id}
       onVersionChange={onVersionChange}
-      surface={surface}
       user={user.data}
       version={version}
     />

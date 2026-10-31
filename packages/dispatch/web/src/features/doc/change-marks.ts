@@ -94,8 +94,7 @@ export function changeMarksAgainst(baselineMarkdown: string, doc: ProseMirrorNod
         text.push({
           blockIndex,
           className: ADDED_WORDS_CLASS,
-          from: offset,
-          to: offset + part.value.length,
+          range: { from: offset, to: offset + part.value.length },
         });
       }
       offset += part.value.length;

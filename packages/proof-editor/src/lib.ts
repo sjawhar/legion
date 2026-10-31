@@ -100,16 +100,15 @@ import { recordMarkHistoryPlugin } from './record-mark-history';
 import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
 import {
   editorChangeDecorationsPlugin,
-  setBlockWidgets as applyBlockWidgets,
-  setTextDecorations as applyTextDecorations,
+  setChangeDecorations as applyChangeDecorations,
 } from './editor-change-decorations';
-import type { BlockWidget, TextDecoration } from './editor-change-decorations';
+import type { ChangeDecorations } from './editor-change-decorations';
 import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
 import type { RetypeOutcome } from './record-mark-retype';
 
 export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
 export type { RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
-export type { BlockWidget, TextDecoration } from './editor-change-decorations';
+export type { BlockWidget, ChangeDecorations, TextDecoration } from './editor-change-decorations';
 export type {
   BlockAttributeKind,
   BlockAttributeSchema,
@@ -204,15 +203,13 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   setActiveMarks(markIds: readonly string[]): void;
   /** Highlights the blocks a host has selected without changing the document. */
   setActiveBlocks(blockIds: readonly string[]): void;
-  /** Draws a class over runs of the document's text without changing the document: one entry per
+  /** Draws what changed over and beside the document, without changing it: one text entry per
    *  run, naming its top-level block by index and the run by character offsets into that block's
-   *  text, or the whole block where it names no offsets. Replaces what was drawn before; an empty
-   *  list draws nothing. See ./editor-change-decorations.ts. */
-  setTextDecorations(decorations: readonly TextDecoration[]): void;
-  /** Draws a piece of text beside the document, before the top-level block an entry names (or at
-   *  the end of the document), without changing the document. Replaces what was drawn before; an
-   *  empty list draws nothing. See ./editor-change-decorations.ts. */
-  setBlockWidgets(widgets: readonly BlockWidget[]): void;
+   *  text, or the whole block where it names no range; one widget per piece of text the document
+   *  no longer holds, drawn before the block an entry names (or at the end of the document).
+   *  Replaces what was drawn before; an empty set draws nothing.
+   *  See ./editor-change-decorations.ts. */
+  setChangeDecorations(decorations: ChangeDecorations): void;
   /** The stable id of the block containing the selection head, if any. */
   blockIdAtSelection(): string | null;
   /** Tear down the editor and any collab bindings. */
@@ -520,11 +517,8 @@ export async function createProofEditor(
     setActiveBlocks(blockIds: readonly string[]): void {
       setActiveHighlights(view, 'block', blockIds);
     },
-    setTextDecorations(decorations: readonly TextDecoration[]): void {
-      applyTextDecorations(view, decorations);
-    },
-    setBlockWidgets(widgets: readonly BlockWidget[]): void {
-      applyBlockWidgets(view, widgets);
+    setChangeDecorations(decorations: ChangeDecorations): void {
+      applyChangeDecorations(view, decorations);
     },
     blockIdAtSelection(): string | null {
       const $head = view.state.selection.$head;

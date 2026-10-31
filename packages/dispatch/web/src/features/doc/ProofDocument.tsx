@@ -77,7 +77,7 @@ const CONTROL_CHARACTERS = /\p{Cc}/gu;
 
 /** The live document's text as the server reads it now. A read of it decides whether the editor
  * may connect: the server answers `409 DOC_SCHEMA` for a stored tree outside the Proof schema. */
-const liveTextQueryOptions = (artifactId: string) =>
+export const liveTextQueryOptions = (artifactId: string) =>
   queryOptions({
     queryKey: ["artifact", artifactId, "text"],
     queryFn: () => api.getArtifactText(artifactId),
@@ -211,10 +211,6 @@ export function ProofDocument({
   const disposeRefocusRef = useRef<(() => void) | undefined>(undefined);
   const isClosedRef = useRef(isClosed);
   const schemaReadOnlyRef = useRef(false);
-  // `surface` is fixed for the life of a mount, and the editor effect reads it through this ref
-  // rather than listing it, so naming the surface can never rebuild the editor.
-  const surfaceRef = useRef(surface);
-  surfaceRef.current = surface;
   const userRef = useRef(user);
   const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
@@ -270,15 +266,19 @@ export function ProofDocument({
   // with a new closure never re-reports the same block.
   const onUnavailableRef = useRef(onUnavailable);
   onUnavailableRef.current = onUnavailable;
-  const inPane = surface === "pane";
+  /** The document's own page, as against the Inbox's reading column: the page claims the
+   *  page-level singletons (the keymap scope, the margin, the search highlights and the
+   *  toolbar), takes edits, and offers the repair and rebuild prompts. `surface` is fixed for
+   *  the life of a mount, so every effect below lists this and none is rebuilt for it. */
+  const page = surface === "page";
   useEffect(() => {
-    if (!inPane || admission === undefined) {
+    if (page || admission === undefined) {
       return;
     }
     onUnavailableRef.current?.(admission.message);
-  }, [admission, inPane]);
-  const repairError = !inPane && admission?.kind === "repair" ? admission : undefined;
-  const rebuildError = !inPane && admission?.kind === "rebuild" ? admission : undefined;
+  }, [admission, page]);
+  const repairError = page && admission?.kind === "repair" ? admission : undefined;
+  const rebuildError = page && admission?.kind === "rebuild" ? admission : undefined;
   const shownLoadError = admission?.kind === "failed" ? admission.message : loadError;
   const blockReferencesQuery = useQuery({
     enabled: version === undefined,
@@ -400,12 +400,11 @@ export function ProofDocument({
   // pressed. A document is its own scope, since the issue page and a project's document page both
   // render one. A pane pushes no scope and registers no binding: the scope stack belongs to the
   // page the reader is on, and a pane's editor takes no edits, so it would never offer Comment.
-  useKeymapScope(inPane ? null : "document");
+  useKeymapScope(page ? "document" : null);
   useKeymap(
     "document",
-    inPane
-      ? []
-      : [
+    page
+      ? [
           {
             id: "comment-on-selection",
             inEditable: true,
@@ -418,6 +417,7 @@ export function ProofDocument({
             },
           },
         ]
+      : []
   );
   useEffect(() => {
     setOpenDecisionIndex((current) => Math.min(current, Math.max(openBlockAsks.length - 1, 0)));
@@ -428,7 +428,7 @@ export function ProofDocument({
   // A pane reports no toolbar: the version controls, the connection dot and the block-link copy
   // belong to the page the document is the page of, never to a column beside a list.
   useEffect(() => {
-    if (surfaceRef.current === "pane") {
+    if (!page) {
       return;
     }
     onToolbarChange?.({
@@ -445,6 +445,7 @@ export function ProofDocument({
     copyBlockLink,
     nameVersion.isPending,
     onToolbarChange,
+    page,
     requestNamedVersion,
     versions,
   ]);
@@ -455,11 +456,11 @@ export function ProofDocument({
   // artifact's instance is gone, so switching documents can't leave the header holding a stale
   // `requestNamedVersion` that would name a version on the artifact the user navigated away from.
   useEffect(() => {
-    if (surfaceRef.current === "pane") {
+    if (!page) {
       return;
     }
     return () => onToolbarChange?.(undefined);
-  }, [onToolbarChange]);
+  }, [onToolbarChange, page]);
 
   useEffect(() => {
     if (blockSchema === undefined) {
@@ -471,9 +472,6 @@ export function ProofDocument({
     }
 
     let mounted = true;
-    // Read once, since `surface` is fixed for the life of a mount and this effect is not rebuilt
-    // for it: whether this is a reading pane, which claims none of the page-level singletons.
-    const pane = surfaceRef.current === "pane";
     let document: DocumentConnection | undefined;
     let editor: EditorHandle | undefined;
     let disposeEditorBindings: (() => void) | undefined;
@@ -520,7 +518,7 @@ export function ProofDocument({
       const blockLink = window.location.hash;
       // The hash names a block of the page the reader is on, never one of a document beside its
       // list, so a pane never follows it.
-      if (!pane && blockLink.startsWith("#b-")) {
+      if (page && blockLink.startsWith("#b-")) {
         const linkedBlockId = decodeURIComponent(blockLink.slice(3));
         // The re-run lands only while the hash still names this block.
         focusInEditor(
@@ -532,7 +530,7 @@ export function ProofDocument({
       }
       // `CSS.highlights["dispatch-search"]` and the margin's open document are one apiece for the
       // whole page; a pane writes neither.
-      if (!pane) {
+      if (page) {
         setSearchHighlights(handle.view.dom, highlightTermRef.current);
         marginRef.current.registerDocument({
           artifactId: artifact.id,
@@ -557,7 +555,7 @@ export function ProofDocument({
           setSearchHighlights(handle.view.dom, highlightTermRef.current);
         });
       };
-      if (!pane) {
+      if (page) {
         refreshSearchHighlights();
         fragment.observeDeep(refreshSearchHighlights);
       }
@@ -592,7 +590,7 @@ export function ProofDocument({
         resizeObserver.disconnect();
         unbindRemoteMarks();
         fragment.unobserveDeep(publishPlacements);
-        if (!pane) {
+        if (page) {
           fragment.unobserveDeep(refreshSearchHighlights);
           marginRef.current.registerDocument(undefined);
         }
@@ -651,7 +649,7 @@ export function ProofDocument({
               schemaReadOnlyRef.current = readOnly;
               setSchemaReadOnly(readOnly);
               setClosedAdmission(isClosedRef.current);
-              editor?.setReadOnly(pane || isClosedRef.current || readOnly);
+              editor?.setReadOnly(!page || isClosedRef.current || readOnly);
             },
             onOutsideSchema: () => {
               if (!mounted) {
@@ -690,7 +688,7 @@ export function ProofDocument({
                 // list, not working in it, and the width rule would read the window rather than
                 // the column and send it.
                 awareness:
-                  pane ||
+                  !page ||
                   (globalThis.document.documentElement.clientWidth > 0 &&
                     globalThis.document.documentElement.clientWidth < 1280)
                     ? null
@@ -721,7 +719,7 @@ export function ProofDocument({
                 onMarkHover: (markId) => marginRef.current.hoverItemForMark(markId),
                 // A pane takes no edits: a reader who clicks into the text from a list never
                 // changes the document they are reading.
-                readOnly: pane || isClosedRef.current || schemaReadOnlyRef.current,
+                readOnly: !page || isClosedRef.current || schemaReadOnlyRef.current,
                 user: {
                   color: colorForLogin(userRef.current.login),
                   name: userRef.current.login,
@@ -755,7 +753,7 @@ export function ProofDocument({
       readmitRef.current = undefined;
       teardown();
     };
-  }, [artifact.id, blockSchema, createEditor, focusInEditor, loadTransport, queryClient]);
+  }, [artifact.id, blockSchema, createEditor, focusInEditor, loadTransport, page, queryClient]);
 
   // A blocked admission is admitted again by the next successful read of the document's text: the
   // refetch a repair upload's or a rebuild's invalidation makes, or any other. Each successful read
@@ -768,17 +766,15 @@ export function ProofDocument({
   }, [textReadAt]);
 
   useEffect(() => {
-    editorRef.current?.setReadOnly(
-      surfaceRef.current === "pane" || isClosed || schemaReadOnlyRef.current
-    );
-  }, [isClosed]);
+    editorRef.current?.setReadOnly(!page || isClosed || schemaReadOnlyRef.current);
+  }, [isClosed, page]);
 
   useEffect(() => {
     const editor = editorRef.current;
-    if (editor !== undefined && surfaceRef.current !== "pane") {
+    if (editor !== undefined && page) {
       setSearchHighlights(editor.view.dom, highlightTerm);
     }
-  }, [highlightTerm]);
+  }, [highlightTerm, page]);
 
   return (
     <section aria-label="Document editor" className="space-y-4">
@@ -843,7 +839,7 @@ export function ProofDocument({
       ) : null}
       {/* The Open-decisions navigator walks the page's own document; a pane leaves it to the
           list beside it. */}
-      {!inPane && version === undefined && openDecision !== undefined ? (
+      {page && version === undefined && openDecision !== undefined ? (
         <nav
           aria-label="Open decisions"
           className="flex min-h-11 items-center gap-2 md:h-7 md:min-h-0"

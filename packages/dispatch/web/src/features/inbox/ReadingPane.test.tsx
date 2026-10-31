@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
-import type { BlockWidget, TextDecoration } from "@legion/proof-editor";
+import type { ChangeDecorations } from "@legion/proof-editor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
@@ -8,7 +8,7 @@ import { MemoryRouter } from "react-router-dom";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { ApiError, api } from "../../api/client";
 import type { Artifact, AskSnooze, InboxRow, IssueDetails, Version } from "../../api/types";
-import { changeMarksAgainst } from "../doc/change-marks";
+import { CHANGED_BLOCK_CLASS, changeMarksAgainst } from "../doc/change-marks";
 import type { CreateEditor, EditorHandle } from "../doc/editor";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
@@ -114,17 +114,27 @@ function renderedDocument(markdown: string): ProseMirrorNode {
 }
 
 /** Records what the version draws over its rendered document, and gives the fake handle the
- *  document the real editor would hold: the fake view's state carries none (`VersionView.test`). */
+ *  document the real editor would hold: the fake view's state carries none (`VersionView.test`).
+ *  With `paintMarks`, it also puts a marked block into the editor's root where the version drew
+ *  any, as the real editor's decorations would: the head reads the drawn document to decide
+ *  whether there is a change to step to. */
 function recordMarks(
   markdown: string,
-  drawn: { text: (readonly TextDecoration[])[]; widgets: (readonly BlockWidget[])[] }
+  drawn: ChangeDecorations[],
+  { paintMarks = false }: { paintMarks?: boolean } = {}
 ): (inner: CreateEditor) => CreateEditor {
   return (inner) => async (root, options) => {
     const handle: EditorHandle = await inner(root, options);
     const state = handle.view.state as unknown as { doc: ProseMirrorNode };
     state.doc = renderedDocument(markdown);
-    handle.setTextDecorations = (decorations) => drawn.text.push(decorations);
-    handle.setBlockWidgets = (widgets) => drawn.widgets.push(widgets);
+    handle.setChangeDecorations = (decorations) => {
+      drawn.push(decorations);
+      if (!paintMarks || decorations.text.length === 0) return;
+      const block = globalThis.document.createElement("p");
+      block.className = CHANGED_BLOCK_CLASS;
+      block.textContent = "The plan ships behind a canary today.";
+      root.append(block);
+    };
     return handle;
   };
 }
@@ -302,10 +312,7 @@ test("an approval draws the latest version marked against the version it follows
   await warmMarkdownRenderer();
   const baseline = "# Plan\n\nThe plan ships behind a flag today.\n\nThe old note.\n";
   const latest = "# Plan\n\nThe plan ships behind a canary today.\n";
-  const drawn = {
-    text: [] as (readonly TextDecoration[])[],
-    widgets: [] as (readonly BlockWidget[])[],
-  };
+  const drawn: ChangeDecorations[] = [];
   const { view } = renderPane({
     ask: approvalAsk(EARLIER_APPROVAL),
     createEditor: recordMarks(latest, drawn),
@@ -325,11 +332,10 @@ test("an approval draws the latest version marked against the version it follows
     expect(screen.getByRole("button", { name: "Request changes" })).toBeDefined();
     // The latest version, which is the version Approve approves.
     expect(await screen.findByLabelText("Document version 4")).toBeDefined();
-    await waitFor(() => expect(drawn.text).toHaveLength(1));
+    await waitFor(() => expect(drawn).toHaveLength(1));
     const marks = changeMarksAgainst(baseline, renderedDocument(latest));
     expect(marks.text.length).toBeGreaterThan(0);
-    expect(drawn.text[0]).toEqual(marks.text);
-    expect(drawn.widgets[0]).toEqual(marks.widgets);
+    expect(drawn[0]).toEqual(marks);
   } finally {
     view.unmount();
   }
@@ -338,10 +344,7 @@ test("an approval draws the latest version marked against the version it follows
 test("an approval of a document nobody has approved marks nothing and offers no Next change", async () => {
   await warmMarkdownRenderer();
   const latest = "# Plan\n\nThe plan ships behind a canary today.\n";
-  const drawn = {
-    text: [] as (readonly TextDecoration[])[],
-    widgets: [] as (readonly BlockWidget[])[],
-  };
+  const drawn: ChangeDecorations[] = [];
   const { view } = renderPane({
     ask: approvalAsk(),
     createEditor: recordMarks(latest, drawn),
@@ -359,7 +362,68 @@ test("an approval of a document nobody has approved marks nothing and offers no 
   try {
     expect(await screen.findByLabelText("Document version 4")).toBeDefined();
     await waitFor(() => expect(screen.queryByText("Loading version…")).toBeNull());
-    expect(drawn).toEqual({ text: [], widgets: [] });
+    expect(drawn).toEqual([]);
+    expect(screen.queryByRole("button", { name: "Next change" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+// "Next change" steps the blocks the version marked. The marks are drawn only once the headless
+// markdown engine has warmed; an engine that never warms, or one that refuses the baseline,
+// leaves `changeMarksAgainst` marking nothing (`change-marks.ts`), and the button then had
+// nothing to step and did nothing. These two rows pin the offer on the marks that were drawn
+// rather than on a baseline that merely loaded.
+test("an approval whose version drew marks offers Next change", async () => {
+  await warmMarkdownRenderer();
+  const baseline = "# Plan\n\nThe plan ships behind a flag today.\n";
+  const latest = "# Plan\n\nThe plan ships behind a canary today.\n";
+  const drawn: ChangeDecorations[] = [];
+  const { view } = renderPane({
+    ask: approvalAsk(EARLIER_APPROVAL),
+    createEditor: recordMarks(latest, drawn, { paintMarks: true }),
+    seed: (client) =>
+      seedDocument(
+        client,
+        document({
+          approval: { latest_version: 4, state: "awaiting", version: 3 },
+          versions: [version(3), version(4)],
+        }),
+        { 3: baseline, 4: latest }
+      ),
+  });
+
+  try {
+    expect(await screen.findByRole("button", { name: "Next change" })).toBeDefined();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an approval whose baseline loaded but whose marks never drew offers no Next change", async () => {
+  await warmMarkdownRenderer();
+  const baseline = "# Plan\n\nThe plan ships behind a flag today.\n";
+  const latest = "# Plan\n\nThe plan ships behind a canary today.\n";
+  const drawn: ChangeDecorations[] = [];
+  const { view } = renderPane({
+    ask: approvalAsk(EARLIER_APPROVAL),
+    // The marks are computed and handed over, and nothing of them reaches the drawn document.
+    createEditor: recordMarks(latest, drawn),
+    seed: (client) =>
+      seedDocument(
+        client,
+        document({
+          approval: { latest_version: 4, state: "awaiting", version: 3 },
+          versions: [version(3), version(4)],
+        }),
+        { 3: baseline, 4: latest }
+      ),
+  });
+
+  try {
+    expect(await screen.findByLabelText("Document version 4")).toBeDefined();
+    await waitFor(() => expect(drawn).toHaveLength(1));
+    expect(drawn[0]?.text.length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Next change" })).toBeNull();
   } finally {
     view.unmount();
@@ -370,10 +434,7 @@ test("an approved document shows the approval it follows in place of the actions
   await warmMarkdownRenderer();
   const baseline = "# Plan\n\nThe plan ships behind a flag today.\n";
   const latest = "# Plan\n\nThe plan ships behind a canary today.\n";
-  const drawn = {
-    text: [] as (readonly TextDecoration[])[],
-    widgets: [] as (readonly BlockWidget[])[],
-  };
+  const drawn: ChangeDecorations[] = [];
   const { view } = renderPane({
     ask: approvalAsk(EARLIER_APPROVAL),
     createEditor: recordMarks(latest, drawn),

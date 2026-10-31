@@ -38,10 +38,13 @@ test("an inline decoration marks the characters its offsets name, and a block en
   await withMarksEditor(
     "The plan ships behind a canary today.\n\nA second paragraph.",
     ({ handle, view }) => {
-      handle.setTextDecorations([
-        { blockIndex: 0, className: CHANGED },
-        { ...wordRange(view, 0, "canary"), blockIndex: 0, className: ADDED },
-      ]);
+      handle.setChangeDecorations({
+        text: [
+          { blockIndex: 0, className: CHANGED },
+          { blockIndex: 0, className: ADDED, range: wordRange(view, 0, "canary") },
+        ],
+        widgets: [],
+      });
 
       expect(drawn(view, ADDED)).toEqual(["canary"]);
       expect(drawn(view, CHANGED)).toEqual(["The plan ships behind a canary today."]);
@@ -60,9 +63,10 @@ test("an inline decoration counts a block's own text, not its document positions
   // The image takes no character of the block's text and two positions in the document, and the
   // emphasis makes "bold" a text node of its own: an offset after both still lands on its word.
   await withMarksEditor("![shot](shot.png)A *bold* claim here.", ({ handle, view }) => {
-    handle.setTextDecorations([
-      { ...wordRange(view, 0, "claim"), blockIndex: 0, className: ADDED },
-    ]);
+    handle.setChangeDecorations({
+      text: [{ blockIndex: 0, className: ADDED, range: wordRange(view, 0, "claim") }],
+      widgets: [],
+    });
 
     expect(drawn(view, ADDED)).toEqual(["claim"]);
   });
@@ -75,9 +79,10 @@ test("an inline decoration counts the newline a hard break draws in the block's 
   await withMarksEditor("Line one  \nthe canary word.", ({ handle, view }) => {
     expect(view.state.doc.child(0).textContent).toBe("Line one\nthe canary word.");
 
-    handle.setTextDecorations([
-      { ...wordRange(view, 0, "canary"), blockIndex: 0, className: ADDED },
-    ]);
+    handle.setChangeDecorations({
+      text: [{ blockIndex: 0, className: ADDED, range: wordRange(view, 0, "canary") }],
+      widgets: [],
+    });
 
     expect(drawn(view, ADDED)).toEqual(["canary"]);
   });
@@ -85,11 +90,14 @@ test("an inline decoration counts the newline a hard break draws in the block's 
 
 test("an entry naming a block the document does not hold, or text it does not reach, draws nothing", async () => {
   await withMarksEditor("One short block.", ({ handle, view }) => {
-    handle.setTextDecorations([
-      { blockIndex: 7, className: CHANGED },
-      { blockIndex: 7, from: 0, to: 3, className: ADDED },
-      { blockIndex: 0, from: 2, to: 400, className: ADDED },
-    ]);
+    handle.setChangeDecorations({
+      text: [
+        { blockIndex: 7, className: CHANGED },
+        { blockIndex: 7, className: ADDED, range: { from: 0, to: 3 } },
+        { blockIndex: 0, className: ADDED, range: { from: 2, to: 400 } },
+      ],
+      widgets: [],
+    });
 
     expect(drawn(view, ADDED)).toEqual([]);
     expect(drawn(view, CHANGED)).toEqual([]);
@@ -101,10 +109,13 @@ test("a widget is drawn before the block it names and at the end of the document
   await withMarksEditor(
     "First kept.\n\nSecond kept.",
     ({ handle, view }) => {
-      handle.setBlockWidgets([
-        { blockIndex: 1, className: REMOVED, text: "The block that stood here." },
-        { blockIndex: view.state.doc.childCount, className: REMOVED, text: "The last block." },
-      ]);
+      handle.setChangeDecorations({
+        text: [],
+        widgets: [
+          { blockIndex: 1, className: REMOVED, text: "The block that stood here." },
+          { blockIndex: view.state.doc.childCount, className: REMOVED, text: "The last block." },
+        ],
+      });
 
       expect(topOfDocument(view)).toEqual([
         "p:First kept.",
@@ -127,9 +138,10 @@ test("a widget with an offset is drawn at that point inside the block's text", a
     "The plan ships today.\n\nSecond kept.",
     ({ handle, view }) => {
       const at = view.state.doc.child(0).textContent.indexOf("today");
-      handle.setBlockWidgets([
-        { blockIndex: 0, className: REMOVED_WORDS, offset: at, text: "behind a flag " },
-      ]);
+      handle.setChangeDecorations({
+        text: [],
+        widgets: [{ blockIndex: 0, className: REMOVED_WORDS, offset: at, text: "behind a flag " }],
+      });
 
       // The widget stands where the words it holds were removed from, not before the block.
       expect(topOfDocument(view)).toEqual([
@@ -149,10 +161,13 @@ test("a widget with an offset is drawn at that point inside the block's text", a
 
 test("a widget whose offset the block's text does not reach draws nothing", async () => {
   await withMarksEditor("One short block.", ({ handle, view }) => {
-    handle.setBlockWidgets([
-      { blockIndex: 0, className: REMOVED_WORDS, offset: 400, text: "Gone since v3." },
-      { blockIndex: 7, className: REMOVED_WORDS, offset: 0, text: "Gone with its block." },
-    ]);
+    handle.setChangeDecorations({
+      text: [],
+      widgets: [
+        { blockIndex: 0, className: REMOVED_WORDS, offset: 400, text: "Gone since v3." },
+        { blockIndex: 7, className: REMOVED_WORDS, offset: 0, text: "Gone with its block." },
+      ],
+    });
 
     expect(drawn(view, REMOVED_WORDS)).toEqual([]);
     expect(view.state.doc.textContent).toBe("One short block.");
@@ -163,8 +178,10 @@ test("both lists are drawn again after setMarkdown replaces the document", async
   await withMarksEditor(
     "Before the replacement.",
     ({ handle, view }) => {
-      handle.setTextDecorations([{ blockIndex: 0, className: CHANGED }]);
-      handle.setBlockWidgets([{ blockIndex: 1, className: REMOVED, text: "Gone since v3." }]);
+      handle.setChangeDecorations({
+        text: [{ blockIndex: 0, className: CHANGED }],
+        widgets: [{ blockIndex: 1, className: REMOVED, text: "Gone since v3." }],
+      });
       expect(drawn(view, CHANGED)).toEqual(["Before the replacement."]);
 
       handle.setMarkdown("The plan ships behind a canary today.\n\nA second paragraph.\n");
@@ -177,8 +194,7 @@ test("both lists are drawn again after setMarkdown replaces the document", async
         "p:A second paragraph.",
       ]);
 
-      handle.setTextDecorations([]);
-      handle.setBlockWidgets([]);
+      handle.setChangeDecorations({ text: [], widgets: [] });
       expect(drawn(view, CHANGED)).toEqual([]);
       expect(drawn(view, REMOVED)).toEqual([]);
     },
