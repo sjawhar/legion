@@ -1,9 +1,13 @@
-// Package testbin names the pinned binaries the real-binary tests run, and readies the fresh HOME
-// a test runs Oh My Pi under (OMPHome).
+// Package testbin names the pinned binaries the real-binary tests run, readies the fresh HOME a
+// test runs Oh My Pi under (OMPHome), and probes the pinned jj for the working-copy filters
+// provisioning is proven against (RequireJJFilters).
 package testbin
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -18,6 +22,22 @@ func OMP(t *testing.T) string {
 func UV(t *testing.T) string {
 	t.Helper()
 	return binary(t, "LEGION_TEST_UV", "uv")
+}
+
+// RequireJJFilters fails unless the jj under test, reading no configuration of the user's, has
+// working-copy filters: provisioning is proven against the jj the worker image ships.
+func RequireJJFilters(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	probe := exec.Command("jj", "config", "list", "--include-defaults", "git.filter.enabled")
+	// The probe runs in the empty directory it reads its configuration from: jj searches upward
+	// from the directory it runs in for the closest .jj, so a probe with no Dir would open the
+	// workspace the test process stands in, which in a Legion issue pod is a real one.
+	probe.Dir = home
+	probe.Env = append(os.Environ(), "JJ_CONFIG="+filepath.Join(home, "none.toml"), "XDG_CONFIG_HOME="+home, "HOME="+home)
+	if out, _ := probe.Output(); len(strings.TrimSpace(string(out))) == 0 {
+		t.Fatal("this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs")
+	}
 }
 
 // binary is the path variable names. A run without one skips, except on GitHub Actions, where
