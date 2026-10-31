@@ -2,18 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-707",
-  "previousHandoff": "a767aee67ade6d932f9367f43b3616c9a3c408f7",
+  "previousHandoff": "ad4ac56b60f286368e6d9a48f1d1998d9d2a071f",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2496",
-  "codeHead": "220af58097b28aaf551218b961675f687f0cdd8c",
-  "round": "answers red ci-ok at 688fe778 (envoy-go-race-api TestAReconnectCatchesUpWhatTheListenerMissed, main flake fixed by #2594): a confirmation forward merge of main b4dc9f96",
+  "codeHead": "e99cd22c953b841d951d0a70fc44104039be71e0",
+  "round": "answers review round 4 at 220af580 (review.json, 89a9c38c): stored updates did not replay at ygo v1.54.1-sami.1; merges main 3c78856b (#2604, ygo v1.54.1-sami.3, copies replay without the format cleanup) and adds the formatted-write stored-order test",
   "proof": [
     {
       "criterion": "1. A test drives an agent write racing browser updates on one warm room, fails on main, passes at the head over enough rounds (count and main's failure rate stated).",
       "surface": "Go tests against a real Postgres 18.6 + pgvector 0.8.7 (local, as CI runs them)",
       "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<url> go test -p 1 ./internal/dispatch/docs/ -count=1 -timeout 75m ; go test -p 1 ./cmd/dispatch/ ./loadtest/browsertype/ -run 'StoredOrder|Protect' -count=1",
-      "observed": "At 220af580 (main b4dc9f96, ygo v1.54.1-sami.1): go build and vet clean; whole internal/dispatch/docs package ok 1398.0s (dispatch://INFRA-707/artifact/docs-suite-220af580-log); TestStoredOrder*, Backfill, TestAFailedRooms*, TestAFlush*, TestAReadPoint*, TestAShadow* ok; cmd/dispatch stored-order and loadtest/browsertype ok. Soak 200 rounds 0 mismatches and race ok at 6b5c1050 (same code diff). p = 1 on main, so n = 200.",
-      "headSha": "220af58097b28aaf551218b961675f687f0cdd8c",
-      "negativeControl": "main 7c2effba's production code plus this branch's storedorder.go and storedorder_test.go: all ten window tests and the soak fail (179 mismatches over 12 of 12 counted rounds); the tester rebuilt the same control from main's own tree (170 mismatches)."
+      "observed": "At e99cd22c (main 3c78856b, ygo v1.54.1-sami.3): whole internal/dispatch/docs package ok 1417.3s (dispatch://INFRA-707/artifact/docs-suite-e99cd22c-log); TestStoredOrderFormattedWritesReplayToEveryVersion passes; TestStoredOrder*, Backfill, TestAFailedRooms*, TestAFlush*, TestAReadPoint*, TestAShadow* and #2604's TestEveryCopyOfARoom* / TestARoomLoadsItsStoredHistory* ok; cmd/dispatch stored-order and loadtest/browsertype ok. Soak 200 rounds 0 mismatches and race ok at 6b5c1050 (same stored-order code). p = 1 on main, so n = 200.",
+      "headSha": "e99cd22c953b841d951d0a70fc44104039be71e0",
+      "negativeControl": "The new test with the format cleanup turned back on in newDocumentCopy: FAIL, the last version holds \"seed\\n\\n*xy*\\n\\n*xy*\\n\" where the room renders \"seed\\n\\n*x*y\\n\\n*xy*\\n\". Earlier: main 7c2effba's production code plus storedorder.go and storedorder_test.go fails all ten window tests and the soak."
     },
     {
       "criterion": "Stored history replays under real browsers and agent HTTP writes on a real Dispatch server; browsertype -protect leaves the protected paragraph alone",
@@ -25,7 +25,8 @@
     }
   ],
   "filesChanged": [
-    ".dispatch/architecture/dispatch-docs.md (merge resolution only)"
+    "packages/envoy/internal/dispatch/docs/storedorder_format_test.go (new)",
+    "merge resolution: roomcursor.go (#2604's roomLoad change), pending_authors.go (block stays moved), roomstate.go (gofmt)"
   ],
   "trickyParts": [
     "RoomFlush is exported (fields unexported) because it crosses VersionedStore, which a test store in internal/dispatch/api wraps.",
@@ -36,6 +37,9 @@
     "Acceptance 2 cluster evidence was taken at eb0fe0be; rounds since change no live write, settlement, snapshot, worker or checker behaviour except that the backfill now takes the document lock before its flush."
   ],
   "answersToReview": [
-    "Forward merge of main b4dc9f96 (carries #2594's fix) at 220af580. One conflict, in the text file .dispatch/architecture/dispatch-docs.md: main's rewritten sentence kept whole, this PR's sentence appended; that line is the only fingerprint change (6da3c25e... -> 51c749df...). No code line of the PR changed. Comment https://github.com/sjawhar/legion/pull/2496#issuecomment-6543772349."
+    "Merge e2090b2d of main 3c78856b: one conflict, pending_authors.go, because this PR moved the room-load block to roomcursor.go; #2604's roomLoad change (state field, read/takeState replacing readHead) carried into roomcursor.go; one roomstate.go field block re-aligned for gofmt.",
+    "The stored-order checker folds through newDocumentCopy (storedorder.go:267), which #2604 builds with WithFormatCleanup(false); this PR adds no other replay document (replica, fork/shadow and stored folds all use newDocumentCopy).",
+    "Test e99cd22c TestStoredOrderFormattedWritesReplayToEveryVersion: formatted commits through Server.Apply and a browser's updates, a named version after each; newest version equals the room's markdown and CheckStoredOrder is clean. Red with the cleanup on in newDocumentCopy (the last version holds *xy* where the room renders *x*y).",
+    "Comment https://github.com/sjawhar/legion/pull/2496#issuecomment-6548247960; GitHub reports MERGEABLE."
   ]
 }
