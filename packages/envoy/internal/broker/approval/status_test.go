@@ -236,3 +236,54 @@ func TestSignInStatusWritesIssuerUnreachableWhenTheProviderCannotBeReached(t *te
 		t.Fatalf("the status after a callback the provider could not answer = %s, want issuer_unreachable", body)
 	}
 }
+
+// TestSignInStatusWritesNoDecisionWhenThePostDecidedNothing pins the one fact the rollout reads
+// this field for: the spec's step 3 contracts the old approval paths away "once GET /signin/status
+// on the production broker shows a decision made on a page", and that decision is "an approval or
+// a denial". A POST that decided neither must leave the time where it was, or the gate opens on a
+// page nobody ever decided anything on.
+//
+// The resend here is the ordinary way to make one: a browser repeating the decision form it
+// already sent (a second click, a back-and-resubmit, a retried request). It is the page's own
+// form, from a live session, bound to a record the person may decide, and the broker decides
+// nothing by it, because the record is already terminal.
+func TestSignInStatusWritesNoDecisionWhenThePostDecidedNothing(t *testing.T) {
+	r := newRig(t)
+	enrollmentID, key := r.benSession(t, "ben-box")
+	p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
+
+	b := r.browser(t)
+	b.SignIn(t, p.recordID, person(ada))
+	form := brokertest.DecisionForm(t, b.Page(t, p.recordID).Body, p.recordID)
+	if form == nil {
+		t.Fatalf("the page for %s offers no decision", p.recordID)
+	}
+	if res := b.FromPage(t, "/approve", brokertest.Decision(form, "approve")); res.Status != http.StatusSeeOther {
+		t.Fatalf("ada's approval = %d, want 303:\n%s", res.Status, res.Body)
+	}
+	status, body := r.signInStatus(t)
+	if status.LastDecisionAt == nil {
+		t.Fatalf("after ada's approval the status = %s, want the decision's own time", body)
+	}
+	decided := *status.LastDecisionAt
+
+	// Far enough apart that two writes cannot share a timestamp.
+	time.Sleep(20 * time.Millisecond)
+	if res := b.FromPage(t, "/approve", brokertest.Decision(form, "approve")); res.Status != http.StatusSeeOther {
+		t.Fatalf("the resend of the same form = %d, want 303:\n%s", res.Status, res.Body)
+	}
+	if n := r.grants(t, p.recordID); n != 1 {
+		t.Fatalf("the resend left %d grants on %s, want the first approval's one", n, p.recordID)
+	}
+	if got := r.state(t, p.recordID); got != "approved" {
+		t.Fatalf("the resend left %s in %q, want approved", p.recordID, got)
+	}
+	status, body = r.signInStatus(t)
+	switch {
+	case status.LastDecisionAt == nil:
+		t.Fatalf("the resend cleared the last decision's time: %s", body)
+	case !status.LastDecisionAt.Equal(decided):
+		t.Fatalf("a POST that decided nothing moved the last decision's time from %s to %s: %s",
+			decided.Format(time.RFC3339Nano), status.LastDecisionAt.Format(time.RFC3339Nano), body)
+	}
+}
