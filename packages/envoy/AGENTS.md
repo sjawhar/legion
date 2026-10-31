@@ -3283,7 +3283,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   Without the parameter the registration is removed whoever wrote it, and the answer carries no body at all, as this route always answered.
   A write route (below the list).
 
-The write routes - `POST /v1/interests/subscribe`, `POST /v1/interests/unsubscribe`, `POST /v1/roles/set`, `DELETE /v1/interests/<session_id>` and `DELETE /v1/sessions/<session_id>` - do every store read and write within one 3.5 s budget (`sendRequestBudget`) taken from the request's own context (`store.Registry.UpsertWithin`, `Remove`, `SetRoleWithPrevious`, `session.SessionRegistry.PutWithin` and `Delete`, each bucket call bounded by `bus.Bounded`), where a silent bus held them for the 10 s JetStream wait.
+The write routes - `POST /v1/interests/subscribe`, `POST /v1/interests/unsubscribe`, `POST /v1/roles/set`, `DELETE /v1/interests/<session_id>` and `DELETE /v1/sessions/<session_id>` - do every store read and write within one 3.5 s budget (`sendRequestBudget`) taken from the request's own context (`store.Registry.UpsertWithin`, `Remove`, `SetRoleWithPrevious`, `session.SessionRegistry.PutWithin`, `Amend` and `Delete`, each bucket call bounded by `bus.Bounded`), where a silent bus held them for the 10 s JetStream wait.
 Store work that did not answer, whatever it names, is `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1` (`writeStoreError`).
 The store's own answers keep the answers they had:
 a refused key its 413 or 400, a held role its 409, no key, an undecodable record or a lost compare-and-swap the status the route always gave it;
@@ -3297,7 +3297,7 @@ role delivery, `/v1/sessions` and `/v1/registry/<id>` rows and the sender a send
 So a claim's two cleanups - the rollback of the claimant's topic when its claim did not land, and the removal of the role's topic from the old holder's record once it did - are best-effort tidying within the same budget.
 A claim that landed answers 200 whatever its old holder's cleanup did:
 a cleanup that failed is logged at WARN (`registry role claim old holder cleanup failed`), and one the budget's end cut short at INFO, and the topic either leaves behind gives nobody the role.
-`GET /v1/interests/` is cache-only, and `/healthz` keeps its own 3 s budget (`healthzBudget`).
+`GET /v1/interests/` answers from the interest cache and reads a lapsed session's last heartbeat from the listener state bucket within one `sendRequestBudget` for the whole list, and `/healthz` keeps its own 3 s budget (`healthzBudget`).
 
 `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`, `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional fields are omitted.
 `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is `none`, `optional`, or `required`.
