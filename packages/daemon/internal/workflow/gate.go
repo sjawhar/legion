@@ -713,6 +713,12 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 //
 // Linger holds a member of a closed tree where it stood (record.TreeLingers): every role of it is
 // suspended there, so a gate that moves then tells nobody, as a CI settlement tells nobody.
+//
+// A holder whose message token cannot be built is logged and skipped, and the rest are told. The
+// gate's state is the record this transaction writes; a message is what the record is worth
+// telling, and secondary to it. Aborting here would roll the gate's own move back for a name the
+// daemon could not spell - a tree whose root key is not an issue key is one such - which would
+// leave the gate closed under workers the message existed to warn.
 func (e *Engine) tellGateMoved(ctx context.Context, tx pgx.Tx, key string, version int, open bool) error {
 	root, err := e.store.Issue(ctx, tx, key)
 	if err != nil || root == nil {
@@ -729,7 +735,9 @@ func (e *Engine) tellGateMoved(ctx context.Context, tx pgx.Tx, key string, versi
 	// itself (accepting) is that same claim, and is told once with it.
 	architect, err := claim.NewToken(project, root.Tree, claim.RoleArchitect)
 	if err != nil {
-		return err
+		e.logOnCommit(ctx, "workflow: the design gate moved and its tree's architect could not be named, so it is not told",
+			"issue", key, "tree", root.Tree, "version", version, "open", open, "error", err)
+		architect = ""
 	}
 	members, err := e.store.TreeIssues(ctx, tx, root.Tree)
 	if err != nil {
@@ -742,7 +750,10 @@ func (e *Engine) tellGateMoved(ctx context.Context, tx pgx.Tx, key string, versi
 		detail = "the version is approved, so the design you are working to is the approved one. A merge the closed gate held is released."
 	}
 	body := fmt.Sprintf("The design gate of %s %s at spec version %d: %s", root.Tree, moved, version, detail)
-	told := []claim.Token{architect}
+	var told []claim.Token
+	if architect != "" {
+		told = append(told, architect)
+	}
 	for _, member := range members {
 		role := RoleFor(member.Phase)
 		if role == "" || role == claim.RoleArchitect {
@@ -750,7 +761,9 @@ func (e *Engine) tellGateMoved(ctx context.Context, tx pgx.Tx, key string, versi
 		}
 		token, err := claim.NewToken(project, member.Key, role)
 		if err != nil {
-			return err
+			e.logOnCommit(ctx, "workflow: the design gate moved and this holder could not be named, so it is not told",
+				"issue", member.Key, "tree", root.Tree, "role", role, "version", version, "open", open, "error", err)
+			continue
 		}
 		if slices.Contains(told, token) {
 			continue
@@ -762,6 +775,9 @@ func (e *Engine) tellGateMoved(ctx context.Context, tx pgx.Tx, key string, versi
 	}
 	e.logOnCommit(ctx, "workflow: the design gate moved and every phase holder of the tree is told", "issue", key, "tree", root.Tree,
 		"version", version, "open", open, "told", len(told))
+	if architect == "" {
+		return nil
+	}
 	return e.enqueue(ctx, tx, root.Tree, record.RoleMessage{Role: string(architect), Body: body})
 }
 

@@ -211,7 +211,6 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
         "accepting",
         "retro",
         "merging",
-        "awaiting_merge",
         "done",
         "held",
       ],
@@ -940,7 +939,8 @@ function legionState(overrides: Record<string, unknown> = {}): LegionState {
     heldOutboxRows: [],
     strandedClaims: [],
     capabilities: [],
-    repositories: { owners: ["acme"], mapped: [], refused: [], caches: [] },
+    repositories: { owners: ["acme"], mapped: [], refused: [], withoutWebhookApp: [], caches: [] },
+    consumers: [],
     settings: { review_round_cap: 3, worker_boot_timeout_seconds: 900 },
     ...overrides,
   });
