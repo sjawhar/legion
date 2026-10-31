@@ -903,6 +903,24 @@ test("a claim state is one the supervisor has", () => {
   expect(LegionOperatorClaimResponse.safeParse(mutated).success).toBeFalse();
 });
 
+// Every source the daemon records a suspension under is in the list golden
+// (`supervise.SuspendSources`, written by `internal/api`'s own golden test), so a source this
+// enum lacks fails the parse here rather than on an operator's `legion claims list` against a
+// live daemon, where one claim suspended by it refuses the whole document.
+test("a suspended claim's source is one the daemon records, and no other", () => {
+  const claims = LegionOperatorClaimsResponse.parse(fixture("operator-claims.json"));
+  const sources = claims.claims.map((c) => c.suspendedBy).filter(Boolean);
+
+  expect(sources).toEqual(["unknown", "operator", "daemon", "exit", "idle"]);
+
+  const mutated = fixture("operator-claims.json") as {
+    claims: Record<string, unknown>[];
+  };
+  mutated.claims[mutated.claims.length - 1].suspendedBy = "bored";
+
+  expect(LegionOperatorClaimsResponse.safeParse(mutated).success).toBeFalse();
+});
+
 test("a register response without its secret is refused", () => {
   const mutated = fixture("register.json") as Record<string, unknown>;
   delete mutated.secret;

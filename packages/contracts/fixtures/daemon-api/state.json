@@ -493,6 +493,7 @@
     "worker_boot_timeout_seconds": 180,
     "worker_rpc_timeout_seconds": 8,
     "worker_stop_timeout_seconds": 30,
+    "worker_idle_suspend_seconds": 1800,
     "tree_stop_timeout_seconds": 90,
     "slow_command_timeout_seconds": 600,
     "probe_interval_seconds": 20,

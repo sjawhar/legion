@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this package pins")
@@ -672,9 +673,13 @@ func TestOperatorClaimGolden(t *testing.T) {
 	golden(t, "operator-claim.json", operatorClaim())
 }
 
-// What the list route answers: a queued claim carries no locator and no delivery yet.
+// What the list route answers: a queued claim carries no locator and no delivery yet, and a
+// suspended one carries the source it was suspended under. Every source supervise records is
+// here, so the contract's `suspendedBy` enum (`packages/contracts/src/legion-api.ts`) is held to
+// the daemon's own list: a source added to supervise.SuspendSources without the enum leaves this
+// fixture unparseable by the plugin that reads it.
 func TestOperatorClaimsGolden(t *testing.T) {
-	golden(t, "operator-claims.json", OperatorClaims{Claims: []OperatorClaim{
+	claims := []OperatorClaim{
 		{
 			Token:      "legion-legion-legion-208-architect",
 			Tree:       "LEGION-208",
@@ -684,7 +689,21 @@ func TestOperatorClaimsGolden(t *testing.T) {
 			State:      "queued",
 		},
 		operatorClaim(),
-	}})
+	}
+	for _, by := range supervise.SuspendSources {
+		claims = append(claims, OperatorClaim{
+			Token:       claim.Token("legion-legion-legion-209-tester-" + string(by)),
+			Tree:        "LEGION-208",
+			Issue:       "LEGION-209",
+			Role:        claim.RoleTester,
+			Generation:  1,
+			State:       "suspended",
+			Session:     "ses_tester_209",
+			SessionFile: "/srv/legion/state/home/.omp/agent/sessions/ses_tester_209.jsonl",
+			SuspendedBy: string(by),
+		})
+	}
+	golden(t, "operator-claims.json", OperatorClaims{Claims: claims})
 }
 
 // An issue the daemon has admitted but not yet given a worker still has to answer the plugin's

@@ -65,6 +65,7 @@ var settingsEmitted = map[string]string{
 	"Config.WorkerBootTimeout":                       "worker_boot_timeout_seconds",
 	"Config.WorkerRPCTimeout":                        "worker_rpc_timeout_seconds",
 	"Config.WorkerStopTimeout":                       "worker_stop_timeout_seconds",
+	"Config.WorkerIdleSuspend":                       "worker_idle_suspend_seconds",
 	"Config.TreeStopTimeout":                         "tree_stop_timeout_seconds",
 	"Config.SlowCommandTimeout":                      "slow_command_timeout_seconds",
 	"Config.ProbeInterval":                           "probe_interval_seconds",
@@ -264,7 +265,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	wantTop := []string{
 		"project", "port", "bind", "advertise_host", "state_dir", "runtime", "admission_cap", "daemon_url",
 		"worker_stream_port", "omp_launch_prefix", "provider_keys", "instructions",
-		"worker_boot_timeout_seconds", "worker_rpc_timeout_seconds", "worker_stop_timeout_seconds",
+		"worker_boot_timeout_seconds", "worker_rpc_timeout_seconds", "worker_stop_timeout_seconds", "worker_idle_suspend_seconds",
 		"tree_stop_timeout_seconds", "slow_command_timeout_seconds", "probe_interval_seconds",
 		"controller_wake_interval_seconds", "worker_boot_registration_deadline_intervals",
 		"launch_failure_limit", "prompt_failure_limit", "prompt_retire_limit", "envoy_url", "nats_urls",

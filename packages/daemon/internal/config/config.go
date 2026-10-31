@@ -111,8 +111,12 @@ type Config struct {
 	WorkerBootRegistrationDeadlineIntervals int
 	WorkerRPCTimeout                        time.Duration
 	WorkerStopTimeout                       time.Duration
-	TreeStopTimeout                         time.Duration
-	SlowCommandTimeout                      time.Duration
+	// WorkerIdleSuspend is how long a worker whose turn is over and that has nothing waiting keeps
+	// its process before the daemon suspends it, keeping its session, so the next task resumes the
+	// same agent (`worker_idle_suspend_seconds`). 0 keeps every idle worker running.
+	WorkerIdleSuspend  time.Duration
+	TreeStopTimeout    time.Duration
+	SlowCommandTimeout time.Duration
 	// ProbeInterval is how often the runtime sweeps every recorded process.
 	ProbeInterval time.Duration
 
@@ -187,20 +191,25 @@ const (
 	maxTimerSeconds = 2_147_483
 )
 
-// durationKeys are the positive-second keys and their defaults (config.ts's DEFAULT_* constants,
-// and the new probe interval). Every one of them is held to the timer bound.
+// durationKeys are the second-valued keys and their defaults (config.ts's DEFAULT_* constants, and
+// the new probe interval). Every one of them is held to the timer bound, and every one is a
+// positive integer but those whose off says so, where 0 is the key turned off.
 var durationKeys = []struct {
 	key          string
 	defaultValue int
-	field        func(*Config) *time.Duration
+	// off is whether 0 is a value this key takes, turning what it times off. Every other key is
+	// positive: a zero timer would fire at once.
+	off   bool
+	field func(*Config) *time.Duration
 }{
-	{"worker_boot_timeout_seconds", 120, func(c *Config) *time.Duration { return &c.WorkerBootTimeout }},
-	{"worker_rpc_timeout_seconds", 5, func(c *Config) *time.Duration { return &c.WorkerRPCTimeout }},
-	{"worker_stop_timeout_seconds", 10, func(c *Config) *time.Duration { return &c.WorkerStopTimeout }},
-	{"tree_stop_timeout_seconds", 60, func(c *Config) *time.Duration { return &c.TreeStopTimeout }},
-	{"slow_command_timeout_seconds", 300, func(c *Config) *time.Duration { return &c.SlowCommandTimeout }},
-	{"probe_interval_seconds", 30, func(c *Config) *time.Duration { return &c.ProbeInterval }},
-	{"controller_wake_interval_seconds", 3600, func(c *Config) *time.Duration { return &c.ControllerWakeInterval }},
+	{"worker_boot_timeout_seconds", 120, false, func(c *Config) *time.Duration { return &c.WorkerBootTimeout }},
+	{"worker_rpc_timeout_seconds", 5, false, func(c *Config) *time.Duration { return &c.WorkerRPCTimeout }},
+	{"worker_stop_timeout_seconds", 10, false, func(c *Config) *time.Duration { return &c.WorkerStopTimeout }},
+	{"worker_idle_suspend_seconds", 1800, true, func(c *Config) *time.Duration { return &c.WorkerIdleSuspend }},
+	{"tree_stop_timeout_seconds", 60, false, func(c *Config) *time.Duration { return &c.TreeStopTimeout }},
+	{"slow_command_timeout_seconds", 300, false, func(c *Config) *time.Duration { return &c.SlowCommandTimeout }},
+	{"probe_interval_seconds", 30, false, func(c *Config) *time.Duration { return &c.ProbeInterval }},
+	{"controller_wake_interval_seconds", 3600, false, func(c *Config) *time.Duration { return &c.ControllerWakeInterval }},
 }
 
 // countKeys are the positive-integer keys with no unit, and their defaults: the registration
@@ -435,12 +444,18 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 }
 
 func isDurationKey(key string) bool {
-	for _, d := range durationKeys {
+	_, ok := durationKey(key)
+	return ok
+}
+
+// durationKey is the duration key named key, and whether there is one.
+func durationKey(key string) (int, bool) {
+	for i, d := range durationKeys {
 		if d.key == key {
-			return true
+			return i, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 func isCountKey(key string) bool {
@@ -452,15 +467,19 @@ func isCountKey(key string) bool {
 	return false
 }
 
-// readPositive reads a duration or count key into the file's map: a positive integer and, for a
-// duration, at most the timer bound (config.ts readPositiveInteger, and loadConfigFromFile's
-// lifecycle keys).
+// readPositive reads a duration or count key into the file's map: a positive integer — or 0 for a
+// duration key that takes it, which turns what it times off — and, for a duration, at most the
+// timer bound (config.ts readPositiveInteger, and loadConfigFromFile's lifecycle keys).
 func readPositive(value *yaml.Node, key string, file fileConfig) error {
 	read, err := readInt(value, key)
 	if err != nil || read == nil {
 		return err
 	}
-	if *read <= 0 {
+	index, duration := durationKey(key)
+	if *read < 0 || (*read == 0 && !(duration && durationKeys[index].off)) {
+		if duration && durationKeys[index].off {
+			return fmt.Errorf("%s must be a positive integer, or 0 to turn it off", key)
+		}
 		return fmt.Errorf("%s must be a positive integer", key)
 	}
 	if isDurationKey(key) {

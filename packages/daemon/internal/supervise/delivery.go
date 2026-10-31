@@ -117,6 +117,11 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}
+	// The claim takes work here, so the wait it was keeping says nothing about it any more. This
+	// is the one place work arrives and may be gone again before the decision ends — a task the
+	// issue's phase has left is dropped by the send that follows — where the decision's own end
+	// would find an idle claim and keep a deadline set before the task came (idleWait).
+	m.disarm(TimerIdle)
 	m.claim.Pending, m.unsaved = &d, false
 	return nil
 }

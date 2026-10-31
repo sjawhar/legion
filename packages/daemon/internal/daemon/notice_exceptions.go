@@ -113,7 +113,11 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	}
 	reported, ok := r.exceptionNotice(exception)
 	if !ok {
-		return nil
+		// Not a notice of this daemon's to an architect. It may still be a report of a message
+		// that reached a worker's role topic and was not forwarded — this daemon's or a peer
+		// agent's — whose claim the idle suspend took the process from: that worker is resumed, so
+		// the sender's next attempt finds its role held (wakeExceptionRole).
+		return r.wakeExceptionRole(ctx, exception)
 	}
 	switch exception.Reason {
 	case "delivery_failed", "no_holder", "receipt_timeout":

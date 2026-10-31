@@ -108,6 +108,7 @@ func defaultsFor(port int) Config {
 		WorkerBootRegistrationDeadlineIntervals: 3,
 		WorkerRPCTimeout:                        5 * time.Second,
 		WorkerStopTimeout:                       10 * time.Second,
+		WorkerIdleSuspend:                       1800 * time.Second,
 		TreeStopTimeout:                         60 * time.Second,
 		SlowCommandTimeout:                      300 * time.Second,
 		ProbeInterval:                           30 * time.Second,
@@ -143,6 +144,22 @@ func TestLoadMinimalFileAppliesDefaults(t *testing.T) {
 	}
 }
 
+// `worker_idle_suspend_seconds` is the one duration key a file may turn off, and 0 is how: it
+// loads as a zero duration, which arms no wait at all, so an idle worker keeps its process
+// (supervise's idleWait). Every other duration key refuses 0, since a zero timer would fire at
+// once.
+func TestLoadTakesZeroAsTheIdleSuspendTurnedOff(t *testing.T) {
+	cfg, err := Load(writeConfigFile(t, minimalFile+"worker_idle_suspend_seconds: 0\n"), noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := defaultsFor(13370)
+	want.WorkerIdleSuspend = 0
+	if !reflect.DeepEqual(cfg, want) {
+		t.Errorf("Load = %+v, want %+v", cfg, want)
+	}
+}
+
 // Stage 2 command paths only need the local daemon record. They keep loading until Task 3.12
 // wires the workflow's App and Dispatch clients, which is the first operation that needs them.
 func TestLoadAllowsStage2ConfigWithoutWorkflowKeys(t *testing.T) {
@@ -169,6 +186,7 @@ worker_boot_timeout_seconds: 90
 worker_boot_registration_deadline_intervals: 4
 worker_rpc_timeout_seconds: 7
 worker_stop_timeout_seconds: 11
+worker_idle_suspend_seconds: 900
 tree_stop_timeout_seconds: 61
 slow_command_timeout_seconds: 301
 probe_interval_seconds: 15
@@ -204,6 +222,7 @@ nats_nkey_seed_file: secrets/legion-pane.nk
 	want.WorkerBootRegistrationDeadlineIntervals = 4
 	want.WorkerRPCTimeout = 7 * time.Second
 	want.WorkerStopTimeout = 11 * time.Second
+	want.WorkerIdleSuspend = 900 * time.Second
 	want.TreeStopTimeout = 61 * time.Second
 	want.SlowCommandTimeout = 301 * time.Second
 	want.ProbeInterval = 15 * time.Second
@@ -956,6 +975,16 @@ func TestLoadRefuses(t *testing.T) {
 			want: "worker_stop_timeout_seconds must be at most 2147483",
 		},
 		{
+			name: "worker_idle_suspend_seconds negative",
+			body: minimalFile + "worker_idle_suspend_seconds: -1\n",
+			want: "worker_idle_suspend_seconds must be a positive integer, or 0 to turn it off",
+		},
+		{
+			name: "worker_idle_suspend_seconds past the timer bound",
+			body: minimalFile + "worker_idle_suspend_seconds: 2147484\n",
+			want: "worker_idle_suspend_seconds must be at most 2147483",
+		},
+		{
 			name: "tree_stop_timeout_seconds zero",
 			body: minimalFile + "tree_stop_timeout_seconds: 0\n",
 			want: "tree_stop_timeout_seconds must be a positive integer",
@@ -1346,6 +1375,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "worker_boot_registration_deadline_intervals", line: "worker_boot_registration_deadline_intervals: 3", class: modelled},
 		{key: "worker_rpc_timeout_seconds", line: "worker_rpc_timeout_seconds: 5", class: modelled},
 		{key: "worker_stop_timeout_seconds", line: "worker_stop_timeout_seconds: 10", class: modelled},
+		{key: "worker_idle_suspend_seconds", line: "worker_idle_suspend_seconds: 1800", class: modelled},
 		{key: "tree_stop_timeout_seconds", line: "tree_stop_timeout_seconds: 60", class: modelled},
 		{key: "slow_command_timeout_seconds", line: "slow_command_timeout_seconds: 300", class: modelled},
 		{key: "envoy_url", line: "envoy_url: http://127.0.0.1:9020", class: modelled},
