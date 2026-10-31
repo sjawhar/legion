@@ -1,0 +1,5 @@
+kind: Added
+body: |-
+  The plugin ships `claude-envoy:outside-message` and `claude-envoy:plain-words`, so a standalone
+  Claude Code session and a Legion phase worker on the Claude Code backend read the same rules for
+  text that reaches a person outside the company as an Oh My Pi session does.
