@@ -133,7 +133,11 @@ func (r *Refusal) Error() string {
 // served about 50/s, below the 60/s the 1x step offers them. Holding the writes to 18 leaves
 // the reads the 22 units that rate asks for, and the writes half again the 12 the base ran with.
 //
-// MEASURED-ROUND-10
+// Measured in adjacent pairs on one pod against the base (28 reads, 12 writes, no combined cap):
+// at 10x the reservation served 65 reads/s (base 86, 1x offers 60) and committed 6.02 events/s
+// (base 4.12), with reads holding at most 22 units and writes 18, refusing only with 429; at 1x it
+// refused 0, 1 and 3 writes and 0, 0 and 17 reads in three runs (base 1, 0, 1 and 0, 0, 0), the 17
+// in one 1.5-second stall that slowed every issue read at once.
 const (
 	MaxReadLimit      = 28
 	MaxWriteLimit     = 24
