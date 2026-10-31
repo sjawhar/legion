@@ -267,8 +267,10 @@ A deployment turns it on with `runtime.kubernetes.test_postgres: true`, a key of
 `pod` rather than inside it. Then:
 
 - The **roles container's launcher**, PID 1 of the one `roles` container, runs `legion-testpg
-  ensure` once at container start, before any role's agent, and restarts it if the postmaster
-  exits. It is not `runtime.kubernetes.setup`: that command runs inside a role's own PID
+  ensure` once at container start, before any role's agent, and every 15 seconds after, so a
+  postmaster that exits is restarted and a start that died with the server up but its role,
+  `vector` or database unmade is finished by the next tick: what `ensure` tests is the DSN, not
+  the port. It is not `runtime.kubernetes.setup`: that command runs inside a role's own PID
   namespace, so the server would be a child of that role's generation and would die with it, and
   the next role would find a stale data directory and no postmaster.
 - The **daemon** puts `LEGION_TEST_PG_DSN` in every role's environment and refuses the name in

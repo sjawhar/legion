@@ -14,8 +14,10 @@
 # load it into the launcher's namespace.
 #
 # The issue pod's launcher runs `ensure` at container start, as PID 1 of the roles container and
-# outside every role's PID namespace, and again if the postmaster dies; a role never starts the
-# server, it finds it listening. `ensure` is idempotent and holds a lock over the work all the same.
+# outside every role's PID namespace, and again every 15 s; a role never starts the server, it
+# finds it serving. `ensure` is idempotent, holds a lock over the work all the same, and tests the
+# DSN rather than the port, so a start that died with the postmaster up and its post-start steps
+# unfinished is carried the rest of the way by the tick that follows rather than reported served.
 #
 # initdb's superuser is the OS user (`id -un`, legion). The DSN names another role, created after
 # the server is up with LOGIN CREATEDB CREATEROLE NOSUPERUSER, because a superuser can run
@@ -112,6 +114,22 @@ parse_dsn() {
 	esac
 }
 
+# serving: the DSN works — a server answers on the port it names and the role and the database it
+# names are there. This is what `ensure` reports and what start-locked tests. A port test is not
+# enough: start() has the postmaster up before it makes the role, `vector` in template1 and the
+# DSN's database, so any failure after that leaves a server answering the port with no usable DSN,
+# and a port test would call that served for the pod's whole life. -w never prompts for a password
+# (the DSN carries none and pg_hba trusts loopback, so a prompt would mean something is wrong, not
+# something to wait on) and PGCONNECT_TIMEOUT bounds the connect, so a half-open port costs one
+# tick and never holds the launcher.
+serving() {
+	PGCONNECT_TIMEOUT=5 psql -X -w -tAq "$LEGION_TEST_PG_DSN" -c 'select 1' > /dev/null 2>&1
+}
+
+# listening: a server on the port accepts connections. start() tests this rather than the DSN to
+# decide whether to launch a postmaster, because `pg_ctl start` against a running server fails:
+# the postmaster is started only when there is none, and the steps after it then run against the
+# server that is already up.
 listening() {
 	pg_isready -q -h 127.0.0.1 -p "$port"
 }
@@ -146,60 +164,72 @@ start() {
 	bin=$(bindir)
 	mkdir -p "$data" "$sockets"
 	chmod 700 "$data"
-	# An interrupted initdb leaves a directory with no PG_VERSION, which no server starts on.
-	if [ ! -f "$data/PG_VERSION" ]; then
-		rm -rf "${data:?}"/* "${data:?}"/.[!.]* 2> /dev/null || true
-		# --locale-provider=icu with en-US sorts text the way CI's en_US.utf8 databases do: a
-		# suite whose ORDER BY output is a fixture would otherwise pass here and fail there on
-		# C collation. --username keeps the OS user as the superuser; the DSN's role is made
-		# below, with no superuser rights.
-		"$bin/initdb" --pgdata "$data" --username "$superuser" --auth-local=trust \
-			--auth-host=trust --encoding=UTF8 --locale-provider=icu --icu-locale=en-US \
-			--no-sync > "$log" 2>&1 ||
-			die "initdb failed; $log holds its output"
+	# start() is reached with no server, and also with one this script started and did not
+	# finish: every step below the postmaster can die with the postmaster up, and the tick that
+	# follows has to carry that server the rest of the way. So each step here is idempotent, and
+	# the postmaster is launched only when nothing accepts connections on the port — `pg_ctl
+	# start` against a running server fails, which would turn a repair into a refusal.
+	if ! listening; then
+		# An interrupted initdb leaves a directory with no PG_VERSION, which no server starts on.
+		if [ ! -f "$data/PG_VERSION" ]; then
+			rm -rf "${data:?}"/* "${data:?}"/.[!.]* 2> /dev/null || true
+			# --locale-provider=icu with en-US sorts text the way CI's en_US.utf8 databases
+			# do: a suite whose ORDER BY output is a fixture would otherwise pass here and
+			# fail there on C collation. --username keeps the OS user as the superuser; the
+			# DSN's role is made below, with no superuser rights.
+			"$bin/initdb" --pgdata "$data" --username "$superuser" --auth-local=trust \
+				--auth-host=trust --encoding=UTF8 --locale-provider=icu --icu-locale=en-US \
+				--no-sync > "$log" 2>&1 ||
+				die "initdb failed; $log holds its output"
+		fi
 		# initdb's own pg_hba.conf trusts every user on every address this server listens on.
 		# This one keeps the superuser on the socket alone and rejects it on every host line,
 		# so a connection that arrives over TCP can never be the superuser, and trusts every
-		# other role on loopback, so a login role a test creates can connect as itself.
+		# other role on loopback, so a login role a test creates can connect as itself. It is
+		# written before every launch, not at initdb alone: a start that died between initdb
+		# and here would otherwise leave the next launch reading initdb's file. A server that
+		# is already up read this same file, from the launch that started it.
 		printf '%s\n' \
 			"local all  $superuser  trust" \
 			"host  all  $superuser  all  reject" \
 			"host  all  all  127.0.0.1/32 trust" \
 			"host  all  all  0.0.0.0/0 reject" > "$data/pg_hba.conf" ||
 			die "writing $data/pg_hba.conf failed"
-	fi
-	# This process holds the lock and no server answers, so a postmaster.pid or socket lock left
-	# here names a server that died with its PID namespace; postgres would test that PID in this
-	# namespace, where it may be a live process. A postmaster that is gone can still have live
-	# backends, which hold the data directory as their working directory and would write it
-	# beside a new server, so the files are cleared only when no process is in there.
-	if [ -f "$data/postmaster.pid" ] || [ -e "$sockets/.s.PGSQL.$port.lock" ]; then
-		if ! answering; then
-			! holders "$data" ||
-				die "a process still runs in $data, so the server that left $data/postmaster.pid is not gone: refusing to clear it"
-			rm -f "$data/postmaster.pid" "$sockets/.s.PGSQL.$port.lock"
+		# This process holds the lock and no server answers, so a postmaster.pid or socket
+		# lock left here names a server that died with its PID namespace; postgres would test
+		# that PID in this namespace, where it may be a live process. A postmaster that is
+		# gone can still have live backends, which hold the data directory as their working
+		# directory and would write it beside a new server, so the files are cleared only
+		# when no process is in there.
+		if [ -f "$data/postmaster.pid" ] || [ -e "$sockets/.s.PGSQL.$port.lock" ]; then
+			if ! answering; then
+				! holders "$data" ||
+					die "a process still runs in $data, so the server that left $data/postmaster.pid is not gone: refusing to clear it"
+				rm -f "$data/postmaster.pid" "$sockets/.s.PGSQL.$port.lock"
+			fi
 		fi
+		# A throwaway cluster trades durability for speed: nothing in it survives the pod. 100
+		# connections cover a package's parallel tests, and 256MB of shared buffers their
+		# fixtures. huge_pages and dynamic_shared_memory_type are the pod's: gVisor serves no
+		# huge pages, and each role mounts its own 64 MiB /dev/shm, too small for the posix
+		# segments the default picks. jit off keeps LLVM out of a test's plan times. The WAL
+		# settings bound the cluster's share of the pod's 10Gi ephemeral-storage limit, which
+		# the kubelet evicts all six roles over, and each is below its default: wal_level=minimal
+		# writes no WAL at all for a table built, copied into or rewritten in the transaction
+		# that made it, which is most of what a suite's fixture does (and it needs
+		# max_wal_senders=0, since no walsender can serve that level, and no replication slot
+		# can exist to pin segments); max_wal_size=512MB halves the checkpoint distance, and
+		# with it the recycled segments a long run settles at; min_wal_size=64MB lets the floor
+		# fall to four segments between runs; and wal_keep_size=0 retains nothing for a replica
+		# this cluster will never have. Measured on 18: a database grown to 985 MB, updated
+		# across a third of its rows, VACUUM FULLed and dropped left the data directory at
+		# 1.1 GB with the defaults and at 425 MB with these.
+		# shellcheck disable=SC2094 # pg_ctl writes $log through --log and this append; it reads none
+		"$bin/pg_ctl" --pgdata "$data" --log "$log" --wait --timeout 120 \
+			--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB -c huge_pages=off -c dynamic_shared_memory_type=mmap -c jit=off -c wal_level=minimal -c max_wal_senders=0 -c max_wal_size=512MB -c min_wal_size=64MB -c wal_keep_size=0" \
+			start >> "$log" 2>&1 ||
+			die "pg_ctl start failed; $log holds its output"
 	fi
-	# A throwaway cluster trades durability for speed: nothing in it survives the pod. 100
-	# connections cover a package's parallel tests, and 256MB of shared buffers their fixtures.
-	# huge_pages and dynamic_shared_memory_type are the pod's: gVisor serves no huge pages, and
-	# each role mounts its own 64 MiB /dev/shm, too small for the posix segments the default
-	# picks. jit off keeps LLVM out of a test's plan times. The WAL settings bound the cluster's
-	# share of the pod's 10Gi ephemeral-storage limit, which the kubelet evicts all six roles
-	# over, and each is below its default: wal_level=minimal writes no WAL at all for a table
-	# built, copied into or rewritten in the transaction that made it, which is most of what a
-	# suite's fixture does (and it needs max_wal_senders=0, since no walsender can serve that
-	# level, and no replication slot can exist to pin segments); max_wal_size=512MB halves the
-	# checkpoint distance, and with it the recycled segments a long run settles at;
-	# min_wal_size=64MB lets the floor fall to four segments between runs; and wal_keep_size=0
-	# retains nothing for a replica this cluster will never have. Measured on 18: a database
-	# grown to 985 MB, updated across a third of its rows, VACUUM FULLed and dropped left the
-	# data directory at 1.1 GB with the defaults and at 425 MB with these.
-	# shellcheck disable=SC2094 # pg_ctl writes $log through --log and this append; it reads none
-	"$bin/pg_ctl" --pgdata "$data" --log "$log" --wait --timeout 120 \
-		--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB -c huge_pages=off -c dynamic_shared_memory_type=mmap -c jit=off -c wal_level=minimal -c max_wal_senders=0 -c max_wal_size=512MB -c min_wal_size=64MB -c wal_keep_size=0" \
-		start >> "$log" 2>&1 ||
-		die "pg_ctl start failed; $log holds its output"
 	# vector in template1 reaches every database a test makes from it, so a suite that needs
 	# pgvector (Dispatch's) runs on this server with no extension step of its own, and a
 	# `create extension if not exists vector` of its own is a no-op the DSN's role may run.
@@ -226,13 +256,13 @@ ensure() {
 	[ -n "${LEGION_TEST_PG_DSN:-}" ] ||
 		die "LEGION_TEST_PG_DSN is unset: nothing names the server to serve"
 	parse_dsn "$LEGION_TEST_PG_DSN"
-	listening && {
-		echo "$name: a server already answers on 127.0.0.1:$port"
+	serving && {
+		echo "$name: a server already serves 127.0.0.1:$port"
 		return 0
 	}
 	mkdir -p "$dir"
 	# flock serialises the callers that start together; the second finds the first's server
-	# listening. -o closes the lock's descriptor in the child, so the server flock's child starts
+	# serving. -o closes the lock's descriptor in the child, so the server flock's child starts
 	# does not inherit it and hold the lock for the pod's whole life: without -o, measured, a
 	# second ensure blocked until its own timeout. -w bounds the wait at one cold start, so a
 	# holder that dies mid-start costs one wait and never a launch; -E makes that timeout 75, a
@@ -250,10 +280,10 @@ ensure)
 	ensure
 	;;
 start-locked)
-	# flock's child: the environment names the DSN, and another caller may have started the server
-	# while this one waited for the lock.
+	# flock's child: the environment names the DSN, and another caller may have finished the
+	# server while this one waited for the lock.
 	parse_dsn "${LEGION_TEST_PG_DSN:?}"
-	listening || start
+	serving || start
 	;;
 stop)
 	# A fast shutdown this waits for: the postmaster's exit leaves its shutdown checkpoint still
