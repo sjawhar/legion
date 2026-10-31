@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-607",
+  "completed": "2026-10-31T12:54:11Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "04e390bf6e613f7ec9f07473c3ccc0ec25e588f1",
+  "round": 14,
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "scope": "Confirmation round. 04e390bf merges main 1a9095e6 into the READY head 3390b679 (approved code 0f60ac74 plus retro's docs/solutions learning and .legion removal), with no conflict. round-shape.py v3 (dispatch://INFRA-598/artifact/round-shape-py) from the workspace with PR 2391: 'old head 0f60ac74 -> 0f60ac74929272fea533d81af07a015f5a3c8795; new head 04e390bf -> 04e390bf6e613f7ec9f07473c3ccc0ec25e588f1; files whose own diff differs: 0', with no file equal only after normalisation. The code is approved in substance.",
+  "reasonForChanges": "The architect's decision (Envoy 11:54Z): ci-ok at 04e390bf is red only on envoy-e2e-local, whose checkout of refs/pull/2391/merge at 304da3dd failed three times with 'upload-pack: not our ref' (job 124502788802): the job queued for an hour, main moved and GitHub replaced the pull request's merge ref. My re-run of the failed jobs (attempt 2, job 124530277072) was still queued an hour later and reuses the gone merge sha. So the one change asked is a forward merge of main for a fresh CI run, which also brings main's #2594 (the reconnect flake fix). No code finding stands.",
+  "ci": "At 04e390bf: lint, typecheck, test, pr-title, dispatch and envoy-go green (read 11:54Z), every other job green except envoy-e2e-local (checkout failure above); ci-ok red on it.",
+  "keyFindings": []
+}

@@ -252,7 +252,8 @@ type router struct {
 // work (api.Background): its Wait returns once every keyed write's handler and every delivery a
 // request left running past its answer has settled, and the delivery hub, every live socket and
 // their subscriptions, and the event stream relay have ended after the process lifetime is
-// cancelled; its ResumeDeliveries is the delivery sweep's pass the maintenance loop runs.
+// cancelled; its ResumeDeliveries is the delivery sweep's pass the maintenance loop runs
+// (api.RunMaintenanceSweep).
 func New(ctx *AppContext) (http.Handler, api.Background) {
 	r := &router{
 		ctx:          ctx,
