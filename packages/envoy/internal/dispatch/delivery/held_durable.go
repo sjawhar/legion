@@ -426,7 +426,7 @@ func startingAt(config natsgo.ConsumerConfig, start uint64) natsgo.ConsumerConfi
 //
 // takeOverFinishWithin bounds the whole of it, from its first step to its last try. It is under
 // intakeHoldTTL - intakeHoldMargin (13 s), how long a hold lasts from its taking or its last
-// renewal. A hold takeHold just took is 13 s old at most when attempt reaches these steps, less
+// renewal. A hold takeHold just took has at most 13 s left when attempt reaches these steps, less
 // the lookup of the durable (lookupDurable, up to 5 s), the consumer lease (duty.Exclusive) and
 // takeOver's read of the durable before them: with every renewal after the taking failing, the
 // hold covers most of the 10 s of the steps, not always all of them. A take-over that runs again
