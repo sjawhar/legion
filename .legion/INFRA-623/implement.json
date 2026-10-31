@@ -2,14 +2,22 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-623",
-  "completed": "2026-10-31T11:40:00Z",
+  "completed": "2026-10-31T13:05:00Z",
   "proof": [
+    {
+      "criterion": "Review round 1: the refusal still holds after it was narrowed to match jj (a `.jj` directory alone) and its message rewritten, and it still names a state directory reached through a symlink.",
+      "surface": "The production CLI, `legion workspace-init provision`, the init container's own command: a decoy colocated jj repository carrying the legacy `.jj/repo/config.toml` jj migrates on opening, its state directory reached through a symlink from outside, provisioning from the pod's real /legion/feed.",
+      "command": "$TMPDIR/symproof/legion-head workspace-init provision --issue INFRA-623 --repo sjawhar/legion --default-branch main --root <the symlink> --credential-helper '!legion git-credential' --feed /legion/feed",
+      "observed": "exit 1, and the message now names both paths as the review asked: 'refusing to run jj in \u2026/state-link-r3/repos/github.com/sjawhar, which resolves to \u2026/decoy-r3/legion state/repos/github.com/sjawhar: \u2026/decoy-r3/.jj is a Jujutsu repository, and this jj command creates a repository of its own and reads that one as well: jj migrates the enclosing repository's configuration \u2026'. The decoy's .jj fingerprint is fbd5da3d802b2497 before and after and .jj/repo still holds no config-id. The pod proof was re-run at this head: the internal/workspace binary with its working directory inside $LEGION_WORKSPACE and /legion/repos read-only, exit 0, 0 failures, 0 mentions of /legion/repos.",
+      "headSha": "bd2921e6133a951d1a43a3a280784201a634b9fc",
+      "negativeControl": "Two, both measured on jj 0.45.1 under $TMPDIR before the change and quoted in the code's comments. (a) A directory holding a regular file named `.jj`: `jj log` below it answers 'Error: There is no jj repo in \".\"', so the walk's old os.Lstat refused a directory jj ignores; the table row that locked that in is now an allowed row and passes. (b) `jj git init --colocate c` run inside a repository b carrying a legacy config.toml printed 'Your config file has been migrated from \u2026/b/.jj/repo/config.toml \u2026', wrote b/.jj/repo/config-id and printed 'Initialized repo in \"c\"' \u2014 it does both, which is why 'instead of' is gone from every copy of the sentence."
+    },
     {
       "criterion": "Round 2, the tester's defect: delivered item 1 of the spec \u2014 a jj command that creates a repository refuses to run under an enclosing .jj \u2014 holds when the state directory is reached through a symlink, the configuration config.go:352-353 allows, standing on a checkout.",
       "surface": "The production CLI, `legion workspace-init provision`, the init container's own command: a decoy colocated jj repository carrying the legacy .jj/repo/config.toml that jj migrates on opening (so a write is visible in the repository), a state directory inside it, and a symlink to that directory from outside, which the run names as its --root; the feed is the pod's real /legion/feed.",
       "command": "$TMPDIR/symproof/legion-head workspace-init provision --issue INFRA-623 --repo sjawhar/legion --default-branch main --root <the symlink> --credential-helper '!legion git-credential' --feed /legion/feed",
       "observed": "exit 1, 'run jj git init --colocate \u2026: refusing to run jj in \u2026/state-link-head/repos/github.com/sjawhar: \u2026/decoy-head/.jj is a Jujutsu repository, and this jj command creates a repository of its own \u2026' \u2014 the refusal names the lexical directory the command would run in and the repository found at the resolved path. The decoy's .jj content fingerprint is 53d10420f862d82e before and after, and .jj/repo still holds no config-id.",
-      "headSha": "2abf344ea8d35ac7dc54550b67e8e47fe5a20d4c",
+      "headSha": "bd2921e6133a951d1a43a3a280784201a634b9fc",
       "negativeControl": "The same command with the binary built from the previous head 305cdb6766cc5f7143b72b5a28e9c3938c2c4d8f, the one the tester failed: exit 0 reporting 'workspace-init: \u2026/state-link-base/workspaces/sjawhar/legion/infra-623 on legion/INFRA-623 from main', with config-id written into the decoy's .jj/repo and its fingerprint moving b11b24e8af10d179 \u2192 38380e170f2461a3. Beside it, the tester's red test (enclosingsymlink_test.go, b932555c3cdf, unmodified) passes at this head and fails at that one."
     },
     {
@@ -17,7 +25,7 @@
       "surface": "The Legion issue pod itself, with the pod's real shared clone /legion/repos bind-mounted read-only (unshare -Urm + mount --bind + mount -o remount,bind,ro), running the real packages/daemon/internal/workspace test binary with the working directory go test gives it \u2014 the package directory inside $LEGION_WORKSPACE, which is a jj workspace of that clone. The binary drives the real jj 0.45.1 and git 2.47.3 through the production execRunner.",
       "command": "go -C packages/daemon test -c -o $TMPDIR/workspace-head.test ./internal/workspace && unshare -Urm $TMPDIR/ro.sh \"$LEGION_WORKSPACE/packages/daemon/internal/workspace\" $TMPDIR/workspace-head.test -test.count=1 -test.timeout=25m",
       "observed": "exit 0, PASS, 0 '--- FAIL' lines and 0 lines naming /legion/repos or 'Read-only file system' anywhere in the output, re-run at this head after the symlink fix (399 s); the same run at 1c3ccfd1 was also exit 0 with 0 failures.",
-      "headSha": "2abf344ea8d35ac7dc54550b67e8e47fe5a20d4c",
+      "headSha": "bd2921e6133a951d1a43a3a280784201a634b9fc",
       "negativeControl": "The same binary built from the base commit 4933464f8ece59afaa387baadbb6928c4b9cee2a (a scratch copy of packages/daemon, packages/envoy, go.work and go.work.sum under $TMPDIR with the nine changed files restored by `jj file show -r 4933464f`), run with the same working directory under the same read-only mount: exit 1, 61 '--- FAIL' lines and 192 lines naming /legion/repos/github.com/sjawhar/legion, each 'Internal error: Failed to determine the secure config for a repo \u2026 Read-only file system (os error 30) at path \"/legion/repos/github.com/sjawhar/legion/.jj/repo/.tmpXXXXXX\"'."
     },
     {
@@ -25,7 +33,7 @@
       "surface": "The same pod guard, over `go test ./cmd/legion`, whose tests run the real workspace-init command and read the clone it provisioned with a real jj and git.",
       "command": "unshare -Urm $TMPDIR/ro-check.sh -run 'TestWorkspaceInitProvisionsTheIssueWorkspace|TestWorkspaceInitProvisionsAtADefaultBranchWithASlash|TestWorkspaceInitRemovesTheWorkspacesStaleIndexLock' ./cmd/legion",
       "observed": "ok github.com/sjawhar/legion/daemon/cmd/legion 7.026s, exit 0, at the final head.",
-      "headSha": "2abf344ea8d35ac7dc54550b67e8e47fe5a20d4c",
+      "headSha": "bd2921e6133a951d1a43a3a280784201a634b9fc",
       "negativeControl": "The same three tests under the same guard before the sweep: all three failed with `jj \u2026: exit status 255`, each naming the volume's clone, while the same three passed with no read-only mount \u2014 the fixture jj at workspace_init_test.go:241 ran with no Dir, so in the pod it opened the workspace the test process stands in."
     },
     {
@@ -33,7 +41,7 @@
       "surface": "go test, on any machine: a decoy colocated jj repository the test chdirs into, standing in for the pod's shared clone, with a full Provision from GitHub and from a feed beside it and a third whose state directory sits inside it.",
       "command": "go -C packages/daemon test -count=1 -run 'EnclosingRepository' ./internal/workspace",
       "observed": "ok github.com/sjawhar/legion/daemon/internal/workspace 5.427s at the final head, three subtests passing: the decoy's refs and every file under its .jj are byte-identical after a Provision from GitHub and from a feed, and a Provision whose state directory sits inside the decoy is refused with an error naming the enclosing .jj.",
-      "headSha": "2abf344ea8d35ac7dc54550b67e8e47fe5a20d4c",
+      "headSha": "bd2921e6133a951d1a43a3a280784201a634b9fc",
       "negativeControl": "The same test file against the base commit 4933464f's production code in a scratch copy: exit 1, all three subtests failing \u2014 'provisioning wrote \u2026/enclosing/.jj/repo/config-id into the enclosing repository', 'provisioning rewrote \u2026/enclosing/.jj/repo/config.toml in the enclosing repository', and 'Provision under the enclosing repository made \u2026/enclosing/legion state/repos/github.com/acme/widgets, want a refusal'."
     },
     {
@@ -41,7 +49,7 @@
       "surface": "The live proof itself: the whole Go daemon booted over a real PostgreSQL 17.11 and a real nats-server v2.10.22, both started on the issue's volume, driven only through Dispatch and GitHub envelopes and its own HTTP routes.",
       "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:54329/legione2e?sslmode=disable bash scripts/e2e/merged-root-waits.sh",
       "observed": "exit 0, 'merged root waits e2e: PASS in 37s' at the final head, every check green: step1-the-acceptance-lands-while-the-child-runs, step2-the-merged-root-waits-for-its-child, step5-a-restart-leaves-the-wait-and-tells-no-one-again, step3-the-waiting-roots-child-completes-its-phase, step7-a-pull-request-opened-from-the-waiting-roots-branch-leaves-its-merge, step4-the-childs-merge-closes-the-root.",
-      "headSha": "2abf344ea8d35ac7dc54550b67e8e47fe5a20d4c",
+      "headSha": "bd2921e6133a951d1a43a3a280784201a634b9fc",
       "negativeControl": "The same command with LEGION_TEST_PG_DSN unset: exit 1, 'FAIL prerequisites: LEGION_TEST_PG_DSN is required \u2026', 'merged root waits e2e: FAIL at prerequisites after 0s' \u2014 the script refuses rather than running against anything it did not get."
     }
   ],
@@ -70,7 +78,8 @@
     "The plan's task 5 named two requireFilters probes. A third class of the same defect was measured live and is fixed here: every other git or jj child a daemon test starts with no working directory, nineteen sites in ten files, two of which (internal/shim/shim_test.go's `jj git init --colocate`) are the production defect's own shape. Three cmd/legion workspace-init tests failed with `jj: exit status 255` under the read-only guard until they were fixed.",
     "The plan's design D1 refused an empty Dir. The refusal is one rule over an empty and a relative Dir, since a relative Dir resolves against the same process directory an empty one inherits.",
     "The simplify pass applied three findings (a shared testbin.RequireJJFilters, fixtureEnvironment built on withoutGitConfigPairs, the new test's stub through writeExecutable) and trimmed the comments that only restated the Dir assignment below them; the efficiency reviewer found nothing. The proof above was re-run at the applied head.",
-    "Round 2 answers the tester's one failure. The tester's red test, packages/daemon/internal/workspace/enclosingsymlink_test.go at b932555c3cdf, is unmodified: `jj diff --git` over it prints nothing, and it passes at this head. The fix is resolveExisting plus one line of refuseEnclosingWorkspace; nothing else of the change moved."
+    "Round 2 answers the tester's one failure. The tester's red test, packages/daemon/internal/workspace/enclosingsymlink_test.go at b932555c3cdf, is unmodified: `jj diff --git` over it prints nothing, and it passes at this head. The fix is resolveExisting plus one line of refuseEnclosingWorkspace; nothing else of the change moved.",
+    "Review round 1 answers all six findings: resolveExisting deleted for gitworktree.go's resolvedPath; the enclosing `.jj` matched with os.Stat and IsDir, as jj matches it; the refusal's two false claims about jj corrected and the resolved directory named beside the configured one; enclosingsymlink_test.go folded into TestProvisionLeavesTheEnclosingRepositoryUntouched as a second row of its 'state directory inside it' subtest and deleted; docs/testing.md's three wrong claims and jjWorkspaceRoot's -R implication corrected; the last two `git -C` children given a Dir. The pull request body gained the `## Contract change census` the review required."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
