@@ -424,17 +424,31 @@ describe("DISPATCH_E2E_PROCESSES", () => {
     expect(keyless.stderr).toContain("DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY must give both processes");
   });
 
-  test("run-server.sh runs DISPATCH_E2E_SERVER_BINARY, when set, in place of the server it builds", async () => {
+  test("run-server.sh runs DISPATCH_E2E_SERVER_BINARY, when set, as it runs the one it builds", async () => {
     const directory = mkdtempSync(join(tmpdir(), "run-server-binary-"));
     try {
       const binary = join(directory, "envoy-dispatch");
+      // The binary reports the directory it runs in, the settings run-server.sh sweeps the
+      // environment down to, and how it was told to listen: the socket it inherited, or the port
+      // it was handed.
       writeFileSync(
         binary,
-        '#!/usr/bin/env bash\necho "given binary in $PWD with DISPATCH_TEST_HOOKS=$DISPATCH_TEST_HOOKS DISPATCH_WEB_DIST=$DISPATCH_WEB_DIST"\n',
+        [
+          "#!/usr/bin/env bash",
+          'fd="$DISPATCH_LISTEN_FD"',
+          "socket=none",
+          'if [ -n "$fd" ] && [ -S "/dev/fd/$fd" ]; then',
+          "  socket=listening",
+          "fi",
+          '[ -n "$fd" ] || fd=none',
+          'echo "given binary in $PWD with DISPATCH_TEST_HOOKS=$DISPATCH_TEST_HOOKS' +
+            " DISPATCH_WEB_DIST=$DISPATCH_WEB_DIST DISPATCH_LISTEN_FD=$fd socket=$socket" +
+            ' DISPATCH_PORT=$DISPATCH_PORT DISPATCH_SERVER_URL=$DISPATCH_SERVER_URL"',
+          "",
+        ].join("\n"),
         { mode: 0o755 }
       );
-      // run-server.sh reads the fakes' ports, and a given binary binds a port of its own: it may
-      // not serve on a held socket.
+      // run-server.sh reads the fakes' ports, and binds the port it is given.
       const environment = {
         DATABASE_URL: "postgres://postgres@127.0.0.1:1/never-opened",
         DISPATCH_E2E_PORT: "8777",
@@ -447,7 +461,9 @@ describe("DISPATCH_E2E_PROCESSES", () => {
       const { code, stdout } = await run(["bash", runServer], environment);
       expect(code).toBe(0);
       expect(stdout).toBe(
-        `given binary in ${envoyDirectory} with DISPATCH_TEST_HOOKS=1 DISPATCH_WEB_DIST=/given/web\n`
+        `given binary in ${envoyDirectory} with DISPATCH_TEST_HOOKS=1 DISPATCH_WEB_DIST=/given/web ` +
+          "DISPATCH_LISTEN_FD=none socket=none DISPATCH_PORT=8777 " +
+          "DISPATCH_SERVER_URL=http://127.0.0.1:8777\n"
       );
 
       const missing = await run(["bash", runServer], {
@@ -459,11 +475,19 @@ describe("DISPATCH_E2E_PROCESSES", () => {
         `DISPATCH_E2E_SERVER_BINARY names ${join(directory, "absent")}, which is not an executable file`
       );
 
+      // With no port of its own the given binary serves on the socket held for it, as a build
+      // from this tree does: held-port.py hands it the listening socket as DISPATCH_LISTEN_FD and
+      // names its port. A previous release adopts it (legion-envoy-v20.1.0 and later), so a
+      // two-build run holds B's port like A's and sets none.
       const { DISPATCH_E2E_PORT: _, ...portless } = environment;
       const held = await run(["bash", runServer], portless);
-      expect(held.code).not.toBe(0);
-      expect(held.stderr).toContain(
-        "DISPATCH_E2E_SERVER_BINARY needs DISPATCH_E2E_PORT: a given build may not serve on a held socket"
+      expect(held.code).toBe(0);
+      const port = /DISPATCH_PORT=([1-9][0-9]*) /.exec(held.stdout)?.[1];
+      expect(port).toBeDefined();
+      expect(held.stdout).toBe(
+        `given binary in ${envoyDirectory} with DISPATCH_TEST_HOOKS=1 DISPATCH_WEB_DIST=/given/web ` +
+          `DISPATCH_LISTEN_FD=3 socket=listening DISPATCH_PORT=${port} ` +
+          `DISPATCH_SERVER_URL=http://127.0.0.1:${port}\n`
       );
     } finally {
       rmSync(directory, { force: true, recursive: true });

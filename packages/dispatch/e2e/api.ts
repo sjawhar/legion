@@ -109,10 +109,9 @@ const sessionCookies = new Map<string, Promise<string>>();
  *  spelling of a login and process asked, and kept until something revokes it: the generation the
  *  cookie names lives in `user_sessions`, which `resetDatabase` truncates (it calls
  *  `forgetSessions`), and a browser context's Sign out as the same login advances it. With
- *  `target` set the sign-in is pinned to that process, so a call pinned there carries a cookie it
- *  signed: a previous release's process (`DISPATCH_E2E_BINARY_B`) shares no cookie key with the
- *  other. A sign-in that fails, by its answer or by the request itself, is not kept, so the next
- *  call asks again. */
+ *  `target` set the sign-in is pinned to that process, so every request a pinned call makes, its
+ *  sign-in included, is served by the process it names. A sign-in that fails, by its answer or by
+ *  the request itself, is not kept, so the next call asks again. */
 function sessionCookie(login: string, target?: DispatchProcess): Promise<string> {
   const key = `${target ?? ""} ${login}`;
   const cached = sessionCookies.get(key);

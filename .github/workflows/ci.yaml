@@ -2840,15 +2840,13 @@ jobs:
           bunx playwright install --with-deps chromium
         working-directory: packages/dispatch
       - name: Browser-test each build's page against the other build's server
-        # B is the previous build, which cannot serve on a socket the harness holds for it, so it
-        # binds DISPATCH_E2E_PORT_B, a port free when this step picks it.
+        # B is the previous build, which serves on the socket the harness holds for it, as A does,
+        # so this step names no port for it.
         env:
           DISPATCH_PREVIOUS_BUILD: ${{ runner.temp }}/dispatch-previous
         run: |
           psql "postgres://postgres:ci@localhost:5432/postgres" -c 'create database dispatch_cross_build'
-          port_b=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
           DISPATCH_E2E_BINARY_B="$DISPATCH_PREVIOUS_BUILD/envoy-dispatch" \
-            DISPATCH_E2E_PORT_B="$port_b" \
             DISPATCH_E2E_WEB_DIST_B="$DISPATCH_PREVIOUS_BUILD/web" \
             bun run e2e:multiprocess -- cross-build.multiprocess
         working-directory: packages/dispatch

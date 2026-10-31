@@ -150,15 +150,16 @@ To run one build's page against another build's server, give B a previous releas
 writes:
 
 ```bash
-DISPATCH_E2E_BINARY_B=<dir>/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=<dir>/web DISPATCH_E2E_PORT_B=<free port> \
+DISPATCH_E2E_BINARY_B=<dir>/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=<dir>/web \
   bun run e2e:multiprocess -- cross-build.multiprocess
 ```
 
 B then runs that envoy-dispatch and serves that web dist (both paths absolute or from
-`packages/envoy`). That release cannot serve on a port the harness holds for it, so it binds
-`DISPATCH_E2E_PORT_B`, and the harness refuses to start without it. It knows no shared cookie key,
-so the preflight skips the shared-key check, and `e2e/cross-build.multiprocess.e2e.ts` keeps each
-context's requests on the process it signed in on.
+`packages/envoy`). That build must be `legion-envoy-v20.1.0` or later, which
+`build-dispatch-build.sh` refuses to go below: it serves on the port the harness holds for it, as
+A does, and signs cookies with the run's shared key, so no run names a port for B and the
+preflight checks it like any other B. `e2e/cross-build.multiprocess.e2e.ts` splits each browser
+context, its page from one build and its API, sockets and `/auth` from the other.
 
 `DISPATCH_E2E_SIGNIN=oidc` signs people in as a deployment does instead of through dev sign-in:
 the harness also starts `packages/envoy/cmd/dev-oidc-issuer` (`e2e/run-signin-issuer.sh`), and

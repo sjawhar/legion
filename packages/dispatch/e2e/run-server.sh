@@ -133,14 +133,11 @@ esac
 # DISPATCH_E2E_BINARY_B, a previous release's build (packages/envoy/scripts/build-dispatch-build.sh),
 # so a browser drives two builds at once. That build gets the same environment: a release ignores
 # a setting it does not know and refuses only the ones it removed, none of which is set here. It
-# knows no DISPATCH_DEV_SIGNIN_SHARED_KEY, so it signs cookies with a key of its own, and a
-# browser context signed in on it sends its requests to it alone. It may not adopt a held socket
-# (DISPATCH_LISTEN_FD), so it needs a port of its own to bind ($own_port_variable).
+# must be legion-envoy-v20.1.0 or later (packages/envoy/scripts/build-dispatch-build.sh refuses an
+# older one): that release adopts the held socket (DISPATCH_LISTEN_FD) and knows
+# DISPATCH_DEV_SIGNIN_SHARED_KEY, so it starts on the port the caller holds for it and signs
+# cookies with the run's shared key, exactly as a build from this tree does.
 server_binary="${DISPATCH_E2E_SERVER_BINARY:-}"
-if [ -n "$server_binary" ] && [ -z "$own_port" ]; then
-  echo "run-server.sh: DISPATCH_E2E_SERVER_BINARY needs $own_port_variable: a given build may not serve on a held socket" >&2
-  exit 2
-fi
 
 # The secrets broker the server relays credential requests to, read before
 # the sweep below drops every DISPATCH_* variable. DISPATCH_E2E_AGENT_SECRETS_URL

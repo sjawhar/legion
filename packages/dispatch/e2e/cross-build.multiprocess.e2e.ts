@@ -46,9 +46,8 @@ import { signIn } from "./users";
  * to the timeline and is answered a snapshot. Every selector is one both builds' own browser
  * suites use.
  *
- * A previous release knows no shared cookie key (e2e/run-server.sh), so a context signs in on the
- * process its API requests go to and sends them nowhere else, and every seed call is pinned to the
- * process it signs in on (`userHeaders`).
+ * Each seed call names the process it runs on (`process` in e2e/api.ts, which pins its sign-in
+ * there too), so the build that wrote a row and the build that reads it back are both known.
  */
 
 /** What a message calls each process's build. */

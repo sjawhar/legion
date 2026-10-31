@@ -7,8 +7,8 @@ body: |-
     across a stop and restart of each build. `scripts/build-dispatch-build.sh --commit <sha|tag> --out
     <dir>` (or `--previous-release`, the newest `legion-envoy-v*` tag in the history of the branch's
     merge base with `origin/main`) builds that previous build from `git archive` of its commit, and
-    refuses a commit whose migrations stop below `0117`. The CI job `dispatch-two-builds` runs it
-    against the previous release, or against the commit a manual run names, and then runs
+    refuses a commit older than the release `legion-envoy-v20.1.0`. The CI job `dispatch-two-builds`
+    runs it against the previous release, or against the commit a manual run names, and then runs
     `packages/dispatch/e2e/cross-build.multiprocess.e2e.ts` in the browser suite's two-process mode
     with Dispatch B run from the previous build (`DISPATCH_E2E_BINARY_B` and
     `DISPATCH_E2E_WEB_DIST_B`): each build's page against the other build's server signs in, opens an

@@ -1611,10 +1611,11 @@ once per run and hands it to both, so a person signed in through one process is 
 other, and points B at `DISPATCH_E2E_WEB_DIST_B` when it is set (default: A's dist) and at
 `DISPATCH_E2E_BINARY_B` when it is set (`binaryB` in `e2e/harness-processes.ts`): a previous
 release's build, which gets the same environment, since a release ignores a setting it does not
-know. Such a B knows no shared key, so `e2e/preflight.ts` leaves out its shared-key check, and it
-cannot serve on a held socket, so the run sets `DISPATCH_E2E_PORT_B` for it (the harness refuses
-to start without it, and `run-server.sh` refuses a given binary with no port). The proxy alternates
-each HTTP
+know. Such a B must be `legion-envoy-v20.1.0` or later
+(`packages/envoy/scripts/build-dispatch-build.sh` refuses an older commit): that release serves on
+the socket the harness holds for it and knows the shared key, so it starts exactly as A does, no
+run names a port for it, and `e2e/preflight.ts` checks it for the one cookie key as it checks any
+other B. The proxy alternates each HTTP
 request and each websocket upgrade between A and B (two turns, each starting at A), streams each
 response back as it arrives, and forwards `Host` and `Origin` unchanged.
 `X-Dispatch-E2E-Process: a|b` on any request

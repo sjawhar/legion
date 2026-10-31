@@ -245,7 +245,9 @@ DISPATCH_BENCH_DATABASE_URL=<copy> packages/envoy/scripts/search-latency-compare
 
 Builds one Dispatch build from a commit of this repository into a directory, for the two-build
 test (`cmd/dispatch/twobuild_*_test.go`, `go test -tags twobuild`), which runs it beside this tree
-on one Postgres and one NATS. It extracts `git archive <commit>` into `<dir>/src`, so it makes no
+on one Postgres and one NATS, and for the browser suite's cross-build run
+(`packages/dispatch/e2e/cross-build.multiprocess.e2e.ts`), which drives one build's page against
+the other build's server. It extracts `git archive <commit>` into `<dir>/src`, so it makes no
 worktree or branch, and builds each part as that commit's own image build does:
 `bun install --frozen-lockfile`, the contracts' `gen:go` and `build`, `bun run build:web`, the
 commit's own `packages/envoy-client/scripts/build-dispatch-cli.sh`, and `go build ./cmd/dispatch`
@@ -259,8 +261,11 @@ packages/envoy/scripts/build-dispatch-build.sh --commit <sha|tag> --out <dir>
 `--previous-release` builds the newest `legion-envoy-v*` tag that is an ancestor of
 `git merge-base HEAD origin/main`, so it needs `origin/main` and the tags fetched. `--commit HEAD`
 builds the current branch the same way. The script refuses a commit that is not an ancestor of
-`HEAD`, and a commit whose migrations stop below 0117: two builds share one database only from 0117
-on (`cmd/dispatch/README.md`, "Database migrations"). `<dir>` must be absent or empty, or already
+`HEAD`, and a commit older than the release `legion-envoy-v20.1.0`, the oldest build either test
+can run as the earlier side: that release carries migration 0117, from which two builds share one
+database (`cmd/dispatch/README.md`, "Database migrations"), serves on a socket handed to it, which
+the browser harness holds for it, and knows the one dev sign-in cookie key that run gives both of
+its servers. `<dir>` must be absent or empty, or already
 hold a complete build of the same commit, which the script leaves as it is. It then holds
 `envoy-dispatch`, `web/` (the web app), `dispatch.js` (the `dispatch` command, run as
 `bun dispatch.js`), `pmdoc/testdata/corpus/`, `pmdoc/schema/blocks.json` and `text/testdata/` from

@@ -61,15 +61,16 @@ const dispatchServer = {
 // so they start after it, on ports held for them before it started (`heldAhead`). B runs the
 // envoy-dispatch DISPATCH_E2E_BINARY_B names when it is set (a path from packages/envoy too), in
 // place of the one run-server.sh builds from this tree: a previous release's build, so a browser
-// drives two builds of the server at once (e2e/cross-build.multiprocess.e2e.ts). Such a build
-// cannot serve on a held socket, so it binds DISPATCH_E2E_PORT_B, which the run must then set.
+// drives two builds of the server at once (e2e/cross-build.multiprocess.e2e.ts). That build must
+// be legion-envoy-v20.1.0 or later (packages/envoy/scripts/build-dispatch-build.sh refuses an
+// older one): it serves on the socket held for it, as this tree's build does, and knows the
+// shared key below, so B starts exactly as A does and no run names a port.
 // Both sign cookies with one key, so a person signed in through whichever answered stays signed
 // in on the other: under dev sign-in the key their one shared value derives, under
 // DISPATCH_E2E_SIGNIN=oidc (e2e/harness-signin.ts) one DISPATCH_SIGNING_KEY, beside the dev OIDC
 // issuer's client secret. Each is generated here, once per run, since each run-server.sh is a
 // process of its own. Every importer generates its own, and only the process that starts the
-// servers hands its own to them. A previous release knows no shared key and signs with its own
-// (run-server.sh).
+// servers hands its own to them.
 const clientSecret = randomBytes(32).toString("base64url");
 
 function dispatchListeners(): HarnessListener[] {
@@ -78,12 +79,6 @@ function dispatchListeners(): HarnessListener[] {
   }
   const sharedKey = randomBytes(32).toString("base64url");
   const webDistB = process.env.DISPATCH_E2E_WEB_DIST_B;
-  if (binaryB !== undefined && !process.env.DISPATCH_E2E_PORT_B) {
-    throw new Error(
-      "DISPATCH_E2E_BINARY_B names a server that cannot serve on a held socket. " +
-        "Set DISPATCH_E2E_PORT_B to a free port for it."
-    );
-  }
   const heldAhead = {
     keeperEnv: "DISPATCH_E2E_LISTEN_FROM",
     portEnv: "DISPATCH_E2E_SERVER_PORT",

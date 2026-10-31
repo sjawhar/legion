@@ -31,9 +31,12 @@
 #   text/testdata/                    the commit's reference-form fixtures
 #   COMMIT                            the full sha, written last: a directory with it is complete
 #
-# The refusals: a commit that is not an ancestor of HEAD, and a commit whose migrations stop below
-# 0117. Two builds share one database only from 0117 on (cmd/dispatch/README.md, "Database
-# migrations"), so an older build cannot be the previous side of the test.
+# The refusals: a commit that is not an ancestor of HEAD, and a commit older than the release
+# legion-envoy-v20.1.0, the oldest build either two-build test can run as the earlier side. That
+# release carries migration 0117, from which two builds share one database (cmd/dispatch/README.md,
+# "Database migrations"); it serves on a socket handed to it (DISPATCH_LISTEN_FD), which the
+# browser suite's harness holds for it; and it knows DISPATCH_DEV_SIGNIN_SHARED_KEY, the one cookie
+# key that run gives both of its servers (packages/dispatch/e2e/run-server.sh).
 set -euo pipefail
 
 usage() {
@@ -88,8 +91,7 @@ done
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)
 readonly root
-readonly migrations=packages/envoy/internal/dispatch/store/migrations
-readonly floor=117
+readonly release_floor=legion-envoy-v20.1.0
 
 if [[ -n "$previous_release" ]]; then
   git -C "$root" rev-parse --verify --quiet origin/main >/dev/null ||
@@ -107,16 +109,10 @@ sha=$(git -C "$root" rev-parse --verify --quiet "$commit^{commit}") ||
 git -C "$root" merge-base --is-ancestor "$sha" HEAD ||
   fail "$commit ($sha) is not an ancestor of HEAD. Give a commit in the history of HEAD."
 
-newest=0
-while IFS= read -r file; do
-  name=${file##*/}
-  [[ "$name" =~ ^([0-9]{4})_.*\.up\.sql$ ]] || continue
-  number=$((10#${BASH_REMATCH[1]}))
-  ((number > newest)) && newest=$number
-done < <(git -C "$root" ls-tree --name-only "$sha" "$migrations/")
-((newest > 0)) || fail "$commit ($sha) has no Dispatch migrations in $migrations. The two-build test needs migration $(printf '%04d' "$floor") or later in the earlier build."
-((newest >= floor)) ||
-  fail "$commit ($sha) has migrations up to $(printf '%04d' "$newest") only. The two-build test needs migration $(printf '%04d' "$floor") or later in the earlier build."
+floor_sha=$(git -C "$root" rev-parse --verify --quiet "$release_floor^{commit}") ||
+  fail "this repository has no tag $release_floor, the oldest release a build of this script may be. Fetch the tags, then run this script again."
+git -C "$root" merge-base --is-ancestor "$floor_sha" "$sha" ||
+  fail "$commit ($sha) is older than the release $release_floor. The two-build tests need that release or later as the earlier build: it shares one database with this tree's build, serves on the socket the browser harness holds for it, and signs cookies with that run's shared dev sign-in key."
 
 if [[ -n "$resolve" ]]; then
   printf '%s\n' "$sha"
