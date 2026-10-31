@@ -5,7 +5,7 @@ import { useLayoutEffect, useState } from "react";
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
 import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
-import type { DocumentJSON, ParseReply, ParseRequest, ParseSchema } from "./markdown-parse.worker";
+import type { DocumentJSON, ParsedBody, ParseRequest, ParseSchema } from "./markdown-parse.worker";
 import { markdownWorkerThreshold } from "./markdown-worker-threshold";
 import { referenceSpans } from "./reference-spans";
 import {
@@ -284,17 +284,13 @@ function newParseWorker(): Worker {
  * before it can answer anything, which costs more than the one stale parse it would save. A turn
  * streaming into the live view therefore leaves the worker exactly one stale frame - the one it
  * was already parsing - and the frame the reader is waiting for is posted the moment that answer
- * lands, rather than queueing behind every frame the stream has written since.
+ * lands, rather than queueing behind every frame the stream has written since. That stale frame
+ * is the newest parse the reader can be given until the stream pauses, so the body that asked
+ * for it is still shown it (`keepAPostedParse`), rather than watching an unchanging paint.
  */
-const parseQueue = new WorkerQueue<SentBody, ParseReply, ParsedAnswer>({
+const parseQueue = new WorkerQueue<SentBody, ParsedBody, ParsedAnswer>({
   stopAnAbandonedJob: false,
-  answeredId(reply) {
-    return "ready" in reply ? undefined : reply.id;
-  },
   answerOf(body, reply) {
-    if ("ready" in reply) {
-      return undefined;
-    }
     if (reply.doc === undefined) {
       // The parser refused the body: its one final failure, which reads as its literal text.
       const refused: ParsedAnswer = { openMermaidFence: undefined, parsed: undefined };
@@ -312,7 +308,7 @@ const parseQueue = new WorkerQueue<SentBody, ParseReply, ParsedAnswer>({
         "Parsing a long Markdown body on the page, its answer does not fit the schema",
         error
       );
-      return undefined;
+      return parseOnThePage(body);
     }
     rememberUpTo(answers, ANSWER_LIMIT, body.key, answer);
     return answer;
@@ -323,9 +319,6 @@ const parseQueue = new WorkerQueue<SentBody, ParseReply, ParsedAnswer>({
     // from the schema of the first long body it is sent and parses every later one the same way.
     worker.postMessage({ blockSchema: first.engine.blockSchema } satisfies ParseSchema);
     return worker;
-  },
-  isReady(reply) {
-    return "ready" in reply;
   },
   limitMs() {
     return deadlineMs;
@@ -367,6 +360,17 @@ export function setParseDeadline(limitMs = PARSE_TIME_LIMIT_MS): void {
   deadlineMs = limitMs;
 }
 
+/** What a caller of `renderWithEngine` wants beyond the rendering itself. */
+export interface RenderWithEngineOptions {
+  /** Keeps the caller's place on a parse the worker has already been posted when the render is
+   *  cancelled, so that answer still reaches `render` (`worker-queue.ts`, `keepIfPosted`). A
+   *  surface asks for it where an answer to a source it has moved on from is still worth
+   *  showing - a streaming turn, whose reader would otherwise watch a body that never changes -
+   *  and must then expect a rendering of a source it no longer holds. Off by default: a
+   *  cancelled render runs no more. */
+  readonly keepAPostedParse?: boolean;
+}
+
 /** Renders `markdown` with a loaded engine: parsed here for a body up to the threshold; for a
  *  longer one the answer already cached for it, or a pending rendering now and the parsed
  *  document once the worker answers. */
@@ -374,7 +378,8 @@ function renderLoaded(
   engine: MarkdownEngine,
   markdown: string,
   softBreaks: SoftBreaks,
-  render: (rendering: MarkdownRendering) => void
+  render: (rendering: MarkdownRendering) => void,
+  { keepAPostedParse = false }: RenderWithEngineOptions
 ): () => void {
   if (!parsesInTheWorker(markdown)) {
     render({
@@ -410,7 +415,8 @@ function renderLoaded(
     () => ({ engine, key, markdown, softBreaks }),
     ({ openMermaidFence, parsed }) => {
       render({ engine, openMermaidFence, parsed, pending: false });
-    }
+    },
+    { keepIfPosted: keepAPostedParse }
   );
 }
 
@@ -434,16 +440,18 @@ function renderLoaded(
  * deadline leaves that body to the page's own thread, so a reader always ends with a formatted
  * body; only the parser refusing a body ends in its literal text.
  *
- * Returns the cancel: a cancelled `render` never runs again, and the body it was waiting for is
- * parsed for whoever else waits.
+ * Returns the cancel: a cancelled `render` never runs again - unless the caller asked to keep a
+ * posted parse (`RenderWithEngineOptions`) and the worker is holding that body, whose answer
+ * still reaches it - and the body it was waiting for is parsed for whoever else waits.
  */
 export function renderWithEngine(
   markdown: string,
   softBreaks: SoftBreaks,
-  render: (rendering: MarkdownRendering) => void
+  render: (rendering: MarkdownRendering) => void,
+  options: RenderWithEngineOptions = {}
 ): () => void {
   if (readyEngine !== undefined) {
-    return renderLoaded(readyEngine, markdown, softBreaks, render);
+    return renderLoaded(readyEngine, markdown, softBreaks, render, options);
   }
   let cancelled = false;
   let cancelAnswer: (() => void) | undefined;
@@ -466,7 +474,7 @@ export function renderWithEngine(
       render({ engine: undefined, openMermaidFence: undefined, parsed: undefined, pending: false });
       return;
     }
-    cancelAnswer = renderLoaded(engine, markdown, softBreaks, render);
+    cancelAnswer = renderLoaded(engine, markdown, softBreaks, render, options);
   })();
   return () => {
     cancelled = true;

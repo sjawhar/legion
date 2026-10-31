@@ -72,7 +72,7 @@ import {
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import { dangerText } from "../../theme/classes";
-import type { MermaidReply, MermaidRequest } from "./mermaid-render.worker";
+import type { DrawnSource, MermaidRequest } from "./mermaid-render.worker";
 import { rememberUpTo, type WorkerJob, WorkerQueue } from "./worker-queue";
 
 /** Draws one body block, or one editor block, once its source's answer arrives. */
@@ -80,12 +80,6 @@ type LateDraw = (drawn: MermaidDrawing) => void;
 /** Parses a source with the engine and soft-break policy that parsed the body; `undefined` for a
  *  source the engine refuses. */
 type Reparse = (source: string) => ProseMirrorNode | undefined;
-
-/** One source the worker is drawing, or is about to (`worker-queue.ts`). Its key is the source
- *  itself, normalised, which is what a drawing is cached under. */
-interface MermaidJob extends WorkerJob {
-  readonly key: string;
-}
 
 /** How long the worker may draw one source before it is refused and the worker terminated. On a
  *  2-CPU issue pod, in Chromium's worker a flowchart of 50 edges draws in under 0.4 s and one of
@@ -210,15 +204,9 @@ function noteSettled(): void {
  * worker costs, where the parse queue keeps its own worker for the opposite reason
  * (`markdown-engine.ts`).
  */
-const mermaidQueue = new WorkerQueue<MermaidJob, MermaidReply, MermaidDrawing>({
+const mermaidQueue = new WorkerQueue<WorkerJob, DrawnSource, MermaidDrawing>({
   stopAnAbandonedJob: true,
-  answeredId(reply) {
-    return "ready" in reply ? undefined : reply.id;
-  },
   answerOf(job, reply) {
-    if ("ready" in reply) {
-      return undefined;
-    }
     let drawn: CachedDrawing;
     if ("markup" in reply) {
       try {
@@ -234,9 +222,6 @@ const mermaidQueue = new WorkerQueue<MermaidJob, MermaidReply, MermaidDrawing>({
   },
   createWorker() {
     return new Worker(new URL("./mermaid-render.worker.ts", import.meta.url), { type: "module" });
-  },
-  isReady(reply) {
-    return "ready" in reply;
   },
   limitMs() {
     return timeLimitMs;

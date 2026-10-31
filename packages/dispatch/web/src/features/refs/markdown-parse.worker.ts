@@ -37,6 +37,7 @@ import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import type { BlockSchema } from "../../api/types";
 import { endsInOpenMermaidFence } from "./mermaid-diagrams";
+import type { WorkerReply } from "./worker-queue";
 
 /** The block schema the page loaded, which this worker builds its engine from. It is posted once,
  *  before the first body. */
@@ -62,11 +63,16 @@ export interface DocumentJSON {
   readonly text?: string;
 }
 
-/** What the worker posts: that it is ready, or the answer to one request. An answer with no
- *  `doc` is a body the parser refused. */
-export type ParseReply =
-  | { ready: true }
-  | { id: number; doc?: DocumentJSON; openMermaidFence?: boolean };
+/** What this worker has to say about one body: the parsed document, with the open-fence check
+ *  made with the parse beside it. No `doc` is a body the parser refused. */
+export interface ParsedBody {
+  doc?: DocumentJSON;
+  openMermaidFence?: boolean;
+}
+
+/** What the worker posts: that it is ready, or the answer to one request, under the id the
+ *  request carried (`WorkerReply`). */
+export type ParseReply = WorkerReply<ParsedBody>;
 
 /** The dedicated worker's own scope: `self`, typed as far as this module uses it (the SPA's
  *  TypeScript program carries the DOM library, not the worker one). */

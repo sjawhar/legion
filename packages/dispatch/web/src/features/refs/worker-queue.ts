@@ -4,7 +4,9 @@
  * goes to (`mermaid-diagrams.ts`). Both wanted the same queue - a ready handshake before the
  * first job, one job in flight, a deadline that starts when the worker can begin, terminate and
  * replace, drop what nobody waits for on a microtask, ignore an answer to a job already dropped -
- * and had written it twice, so a fix to either reached one of them (sjawhar/legion#2519).
+ * and had written it twice, so a fix to either reached one of them (sjawhar/legion#2519). They
+ * speak one protocol too (`WorkerReply`), so the queue reads a reply's `ready` and `id` itself
+ * and neither owner writes that twice.
  *
  * What differs is the policy, which `WorkerQueuePolicy` carries: what the worker is, what a job
  * is posted as, and above all what becomes of a job the worker cannot answer. The diagram
@@ -16,8 +18,10 @@
  * is the one place the two still differ (`stopAnAbandonedJob`): a diagram's layout can run for
  * seconds, so the renderer is terminated and replaced, while a fresh parse worker costs more
  * than the parse it would save - the worker holds a module of its own and builds a headless
- * engine before it can answer anything - so the parse queue lets the worker finish and drops the
- * answer. Either way the next job waits for that one rather than being posted behind it: a turn
+ * engine before it can answer anything - so the parse queue lets the worker finish. Its answer
+ * is dropped where nobody wants it, and kept where the owner asked to keep a posted job
+ * (`keepIfPosted`), which is how a streaming turn is shown the frame the worker was holding.
+ * Either way the next job waits for that one rather than being posted behind it: a turn
  * streaming into the live view hands the worker one stale frame, never one per frame.
  */
 
@@ -26,6 +30,16 @@
 export interface WorkerJob {
   readonly key: string;
 }
+
+/**
+ * What a worker of this folder posts, which is the one protocol both of them speak: the ready
+ * handshake, once its imports have loaded and before it answers anything, and then one answer
+ * per job, naming the job by the id it was posted under. `Answered` is what the worker has to
+ * say about a job, which its owner's policy turns into the answer the page keeps
+ * (`WorkerQueuePolicy.answerOf`); the queue itself reads nothing of a reply but `ready` and
+ * `id`.
+ */
+export type WorkerReply<Answered> = { ready: true } | ({ id: number } & Answered);
 
 /** One job in the queue: what its owner knows about it, the id it was posted under, and every
  *  render waiting on its answer. */
@@ -38,7 +52,7 @@ interface Queued<Job extends WorkerJob, Answer> {
 }
 
 /** What a queue does that its two owners do differently. */
-export interface WorkerQueuePolicy<Job extends WorkerJob, Reply, Answer> {
+export interface WorkerQueuePolicy<Job extends WorkerJob, Answered, Answer> {
   /**
    * Terminates the worker holding a job nobody waits for any more, rather than letting it
    * finish. True where the work the worker is doing costs more than a fresh worker does, false
@@ -50,17 +64,12 @@ export interface WorkerQueuePolicy<Job extends WorkerJob, Reply, Answer> {
   createWorker(first: Job): Worker;
   /** Posts `job` under `id`, which names its answer. */
   post(worker: Worker, id: number, job: Job): void;
-  /** Whether `reply` is the worker's ready handshake, which is what lets a job be posted. */
-  isReady(reply: Reply): boolean;
-  /** The job `reply` answers, by the id it was posted under; `undefined` where it answers none. */
-  answeredId(reply: Reply): number | undefined;
-  /** `job`'s answer as `reply` carries it, which the policy caches; `undefined` where the policy
-   *  cannot take the worker's answer, which settles the job as `withoutTheWorker` does. */
-  answerOf(job: Job, reply: Reply): Answer | undefined;
-  /** `job`'s answer where the worker that held it gave none: its deadline ran out, or the answer
-   *  it gave could not be taken. A deadline that ran out has terminated the worker first, and
-   *  the jobs behind it go to a fresh one; an answer that could not be taken leaves the worker
-   *  where it is. */
+  /** `job`'s answer as the worker's reply carries it, which the policy caches. The queue has
+   *  already matched the reply to `job` by its id, so what is left is the owner's own reading of
+   *  it; an owner that cannot take the answer answers as it does without the worker. */
+  answerOf(job: Job, reply: { id: number } & Answered): Answer;
+  /** `job`'s answer where the worker that held it gave none: its deadline ran out, which has
+   *  terminated that worker first, so the jobs behind it go to a fresh one. */
   withoutTheWorker(job: Job): Answer;
   /** `job`'s answer where no worker will run at all: one could not be created, its chunk did not
    *  load, or one crashed. */
@@ -75,8 +84,8 @@ export interface WorkerQueuePolicy<Job extends WorkerJob, Reply, Answer> {
   settled?(): void;
 }
 
-export class WorkerQueue<Job extends WorkerJob, Reply, Answer> {
-  private readonly policy: WorkerQueuePolicy<Job, Reply, Answer>;
+export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
+  private readonly policy: WorkerQueuePolicy<Job, Answered, Answer>;
   /** The jobs waiting to be posted, oldest first; the one in flight is not among them. */
   private queued: Queued<Job, Answer>[] = [];
   /** The job the worker is holding: posted and not answered. Nothing else is posted until it is
@@ -93,7 +102,7 @@ export class WorkerQueue<Job extends WorkerJob, Reply, Answer> {
   private dropQueued = false;
   private lastId = 0;
 
-  constructor(policy: WorkerQueuePolicy<Job, Reply, Answer>) {
+  constructor(policy: WorkerQueuePolicy<Job, Answered, Answer>) {
     this.policy = policy;
   }
 
@@ -110,8 +119,22 @@ export class WorkerQueue<Job extends WorkerJob, Reply, Answer> {
    * Returns the cancel: it takes `waiter` off the job, so a cancelled render never runs and
    * holds none of its caller's DOM while the worker works, and then queues the drop on a
    * microtask, after any re-render in the same commit has asked again.
+   *
+   * `keepIfPosted` is for an owner whose answer is worth having even once it has asked for
+   * something newer: a cancel then leaves `waiter` on a job the worker has already been posted,
+   * so that answer still reaches it, and takes it only off a job still waiting to be posted,
+   * which is dropped as any other. A turn streaming into the live view asks that way
+   * (`markdown-engine.ts`): every frame cancels the frame before it, and the frame the worker is
+   * holding carries the only parse the reader can be shown before the stream ends
+   * (sjawhar/legion#2519). Such an owner must expect an answer to a source it has moved on from,
+   * and must say for itself when that answer stops being worth painting.
    */
-  wait(key: string, make: () => Job, waiter: (answer: Answer) => void): () => void {
+  wait(
+    key: string,
+    make: () => Job,
+    waiter: (answer: Answer) => void,
+    { keepIfPosted = false }: { keepIfPosted?: boolean } = {}
+  ): () => void {
     if (this.noWorker) {
       waiter(this.policy.withoutAWorker(make()));
       return () => undefined;
@@ -135,6 +158,9 @@ export class WorkerQueue<Job extends WorkerJob, Reply, Answer> {
         return;
       }
       cancelled = true;
+      if (keepIfPosted && this.inFlight === waiting) {
+        return;
+      }
       const at = waiting.waiters.indexOf(waiter);
       if (at !== -1) {
         waiting.waiters.splice(at, 1);
@@ -216,7 +242,7 @@ export class WorkerQueue<Job extends WorkerJob, Reply, Answer> {
     }
     this.worker = started;
     this.ready = false;
-    started.addEventListener("message", (event: MessageEvent<Reply>) => {
+    started.addEventListener("message", (event: MessageEvent<WorkerReply<Answered>>) => {
       this.answered(started, event.data);
     });
     started.addEventListener("error", (event) => {
@@ -226,18 +252,18 @@ export class WorkerQueue<Job extends WorkerJob, Reply, Answer> {
     });
   }
 
-  private answered(from: Worker, reply: Reply): void {
+  private answered(from: Worker, reply: WorkerReply<Answered>): void {
     // An answer from a worker since replaced says nothing about the job a fresh one holds.
     if (from !== this.worker) {
       return;
     }
-    if (this.policy.isReady(reply)) {
+    if ("ready" in reply) {
       this.ready = true;
       this.postNext();
       return;
     }
     const held = this.inFlight;
-    if (held === undefined || this.policy.answeredId(reply) !== held.id) {
+    if (held === undefined || reply.id !== held.id) {
       return;
     }
     window.clearTimeout(this.timer);
@@ -246,10 +272,11 @@ export class WorkerQueue<Job extends WorkerJob, Reply, Answer> {
     // The worker starts on the next job while this answer is turned into what the page needs.
     this.postNext();
     // Nothing is kept for a job the page has moved on from: the answer is dropped where it
-    // arrives, rather than costing the thread the work of taking it and the cache a place.
+    // arrives, rather than costing the thread the work of taking it and the cache a place. A
+    // waiter that asked to keep a posted job (`keepIfPosted`) is still one, so a streaming turn
+    // is shown the frame the worker was holding.
     if (held.waiters.length > 0) {
-      const answer = this.policy.answerOf(held.job, reply);
-      this.settle(held, answer ?? this.policy.withoutTheWorker(held.job));
+      this.settle(held, this.policy.answerOf(held.job, reply));
     }
     this.policy.settled?.();
   }

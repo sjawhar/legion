@@ -239,11 +239,25 @@ function* paintBlockInSlices(
   finishBlock(built);
   yield;
   // The reader's own text goes as the first batch of the body arrives, so the element holds one
-  // or the other at every moment the engine draws, and the batches fill it from there.
-  element.replaceChildren();
-  const batch = { left: ATTACH_BATCH };
-  while (built.firstChild !== null) {
-    yield* attachNode(element, built.firstChild, batch);
+  // or the other at every moment the engine draws, and the batches fill it from there. What it
+  // held waits off the page meanwhile and goes back if this paint is stopped before its last
+  // batch, so a paint the next answer takes over from leaves the whole body the reader was
+  // reading, never the prefix of one that was still arriving (sjawhar/legion#2519).
+  const held = document.createDocumentFragment();
+  while (element.firstChild !== null) {
+    held.appendChild(element.firstChild);
+  }
+  let landed = false;
+  try {
+    const batch = { left: ATTACH_BATCH };
+    while (built.firstChild !== null) {
+      yield* attachNode(element, built.firstChild, batch);
+    }
+    landed = true;
+  } finally {
+    if (!landed) {
+      element.replaceChildren(held);
+    }
   }
 }
 
