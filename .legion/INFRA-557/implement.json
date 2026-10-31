@@ -2,45 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-31T02:30:00Z",
-  "round": "review round 12",
+  "completed": "2026-10-31T09:30:00Z",
+  "round": "tester's round-18 failure",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "ff705a787c7e128e525b17ecf1507493ce78d498",
-  "answersReview": "9acbebf28427371875bc47863603b4c4bcb1b082",
+  "codeHead": "9c2471397600f57efa702c1859cfe390e3b499b8",
+  "answersTest": "7494c07d267c3fab008d2900325ba707a6fa0346",
   "proof": [
     {
-      "criterion": "A holder whose receive connection alone stays down releases the lease; the standby delivers every message in order within 15 s; the cut pod never takes the lease back while down and stands by after the heal",
-      "surface": "two real envoy-listener processes under the rendered ListenerPermissions grant on nats-server; pod-a behind mpLaneRelay, which freezes only its 'envoy-listener pod-a' connection and refuses its reconnects",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -v -run '^TestTwoPodsReceiveConnection' ./cmd/listener",
-      "observed": "pod-a WARN 'listener lease released: the receive connection is down' down_ms 3001; pod-b took the lease 6.163 s after the cut; 289 messages exactly once in publish order, the first after the cut at 12.109 s; pod-a held the lease at no poll over 20 s more of cut; after the heal 200 role standby. Quick reconnect (back 1.008 s after detection) kept the lease",
-      "headSha": "ff705a787c7e128e525b17ecf1507493ce78d498",
-      "negativeControl": "before the fix: 'waited 15s for pod-b to take the lease over' (TestTwoPodsReceiveConnectionLostHandsOverWithin15s)"
+      "criterion": "On a route that drops packets, a holder whose receive connection alone is lost releases the lease and a standby delivers within 15 s (the tester's red row, unmodified)",
+      "surface": "two real envoy-listener processes under the rendered ListenerPermissions grant; pod-a's receive connection cut by mpLaneRelay.blackholeNew, its reconnect dials hanging",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=3 -timeout 30m -run '^TestTwoPodsReceiveConnection' -v ./cmd/listener",
+      "observed": "TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s PASS 3 of 3, all 110 messages within 15 s, slowest 11.951/11.949/11.954 s; the other two receive-cut rows pass 3 of 3",
+      "headSha": "9c2471397600f57efa702c1859cfe390e3b499b8",
+      "negativeControl": "at ff705a78 (and the tree before 6828bbb3): 'pod-a never released the lease for its lost receive connection' / '10 of 150 messages reached their session later than 15s'"
     },
     {
-      "criterion": "The lease's gate: release after the bound, not before; a standby with its receive connection down takes no record",
-      "surface": "lease on a real NATS KV bucket with a fake clock",
-      "command": "cd packages/envoy && go test -count=1 -run 'TestLeaseHolderReleases|TestLeaseHolderKeeps|TestLeaseStandbyTakesNoRecord' ./cmd/listener/",
-      "observed": "pass",
-      "headSha": "ff705a787c7e128e525b17ecf1507493ce78d498",
-      "negativeControl": "without the gate: 'the holder still holds the lease 3s after its receive connection went down'; 'the standby's poll of an absent record waits 1s holding true'"
+      "criterion": "The lease's receive signal and Client.Connected never wait on nats.go's connection lock",
+      "surface": "internal/bus client against a real nats-server; the receiver with the receive connection's locks held",
+      "command": "cd packages/envoy && go test -count=1 -run TestConnectedAnswersWhileAReconnectDialHangs ./internal/bus/ && go test -count=1 -run TestTheReceiveSignalAnswersWhileTheReceiveConnectionsLocksAreHeld ./cmd/listener/",
+      "observed": "both answer within 100 ms",
+      "headSha": "9c2471397600f57efa702c1859cfe390e3b499b8",
+      "negativeControl": "with the old reads: 'Connected took 4.896773062s while nats.go held the connection's lock'; 'the receive signal took 4.89439741s to answer'"
     },
     {
-      "criterion": "The two merges of main keep both sides and the PR merges",
-      "surface": "listener suites; infra; ci.yaml router check; semantic-line-breaks check; GitHub",
-      "command": "go test -tags multiprocess -count=1 -timeout 40m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; infra ./core/... ./aws/... ./render/... ./gcp/...; .github/scripts/check-ci-filters.sh; bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md; gh api repos/sjawhar/legion/pulls/2404",
-      "observed": "multiprocess ok 672.197s and listener ok 802.402s at 6c38d745; infra ok; 29 gates; layout check passes; mergeable true. https://github.com/sjawhar/legion/pull/2404#issuecomment-6537570887",
-      "headSha": "ff705a787c7e128e525b17ecf1507493ce78d498",
-      "negativeControl": "before each merge GitHub read dirty"
+      "criterion": "No regression; the merge of main; the PR merges",
+      "surface": "listener suites, internal/bus with -race, ci.yaml router check, layout check, GitHub",
+      "command": "go test -tags multiprocess -count=1 -timeout 40m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; go test ./internal/bus/... (and -race); .github/scripts/check-ci-filters.sh; bun scripts/semantic-line-breaks.ts scripts/e2e/README.md packages/envoy/AGENTS.md; gh api repos/sjawhar/legion/pulls/2404",
+      "observed": "multiprocess ok 706.820s; listener ok 837.423s; bus ok 335.069s / race ok 354.697s; 29 gates; layout ok; mergeable true. https://github.com/sjawhar/legion/pull/2404#issuecomment-6541571491",
+      "headSha": "9c2471397600f57efa702c1859cfe390e3b499b8",
+      "negativeControl": "a data race (TestAConnectionThatClosesAsARecoveryEndsIsRecovered) while a connect set the flag before install wrote c.Conn; fixed by counting a connect only for the installed connection"
     }
   ],
   "filesChanged": [
-    "580089b5: cmd/listener/lease.go (leaseReceiveLost, SetReceiveSignal, receiveDown, releaseReceiveLost, poll gate), receive.go (receiveUp), main.go (wiring), lease_receive_test.go (new), multiprocess_harness_test.go (mpLaneRelay), multiprocess_takeover_test.go (two rows), lease_recovery_test.go (wait for the take's signal), README.md, AGENTS.md, changie fragment pr2404-receive-lost-release.yaml",
-    "6c38d745: merge of main (#2517 role claim view check in okAnswer; ci.yaml; docs)",
-    "ff705a78: merge of main (#2422 AGENTS.md layout)"
-  ],
-  "trickyParts": [
-    "The bound is 3 s: the measured reconnect after a cut came 1.008 s after detection, and 3 s still lands the take-over and first delivery at 12.1 s of the 15 s bound.",
-    "A receive-lost release whose bucket write fails keeps the hold and retries, so a short outage of both connections does not hand the lease over."
+    "6828bbb3: internal/bus/nats.go (connectedConn, installedConn, noteConnection, markConnected, settleConnected; Connected reads the flag), internal/bus/connect.go (state callback), internal/bus/connected_test.go (new) and five existing bus tests (new parameter), cmd/listener/receive.go (clientConn, subscribed atomics; lock-free receiveUp and reconnected), receive_stop.go, receive_signal_test.go (new), receive_durable_test.go, README.md, AGENTS.md, changie fragment",
+    "9c247139: merge of main (scripts/e2e/README.md in main's one-sentence-per-line layout)"
   ],
   "deviations": [],
   "openQuestions": [],
