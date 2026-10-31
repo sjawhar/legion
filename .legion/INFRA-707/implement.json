@@ -2,17 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-707",
-  "completed": "2026-10-31T05:29:50Z",
+  "previousHandoff": "d178bdad0bf5a85bcd12f736e2dbe96ec10c624b",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2496",
-  "codeHead": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
-  "round": "answers review round 2 at f33d68d2 (review.json, 3b11437f): the backfill lock and three minors (b67efab8), then a forward merge of main f4ec92ee (6b5c1050)",
+  "codeHead": "688fe778051692832d1d21f7c20d3b74fea3a5d1",
+  "round": "answers review round 3 at 6b5c1050+4a9fcec3 (review.json, 2306f275): a confirmation forward merge of main 6a4aa615 so CI runs on a fresh merge ref; the PR diff fingerprint is unchanged (6da3c25e...)",
   "proof": [
     {
       "criterion": "1. A test drives an agent write racing browser updates on one warm room, fails on main, passes at the head over enough rounds (count and main's failure rate stated).",
       "surface": "Go tests against a real Postgres 18.6 + pgvector 0.8.7 (local, as CI runs them)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/docs/ -count=1 -timeout 75m ; go test ./internal/dispatch/docs/ -run TestStoredOrderSoak -count=1 -v -args -stored-order-rounds=200 ; CGO_ENABLED=1 go test -race ./internal/dispatch/docs/ -run 'TestStoredOrder|TestAFlush|TestAReadPoint|TestAShadow|TestAFailedRooms|Backfill' -count=1 ; go test ./cmd/dispatch/ ./loadtest/browsertype/ -count=1",
-      "observed": "At 6b5c1050: whole docs package ok 1472.1s; soak rounds=200 counted=200 mismatching_counted_rounds=0 mismatches=0; race lane ok, no data race; cmd/dispatch and browsertype ok; TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice passes (and fails with the backfill's lock line removed). p = 1 on main, so n = 200.",
-      "headSha": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<url> go test -p 1 ./internal/dispatch/docs/ -run 'TestStoredOrder|Backfill|TestAFailedRooms|TestAFlush|TestAReadPoint|TestAShadow' -count=1 ; go test -p 1 ./cmd/dispatch/ ./loadtest/browsertype/ -run 'StoredOrder|Protect' -count=1",
+      "observed": "Confirmation round at 688fe778 (PR diff byte-identical to 6b5c1050+4a9fcec3): go build and vet clean; TestStoredOrder*, Backfill, TestAFailedRooms*, TestAFlush*, TestAReadPoint*, TestAShadow* ok; cmd/dispatch stored-order and loadtest/browsertype ok. Full proof at 6b5c1050 (same diff): whole docs package ok 1472.1s, soak 200 rounds 0 mismatches, race ok. p = 1 on main, so n = 200.",
+      "headSha": "688fe778051692832d1d21f7c20d3b74fea3a5d1",
       "negativeControl": "main 7c2effba's production code plus this branch's storedorder.go and storedorder_test.go: all ten window tests and the soak fail (179 mismatches over 12 of 12 counted rounds); the tester rebuilt the same control from main's own tree (170 mismatches)."
     },
     {
@@ -25,9 +25,7 @@
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs/{service.go,ledger.go,flush.go,roomcursor.go}",
-    "packages/envoy/internal/dispatch/docs/backfill_order_test.go (new race test), stale_room_test.go (eviction waits for the stamp's commit)",
-    "packages/envoy/AGENTS.md (merge resolution in main's one-sentence-per-line layout)"
+    "None of the PR's own files: a merge of main 6a4aa615 with no conflicts."
   ],
   "trickyParts": [
     "RoomFlush is exported (fields unexported) because it crosses VersionedStore, which a test store in internal/dispatch/api wraps.",
@@ -38,10 +36,7 @@
     "Acceptance 2 cluster evidence was taken at eb0fe0be; rounds since change no live write, settlement, snapshot, worker or checker behaviour except that the backfill now takes the document lock before its flush."
   ],
   "answersToReview": [
-    "service.go:2349 (blocking): backfillBlockIDs takes lockDocumentRoom right after Begin, before storeRepair reads the room's queue; the exception paragraph and flushThrough's exception sentence are gone. New TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice: red with the lock line removed (bob's edit stored in 2 rows, class mismatch), green with it. The stale-room test is now TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt (option B; option A failed because an eviction before Begin drops the stamp's class).",
-    "service.go:2355: Ledger.settling renamed ownTx at both sites and in inTransaction; the type doc names settlement and the backfill.",
-    "ledger.go:240: takeRoomCursors decides the write/flush pairing once.",
-    "roomcursor.go:301: appendingCursor's comment corrected.",
-    "Forward merge of main f4ec92ee at 6b5c1050: only packages/envoy/AGENTS.md conflicted (main re-laid it out one sentence per line); resolved in main's layout with this PR's corrections. Comment https://github.com/sjawhar/legion/pull/2496#issuecomment-6539229273. All four threads replied to and resolved."
+    "Forward merge of main 6a4aa615 at 688fe778, no conflicts, fingerprint 6da3c25e34949f93a5ca0e06a392a5d479de11ab47c5f97105dd869857ba5322 before and after; the reviewer's 4a9fcec3 kept. Comment https://github.com/sjawhar/legion/pull/2496#issuecomment-6541753254. Main carries #2598 (broker claims test); #2594 (reconnect test) had not landed, so TestAReconnectCatchesUpWhatTheListenerMissed alone red would be main's flake.",
+    "All review threads were already resolved; none open."
   ]
 }
