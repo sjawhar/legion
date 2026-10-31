@@ -85,7 +85,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   Type check one package against its own tsconfig.
   The root has no tsconfig.json, so a bare `bunx tsc --noEmit` there checks nothing: it prints tsc's help and exits 1.
   CI runs this command in each of these, in a job of ci.yaml that runs when a change touches a file it reads:
-  packages/contracts, envoy-client, envoy-plugin, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch, and docs/site
+  packages/contracts, envoy-client, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch, and docs/site
 
 - `bunx tsc --noEmit -p scripts/dispatch && bunx tsc --noEmit -p scripts/github-apps`
 
@@ -536,7 +536,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Changelog entries are fragment files**
   — a change that earns a changelog line adds a fragment to each package it changes that has a `.changie.yaml`:
-  the seven packages `.github/workflows/changelog-fold.yaml` lists in `CHANGELOG_PACKAGES` (`pi-legion`, `pi-envoy`, `envoy-plugin`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`).
+  the six packages `.github/workflows/changelog-fold.yaml` lists in `CHANGELOG_PACKAGES` (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`).
   A package without one, such as `packages/daemon`, has no fold.
   Write it with `go run github.com/miniscruff/changie@v1.26.0 new --kind <kind> --body '<text>' --custom Issue=pr<number>` from the package directory, `<number>` being this pull request's own number.
   Every `.changie.yaml` sets `fragmentFileFormat: '{{.Custom.Issue}}-{{.Kind}}-{{.Time.Format "20060102-150405"}}'`, so the file lands at `packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`.
