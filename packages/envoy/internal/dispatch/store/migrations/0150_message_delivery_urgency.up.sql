@@ -10,6 +10,11 @@
 -- the table under its ACCESS EXCLUSIVE lock, while `not valid` writes the catalog alone and still
 -- refuses every row written or updated after it (packages/envoy/cmd/dispatch/README.md). No
 -- release validates it: every row below it carries no urgency at all.
+--
+-- An attempt a person's Retry opens records no urgency and sends none. The column writes the
+-- catalog alone and refuses and rewrites no row, so the census answers 0; the sweep reads its
+-- candidates through 0138's partial indexes, and this migration builds none of its own. It is
+-- additive, so rolling back past it is an image rollback alone.
 alter table message_deliveries add column urgency text;
 alter table message_deliveries add constraint message_deliveries_urgency_check
   check (urgency in ('low', 'med', 'high', 'blocking')) not valid;

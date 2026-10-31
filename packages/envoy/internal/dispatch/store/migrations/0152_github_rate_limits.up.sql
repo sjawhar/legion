@@ -25,7 +25,9 @@
 --
 -- A new table: nothing existing is read, locked or rewritten, and the release before this one
 -- neither reads nor writes it, so it rolls beside this one (cmd/dispatch/README.md, "Database
--- migrations"), each of its processes obeying GitHub's answers on its own as before.
+-- migrations"), each of its processes obeying GitHub's answers on its own as before and its
+-- sweeps keeping their backoff in the NATS KV bucket. The census answers 0, and rolling back past
+-- it is an image rollback alone.
 create table github_rate_limits (
     scope text primary key,
     until timestamptz not null,

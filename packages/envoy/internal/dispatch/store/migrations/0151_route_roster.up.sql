@@ -26,7 +26,9 @@
 --
 -- A new table: nothing existing is read, locked or rewritten, and the release before this one
 -- neither reads nor writes it, so it rolls beside this one (cmd/dispatch/README.md, "Database
--- migrations"), keeping its per-process copy while this release reads the shared row.
+-- migrations"), keeping its per-process copy while this release reads the shared row, so while
+-- both serve only processes of this release agree on a route and on the agents list. The census
+-- answers 0, and rolling back past it is an image rollback alone.
 create table route_roster (
     id boolean primary key default true check (id),
     answered boolean not null,

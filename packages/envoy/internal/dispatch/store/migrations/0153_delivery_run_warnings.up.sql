@@ -19,7 +19,8 @@
 --
 -- A new table: nothing existing is read, locked or rewritten, and the release before this one
 -- neither reads nor writes it, so it rolls beside this one (cmd/dispatch/README.md, "Database
--- migrations"), each of its processes logging its own warnings as before.
+-- migrations"), each of its processes logging its own warnings as before. The census answers 0,
+-- and rolling back past it is an image rollback alone.
 create table delivery_run_warnings (
     repo text not null,
     run_id bigint not null,
