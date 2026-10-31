@@ -35,8 +35,8 @@ import (
 const (
 	liveMachineID = "example-host-a"
 	liveSession   = "s1"
-	// liveServingSession is a session the listener reaches on its serving port, as the OpenCode
-	// plugin's sessions are reached, rather than over NATS.
+	// liveServingSession is a session the listener reaches on its serving port, as a session that
+	// serves an HTTP port is reached, rather than over NATS.
 	liveServingSession = "s-serving"
 	liveRole           = "example-role"
 	// liveHealthWindow is how long the listener has to answer "healthy" (its durable bound under
