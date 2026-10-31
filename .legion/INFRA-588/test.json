@@ -2,84 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "completed": "2026-10-31T04:53:00Z",
-  "round": 11,
-  "head": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
-  "codeHead": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
-  "roundNote": "Round 11 is the parent's last round, so it is a full test round, not a fingerprint check. 75680e45 forward-merges main d7e1daaaaf70 (which carries INFRA-629/630/631/632) and raises the closings to main's last numbers (daemon 0064, Dispatch 0149). It also adds a daemon changelog fragment and relays out the store README. I re-ran the migration proofs and the five INFRA-633 acceptance checks myself, on branches and a live run of my own. The workspace was recreated, so I stood up a fresh PostgreSQL 17.11 + pgvector 0.8.0 from Debian packages on the issue volume (docs/solutions/testing/...INFRA-42.md).",
+  "completed": "2026-10-31T05:28:00Z",
+  "round": 12,
+  "head": "4ee7760ffc3ee0840dac87d739eabe791a8c311d",
+  "codeHead": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
+  "roundNote": "Round 12 tests the answer to round 11 and the architect's scope (Envoy 86d49bda). c50be619 deletes the four daemon fragments: this PR's and main's three orphans. a02ce346 lays out scripts/conflicts/README.md. 7fbb983f adds refuse_unlisted to release-push.sh fold-plan, runs changelog-fold.yaml's fold_build on any PR that touches packages/*/.changes/**, adds the tests and adds one AGENTS.md line. It also answers the architect's two questions (Envoy 9e49f4e0): (A) does the refusal stop a PR before the merge, and (B) does an orphan on main now stop the whole fold. Migrations and scripts/conflicts code are unchanged since round 11, so its proofs of them still apply.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Every figure of the implementer's I re-ran holds: the merges both ways for the fragments, the skills and the guides; check-dist; the measurement (my run to 04:37Z reads 130 PRs, 408 conflicting merges, 0 in the after state for all 8 globs, changelog-only 3.4%; theirs to 04:00Z reads 403, 3.5%); and the migration tests and boots. The implementer's proof does not cover the daemon fragment below, which the architect flagged (Envoy 321fe6ce)."
+    "how": "The three items hold where I drove them. No packages/daemon/.changes remains, and c50be619 deletes exactly those 4 files. The README carries the note and passes the layout checker; a word-level diff shows only the note added and the flags table turned into a list. release-push.test.sh passes 628/0, and with the refuse_unlisted call removed 3 of its new checks fail, so the tests pin the refusal. The proof is right about what fold-plan does. It does not cover where fold-plan runs, which is both of the architect's questions, and both fail."
   },
   "failures": [
     {
-      "criterion": "Changelog entries are fragment files that the fold takes (AGENTS.md 'Changelog entries are fragment files'; the architect's brief: a fragment, not a CHANGELOG edit)",
-      "evidence": "The head adds packages/daemon/.changes/unreleased/pr-2411-migration-timestamps.yaml. packages/daemon has no .changie.yaml (ls: no such file), and .github/workflows/changelog-fold.yaml's CHANGELOG_PACKAGES (lines 65-68) does not list it. AGENTS.md line 540: 'A package without one, such as packages/daemon, has no fold.' Driven with the fold's own planner at this head: 'bash .github/scripts/release-push.sh fold-plan <the CHANGELOG_PACKAGES list>' exits 0 and plans 23 fragments, none under packages/daemon. The same command with packages/daemon added refuses: '::error::release-push.sh fold-plan: packages/daemon holds no CHANGELOG.md at HEAD to fold its fragments into'. So the fragment never folds and stays on main. Required fix, as the architect specified: delete packages/daemon/.changes/unreleased/pr-2411-migration-timestamps.yaml and change nothing else. The packages/envoy fragment is right: it names no Dispatch key, and the fold's plan holds it for envoy's next release, as it does every unreleased fragment of a released package. I wrote no permanent red test. The only test that could catch this is a repository gate over every .changes/ directory, and main already holds three such daemon fragments (fix-open-roles-live.yaml, pr-2542-daemon-silent-cut.yaml, squash-commit-message.yaml), so the gate would fail on main itself. I am reporting those three to the controller as a defect outside this tree."
+      "criterion": "(A) The orphan-fragment refusal stops a pull request before the merge (architect, Envoy 9e49f4e0: a required check must go red on a branch that adds packages/daemon/.changes/unreleased/x.yaml)",
+      "evidence": "The refusal runs only in changelog-fold.yaml's fold_build job (workflow 'Fold Changelog Fragments'). gh api repos/sjawhar/legion/rulesets: ruleset 12331919 'main' (branch, active) requires exactly two contexts, ci-ok and pr-title. There is no branch protection to read beyond it (403 to this App). ci-ok is ci.yaml's aggregate of ci.yaml's own jobs, and its needs block mentions no fold or changelog job (awk over the block: 0 matches); a job cannot need a job of another workflow. On this head GitHub lists fold_build as its own check run (https://github.com/sjawhar/legion/actions/runs/41171920695/job/124451503859), apart from ci-ok and pr-title. ci.yaml runs release-push.test.sh, the script's unit tests over fixtures, not fold-plan over the repository's tree. Driven: a branch off 7fbb983f that adds packages/daemon/.changes/unreleased/x.yaml makes fold-plan exit 1 with the ::error:: naming the file, so fold_build would be red, but neither required context runs it, and the merge is not blocked. The gate does not gate. Fix, as the architect named it: run the same refusal in a job the base branch requires. I wrote no permanent red test for this one: it would have to assert what a workflow file contains, a check of a check, and the ruleset read plus the driven branch are the evidence."
+    },
+    {
+      "criterion": "(B) An orphan fragment that reaches main does not stop the fold of the packages it can fold, and is named (architect, Envoy 9e49f4e0)",
+      "evidence": "changelog-fold.yaml's 'Plan the fold' step runs plan=$(.github/scripts/release-push.sh fold-plan $CHANGELOG_PACKAGES), so a non-zero exit fails fold_build, and fold_publish (needs: fold_build) does not run. Driven on real trees with the CHANGELOG_PACKAGES list: at 7fbb983f, clean, fold-plan exits 0 and plans 23 fragments of 7 packages; with one commit adding packages/daemon/.changes/unreleased/x.yaml it exits 1 and prints no plan ('::error::release-push.sh fold-plan: packages/daemon/.changes/unreleased/x.yaml at HEAD: each is under the .changes/ of a package the fold was not given…'). The previous code, 710f02a2, with the same added file exits 0 and plans the same 23 fragments of 7 packages. So one orphan on main now stops every package's fold: a regression. Red test, its own commit a26683995f0f: .github/scripts/release-push.test.sh check 'fold-plan: an orphan fragment on main does not stop the plan of the packages the fold is given', in the implementer's fold-orphan fixture while the daemon fragment is present. It expects exit 0, the envoy plan line, and stderr naming packages/daemon/.changes/unreleased/pr-1-daemon.yaml. Command: bash .github/scripts/release-push.test.sh, which fails with 'FAIL: fold-plan: an orphan fragment on main does not stop the plan of the packages the fold is given', Results 628 passed, 1 failed. Under 710f02a2 the fixture gives exit 0 and the plan but an empty stderr, so the test needs both halves: the fold continues and the orphan is named. The implementer's own check 'a fragment of a package no spec names is refused by name, with no plan' asserts the opposite of the required behaviour and is theirs to change."
     }
   ],
-  "failed": 1,
+  "failed": 2,
   "proof": [
     {
-      "criterion": "Migration identifiers two concurrent pull requests cannot both claim, after the forward merge raised the closings to main's last numbers",
-      "surface": "each runner's identifier check on real branches in a scratch clone off 75680e45, and the tests at this head",
-      "command": "branch nx adds daemon 0065_t588_nx and Dispatch 0150_t588_nx (+census); branches ta and tb add 20261031050000 and 20261031051000; git merge-tree ta tb both orders; go test on each branch and the merge; at this head, go test of migrationid, pgmigrate, the daemon migrations package and Dispatch's identifier and migrate tests against my Postgres",
-      "observed": "migrationid closings: 0064_pull_request_pass_settlement.up.sql at 64, 0149_event_horizon.up.sql at 149, main's last numbered files. nx refused in both: 'migration 0065_t588_nx.up.sql takes version 65: the numbered migrations ended at 64…' and '…0150… ended at 149…'. ta, tb and the merge (tree c35d533f9e2f, the same both orders) pass. All identifier and migrate tests pass, including my three red tests, whose files are unchanged (jj diff a25cec37..75680e45: 0 files). No existing .sql file differs from main",
-      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
-      "negativeControl": "the nx refusals above"
+      "criterion": "The four daemon fragments are gone and nothing else moved",
+      "surface": "the tree at this head, and commit c50be619",
+      "command": "ls packages/daemon/.changes; jj diff -r c50be619560f --stat; release-push.sh fold-plan <CHANGELOG_PACKAGES> at 7fbb983f",
+      "observed": "packages/daemon/.changes: no such directory. c50be619 deletes fix-open-roles-live.yaml, pr-2411-migration-timestamps.yaml, pr-2542-daemon-silent-cut.yaml and squash-commit-message.yaml, 4 files, 0 insertions. fold-plan on the clean tree: exit 0, 23 fragments of 7 packages",
+      "headSha": "4ee7760ffc3ee0840dac87d739eabe791a8c311d",
+      "negativeControl": "the same fold-plan with one daemon fragment added exits 1 (failure B)"
     },
     {
-      "criterion": "The migrations run once and old pods keep answering, from main's code through this release",
-      "surface": "the daemon's real Migrate and Dispatch's real Migrate and Pool.Healthy, built at main d7e1daaa, this head and the merged timestamped tree, on PostgreSQL 17.11 + pgvector 0.8.0",
-      "command": "daemon: main, then this head, then the merged tree, then again; fresh: merged. Dispatch: main seeds a database; main's process loops Healthy while this head migrates; this head's process loops while the merged tree migrates; control: main's process while the merged tree migrates",
-      "observed": "daemon: 64, 0 (version 64), 2 (version 20261031051000), 0; fresh 66. Dispatch: this head over main keeps column integer, rows 149, and main's pods read 25 clean, 0 failed; the merged tree over this head: column bigint, rows 151, and this head's pods read 25 clean, 0 failed",
-      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
-      "negativeControl": "main's pods under the merged tree directly: 24 clean, 1 failed (the release-order case the docs state)"
+      "criterion": "scripts/conflicts/README.md is laid out one sentence per line with the note, and its words are unchanged",
+      "surface": "scripts/semantic-line-breaks.ts on the file; a word-level diff of c50be619..a02ce346",
+      "command": "bun scripts/semantic-line-breaks.ts scripts/conflicts/README.md; diff of the whitespace-split words of the two versions",
+      "observed": "layout exit 0, and the file-head note is present. The words added are the note's four sentences and list markers where the flags table became a list; the table's pipes and separator are gone; no other word changed",
+      "headSha": "4ee7760ffc3ee0840dac87d739eabe791a8c311d",
+      "negativeControl": "the same checker failed the file at 75680e45 (line 147, R1; round 11)"
     },
     {
-      "criterion": "INFRA-633 #1 and #2: changelog fragments and built claude-envoy files no longer conflict",
-      "surface": "git merge-tree on branches in a scratch clone; packages/claude-envoy's check-dist at this head; the rebuild workflow's runs on main",
-      "command": "f1 and f2 off this head each add one fragment to packages/envoy/.changes/unreleased; s1 and s2 each append a line to skills/legion-worker/SKILL.md and skills/legion-architect/SKILL.md; merge-tree both orders; (cd packages/claude-envoy && bun run check-dist); gh run list --workflow claude-envoy-rebuild.yaml --branch main",
-      "observed": "fragments: exit 0 both orders. Skills: exit 0 both orders, each branch touching only its skills/ file. check-dist: 'dist/ and legion/ match a fresh build'. Rebuild run 41164510507 at d7e1daaaaf70: success. This PR changes no CHANGELOG.md and no packages/claude-envoy/dist or legion file",
-      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
-      "negativeControl": "c1 and c2 off c892b97d each add an entry under packages/envoy/CHANGELOG.md's [Unreleased]: exit 1 both orders, naming packages/envoy/CHANGELOG.md"
-    },
-    {
-      "criterion": "INFRA-633 #3: two pull requests editing different sentences or list items of a restructured guide do not conflict",
-      "surface": "git merge-tree on commits built with git plumbing in a scratch clone, for AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, scripts/e2e/README.md and docs/kubernetes.md",
-      "command": "for each guide at this head: one branch appends a sentence to a paragraph's first sentence line and another to its third; one branch adds a list item after the first item of a list and another after the third; merge-tree both orders. Then the same two sentence edits on the c892b97d layout, the paragraph rewrapped at 100 columns as its convention had",
-      "observed": "all five guides: sentence pair exit (0, 0), list pair exit (0, 0)",
-      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
-      "negativeControl": "the old layout with the paragraph rewrapped: exit (1, 1) in all five guides"
-    },
-    {
-      "criterion": "INFRA-633 #4: the guidance is on main",
-      "surface": "grep of the guides at this head (main plus this PR, which changes none of these lines)",
-      "command": "grep AGENTS.md, packages/envoy/AGENTS.md, packages/claude-envoy/AGENTS.md and README.md; then grep every AGENTS.md, README.md and SKILL.md for 'commit (the) built|rebuilt|dist/|legion/'",
-      "observed": "AGENTS.md:537 'Changelog entries are fragment files' and :550 'Never edit a CHANGELOG.md'; AGENTS.md:6 and packages/envoy/AGENTS.md:5 carry the layout note, and AGENTS.md:570 has the convention; packages/claude-envoy/AGENTS.md:82,99,249 and README.md:298 say a pull request never commits dist/ or legion/",
-      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
-      "negativeControl": "no guide tells a pull request to commit built files (the second grep is empty)"
-    },
-    {
-      "criterion": "INFRA-633 #5: the measurement after the fixes",
-      "surface": "the measure.ts CLI against sjawhar/legion on GitHub, fresh workdir",
-      "command": "bun scripts/conflicts/measure.ts --since 2026-10-28T09:12:59Z --branch-prefix legion/ --workdir $TMPDIR/t588/meas --compare-with before.json --fixed 'packages/*/CHANGELOG.md=184897acc118' --fixed 'packages/claude-envoy/dist/**=78d5f6b61539' --fixed 'packages/claude-envoy/legion/**=78d5f6b61539' --fixed 'packages/envoy/AGENTS.md=8a72cf798a5f' --fixed 'packages/envoy/cmd/dispatch/README.md=8a72cf798a5f' --fixed 'AGENTS.md=d7e1daaaaf70' --fixed 'scripts/e2e/README.md=d7e1daaaaf70' --fixed 'docs/kubernetes.md=d7e1daaaaf70' (the merge commits of #2419, #2423, #2422 and #2474)",
-      "observed": "exit 0, about 13 min, 867 MB. 130 PRs read, 95 carrying, 408 conflicting merges. Every fixed glob has 0 in the after state: changelogs 1/38/0, dist 5/4/0, legion 0/1/0, envoy AGENTS.md 111/18/0, Dispatch README 99/13/0, AGENTS.md 9/0/0, e2e README 5/1/0, kubernetes 10/1/0. Changelog-only 89/253 (35.2%) -> 14/408 (3.4%); changelog + guides + generated 108 (42.7%) -> 55 (13.5%)",
-      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
-      "negativeControl": "my own git merge-base --is-ancestor loop over the raw records gives envoy AGENTS.md 111 before / 18 transition and changelogs 1 / 38, with no after, matching the tool"
-    },
-    {
-      "criterion": "The script, its router job and the filters after the merge",
-      "surface": "the CLI, its tests, and the repository's two filter checks at this head; GitHub's check list at 75680e45",
-      "command": "bun scripts/conflicts/measure.ts --from-json before.json --branch-prefix legion/; bun test, biome and tsc on scripts/conflicts; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh and check-image-trigger-paths.sh; gh api check-runs",
-      "observed": "scripts/conflicts unchanged since round 10 (0 files). 126/80/253, tiers 89/108; 40 pass, biome clean, tsc 0; check-ci-filters exit 0 ('conflicts-script: 37 files, 0 uncovered', 29 gates); image check exit 0 (5 builds). GitHub's changes job succeeded and scheduled conflicts-script on this head",
-      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
-      "negativeControl": "round 5: removing scripts/conflicts/** from the filter fails check-ci-filters with 15 uncovered"
+      "criterion": "The implementer's fold-plan tests pin the refusal",
+      "surface": ".github/scripts/release-push.test.sh",
+      "command": "bash .github/scripts/release-push.test.sh at 7fbb983f; again in a scratch tree with fold-plan's refuse_unlisted call replaced by a no-op",
+      "observed": "628 passed, 0 failed",
+      "headSha": "4ee7760ffc3ee0840dac87d739eabe791a8c311d",
+      "negativeControl": "with the call removed: 625 passed, 3 failed ('a fragment of a package no spec names is refused by name, with no plan', 'that refusal names the specs…', 'a file under .changes/ outside unreleased/ is refused too…')"
     }
   ],
   "observations": [
-    "CI at code head 75680e45: changes succeeded. Every other job, lint, typecheck, test, pr-title and conflicts-script among them, was queued when I read it (04:46Z). 506d7816 is handoff-only.",
-    "For the architect: scripts/conflicts/README.md is a new file and carries no semantic-line-breaks note. scripts/semantic-line-breaks.ts fails it (line 147, R1). AGENTS.md says 'a new guide is written this way and carries the note'. Whether a script's README is a guide is a judgment, and no gate checks it. The three files the guides test checks, and every guide carrying the note, pass. packages/envoy/deploy/README.md and loadtest/README.md fail the checker too but carry no note, so they are outside the rule.",
-    "Raising the closings follows main: another pull request that merges a numbered migration before this one does will need the closing raised again in this branch's next forward merge.",
+    "CI: 7fbb983f has no check runs of its own, since it was pushed under 4ee7760f. At 4ee7760f, changes, fold_build, build and pr-title were queued when I read them (05:25Z), and no ci-ok result exists yet.",
+    "Round 11's migration, rolling-deploy and five-acceptance-check proofs apply: no migration, store or scripts/conflicts file changed since 75680e45.",
     "Round 7's release-order note, round 4's squash-body note and round 1's `since`-edge note still apply."
   ]
 }
