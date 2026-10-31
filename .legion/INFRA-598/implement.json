@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-31T15:10:42Z",
+  "completed": "2026-10-31T19:20:51Z",
   "proof": [
+    {
+      "criterion": "Review round 7: an unreadable lock makes the watcher and the runner-job wait act on nothing at that poll and keep polling; the guard's note carries the failed read's words; one copy_exec; live.transport never written",
+      "surface": "cluster.sh under cluster.test.sh's fakes (FAKE_LOCK_GET_FAIL_TIMES failing one whole copy_is_ours), the loadgen Go tests, shellcheck and check-ci-images",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -count=1 ./loadtest/ && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh && timeout 2400 bash loadtest/cluster/cluster.test.sh",
+      "observed": "cluster.test.sh 54 PASS, 0 FAIL: (bb) the watcher records pg_disk and stops the job on a later poll after one whole failed copy_is_ours, and runner_wait stops the job on a later poll and prints timeout; (aa) the note carries 'The connection to the server 10.0.0.1:443 was refused'; (cc) copy_exec takes -t and -i in either order; go test ok incl. TestNewSummaryNamesNoLiveTransport; run-step, common, shellcheck, check-ci-images exit 0; PR MERGEABLE after the push",
+      "headSha": "d9d38377fa58",
+      "negativeControl": "against 183c0d7f's cluster.sh: 'runner_stop's note does not carry what the failed read of the lock said' and 'the disk watcher took 1 poll(s): it stopped watching at the poll whose every read of the lock failed instead of reading again at the next one'"
+    },
     {
       "criterion": "Tester round 9: cluster.test.sh's new assertions are deterministic under CPU load (test-only change)",
       "surface": "cluster.test.sh under the tester's loader (4 busy loops on the pod's 2 CPUs), one run at a time on pod legion-infra-infra-598, and GitHub CI's envoy-go at the merged head",
@@ -170,7 +178,8 @@
     "A typed replay still loses edits where typing changed the logged text (68 named and 44 unnamed edits in the 20-minute r16-typing); the README says typed replays are not compared with the outage.",
     "The tester's cases (o) and (p) keep their shellcheck notes; CI runs no shellcheck on cluster.test.sh.",
     "The four cluster files are exceptions under 'a CI job runs it, and it fetches nothing' rather than the architect's suggested 'no CI job runs it' for three of them: envoy-go runs cluster.test.sh, which sources cluster.sh, templates nats.yaml and runs render-nats.sh --pin-from, so 'no CI job runs it' would be false; none of them hands an image to a registry in CI.",
-    "Main's probeDashboard replaced this PR's decideLiveTransport: it falls back to SSE on any dial failure (this PR's only on a 404) and probes even with -live 0; neither was re-added."
+    "Main's probeDashboard replaced this PR's decideLiveTransport: it falls back to SSE on any dial failure (this PR's only on a 404) and probes even with -live 0; neither was re-added.",
+    "Leftover check before completing: ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|loadruns|cluster.test.sh|while :' printed no lines."
   ],
   "openQuestions": []
 }
