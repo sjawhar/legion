@@ -1032,13 +1032,15 @@ func (h *helperLog) repo(name string, keys ...[2]string) string {
 	path := filepath.Join(h.dir, name)
 	initialise := exec.Command(h.realGit, "init", "--quiet", path)
 	// The init creates path, so it runs in the log's own directory, which holds it; the configure
-	// below reaches the repository with -C.
+	// below runs in the repository it names with -C, which the init has made by then.
 	initialise.Dir = h.dir
 	if output, err := initialise.CombinedOutput(); err != nil {
 		h.t.Fatalf("init %s: %v: %s", name, err, output)
 	}
 	for _, kv := range keys {
-		if output, err := exec.Command(h.realGit, "-C", path, "config", "--add", kv[0], kv[1]).CombinedOutput(); err != nil {
+		configure := exec.Command(h.realGit, "-C", path, "config", "--add", kv[0], kv[1])
+		configure.Dir = path
+		if output, err := configure.CombinedOutput(); err != nil {
 			h.t.Fatalf("config %s: %v: %s", kv[0], err, output)
 		}
 	}

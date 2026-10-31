@@ -61,20 +61,23 @@ one whose queue overflows.
 ## A test that starts jj or git names a working directory
 
 jj searches upward from the directory it runs in for the closest `.jj` and opens that repository, and it has no ceiling option.
-`-R` names the workspace for a command that opens one, and the two that create a repository, `jj git clone` and `jj git init --colocate`, take no `-R` at all.
+`-R` names the workspace a command acts on, and the two that create a repository, `jj git clone` and `jj git init --colocate`, take no `-R` at all.
+`-R` does not keep jj off the repository its working directory sits in: jj 0.45.1 loads that repository's configuration before it applies `-R`, and `jj -R <b> log` run inside a repository `a` wrote `a/.jj/repo/config-id`.
+Every `-R` call site of `packages/daemon/internal/workspace` is safe because its `Dir` **is** its `-R` target (`RunCheckedIn`, `onClone`'s callers, `createWorkspace`'s `jj workspace add`), not because the flag fences jj in.
 A child process started with no working directory of its own inherits the test process's, which in a Legion issue pod is inside `$LEGION_WORKSPACE`, a jj workspace of the pod's real shared clone under `/legion/repos`.
 So a test whose jj child names no directory opens and writes that clone, and the same test is green on a GitHub runner, whose checkout is git-only with no `.jj` anywhere above it (dispatch://INFRA-623).
 
 - Set `Dir` on every `exec.Command` a test starts that runs `jj`, and on every one that runs `git`, to a directory the test made.
   A `--git-dir` is not enough on its own: it tells git which repository to act on and leaves the child standing wherever the test process stands, which is what the next reader of the command has to work out again.
 
-- The two probes that got this wrong were copies of one helper, `requireFilters` in `packages/daemon/internal/workspace/isolation_test.go` and the same probe inlined in `packages/daemon/internal/runtime/sandbox/boundary_test.go`, each running `jj config list` with no `Dir`.
+- The two probes that got this wrong were copies of one helper, now `testbin.RequireJJFilters` in `packages/daemon/internal/testbin`, each running `jj config list` with no `Dir`.
   A probe is as much a jj child as a fixture is.
 
-- A test that drives `packages/daemon/internal/workspace` needs nothing of its own: `execRunner.Run` refuses a `Command` whose `Dir` is not absolute, and refuses a jj command that creates a repository when that directory, or any above it, holds a `.jj` (`refuseEnclosingWorkspace`).
+- A test that drives `packages/daemon/internal/workspace` needs nothing of its own: `execRunner.Run` refuses a `Command` whose `Dir` is not absolute, and refuses a jj command that creates a repository when that directory, or any above it, holds a `.jj` directory (`refuseEnclosingWorkspace`).
   `TestProvisionLeavesTheEnclosingRepositoryUntouched` holds both on a runner, by provisioning from inside a decoy repository.
 
-- A test that builds a repository of its own puts it under `t.TempDir()`, so a `TMPDIR` inside a checkout is the one case that refuses rather than the one that corrupts.
+- A test that builds a repository of its own puts it under `t.TempDir()`, and `TMPDIR` must sit inside no checkout.
+  Nothing refuses the fixtures' own `jj git init --colocate` (`runSetup`, `enclosingRepository`): it runs outside the runner, where `refuseEnclosingWorkspace` never sees it, so under a `TMPDIR` inside a checkout it would read and migrate that checkout's repository first.
 
 ## Containers a test starts
 

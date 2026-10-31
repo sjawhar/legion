@@ -28,7 +28,9 @@ import (
 //
 // Half (a), with the state directory outside the decoy, holds every call site to a directory of
 // its own. Half (b), with the state directory inside it, is what holds the ancestor walk: a
-// directory the caller named has ancestors too, and jj still walks up through them.
+// directory the caller named has ancestors too, and jj still walks up through them. Half (b)
+// runs once per way the state directory is reached, because the path the operator names and the
+// path the child stands in need not be the same one.
 func TestProvisionLeavesTheEnclosingRepositoryUntouched(t *testing.T) {
 	for _, source := range []string{"github", "feed"} {
 		t.Run("a state directory outside it, from "+source, func(t *testing.T) {
@@ -52,24 +54,49 @@ func TestProvisionLeavesTheEnclosingRepositoryUntouched(t *testing.T) {
 		})
 	}
 
-	t.Run("a state directory inside it", func(t *testing.T) {
-		run := newLocalRunner(t)
-		decoy := enclosingRepository(t)
-		before := readEnclosingState(t, decoy)
-		t.Chdir(decoy)
+	// The second row is the configuration refuseSymlinkedLayout's own comment allows — the state
+	// directory itself is not checked, because an operator may reach it through a symlink — and
+	// it is the live operator case, a legion.yaml kept inside a checkout with state_dir resolved
+	// against it. jj reads such a directory physically: a child chdir'd into a path that holds a
+	// symlink asks the kernel where it stands, and the kernel answers with the link's target, so
+	// jj walks up from inside the decoy however the caller spelled the path.
+	for name, stateDir := range map[string]func(t *testing.T, decoy string) string{
+		"a state directory inside it": func(t *testing.T, decoy string) string {
+			return filepath.Join(decoy, "legion state")
+		},
+		"a state directory reached through a symlink into it": func(t *testing.T, decoy string) string {
+			link := filepath.Join(t.TempDir(), "state-link")
+			if err := os.Symlink(makeDir(t, filepath.Join(decoy, "legion state")), link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := newLocalRunner(t)
+			decoy := enclosingRepository(t)
+			before := readEnclosingState(t, decoy)
+			t.Chdir(decoy)
 
-		req := provisionRequest(t)
-		req.StateDir = filepath.Join(decoy, "legion state")
-		req.Source = FromGitHub(staticToken(testInstallationToken), req.StateDir)
-		working, err := Provision(context.Background(), run, req)
-		if err == nil {
-			t.Fatalf("Provision under the enclosing repository made %s, want a refusal: the shared clone would sit below %s, and every jj that creates a repository there would open it instead", working.Clone, decoy)
-		}
-		if enclosing := filepath.Join(decoy, ".jj"); !strings.Contains(err.Error(), enclosing) {
-			t.Errorf("Provision = %v, want a refusal naming the enclosing %s", err, enclosing)
-		}
-		assertEnclosingRepositoryUnchanged(t, decoy, before)
-	})
+			req := provisionRequest(t)
+			req.StateDir = stateDir(t, decoy)
+			req.Source = FromGitHub(staticToken(testInstallationToken), req.StateDir)
+			working, err := Provision(context.Background(), run, req)
+			if err == nil {
+				t.Fatalf("Provision with its state directory at %s made %s, want a refusal: the shared clone would sit below %s, and every jj that creates a repository there reads and writes that one as well", req.StateDir, working.Clone, decoy)
+			}
+			// Production names the directory read physically, so the assertion resolves the decoy
+			// too: a t.TempDir() below a symlinked TMPDIR makes the lexical path a different one.
+			resolved, resolveErr := filepath.EvalSymlinks(decoy)
+			if resolveErr != nil {
+				t.Fatal(resolveErr)
+			}
+			if enclosing := filepath.Join(resolved, ".jj"); !strings.Contains(err.Error(), enclosing) {
+				t.Errorf("Provision = %v, want a refusal naming the enclosing %s", err, enclosing)
+			}
+			assertEnclosingRepositoryUnchanged(t, decoy, before)
+		})
+	}
 }
 
 // enclosingRepository is the decoy: a colocated jj repository holding a commit of its own and a
@@ -269,8 +296,8 @@ func TestJJWorkspaceRootIsTheRepositoryFlagAlone(t *testing.T) {
 }
 
 // A jj command that creates a repository of its own is refused below a repository it does not
-// own, however far above it that repository sits, because jj would open and write that one
-// instead of creating its own.
+// own, however far above it that repository sits, because jj reads and writes that one as well
+// as creating its own.
 func TestAJJThatCreatesARepositoryIsRefusedInsideOne(t *testing.T) {
 	for name, tc := range map[string]struct {
 		// plant builds the tree below root and returns the directory the command would run in.
@@ -293,7 +320,11 @@ func TestAJJThatCreatesARepositoryIsRefusedInsideOne(t *testing.T) {
 			},
 			repository: "repository",
 		},
-		"the .jj above it is jj's workspace pointer, a file": {
+		// A regular file named `.jj` is not a repository to jj: its workspace pointer is the file
+		// `.jj/repo` inside a `.jj` directory, and jj 0.45.1 below such a file answers `Error:
+		// There is no jj repo in "."`. Allowing it is right because refusing it would refuse a
+		// provisioning run jj itself would carry out with no repository in sight.
+		"a regular file named .jj, which jj does not read as a repository": {
 			plant: func(t *testing.T, root string) string {
 				makeDir(t, filepath.Join(root, "workspace"))
 				if err := os.WriteFile(filepath.Join(root, "workspace", ".jj"), []byte("repo: ../repository/.jj/repo\n"), 0o644); err != nil {
@@ -301,7 +332,6 @@ func TestAJJThatCreatesARepositoryIsRefusedInsideOne(t *testing.T) {
 				}
 				return makeDir(t, filepath.Join(root, "workspace", "state"))
 			},
-			repository: "workspace",
 		},
 		"a directory below a repository that is not there yet": {
 			plant: func(t *testing.T, root string) string {
@@ -318,10 +348,16 @@ func TestAJJThatCreatesARepositoryIsRefusedInsideOne(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			root := t.TempDir()
+			// Production names the directory read physically, so the tree is planted below the
+			// resolved temporary root: a TMPDIR that is itself a symlink would otherwise leave
+			// the expectations on a path the refusal never names.
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			dir := tc.plant(t, root)
 
-			err := refuseEnclosingWorkspace(dir)
+			err = refuseEnclosingWorkspace(dir)
 			if tc.repository == "" {
 				if err != nil {
 					t.Fatalf("refuseEnclosingWorkspace(%s) = %v, want no refusal (no .jj may sit above the tests' temporary directory)", dir, err)
