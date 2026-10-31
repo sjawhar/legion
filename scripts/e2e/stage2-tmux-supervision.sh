@@ -302,11 +302,6 @@ expect_refusal() {
 
 # ---- setup -----------------------------------------------------------------------------------------
 
-model_route=${LEGION_E2E_MODEL_ROUTE:-}
-case "$model_route" in
-key-file | box-login) ;;
-*) fail "LEGION_E2E_MODEL_ROUTE must be key-file or box-login, not '$model_route'" ;;
-esac
 for tool in go docker jq curl python3 tmux bun mise socat secrets; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done

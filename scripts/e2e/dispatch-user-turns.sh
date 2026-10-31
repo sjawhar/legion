@@ -101,7 +101,7 @@ cleanup() {
   set +e
   # First, before anything slower can hang: the model route's key command, which bakes in the key
   # file's resolved path.
-  rm -rf "$work/model-gateway-key"
+  rm -rf "$work/model-key"
   tm capture-pane -p -t user >"$evidence/checks/session.pane" 2>/dev/null
   [ -z "$session_file" ] || cp "$session_file" "$evidence/session.jsonl" 2>/dev/null
   tm kill-server >/dev/null 2>&1

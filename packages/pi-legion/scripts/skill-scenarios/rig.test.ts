@@ -291,6 +291,54 @@ describe("a setup that fails after install_model_route", () => {
     expect(existsSync(path.join(kept, "profiles/probe/ready"))).toBe(true);
   });
 
+  // Catches: cmd_profile holding the provider route to the key-file route's two inputs. A provider
+  // label reaches the model through the operator's own block, so it needs neither
+  // LEGION_E2E_ANTHROPIC_KEY_FILE nor an install-key-file-model-route.sh in its checkout.
+  test("cmd_profile builds a provider label with no key file and no key-file installer", () => {
+    const dir = freshDir("provider-work");
+    const co = checkout();
+    rmSync(path.join(co, "scripts/e2e/lib/install-key-file-model-route.sh"));
+    const models = path.join(dir, "operator-models.yml");
+    writeFileSync(
+      models,
+      [
+        "providers:",
+        "  box-gateway:",
+        "    baseUrl: http://gateway.internal.example:4000",
+        '    apiKey: "!cat /run/user/1000/box/gateway-key"',
+        "    api: anthropic-messages",
+        "",
+      ].join("\n")
+    );
+    const script = [
+      "set -euo pipefail",
+      ...[
+        "fail",
+        "label_dir",
+        "on_exit",
+        "drop_unready_keys",
+        "install_provider_route",
+        "install_model_route",
+        "cmd_profile",
+      ].map(fn),
+      "route_model_id=claude-opus-4-8",
+      "checkout_commit() { printf 'fixture parents=base\\n'; }",
+      'work=$1; cmd_profile probe "$2"',
+    ].join("\n");
+    const run = bash(script, [dir, co], {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER_FILE: models,
+      LEGION_E2E_MODEL_PROVIDER: "box-gateway",
+    });
+    expect({ code: run.code, stderr: run.stderr }).toEqual({ code: 0, stderr: "" });
+    const P = path.join(dir, "profiles/probe");
+    expect(existsSync(path.join(P, "model-key"))).toBe(false);
+    expect(existsSync(path.join(P, "ready"))).toBe(true);
+    expect(readFileSync(path.join(P, "built-from"), "utf8")).toContain(
+      "model box-gateway/claude-opus-4-8\n"
+    );
+  });
+
   // Catches: a judge-profile build that fails at its second profile and keeps the first one's key
   // command.
   test("judge_profiles removes both profiles' model-key and marks nothing ready", () => {

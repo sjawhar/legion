@@ -423,9 +423,11 @@ cmd_profile() {
   [ ! -e "$P" ] || fail "$P exists; remove it to rebuild label $label"
   co=$(cd "$2" && pwd -P)
   [ -f "$co/scripts/e2e/lib/install-plugin-profile.sh" ] || fail "$co is not a Legion checkout"
-  [ -f "$co/scripts/e2e/lib/install-key-file-model-route.sh" ] ||
-    fail "$co has no scripts/e2e/lib/install-key-file-model-route.sh, the model route a label installs with its own checkout's installer: build the label from a checkout that has it"
-  [ -n "${LEGION_E2E_ANTHROPIC_KEY_FILE:-}" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
+  if [ "${LEGION_E2E_MODEL_ROUTE:-key-file}" = key-file ]; then
+    [ -f "$co/scripts/e2e/lib/install-key-file-model-route.sh" ] ||
+      fail "$co has no scripts/e2e/lib/install-key-file-model-route.sh, the model route a label installs with its own checkout's installer: build the label from a checkout that has it"
+    [ -n "${LEGION_E2E_ANTHROPIC_KEY_FILE:-}" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
+  fi
   mkdir -p "$P"
   on_exit "$(printf 'drop_unready_keys %q %q' "$P/ready" "$P/model-key")"
   printf '%s\n' "$co" >"$P/checkout"
@@ -1202,6 +1204,7 @@ judge_keys() {
 cmd_judge_omp() {
   [ $# = 3 ] || fail "usage: rig.sh judge-omp <ste|bare> <dir> <output file name>"
   local kind=$1 dir output=$3 skills status=0 omp P agent keys key_file h=/home/judge
+  local route=() host ip
   case $kind in ste) skills=(--skills asd-ste100) ;; bare) skills=(--no-skills) ;; *) fail "judge-omp: '$kind' is ste or bare" ;; esac
   dir=$(cd "$2" && pwd -P) || fail "judge-omp: $2 is not a directory"
   [ -f "$dir/prompt.txt" ] || fail "judge-omp: $dir has no prompt.txt"
