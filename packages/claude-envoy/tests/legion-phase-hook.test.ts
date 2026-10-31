@@ -2,7 +2,11 @@ import { expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport"
+import {
+  EnvoyApiError,
+  type PublishInput,
+  type PublishResult,
+} from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops"
 import { REMINDER } from "@legion/pi-shared/phase-stall"
@@ -80,7 +84,10 @@ async function harness(
     /** What the bridge answers the `attempt`th inbox write; queued by default. */
     readonly inboxAnswer?: (attempt: number) => Promise<void>
     /** What the listener answers the `attempt`th publish; accepted by default. */
-    readonly publish?: (input: PublishInput, attempt: number) => Promise<unknown>
+    readonly publish?: (
+      input: PublishInput,
+      attempt: number,
+    ) => Promise<Pick<PublishResult, "kept">>
   } = {},
 ): Promise<Harness> {
   const directory = await mkdtemp(join(tmpdir(), "claude-envoy-phase-hook-"))

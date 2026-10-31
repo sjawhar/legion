@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { ROLE_TOPIC_PREFIX, roleForPhase, roleToken } from "@legion/contracts";
 import type { LegionIssue, LegionState } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
-import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport";
+import {
+  EnvoyApiError,
+  type PublishInput,
+  type PublishResult,
+} from "@legion/envoy-client/transport";
 import type { ClaimCapability } from "./legion-phase-ops";
 import {
   LAST_MESSAGE_LIMIT,
@@ -30,8 +34,15 @@ import type { StallLimits } from "./stall-limits";
  * that makes an armed timer stale, is the whole defence against two timers sending two reminders.
  */
 
-/** Publishes one Envoy message (`EnvoyClient.publish`). */
-export type EnvoyPublish = (input: PublishInput) => Promise<unknown>;
+/**
+ * Publishes one Envoy message (`EnvoyClient.publish`), typed as the part of the listener's answer
+ * this reminder reads: `kept` alone. This sender publishes with `keep: false`, so every listener
+ * this code knows answers an unheld or lapsed role 404 and keeps nothing, and a kept answer is
+ * one none of them gives. It is read all the same (`tellArchitect`), because a listener that
+ * ignored the flag would otherwise have the run record an architect as told that no architect was
+ * ever handed the notice; reading it costs one field.
+ */
+export type EnvoyPublish = (input: PublishInput) => Promise<Pick<PublishResult, "kept">>;
 
 export interface PhaseReminderLog {
   readonly debug: (message: string, context?: Record<string, unknown>) => void;
@@ -300,13 +311,10 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       // A listener that kept the notice all the same (202, `PublishResult.kept`) has told no
       // architect, and its copy is dropped once the kept window passes. It is read as the 404 is:
       // nobody was told, so the run's next reminder publishes the same notice again under the
-      // same key.
-      if (
-        typeof answer === "object" &&
-        answer !== null &&
-        "kept" in answer &&
-        answer.kept === true
-      ) {
+      // same key. No listener this code knows answers it, since the publish above sends
+      // `keep: false`; it is read because one that ignored the flag would otherwise have this run
+      // record an architect as told that no architect was ever handed the notice.
+      if (answer.kept === true) {
         deps.log.debug("legion: the listener kept the architect notice; telling it again later", {
           issue: claim.issue,
           reminders,

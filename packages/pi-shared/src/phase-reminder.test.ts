@@ -4,6 +4,7 @@ import {
   createEnvoyClient,
   EnvoyApiError,
   type PublishInput,
+  type PublishResult,
 } from "@legion/envoy-client/transport";
 import { createPhaseReminder, type PhaseReminder } from "./phase-reminder";
 import type { PhaseStallEntry } from "./phase-stall";
@@ -68,7 +69,7 @@ interface Rig {
  * daemon holds no record for the issue, so every record check reminds. */
 function rig(options: {
   readonly sendReminder?: (reminder: string) => void | Promise<void>;
-  readonly publish?: (input: PublishInput) => Promise<unknown>;
+  readonly publish?: (input: PublishInput) => Promise<Pick<PublishResult, "kept">>;
 }): Rig {
   const timers: ArmedTimer[] = [];
   const sent: string[] = [];
@@ -109,7 +110,7 @@ function fireLast(timers: readonly ArmedTimer[]): void | Promise<void> {
 // new run began, must not mark the new run as told: that would silence its notice at every
 // threshold until the count reset again.
 test("a notice accepted after its run ended acknowledges nothing of the next run", async () => {
-  const listener = Promise.withResolvers<unknown>();
+  const listener = Promise.withResolvers<Pick<PublishResult, "kept">>();
   const reached = Promise.withResolvers<void>();
   let attempt = 0;
   const { reminder, timers, entries, published } = rig({
