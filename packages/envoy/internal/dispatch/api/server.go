@@ -512,7 +512,7 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 	s.routeIndex = routeIndexEntries(routes)
 	replays := s.keyedReplays()
 	for _, route := range routes {
-		handler := s.resolveShortIDs(route.Pattern, route.Handler)
+		handler := s.resolveShortIDs(route.Pattern, route.Auth, route.Handler)
 		if keyedMethod(route.Method) {
 			handler = s.keyedWrites(route.Method, route.Pattern, handler, replays[route.Method+" "+route.Pattern])
 		}

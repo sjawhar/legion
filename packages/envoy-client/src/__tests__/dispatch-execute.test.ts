@@ -10766,7 +10766,10 @@ describe("executeDispatchTool", () => {
     for (const id of [specAsk, specAsk.slice(0, 8)]) {
       requested.length = 0;
       await read(id);
-      expect([id, requested]).toEqual([id, [`/api/v1/asks/${id}`, "/api/v1/references", "/api/v1/references"]]);
+      expect([id, requested]).toEqual([
+        id,
+        [`/api/v1/asks/${id}`, "/api/v1/references", "/api/v1/references"],
+      ]);
     }
 
     const refusal = (id: string) =>
@@ -11142,9 +11145,7 @@ test("a comment named by a short id under a project document is resolved by Disp
   );
   expect(requests).toContain(`/api/v1/comments/${commentUuid}/resolve`);
   // The document's comment list is not read: the rule lives on the server.
-  expect(requests).not.toContain(
-    "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3/comments"
-  );
+  expect(requests).not.toContain("/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3/comments");
 });
 
 test("refuses to resolve a comment named by an ask reference", async () => {

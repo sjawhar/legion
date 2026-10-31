@@ -822,7 +822,8 @@ async function readAskRef(
   try {
     return await client.getAsk(normalizeUUID(id) ?? id, scope);
   } catch (error) {
-    const refused = error instanceof DispatchServiceError && (error.status === 404 || error.status === 400);
+    const refused =
+      error instanceof DispatchServiceError && (error.status === 404 || error.status === 400);
     if (!refused) throw error;
     const written = id.toLowerCase();
     const asks = await list();

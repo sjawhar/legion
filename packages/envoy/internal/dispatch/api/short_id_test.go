@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -205,6 +206,67 @@ func TestAShortIDIsResolvedWithinTheIssueTheLinkNames(t *testing.T) {
 	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), elsewhere) {
 		t.Errorf("short id under an issue without it: status=%d body=%s, want 404 naming %s",
 			missing.Code, missing.Body.String(), elsewhere)
+	}
+}
+
+// The bound on the rows a short id's range reads is a bound on the scope's own candidates: a
+// crowd of asks on other issues, all sharing the prefix, must neither hide the one the link
+// names nor let one of two asks on that issue read as unique.
+func TestTheCandidateBoundIsAppliedWithinTheScope(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	mine := createInteractionIssue(t, handler, "TEST", "The issue the link names", "A spec")
+	crowd := secondIssue(t, handler, "TEST", "Another issue entirely")
+	const shared = "1d7e45aa"
+	// Enough rows under the prefix, sorting before the one the link names, to fill the scan's
+	// bound several times over.
+	for index := range 30 {
+		insertAsk(t, database, fmt.Sprintf("%s-0000-4000-8000-0000000000%02x", shared, index), crowd, "Not this one?")
+	}
+	wanted := insertAsk(t, database, shared+"-ffff-4000-8000-000000000001", mine.Key, "This one?")
+
+	answer := sessionRequest(t, handler, http.MethodGet, "/api/v1/asks/"+shared+"?issue="+mine.Key, nil)
+
+	if answer.Code != http.StatusOK {
+		t.Fatalf("the scoped short id behind a crowd: status=%d body=%s, want 200", answer.Code, answer.Body.String())
+	}
+	if got := decodeBody[askRead](t, answer).Ask.ID; got != wanted {
+		t.Fatalf("the scoped short id opened %s, want %s", got, wanted)
+	}
+	// A second ask on that issue under the same prefix, still behind the crowd, makes it
+	// ambiguous within the scope rather than unique.
+	insertAsk(t, database, shared+"-ffff-4000-8000-000000000002", mine.Key, "Or this one?")
+	ambiguous := sessionRequest(t, handler, http.MethodGet, "/api/v1/asks/"+shared+"?issue="+mine.Key, nil)
+	if ambiguous.Code != http.StatusConflict {
+		t.Fatalf("two scoped asks behind a crowd: status=%d body=%s, want 409", ambiguous.Code, ambiguous.Body.String())
+	}
+}
+
+// A route's own authorization decides before any lookup: a bearer on a human-only route reads
+// its 403, never a 404 or a list of candidate ids it may not see.
+func TestAShortIDOnARouteTheCallerMayNotUseIsRefusedByTheRoute(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Human-only routes", "A spec")
+	const shared = "6b0c31fe"
+	askID := insertAsk(t, database, shared+"-0000-4000-8000-000000000001", issue.Key, "Which transport?")
+	insertAsk(t, database, shared+"-0000-4000-8000-000000000002", issue.Key, "Which region?")
+
+	// PUT /api/v1/me/asks/{id}/snooze is human-only.
+	refused := sessionRequest(t, handler, http.MethodPut, "/api/v1/me/asks/"+shared+"/snooze", map[string]any{
+		"snoozed_until": "2099-01-01T00:00:00Z",
+	})
+
+	if refused.Code != http.StatusForbidden || !strings.Contains(refused.Body.String(), `"code":"HUMAN_ONLY"`) {
+		t.Fatalf("a bearer on a human-only route: status=%d body=%s, want 403 HUMAN_ONLY", refused.Code, refused.Body.String())
+	}
+	if strings.Contains(refused.Body.String(), askID) {
+		t.Fatalf("the refusal named a candidate id: %s", refused.Body.String())
+	}
+	// The same short id resolves for a person, whom the route admits.
+	allowed := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/asks/"+shared+"/snooze", map[string]any{
+		"snoozed_until": "2099-01-01T00:00:00Z",
+	}, "alice")
+	if allowed.Code != http.StatusConflict || !strings.Contains(allowed.Body.String(), `"code":"AMBIGUOUS_ID"`) {
+		t.Fatalf("a person on the same route: status=%d body=%s, want 409 AMBIGUOUS_ID", allowed.Code, allowed.Body.String())
 	}
 }
 

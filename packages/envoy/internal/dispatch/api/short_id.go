@@ -81,19 +81,6 @@ type shortIDScope struct {
 	artifact string
 }
 
-func (s shortIDScope) named() bool { return s.issue != "" || s.artifact != "" }
-
-// holds reports whether a candidate row belongs to this scope.
-func (s shortIDScope) holds(row shortIDRow) bool {
-	if s.issue != "" && !strings.EqualFold(row.issue, s.issue) {
-		return false
-	}
-	if s.artifact != "" && !strings.EqualFold(row.artifact, s.artifact) {
-		return false
-	}
-	return true
-}
-
 // describe names where the lookup looked, with the preposition that reads: "on CORE-1", "in
 // this workspace".
 func (s shortIDScope) describe() string {
@@ -117,37 +104,45 @@ type shortIDRow struct {
 }
 
 // shortIDItem is an item kind a link addresses by uuid. query reads the candidates in a short
-// id's range with the owners that scope them: a row's issue key, and the document it hangs on
-// where it has one. Every column is read as text, so no row can fail the read by holding a value
-// another type would refuse.
+// id's range that belong to the scope, with the owners it was held to: a row's issue key, and
+// the document it hangs on where it has one. The scope is in the query rather than applied to
+// what comes back, so the bound on the rows read is a bound on the scope's own candidates:
+// filtering afterwards would let unrelated rows that sort earlier hide, or falsely make unique,
+// the rows the link names. Every column is read as text, so no row can fail the read by holding
+// a value another type would refuse. $4 is the issue key the lookup is held to and $5 the
+// document, each the empty string when the link names none.
 type shortIDItem struct {
 	noun  string
 	query string
 }
+
+// shortIDOwned is the scope predicate every query carries, over the two owner expressions it
+// selects: an empty scope holds every row.
+const shortIDOwned = ` and ($4 = '' or upper(%s) = upper($4)) and ($5 = '' or %s = $5)`
 
 // shortIDItems names, for each route segment that an `{id}` follows, the item that id addresses.
 // A segment absent here - `runs` (a GitHub run number), `session-groups`, `credential-requests`,
 // `credential-grants`, `machine-logins`, `agent-tokens`, `threads` - carries an id of another
 // shape, or of a record no link a person follows addresses, and is left exactly as written.
 var shortIDItems = map[string]shortIDItem{
-	"asks": {noun: "ask", query: `
-		select id::text, coalesce(issue_key, ''),
-		       coalesce(artifact_id::text, block_artifact_id::text,
-		                anchor->>'artifact_id', approval->>'artifact_id', '')
-		from asks where id between $1 and $2 order by id limit $3`},
-	"comments": {noun: "comment", query: `
-		select id::text, coalesce(issue_key, ''),
-		       coalesce(artifact_id::text, anchor->>'artifact_id', '')
-		from comments where id between $1 and $2 order by id limit $3`},
-	"messages": {noun: "message", query: `
-		select id::text, coalesce(issue_key, ''), ''
-		from messages where id between $1 and $2 order by id limit $3`},
-	"artifacts": {noun: "document", query: `
-		select id::text, coalesce(issue_key, project_key, ''), id::text
-		from artifacts where id between $1 and $2 order by id limit $3`},
-	"broadcasts": {noun: "broadcast", query: `
-		select id::text, '', ''
-		from broadcasts where id between $1 and $2 order by id limit $3`},
+	"asks": {noun: "ask", query: shortIDQuery("asks",
+		"coalesce(issue_key, '')",
+		"coalesce(artifact_id::text, block_artifact_id::text, anchor->>'artifact_id', approval->>'artifact_id', '')")},
+	"comments": {noun: "comment", query: shortIDQuery("comments",
+		"coalesce(issue_key, '')",
+		"coalesce(artifact_id::text, anchor->>'artifact_id', '')")},
+	"messages": {noun: "message", query: shortIDQuery("messages", "coalesce(issue_key, '')", "''")},
+	"artifacts": {noun: "document", query: shortIDQuery("artifacts",
+		"coalesce(issue_key, project_key, '')", "id::text")},
+	"broadcasts": {noun: "broadcast", query: shortIDQuery("broadcasts", "''", "''")},
+}
+
+// shortIDQuery builds one item's candidate read from its table and the two expressions that
+// name a row's owners, which are both selected and held to the scope.
+func shortIDQuery(table, issue, artifact string) string {
+	return fmt.Sprintf(
+		`select id::text, %s, %s from %s where id between $1 and $2`+shortIDOwned+` order by id limit $3`,
+		issue, artifact, table, issue, artifact)
 }
 
 // patternIDSegment is the route segment an `{id}` wildcard follows, which names the item that id
@@ -163,7 +158,11 @@ var patternIssueKey = regexp.MustCompile(`^/api/v1/issues/\{key\}/`)
 // login check, the keyed-write layer - reads the id as the caller wrote it, and the handler
 // below reads the id the record carries. A value that is already a uuid, or is no short id at
 // all, is passed straight through: the common request pays one uuid parse and no query.
-func (s *server) resolveShortIDs(pattern string, handler http.HandlerFunc) http.HandlerFunc {
+//
+// auth is the route's own class, and a caller it does not admit is handed to the handler
+// untouched, which answers as it always has: a bearer on a human-only route reads its 403
+// rather than a 404 or a list of candidate ids it may not see.
+func (s *server) resolveShortIDs(pattern string, auth routeAuth, handler http.HandlerFunc) http.HandlerFunc {
 	segment := patternIDSegment.FindStringSubmatch(pattern)
 	if segment == nil {
 		return handler
@@ -179,11 +178,11 @@ func (s *server) resolveShortIDs(pattern string, handler http.HandlerFunc) http.
 			handler(w, r)
 			return
 		}
-		// A caller that did not authenticate never reaches a lookup: the handler answers it as
-		// it does today. The caller it resolves is kept on the request, so the handler's own
-		// read of it costs nothing more.
+		// A caller that did not authenticate, or that this route does not admit, never reaches
+		// a lookup. The caller it resolves is kept on the request, so the handler's own read of
+		// it costs nothing more.
 		actor, human, err := s.optionalActor(r)
-		if err != nil {
+		if err != nil || (auth == authHuman && !human) || (auth == authBearer && human) {
 			handler(w, r)
 			return
 		}
@@ -236,7 +235,7 @@ func (s *server) resolveShortID(
 	written string,
 	low, high uuid.UUID,
 ) (string, *apiError) {
-	rows, err := q.Query(ctx, item.query, low, high, shortIDCandidates)
+	rows, err := q.Query(ctx, item.query, low, high, shortIDCandidates, scope.issue, scope.artifact)
 	if err != nil {
 		return "", errorf(http.StatusInternalServerError, "INTERNAL", "resolve %s id: %v", item.noun, err)
 	}
@@ -247,12 +246,7 @@ func (s *server) resolveShortID(
 	if err != nil {
 		return "", errorf(http.StatusInternalServerError, "INTERNAL", "resolve %s id: %v", item.noun, err)
 	}
-	matches := candidates[:0]
-	for _, candidate := range candidates {
-		if scope.holds(candidate) {
-			matches = append(matches, candidate)
-		}
-	}
+	matches := candidates
 	if len(matches) == 1 {
 		return matches[0].id, nil
 	}

@@ -262,9 +262,12 @@ function cssEscapeAttrValue(value: string): string {
  *  the wrong one, since an ambiguous start focuses nothing. */
 function onlyBlockStartingWith(root: HTMLElement, written: string): HTMLElement | null {
   if (written.length < 8) return null;
+  // Case-insensitive, as the server's own short-id match is: a link can carry an uppercase
+  // prefix of an id the document stores in lowercase.
+  const start = written.toLowerCase();
   let found: HTMLElement | null = null;
   for (const candidate of root.querySelectorAll<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}]`)) {
-    if (!(candidate.getAttribute(BLOCK_ID_DOM_ATTR) ?? '').startsWith(written)) continue;
+    if (!(candidate.getAttribute(BLOCK_ID_DOM_ATTR) ?? '').toLowerCase().startsWith(start)) continue;
     if (found !== null) return null;
     found = candidate;
   }
