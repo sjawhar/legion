@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
-import { checkouts, specWork } from "./score";
+import { checkouts, specWork, TestHandoff } from "./score";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
 // profile's gateway key command runs past its budget) says nothing about the skill under test: the
@@ -2912,6 +2912,32 @@ test("a run whose agent got a turn and did nothing is a failure", () => {
 test("the tester ran the CLI when the bun stand-in recorded a run of greet.ts, not when a command named it", () => {
   expect(out).toMatch(/tester-proof-ran-1\tpass=false\tref=false\tran=true /);
   expect(out).toMatch(/tester-proof-ran-2\tpass=false\tref=false\tran=false /);
+});
+
+// The tester writes its handoff whole with `write`, and its prompt names no time: a body with no
+// `completed` key is what the prompt asks for, so the schema takes it and the run is scored. Before
+// the prompt dropped the time, the schema demanded `completed` and such a body was a rig error.
+const testerHandoff = {
+  schemaVersion: 1,
+  phase: "test",
+  issue: "LWEVAL-1",
+  implementerProof: { verdict: "verified", how: "ran `bun greet.ts Ada` at the head" },
+  proof: [
+    {
+      criterion: "`bun greet.ts <name>` prints the greeting it returns",
+      surface: "the CLI",
+      command: "bun greet.ts Ada",
+      observed: "prints Hello, Ada! and exits 0",
+      headSha: "0f2cc1d4e8b0a1f6c7d2e3b4a5968778695a4b3c",
+      negativeControl: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
+    },
+  ],
+};
+
+test("a tester handoff that carries no completed time is read, and one with no issue is not", () => {
+  expect(TestHandoff.safeParse(testerHandoff).success).toBe(true);
+  const { issue: _issue, ...noIssue } = testerHandoff;
+  expect(TestHandoff.safeParse(noIssue).success).toBe(false);
 });
 
 test("a tool call reading the other label's checkout is a rig error wherever the path falls in it", () => {
