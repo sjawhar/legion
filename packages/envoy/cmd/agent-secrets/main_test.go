@@ -123,7 +123,9 @@ func (c *brokerCounters) servedSettings() *Settings {
 // answer as a broker from before that page, and the *_UNNAMED ones as brokers from before the
 // approver field, which name no approver. No real broker answers with the page and no approver,
 // since approve_url is the newer field, but the waiting line has a sentence for that pair and
-// PENDING_UNNAMED is what checks it.
+// PENDING_UNNAMED is what checks it. PENDING_NO_RECORD carries no record at all: record_id is
+// optional in the broker's own model, so an older broker may leave it out, and the one line that
+// would use it is the Dispatch page such a broker sends a person to.
 var fakePending = map[string]struct {
 	requestID, recordID, approver string
 	page                          bool
@@ -134,13 +136,17 @@ var fakePending = map[string]struct {
 	"PENDING_ME_OLDER":      {"req-pending-older", "rec-pending-older", "ada@example.com", false},
 	"PENDING_ANYONE_OLDER":  {"req-pending-anyone-older", "rec-pending-anyone-older", record.AnyoneApprover, false},
 	"PENDING_UNNAMED_OLDER": {"req-pending-unnamed-older", "rec-pending-unnamed-older", "", false},
+	"PENDING_NO_RECORD":     {"req-pending-no-record", "", "ada@example.com", false},
 }
 
 // pendingAnswer is fakeBroker's answer for a fakePending entry, request fields included or not;
 // base is the fake broker's own URL, which its approve_url names.
 func pendingAnswer(name, base string, request bool) map[string]any {
 	p := fakePending[name]
-	answer := map[string]any{"state": "pending", "grant_id": nil, "record_id": p.recordID}
+	answer := map[string]any{"state": "pending", "grant_id": nil}
+	if p.recordID != "" {
+		answer["record_id"] = p.recordID
+	}
 	if p.approver != "" {
 		answer["approver"] = p.approver
 	}
@@ -205,7 +211,7 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				"grant_id": "grant-granted", "record_id": nil, "approver": nil,
 			})
 		case "PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED",
-			"PENDING_ME_OLDER", "PENDING_ANYONE_OLDER", "PENDING_UNNAMED_OLDER":
+			"PENDING_ME_OLDER", "PENDING_ANYONE_OLDER", "PENDING_UNNAMED_OLDER", "PENDING_NO_RECORD":
 			writeJSON(w, pendingAnswer(name, audience, true))
 		case "APPROVED_ME":
 			writeJSON(w, map[string]any{
@@ -479,6 +485,13 @@ var pendingSentences = map[string]map[string]string{
 	"PENDING_UNNAMED_OLDER": {
 		"":                          "waiting for approval under Credential requests in the Dispatch Inbox; the broker does not say whose",
 		"https://dispatch.example/": "waiting for approval in Dispatch: https://dispatch.example/credentials/rec-pending-unnamed-older; the broker does not say whose",
+	},
+	// No record, so no page can be built: the line names the Inbox whatever
+	// AGENT_SECRETS_APPROVE_URL says, and the command neither guesses a page nor dies on the
+	// missing field.
+	"PENDING_NO_RECORD": {
+		"":                          "waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox",
+		"https://dispatch.example/": "waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox",
 	},
 }
 

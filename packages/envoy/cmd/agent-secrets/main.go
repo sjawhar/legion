@@ -717,7 +717,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 	} else {
 		fmt.Fprintf(stdout, "request_id: %s\nstate: %s\nsource: %s\n", result.RequestID, result.State, c.source(ctx))
 		if result.State == "pending" {
-			fmt.Fprintln(stdout, waitingOn(result.Approver, *result.RecordID, result.ApproveURL))
+			fmt.Fprintln(stdout, waitingOn(result.Approver, pendingRecordID(result.RecordID), result.ApproveURL))
 		}
 	}
 	switch result.State {
@@ -763,7 +763,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "state: %s\nsource: %s\n", result.State, c.source(ctx))
 	if result.State == "pending" {
-		fmt.Fprintln(stdout, waitingOn(result.Approver, *result.RecordID, result.ApproveURL))
+		fmt.Fprintln(stdout, waitingOn(result.Approver, pendingRecordID(result.RecordID), result.ApproveURL))
 	}
 	if result.GrantID != nil {
 		fmt.Fprintf(stdout, "grant_id: %s\n", *result.GrantID)
@@ -959,7 +959,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 
 	state, grantID, requestID := result.State, result.GrantID, result.RequestID
 	if state == "pending" {
-		reportPending(stderr, requestID, *result.RecordID, result.Approver, result.ApproveURL, *wait, src())
+		reportPending(stderr, requestID, pendingRecordID(result.RecordID), result.Approver, result.ApproveURL, *wait, src())
 		deadline := time.Now().Add(*wait)
 		backoff := 2 * time.Second
 		for state == "pending" {
@@ -1041,14 +1041,30 @@ func reportPending(stderr io.Writer, requestID, recordID string, approver *strin
 	fmt.Fprintf(stderr, "agent-secrets: %s\n", waitingOn(approver, recordID, brokerPage))
 }
 
+// pendingRecordID is the record a pending request waits on, and "" when the broker's answer
+// names none. The field is optional in the broker's own model, and the only line that needs it
+// is the Dispatch page a broker older than the approval page sends a person to, which is exactly
+// the broker whose answer may leave it out; so a missing one names no page rather than ending
+// the command on a nil.
+func pendingRecordID(id *string) string {
+	if id == nil {
+		return ""
+	}
+	return *id
+}
+
 // waitingOn is the sentence that says whom a pending request waits on and where they decide it:
 // the approver its credential record names (a person's login, or anyone signed in for a shared
 // secret), and the page where that person decides it. That page is brokerPage, the record's page
-// on the secrets broker, which the broker's answer carries as approve_url. A broker from before
+// on the secrets broker, which the broker's answer carries as approve_url. It is the one place a
+// line of this command names the broker's own host, and it names it because a person must open
+// that page: the host is the one AGENT_SECRETS_URL already names, and no other line says where an
+// answer came from (source_test.go's TestNoSessionLineNamesAHostOrAStoreID). A broker from before
 // that page carries none, and a person decides the record in Dispatch instead: its page under
-// AGENT_SECRETS_APPROVE_URL where that is set, else the Inbox's Credential requests section. The
-// broker names an approver for every pending request; one from before it did names none, and the
-// sentence says so rather than guessing.
+// AGENT_SECRETS_APPROVE_URL where that is set, else the Inbox's Credential requests section. A
+// broker that names no record either leaves only the Inbox, since no page can be built without
+// one. The broker names an approver for every pending request; one from before it did names
+// none, and the sentence says so rather than guessing.
 func waitingOn(approver *string, recordID, brokerPage string) string {
 	if brokerPage != "" {
 		switch {
@@ -1061,6 +1077,9 @@ func waitingOn(approver *string, recordID, brokerPage string) string {
 		}
 	}
 	base := approveURL()
+	if recordID == "" {
+		base = ""
+	}
 	page := base + "/credentials/" + recordID
 	switch {
 	case approver == nil && base == "":
