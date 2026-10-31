@@ -230,7 +230,14 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	child := exec.CommandContext(bounded, executable, args...)
 	child.Dir = command.Dir
-	env, err := pinGitConfig(without(merge(merge(runtime.WithoutNATSSeeds(os.Environ()), transportEnvironment), command.Env), "GIT_CONFIG_PARAMETERS"))
+	// Provisioning's children take their git configuration from the caller's intent, never from
+	// the process that happens to start them: the GIT_CONFIG_* block the environment carries goes
+	// before transportEnvironment and the command's own entries are merged in, so pinGitConfig
+	// counts the command's own pairs alone (withoutGitConfigPairs). A Legion pod hands every
+	// process such a block, a role's GitHub credential helper among them, which no clone or fetch
+	// provisioning starts may read.
+	base := withoutGitConfigPairs(runtime.WithoutNATSSeeds(os.Environ()))
+	env, err := pinGitConfig(without(merge(merge(base, transportEnvironment), command.Env), "GIT_CONFIG_PARAMETERS"))
 	if err != nil {
 		return Result{}, err
 	}
@@ -454,10 +461,15 @@ func describeEntry(info fs.FileInfo, err error) string {
 }
 
 // jjWorkspaceRoot is the workspace a jj command opens: the value of its last -R (or
-// --repository) flag, else the directory it runs in, which every caller in this package names as
-// the workspace root itself.
+// --repository) flag, and nothing else. Command.Dir is purely the working directory the child
+// runs in, so a command that names no -R opens no workspace and guardWorkspace is unchanged for
+// every command. Provisioning names a directory for its two rootless commands too — `jj git
+// clone` and `jj git init --colocate`, neither of which takes a -R — and reading that directory
+// as a workspace root would send them through guardWorkspace into refuseSymlinkedLayout, which
+// walks layoutDepth ancestors and would there Lstat the state directory itself, the one directory
+// deliberately left unchecked because an operator may reach it through a symlink.
 func jjWorkspaceRoot(command Command) string {
-	root := command.Dir
+	root := ""
 	for i, arg := range command.Argv {
 		switch {
 		case (arg == "-R" || arg == "--repository") && i+1 < len(command.Argv):
@@ -491,6 +503,19 @@ func merge(base, overrides []string) []string {
 // without is environment with no entry named key.
 func without(environment []string, key string) []string {
 	return slices.DeleteFunc(environment, func(entry string) bool { return environmentKey(entry) == key })
+}
+
+// withoutGitConfigPairs is environment with no GIT_CONFIG_COUNT and none of the
+// GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs it counts. The whole block goes, rather than the
+// count alone, because either half left behind misleads pinGitConfig: an inherited count with no
+// matching keys has git read pairs that are not there and numbers the pins past them, and
+// inherited keys with no count are the pairs the pins are then numbered over. A command that
+// needs a pair names it in Command.Env, which is merged in after this.
+func withoutGitConfigPairs(environment []string) []string {
+	return slices.DeleteFunc(environment, func(entry string) bool {
+		key := environmentKey(entry)
+		return key == "GIT_CONFIG_COUNT" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_")
+	})
 }
 
 // pinGitConfig appends pinnedGitConfig after the GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/
@@ -621,13 +646,16 @@ func onClone(cloneDir string, args ...string) ([]string, error) {
 	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir), nil
 }
 
-// runCheckedOnClone is RunChecked for an onClone command, including its empty-clone refusal.
+// runCheckedOnClone is RunChecked for an onClone command, including its empty-clone refusal. It
+// runs in cloneDir, the directory the command's own -R names: a child of provisioning's takes its
+// working directory from the caller's intent, never from the process that starts it, and the
+// clone is there whenever a command is built against it.
 func runCheckedOnClone(ctx context.Context, run Runner, cloneDir string, args ...string) (Result, error) {
 	argv, err := onClone(cloneDir, args...)
 	if err != nil {
 		return Result{}, err
 	}
-	return RunChecked(ctx, run, argv, nil, "")
+	return RunChecked(ctx, run, argv, nil, cloneDir)
 }
 
 func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
@@ -654,7 +682,7 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	if err != nil {
 		return err
 	}
-	result, runErr := runCommand(ctx, run, argv, source.env, "")
+	result, runErr := runCommand(ctx, run, argv, source.env, cloneDir)
 	_, err = checkedResult(argv, result, runErr)
 	return err
 }
@@ -685,8 +713,10 @@ func ConfigureRepositoryCredential(ctx context.Context, run Runner, cloneDir str
 		{"credential.useHttpPath", "true"},
 	} {
 		// `git config --get-all` exits 1 for a key the clone never set, which is as stale as an old
-		// helper; a run that failed to start is an error.
-		result, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "config", "--get-all", check.key}, nil, "")
+		// helper; a run that failed to start is an error. Each read runs in the clone itself, the
+		// directory --git-dir names the repository of: the daemon runs this over a clone it has
+		// just provisioned or found, so it is there.
+		result, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "config", "--get-all", check.key}, nil, cloneDir)
 		if err != nil {
 			return false, fmt.Errorf("read the shared clone's %s: %w", check.key, err)
 		}
@@ -717,7 +747,7 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 		{"git", "--git-dir=" + gitDir, "config", "credential.interactive", "false"},
 		{"git", "--git-dir=" + gitDir, "config", "credential.useHttpPath", "true"},
 	} {
-		if _, err := RunChecked(ctx, run, argv, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, argv, nil, cloneDir); err != nil {
 			return err
 		}
 	}
@@ -733,7 +763,7 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 		if err != nil {
 			return err
 		}
-		present, err := RunChecked(ctx, run, probe, nil, "")
+		present, err := RunChecked(ctx, run, probe, nil, cloneDir)
 		if err != nil {
 			return err
 		}
@@ -744,14 +774,14 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 		if err != nil {
 			return err
 		}
-		removed, err := runCommand(ctx, run, unset, nil, "")
+		removed, err := runCommand(ctx, run, unset, nil, cloneDir)
 		if err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(unset, " "), err)
 		}
 		if removed.ExitCode == 0 {
 			continue
 		}
-		rechecked, err := RunChecked(ctx, run, probe, nil, "")
+		rechecked, err := RunChecked(ctx, run, probe, nil, cloneDir)
 		if err == nil && strings.TrimSpace(rechecked.Stdout) == "" {
 			continue
 		}

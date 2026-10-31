@@ -537,7 +537,7 @@ func TestTheRunnerRefusesASharedCloneWhoseRepositoryIsASymlink(t *testing.T) {
 
 	for name, command := range map[string]func() error{
 		"a command on the clone": func() error {
-			_, err := RunChecked(context.Background(), run, append(log, "-R", ws.Clone), nil, "")
+			_, err := RunChecked(context.Background(), run, append(log, "-R", ws.Clone), nil, ws.Clone)
 			return err
 		},
 		"a command in a workspace of it": func() error {
@@ -633,7 +633,7 @@ func TestTheRunnerRefusesASymlinkedJJ(t *testing.T) {
 		untouched := symlinkJJ(t, ws.Clone, filepath.Join("repo", "config-id"), filepath.Join("repo", "config.toml"))
 		for name, command := range map[string]func() error{
 			"a command on the clone": func() error {
-				_, err := RunChecked(context.Background(), run, append(log, "-R", ws.Clone), nil, "")
+				_, err := RunChecked(context.Background(), run, append(log, "-R", ws.Clone), nil, ws.Clone)
 				return err
 			},
 			"a command in a workspace of it": func() error {
@@ -756,7 +756,7 @@ func TestTheRunnerRefusesASymlinkedLayoutDirectory(t *testing.T) {
 				t.Fatal(err)
 			}
 			untouched := plant(t, filepath.Join(copied, rel), "config-id", "config.toml")
-			_, err = RunChecked(context.Background(), run, append(slices.Clip(log), "-R", ws.Clone), nil, "")
+			_, err = RunChecked(context.Background(), run, append(slices.Clip(log), "-R", ws.Clone), nil, ws.Clone)
 			refused(t, "a command on the clone", err, symlink)
 			_, err = RunCheckedIn(context.Background(), run, ws, log)
 			refused(t, "a command in a workspace of it", err, symlink)
