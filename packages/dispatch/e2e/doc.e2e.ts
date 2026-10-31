@@ -13,6 +13,7 @@ import {
   getArtifact,
   getArtifactText,
   getArtifactVersion,
+  patchIssue,
 } from "./api";
 import { runDispatch } from "./dispatch-cli";
 import {
@@ -507,6 +508,54 @@ test("a dropped document transport reconnects the mounted editor and leaves one 
     await alice.close();
   }
 });
+
+for (const row of [
+  { key: "IDLE", reader: "an editor", readOnly: false },
+  { key: "VIEW", reader: "a read-only viewer", readOnly: true },
+]) {
+  test(`an idle document provider stays on one connection past its receive timeout, as ${row.reader}`, async ({
+    browser,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name !== "chromium",
+      "one Hocuspocus provider proves the document socket stays connected"
+    );
+    test.setTimeout(90_000);
+    await createProject({ key: row.key, name: "Idle document" });
+    const issue = await createIssue({
+      project: row.key,
+      spec: "# Quiet document\n\nIt stays connected.\n",
+      title: "Idle document connection",
+    });
+    if (row.readOnly) {
+      // A closed issue's document admits its socket read-only.
+      await patchIssue(issue.key, { status: "done" });
+    }
+
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const sockets = countDocumentSockets(page, issue.primary_artifact_id);
+      await page.goto(`/issues/${issue.key}/spec`);
+      await expect(documentEditor(page)).toContainText("It stays connected.");
+      if (row.readOnly) {
+        await expect(
+          page.getByText("This issue is closed. Its document is read-only.")
+        ).toBeVisible();
+      }
+      await expect(connectedDot(page)).toHaveText("connected");
+      await expect.poll(sockets).toBe(1);
+
+      // The provider closes a socket that has delivered nothing for 30 s.
+      await page.waitForTimeout(42_000);
+
+      await expect(connectedDot(page)).toHaveText("connected");
+      expect(sockets()).toBe(1);
+    } finally {
+      await alice.close();
+    }
+  });
+}
 
 test("document marks and table alignment use classes rather than inline styles", async ({
   browser,
