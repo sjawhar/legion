@@ -265,6 +265,37 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the pattern" "$(contains "$out" 'filter app has !docs/\*\*, a `!` pattern under predicate-quantifier some')"
 
+echo "case: a declared read and a filter pattern that match no file of the repository"
+root=$(fixture dead-pattern)
+replace "$root/.github/scripts/ci_job_reads.py" 'reads=[Read(".github/workflows/ci.yaml", "a job reads its own definition")]' \
+  'reads=[Read(".github/workflows/ci.yaml", "a job reads its own definition"), Read("packages/contracts/fixtures/delivery-live/**", "lib_test.go reads the live fixtures")]'
+run_check "$root"
+check "fails on the gate's dead read" "$(is "$status" 1)"
+check "names the read and the gate it is in" \
+  "$(contains "$out" "::error file=.github/scripts/ci_job_reads.py::gate app reads packages/contracts/fixtures/delivery-live/\*\*, which matches no file in the repository")"
+replace "$root/.github/workflows/ci.yaml" "              - 'fixtures/**'" \
+  $'              - \'fixtures/**\'\n              - \'packages/contracts/fixtures/delivery-live/**\''
+run_check "$root"
+check "fails on the filter's dead pattern too" "$(is "$status" 1)"
+check "names the pattern and the filter it is in" \
+  "$(contains "$out" "::error file=.github/workflows/ci.yaml::filter app has packages/contracts/fixtures/delivery-live/\*\*, which matches no file in the repository")"
+
+echo "case: a RULES row's dead read fails, and a ! pattern that matches nothing does not"
+root=$(fixture dead-pattern-rules)
+replace "$root/.github/scripts/ci_job_reads.py" \
+  'RULES = {"mod/lib/lib_test.go": [Read("fixtures/data.json", "lib_test.go reads ../../fixtures/data.json")]}' \
+  'RULES = {"mod/lib/lib_test.go": [Read("fixtures/data.json", "lib_test.go reads ../../fixtures/data.json"), Read("fixtures/gone/**", "lib_test.go reads a directory that is not here")]}'
+run_check "$root"
+check "fails on the RULES row's dead read" "$(is "$status" 1)"
+check "names the read and the row it is in" \
+  "$(contains "$out" "::error file=.github/scripts/ci_job_reads.py::the RULES row for mod/lib/lib_test.go reads fixtures/gone/\*\*, which matches no file in the repository")"
+
+root=$(fixture dead-pattern-exempt)
+replace "$root/.github/workflows/ci.yaml" "              - 'fixtures/**'" \
+  $'              - \'fixtures/**\'\n              - \'!fixtures/gone/**\''
+run_check "$root"
+check "a ! pattern matching nothing is no dead pattern" "$(is "$status" 0)"
+
 echo "case: a go command that cannot run fails rather than reading an empty closure"
 root=$(fixture broken-workspace)
 printf 'go 1.21\n\nuse ./missing\n' > "$root/go.work"

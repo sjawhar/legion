@@ -277,6 +277,10 @@ lock=$HOME/.local/state/legion/e2e/stage4b.lock
 record=$work/sandboxes
 pg_container=legion-e2e4b-pg-$$
 session_db_container=legion-e2e4b-db-$$
+# Set once session_db_start has the session database accepting connections. No role pod, the kind
+# that keeps an Oh My Pi session, runs before then: the daemon launches each one, and it starts
+# later. So a run stopped earlier has no session in a database to copy (collect_transcripts).
+session_db_ready=
 profile=legion-e2e4b-$$-$(date +%s)
 state=$work/state
 # The HOME the controller's Oh My Pi runs under, so its profile lives in the work directory
@@ -296,6 +300,10 @@ locked=
 # that sets a hook of its own sets this one back after it.
 timeout_hook=limit_pending_blocked
 daemon_pid=
+# Set when start_daemon first launches the daemon, and never cleared (daemon_pid is, at every
+# restart and at hygiene). Every role pod is the daemon's, so before then none can have run
+# (session_copy).
+daemon_started=
 watch_pid=
 leaks_pid=
 events_pid=
@@ -988,9 +996,15 @@ bash_legion_commands() {
 # agent's row cannot cost the run the rest of its transcripts. Any key not copied fails the call at
 # the end, so the caller still sees the loss. The listing gives each key as hex, one line a key even
 # when the key holds a newline, decoded here byte for byte. The directory is made only once the
-# listing holds a key.
+# listing holds a key. Oh My Pi's sql storage creates the session table when it starts
+# (docs/kubernetes.md, "What Oh My Pi creates"; internal/ompsessions), so a database with no session
+# table means no role pod's Oh My Pi ever reached it. Before the daemon has started that is no
+# fault, since every role pod is the daemon's: a note says so, nothing is copied, and the call
+# succeeds. Once the daemon has started, the call cannot tell a role pod not launched yet from one
+# that came up and never reached the database, a fault of the system under test, so it fails,
+# naming the database. An answer to that question that is neither yes nor no fails the call too.
 session_copy() {
-  local prefix=$1 area=$2 stem=$3 LC_ALL=C root hex line path name other dest resolved i lost=
+  local prefix=$1 area=$2 stem=$3 LC_ALL=C root table hex line path name other dest resolved i lost=
   local -a keys=() names=()
   local -A first=() also=()
   case $area in
@@ -1015,6 +1029,20 @@ session_copy() {
     echo "the sessions under $prefix are not copied: their directory $root/$stem resolves to $dest, not directly inside $root" >&2
     return 1
   fi
+  table=$(session_psql table omp_session_files <<<"SELECT to_regclass(:'table') IS NOT NULL;") || return 1
+  case $table in
+    t) ;;
+    f)
+      if [ -z "$daemon_started" ]; then
+        note "transcripts: the session database $session_db_container has no session table and the daemon never started, so no role pod ran and no session under $prefix is copied"
+        return 0
+      fi
+      echo "the sessions under $prefix are not copied: the session database $session_db_container has no session table, so no role pod's Oh My Pi reached it, though the daemon started" >&2
+      return 1 ;;
+    *)
+      echo "the sessions under $prefix are not copied: the session database $session_db_container answered '$table' to whether it has a session table" >&2
+      return 1 ;;
+  esac
   hex=$(session_psql prefix "$prefix" <<<"SELECT encode(convert_to(path, 'UTF8'), 'hex') FROM omp_session_files WHERE left(path, length(:'prefix')) = :'prefix' ORDER BY path;") || return 1
   [ -n "$hex" ] || return 0
   mkdir -p -- "$dest" || return 1
@@ -1491,6 +1519,7 @@ start_daemon() {
   env -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
     "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
+  daemon_started=1
   timeout_hook=report_boot
   # A daemon that exits (a refused image probe, a config it will not run) ends the wait at once.
   until_true 900 "the Go daemon to boot and answer /healthz" daemon_answers_or_exited
@@ -2673,10 +2702,13 @@ remove_run_branches() {
 # fails when session_copy left any out (a key refused or unreadable, each named on stderr) or could
 # not list them, or when the controller's sessions could not be copied, after copying everything
 # else all the same, and cleanup makes that the teardown check `transcripts`, never a note a
-# passing run reads past.
+# passing run reads past. A run stopped before its session database accepted connections
+# (session_db_ready unset: a refusal in prerequisites or preflight, say) ran no role pod, so it has
+# no pod session to copy: a note says so in place of the copy, which could only fail to reach a
+# database that never accepted connections.
 # The pods' transcripts go in a directory of their own because of where, not what: session_copy
-# writes only names that resolve as a direct child of the directory it writes in (:1065-1071, a
-# parent-equality test rather than a prefix one), so a key's derived name can never leave
+# writes only names that resolve as a direct child of the directory it writes in (its `resolved`
+# check, a parent-equality test rather than a prefix one), so a key's derived name can never leave
 # transcripts/pods whatever it derives — controller, daemon-controller and pods among them. The
 # collector's own directories are that directory's siblings, not its parent. Merging them back into
 # one directory would put a pod's derived name and the collector's own paths in one namespace
@@ -2684,10 +2716,14 @@ remove_run_branches() {
 # containment assertion are all about a name's shape and its parent, and none of them knows which
 # names the collector owns. Nor need they know which directory they measure against: session_copy
 # is handed none, but anchors it itself, transcripts/pods here, as a direct child of a root of its
-# own (:1008-1025), so no value a caller derives can move it.
+# own (its checks of STEM and `dest`), so no value a caller derives can move it.
 collect_transcripts() {
   local copied=1
-  session_copy "$pod_sessions_dir/" transcripts pods || copied=
+  if [ -n "$session_db_ready" ]; then
+    session_copy "$pod_sessions_dir/" transcripts pods || copied=
+  else
+    note "transcripts: the run stopped before its session database $session_db_container accepted connections, so no pod kept a session in it and none is copied"
+  fi
   if [ -d "$profile_agent/sessions" ]; then
     if ! { mkdir -p -- "$evidence/transcripts/controller" && cp -R -- "$profile_agent/sessions/." "$evidence/transcripts/controller/"; }; then
       echo "the operator's controller's sessions in $profile_agent/sessions could not all be copied into $evidence/transcripts/controller" >&2
@@ -3304,6 +3340,7 @@ until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" p
 # dies with it. It binds the devbox's private address, not loopback, since the pods dial it as they
 # dial the worker stream.
 session_db_start "$host" --cpus 2 --memory 4g
+session_db_ready=1
 note "container $session_db_container: database sessions on $host:$port_session_db ($session_db_image), which every pod reads through the providers Secret's $session_dsn_key (the URL is in an owner-only file, not printed)"
 mkdir -p "$state"
 cat >"$work/instructions.md" <<'EOF'

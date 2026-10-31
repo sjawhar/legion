@@ -1,4 +1,4 @@
--- packages/envoy/internal/broker/store/migrations/0020_oauth_pod_sessions.up.sql
+-- packages/envoy/internal/broker/store/migrations/0021_oauth_pod_sessions.up.sql
 -- Which pod may exchange under which session name: the registration a deployment's daemon writes
 -- for a pod it starts (POST /v1/oauth/exchange/pod-sessions), which the token exchange reads in
 -- its own transaction before it mints a token for that pod, asking the cluster nothing.

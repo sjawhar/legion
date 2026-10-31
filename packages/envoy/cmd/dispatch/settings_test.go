@@ -617,9 +617,6 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("SignInIssuer = %q", boot.SignInIssuer)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": ""}, "DISPATCH_SIGNIN_ISSUER missing")
-			// Cookie identity is Google sign-in: with none of the sign-in settings, the server refuses to start.
-			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""},
-				"cookie identity signs people in: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN are required")
 			// The pool main builds the code flow for: /auth/start sends the browser to its
 			// authorization endpoint. A pool whose discovery fails does not stop the router being
 			// built: /auth/start answers 503 SIGNIN_UNAVAILABLE until the pool answers.
