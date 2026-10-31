@@ -2274,7 +2274,11 @@ export default function envoyExtension(pi: PiApi): void {
   // None of them while the listener has refused that role to `id`. The pass
   // claims it softly (`settleRole`): a session's records may be stale evidence (the parent of a
   // fork whose role moved to the child, a second process on the same transcript), and it must not
-  // take a role another live session holds; the listener decides that atomically.
+  // take a role another live session holds. The listener decides that atomically: a soft claim
+  // naming a predecessor takes the role from that predecessor only when the predecessor has no
+  // live registry entry, when its live entry carries this client instance's own instance id, or
+  // when either side carries no instance id. A predecessor still live under another client
+  // instance keeps the role, and the claim is refused naming it.
   const desiredRole = async (
     handle: TaskHandle,
     id: string,

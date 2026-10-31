@@ -152,9 +152,12 @@ export interface TaskHandle {
    */
   readonly settleEndedHolds: (wanted: string | undefined) => Promise<boolean>;
   /**
-   * Claims `role` for this task's session. A soft claim is granted only when the role is unheld,
-   * its holder is no longer live, or its holder is `previousSessionID` and that predecessor is
-   * this client instance's; a hard claim is last-claim-wins. Answers whether the claim landed.
+   * Claims `role` for this task's session. A hard claim is last-claim-wins. A soft claim naming
+   * `previousSessionID` takes the role from that predecessor only when the predecessor has no
+   * live registry entry, when its live entry carries this client instance's own instance id, or
+   * when either side carries no instance id. A predecessor still live under another client
+   * instance keeps the role. A soft claim is also granted when the role is unheld, and when its
+   * holder is no longer live. Answers whether the claim landed.
    *
    * A claim the listener granted after this task's deadline fired is left as a pending hand-back,
    * and one granted after the session moved is adopted under the id the listener names.
