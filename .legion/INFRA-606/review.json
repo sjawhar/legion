@@ -2,36 +2,38 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-606",
-  "completed": "2026-10-30T13:08:40Z",
-  "round": 8,
-  "headReviewed": "ef5a314d1124fb36b16d310bc7cff31260a40bf2",
-  "codeHead": "edaaae7e9436",
+  "completed": "2026-10-31T09:10:31Z",
+  "round": 9,
+  "headReviewed": "9e5642edb7e900ef2273f6243625f2ca973ad0da",
+  "codeHead": "3d5c31a9da84",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 2,
-  "ci": "Run 41051691829 at edaaae7e was queued at review time (every job but `changes`). Pi-envoy red, if any, is main's: INFRA-826's #2550 merged to main at 12:02Z, after this branch's last forward merge (fd9f4e1c, 09:51Z). The next approval waits for lint, typecheck, test, pr-title, envoy-go, envoy-go-race, envoy-go-race-docs, dispatch, dispatch-multiprocess and the browser job green at the next code head, read by the reviewer.",
-  "tests": "The deep reviewer at edaaae7e on local Postgres 16 (-p 2 -parallel 4, memory below 2.5 GB): go vet ./internal/dispatch/... clean; outbox and model ok; api -run 'Mention|Comment|Deliver|Sweep|Retry|Fallback|Supersede|Keyed|Queued|Lane|Attempt|Repeat|Shutdown|Outbox' ok; TestRoutesTable* ok. Round-7 reproduction now passes (attempt 1 sent). Round-8 reproduction (dispatch://INFRA-606/artifact/infra606-review-r8-mode-dup-repro-tar-gz) fails: two frames under keys ...:steer and ...:btw.",
+  "minor": 3,
+  "roundKind": "Full round: my last review (round 8) requested changes, so this is not a confirmation round and no round-shape comparison applies.",
+  "ci": "Required set is now ci-ok and pr-title (rulesets). Run 41170407259 at 3d5c31a9: every job green except envoy-go, whose only failure is main's TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries in internal/broker/oauth (broken by #2474, fixed by open #2598), so ci-ok is red on main's test alone; pr-title success.",
+  "tests": "Deep reviewer at 3d5c31a9, Postgres 16 local: go build and vet clean; full ./internal/dispatch/api under -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB passes except the known collation test; outbox, model, internal/contracts, cmd/listener pass. Round-8 reproduction adapted (TestARetryInAnotherModeThatTimedOutLeavesTheRecipientOneCopy) passes and fails with the mode put back in the key. Two scratch rollout tests (old-key send then new-key resend; old receipt-timeout then new same-mode Retry) fail: the session gets the comment twice. Pod memory about 2.2 GB when sampled.",
   "threadsAnswered": [
-    "PRRT_kwDORFy7ds6x6pYo"
+    "PRRT_kwDORFy7ds6x-gRS",
+    "PRRT_kwDORFy7ds6x-gRg"
   ],
-  "round7Status": "Fixed on every named path: a failed Retry leaves attempt 1 to the lane; a Retry in flight makes the lane stand down and the sweep owes attempt 1 once it fails; a sent Retry supersedes attempt 1; keyed repeat and sweep share the bound switch; a sender that dies after a failed Retry leaves attempt 1 owed. The merge counts every fallback publish failure through countPublishFailure and inherits envelope()'s quiet. The round-7 doc minors and the post-shutdown claim are fixed.",
+  "round8Status": "Fixed: one key per mention, so a timed-out Retry in another mode leaves one copy; the sweep settles an overtaken attempt left pending; the doc passages are corrected except comment_delivery.go:672-677. The #2392 horizon merge holds: relay, resume, overflow catch-up and GET /api/v1/events/log read up to the horizon with no skip or duplicate. refreshHeldClaims records only over the claim it read.",
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/envoy/internal/dispatch/model/model.go",
-      "description": "MentionAttemptStandsSQL (model.go:1325-1327) treats every later failed attempt as having delivered nothing, but a receipt timeout is recorded failed while 'the message may already have been delivered' (envoy_resolve.go:154-159, contracts/generated.go:153), and a reply-callback error can fail an attempt the session received. A Retry in another mode that lands and times out leaves attempt 1 standing; the lane (comment_delivery.go:307-310) or the sweep sends it under its own mode's key, so the session gets two frames the listener and host cannot dedupe. Reproduced. Round 7's build superseded attempt 1 here (one copy). Fix: send an attempt that stands only because later attempts failed under the latest failed later attempt's mode and key (as the outbox's fallback copy already does), or let only a provably undelivered failure make it stand; add the reproduction as a test; correct 'a failed Retry delivers nothing' (model.go:1317-1319, comment_delivery.go:241-243 and 664-666, the changelog)."
+      "description": "CommentMentionIdempotencyKey changed from main's `<comment>:<target>:<mode>` to `<comment>:<target>`, and the listener derives the dedupe key verbatim (cmd/listener/api.go:574-578). A mention the previous build delivered and did not settle, resent by this build's sweep, or a same-mode Retry of an old receipt-timeout attempt, reaches the session again with duplicate:false; the outbox's copy for an old failed attempt does too. The window is the 72 h MentionSweepWindow / duplicate window after the deploy; Recreate does not avoid it. Reproduced in two scratch tests. Fix: key by the mention's own mode, `<comment>:<target>:<comment_mentions.delivery>` (attempt 1 is always in that mode), which equals main's key for every automatic send and keeps one key per mention, so the round-8 fix holds."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go",
-      "description": "An attempt overtaken by a delivered one stays pending for good when supersedeOvertakenAttempts errors (:645-649 says the next bound sender settles it; after a stand-down none is bound, the sweep owes only standing attempts, and the outbox never reads the key abandoned beside a sent attempt), and also when a reply flips a stood-down Retry's attempt to sent (:1074-1077). The card shows it pending indefinitely. Let the sweep settle pending, claim-free attempts that MentionAttemptDeliveredLaterSQL covers, and drop the error branch."
+      "file": "packages/envoy/internal/dispatch/api/delivery_sweep.go",
+      "description": "Docs: delivery_sweep.go:87-95 lists a stood-down attempt among the outbox's resumed ones and says the copy is held back for every attempt a send is still coming for, and model.go:1445-1450 says an abandoned attempt has no send coming; a stood-down attempt reads abandoned while its Retry is in flight and becomes the sweep's owed attempt once the Retry fails. comment_delivery.go:672-677 says nothing else settles an overtaken attempt; settleSupersededMentions now does. events.go:22-24 says the overflow catch-up pages at maxEventReplay; it reads at maxLiveReplay (live_events.go:312)."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/model/model.go",
-      "description": "Docs the stand-down state makes false: model.go:1388-1389 (MentionAbandonedSQL 'the delivery sweep will never send') and delivery_sweep.go:85-88 ('every attempt that may yet be sent'): a stood-down attempt reads abandoned while its Retry is in flight and is owed once it fails; model.go:1320-1321 names the wrong predicate. Hardening: a second card Retry while the first is in flight resumes the stood-down attempt 1 in its pinned mode (:317-331)."
+      "file": "PR body",
+      "description": "The risk bullet on the fallback copy still names the key `agent.<session>.<comment>:<target>:<mode>` and says a retry in another mode is delivered; under b423cb71 both are false."
     }
   ],
-  "notRaised": "Under the architect's round cap: comment_delivery.go at 1115 lines; the publish-failure classification in two copies (mentions.go:742-755, publisher.go:775-788); the claim switch's two booleans for a three-state outcome."
+  "notRaised": "Under the architect's round cap: settleSupersededMentions copies settleUndeliverable's batch loop; resolveEventReplay's -1 sentinel parameter and the duplicated handover check in feedEvents/resumeAfterOverflow; the abandoned predicate expanded twice in mentionDeliveryQuery; comment_delivery.go at 1131 lines."
 }
