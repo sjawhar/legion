@@ -3468,7 +3468,8 @@ reach disabled) plus `memory.backend: "off"`, so the run writes no memory into t
 database. No `models.yml` is written, so no `apiKey` or `X-Api-Key` overrides the stored login.
 
 **The operator's build.** Processes sharing one `agent.db` refresh its OAuth token safely only on a
-build with the refresh-race fix, first released as `18.12.2-sami.20261026-004924`; on a build
+build with the refresh-race fix, which base 18.12.2 first released as `18.12.2-sami.20261026-004924`
+and which base 18.13.2 carries from its first build, `18.13.2-sami.20261027-235348`; on a build
 without it one process can spend the shared refresh token while another still holds it, which
 disables the login for every session on the box. So the panes run the operator's own build, the one
 the operator's sessions already run against that database, not `.omp-pin` (which also feeds the
@@ -3490,9 +3491,9 @@ Exit 1 (the box):
 
 - `<db> is not a regular file: the operator has no Oh My Pi login on this box to share (log in with the operator's own omp first)`, or `<db> is a symlink; …`;
 - `the operator's global mise config pins no single active github:sjawhar/oh-my-pi, …`;
-- `the operator's github:sjawhar/oh-my-pi is <v>, not <base>-sami.YYYYMMDD-HHMMSS, so it cannot be compared with the refresh-race fix (18.12.2-sami.20261026-004924)`;
-- `the operator's github:sjawhar/oh-my-pi is <v>, base <b>; only base 18.12.2 is known here, …`: another base version is refused, never guessed at;
-- `the operator's github:sjawhar/oh-my-pi is <v>, older than 18.12.2-sami.20261026-004924, the first build with the refresh-race fix; …`.
+- `the operator's github:sjawhar/oh-my-pi is <v>, not <base>-sami.YYYYMMDD-HHMMSS, so it cannot be compared with the refresh-race fix (18.13.2-sami.20261027-235348)`;
+- `the operator's github:sjawhar/oh-my-pi is <v>, base <b>; only base 18.13.2 is known here, …`: another base version is refused, never guessed at;
+- `the operator's github:sjawhar/oh-my-pi is <v>, older than 18.13.2-sami.20261027-235348, the first build with the refresh-race fix; …`.
 
 It writes `<dest>/box-login.route`, the link, the database's path and the build, for the evidence;
 it holds no secret. Claude Code has no such route

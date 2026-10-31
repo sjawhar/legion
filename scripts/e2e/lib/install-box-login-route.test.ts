@@ -24,7 +24,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 // The caller's HOME, which the installer refuses as --home; distinct from the fake operator home.
 const callerHome = join(dir, "caller-home");
 mkdirSync(callerHome);
-const fixed = "18.12.2-sami.20261026-004924";
+const fixed = "18.13.2-sami.20261027-235348";
 // Stand-in bytes for the operator's database: the installer must link to it and never change it.
 const dbBytes = "not a database: a stand-in the installer must link to and never touch\n";
 
@@ -177,23 +177,23 @@ describe("the box-login model route installer", () => {
   });
 
   test("refuses an operator build older than the refresh-race fix", () => {
-    const r = install({ version: "18.12.2-sami.20261025-144204" });
+    const r = install({ version: "18.13.2-sami.20261027-144204" });
     expect(r.code).toBe(1);
     expect(r.stderr).toContain(
-      "is 18.12.2-sami.20261025-144204, older than 18.12.2-sami.20261026-004924, the first build with the refresh-race fix"
+      "is 18.13.2-sami.20261027-144204, older than 18.13.2-sami.20261027-235348, the first build with the refresh-race fix"
     );
     expect(existsSync(r.agent)).toBe(false);
   });
 
   test("takes a build stamped after the fix", () => {
-    const r = install({ version: "18.12.2-sami.20261101-000000" });
+    const r = install({ version: "18.13.2-sami.20261101-000000" });
     expect(r.code).toBe(0);
-    expect(r.stdout).toBe("github:sjawhar/oh-my-pi@18.12.2-sami.20261101-000000\n");
+    expect(r.stdout).toBe("github:sjawhar/oh-my-pi@18.13.2-sami.20261101-000000\n");
   });
 
   test.each([
     ["an unparseable", "latest", "not <base>-sami.YYYYMMDD-HHMMSS"],
-    ["another base's", "18.13.0-sami.20261101-000000", "base 18.13.0; only base 18.12.2 is known"],
+    ["another base's", "18.12.2-sami.20261101-000000", "base 18.12.2; only base 18.13.2 is known"],
   ])("refuses %s pin rather than guessing", (_, version, message) => {
     const r = install({ version });
     expect(r.code).toBe(1);
