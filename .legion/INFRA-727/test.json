@@ -2,25 +2,58 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-727",
-  "completed": "2026-10-31T01:35:00Z",
-  "round": 5,
-  "head": "1b1386967e05 (branch head; the code head is abf83df601f8)",
+  "completed": "2026-10-31T02:05:00Z",
+  "round": 6,
+  "head": "c12eb998f5cb (the red row), over the merge head 4d1f4d93d221",
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "Not verified this round, which is why it is rejected rather than accepted: the INFRA-512 architect stopped the round at the gate before any verification (its message of 2026-10-31T01:23:47Z), so I drove nothing on the page at this head and no proof of round 5 is checked. Nothing here disputes those proofs; they are simply unread. The round-4 verdict stands for its own head, where I verified every proof the implementer made at 50a3a5870436."
+    "verdict": "verified",
+    "how": "Re-ran the implementer's own command at the merge head: `cd packages/dispatch && bun run e2e -- compose-wait` → 11 passed (6.0m), every row of the spec including the four this phase wrote and the new cross-block row. The merge resolution itself I read rather than took: packages/envoy/cmd/dispatch/README.md now carries main's list form with this branch's ANCHOR_MISSING paragraph in it, and packages/dispatch/web/src/api/client.ts still exports isAnchorMissing. This round also carries the round-5 work the gate stopped me from checking, so I drove the review findings on the page as well (below), rather than reading the unit suites for them."
   },
   "failed": 1,
   "failures": [
     {
-      "criterion": "The merge gate: the pull request's head must be one GitHub can merge and run checks on, so the tester's round and the reviewer's read mean something at the head that merges",
-      "evidence": "The pull request conflicts with main. Checked myself at 01:30Z: `gh pr view 2548 --json mergeable,mergeStateStatus` answers CONFLICTING and DIRTY at head 1b1386967e05. Two files are changed on both sides since the fork point 0be366cf8a2d - packages/envoy/cmd/dispatch/README.md and packages/dispatch/web/src/api/client.ts - and GitHub computes no merge ref for a conflicting head, so no new run can start on it. What did run before main moved is at the code head abf83df601f8 and is not red: ci-filters, dispatch-browser-multiprocess, dispatch-memory, dispatch-multiprocess, docs/build, envoy-go-race, envoy-go-race-api is still going with envoy-go and dispatch, envoy-go-race-docs, envoy-go-race-pmdoc, envoy-infra-go, envoy-session-stall, envoy-smoke, lint, listener-server-change, test and worker-image/build all green. So this is a merge-gate failure, not a verdict on the work: bring main in, and the full round runs on the merged head."
+      "criterion": "Review finding 4 as the architect set it: each refusal says what is true in the case it is reached in. A sentence that tells the reader their words are no longer where they selected them, while those words are exactly where they selected them, is the defect that finding named - now reachable through this round's own cross-block path",
+      "evidence": "Red test: packages/dispatch/e2e/compose-wait.e2e.ts, 'a cross-block refusal does not claim the words moved while they are where they were' (commit c12eb998f5cb). Four paragraphs: 'The fox jumps.' / 'Over the lazy dog it goes.' / 'A hound also jumps.' / 'Over the lazy dog it trots.'. The reader selects across the first break ('jumps.' to 'Over the lazy dog'), so the composer keeps no block and no surroundings. Another writer rewrites the first two paragraphs around the selection ('The swift fox jumps.', 'Over the lazy dog it bounds.'), which takes the mark and leaves the reader's own words where they were; the same words read across the second pair too. Refusing is right - nothing says which pair is theirs - but the sentence shown is 'The text you selected is still in the document, but no longer where you selected it, so this comment cannot be attached on its own', and the second clause is false: their words never moved. Run `cd packages/dispatch && bun run e2e -- compose-wait`: the row fails on that sentence (`expect(received).not.toContain('no longer where you selected it')`), and asserts only what must not be said, never the wording to use. In remarkRange the document-wide step answers `readings.count > 0 ? 'unplaceable' : 'gone'` whenever more than one reading is surrounded alike; with no placement every reading is 'surrounded', so two readings land on the 'elsewhere' sentence where the 'read in more than one place with the same text around them' sentence is the true one - that sentence already exists and is already correct in the block case (measured below). The architect may judge this not worth a round at the cap; it is recorded as a failure because it is the same class the review already failed once, and the fix is a routing change of one branch, not new behaviour."
     }
   ],
-  "checkedAndNotADefect": [
-    "The architect's second gate problem - that the public diff names a Dispatch key in seven added comment lines (dispatch://INFRA-727, six in packages/dispatch/e2e/compose-wait.e2e.ts and one in MentionComposer.margin.test.tsx) - does not hold against this repository's own rule, measured three ways and reported to the architect rather than failed on. First, the repository's own checker passes those two files: `bash .github/scripts/check-private-names.sh packages/dispatch/e2e/compose-wait.e2e.ts packages/dispatch/web/src/features/margin/MentionComposer.margin.test.tsx` exits 0, saying no file or path names the private deployment repository or the company. Second, its rule 1 names the forbidden project key by pattern - 'agent' then 'c' as a token of its own - which is the private deployment repository's key and not this project's; main itself carries dispatch://INFRA-206 and dispatch://INFRA-227 in AGENTS.md and dozens of docs/solutions file names ending in an INFRA key (INFRA-31, INFRA-42, INFRA-43, INFRA-256, INFRA-583, INFRA-629 among them). Third, the lint lane, which runs that checker over the tree, is green at abf83df601f8 with all seven lines present. Four of the seven lines are mine, written in the red rows of rounds 1 to 3, so if the architect wants the citations out as a convention rather than as a rule, say so and I will take mine out in my own commit in the next round - it is a comment edit and changes no assertion."
+  "proof": [
+    {
+      "criterion": "Finding 1: the automatic re-send carries what the reader has typed, not what the 300 ms debounce last wrote",
+      "surface": "The margin composer on the page, Chromium against the real Go server and PostgreSQL 17.11",
+      "command": "cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium zz-tester-probe -g 'probe X5' (throwaway spec, deleted after the run)",
+      "observed": "The reader types 'First words.', another writer rewrites the sentence around the selection and takes the mark, the reader types ' A late thought.' and presses Send inside the debounce window. The comment created reads 'First words. A late thought.' - the re-send carried the later words, which is what finding 1 asked for.",
+      "headSha": "4d1f4d93d221",
+      "negativeControl": "The same probe before the fix would have sent the debounced text; the implementer's own margin row covers that direction, and my earlier attempt at this probe measured nothing because the composer disables its field once Send is pressed - the only window is the one before the press, which is the window the debounce loses."
+    },
+    {
+      "criterion": "Finding 2: a selection across two blocks re-anchors like a one-block selection, and is never called deleted while it is on the page",
+      "surface": "The same",
+      "command": "cd packages/dispatch && bun run e2e -- compose-wait ; plus the throwaway cross-block probes",
+      "observed": "The new row passes at the merge head: the selection spans the break, the sweep takes the mark while the author is away, and the comment attaches over both halves. Driven beyond it: the same words reading across a second pair of paragraphs refuse rather than attach (no comment, no mark, draft kept), and a cross-block selection whose second half is replaced outright - both paragraphs rewritten, so mark and words are gone - says 'The text you selected was changed or deleted', which is true there.",
+      "headSha": "4d1f4d93d221",
+      "negativeControl": "The deleted case and the still-present case give different sentences from the same path, so the 'changed or deleted' wording is not reached while the words are on the page - except for the second clause of the 'elsewhere' sentence, which is this round's failure above."
+    },
+    {
+      "criterion": "Findings 3 and 4 in their other cases: the tracking plugin is gone and the re-anchor still answers; two surrounded readings of the reader's own block say so",
+      "surface": "The same",
+      "command": "cd packages/dispatch && bun run e2e -- compose-wait ; the throwaway probe 'two readings surrounded alike in the reader's block'",
+      "observed": "All eleven rows pass with the plugin deleted, the two that could only have passed through it included - the long compose past the TTL and the offline tab past it, both of which rebuild the editor before Send. A paragraph of 'the lazy dog sits.' nine times over, the reader on the fifth reading, now answers the new sentence: 'The words you selected read in more than one place with the same text around them, so nothing says which one this comment is about. Your draft is kept — select the text again to attach it.' - true of that case, and naming the kind.",
+      "headSha": "4d1f4d93d221",
+      "negativeControl": "The same paragraph five times over, where the block is too short for a second reading to carry a full 32 characters on each side, attaches to the reader's own reading instead of refusing, so the sentence is reached by ambiguity and not by repetition alone (measured in round 3 and unchanged)."
+    },
+    {
+      "criterion": "Finding 6's rollout line: a held send stored by an older tab, with no placement, still sends",
+      "surface": "The same code path on the page: a compose that keeps no placement at all, which is what a cross-block selection and an old stored row both hand the re-anchor",
+      "command": "cd packages/dispatch && bun run e2e -- compose-wait (the cross-block row) and the cross-block probes",
+      "observed": "With no placement the re-anchor takes the document-wide step with empty surroundings, which matches every reading: one reading in the document attaches (the cross-block row's comment is created and anchored over both halves), two readings refuse rather than guess. That is the behaviour the census promises for a row with no placement.",
+      "headSha": "4d1f4d93d221",
+      "negativeControl": "I did not materialise an old IndexedDB row, so this is the branch a missing placement takes and not a row written by an older build; the two-reading case is the control that the empty-surroundings match does not become a free attach."
+    }
   ],
+  "ci": "Read on GitHub, never re-run and never waited for. The pull request is MERGEABLE again at the merge head, and the CI run at 4d1f4d93d221 was created at 01:39Z and still queued when I read it at 02:00Z, with `changes` green and every other lane queued, so no lane has settled there. The last settled evidence on the branch is the pre-merge head abf83df601f8: ci-filters, the three dispatch browser lanes, docs/build, envoy-go-race and its api, docs and pmdoc shards, envoy-infra-go, envoy-session-stall, envoy-smoke, lint, listener-server-change, test and worker-image/build green, with dispatch and envoy-go still going. The Go side of finding 5 - the mark's TTL counted from the author's last presence - is an integration suite and is CI's to settle in envoy-go and its race shards; I read it there rather than re-running it.",
   "notRunThisRound": [
-    "Everything the architect's round cap lists: the eight review findings and the four minor ones, all compose-wait rows at this head, and required CI at the new head. The round was stopped at the gate before any of it, by the architect's instruction, and it runs whole on the merged head."
+    "The whole Chromium project: the implementer's last run is at abf83df601f8 (934 passed, 1 failed), and the only failure, e2e/hover-preview.e2e.ts:87, I reproduced on a clone of main in this pod in round 3. Nothing of the application changed between that head and this one but the merge of main.",
+    "The four minor review items as a list: I drove the two that are observable (the refusal sentences, and that one scan answers all three questions of the block step through the rows above) and left the rest to the reviewer, which owns its own findings."
   ],
-  "environment": "The pod harness is in place and was not needed this round: /legion/scratch/harness/setup.sh with env.sh beside it (rootless PostgreSQL 17.11 with pgvector, Playwright Chromium), idempotent. Check `pg_isready -h 127.0.0.1 -p 55432` before starting that Postgres."
+  "environment": "The pod harness is unchanged: /legion/scratch/harness/setup.sh with env.sh beside it (rootless PostgreSQL 17.11 with pgvector, Playwright Chromium), idempotent. One thing to know for a throwaway probe spec: Playwright runs the rows of one file in parallel workers here, and every row's `resetDatabase` truncates the database under the others, so a probe file must be run one row at a time with `-g` or its rows will wreck each other's documents - two of mine did before I noticed."
 }
