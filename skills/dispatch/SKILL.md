@@ -44,6 +44,8 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 
 Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status or route it, and claim it only as a Legion role of its tree, even when its claim reads `· not running`, as a suspended architect's does: taking it removes the tree from the workflow.
 
+A claim carries its holder's session state. `· not running` is a holder the session registry reads as `gone`. A holder that reads `unresponsive` — it has not registered since the live window but is inside the gone horizon — still holds its claim: the issue is not unclaimed, it is not dead, and the message you send it waits for it. Take a claim only from a holder that reads `gone`, or one that has read `unresponsive` for more than 20 minutes.
+
 A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no event Dispatch marks quiet.
 
 ## Close what you opened

@@ -9,7 +9,9 @@ launched you.
 
 The operator ran `legion controller start --config controller.yaml [--daemon-url <url>]` on their
 own machine, and you are that foreground session. The daemon reads your liveness from the Envoy
-role registry (the holder of `legion-<project>-controller` and its `last_seen`) and launches no
+role registry: the holder of `legion-<project>-controller`, its state and its `last_seen`. It
+replaces no controller whose session reads `unresponsive` — past the live window, inside the gone
+horizon, still the holder — and acts only on one that reads `gone`. The daemon launches no
 controller itself, so do not exit the session: while none runs, the project has no controller. A
 second `legion controller start` replaces you: it mints a new secret, your grants stop working
 (every `set_status` answers 403), and the role moves to the new session.
