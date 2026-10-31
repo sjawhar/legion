@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-138",
+  "completed": "2026-10-26T18:54:46Z",
+  "headTested": "36bc546e26f0962a82af2acd7da680f81da592c2",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's RC1 and RC3 commands on GitHub at its own head H_impl 36bc546e (its proof named 0b7970ca): same results. Re-read RC4's smoke pull request sjawhar/legion-smoke#805 on GitHub: merged true, changed_files 0, commits 2, merge commit 4b346f7f with 0 files on parent 6d843f28, smoke main still 6d843f28, no infra-138* ref left."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "RC1: until INFRA-177's cutover push, the pull request changes only paths under .legion/INFRA-138/.",
+      "surface": "GitHub on sjawhar/legion, pull request https://github.com/sjawhar/legion/pull/2265",
+      "command": "gh api repos/sjawhar/legion/pulls/2265/files --paginate --jq '[.[].filename] | all(startswith(\".legion/INFRA-138/\"))'; and --jq '[.[] | {filename,status,additions,deletions}]'",
+      "observed": "true; two added files, .legion/INFRA-138/implement.json +39 and .legion/INFRA-138/plan.json +162, matching the body's Size line (+201/-0). Pull request head is 36bc546e (gh pr view --json headRefOid).",
+      "headSha": "36bc546e26f0962a82af2acd7da680f81da592c2",
+      "negativeControl": "the same filter over pull request 2239 -> false"
+    },
+    {
+      "criterion": "RC3: the PR body has 'Dispatch: INFRA-138', says no product code and merge only after every child and INFRA-480, and lists B1-B41 with delivering children as plan section 5 does.",
+      "surface": "GitHub on sjawhar/legion, pull request https://github.com/sjawhar/legion/pull/2265",
+      "command": "B=$(gh pr view 2265 -R sjawhar/legion --json body --jq .body); grep -cF 'Dispatch: INFRA-138'; grep -cF 'INFRA-480'; grep -cE '\\bB41\\b'; grep -cE '^\\| B[0-9]+ \\|'; diff of the body's '| B<n> |' rows against the same rows of dispatch doc-read --issue INFRA-138 --artifact plan-md; sequence check of the bullet numbers",
+      "observed": "1, 8, 2, 41; diff empty (rows identical to plan section 5); bullet numbers B1..B41 with no gap or repeat. Change bullets state no product code and merge only after INFRA-156/172-177 are done and INFRA-480 proves the Acceptance on main.",
+      "headSha": "36bc546e26f0962a82af2acd7da680f81da592c2",
+      "negativeControl": "gh pr view 2239 -R sjawhar/legion --json body --jq .body | grep -cF 'Dispatch: INFRA-138' -> 0"
+    },
+    {
+      "criterion": "RC4: GitHub squash-merges a pull request that has commits but changes no file.",
+      "surface": "GitHub on sjawhar/legion-smoke, pull request https://github.com/sjawhar/legion-smoke/pull/805",
+      "command": "gh api repos/sjawhar/legion-smoke/pulls/805 --jq '{merged,changed_files,commits,merge_commit_sha,head_sha:.head.sha}'; gh api repos/sjawhar/legion-smoke/commits/4b346f7fe975849352ee7141c68580d3c6120164 --jq '{files:(.files|length),parents:[.parents[].sha]}'; gh api repos/sjawhar/legion-smoke/branches/main --jq .commit.sha; gh api repos/sjawhar/legion-smoke/git/matching-refs/heads/infra-138 --jq length",
+      "observed": "merged true, changed_files 0, commits 2, merged_by legion-implementer[bot], head 0b33835e; merge commit 4b346f7f has 0 files and parent 6d843f28; smoke main 6d843f28 (untouched); 0 infra-138* refs left",
+      "negativeControl": "the implementer's recorded refusal of gh pr create with no commits beyond base ('No commits between ...') is not re-run, since both scratch refs are deleted; contrast read: gh api repos/sjawhar/legion/compare/main...36bc546e --jq '[.files[].filename] | {n:length, allRoot: all(startswith(\".legion/INFRA-138/\"))}' -> n 2, allRoot true (a pull request that does change files reports them)"
+    },
+    {
+      "criterion": "RC2: lint, typecheck, test and pr-title conclude success on H_impl; every later commit touches only .legion/.",
+      "surface": "GitHub on sjawhar/legion, check runs of commit 36bc546e and compare API",
+      "command": "gh api repos/sjawhar/legion/commits/36bc546e26f0962a82af2acd7da680f81da592c2/check-runs --paginate --jq '[.check_runs[] | select(.name | IN(\"lint\",\"typecheck\",\"test\",\"pr-title\")) | {name,status,conclusion}]'; gh pr checks 2265 -R sjawhar/legion --required; gh api repos/sjawhar/legion/compare/36bc546e...36bc546e",
+      "observed": "At 2026-10-26T18:53Z all four required checks exist on H_impl and are queued (Tests run https://github.com/sjawhar/legion/actions/runs/40381545451 created 18:52:00Z; PR Title run https://github.com/sjawhar/legion/actions/runs/40381570353 created 18:52:10Z; an earlier PR Title run 40381545412 cancelled). So the trailerless push did start the required checks; their conclusion is not settled and was not waited for: the reviewer reads it before approving, and a red sends the issue back. Compare H_impl...head: identical, no commit above H_impl.",
+      "headSha": "36bc546e26f0962a82af2acd7da680f81da592c2",
+      "negativeControl": "check-runs at H_plan 0b7970ca9125 (trailered, touches only .legion/INFRA-138/plan.json, committed 18:50:02Z) -> total_count 0, none of the four"
+    }
+  ],
+  "risks": [
+    "RC2's check half is unsettled at this round: all four required checks were queued on H_impl when read (18:53Z). The reviewer must read them as success at 36bc546e before approving.",
+    "RC4 merged into an unprotected scratch base on sjawhar/legion-smoke. sjawhar/legion main's ruleset (required_linear_history, pull_request with 1 approving review, required_status_checks lint/typecheck/test/pr-title) and the daemon's ready_merge path (auto-merge arm with expected head) are not exercised on an empty pull request until RC5 and READY. Squash is linear and none of those rules is about the diff's size, so no refusal is expected, but it is unproven."
+  ],
+  "notProven": "The 41 root Acceptance bullets are INFRA-480's, per plan section 4 'Tester, first round' step 3; not attempted."
+}
