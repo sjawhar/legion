@@ -43,6 +43,7 @@ Read each by its `skill://` link: a read by path stops at 300 lines.
 | The issue deletes code, a command, or documentation | `skill://legion-worker/references/cleanup-deletion.md` |
 | You need a tool the image may not carry, before you install anything; before you measure Oh My Pi's binary; or a test fails in your pod | `skill://legion-worker/references/tools.md` |
 | A problem outside your issue, or a failed production check | `skill://legion-worker/references/findings.md` |
+| Your text would reach a person outside the company: a comment, issue or pull request on a repository the company does not own, an email, a message to another project's maintainers | `skill://outside-message` |
 
 ## Every role pushes its own commits
 
