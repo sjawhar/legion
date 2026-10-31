@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-336",
+  "completed": "2026-10-31T01:16:04Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Every proof entry was driven again independently at ffc0ee86308052942b660d85cbe686a51eec1e1b, with the tester's own tasks and the tester's own scripts, not by re-running the implementer's. C3: six fresh headless Oh My Pi sessions (three roles x two checkouts), composed through workerPane() with a composer of my own ($TMPDIR/infra336t/compose2.ts, which splits the daemon's --append-system-prompt shell text with the shell rather than a regular expression) and given tasks of my own, one of them the planner role the implementer never ran. Head: all three bodies have no `completed` and all three carry `previousHandoff`. Base (main's daemon module, extracted by me with `git archive 92619d8df packages/daemon packages/envoy go.work go.work.sum`): all three carry `completed`, and the tester's and the planner's read 2026-10-31T00:00:00Z in sessions that ran at 01:11Z, with that string in an assistant message and in no tool result of either transcript. C6: my own scratch jj repository and three rounds, not the implementer's. C1, C2, C4, C5: the plan's own commands at this head. C7 is CI's, read on GitHub and not re-run. The implementer's recorded observations all reproduce; the two failures below are defects beyond its proof, not a gap in it."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "C2 (A2, R2): the skill-scenario harness scores a tester handoff written to the new shape — but it now refuses the shape every other checkout's prompt spells, so the harness's documented two-label comparison measures the prompt change and not the rule",
+      "evidence": "`previousHandoff: z.string()` in packages/pi-legion/scripts/skill-scenarios/score.ts:107 is required. Each label's agent gets the role prompt of its own checkout (packages/pi-legion/scripts/skill-scenarios/worker-pane.ts:54 passes `path.join(checkout, \"packages\", \"daemon\")` as the pane's daemon module), while one scorer reads every label's runs (rig.sh:1560, `bun \"$here/score.ts\" runs \"$work/runs\"`). The documented comparison is `./rig.sh batch tester-proof 5 head base` (packages/pi-envoy/scripts/README.md:269), base being a checkout of main. Measured: main's tester prompt, composed at 92619d8df, carries `completed: \"<RFC 3339 UTC time of writing>\"` twice and the string `previousHandoff` zero times, so a base-label tester writes `completed` and no `previousHandoff`; `TestHandoff.safeParse` of that body prints `base-arm parses: false` and `✖ Invalid input: expected string, received undefined → at previousHandoff`, which testerProof (score.ts:714) records as `proofProblems=[\"not a test handoff: …\"]` and scores `pass=false`. Before this change the bias ran the other way and no checkout met it: both prompts asked for `completed`. Red test: `test(\"a tester handoff of a checkout whose prompt predates previousHandoff is read too\")` in packages/pi-legion/scripts/skill-scenarios/score.test.ts, commit df06144227c0. `cd packages/pi-legion && bun test scripts/skill-scenarios/score.test.ts` prints `67 pass, 1 fail` with `expect(received).toBe(expected) Expected: true Received: false` at that test. Measured fix: `previousHandoff: z.string().optional()` makes it `68 pass, 0 fail` and leaves the implementer's own new case passing; the schema was then restored with `jj restore`, so the branch carries the red test and not the fix."
+    },
+    {
+      "criterion": "R3 and D4: `previousHandoff` closes the identical-body round — but the revset the prompt tells a worker to read it with answers nothing, silently, whenever the shell's directory is not the workspace root, which writes the empty string and reproduces the HANDOFF_NOT_NEW the field exists to close",
+      "evidence": "packages/daemon/internal/prompts/go/worker-common.md:21 gives `jj -R \"$LEGION_WORKSPACE\" log --no-graph -r 'latest((::@- ~ ::trunk()) & files(\".legion/<issue>/<phase>.json\"))' -T commit_id`, whose fileset has no `root:` prefix, so jj resolves it against the shell's working directory while `-R` fixes only the repository. The function this mirrors, findHandoffCommit (packages/pi-shared/src/handoff-commit.ts:114-124), uses `files(root:\".legion/<KEY>/<phase>.json\")`. Measured in this workspace at ffc0ee86: from the workspace root the prompt's command prints `ffc0ee86308052942b660d85cbe686a51eec1e1b`; run unchanged from `packages/pi-legion` it prints nothing and exits 0; the same command with `root:` added prints `ffc0ee86308052942b660d85cbe686a51eec1e1b` from `packages/pi-legion` too. The prompt then tells the worker to write `\"\"` (`an empty string when that command prints nothing`), which is what a first round writes, so a second round at an unmoved head writes its predecessor's bytes again. Measured consequence in a scratch jj repository ($TMPDIR/infra336t/c6.sh): round 2 with `previousHandoff` at round 1's commit makes a non-empty commit (826b49a5adfff252159c1d968e8daf661b9ed091, `jj log -r @- -T empty` prints false), while the byte-identical round 3 makes an empty commit (`empty` prints true) and findHandoffCommit's own revset answers round 2's commit again — the HANDOFF_NOT_NEW refusal (packages/daemon/internal/workflow/engine.go). The failure is silent: no error, exit 0, an empty answer that reads like `there is no previous handoff`. Fix: add `root:` to the fileset in that one sentence, so the prompt's command and findHandoffCommit agree. No red test: the repository pins no prompt wording (the plan's D6), and a test of this text would be a source-text pin."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "C3 (A2, A4, R1, R3): an agent reading the prompt this checkout's daemon composes writes a handoff with no `completed` key and with `previousHandoff`",
+      "surface": "six real headless Oh My Pi sessions on the tester, planner and implementer prompts `workerPane()` composes from a checkout's own daemon module (`go run ./cmd/daemon-pane` over the module's embedded prompts), three on this head and three on main",
+      "command": "bash $TMPDIR/infra336t/sessions.sh head and bash $TMPDIR/infra336t/sessions.sh base, each composing with `bun $TMPDIR/infra336t/compose2.ts <daemon module> <role> <rig> <out>` and running `omp -p --session-dir <dir> \"<the role's task>\" --append-system-prompt \"$(cat <prompt>)\"` with every LEGION_* and DISPATCH_* variable unset, OMP_SESSION_SQL_DSN_FILE unset and OMP_SESSION_STORAGE=file; then `jq -r 'has(\"completed\")'` and `jq -rc '.previousHandoff // \"ABSENT\"'` on each handoff",
+      "observed": "head: tester, planner and implementer each printed has(completed)=false; previousHandoff is 7c1e55a0b3d9f2461a8e0c7b5d4639182af0e6b3 for the tester (the commit its task named) and the empty string for the planner and the implementer (neither task named one). The head implementer, asked for a pull-request comment recording when its proof ran, wrote `Proof of 1h5m ran at 2026-10-31T01:11:00Z.`, and that string is in a `toolResult` entry of its JSONL — the output of the `date -u +%FT%TZ` it ran — so A4 held. The head tester and planner wrote no date at all. The only `completed` left in each composed prompt is the verb, in the CI-red paragraph, and (implementer) the name of a Dispatch deploy event.",
+      "headSha": "ffc0ee86308052942b660d85cbe686a51eec1e1b",
+      "negativeControl": "the same three tasks on main's prompt, composed from the daemon module of 92619d8df: all three handoffs carry `completed`, and the tester's and the planner's read 2026-10-31T00:00:00Z — midnight — in sessions that ran at 01:11Z. `jq` over each transcript shows that string in exactly one entry, an assistant message, and in no tool result; the only tool call either session made was the `write`. That is the defect this issue removes, measured on the unchanged prompt."
+    },
+    {
+      "criterion": "C1 (A1, R1, R2): no prompt, skill, harness or fixture in the repository still asks for or writes the field",
+      "surface": "the repository at this commit",
+      "command": "git grep -nE 'time of writing|set (`completed` )?to now|first four for you|four stamps|issue, completed\\)|\"?completed\"?: ?(\"[0-9<]|z\\.iso|\\$completed|true)|--arg completed|`completed` an RFC|field\\(\"completed\"\\)' -- packages/daemon/internal/prompts packages/daemon/internal/api skills packages/pi-legion/scripts/skill-scenarios packages/pi-legion/extensions packages/dispatch",
+      "observed": "prints nothing, exit 1",
+      "headSha": "ffc0ee86308052942b660d85cbe686a51eec1e1b",
+      "negativeControl": "the same grep at main (92619d8dfcc6ba947ebd8d27d55e7d4d5e59f8c5) prints 14 lines, the 14 this change removes"
+    },
+    {
+      "criterion": "C2 (A2, R2): the skill-scenario harness scores a tester handoff written to the new shape",
+      "surface": "the harness's own test run",
+      "command": "cd packages/pi-legion && bun test scripts/skill-scenarios/score.test.ts",
+      "observed": "67 pass, 0 fail, 355 expect() calls at the head as the implementer left it, including the new case 'a tester handoff that carries no completed time is read, and one with no issue is not'. (With the tester's red test added the same command prints 67 pass, 1 fail; see failures.)",
+      "headSha": "ffc0ee86308052942b660d85cbe686a51eec1e1b",
+      "negativeControl": "`TestHandoff.safeParse` of the same body with `issue` removed is false, which is the case's own control; and the body main's prompt asks for parses false too, which is the first failure above"
+    },
+    {
+      "criterion": "C4 and C5 (A4, A5, R4, R5): the time sentence sits in the three prompt parts and nowhere else, `previousHandoff` in the five prompt files, and the correction in the four notes",
+      "surface": "the repository at this commit",
+      "command": "git grep -Fl \"<the time sentence>\" -- packages/daemon/internal/prompts; grep -Fc \"<the time sentence>\" <each of the three>; git grep -ln previousHandoff -- packages/daemon/internal/prompts; grep -Fc \"<the correction sentence>\" <each of the four notes>",
+      "observed": "the sentence is in go/architect-common.md, go/worker-common.md and roles/controller-root.md, once each, and in no other file under packages/daemon/internal/prompts; over the whole repository it is in those three and in .legion/INFRA-336/implement.json alone. previousHandoff is in go/worker-common.md and the four role residues (planner, implementer, tester, reviewer) and nowhere else there. The correction sentence prints 1 in each of the four docs/solutions notes, and each sits where the note's own text describes the handoff's fields, so it reads true where it stands.",
+      "headSha": "ffc0ee86308052942b660d85cbe686a51eec1e1b",
+      "negativeControl": "the same two greps at main print nothing for either needle: neither the sentence nor the field exists there"
+    },
+    {
+      "criterion": "C6 (R3, D4): with `previousHandoff`, a round that repeats its predecessor's decision, counts and findings at an unmoved head still writes a commit the completion can report",
+      "surface": "the mechanic `handoff_complete` runs — a scratch jj repository with a real remote, read with findHandoffCommit's own revset",
+      "command": "bash $TMPDIR/infra336t/c6.sh — three review rounds at one head with the same decision, counts and finding; round 2 names round 1's commit in `previousHandoff`, round 3 repeats round 2's bytes; each round runs `jj split -m 'review: record handoff' .legion/PROBE-9/review.json`, then `jj log -r @- -T empty` and `jj log --no-graph -r 'latest((::@- ~ ::trunk()) & files(root:\".legion/PROBE-9/review.json\"))' -T commit_id`",
+      "observed": "round 1 commits b1e652c6778ada70334dc4d1117f609c0f54f89b, empty=false. Round 2, naming round 1's commit, commits 826b49a5adfff252159c1d968e8daf661b9ed091, empty=false, and the revset answers that new commit, so the completion reports a commit the daemon has not seen.",
+      "headSha": "ffc0ee86308052942b660d85cbe686a51eec1e1b",
+      "negativeControl": "round 3, byte-identical to round 2: `jj split` makes an empty commit (`jj log -r @- -T empty` prints true) and the revset answers round 2's commit 826b49a5 again — the HANDOFF_NOT_NEW refusal the field closes"
+    },
+    {
+      "criterion": "C7: the repository's static lanes at the head under test",
+      "surface": "GitHub's checks on pull request 2585 at this head, read and not re-run",
+      "command": "gh pr checks 2585; gh run list --repo sjawhar/legion --commit ffc0ee86308052942b660d85cbe686a51eec1e1b",
+      "observed": "at 2026-10-31T01:15:55Z, 15 minutes after the implementer's push, both lanes are still running: run 41153157288 (CI) `queued` and run 41153157207 (PR Title) `pending`, neither with a conclusion. Read as running; no lane was waited for and none was re-run. The tester's own red-test commit will put CI red at the head it pushes, by design.",
+      "headSha": "ffc0ee86308052942b660d85cbe686a51eec1e1b",
+      "negativeControl": "the tester's own additions were checked locally before the push instead: `bunx biome check packages/pi-legion/scripts/skill-scenarios/score.test.ts` checked 1 file with no fixes, and `cd packages/pi-legion && bun run typecheck` (`bunx tsc --noEmit`) printed no error, so the red test fails on its assertion and not on lint or types"
+    }
+  ]
+}
