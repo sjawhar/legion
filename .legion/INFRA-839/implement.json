@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-839",
+  "completed": "2026-10-31T02:55:00Z",
+  "proof": [
+    {
+      "criterion": "Acceptance 1: a role message the listener cannot deliver is kept outside the role lanes and forwarded once, in order, on the claim; one release; the purge, the role-lane rule and every grant unchanged.",
+      "surface": "Go tests on a real nats-server (internal/testnats), the stream and its consumers as the listener builds them.",
+      "command": "cd packages/envoy && go test -count=1 ./internal/bus ./cmd/listener",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 687.526s; ok github.com/sjawhar/envoy/internal/bus 356.743s. TestStreamConfigExcludesRoleLanes, TestEveryStreamSubjectIsClassifiedForReplay, TestEveryStreamSubjectIsALiteralPrefixAndWildcard, the two legacy-purge tests and TestTheKeeperNeverPutsBackARoleLaneAStartMovedOffTheStream all pass; the only edit to any of them is the one new subject in TestStreamConfigExcludesRoleLanes's pinned list. notifications.role.> is still off streamSubjects, migrateRoleLanesOffStream and the purge are untouched, and infra/core/permissions.go is unchanged: the kept subjects publish under the grant's existing notifications.> and read under its existing $JS.API.STREAM.MSG.GET.<stream>. TestAClaimForwardsEachKeptRoleMessageToItsNewHolderExactlyOnce shows one claim forwarding the kept copy once and a second claim forwarding nothing more.",
+      "headSha": "a44186d01569",
+      "negativeControl": "A listener whose own subject list lacks the kept prefix: bus.DurableNotificationSubjects() is StreamSubjects() minus that prefix, and TestTheRoleLanesGiveUpBranchesKeepTheMessageWithNoException binds a real durable through startListenerSubscription and fails if it is handed the kept copy; the test's select on the delivery channel sees nothing for a second, and test_messages_received{source=\"agent\",topic_prefix=\"notifications.role\"} reads 1, not 2."
+    },
+    {
+      "criterion": "Acceptance 2a: on the real stack, a role message published with no holder reaches the next holder's session once, with a negative control on the behaviour before the change.",
+      "surface": "packages/envoy/scripts/e2e-local.sh: the real envoy-listener binary, a real NATS server and a real session process on a serve port.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash packages/envoy/scripts/e2e-local.sh",
+      "observed": "Exit 0. 'unclaimed-role window: kept message 7e4bfe9c0eb936c1723ac1f16278d009 reached the fake session exactly once, carrying kept_at'. out/e2e/unheld-role-response.json is HTTP 202 {\"event_id\":\"7e4bfe9c0eb936c1723ac1f16278d009\",...,\"topic\":\"notifications.role.e2e-reviewer\",\"kept\":true,\"kept_reason\":\"unclaimed\"}; after POST /v1/roles/set the captured forward carries kept_at under dedupe_key envoy.role.forward.publish.<key>, counted exactly once in the session's own prompts and once on the bus.",
+      "headSha": "a44186d01569",
+      "negativeControl": "The same publish with keep:false to an unheld role in the same run: HTTP 404 {\"error\":\"no holder for role e2e-unkept\",\"reason\":\"unclaimed\"}, nothing stored on the bus for it, and its claimant handed nothing ('keep-false control:' line). Before the change, measured with a throwaway Go test on a real nats-server at main ab3193265e73 and at this branch's base ddc0078d1e12: 404 {\"error\":\"no holder for role t0-unheld\",\"reason\":\"unclaimed\"} and no delivery; and the rig as main carries it, which asserts that 404, fails at this head with 'ERR: an unheld role publish was not rejected with 404.'"
+    },
+    {
+      "criterion": "Acceptance 2b: on the real stack, a role message published while the claim has lapsed reaches the next claimant once, with a negative control on the behaviour before the change.",
+      "surface": "The same rig: the holder's registration is removed through DELETE /v1/sessions/<id>, so its claim lapses without waiting out session.ClaimStaleAfter.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash packages/envoy/scripts/e2e-local.sh",
+      "observed": "'lapsed-claim window: kept message c5ae2f93b94fcd968587ebbc74ffb408 reached the fake session exactly once, carrying kept_at'. out/e2e/lapsed-role-response.json is HTTP 202 {...,\"topic\":\"notifications.role.e2e-escalation\",\"holder\":\"ses_e2e_local\",\"kept\":true,\"kept_reason\":\"holder_lapsed\"}; after the session registers and claims again the forward carries kept_at and is counted once.",
+      "headSha": "a44186d01569",
+      "negativeControl": "Before the change, the same case measured on a real nats-server at both candidate bases: 404 {\"error\":\"role t0-lapsed holder ses_t0_lapsed lapsed; claim released (last seen ...)\",\"reason\":\"holder_lapsed\",\"claim_released\":true}, the claim released and nothing delivered. In this run the held-role publish is still HTTP 200 with holder ses_e2e_local and no kept field at all, so a kept answer cannot be read for a delivered one."
+    },
+    {
+      "criterion": "Acceptance 2c: a kept message older than one hour is dropped and counted; a forwarded one carries the time it was kept.",
+      "surface": "cmd/listener tests against a real nats-server, with the drain's clock moved rather than an hour waited (the age is the stream's own store time, which no caller chooses).",
+      "command": "cd packages/envoy && go test -count=1 ./cmd/listener -run 'Kept'",
+      "observed": "ok. TestAnOverWindowKeptMessageIsDroppedCountedAndPassedOver: the over-age copy is forwarded 0 times, 'listener dropped a kept role message older than the keep window' is logged exactly once, test_role_kept_expired reads 1, and a second drain at the real clock forwards it 0 times, so the cursor moved past it. The forwarded copies of the other tests carry kept_at taken from the stream's store time.",
+      "headSha": "a44186d01569",
+      "negativeControl": "The second drain in the same test runs with the real clock, where the copy is well inside roleKeepWindow: it still forwards nothing, which is only true because the cursor advanced; a cursor that had not moved would forward it and fail the assertion."
+    },
+    {
+      "criterion": "Acceptance 3: a sender can ask not to be kept, and the Legion daemon does.",
+      "surface": "The live rig for the listener's half, and the daemon's own publish body for the sender's half.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash packages/envoy/scripts/e2e-local.sh && cd packages/daemon && go test -count=1 ./internal/notify",
+      "observed": "The rig's keep-false control: HTTP 404 {\"error\":\"no holder for role e2e-unkept\",\"reason\":\"unclaimed\"}, nothing on the bus, its claimant handed nothing. ok github.com/sjawhar/legion/daemon/internal/notify 0.037s: TestHTTPPublisherSendsPayloadAndOutboxDedupeKey now reads keep off the wire and fails unless it is present and false; the 404 to ErrNoHolder and 504 to ErrNotDelivered mappings are unchanged.",
+      "headSha": "a44186d01569",
+      "negativeControl": "The daemon test's assertion refuses an absent keep as well as a true one ('if body.Keep == nil || *body.Keep'), because a missing field reads as the listener's default, which is to keep; removing the field from notify.go fails it."
+    },
+    {
+      "criterion": "Acceptance 4: the rule that none is kept for a later claimant is rewritten everywhere it is stated.",
+      "surface": "The tree, and the built documentation site.",
+      "command": "grep -rn \"none is stored for a later claimant\\|An unheld role returns an error\\|no live session holds the role, the publish fails\\|none is kept for a later claimant\\|A role message is not kept for a later claimant\" packages/envoy packages/envoy-client packages/pi-envoy packages/claude-envoy skills docs --include='*.md'; cd docs/site && bun run build",
+      "observed": "The grep returns nothing. The site builds: 'All internal links are valid', '43 page(s) built in 16.24s', 'Complete!'. Rewritten: packages/envoy/AGENTS.md (the rule, the exceptions bullet and the Listener API publish row), packages/envoy/docs/architecture.md (the send-and-publish answers, the refusal-reason census, the delivery-status table, the role-delivery answers and the role lane), packages/envoy/README.md, packages/envoy-client/README.md, packages/pi-envoy/README.md, packages/claude-envoy/AGENTS.md, skills/envoy/SKILL.md, skills/envoy/references/deliveries.md and roles.md, skills/legion-oracle/SKILL.md, skills/legion-controller/references/finding-asks.md, skills/legion-worker/references/findings.md, docs/site/src/content/docs/dispatch/envoy.md.",
+      "headSha": "a44186d01569",
+      "negativeControl": "The two records that stay true are deliberately outside the pattern and were left exactly as they are: internal/bus/stream.go's comment that the role lanes must never be retained, and docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md:57-59. The second grep, for '404 for an unheld role|unheld role returns 404', returns only packages/claude-envoy/legion/skills/legion-worker/references/findings.md, the generated copy the claude-envoy rebuild workflow writes on main after the merge."
+    },
+    {
+      "criterion": "Acceptance 5 (folded from INFRA-119): one role-lane message, one record, the kept lane included.",
+      "surface": "cmd/listener tests over both delivery paths, with the listener's own metrics endpoint scraped.",
+      "command": "cd packages/envoy && go test -count=1 ./cmd/listener -run 'Received|Role|Kept'",
+      "observed": "ok. TestTheRoleLanesGiveUpBranchesKeepTheMessageWithNoException scrapes the listener's /metrics after one role publish and reads test_messages_received{source=\"agent\",topic_prefix=\"notifications.role\"} 1; the real durable bound in the same test is handed nothing, and no delivery exception is published. TestDurableAcknowledgesAStoredForwardCopyAndDeliversNothing, the half that already held at the base, still passes.",
+      "headSha": "a44186d01569",
+      "negativeControl": "The failing-before half is the kept copy's: a kept copy is on the stream, so without bus.DurableNotificationSubjects() leaving the kept prefix out of the durable's filter the same test's durable receives it, the count reads 2 and the select on the delivery channel fails naming the event and its topic."
+    }
+  ],
+  "filesChanged": [
+    "packages/contracts/src/subject.ts, src/envelope.ts, schemas/envelope.schema.json, scripts/gen-go.ts: KEPT_TOPIC_PREFIX, keptRoleSubject, keptRoleCursorSubject and the envelope's kept_at, emitted into Go.",
+    "packages/envoy/internal/contracts/generated.go: regenerated (bun run gen:go); never hand-edited.",
+    "packages/envoy/internal/bus/stream.go: the kept prefix in streamSubjects and privateStreamSubjects, and DurableNotificationSubjects().",
+    "packages/envoy/internal/bus/stored.go: LastStoredMessage and the shared storedMessage read.",
+    "packages/envoy/internal/bus/nats.go: PublishStoredOn, PublishCursorAt with ErrCursorMoved, KeptMsgID, and the publish path refactored to take its subject (sendStored, publishJetStreamOn).",
+    "packages/envoy/cmd/listener/role_keep.go (new): the keep, the per-role drain, roleKeepWindow, roleKeepDrainMax and the cursor.",
+    "packages/envoy/cmd/listener/confirmed.go: roleSend.keep, the kept() 202 answer, the sendKept outcome.",
+    "packages/envoy/cmd/listener/delivery.go: the role lane's two give-up branches keep first; the roleKeptExpired counter on the config.",
+    "packages/envoy/cmd/listener/api.go: the keep request field, kept and kept_reason on publishResponse, the drain started after a claim.",
+    "packages/envoy/cmd/listener/request_record.go: acceptWith, an accepted answer under a status of its own.",
+    "packages/envoy/cmd/listener/durable.go: the durable filter takes DurableNotificationSubjects().",
+    "packages/envoy/cmd/listener/main.go: envoy_role_kept_expired_total.",
+    "packages/envoy/scripts/e2e-local.sh: both kept windows, the keep-false control, the held-role assertion, and the log-file race at startup.",
+    "packages/envoy-client/src/transport.ts, tool-contract.ts, delivery.ts: PublishInput.keep, PublishResult.kept/keptReason, publishConfirmationText, kept_at on a delivery card, the envoy_publish description's three answers.",
+    "packages/pi-envoy/extensions/envoy.ts and packages/claude-envoy/src/envoy-channel-server.ts: both hosts render a kept answer as success in the same words.",
+    "packages/pi-shared/src/phase-reminder.ts: roleUnheld renamed keptNothing, its doc comment and log line made true.",
+    "packages/daemon/internal/notify/notify.go: keep:false on the daemon's publish body.",
+    "Prose: packages/envoy/AGENTS.md, packages/envoy/README.md, packages/envoy/docs/architecture.md, packages/envoy-client/README.md, packages/pi-envoy/README.md, packages/claude-envoy/AGENTS.md, skills/envoy/{SKILL.md,references/deliveries.md,references/roles.md}, skills/legion-oracle/SKILL.md, skills/legion-controller/references/finding-asks.md, skills/legion-worker/references/findings.md, docs/site/src/content/docs/dispatch/envoy.md.",
+    "Changelog fragments pr2588-* in envoy, envoy-client, contracts, pi-envoy, claude-envoy and pi-legion."
+  ],
+  "trickyParts": [
+    "A kept copy carries the role topic in its envelope, so a consumer that delivered it would re-trigger role delivery on every listener. bus.DurableNotificationSubjects() keeps the kept prefix out of the one consumer filter built over the notification subjects (cmd/listener/durable.go); a test binds a real durable and fails if it is handed one.",
+    "Two numbers are needed from the cursor: the cursor message's own stream sequence, which the compare-and-swap write must name, and the kept sequence its body names, where the walk starts. readRoleKeepCursor returns both.",
+    "A forward that reached the server and drew no receipt (bus.ErrReceiptTimeout) counts as forwarded and the walk goes on, because that forward is stored on the holder's agent subject and a returning session replays it. T0 measured exactly that at both candidate bases before any code was written.",
+    "The drain reads the kept lane before the cursor, so a claim of a role nothing was ever kept for costs one stream read rather than two. Every claim write starts a drain, and a holder re-claims on its heartbeat, so that path is the common one.",
+    "envoy_role_kept_expired_total carries no role label: a role token names a tree role of one issue, so a deployment sees unboundedly many, and each would be a counter series kept for the process's life."
+  ],
+  "deviations": [
+    "The kept answer is 202, not the 200 the plan's section 2 wrote. INFRA-514's architect decided it on 2026-10-31 after INFRA-771's implementer pointed out that with its T4 making every role forward stored-only, a 200 would no longer tell a sender anything was received. The three answers are now 200 (a live holder took it), 202 (kept) and 404 (nothing kept).",
+    "This branch is based on legion/INFRA-594 (sjawhar/legion#2446), not on main, by the architect's instruction of 2026-10-30: #2446 changes every file this change touches. The base was merged forward once at ddc0078d1e12, resolving two conflicts by keeping both sides (internal/bus/nats.go, packages/claude-envoy/tests/envoy-channel-stall.test.ts). The pull request's base is that branch; it is retargeted to main and main merged forward once #2446 merges.",
+    "Plan T6 added no fix to delivery.go's record guard: the double record was already gone at the base, as the plan's section 1 predicted, and nothing T0 measured found a path that still doubles. The rule is pinned by test instead.",
+    "The plan's T11 asked for the rig's two windows; a third was added, the keep:false control, so acceptance 3's listener half and both windows' negative control run on the same live stack."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "packages/envoy/scripts/e2e-local.sh could die at startup before it ran anything: wait_for_listener's first jq read the listener log before the backgrounded redirect had created it, and under set -e that killed the script. Observed once in this workspace; fixed here, since this change edits that file.",
+    "The rig's capture subscriber had to skip notifications.envoy.kept.cursor.>: the drain cursor is listener bookkeeping rather than an envelope, and captured it failed the run's final envelope assertion.",
+    "The Postgres-backed tests of cmd/listener need a server; the pod has the Postgres 17 client tools but no server, and testcontainers has no runtime here. They were run against a Postgres unpacked under $TMPDIR and reached through DISPATCH_TEST_DATABASE_URL, which is how CI's envoy-go job provides one."
+  ]
+}
