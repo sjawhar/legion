@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -40,6 +41,9 @@ func TestSeedAtASmallScale(t *testing.T) {
 	})
 	t.Run("the event counters match the seeded events", func(t *testing.T) {
 		assertEventCountersMatch(t, first)
+	})
+	t.Run("every ask has the event its reader resolves", func(t *testing.T) {
+		assertEveryAskHasItsOpeningEvent(t, first)
 	})
 	t.Run("every arm of graph_edges holds rows", func(t *testing.T) {
 		assertEveryGraphArmHoldsRows(t, first)
@@ -304,6 +308,42 @@ func assertEventCountersMatch(t *testing.T, database *store.Store) {
 	if len(mismatched) > 0 {
 		t.Errorf("%d owners whose counter does not match their events, the first few: %v",
 			len(mismatched), mismatched[:min(5, len(mismatched))])
+	}
+}
+
+// assertEveryAskHasItsOpeningEvent holds every seeded ask to the identity event a read of it
+// resolves. api.attachOpenedEventIDs runs events.OpenedEventIDs over every ask it is about to
+// answer with and fails the whole request when one has no event, so an ask without one answers
+// 500 on GET /api/v1/issues/{key}/asks, GET /api/v1/artifacts/{id}/asks, GET /api/v1/asks/{id},
+// the Inbox and the issue read's open_asks. The check calls that same function rather than
+// restating its query, so a change to which types establish an ask's identity is followed here.
+func assertEveryAskHasItsOpeningEvent(t *testing.T, database *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := database.Pool.Query(ctx, `select id::text from asks order by id`)
+	if err != nil {
+		t.Fatalf("list the asks: %v", err)
+	}
+	askIDs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("list the asks: %v", err)
+	}
+	if len(askIDs) == 0 {
+		t.Fatal("the seeded database holds no ask, so this check proves nothing")
+	}
+	openedEventIDs, err := events.OpenedEventIDs(ctx, database.Pool, askIDs)
+	if err != nil {
+		t.Fatalf("resolve the opening events: %v", err)
+	}
+	missing := []string{}
+	for _, askID := range askIDs {
+		if _, held := openedEventIDs[askID]; !held {
+			missing = append(missing, askID)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("%d of %d asks have no opening event, the first few: %v",
+			len(missing), len(askIDs), missing[:min(5, len(missing))])
 	}
 }
 

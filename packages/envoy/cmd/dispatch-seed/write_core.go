@@ -2,14 +2,32 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // seedActor is the author every seeded row carries that is not a session's. It is a user actor,
 // the shape `author`, `created_by` and `actor` hold everywhere in the schema.
 const seedActor = `{"kind":"user","id":"seed@dispatch.invalid","name":"Seed"}`
+
+// seedAuthor is seedActor as the model reads it, for the event payloads the seed builds through
+// model rather than as text (askOpenedPayload). It is decoded from the one constant instead of
+// written out a second time, so the author a payload names cannot drift from the author its row
+// holds; model.Actor carries no display name, so the payload holds the kind and the id alone,
+// which is what a server's own payload holds.
+var seedAuthor = decodeSeedActor()
+
+func decodeSeedActor() model.Actor {
+	var actor model.Actor
+	if err := json.Unmarshal([]byte(seedActor), &actor); err != nil {
+		panic(fmt.Sprintf("dispatch-seed: seedActor is not an actor: %v", err))
+	}
+	return actor
+}
 
 // sessionActor is the actor of a session, as events.actor carries one: the shape
 // `events_session_actor_created_at_idx` is partial on and `agentLastActivity` reads.

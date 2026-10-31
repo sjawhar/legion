@@ -400,12 +400,13 @@ the pinned image. The database retains the migrated schema; tests only truncate 
 `go run ./cmd/dispatch-seed` fills an empty database with the data set a statement measurement is
 taken on: ten times production's row counts at `--scale 1` — 10 projects, 20,000 issues over
 parent chains and `blocked_by` links, 40,000 documents with 200,000 versions, 80,000 asks,
-370,000 comments, 60,000 messages, 1,250,000 events and a vector for half the issues, documents,
-asks, comments and messages — and the same shape times the scale at any other. It is deterministic:
-one fixed base time, one fixed random seed, and a fixed block id generator
-(`pmdoc.SetBlockIDGenerator`), so two runs at one scale write the same rows and a reading taken
-before a change and one taken after it read the same data. The text is drawn from a Zipf list of
-20,000 words, so the `tsvector` columns carry real lexemes at known frequencies.
+370,000 comments, 60,000 messages, 1,250,000 events beside the `ask.opened` event every ask is
+written with, and a vector for half the issues, documents, asks, comments and messages — and the
+same shape times the scale at any other. It is deterministic: one fixed base time, one fixed
+random seed, and a fixed block id generator (`pmdoc.SetBlockIDGenerator`), so two runs at one
+scale write the same rows and a reading taken before a change and one taken after it read the same
+data. The text is drawn from a Zipf list of 20,000 words, so the `tsvector` columns carry real
+lexemes at known frequencies.
 
 ```sh
 cd packages/envoy
@@ -427,10 +428,13 @@ state those writes leave owed, so a Dispatch server started on the seeded databa
 nothing: the block index, the item blocks, the task counts, the reference excerpts and the event
 publication are all already done, and the per-owner `last_seq` counters match the seeded events, so
 the first comment, ask, message, upload or title edit written to a seeded issue does not fail the
-unique `(issue_key, seq)`. It ends with one full `search_term_stats` build for every project, so no
-measured related-terms pass is a first-use full build, and with `vacuum (analyze)`, not `analyze`:
-a freshly loaded table has no all-visible pages, so the planner avoids an index-only scan on it
-however good the statistics are.
+unique `(issue_key, seq)`. Every ask is written with its `ask.opened` event, in the ask's own
+transaction as the create route writes it, because every read of an ask resolves that event
+(`events.OpenedEventIDs`) and fails the whole request when the ask has none, which would answer
+500 on the ask lists, the ask read, the Inbox and an issue's `open_asks`. It ends with one full
+`search_term_stats` build for every project, so no measured related-terms pass is a first-use full
+build, and with `vacuum (analyze)`, not `analyze`: a freshly loaded table has no all-visible pages,
+so the planner avoids an index-only scan on it however good the statistics are.
 
 That build is the one the database's own schema carries, read once from the catalogue rather than
 by running a build and catching its error, which could not tell a missing column from a real

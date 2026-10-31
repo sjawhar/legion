@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -16,13 +17,22 @@ import (
 // read of an item is its tsvector and its first block, both of which this size exercises.
 const itemBodyBytes = 600
 
-// writeAsks writes the asks with their followers and their mentions. An ask has no blocks, so its
-// mentions are rows of `refs` alone: that is what makes the 100,000 rows of `refs` twice the
-// 50,000 block mentions spread over the three block tables.
+// writeAsks writes the asks with their followers, their mentions and the `ask.opened` event each
+// one is read through. An ask has no blocks, so its mentions are rows of `refs` alone: that is
+// what makes the 100,000 rows of `refs` twice the 50,000 block mentions spread over the three
+// block tables.
+//
+// The opening event is written in the ask's own transaction, as the create route writes it
+// (api/asks.go), because its payload carries the question the row was written with. Every read
+// of an ask resolves that event (events.OpenedEventIDs, through api.attachOpenedEventIDs) and
+// fails the whole request when the ask has none, so an ask written without one answers 500 on
+// every route that lists or reads it.
 func (r *seedRun) writeAsks(ctx context.Context) error {
+	seqs := r.askEventSeqs()
 	return r.inBatches(ctx, "asks", len(r.plan.asks), batchRows, func(ctx context.Context, tx pgx.Tx, from, to int) error {
 		mentions := newMentionRows("ask")
 		followers := make([][]any, 0, to-from)
+		opened := make([][]any, 0, to-from)
 		for index := from; index < to; index++ {
 			ask := r.plan.asks[index]
 			mention := ""
@@ -38,6 +48,7 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 			if ask.Document >= 0 {
 				artifactID = &r.plan.documents[ask.Document].ID
 			}
+			var anchorValue *model.Anchor
 			if ask.Anchored {
 				document := r.plan.documents[ask.Document]
 				block := firstParagraphBlock
@@ -46,6 +57,12 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 				}
 				value := anchorJSON(document.ID, block, document.Versions, r.plan.vocabulary.phrase(r.random, 4))
 				anchor = &value
+				// The payload carries the anchor the row holds, read back with the server's own
+				// reader of a stored anchor, so the two cannot describe different marks.
+				anchorValue = &model.Anchor{}
+				if err := model.DecodeAnchor([]byte(value), anchorValue); err != nil {
+					return fmt.Errorf("ask %s: decode the anchor it is written with: %w", ask.ID, err)
+				}
 			}
 			if ask.BlockDoc >= 0 {
 				blockArtifact = &r.plan.documents[ask.BlockDoc].ID
@@ -70,10 +87,38 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 			if index < r.sizes.AskFollowers {
 				followers = append(followers, []any{ask.ID, ask.Follower, ask.CreatedAt})
 			}
+			payload, err := askOpenedPayload(model.Ask{
+				ID:              ask.ID,
+				IssueKey:        issueKey,
+				ArtifactID:      artifactID,
+				BlockID:         blockID,
+				BlockArtifactID: blockArtifact,
+				Author:          seedAuthor,
+				Kind:            "question",
+				Question:        question,
+				Options:         []model.AskOption{},
+				Urgency:         "med",
+				Anchor:          anchorValue,
+				State:           "open",
+				CreatedAt:       ask.CreatedAt,
+			})
+			if err != nil {
+				return err
+			}
+			// The event is owned by the ask's own owner and dated at the ask, as one appended
+			// with the ask is, and it is published (`notify` false, `published_at` set) like
+			// every other event the seed writes.
+			opened = append(opened, []any{
+				r.askEventIDBase() + int64(index) + 1, issueKey, artifactID, nil, seqs[index],
+				"ask.opened", seedActor, payload, false, ask.CreatedAt, ask.CreatedAt,
+			})
 		}
 		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"ask_followers"},
 			[]string{"ask_id", "session_id", "since"}, pgx.CopyFromRows(followers)); err != nil {
 			return fmt.Errorf("ask followers: %w", err)
+		}
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"events"}, eventColumns, pgx.CopyFromRows(opened)); err != nil {
+			return fmt.Errorf("ask opening events: %w", err)
 		}
 		return mentions.write(ctx, tx)
 	})
