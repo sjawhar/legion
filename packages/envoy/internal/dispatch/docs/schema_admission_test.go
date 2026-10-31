@@ -19,6 +19,7 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
@@ -441,6 +442,50 @@ func TestARevokeWaitsForTheMessageTheServerHasInFlight(t *testing.T) {
 	}
 	if biggest <= 64*1024 {
 		t.Fatalf("the biggest message the page read whole is %d bytes; this test needs the revoke to arrive inside one past 64 KB", biggest)
+	}
+}
+
+// A page on a slow link takes longer than a second to drain what the server is writing to it when
+// the re-check revokes its socket. The close must still go out between two messages, with the
+// admission-revoked code: a close that gives up after a second and drops the connection cuts the
+// message the server is writing, and the page reads a bare 1006 instead of the code it reconnects
+// on. Here the room sends the page several whole-document replacements of about 1 MB each, more
+// than the connection's buffers hold, while the page reads nothing; the re-check revokes it with
+// those writes still going out, and the page starts reading two seconds later - within ygo's
+// ten-second bound on a write. It must read every message whole and then the close.
+func TestARevokedSlowPageReadsTheMessageInFlightAndThenTheRevokedClose(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, bigDocumentMarkdown())
+	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(server.Close)
+
+	reader := dialSlowPage(t, server.URL, artifactID, page(1, 1))
+	time.Sleep(250 * time.Millisecond)
+	for round := range 8 {
+		markdown := strings.ReplaceAll(bigDocumentMarkdown(), "document ", fmt.Sprintf("round%d ", round))
+		if err := joinedWrite(service, func(ctx context.Context) error {
+			_, err := service.ReplaceText(ctx, artifactID, markdown, model.Actor{Kind: "user", ID: "alice"})
+			return err
+		}); err != nil {
+			t.Fatalf("replace the document (round %d): %v", round, err)
+		}
+	}
+	fleetProcess(t, service, 3, 2, 0)
+	if err := service.recheckSchemaAdmissions(context.Background()); err != nil {
+		t.Fatalf("re-check the sockets' admission: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	_ = reader.SetReadDeadline(time.Now().Add(30 * time.Second))
+	for {
+		if _, _, err := reader.ReadMessage(); err != nil {
+			var closed *gws.CloseError
+			if !errors.As(err, &closed) || closed.Code != contracts.DocumentAdmissionRevokedCloseCode {
+				t.Fatalf("the revoked page, reading two seconds after the revoke, ended with %v, want every message whole and then a close with %d",
+					err, contracts.DocumentAdmissionRevokedCloseCode)
+			}
+			return
+		}
 	}
 }
 
