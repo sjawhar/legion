@@ -2,51 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-575",
-  "completed": "2026-10-31T15:05:00Z",
-  "round": 9,
+  "completed": "2026-10-31T19:25:00Z",
+  "round": 10,
   "implementerProof": {
     "verdict": "verified",
-    "how": "A forward merge sits between my last recorded head (8cb0c2c9, round 6) and this one, so this is a full test round, not a bare re-check: the fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md at 8cb0c2c9 is ee5580481c432b3f19ce47ceb38cde6c4da4491a65fd9bc259f04640b4c3dcaa and at the merge head 7d0324c3 it is 0e5c559067b9baff00265acb48e9462a49e60e061355a861c40cfd7c39dc93e1 - changed, because of the references row round 7 fixed. The implementer's own claim about the merge is verified at the same time and exactly: the fingerprint at the pre-merge code head 24f71ce7 is 0e5c559067b9baff00265acb48e9462a49e60e061355a861c40cfd7c39dc93e1, byte for byte the merge head's, so main's 238 changed files moved none of the branch's own lines. Its four claims then re-run here: the backlink row is green (inside the whole project and, at the previous head, 10 passed three times out of three on a run of its own); the whole chromium project at the merge head is 936 passed, 25 skipped, 0 failed, one better than its 935/1 because the row it called a suite flake passes here; CI's `envoy-go` lane, red for two rounds, is green at this head, which is what main's #2598 was merged forward for; and no product file of the branch moved."
+    "how": "This round answers a review, so its two correctness fixes were driven on the page rather than read off their unit rows, each with a control at the pre-fix head 7d0324c3 exported to a scratch tree (`git archive`, its own install and build): the held-question step and the removed words of a block with no text of its own - both below under `proof`, both red at the pre-fix head and green here. Its other claims re-run as it states them: `bun test web/src/features/inbox/Inbox.test.tsx -t 'held past'` 6 pass / 0 fail, `web/src/features/doc/change-marks.test.ts` 9 pass / 0 fail and proof-editor's `tests/editor-change-decorations.test.ts` 10 pass / 0 fail inside its suite, `ChangeView.test.tsx` 9 pass / 0 fail; and the whole chromium project at this head is 936 passed, 25 skipped, 0 failed (58.0m) here against its 936/25/0, with the nine rows of inbox-reading-pane.e2e.ts, all ten of references.e2e.ts, both nav rows, hover-preview and delivery.e2e.ts:215 green."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "The whole layout change at the head that merges, after the forward merge of main (INFRA-92: a layout change is proven by the whole project, and after a merge the proof is run again at the merge head).",
-      "surface": "The whole Chromium project of the Dispatch browser suite - the built SPA served by the real Go server against a real Postgres, driven in a real Chromium.",
+      "criterion": "The review's first correctness defect: `j` and `k` from a question the column holds past its row step from the place that row held - the case the review found at the END of the list, where one neighbour cannot say where the row stood.",
+      "surface": "The Inbox page of a running Dispatch at 1440 px, driven in a real Chromium: the reader types an answer, the server withdraws the question, the column keeps it (the architect's ruling), and the reader presses a key.",
+      "command": "A throwaway probe (e2e/tmp-probe-575g.e2e.ts, removed before this handoff) run with: source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/tmp-probe-575g.e2e.ts --project=chromium",
+      "observed": "Green on all three rows. Held past the LAST row of three: `k` selects the row above where it stood (B), and `j` moves nowhere, leaving the held question in the column with no row selected, as `j` does at the end of any list. Held past a MIDDLE row: `j` selects the row below where it stood.",
+      "headSha": "74199f0d7705f9e3df0e038b5ec5fd1b7761b19e",
+      "negativeControl": "The same probe file on a clean export of the pre-fix head 7d0324c3 (/legion/scratch/tmp/pre10, its own `bun install` and contracts build): the two last-row rows FAIL there - `k` selects the wrong row (the selection reads another ask's id) and `j` loses the held question - while the middle-row row passes, which is exactly the shape the review described and the implementer's own unit control reports."
+    },
+    {
+      "criterion": "The review's second correctness defect: a paragraph the next version replaces with a block that has no text of its own still shows the words it lost, struck through where it stood (R5, and the approval column of A1).",
+      "surface": "The reading column's approval on a running Dispatch: a document approved at version 1 whose paragraph version 2 replaces with a picture - a block with no text run of its own.",
+      "command": "The same probe file and command.",
+      "observed": "Green: the column draws exactly one `.dispatch-change-removed-words`, it carries the lost sentence, and its computed `text-decoration-line` contains `line-through`. The drawn shape is the fallback the fix promises - `<div class=\"dispatch-change-removed-words ProseMirror-widget\">The plan ships behind a flag today.</div>` standing among the blocks, before the paragraph that now holds the picture.",
+      "headSha": "74199f0d7705f9e3df0e038b5ec5fd1b7761b19e",
+      "negativeControl": "The same row on the pre-fix export fails with the words simply gone: `expect(locator).toHaveCount(expected) … Expected: 1, Received: 0`, and the column's own HTML there holds the picture's paragraph and no widget at all (`removedTags=[]`). A first form of this probe replaced the paragraph with `---`, which the editor keeps as a paragraph whose text is `---` (`removedTags=[\"SPAN\"]`, green at both heads): that form never reached the case, and the picture is what reaches it - recorded so the next reader does not repeat the dead end."
+    },
+    {
+      "criterion": "The whole layout change at the head that merges, with nothing of the pull request regressed under this round's seven fixes (INFRA-92).",
+      "surface": "The whole Chromium project of the Dispatch browser suite - the built SPA served by the real Go server against a real Postgres.",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- --project=chromium",
-      "observed": "961 rows: 936 passed, 25 skipped, 0 failed (1.1h) at 7d0324c3e218. Green inside it: the nine rows of e2e/inbox-reading-pane.e2e.ts (the five of A1, my two for the architect's ruling, the implementer's refusal row and my Enter-focus row), all ten of e2e/references.e2e.ts including :26, the row CI's `dispatch` lane was red on, both rows of e2e/nav.e2e.ts, and e2e/hover-preview.e2e.ts:111 (the row carried red through every earlier round as main's; main's #2581 fix came in with the merge). e2e/delivery.e2e.ts:215, the one failure the implementer saw at this head, passes here.",
-      "headSha": "7d0324c3e218ec6b6760fc1acf9f8b446b29b3e7",
-      "negativeControl": "My own run at the pre-merge head is the control for what the merge changed: 933 passed, 25 skipped, 1 failed at 24f71ce7, the one failure hover-preview, which is green here. Round 1's control for the feature itself still stands: the whole reading-pane spec on the base commit 14d907b6fdd3 was 7 failed, 0 passed, which is A1's and A3's 'fails on the commit before the change'."
+      "observed": "961 rows: 936 passed, 25 skipped, 0 failed (58.0m) at 74199f0d. Green inside it: the nine rows of e2e/inbox-reading-pane.e2e.ts (A1's five, the two for the architect's ruling, the refusal row and the Enter-focus row), all ten of e2e/references.e2e.ts, both of e2e/nav.e2e.ts, e2e/hover-preview.e2e.ts and e2e/delivery.e2e.ts:215 - the two rows that were red earlier in this pull request and are main's and the suite's own.",
+      "headSha": "74199f0d7705f9e3df0e038b5ec5fd1b7761b19e",
+      "negativeControl": "Round 1's control for the feature still stands: the whole reading-pane spec on the base commit 14d907b6fdd3 was 7 failed, 0 passed, which is A1's and A3's 'fails on the commit before the change'. For this round's own fixes, the pre-fix export above is the control."
     },
     {
-      "criterion": "Round 6's failure is answered: the backlink row no longer races the Inbox's width switch, and the race it had is gone rather than hidden.",
-      "surface": "The Inbox page at 390 px and then at 1440 px, driven in a real Chromium.",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/references.e2e.ts --project=chromium (three times at 24f71ce7), and inside the whole-project run at 7d0324c3",
-      "observed": "10 passed, three times out of three, and green again inside the project run at the merge head. The row now resolves the card after the resize through e2e/inbox-pane.ts's `askCard`, which reads which layout the width draws, opens that fresh card's own backlink panel, waits for its text, and only then screenshots - so no handle is held across the remount.",
-      "headSha": "7d0324c3e218ec6b6760fc1acf9f8b446b29b3e7",
-      "negativeControl": "The old row, copied to a scratch spec at the head it failed on and run under Chromium's own CPU throttle (`Emulation.setCPUThrottlingRate` at 20, the suite's ordinary 30 s budget), fails with CI's exact error: `Error: locator.screenshot: Element is not attached to the DOM`. The same copy is green unthrottled and at a rate of 6, which is why the race showed only on CI's machine. At 20 with a 120 s budget both copies pass, since Playwright's own detach retry then has room to re-resolve - so the throttle pair discriminates at the margin only, and the primary evidence is CI's own lane plus the mechanism I measured in round 6 (a held element reads `connected:false` after the resize while a card is drawn again in the column)."
-    },
-    {
-      "criterion": "Everything static is green at the head the reviewer reads, read on GitHub and re-run by nobody - the `envoy-go` lane that returned this issue twice included.",
-      "surface": "GitHub Actions, run 41200051658 at the merge head.",
-      "command": "gh api --paginate 'repos/sjawhar/legion/actions/runs/41200051658/jobs?filter=latest&per_page=100'",
-      "observed": "Green: `lint`, `test`, `changes`, `contracts`, `docs / build`, `dispatch-browser-multiprocess`, `claude-envoy`, `envoy-client`, `envoy-go`, `envoy-go-race-pmdoc`, `envoy-plugin`, `envoy-smoke`, `pi-envoy`, `pi-legion`, `pi-shared`. `dispatch` was still in progress when I read it last and is READ AS RUNNING here; it is the lane the backlink row sits in, and that row is green in my own whole-project run at this head. The daemon watches the same run and returns the issue by itself if it settles red.",
-      "headSha": "7d0324c3e218ec6b6760fc1acf9f8b446b29b3e7",
-      "negativeControl": "The two runs this one replaces are the control: at 24f71ce7 `dispatch` was red on references.e2e.ts:26 and `envoy-go` red on a broker test main had already fixed, with `ci-ok` red behind them. The merge was made for the second of those, and that lane is green here."
-    },
-    {
-      "criterion": "The pane itself is where rounds 1 to 6 proved it, at a head carrying main's 238 changed files.",
-      "surface": "The Inbox page of a running Dispatch at 1440, 1280, 1279 and 390 px and in the drawer.",
-      "command": "The reading-pane rows inside the whole-project run above, at 7d0324c3",
-      "observed": "All nine green: the two columns and the first row selected, the section heading at the top of the column with the bar and 'Skip to the answer', the two-tap answer with the next row selected and the answered row gone, Approve at the head with the changed blocks marked and none for a first request, today's card for an anchored question and for one in no document, the keys and ?item= across a reload, today's card at 1279 px and 390 px and in the drawer, the architect's ruling and its exception, the refused answer kept with its Retry, and one Enter opening the note field with the reader in it.",
-      "headSha": "7d0324c3e218ec6b6760fc1acf9f8b446b29b3e7",
-      "negativeControl": "The fingerprint pair is the control that these rows judge the same change they always did: 24f71ce7 and 7d0324c3 hash alike (0e5c5590…dc93e1), so the merge moved none of the branch's own lines, and what differs at this head is main's work alone."
+      "criterion": "Everything static is green at the head the reviewer reads - the `dispatch` lane that carried this pull request's only CI red included.",
+      "surface": "GitHub Actions, run 41219036600 at the code head 1f9799b3.",
+      "command": "gh api --paginate 'repos/sjawhar/legion/actions/runs/41219036600/jobs?filter=latest&per_page=100'",
+      "observed": "`dispatch` SUCCESS - the first green of that lane on this pull request - with `lint`, `test`, `changes`, `contracts`, `docs / build`, `dispatch-browser-multiprocess`, `claude-envoy`, `envoy-client`, `envoy-go`, `envoy-go-race-pmdoc`, `envoy-plugin`, `envoy-smoke`, `pi-envoy`, `pi-legion`, `pi-shared` all green. `ci-ok`, which only condenses the others, was still queued when I read it last and is recorded as running; nothing it condenses is red.",
+      "headSha": "1f9799b301a629c42a13a10b4331709f11a2dfc6",
+      "negativeControl": "The two runs it replaces are the control: at b1e074f1 `dispatch` was red on references.e2e.ts:26, and at 24f71ce7 `envoy-go` was red on a broker test main had already fixed. Both lanes are green here."
     }
   ],
   "notes": [
     "A2, the production check of the Inbox page (`dispatch-production-check.sh --page /`), is the implementer's after the merge and is the only acceptance line left unrun.",
-    "Two rounds of this issue were decided by CI reading a merge ref older than a fix on main (`gh run rerun` replays the same ref), and one by a row that was green on this pod and red on CI's machine. Both are written up in the implementer's handoff; the second is worth the suite's memory: a row that resizes across 1280 px must resolve its card again after the switch, through e2e/inbox-pane.ts's `askCard`."
+    "For the next reader of this change: a probe of the removed-words fallback must use a block that truly has no text of its own - a picture reaches it, while `---` written into a paragraph does not."
   ],
-  "environment": "The issue pod on the shared harness: Postgres 17 with pgvector on 127.0.0.1:55432 (its setup script now guards on `pg_isready` rather than a pid file, after a start by one role shut down the server another was using), the tester's own databases, Playwright's chromium on the issue volume, 2 CPUs, one Playwright worker. Nothing of mine is unpushed; the scratch copies used for the throttle control are removed and the workspace is clean."
+  "environment": "The issue pod on the shared harness: Postgres 17 with pgvector on 127.0.0.1:55432, the tester's own databases, Playwright's chromium on the issue volume, 2 CPUs, one Playwright worker. The probe file and the pre-fix export are outside the branch or removed; the workspace is clean but for this handoff."
 }
