@@ -286,7 +286,9 @@ func (issuePod) mainVolumes(r *Runtime) []corev1.Volume {
 		// The test database's cluster, on the node's disk for the same reason the role homes are:
 		// a memory volume would charge its data directory and every test's database to the pod's
 		// memory. It is created with the pod and deleted with it, so each issue starts on an
-		// empty cluster.
+		// empty cluster. It carries no SizeLimit, as the role homes volume does not: the pod's
+		// ephemeral-storage limit is what bounds both, and a test that fills the node's disk
+		// through either is evicted with every role of the pod.
 		volumes = append(volumes, corev1.Volume{Name: testPGVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 	}
 	return volumes

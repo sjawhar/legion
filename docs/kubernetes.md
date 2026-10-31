@@ -277,7 +277,10 @@ A deployment turns it on with `runtime.kubernetes.test_postgres: true`, a key of
 - The **data directory** is `/var/run/legion/roles/testpg` (`LEGION_TESTPG_DIR`), a disk
   `emptyDir` the daemon mounts there and covers inside every role namespace, so no role can write
   or corrupt the cluster while its tests use it, and it dies with the pod — every issue starts on
-  an empty cluster.
+  an empty cluster. That `emptyDir` carries no `sizeLimit`, as the role homes volume beside it
+  does not: what bounds it is the pod's own ephemeral-storage limit, and a runaway test that fills
+  the node's disk through it is evicted with all six roles. The WAL settings below bound the
+  server's steady state, not a test writing rows.
 - The DSN's user is `legion_test`, created `LOGIN CREATEDB CREATEROLE NOSUPERUSER` after the
   start; `initdb`'s superuser is the container's own OS user (`legion`). A test gets `create
   database`, `drop database` and `create role` and not the cluster superuser, because a superuser
@@ -295,6 +298,11 @@ A deployment turns it on with `runtime.kubernetes.test_postgres: true`, a key of
 - Each run of the script is bounded at 60 s. The first `ensure` runs before the launcher serves
   any role, and the daemon gives a pod 120 s to boot by default, so an `ensure` that hangs costs
   that pod a log line and not its boot.
+- A postmaster the node kills comes back within a tick, but **not with what was in it**: this
+  cluster runs `fsync=off` and `synchronous_commit=off`, so a `kill -9` loses the last commits —
+  measured, a role created just before the kill was gone after recovery. The DSN's own role is
+  among what can be lost, and `start()` creates it again, so the server heals itself; a test's
+  rows do not. Nothing here is a database to keep anything in.
 - The daemon's **image probe proves it under the runtime a pod runs on**: for a deployment that
   sets the key, the probe Sandbox's `legion probe-image` carries `--test-postgres <its own
   volume>`, which runs `legion-testpg check` and `ensure`, makes and drops a database through the

@@ -19,17 +19,20 @@ cites is in sjawhar/legion.
   `createdb -h 127.0.0.1 -p 5433 -U legion_test "e2e_$(date +%s)"`, then point `DATABASE_URL` at it.
 - The server is empty in every new pod and dies with it. Every database made from `template1`
   has pgvector.
-- A refused connection is not yours to repair. Starting the server is the roles container's
-  launcher's job: it runs `legion-testpg ensure` before any role starts and again every 15
-  seconds, so wait about that interval and try again. Never start a server of your own beside it,
-  and never reach for another DSN. Still refused after that wait: report it, with the error you
-  got and the port you used, as a fault of the pod rather than of your change.
-- No `LEGION_TEST_PG_DSN` in your environment and no `legion-testpg` on `PATH`: your deployment's
-  image or configuration predates the key, so the pod has no server for you to use. Stand up a
-  Postgres of your own on the issue's volume with the harness below (**The worked case** under
-  "What the withheld capability is, and what it is not" — the same extracted Postgres serves any
-  test, not only the Dispatch stack), and set `LEGION_TEST_PG_DSN` to it yourself so everything
-  that reads the variable finds it.
+- `LEGION_TEST_PG_DSN` set and the connection refused: that is not yours to repair. Starting the
+  server is the roles container's launcher's job — it runs `legion-testpg ensure` before any role
+  starts and again every 15 seconds — so wait about that interval and try again. Never start a
+  server of your own beside it, and never reach for another DSN. Still refused after that wait:
+  report it, with the error you got and the port you used, as a fault of the pod rather than of
+  your change.
+- `LEGION_TEST_PG_DSN` unset: your deployment has not turned the pod's server on, so no launcher
+  is starting one and nothing will appear while you wait. With `legion-testpg` on `PATH`, start
+  one yourself and keep it: `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable`
+  then `legion-testpg ensure`, which makes the cluster, the role and `vector` in `template1`.
+  With no `legion-testpg` either, stand up a Postgres of your own on the issue's volume with the
+  harness below (**The worked case** under "What the withheld capability is, and what it is not" —
+  the same extracted Postgres serves any test, not only the Dispatch stack), and set
+  `LEGION_TEST_PG_DSN` to it yourself so everything that reads the variable finds it.
 
 ## The five clients the image already carries
 
