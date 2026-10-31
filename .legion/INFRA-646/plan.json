@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-646",
+  "completed": "2026-10-29T17:40:34Z",
+  "plan": "dispatch://INFRA-646/artifact/plan-md@v1 (the whole plan; this handoff records its checks and departures). Base main c1f746a4. Build: C1 readFork returns pmdoc.ValidDocument from pmdoc.ReadUnshared for all six fork reads, the three renders of a tree it returned use that ValidDocument; C2 an edit batch holds a lazily validated tree so each tree is validated once (ValidDocument methods QuoteFinder, Splice, BlockIndex, BlockBoundary, InsertTableRows, BlockRange, DeleteTextblock, DeleteBlock, BlockDescendantIDs, and pmdoc.UpdateDocument; outcome validates the final tree once and hands it to UpdateDocument); C3 changedBlocks computed once per replace in one walk, shared by the edit and accept paths; C4 buildFlattenedText preallocates from a first pass. Not built, written up on INFRA-512: N1-N6. Measure on the INFRA-639 replay at 4b756a26 or later: run-step.sh --replay --rate 0.05 --reads 1 --uploads 0.25 --rng-seed 1 --gomaxprocs 2 --dispatch-commit <base|head>, three alternating runs a side, E and the gate stated from base-1 before any head run.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the proof format, the pull request body and its E2E lines (references/pr-body.md), the push and handoff rules",
+      "dispatch: reading LINUX specs for the corpus and posting the N1-N6 write-up comment on INFRA-512",
+      "envoy: sending E, the gate and any base-1 finding above 10% of W5 to the INFRA-512 architect's role topic",
+      "ce-simplify-code: the simplify pass the pull request body records"
+    ],
+    "test": [
+      "legion-worker: the proof format; re-running A1-A9 from its own builds on the INFRA-639 replay and the corpus tests",
+      "dispatch: fetching the LINUX corpus (INFRA-692's linux-corpus-tar-gz or dispatch doc-read) for test 4"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and references/review-threads.md for the review of the head and its threads"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Rule (ii) needs a pre-registered expected gain and pprof command per changed function; the changes land in W5, W7 and W8.", "answer": "The plan's merge measurement defines one gate share S (focus on applyOpsUnconditional/ApplyOps func1, readFork, buildFlattenedText) and E = E1 (readFork share x reader ratio) + E2 (Validate share under W5 x (n_base-n_head)/n_base) + E3 (growslice under buildFlattenedText), each with its command, stated from base-1 and sent to the INFRA-512 architect before any head run."},
+      {"finding": "C5 (reusing the precondition's token) never runs on the replay, so it cannot show a CPU removal.", "answer": "Dropped from the build; recorded as N1 in the INFRA-512 write-up. The INFRA-639 replay's edit request carries no precondition (replay_source.go:953 on legion/INFRA-639)."},
+      {"finding": "The conditional path runs the whole batch two to four times (requirePreconditionCoverage, prevalidateOperations, verifyTableAnchorSnapshots).", "answer": "Out of scope and stated in N1: none of those runs is on the replay; C2-C4 make each run cheaper as it stands."},
+      {"finding": "changedBlocks is shared by the accept and reject routes and its hoist has an error-precedence contract.", "answer": "C3 hoists it for every caller (edit replace and its code arm, delete-by-find, refuseUnreadableAccept, refuseReshapedAccept, refuseAcceptedCodeThatReshapes, settleAccepted, padCutTables, marks.go:338-345) where the first call ran, keeps documentBlock's first-fit rule and ErrTargetNotFound per endpoint; test 3 pins the refusal order and base's exact error text on both routes."},
+      {"finding": "ValidDocument threading reaches five batch callers, the operationValidator type and many tests; QuoteFinder is pmdoc's existing pay-once convention.", "answer": "applyOperationsWithValidation keeps *pmdoc.Node and holds a lazily validated tree internally, so no caller or test signature changes; quote finding goes through a ValidDocument.QuoteFinder() constructor of the existing QuoteFinder, not a second convention."},
+      {"finding": "readFork has six callers and fork_reads_test pins its counts.", "answer": "readFork itself converts (recorded as a departure), still counts forkTrees.read on every path; test 5: fork_reads_test passes with its counts unchanged."},
+      {"finding": "The after-read tree is retained and compared by pointer (anchorsTree), so the ValidDocument must wrap that exact pointer.", "answer": "C1: callers take .Node(), the very pointer ReadUnshared returned; never a ReadForRendering tree; ReadUnshared copies values as Read does; writeVersionTx's pointer test sees today's pointers. A negative control builds readFork on ReadForRendering."},
+      {"finding": "editTree's repair branch hands a fresh tree that stampAskBlockIDs mutates; EnsureBlockIDs and AddMarks mutate in place.", "answer": "The batch validates lazily after stampAskBlockIDs, outcome validates after EnsureBlockIDs, AddMarks acts on the replacement that Splice still validates; the plan lists these mutation points and has each named in the comment of the value that would straddle it. stampAskBlockIDs is a no-op when BlockIDRepairCount is 0 (shared walk, pmdoc/block_ids.go:93-125)."},
+      {"finding": "C5 takes the token before the stamp; the batch after it.", "answer": "Moot: C5 is not built (N1)."},
+      {"finding": "Attribute the expected gain per change, not as one lump; the two token encodings remain.", "answer": "E is the sum of E1, E2, E3, each with its own command and formula; the encodings are not claimed."},
+      {"finding": "find.go changed between a409c128 and c1f746a4 (QuoteFinder, lazy forms).", "answer": "The a409c128 profile is labelled design evidence only; the planner re-profiled buildFlattenedText on c1f746a4 (1.04 s, growslice 0.73 s) and prototyped C4 there (FindQuote 50-57 to 36-39 ms/op, 45 to 24 MB/op on LINUX-180); the gate's base is base-1 at the merge base."},
+      {"finding": "W5's share has three values in the record (3.2%, 3.15-3.78%, 2.43%).", "answer": "The gate's denominator is base-1's profile on the INFRA-639 replay at the merge base; the other figures are named as design evidence."},
+      {"finding": "ReadUnshared on the fork is exact if every fork access is single-goroutine; the checkRendering test hook can run off the test goroutine.", "answer": "A7: envoy-go-race over ./internal/dispatch/... at the head (main's internal/bus red, INFRA-750, recorded as main's) and go test -race on the docs fork, live and edit tests in the pod."},
+      {"finding": "No machine check that a write's CRDT output is unchanged.", "answer": "Test 1 compares UpdateDocument's and Update's encoded state byte for byte with a fixed client id on every pmdoc corpus document; test 4 extends TestWriteCorpus with seven more edit kinds and cmp's base and head dumps on real LINUX specs; A5 compares the HTTP answers of base and head builds."},
+      {"finding": "C4's sizing pass and its memory must be stated.", "answer": "C4 counts UTF-16 units with len16 and bytes over text nodes plus one per node for the gap; the buffers are the call's own and dropped with the finder (no resident memory); A4 benchmark shows B/op and ns/op down with identical ranges."},
+      {"finding": "INFRA-707, INFRA-644 and INFRA-593 edit the same files.", "answer": "Sequencing: C1 is confined to readFork, its six call sites and three renders; the branch that merges second adapts; rebase and re-run base if main moves before the head runs."},
+      {"finding": "Not-built items need their blocking fact recorded.", "answer": "N1-N6 each carry the fact that blocks them and the share to quote at the head, posted on INFRA-512 (A10)."},
+      {"finding": "Naming and changelog rules sit only in the architect's comment.", "answer": "A11: a changie fragment pr<N>-Changed-<time>.yaml, no INFRA- key added outside .legion/, no Dispatch key in commit subjects; retro's docs/solutions/<category>/<slug>-pr<N>.md."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "The architect's addition: applyLive's two fork reads (treeOf before and after the write) use pmdoc.ReadUnshared.",
+      "plan": "readFork itself returns a ValidDocument from pmdoc.ReadUnshared, so all six fork reads (applyLive x2, applyMargin, captureLiveTextAndAuthors, heldTree, docTree) take it, and the three renders of a tree readFork returned (applyLive before and after, applyMargin) use that ValidDocument.",
+      "evidence": "Every one of the six callers reads a write transaction's fork on the request goroutine (docs/livewrite.go forkLive/warmFork/coldFork, docs/mutation.go applyLive/applyMargin/recordLiveOperation), the condition ReadUnshared states; one reader for every fork read is one rule rather than two.",
+      "outcome": {"kind": "changed", "scope": "Four more call sites read through ReadUnshared than the spec names; the summary, acceptance and settled decisions hold."}
+    },
+    {
+      "spec": "Shared context: the Dispatch server run locally against Postgres 17 with pgvector.",
+      "plan": "The merge measurement runs on the harness the architect set (INFRA-639 replay client, dispatch://INFRA-646/comment/ba9208c0-bde5-4cc6-a8a7-27ce403da57e), whose Postgres is 16.2 with pgvector from the pgserver wheel; the docs package's equivalence tests run on a local Postgres 17 with pgvector.",
+      "evidence": "packages/envoy/loadtest/README.md on legion/INFRA-639 (Requirements: the pgserver wheel holds Postgres 16.2 and pgvector); the architect's comment names that client.",
+      "outcome": {"kind": "unchanged"}
+    }
+  ]
+}

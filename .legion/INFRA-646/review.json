@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-646",
+  "completed": "2026-10-31T14:27:38Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 0,
+  "minor": 5,
+  "reviewedHead": "34c2a9fc8fcfd434491177430082fc2bf0a1295d",
+  "codeHead": "6db39f4d0147cc7a6e89e130a33cbf84d4aa5f0f",
+  "ci": "Required set (rulesets): ci-ok, pr-title; branch protection none. CI head 6db39f4d: every check completed success or skipped, ci-ok and pr-title success. compare 6db39f4d...34c2a9fc: handoffsOnly true, 2 files.",
+  "thermonuclear": "deep-review at 34c2a9fc: approve. It found nothing at Medium or High, and its 3 Minor findings change no behaviour. It traced the find.go merge onto #2480 (the valid gate in matches, which Find and NearestFirst share; NewQuoteFinder still validates), the ask_block_text.go merge, the cutover, and applyBatch replacing applyOperationsWithValidation. go build and go vet are clean, and the pmdoc suite passes with -timeout 60m (ok, 1000.342s). code-quality at 34c2a9fc: changes requested, 4 Minor findings, none observable. I checked each finding against the code before I kept it or declined it.",
+  "roundOneThreads": "I read all 8 round-1 threads and the code each reply names. All 8 are fixed at ef448091 or later, and the implementer resolved them; this round replies on each.",
+  "keyFindings": [
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/plain_tree_test.go", "description": "blockDescendantIDs (:48) has no caller. splice (:10) and insertTableRows (:64) build ValidDocument{doc: doc} by hand, and insertTableRows also copies ValidateDocument's checks. spliceValidated (splice.go:30) exists only so the test helper can call it. The header (:3-8) says that every caller holds a validated tree and that an operation has one form; DeleteBlock, Update, FindQuote and RenderWithBlockOffsets keep plain production callers. :32 names \"BlockIndex\", which is a removed function."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/valid_document.go", "description": ":6-8 says that a read inside the package makes a ValidDocument; no production code does. :17-18 says that every method of the zero value refuses with wantsDocument, but Splice, TokenJSON, RenderWithBlockOffsets and UpdateDocument answer their plain counterpart's nil error. The plain-tree list (:11-15) leaves out FindQuote/NewQuoteFinder and MoveBlock."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": ":514 says that the edit's repair read and rewriteLive's read go through pmdoc.Read. Only the unconditional repair read does (treeOf, mutation.go:1444). The conditional edit's repair read and rewriteLive's read go through treeOfTransaction, that is pmdoc.ReadInTransaction. :511 leaves out startTree's treeOfUnshared. :516 says that every later pmdoc call takes the validation, but MoveBlock (edits.go:1150 into blocks.go:581) and FindHeading (find.go:308) validate again. :517 says those reads have one form, which is false for DeleteBlock (accept.go:139) and EncodeTokenJSON (edits.go:209). The changelog fragment's 'each tree the edit touches is validated once' makes the same over-claim."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/edits.go", "description": "Comments that still name functions this PR deleted: edits.go:415 (pmdoc.BlockRange), ask_block_text.go:626 (pmdoc.BlockBoundary), AGENTS.md:354 (pmdoc.InsertTableRows), :761 (pmdoc.DeleteTextblock), :798 (pmdoc.Splice), :1681 (pmdoc.BlockBoundary), and edits_test.go:2865 (\"BlockIndex\")."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/find.go", "description": "find.go:164-165 says the finder validates the document at its first Find, which a finder made by ValidDocument.QuoteFinder does not. read.go:26-27 still gives ReadUnshared's only user as the read cache's fold and says the caller drops the tree; readFork now keeps the tree (liveWrite.tree)."}
+  ],
+  "declined": [
+    "reject.go:33 validates next once per loop pass (deep review, Minor). Base did the same inside pmdoc.Splice, so nothing regresses. The implementer's simplify pass already declined holding the validated tree across rejectedInsert's loop, for a stated reason. This is an optimisation, not a defect.",
+    "The four declines from round 1 still stand."
+  ]
+}
