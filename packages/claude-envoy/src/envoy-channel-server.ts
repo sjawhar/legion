@@ -56,6 +56,7 @@ import {
   EnvoyApiError,
   type EnvoyClient,
   expandSubscriptionTopics,
+  holderStateOf,
   mergeInterestSources,
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
@@ -129,6 +130,14 @@ const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
 const HANDOFF_POLL_MS = 250
 /** How long a handoff waits for NATS to confirm the new direct subject before retrying. */
 const HANDOFF_FLUSH_TIMEOUT_MS = 10_000
+
+/**
+ * How long a deregistration waits for a registration already on the wire. One that lands after
+ * the DELETE writes the record back, and the session stays registered with nothing heartbeating
+ * it (dispatch://INFRA-392); a listener call can take a timeout and a retry to fail, so this is
+ * the whole of one attempt.
+ */
+const REGISTRATION_SETTLE_MS = 5_000
 
 /** `promise`, or a rejection naming `what` once `ms` pass. */
 async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
@@ -263,6 +272,9 @@ export interface ChannelSessionOptions {
   readonly configFile: SessionConfigFile
   /** How long a handoff waits for NATS to confirm the new direct subject before it retries. */
   readonly handoffFlushTimeoutMs?: number
+  /** How long a deregistration waits for a registration already on the wire (default
+   *  `REGISTRATION_SETTLE_MS`), past which the DELETE goes out anyway. */
+  readonly registrationSettleMs?: number
   /**
    * `${CLAUDE_PLUGIN_DATA}`: role state per session id, the per-process handoff files, and the
    * replay state per session id.
@@ -543,6 +555,39 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     return result
   }
 
+  /**
+   * The registration this process has on the wire, if any, settled either way. A
+   * `DELETE /v1/sessions/<id>` that overtakes one is undone when it lands: the listener writes the
+   * record again, and a session nothing heartbeats stays registered — live for the live window,
+   * then unresponsive for the gone horizon — so peers keep sending to a server that has stopped
+   * (dispatch://INFRA-392). Every deregistration waits it out first.
+   */
+  let registrationInFlight: Promise<void> | undefined
+
+  /** How long a deregistration waits for that registration, and for the writes the chain still
+   *  holds. A listener call can take a timeout and a retry to fail, so the default is the whole
+   *  of one attempt; past it the DELETE goes out anyway, since one never sent always leaves the
+   *  record behind where one that races a slow registration only may. */
+  const settleMs = options.registrationSettleMs ?? REGISTRATION_SETTLE_MS
+
+  /** Resolves when `settling` settles, or when `settleMs` have passed. */
+  const settledOrGivenUp = async (settling: Promise<unknown>): Promise<void> => {
+    const { promise, resolve } = Promise.withResolvers<void>()
+    const timer = setTimeout(resolve, settleMs)
+    try {
+      await Promise.race([settling.catch(() => undefined), promise])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** Deregisters a session this server has stopped heartbeating: its own at shutdown, and the
+   *  pre-`/clear` id a handoff leaves behind. */
+  const deregister = async (sessionID: string): Promise<void> => {
+    if (registrationInFlight !== undefined) await settledOrGivenUp(registrationInFlight)
+    await options.client.unregisterSession(sessionID)
+  }
+
   // The live path's claims, which a replay sweep reads to leave a frame being delivered alone.
   const dedupe = createDeliveryDedupe()
   /**
@@ -741,7 +786,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         }
       }
     }
-    await options.client.subscribe({
+    const registering = options.client.subscribe({
       sessionID: identity.id,
       directory: identity.directory,
       topics: forwarder
@@ -754,6 +799,17 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       selfSubscribed: true,
       plugin: { name: packageName, version: options.pluginVersion },
     })
+    // Held as a promise that settles either way, so a deregistration waits for the call to leave
+    // the wire without taking on its rejection.
+    const settled = registering.then(
+      () => undefined,
+      () => undefined,
+    )
+    registrationInFlight = settled
+    void settled.then(() => {
+      if (registrationInFlight === settled) registrationInFlight = undefined
+    })
+    await registering
   }
 
   /**
@@ -908,7 +964,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS,
         "flushing NATS",
       )
-      await options.client.unregisterSession(previous)
+      // The old id's own registration first: one still on the wire writes the record back after
+      // this DELETE, and the id Claude Code has left stays registered with nothing heartbeating
+      // it.
+      await deregister(previous)
     } catch (error) {
       // The session stays on the old id until a later tick retries, so the new
       // subject leaves the topic list; otherwise the next registration would
@@ -1213,13 +1272,17 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       clearInterval(heartbeatTimer)
       if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       await forwarder.close()
-      await serialized(() => options.client.unregisterSession(identity.id)).catch(
-        (error: unknown) => {
-          process.stderr.write(
-            `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
-          )
-        },
-      )
+      // The heartbeat is stopped and `follow` refuses while shutting down, so no registration
+      // starts from here. What the chain still holds is waited out — a registration it runs after
+      // the DELETE would write the record back — and so is one already on the wire, both bounded:
+      // a write this listener has stalled on must not keep the deregistration off the wire
+      // entirely, since a record left behind outlives this process by the whole gone horizon.
+      await settledOrGivenUp(registryWrites)
+      await deregister(identity.id).catch((error: unknown) => {
+        process.stderr.write(
+          `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
+        )
+      })
       // The handoff directory stays: Claude Code restarts this server inside the
       // same `claude` process (plugin reload, changed config), and the hook does
       // not rewrite the file until the next SessionStart. Startup pruning removes
@@ -1255,6 +1318,7 @@ export async function executeEnvoyTool(
         message: sendConfirmationText(result),
         event_id: result.envelope.event_id,
         recipient: result.recipient,
+        recipient_state: result.recipientState,
         confirmed: result.confirmed,
       }
     }
@@ -1292,9 +1356,12 @@ export async function executeEnvoyTool(
       return { session_id: identity.id, machine_id: machineID(), dir: identity.directory }
     case EnvoyToolOperation.listSessions: {
       const args = parseArguments(spec, input)
+      // The stalled sessions are asked for by name: a peer that missed its heartbeats is still
+      // running, and a list that leaves it out is read as the peer having died.
       const sessions = await runtime.client.listSessions({
         ...(args.dir === undefined ? {} : { directory: args.dir }),
         ...(args.title === undefined ? {} : { title: args.title }),
+        include: "unresponsive",
       })
       return args.machine
         ? sessions.filter((session) => (session.host ?? session.machine_id) === args.machine)
@@ -1309,7 +1376,10 @@ export async function executeEnvoyTool(
     }
     case EnvoyToolOperation.getRole: {
       const args = parseArguments(spec, input)
-      return runtime.client.getRole(args.role)
+      const role = await runtime.client.getRole(args.role)
+      // A listener that names only one of the two states still shows the model one answer: what
+      // state the holder is in, and when it was last seen.
+      return { ...role, holder_state: holderStateOf(role) }
     }
     case EnvoyToolOperation.inbox:
       parseArguments(spec, input)

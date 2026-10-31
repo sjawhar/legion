@@ -7,6 +7,7 @@ import { machineID } from "@legion/envoy-client/machine";
 import { sessionConfigFile, sessionSettings } from "@legion/envoy-client/session-settings";
 import {
   envoyToolSpecs,
+  sendConfirmationText,
   type ToolSpec,
   toMessageMetadata,
 } from "@legion/envoy-client/tool-contract";
@@ -127,14 +128,19 @@ function envoyTools(
       args: sendSpec.arguments(zodSchemaApi(tool.schema)) as never,
       async execute(args, ctx) {
         ctx.metadata({ title: "Envoy send" });
-        return JSON.stringify(
-          await client.send({
-            sourceSessionID: ctx.sessionID,
-            targetSessionID: args.session_id as string,
-            message: args.message as string,
-            ...toMessageMetadata(args as never),
-          })
-        );
+        const result = await client.send({
+          sourceSessionID: ctx.sessionID,
+          targetSessionID: args.session_id as string,
+          message: args.message as string,
+          ...toMessageMetadata(args as never),
+        });
+        return JSON.stringify({
+          message: sendConfirmationText(result),
+          event_id: result.envelope.event_id,
+          recipient: result.recipient,
+          recipient_state: result.recipientState,
+          confirmed: result.confirmed,
+        });
       },
     }),
     envoy_publish: tool({
@@ -188,9 +194,12 @@ function envoyTools(
       args: sessionsSpec.arguments(zodSchemaApi(tool.schema)) as never,
       async execute(args, ctx) {
         ctx.metadata({ title: "Envoy sessions" });
+        // The stalled sessions are asked for by name: a peer that missed its heartbeats is still
+        // running, and a list that leaves it out is read as the peer having died.
         const sessions = await client.listSessions({
           ...(args.dir === undefined ? {} : { directory: args.dir as string }),
           ...(args.title === undefined ? {} : { title: args.title as string }),
+          include: "unresponsive",
         });
         const machine = args.machine as string | undefined;
         return JSON.stringify(
@@ -293,6 +302,14 @@ export default async (input: { serverUrl: URL }) => {
     }
   };
 
+  /**
+   * The registration on the wire for each served session. A `DELETE /v1/sessions/<id>` that
+   * overtakes one is undone when it lands: the listener writes the record again, and a session
+   * nothing heartbeats stays registered — live for the live window, then unresponsive for the
+   * gone horizon — so peers keep sending to a serve that has stopped (dispatch://INFRA-392).
+   */
+  const registrationsInFlight = new Map<string, Promise<void>>();
+
   // driving = this process is the one running the session (it has gone busy
   // here), as opposed to a sibling re-adopted from shared on-disk state after a
   // serve restart. Envoy uses it to keep a live driver's route from being stolen
@@ -303,8 +320,8 @@ export default async (input: { serverUrl: URL }) => {
     title: string | null,
     port: number,
     driving: boolean
-  ) =>
-    client
+  ) => {
+    const registering = client
       .subscribe({
         sessionID,
         directory: cwd,
@@ -314,7 +331,39 @@ export default async (input: { serverUrl: URL }) => {
         driving,
         plugin: PLUGIN,
       })
-      .catch(() => {});
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    registrationsInFlight.set(sessionID, registering);
+    void registering.then(() => {
+      if (registrationsInFlight.get(sessionID) === registering) {
+        registrationsInFlight.delete(sessionID);
+      }
+    });
+    return registering;
+  };
+
+  /** How long a deregistration waits for that session's registration to leave the wire; past it
+   *  the DELETE goes out anyway, since one never sent always leaves the record behind where one
+   *  that races a slow registration only may. */
+  const REGISTRATION_SETTLE_MS = 5_000;
+
+  /** Deregisters a session this serve no longer heartbeats: one OpenCode deleted, and every
+   *  session it still holds when the process is asked to stop. */
+  const deregisterSession = async (client: EnvoyClient, sessionID: string): Promise<void> => {
+    const registering = registrationsInFlight.get(sessionID);
+    if (registering !== undefined) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      const timer = setTimeout(resolve, REGISTRATION_SETTLE_MS);
+      try {
+        await Promise.race([registering, promise]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    await client.unregisterSession(sessionID).catch(() => {});
+  };
 
   // A process registers ONLY the sessions it has actually run (see the busy
   // handler below). It must never claim a route for a session it merely has
@@ -352,12 +401,33 @@ export default async (input: { serverUrl: URL }) => {
       }
     }, envoyOn.heartbeatMs);
     heartbeatTimer.unref?.();
+    // A serve is stopped by a signal, and an `exit` handler may not be asynchronous, so the
+    // session records it holds were left for the listener to expire: for the whole live window
+    // peers read a stopped serve's sessions as live, and for the gone horizon after it as
+    // unresponsive (dispatch://INFRA-392). Each signal stops the heartbeat and deregisters every
+    // session this serve still holds, each behind that session's own registration, and only then
+    // lets the signal take the process: it is re-raised with no listener of ours left, so the
+    // default disposition and the exit code are the signal's own.
+    const signals: readonly NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"];
+    const client = envoyOn.client;
+    let stopping = false;
     stopEnvoy = () => {
+      stopping = true;
       clearInterval(portTimer);
       clearInterval(heartbeatTimer);
+      for (const name of signals) process.off(name, stopOnSignal);
     };
+    function stopOnSignal(signal: NodeJS.Signals): void {
+      if (stopping) return;
+      stopEnvoy();
+      const served = [...trackedSessions.keys()];
+      trackedSessions.clear();
+      void Promise.all(served.map((sessionID) => deregisterSession(client, sessionID))).then(() => {
+        process.kill(process.pid, signal);
+      });
+    }
+    for (const name of signals) process.on(name, stopOnSignal);
   }
-  process.on("exit", stopEnvoy);
 
   return {
     config: (
@@ -455,9 +525,11 @@ export default async (input: { serverUrl: URL }) => {
           (props.sessionID as string | undefined) ??
           (props.info as { id?: string } | undefined)?.id;
         if (deletedID) {
-          // Stop heartbeating a session that no longer exists, so its 5-min
-          // envoy_sessions entry expires instead of being kept alive (which would
-          // cause delivery attempts to a dead session id on the current port).
+          // Stop heartbeating a session that no longer exists, and take its registration out of
+          // the registry now rather than leaving it to expire: an entry nothing heartbeats reads
+          // as live for the live window and as unresponsive for the gone horizon after it, which
+          // is deliveries to a dead session id on this port for the whole of it
+          // (dispatch://INFRA-392). The DELETE goes out behind that session's own registration.
           trackedSessions.delete(deletedID);
           if (activeSessionID === deletedID) {
             activeSessionID = null;
@@ -465,10 +537,11 @@ export default async (input: { serverUrl: URL }) => {
           }
           // Best-effort: drop the deleted session's interests so routing stops.
           envoyOn?.client.unsubscribe({ sessionID: deletedID, topics: [] }).catch(() => {});
+          if (envoyOn !== undefined) await deregisterSession(envoyOn.client, deletedID);
         }
       }
     },
-    // Cleanup hook (used by tests; production relies on process 'exit').
+    // Cleanup hook (used by tests; production relies on the signal handlers above).
     dispose: stopEnvoy,
     tool:
       envoyOn === undefined

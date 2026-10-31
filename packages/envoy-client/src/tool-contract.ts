@@ -8,7 +8,22 @@ import {
 } from "@legion/contracts";
 import { z } from "zod";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
-import type { MessageMetadataInput } from "./transport";
+import type { MessageMetadataInput, SessionState } from "./transport";
+
+/**
+ * What an agent must do about a session that stopped answering (dispatch://INFRA-392). It reads
+ * this at the moment it decides whether a peer is alive, so it says what to do and what not to
+ * do: a stalled box costs a session its heartbeats, never its work.
+ */
+const UNRESPONSIVE_RULE =
+  "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a " +
+  "message sent to it is stored until it answers. Start no replacement for it and take no claim " +
+  "from it until it is gone, or has been unresponsive for more than 20 minutes.";
+
+const SESSION_STATE_GUIDE =
+  "A session is live, unresponsive or gone, by how long ago it last registered: live within 5 " +
+  "minutes, unresponsive after that and within an hour, gone past the hour or with no record at " +
+  `all. ${UNRESPONSIVE_RULE} A session named with no state is live.`;
 
 const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
@@ -173,7 +188,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT}`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. The confirmation names the recipient's state. A message to an unresponsive session is stored and reaches it when it answers again, so an unresponsive recipient is not a failed send and no reason to send to someone else instead. ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({
       session_id: schema
         .string()
@@ -184,7 +199,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered until Envoy finds it gone and is named until then, and so is one that is merely unresponsive, which takes the message when it answers. A named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${SESSION_STATE_GUIDE} ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
@@ -197,7 +212,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_role_get",
-    description: "Get the live holder of a named Envoy role.",
+    description: `Get the holder of a named Envoy role, with its holder_state and the holder's last_seen. A holder that is only unresponsive still holds the role: nothing a lookup does releases its claim, and only a gone holder leaves the role unheld. ${SESSION_STATE_GUIDE}`,
     arguments: (schema) => ({ role: schema.string() }),
     operation: EnvoyToolOperation.getRole,
   },
@@ -211,7 +226,9 @@ export const envoyToolSpecs = [
   {
     name: "envoy_sessions",
     description:
-      "List all live sessions registered with Envoy. Filter by optional machine, directory, or title.",
+      "List the Envoy sessions that are live or unresponsive; a gone session is listed by neither. " +
+      "Filter by optional machine, directory, or title. Each row carries its state and its " +
+      `last_seen, the epoch milliseconds of its last registration. ${SESSION_STATE_GUIDE}`,
     arguments: (schema) => ({
       machine: schema.string().optional(),
       dir: schema.string().optional(),
@@ -236,13 +253,19 @@ export const envoyToolSpecs = [
   },
 ] as const satisfies readonly ToolSpec[];
 
-/** The envoy_send confirmation line both hosts show the model. */
+/** The envoy_send confirmation line both hosts show the model, naming the recipient's state:
+ *  a send to an unresponsive session is stored for it, not a delivery that failed. */
 export function sendConfirmationText(result: {
   readonly envelope: { readonly event_id: string };
   readonly recipient: string;
+  readonly recipientState: SessionState;
   readonly confirmed: boolean;
 }): string {
-  return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+  const state =
+    result.recipientState === "unresponsive"
+      ? `unresponsive, so it is stored until that session answers; ${UNRESPONSIVE_RULE}`
+      : result.recipientState;
+  return `sent ${result.envelope.event_id} to ${result.recipient} (${state})${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
 }
 
 // The specs are frozen module constants, so each operation's schema is built once and shared;
