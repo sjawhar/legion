@@ -99,7 +99,7 @@ func documentBlock(doc *Node, target Range) (index, start, end int, err error) {
 // ValidDocument wants a document.
 func (d ValidDocument) BlockIndexes(target Range) (first, last int, err error) {
 	if d.doc == nil {
-		return 0, 0, wantsDocument("BlockIndex")
+		return 0, 0, wantsDocument("BlockIndexes")
 	}
 	first, last = -1, -1
 	position := 0
