@@ -12,8 +12,8 @@
       "criterion": "A GitHub Actions run exists for the head the reviewer reads, so CI judges this pull request's current code - the docs fix of round 3 included.",
       "surface": "GitHub Actions on sjawhar/legion, at this round's head.",
       "command": "gh api 'repos/sjawhar/legion/actions/runs?head_sha=<this head>' --jq .total_count, and gh pr checks 2549 --repo sjawhar/legion",
-      "observed": "RECORDED_AT_PUSH: the run created for this round's head, named in the pull request body and in the completion report. Before the push: `actions/runs?head_sha=de8b7ea325de…` -> total_count 0, `?head_sha=6ad7ca1f…` -> 0, `commits/6ad7ca1f…/check-suites` -> 0, and the newest run on this branch was 41128214713 at the round-2 code head 93c4ab64, whose `docs / build` failed.",
-      "headSha": "RECORDED_AT_PUSH",
+      "observed": "After the push, GitHub created two runs for this head: CI 41150173180 (https://github.com/sjawhar/legion/actions/runs/41150173180) and PR Title 41150173121, both queued when read. Before the push: `actions/runs?head_sha=de8b7ea325de\u2026` -> total_count 0, `?head_sha=6ad7ca1f\u2026` -> 0, `commits/6ad7ca1f\u2026/check-suites` -> 0, and the newest run on this branch was 41128214713 at the round-2 code head 93c4ab64, whose `docs / build` failed. I did not wait for the run: the daemon reads CI itself.",
+      "headSha": "95aeef96812ac12e2130614791d96b4e00939f65",
       "negativeControl": "Round 2 is the control that the trailer is what stopped the run, not the branch or the repository: its code head 93c4ab64 was pushed alone, before its trailered handoff 232b6c25, and CI ran (run 41128214713, every lane but `docs / build` green). Round 3 changed only the shape of the push and the run disappeared."
     },
     {
