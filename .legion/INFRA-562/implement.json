@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-562",
-  "completed": "2026-10-31T04:53:30Z",
+  "completed": "2026-10-31T07:26:44Z",
   "proof": [
     {
       "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
@@ -211,6 +211,14 @@
       "observed": "Before the fix: main f4ec92ee failed 1 of 50 and head a8c1b638 failed 2 of 50, every failure the same `delivery_live_hub_test.go:776: after a merge the listener could not hear, a frame nobody should be sent` CI showed; this branch changes neither delivery_live_hub.go nor the test file, so the failure is main's flaky test (it also failed on main at e018f1d3, run 41141376073). Fix: the test file as sjawhar/legion#2594 (commit 4b7746eb, open, another tree) changes it, byte for byte - the hub settles (rig.settle) before the listener is blinded, and terminateListener returns only once every backend it terminated has left pg_stat_activity. After it, at f9f6188d: `ok github.com/sjawhar/envoy/internal/dispatch/api 219.401s`, 50 of 50, and the live-hub tests (-run 'Hub|Reconnect|DeliveryLive') ok 19.0s; gofmt and go vet clean.",
       "headSha": "f9f6188deeda",
       "negativeControl": "The same 50-run command at main f4ec92ee without the fix: `FAIL github.com/sjawhar/envoy/internal/dispatch/api 188.574s`, 1 failure at line 776; at a8c1b638 without the fix: 2 failures."
+    },
+    {
+      "criterion": "Review round 14: ci-ok goes green - packages/envoy/internal/broker/oauth/claims_doc_test.go equals sjawhar/legion#2598's (head 930cad24) byte for byte, so TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries passes against main's relaid docs/kubernetes.md (#2474) in CI's merge tree",
+      "surface": "the broker's oauth test package, run against main's docs/kubernetes.md (what CI's merge ref holds) and against this branch's",
+      "command": "cd packages/envoy && go test -count=1 -run TestTheDocumentedClaims -v ./internal/broker/oauth/ (once with docs/kubernetes.md replaced by main@origin's copy, once with the branch's)",
+      "observed": "Commit fd7b9b1b changes that one file; its sha256 equals `git show 930cad24:packages/envoy/internal/broker/oauth/claims_doc_test.go` (8e06e83bee5c1341\u2026), and the file was identical on this head, main and #2598's base before it. With main's guide: `--- PASS: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries`, ok; with the branch's guide: PASS too. gofmt and go vet clean. Main's highest migration is still 0149_event_horizon and #2598 is still open, so no merge and no renumbering.",
+      "headSha": "fd7b9b1b2d07",
+      "negativeControl": "The previous file (main's) against main's guide: `--- FAIL: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries \u2026 claims_doc_test.go:79: docs/kubernetes.md's claim list and the claims the exchange decides on disagree`, the failure CI run 41170368978's envoy-go showed."
     }
   ],
   "filesChanged": [
@@ -220,6 +228,7 @@
     "merge with #2366 (7ac06a53): model/model.go conflict, api/comment_create.go wait predicate (claimant, ask followers, primary-document session authors), deliveryaudit_test.go compile fix; three tests in comment_mention_takeover_test.go (c63149d0)",
     "packages/dispatch/e2e/{message-agent,mention-composer,broadcast,agent-view-settings}.e2e.ts (the 12 s take-over window)",
     "packages/envoy/cmd/dispatch/{main.go,redeliver.go,settings.go,README.md,AGENTS.md}",
+    "packages/envoy/internal/broker/oauth/claims_doc_test.go",
     "packages/envoy/internal/dispatch/api/delivery_live_hub_test.go",
     "packages/envoy/internal/dispatch/api/{messages.go,message_delivery.go,comment_create.go,comment_delivery.go,broadcasts.go,envoy_resolve.go,delivery_resume.go (new),issue_route_status.go,test_hooks_fanout.go (new),events.go,delivery_live_socket.go,artifacts.go,agent_stream.go,routes_table.go,server.go,delivery.go,issue_claim.go,ask_transitions.go,ask_snooze.go}",
     "packages/envoy/internal/dispatch/store/migrations/0121_message_delivery_urgency, 0122_route_roster, 0123_github_rate_limits, 0124_delivery_run_warnings (.up.sql + .census.sql)",
