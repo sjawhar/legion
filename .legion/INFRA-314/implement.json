@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-314",
-  "completed": "2026-10-31T18:35:00Z",
+  "completed": "2026-10-31T19:40:00Z",
   "proof": [
     {
       "criterion": "A1, A2, A3, A4, A9, A10, A11: the broker serves its own approval page with a sign-in on its own origin; only the signed-in approver decides, and the decision is bound to what the page showed; nothing Dispatch holds decides; the four sign-in settings are required; a sign-in crosses processes and restarts",
@@ -91,6 +91,14 @@
       "observed": "ok. Inside the burst none of GET /approve/<id>, GET /signin/callback and GET /signin/status is refused and the stylesheet answers 200. Past it the two page routes answer 429 with Retry-After: 3600, Content-Security-Policy equal to approval.ContentSecurityPolicy, X-Frame-Options: DENY, Referrer-Policy: same-origin, Cache-Control: no-store, nosniff and Content-Type: text/html, with HTML saying 'Too many requests' and naming neither 'serviceaccount' nor 'token'; GET /signin/status answers 429 RATE_LIMITED naming neither word; the stylesheet still answers 200. All four Go packages ok, cmd/agent-secrets ok, and the browser suite 53 passed with 1 pre-existing skip, machine-login.e2e.ts:43 among them, which is what covers fake-broker.ts's deleted refusal branches.",
       "headSha": "e2dcb986ec2438f5b483f5cd6cfabb47ed572951",
       "negativeControl": "With the bucket's spend deleted from authenticate's authSignIn case, the new test fails at 'GET /approve/<id> past the bucket = 302 Retry-After=\"\" , want 429 with Retry-After 3600'; restored, ok. That is the review's own point, that deleting either call would have passed every suite before this round."
+    },
+    {
+      "criterion": "The review's Important finding: the generated API reference must show the 429 the approval page's routes answer past the per-address bucket, which cmd/broker-refgen stopped seeing when the refusal moved into approval.Page.WriteRateLimited; and its Minor, the fake broker's last unreached refusal",
+      "surface": "cmd/broker-refgen reading the broker's real source as the docs build does, the three pages it writes compared between 9558f6ed and this head, the docs site's own build, and Dispatch's browser suite in real Chromium for the fake broker",
+      "command": "cd packages/envoy && go test -count=1 ./cmd/broker-refgen/ ./internal/broker/api/ ; go run ./cmd/broker-refgen \"$LEGION_WORKSPACE\" <out> at both heads and diff -r ; cd docs/site && bun run build ; cd packages/dispatch && bun run e2e -- broker-approval.e2e.ts machine-login.e2e.ts inbox.e2e.ts --project chromium",
+      "observed": "ok. A pageAnswerers table names WriteRateLimited and the approval package, collect records such a call with that directory, and resolve reads it in that package's graph, so the 429 comes out of the method's own WriteHeader as a page answer. api.md's Authentication row for the broker sign-in session class reads '429 (an HTML page)<br>500 (an HTML page)' where it read 'none'; diff -r against the reference generated at 9558f6ed is that one cell and nothing else. errors.md is unchanged, deliberately: an HTML refusal carries no code, so RATE_LIMITED keeps the routes and classes that answer it, GET /signin/status among them. The docs site builds 43 pages with every internal link valid. The fake broker's 409 RECORD_TERMINAL is deleted and the browser suite is 53 passed, 1 pre-existing skip.",
+      "headSha": "fcbb5469d6b0f57340c48f436515e0597adb61c3",
+      "negativeControl": "TestTheSignInClassRefusesPastTheRateLimit, with routes.go and pages.go reverted and the test kept, fails with 'the Broker sign-in session class refuses [], want the approval page's 429' and the rendered-row assertion red beside it; both files restored, ok. That is the review's point that nothing in refgen's tests caught the loss."
     }
   ],
   "filesChanged": [
