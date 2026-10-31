@@ -106,7 +106,10 @@ type schemaAdmission struct {
 // (admit), so a token's answer is that decision, whichever of them sent it. A socket a re-check
 // revoked waits on with them until its own ServeHTTP removes it (revokeUnless): its token may
 // still be on its way, and a token that found its socket's entry gone would take the answer of
-// another socket of the key, which would then be read-only for as long as it stays open.
+// another socket of the key, which would then be read-only for as long as it stays open. It waits
+// behind every other entry of the key: a token takes a revoked entry's answer only when no other
+// entry waits (answer), since an entry a revoked one answered for would be left waiting in just
+// that way.
 type schemaAdmissions struct {
 	mu      sync.Mutex
 	sockets map[schemaAdmissionKey][]*schemaAdmission
@@ -136,20 +139,36 @@ func (a *schemaAdmissions) admit(admission *schemaAdmission) bool {
 	return true
 }
 
-// answer is the decision of the first socket of key still waiting for its token's answer, which
-// it marks answered, or false (read-only) when none is waiting. A revoked socket's entry is one
-// of them: its socket is closing, and ygo made it writable when it was admitted, so the decision
-// it holds takes nothing from any other socket of the key, each of which holds that same decision.
+// answer is the decision of the first socket of key still waiting for its token's answer that no
+// re-check has revoked, which it marks answered. A revoked socket's entry answers only when no
+// other entry of the key waits, and when none waits at all the answer is false (read-only). Every
+// waiting entry of a key holds one decision, so which of them answers changes no answer; what it
+// changes is which entry is left waiting. A revoked entry that answered in a live socket's place
+// would leave that socket's own entry waiting for the life of its socket - the revoked socket's
+// ServeHTTP removes its entry, and no second token of the key comes to answer the entry left
+// behind - and admit refuses every read-only socket of the key, the revoked page's own read-only
+// reconnect among them, for as long as that entry waits.
 func (a *schemaAdmissions) answer(key schemaAdmissionKey) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	var revoked *schemaAdmission
 	for _, waiting := range a.sockets[key] {
-		if !waiting.answered {
+		if waiting.answered {
+			continue
+		}
+		if !waiting.revoked {
 			waiting.answered = true
 			return waiting.writable
 		}
+		if revoked == nil {
+			revoked = waiting
+		}
 	}
-	return false
+	if revoked == nil {
+		return false
+	}
+	revoked.answered = true
+	return revoked.writable
 }
 
 // remove forgets admission, once its socket has ended or a re-check has closed it. Removing one
