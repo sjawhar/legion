@@ -142,7 +142,7 @@
     },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
-      "version": "11.1.0",
+      "version": "12.5.1",
       "dependencies": {
         "@opencode-ai/plugin": "~1.14.46",
       },
@@ -172,7 +172,7 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-envoy",
-      "version": "13.1.0",
+      "version": "13.10.1",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -189,7 +189,7 @@
     },
     "packages/pi-legion": {
       "name": "@sjawhar/pi-legion",
-      "version": "14.1.0",
+      "version": "15.5.1",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",

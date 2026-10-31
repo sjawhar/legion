@@ -1,5 +1,21 @@
 # Changelog
 
+## [main@d7e1daaaaf70] - 2026-10-31
+
+### Added
+
+- The plugin ships `claude-envoy:outside-message` and `claude-envoy:plain-words`, so a standalone
+  Claude Code session and a Legion phase worker on the Claude Code backend read the same rules for
+  text that reaches a person outside the company as an Oh My Pi session does.
+
+### Changed
+
+- The `dispatch` and `dispatch-writing-specs` skills this plugin links tell a session to write
+  each ask or comment id whole in a reference, taking it from `dispatch read`'s `Ask id:` or
+  from the page URL, because the command accepts a prefix while a person's link does not. The
+  `dispatch` skill said an ask or comment id could be an 8-hex prefix, and a reference built
+  from one opens nothing for the person who clicks it.
+
 ## [main@e65900f4438b] - 2026-10-30
 
 ### Added
