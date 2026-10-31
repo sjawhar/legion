@@ -234,6 +234,14 @@ func refuseDispatchSeed(value pulumi.StringInput, dispatch, input string) pulumi
 	}).(pulumi.StringOutput)
 }
 
+// dependsOnInput orders a child after the resources in's value comes from. A value used only for
+// ordering reaches no input of the child, so the dependencies a consumer's output carries into the
+// component would otherwise be lost; DependsOnInputs takes the dependencies of the output it is
+// given, which are in's.
+func dependsOnInput(in pulumi.StringInput) pulumi.ResourceOption {
+	return pulumi.DependsOnInputs(in.ToStringOutput().ApplyT(func(string) []pulumi.Resource { return nil }).(pulumi.ResourceArrayOutput))
+}
+
 // refuseDispatchSecret is the one check every secret credential input of the component runs once
 // it resolves (tailnetAuthKey, signInClientSecret): a blank or whitespace-only value is a
 // credential that cannot work (the front door cannot join the tailnet, Dispatch refuses a blank
@@ -337,10 +345,23 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 	dispatchSecretName := s.hostname + "-dispatch"
 	databaseURL := pulumi.Sprintf("postgres://dispatch:%s@127.0.0.1:5432/dispatch?sslmode=disable", database.password.Result)
+	// DISPATCH_SIGNING_KEY is the key set auth.ParseSigningKeys reads: the generations' results
+	// in the list's order, one space between them. One generation joins to that result alone,
+	// unchanged, so a deployment already running one key keeps the exact Secret data it has and
+	// this release's first apply plans no change to it (TestDispatchDefaultSigningKeySetIsTodaysOneKey
+	// pins those bytes). The join runs on a StringArray, so every element is a string already and
+	// there is no resolution the apply could fail on.
+	results := make(pulumi.StringArray, 0, len(database.signing))
+	for _, key := range database.signing {
+		results = append(results, key.Result)
+	}
+	signingKey := results.ToStringArrayOutput().ApplyT(func(keys []string) string {
+		return strings.Join(keys, " ")
+	}).(pulumi.StringOutput)
 	// The sign-in client secret is one key of this Secret only where sign-in is on: without the
 	// sign-in inputs signInClientSecret is nil, which refuseDispatchSeedInSecret cannot take, and
 	// the app reads no such variable anyway.
-	dispatchData := pulumi.StringMap{"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": database.agentToken.Result, "DISPATCH_SIGNING_KEY": database.signing.Result}
+	dispatchData := pulumi.StringMap{"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": database.agentToken.Result, "DISPATCH_SIGNING_KEY": signingKey}
 	if s.signInOn {
 		dispatchData["DISPATCH_SIGNIN_CLIENT_SECRET"] = refuseDispatchSeedInSecret(args.SignInClientSecret, dispatch, "signInClientSecret")
 	}
@@ -493,19 +514,19 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		return networkPolicy(ctx, name, s.namespace, map[string]string{"app": name}, ingress, child...)
 	}
 
-	// The front door, one thing and registered as one: the Secret holding the key its pods join
-	// the tailnet with, the children newDispatchFrontDoor builds and renders its pod from (its TLS
-	// Secret, its Serve config, its account and that account's Role and RoleBinding),
-	// frontDoorReplicas pods hosting the Tailscale Service svc:<hostname>, the name every reader
-	// reaches Dispatch at, the Service the app and the listener dial their SOCKS5 proxy at without
-	// natsInCluster, and the policy fencing that proxy. The Deployment is recreated at one pod and
-	// rolled above it, so by default a roll never leaves the name to a single pod, and only the
-	// auth key's checksum is on its template: a renewed certificate in its TLS Secret rolls no
-	// pod. Without the tailnet inputs none of this
-	// is registered: nothing here has a value to render from, the auth key and tailnetService among
-	// them, and readers reach the app inside the cluster instead. The gate is also what keeps a nil
-	// tailnetAuthKey away from refuseDispatchSeedInSecret, which would dial ToStringOutput on it
-	// and take the provider down with it.
+	// The front door, one thing and registered as one: the Tailscale Service svc:<hostname> itself
+	// (newDispatchTailscaleService), the Secret holding the key its pods join the tailnet with, the
+	// children newDispatchFrontDoor builds and renders its pod from (its TLS Secret, its Serve
+	// config, its account and that account's Role and RoleBinding), frontDoorReplicas pods hosting
+	// that Service, the name every reader reaches Dispatch at, the Service the app and the listener
+	// dial their SOCKS5 proxy at without natsInCluster, and the policy fencing that proxy. The
+	// Deployment is recreated at one pod and rolled above it, so by default a roll never leaves the
+	// name to a single pod, and only the auth key's checksum is on its template: a renewed
+	// certificate in its TLS Secret rolls no pod. Without the tailnet inputs none of this is
+	// registered: nothing here has a value to render from, the auth key and the tags the Service
+	// carries among them, and readers reach the app inside the cluster instead. The gate is also
+	// what keeps a nil tailnetAuthKey away from refuseDispatchSeedInSecret, which would dial
+	// ToStringOutput on it and take the provider down with it.
 	var frontDoorResources []pulumi.Resource
 	if s.frontDoor {
 		authKeyName := s.hostname + "-tailnet-auth-key"
@@ -513,7 +534,11 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		if err != nil {
 			return err
 		}
-		frontDoorPod, frontDoorOpts, err := newDispatchFrontDoor(ctx, dispatch, s, args.TailnetService, authKeyName, metadata, child)
+		tailscaleService, err := newDispatchTailscaleService(ctx, comp, s, database.instance)
+		if err != nil {
+			return err
+		}
+		frontDoorPod, frontDoorOpts, err := newDispatchFrontDoor(ctx, s, tailscaleService, database.instance, authKeyName, metadata, child)
 		if err != nil {
 			return err
 		}
@@ -528,28 +553,32 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		// Ingress, which denies every source.
 		frontDoorIngress := networkingv1.NetworkPolicyIngressRuleArray{}
 		if !s.natsInCluster {
-			tailnetService, err := service(tailnetName, dispatchSOCKS5Port)
+			socks5Service, err := service(tailnetName, dispatchSOCKS5Port)
 			if err != nil {
 				return err
 			}
-			frontDoorResources = []pulumi.Resource{tailnet, tailnetService}
+			frontDoorResources = []pulumi.Resource{tailnet, socks5Service}
 			frontDoorIngress = append(frontDoorIngress, ingressFrom(dispatchSOCKS5Port, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname), podPeer(listenerName)}))
 		}
 		if err := policy(tailnetName, frontDoorIngress); err != nil {
 			return err
 		}
 	}
-	// In the SOCKS5 mode both other workloads dial the NATS hub through the front door's proxy, so
-	// each waits for its pod and its Service, for a reason of its own. envoy-listener exits on a
-	// failed initial connect (packages/envoy/cmd/listener/main.go), so a listener pod started
-	// before the proxy exists never goes ready and the rollout waits it out. envoy-dispatch serves
-	// without NATS: its /healthz readiness reads only Postgres, reporting nats false meanwhile, and
-	// its bus clients connect in the background once the proxy answers. So an app pod started first
-	// would go ready and serve without the bus (no outbox publish, no delivery intake) until then;
-	// the app waits for the front door only so that it starts connected. With natsInCluster neither
-	// waits for it: the proxy was the only reason either did, the port-1055 Service is not
-	// registered at all, and waiting would let a front-door outage hold up a listener rollout that
-	// no longer depends on it. Without a front door neither waits either, there being nothing to
+	// In the SOCKS5 mode the listener dials the NATS hub through the front door's proxy and waits
+	// for its pod and its Service; the app, which dials the same proxy, does not. envoy-listener
+	// exits when its first bus connection fails (packages/envoy/cmd/listener/main.go), so a
+	// listener pod started before the proxy exists never goes ready and the rollout waits it out:
+	// that wait earns its keep. envoy-dispatch serves without the bus: its /healthz readiness
+	// reads Postgres alone, reporting nats false meanwhile, and its bus clients connect in the
+	// background once the proxy answers, so the app pod goes ready and serves either way. It
+	// waited only so that it started connected, and that is now outweighed: during the cutover
+	// the front door is deliberately away while the database's availability type changes, and the
+	// server must come back inside that stop rather than behind the front door. Its database
+	// ordering is untouched by this — database.instance.ConnectionName is a cloud-sql-proxy
+	// argument on the app's own pod, so the pod still waits for the instance. With natsInCluster
+	// the listener does not wait either: the proxy was the only reason it did, the port-1055
+	// Service is not registered at all, and waiting would let a front-door outage hold up a
+	// listener rollout that no longer depends on it. Without a front door there is nothing to
 	// wait for, and the sandbox is in-cluster NATS by the resolver's own rule.
 	frontDoor := pulumi.DependsOn(frontDoorResources)
 	// Both also mount the NATS seed, which the pod can read only once its principal holds
@@ -725,7 +754,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// envoy-dispatch reads the dispatch Secret and ENVOY_TOKEN from the listener's, so a change to
 	// either rolls the app.
 	appChecksums := map[string]*corev1.Secret{dispatchSecretName: dispatchSecret, listenerName: listenerSecret}
-	if _, err := deployment(s.hostname, s.replicas, s.disruption.appPDBMinAvailable, appChecksums, appPod, frontDoor, pulumi.DependsOn(appGrants)); err != nil {
+	if _, err := deployment(s.hostname, s.replicas, s.disruption.appPDBMinAvailable, appChecksums, appPod, pulumi.DependsOn(appGrants)); err != nil {
 		return err
 	}
 	if _, err := service(s.hostname, 8766); err != nil {
