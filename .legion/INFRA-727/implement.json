@@ -2,36 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-727",
-  "completed": "2026-10-31T01:45:00Z",
-  "round": 6,
+  "completed": "2026-10-31T02:30:00Z",
+  "round": 7,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2548",
-  "head": "4d1f4d93d221",
-  "answers": "The tester's failure: the pull request conflicted with main, so GitHub ran no checks on it. This round is the forward merge alone.",
+  "head": "c7010979a05b",
+  "answers": "The tester's failure at 4d1f4d93 (red row c12eb998): a cross-block refusal told the reader their words were no longer where they selected them, while the words had not moved.",
   "proof": [
     {
-      "criterion": "The pull request merges with main again, and the merge changed nothing of this branch's behaviour",
-      "surface": "GitHub, and the browser suite against the real Go server and PostgreSQL 17.11 with pgvector",
-      "command": "jj new legion/INFRA-727 main@origin, resolve, then cd packages/dispatch && bun run e2e -- compose-wait at the merge head",
-      "observed": "One text conflict, packages/envoy/cmd/dispatch/README.md: main turned the status-and-code table into a list (#2577) while this branch rewrote the ANCHOR_MISSING row. Resolved as a semantic merge - main's list form carrying this branch's ANCHOR_MISSING wording, so neither side's work is lost. packages/dispatch/web/src/api/client.ts, which also moved on both sides, merged without a conflict and still exports isAnchorMissing beside the client's other refusal predicates, which I read back rather than assumed. At the merge head: 11 passed (6.0m), every row of the spec including the tester's four; go vet ./internal/dispatch/... and gofmt -l internal/dispatch clean; both typechecks and bunx biome check green; 227 proof-editor and 2980 dispatch unit tests.",
-      "headSha": "4d1f4d93d2213b1ba78d63f29299503e7505c9d7",
-      "negativeControl": "The fingerprint over this pull request's own lines is recorded on both sides of the merge (190dbec1 -> 7461e1c1) and posted with the comparison on the pull request; it changed, as it must when the base's copy of these files moves, which is why the rows were run again at the merge head rather than carried over."
+      "criterion": "The tester's red row, unmodified: a cross-block refusal does not claim the words moved while they are where they were - and the rule every refusal is held to, that it says a true thing",
+      "surface": "Dispatch's web app in Chromium through Playwright, against the real Go server and PostgreSQL 17.11 with pgvector",
+      "command": "cd packages/dispatch && bun run e2e -- compose-wait",
+      "observed": "12 passed (6.1m) at c7010979a05b. The tester's row is green: a selection across a paragraph break, both pairs of paragraphs rewritten around the reader's own words so the mark goes and the words stay, and the composer now says the words read in more than one place with the same text around them, never that they are no longer where they were selected. The eleven earlier rows, the tester's five among them, are green with it.",
+      "headSha": "c7010979a05b",
+      "negativeControl": "The row is red at 4d1f4d93d221, where that case answered 'unplaceable' and the composer said the words had moved. The unit suite holds the two halves apart: a reading among words the reader never read beside theirs is still 'unplaceable', and two readings surrounded alike are 'ambiguous'."
+    },
+    {
+      "criterion": "Every other refusal sentence is unchanged",
+      "surface": "The margin's and the editor's unit suites",
+      "command": "cd packages/dispatch && bun test --parallel web/src e2e/__tests__ ; cd packages/proof-editor && bun test src/tests tests",
+      "observed": "2980 and 227 pass. No sentence in margin-context.tsx was touched this round: the change is which of the five existing reasons the document-wide step answers with. margin-context.test.ts, which asserts the five word for word, is unchanged and green.",
+      "headSha": "c7010979a05b",
+      "negativeControl": "That test file asserts each sentence verbatim and that only the words-read-nowhere sentence says 'changed or deleted', so any edit to the wording fails it."
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/dispatch/README.md (the merge resolution; main's list form with this branch's ANCHOR_MISSING paragraph in it)",
-    "Everything else in the merge commit is main's own, brought in unchanged"
+    "packages/proof-editor/src/record-mark-retype.ts (the document-wide step answers 'ambiguous' for more than one reading surrounded alike)",
+    "packages/proof-editor/tests/record-mark-retype.test.ts (four expectations moved to 'ambiguous', their comments saying why, and one test renamed for the two refusals it now drives)"
   ],
   "trickyParts": [
-    "The README conflict is a form change meeting a content change: taking either side whole would have dropped the other's work, so the resolution is main's list with this branch's paragraph moved into it."
+    "With nothing remembered - a selection across a paragraph break, or a send held by a tab older than the placement field - every reading counts as surrounded alike, so 'more than one surrounded' and 'more than one reading at all' are the same case there. That is why the one branch covers both, and why the sentence about reading alike is the true one for it.",
+    "The two document-wide refusals mean different things and both are still reachable: a single reading among words the reader never read beside theirs is 'unplaceable' - it reads somewhere, but not where they selected it - while two readings alike are 'ambiguous'."
   ],
-  "deviations": [
-    "The architect's second item for this round - rewording seven comment citations of dispatch://INFRA-727 - was withdrawn before I started (Envoy, 01:27Z): the repository's public-names rule forbids the private deployment repository's key, not this project's, main itself cites INFRA keys, and check-private-names.sh and the lint lane pass with them. The seven comments stand as they are."
-  ],
+  "deviations": [],
   "openQuestions": [
     "The reported 'about ten seconds' is still unexplained, as every round has recorded.",
-    "e2e/hover-preview.e2e.ts:87 fails in this pod on main as well as on this branch; CI is where it is watched. The whole Chromium project was not run again this round, which changed no application code: its last run is at abf83df601f8, 934 passed and 1 failed."
+    "e2e/hover-preview.e2e.ts:87 fails in this pod on main as well as on this branch; CI is where it is watched. The whole Chromium project was not run again this round, which changed one branch of one function and its tests: its last run is at abf83df601f8, 934 passed and 1 failed."
   ],
   "discoveredComplexity": [
-    "The simplify pass is spent (round 1, ce-simplify-code at 96a647eb, applied). A round that only merges the base runs none."
+    "The simplify pass is spent (round 1, ce-simplify-code at 96a647eb, applied). A round answering a tester failure runs none."
   ]
 }
