@@ -168,12 +168,12 @@ func validateUpdate(update []byte, maxPending int) error {
 // decodeStoredState applies state, a stored history, one of its rows or the state a room or cold
 // read loads, to doc, and is the one way the service decodes stored state, so every refusal of it
 // reads the same. ygo's apply names a failure as ErrInvalidUpdate followed by the decoder's reason
-// ("crdt: invalid update: encoding: unexpected end of input"). The release candidate this module
-// pins (go.mod) regressed on that: where its reader of an update's structs fails it reports the
-// sentinel wrapped in itself ("crdt: invalid update: crdt: invalid update") and no reason, which
-// invalidOnce returns as the sentinel alone so the line a refusal logs states it once. The fix is
-// with the ygo release (dispatch://INFRA-593/artifact/ygo-truncated-reason-patch); once the pinned
-// tag carries it, delete invalidOnce, doubledInvalidUpdate and the reasonless cases of
+// ("crdt: invalid update: encoding: unexpected end of input"). v1.54.1-sami.1, the fork release
+// this module pins (go.mod), regressed on that: where its reader of an update's structs fails it
+// reports the sentinel wrapped in itself ("crdt: invalid update: crdt: invalid update") and no
+// reason, which invalidOnce returns as the sentinel alone so the line a refusal logs states it
+// once. The fix ships in the fork's next release
+// (dispatch://INFRA-593/artifact/ygo-truncated-reason-patch); once the pinned tag carries it, delete invalidOnce, doubledInvalidUpdate and the reasonless cases of
 // decode_reason_test.go and fold_reason_test.go, which then fail saying nothing reasonless is left.
 func decodeStoredState(doc *crdt.Doc, state []byte) error {
 	return invalidOnce(crdt.ApplyUpdateV1(doc, state, nil))

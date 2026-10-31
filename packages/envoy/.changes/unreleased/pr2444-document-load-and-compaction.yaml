@@ -33,6 +33,9 @@ body: |-
   partway leaves the room with what it kept and drains the pending queue on that part. When the
   server closes a browser's connection itself (a room close or a shutdown), input the browser had
   sent and the server had not yet read is dropped rather than applied, and the browser sends it again
-  when it reconnects. The fork's opt-in hooks and scan bounds are off, and Dispatch sets none.
+  when it reconnects. A stored document holding a clock past 2^53-1 or a client past 2^55-1 is now
+  refused when it loads; no Yjs client, and no write of Dispatch's, can make one. A truncated stored
+  history is refused as `crdt: invalid update` without the decoder's reason until the next fork
+  release. The fork's opt-in hooks and scan bounds are off, and Dispatch sets none.
 custom:
     Issue: pr2444

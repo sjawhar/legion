@@ -139,11 +139,10 @@ require (
 // in commit order under its own lock (UpdateLog, #332), so the room's update observer measures
 // each update against the room the commit before it left; an update past the cap on parked delete
 // ranges, or past the pending queue's own cap, is refused before it changes the document (#334,
-// #340); a struct sent again while it waits in the pending queue parks once (#344); and, new in
-// this candidate, a peer the server closes while its read loop runs has its unread buffered input
-// dropped rather than applied and stored (#343), which the closes Dispatch itself makes - its
-// CloseRoom calls and its shutdown - take. The fork's opt-in hooks and bounds
+// #340, and the clock and client bounds of #356); a struct sent again while it waits in the
+// pending queue parks once (#344); and a peer the server closes while its read loop runs has its
+// unread buffered input dropped rather than applied and stored (#343), which the closes Dispatch
+// itself makes - its CloseRoom calls and its shutdown - take. The fork's opt-in hooks and bounds
 // (Server.OnPeerUpdate, WithMaxIntegrateScan, WithIntegrateScanBudget, Server.PeerWriteQueueBytes)
-// are off unless set, and Dispatch sets none. This pins a pseudo-version of the release candidate
-// rc/v1.54.1-sami.1 (a23bc871) until its tag, v1.54.1-sami.1, exists.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-0.20261031011805-a23bc8717a4b
+// are off unless set, and Dispatch sets none.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.1
