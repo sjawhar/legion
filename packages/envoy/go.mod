@@ -133,20 +133,26 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 )
 
-// The sjawhar/ygo fork is upstream ygo v1.51.2 plus fixes Dispatch depends on while each waits in
-// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #331, #332; the fork
-// carries #258's fix as its own closed duplicate, #262): an iterative delete cascade and nested
-// reads, so the stack a delete or read needs does not grow with a tree a peer nested; the
-// transactional GC range search; a whole document state resolves its own dependencies before the
-// pending cap, through a dependency worklist rather than a re-scan per step; items merge only when
-// their right origins match, so a re-encoded document keeps its text order; the bundled stores keep
-// a large incremental update, and BroadcastUpdate and the cluster relay check one with the stores'
-// check rather than refusing it past a pending cap; Apply stamps a room with no peer idle when it
-// returns, so the idle sweep evicts a room only the API touched; a Hocuspocus-framed connection is
-// answered one SyncStatus for each SyncStep2 or Update it sends, so the browser's provider learns
-// which of its edits the room took; CloseRoom closes a browser that connects while it runs,
-// which it used to leave on the room it removed, where no later edit reached it; and a document
-// logs each committed transaction's update in commit order under its own lock (UpdateLog), so the
-// room's update observer measures each update against the room the commit before it left. A merged
-// update's skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.4
+// The sjawhar/ygo fork is upstream ygo v1.54.0 plus fixes, each carried until upstream ships it;
+// its release notes list every member with its upstream pull request. Upstream merged, and the
+// fork dropped, every member of the v1.51.3-sami.N line it does not list again: the transactional
+// GC range search (reearth/ygo#258, which replaces the fork's closed #262), the iterative delete
+// cascade (#263), right-origin merges (#266), large incremental updates in the stores (#268), the
+// idle stamp after Apply (#269), whole states resolving within the pending budget (#260), a
+// SyncStatus for every Hocuspocus sync frame (#291), Server.OnPeerUpdate (#304), which Dispatch
+// does not set, and deferred items integrating in dependency order (#296, #311, #312). Fifteen
+// members wait in open upstream pull requests: CloseRoom closes a browser that joins while it runs
+// (#331); a document logs each commit's update in commit order under its own lock (UpdateLog,
+// #332), against which the room's update observer measures each update; a remote update's scans
+// can be bounded (#333); parked delete ranges are capped, and a room loads its stored state with
+// the cap lifted (#334); a map-valued text format no longer panics with the lock held (#335);
+// ChangedTypes and Parent (#336); awareness reaches its sending peer and a read-only peer gets a
+// bounded empty awareness response, so an idle provider stays connected (#338); a failed write
+// closes the peer (#339); the pending cap refuses an update before it changes the document (#340);
+// a relay-injected update that fails partway reaches the node's peers (#341); a per-peer write
+// queue byte budget (#342); a server close drops the peer's buffered input (#343); a re-sent
+// pending struct parks once (#344); clocks past 2^53-1 and clients past 2^55-1 are refused, so a
+// stored state holding one does not load (#356); and a partly applied update reaches the other
+// peers with what it parked as well as what landed (#357). One is fork-only, with no upstream
+// pull request yet: a per-apply scan budget stacked on #333, which Dispatch does not set.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.1

@@ -106,9 +106,6 @@ type Service struct {
 	unrecordedMarkTTL time.Duration
 	// editNoticeQuiet is Deps.EditNoticeQuiet, with its default applied.
 	editNoticeQuiet time.Duration
-	// keepAlive is how often a document socket's peer is sent a keep-alive (keepalive.go):
-	// documentKeepAlive, which a test shortens.
-	keepAlive time.Duration
 	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
@@ -641,7 +638,6 @@ func New(deps Deps) *Service {
 		settle:            settle,
 		settleTimeout:     settlementTimeout,
 		settlements:       newSettlementSlots(settlementWorkers),
-		keepAlive:         documentKeepAlive,
 		markWait:          markWait,
 		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),
