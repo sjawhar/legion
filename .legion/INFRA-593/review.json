@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-593",
+  "completed": "2026-10-31T08:45:09Z",
+  "round": 8,
+  "headReviewed": "eb992560d00799f117f86275ac233bc9bd368149",
+  "reviewerProseCommit": "ae06c793ee7b4ce84384aad6e3e6f9101d695e9007",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "roundShape": "round-shape.py v3, old 20e033515eaaffa83c063403a28ed0db37eb9ffe -> new eb992560d00799f117f86275ac233bc9bd368149: 20 files whose own diff differs, runtime among them (go.mod, go.sum, docs/compaction.go, fold.go, livewrite.go, mutation.go, persistence.go, service.go, testhooks.go, tree.go, websocket.go); none equal only after migration normalisation. A full round.",
+  "ci": "At eb992560 (merged into main 3f7b3e75), read 07:05 UTC: lint, typecheck, test, pr-title, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go-race, envoy-go-race-docs, -api and -pmdoc and every other lane passed; envoy-go failed only in internal/broker/oauth TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries, main's own red since #2474 (main run 41164510541), fixed on main by #2598 at 08:42 UTC. At the reviewer's prose head ae06c793: lint, typecheck, test and pr-title passed (08:44 UTC).",
+  "thermonuclear": "Both run once on the delta 20e03351..eb992560: deep review APPROVE (two documentation minors, one hardening note), code quality four cleanup minors. Every round-7 finding fixed in 800ec539 and eb992560; every remaining direct ygo call in docs reads live or incoming state.",
+  "roundSevenThreads": "PRRT_kwDORFy7ds6yMn3M, ...3P, ...3Q, ...3R, ...3S, ...3U answered as accepted and fixed; already resolved.",
+  "proseFixedByReviewer": "ae06c793: decodeStoredState's comment states the regression it works around and its exit (the ygo patch) with no caller list; loadTree's and coldFork's echoes dropped; tree.go and AGENTS.md name refuseUndecodable and coldFork among newDocumentCopy's decodes; AGENTS.md's misread log message on one line; the changelog fragment renamed pr2444-document-load-and-compaction.yaml with Issue pr2444, no Dispatch key in its body, and ygo #340/#343's behaviour stated.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/go.mod", "description": "Repin ygo to the tag v1.54.1-sami.1 (tag object 1d92267b, commit 8dae657d), required before merge per the INFRA-514 architect. The tag diverges from the pinned a23bc871 (16 ahead, 13 behind: PeerWriteQueueBytes, drop of a closed peer's buffered input, #356's clock and client bounds, #357's partial-commit drain, #338, #339), so the repin changes ygo code and needs the tests and the cut-row probe again; check whether the tag carries the wrapUpdateErr fix, and if it does, delete invalidOnce, doubledInvalidUpdate and the reasonless test cases as decodeStoredState's comment now says."}
+  ],
+  "notDefects": [
+    "The two cut-row searches in decode_reason_test.go and fold_reason_test.go: short, test-local, with different base documents; they go together with invalidOnce once the tag fixes the wording.",
+    "Server.PeerWriteQueueBytes left unset: main has the same exposure (authenticated sockets only); recorded in the PR body's risks; choosing a size is a decision, raised to the architect.",
+    "envoy-go's broker/oauth failure at eb992560: main's, fixed by #2598."
+  ]
+}

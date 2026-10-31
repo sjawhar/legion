@@ -202,10 +202,14 @@ type roomInstance struct {
 // the load read. Without that the fresh room would stand at the head of the read alone while the
 // store stood one past it, and the gate would refuse its every durable write until it reloaded -
 // a room born behind, which no reload is guaranteed to fix, since the next load can lose the same
-// race.
+// race. It also carries the state that read loaded from LoadDoc to the room's load hook, which
+// decodes it into the room's document (takeState, onLoadDocument).
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
+	// state is the durable state the load read (keepState), until the room's load hook takes it
+	// (takeState): nil once taken, and for a load that read an empty history.
+	state []byte
 	// appended are the versions took recorded before the instance existed, folded into its cursor
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
@@ -229,6 +233,34 @@ func (load *roomLoad) readHead(head persistence.Version) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
 	load.head = int64(head)
+}
+
+// keepState records state, the durable state the load read at its head, for the room's load hook
+// to take (takeState).
+func (load *roomLoad) keepState(state []byte) {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	load.state = state
+}
+
+// takeState is the state the load read (keepState), handed over once: the record keeps none of
+// it after, so a record that outlives its load holds no copy of the document.
+func (load *roomLoad) takeState() []byte {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	state := load.state
+	load.state = nil
+	return state
+}
+
+// takeLoadedState is the state room's load read (servicePersistenceAdapter.LoadDoc), taken off its
+// record (roomLoad.takeState): nil for a room ygo loads without that read, and for an empty
+// history.
+func (s *Service) takeLoadedState(room string) []byte {
+	if loading, ok := s.roomLoads.Load(room); ok {
+		return loading.(*roomLoad).takeState()
+	}
+	return nil
 }
 
 // took records version, which this process has made durable for the room while its load runs: on

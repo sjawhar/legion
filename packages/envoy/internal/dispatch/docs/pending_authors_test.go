@@ -898,9 +898,7 @@ func TestAnUploadOnARoomLoadedFromACompactedHistoryConsumesExactlyItsRoomsAuthor
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	editAsConnectedPeer(t, taskB, artifactID, 1, alice, appendBlocks(t, "Alice's paragraph.\n"))
 	waitForLandedAppends(t, taskB, artifactID)
-	if _, err := NewPgVersioned(database).Compact(ctx, artifactID, compactKeep); err != nil {
-		t.Fatalf("compact the document: %v", err)
-	}
+	compactAged(t, NewPgVersioned(database), database, artifactID)
 	if rows := storedUpdateCount(t, database, artifactID); rows != 1 {
 		t.Fatalf("stored updates after compaction = %d, want 1", rows)
 	}

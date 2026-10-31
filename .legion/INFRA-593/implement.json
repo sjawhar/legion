@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-593",
+  "completed": "2026-10-31T09:55:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
+  "round": 14,
+  "proof": [
+    {
+      "criterion": "The evidence holds at the ygo tag v1.54.1-sami.1: the refused, parked, fold-reason and history-reason tests (the tester's a22f0f29 and 7c35d610 among them) are deterministic under -race",
+      "surface": "go test -race of internal/dispatch/docs on Postgres 16.2, under the pod's memory caps",
+      "command": "GOMAXPROCS=4 GOMEMLIMIT=12GiB CGO_ENABLED=1 go test -race -p 1 -parallel 4 ./internal/dispatch/docs -count=300 -run '^(TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce|TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks|TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt|TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce)$' -v",
+      "observed": "ok 457.6 s: 300 PASS of each of the 4 tests, 0 FAIL, 0 DATA RACE. Sampled peak 2.61 GiB of 19 (memory.usage_in_bytes every 2 s; the sampler was stopped as a shell job after 349 samples, since this shell gives no $! pid).",
+      "headSha": "be665c15029c6fcdd9895719a71283e291f39bdb",
+      "negativeControl": "At b24baf7d (ygo sami.7) a22f0f29's test failed (the room kept a refused deletion); at 800ec539, before fold.go was routed, 7c35d610's test failed with the doubled refusal."
+    },
+    {
+      "criterion": "The tag's truncated-row wording, measured: does it fix ygo's doubled refusal?",
+      "surface": "throwaway Go probe against github.com/sjawhar/ygo v1.54.1-sami.1",
+      "command": "$TMPDIR/infra593/cutprobe: a real 181,922-byte compacted row from the e2e database, cut at 200 points, applied into a room-shaped document",
+      "observed": "196 'crdt: invalid update: crdt: invalid update', 4 'crdt: invalid update: encoding: unexpected end of input'. The tag does not fix it, so invalidOnce, doubledInvalidUpdate and the reasonless test cases stay; the fix ships in the fork's next release.",
+      "headSha": "be665c15029c6fcdd9895719a71283e291f39bdb",
+      "negativeControl": "sami.4, sami.7 and sami.9 give the reason for all 200 cuts of a real row (tester round 11)."
+    },
+    {
+      "criterion": "Packages and server still work at the tag; acceptance 1, 2 and 5",
+      "surface": "local suites on Postgres 16.2 (en_US), and real envoy-dispatch with NATS off",
+      "command": "go vet (plain, multiprocess, memory); GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -parallel 4 ./internal/dispatch/docs ./cmd/dispatch; bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 17)",
+      "observed": "vet clean; ok docs 1534.6 s (websocket tests included), cmd/dispatch 317.2 s, sampled peak 8.16 GiB of 19 over 926 samples (sampler stopped by its pid); e2e: 41 rows, the restart's sweep compacted=1 rows_deleted=37 leaving 4, the 3 young rows unchanged in version, xmin and md5, text sha256 identical, a 31st upload reads back.",
+      "headSha": "be665c15029c6fcdd9895719a71283e291f39bdb",
+      "negativeControl": "The restarted process's first sweep tick logs candidates=0 while the hour is recorded as served."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/docs/{fold,persistence,service,tree,websocket,rebuild,compaction}.go: per-instance pending queue (PgVersioned.maxPendingItems, Service.maxPendingItems -> Server.MaxPendingItems and validateUpdate), maxUpdateItems in production",
+    "packages/envoy/internal/dispatch/docs/{history_fold,load_fold,compaction}_test.go: unfoldableHistory(maxPending), shrinkPendingItems, testPendingItems = 64",
+    "migration renumbered 0141 -> 0142_doc_compaction_owed (up, census, its test, AGENTS.md, changelog fragment, cmd/dispatch/README.md)"
+  ],
+  "deviations": [
+    "Correction of round 11's handoff: it said ygo sami.4 words a cut row's refusal 'crdt: invalid update: crdt: invalid update' too. That was wrong. sami.4, sami.7 and sami.9 name 'encoding: unexpected end of input' for all 200 cuts of a real stored row, and the release candidate (845ce79c and a23bc871) drops it for 196: a candidate regression, whose fix is with the ygo release session (dispatch://INFRA-593/artifact/ygo-truncated-reason-patch). Until it ships, decodeStoredState states the refusal once, and the log no longer says a history was cut short.",
+    "No merge of main this round: GitHub reports MERGEABLE at be665c15; main's last migration is still 0149.",
+    "ygo changes from a23bc871 to the tag that touch Dispatch: #356's clock/client bounds (a stored document past them is refused at load; Dispatch's ids are 32-bit, crdt/doc.go:394-400), #357's partial-commit drain and relay (no cluster relay in Dispatch), #338, #339. Server.PeerWriteQueueBytes stays unset, as on main."
+  ],
+  "answersReview": "Review round 8 at eb992560 (REQUEST_CHANGES, review head f60452da): one required change, the repin to the ygo tag v1.54.1-sami.1. Done in be665c15; the tag does not fix wrapUpdateErr's doubled wording, so invalidOnce stays and the PR body says so."
+}

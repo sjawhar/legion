@@ -20,10 +20,23 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// A failed room's eviction flushes and compacts the document under its advisory lock. An
-// operation inside a database transaction that waited for that eviction could be waiting on its
-// own transaction, which Postgres cannot see, so these tests bound every such wait.
+// A failed room's eviction flushes the document and compacts its rows older than the tail under
+// its advisory lock. An operation inside a database transaction that waited for that eviction
+// could be waiting on its own transaction, which Postgres cannot see, so these tests bound every
+// such wait.
 const recoveryBound = 10 * time.Second
+
+// seedFoldableText seeds the document as markdown in rows older than the tail, so a failed room's
+// eviction has rows to compact and waits for the document's advisory lock to write them: every
+// test here that holds that lock across an eviction needs the eviction to wait for it.
+func seedFoldableText(t *testing.T, service *Service, artifactID, markdown string) {
+	t.Helper()
+	seedServiceText(t, service, artifactID, "draft")
+	if _, err := joinedReplaceText(service, artifactID, markdown, model.Actor{Kind: "user", ID: "seed"}); err != nil {
+		t.Fatalf("write the seeded text: %v", err)
+	}
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, time.Hour)
+}
 
 // failsFast runs op and requires ErrServiceUnavailable within the bound.
 func failsFast(t *testing.T, what string, op func() error) {
@@ -275,7 +288,7 @@ func TestATransactionHoldingTheRoomLockFailsFastOnItsFailedRoom(t *testing.T) {
 			database := storetest.Open(t)
 			artifactID := create(t, database, "")
 			service := lockOrderServiceFor(t, database)
-			seedServiceText(t, service, artifactID, "before")
+			seedFoldableText(t, service, artifactID, "before")
 			ctx := context.Background()
 			if err := service.warmLiveDocument(ctx, artifactID); err != nil {
 				t.Fatalf("load live document: %v", err)
@@ -311,13 +324,13 @@ func TestATransactionHoldingTheRoomLockFailsFastOnItsFailedRoom(t *testing.T) {
 // the room has recovered, a write runs as ever.
 func TestAWriteMeetingAFailedRoomFailsFastWhoeverHoldsItsLock(t *testing.T) {
 	database, service, artifactID := lockOrderService(t)
-	seedServiceText(t, service, artifactID, "before")
+	seedFoldableText(t, service, artifactID, "before")
 	ctx := context.Background()
 	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
 		t.Fatalf("load live document: %v", err)
 	}
 	// Another transaction holds the document's advisory lock, so the failed room's eviction,
-	// which compacts the document, cannot finish until the test releases it.
+	// which compacts the document's old rows, cannot finish until the test releases it.
 	holder, err := database.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin lock holder: %v", err)
@@ -372,7 +385,7 @@ func TestAWriteMeetingAFailedRoomFailsFastWhoeverHoldsItsLock(t *testing.T) {
 // has recovered.
 func TestABlockPathReadThatCannotWaitFailsFastOnAFailedRoom(t *testing.T) {
 	database, service, artifactID := lockOrderService(t)
-	seedServiceText(t, service, artifactID, "before")
+	seedFoldableText(t, service, artifactID, "before")
 	ctx := context.Background()
 	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
 		t.Fatalf("load live document: %v", err)

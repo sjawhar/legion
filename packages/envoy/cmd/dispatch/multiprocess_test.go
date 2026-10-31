@@ -1177,20 +1177,25 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Five of the eleven leases are observable inside a window a test can wait out:
+// Six of the eleven leases are observable inside a window a test can wait out:
 // reference-excerpts, block-index, search-term-stats and webhook-redelivery, whose first pass is
-// immediate, and suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in.
-// The other six are not, and this row says so rather than pretending: document-compaction's
-// interval is 24 h; issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in,
-// the boot's repair taking no lease; architecture-import's and delivery-reconcile's first pass is
-// jittered uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own,
-// so whether their passes ever overlap is a coin toss no test should turn into a flake;
-// edit-notices' period is five seconds, so this window holds many of its periods, each served once
-// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for); and
-// server-processes' prune is one delete on server_processes, the table every process's heartbeat
-// writes every five seconds, so a lock that held the prune would hold the registry itself.
+// immediate, document-compaction, whose first is at start too, and suggestion-outcomes, whose
+// first is one SuggestionSweepInterval (a minute) in. document-compaction is not held inside its
+// pass: its period is the aligned hour, so the process whose tick comes second skips because the
+// lease is held or because the hour is served, and either way the pass runs once - provided both
+// first ticks fall in one hour, which waitOutABucketBoundary sees to. The other five are not, and
+// this row says so rather than pretending: issue-ask-repair's first leased pass is one
+// IssueAskRepairInterval (10 min) in, the boot's repair taking no lease; architecture-import's and
+// delivery-reconcile's first pass is jittered uniformly over SyncInterval/ReconcileInterval (5 min)
+// and each process draws its own, so whether their passes ever overlap is a coin toss no test
+// should turn into a flake; edit-notices' period is five seconds, so this window holds many of its
+// periods, each served once (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what
+// its lease is for); and server-processes' prune is one delete on server_processes, the table every
+// process's heartbeat writes every five seconds, so a lock that held the prune would hold the
+// registry itself.
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
+	waitOutABucketBoundary(t, time.Hour)
 	fake := startGitHubFake(t)
 	// The term-statistics refresh writes nothing for a database with no project, so one exists
 	// before either process starts.
@@ -1256,9 +1261,12 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	waitForLease(t, pair, leaseRan, "search-term-stats", 60*time.Second)
 	requireLeasedOnce(t, pair, "reference-excerpts")
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
+	// Both processes' first compaction-sweep ticks are long past by now: each came at its
+	// process's start, and the suggestion-outcome sweep's first came a minute in.
+	waitForLease(t, pair, leaseRan, "document-compaction", 60*time.Second)
+	requireLeasedOnce(t, pair, "document-compaction")
 	requireLeasedOnce(t, pair, "search-term-stats")
 	for _, unobserved := range []struct{ lease, why string }{
-		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},

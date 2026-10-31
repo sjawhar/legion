@@ -410,7 +410,10 @@ func main() {
 	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
 	//     delivery live hub and its listener (migration 0107_events_notify.up.sql states that
-	//     purpose), the event stream relay, the document rooms' timers, and the stale-room
+	//     purpose), the event stream relay, the document rooms' timers, the document compaction
+	//     queue (docs.New starts it; it compacts the documents this process's own appends and
+	//     loads noted, and the hourly compaction sweep below is the leased pass over the
+	//     documents doc_compaction_owed names, those with rows to fold), and the stale-room
 	//     evictor (it closes the rooms resident in this process that the other process's writes
 	//     left behind the durable head, so it has to run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
@@ -440,8 +443,6 @@ func main() {
 			Store:           &store.Store{Pool: outboxPool},
 			Publisher:       natsClient,
 			Broker:          broker,
-			Docs:            documentService,
-			Leases:          leases,
 			PublishFailures: outboxPublishFailures,
 		})
 	}
@@ -480,6 +481,10 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
+	// Documents the compaction queues let go - every room a restart, a Shutdown or a Quiesce
+	// dropped from one - fold within an hour of coming due, whether or not NATS is configured
+	// (INFRA-593).
+	go documentService.RunCompactionSweep(ctx, leases)
 	// Each document's edit notice goes once its quiet window after a person's last
 	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
 	// still pending when this process stops is sent by the next sweep of either process.

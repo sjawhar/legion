@@ -473,14 +473,16 @@ func TestSettlementThatStampsAndRepairsReleasesItsSlots(t *testing.T) {
 
 // A room that fails while a settlement's repair commits into it - an append of the room fails, or
 // another write gives up - recovers, and its readers' wait for that recovery ends: the failed
-// room's eviction, which compacts under the document's advisory lock the settlement holds, waits
-// for the repair's commit to reach the room's persistence rather than retiring the room's worker
-// under it (roomServer, LEGION-498).
+// room's eviction, which compacts the document's old rows under the document's advisory lock the
+// settlement holds, waits for the repair's commit to reach the room's persistence rather than
+// retiring the room's worker under it (roomServer, LEGION-498).
 func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	pause := pauseRepairCommits(service)
 	generation := owedStamp(t, service, artifactID)
+	// Old rows give the eviction's compaction a fold to write, which waits for the lock.
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, time.Hour)
 
 	settled := settleUnderPause(t, service, pause, artifactID, generation)
 	service.failRoom(artifactID, errors.New("injected room failure"))

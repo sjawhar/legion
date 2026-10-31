@@ -66,8 +66,8 @@ func TestRunLeasedAfterEachPassTicksAtStartAndThenAtTheWaitEachPassAsksFor(t *te
 }
 
 // A loop whose first tick is one interval in - the suggestion-outcome sweep, the issue-ask repair
-// (the boot makes its own pass first) and the daily compaction - must not pass at start: a
-// compaction that ran at every boot would walk every document on each deploy.
+// (the boot makes its own pass first) - must not pass at start: the issue-ask repair's boot pass
+// would run twice on each deploy.
 func TestRunLeasedWaitsAnIntervalBeforeTheFirstTickWhenAsked(t *testing.T) {
 	leases := leasesOf(t, storetest.Open(t))
 	const interval = 300 * time.Millisecond
@@ -78,7 +78,7 @@ func TestRunLeasedWaitsAnIntervalBeforeTheFirstTickWhenAsked(t *testing.T) {
 	started := time.Now()
 	go func() {
 		defer close(done)
-		RunLeased(ctx, leases, "document-compaction", interval, TickAfterInterval, func(context.Context) {
+		RunLeased(ctx, leases, "issue-ask-repair", interval, TickAfterInterval, func(context.Context) {
 			select {
 			case ran <- time.Now():
 			default:

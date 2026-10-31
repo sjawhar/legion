@@ -374,13 +374,13 @@ one. Three things have to be true first; Dispatch checks the first for you.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
 to 64 connections for requests, up to 13 for the periodic work it runs once across the servers, up
-to 4 for loading documents, one for the health check, one for the events outbox, and up to 2 for
-reading where the event log is safe to stream from (the event horizon), and it holds
-four more open for as long as it runs: one each for the three things that wait on Postgres
-notifications, which are delivery, the live socket's event-feed relay, and closing a document
-session another server has written to, and one for its entry in the list of running servers, which
-it renews every five seconds. That is 89 connections for one server at its ceiling, and twice that
-for two, past a default Postgres's limit of 100. Check the database's connection
+to 4 for loading documents, up to 2 for compacting documents, one for the health check, one for
+the events outbox, and up to 2 for reading where the event log is safe to stream from (the event
+horizon), and it holds four more open for as long as it runs: one each for the three things that
+wait on Postgres notifications, which are delivery, the live socket's event-feed relay, and closing
+a document session another server has written to, and one for its entry in the list of running
+servers, which it renews every five seconds. That is 91 connections for one server at its ceiling,
+and twice that for two, past a default Postgres's limit of 100. Check the database's connection
 limit before you start the second server: a limit sized for one server, with whatever else uses
 that database counted in, is the thing that runs out.
 

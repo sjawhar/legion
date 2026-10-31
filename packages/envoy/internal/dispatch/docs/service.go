@@ -73,11 +73,15 @@ type Deps struct {
 // takes and lands under the document's advisory lock (UpdateCredit). Document writes that join an
 // API transaction use AppendUpdateTx, classifying the update the way the room's update observer
 // classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
-// transaction, through the same persistence boundary as its preflight load. Head is the version
-// Load would fold up to now, which says whether a state loaded earlier is still the stored one.
+// transaction, through the same persistence boundary as its preflight load. Load, ygo's, is a
+// room's load. Head is the version Load would fold up to now, which says whether a state loaded
+// earlier is still the stored one.
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds
-// caches its rendering by (coldRead).
+// caches its rendering by (coldRead). compactRoom is the compaction every path Dispatch compacts a
+// document on runs (a room's close, the compaction queue, the compaction sweep), under the tail
+// rule; Compact, ygo's, is the keep-N rule only. pgVersioned is the PgVersioned the store is or
+// wraps, which New hands the Service's note of each append and load (noteStoredUpdates).
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
@@ -86,6 +90,8 @@ type VersionedStore interface {
 	Head(ctx context.Context, room string) (persistence.Version, error)
 	DocumentStamp(ctx context.Context, room string) (DocumentStamp, error)
 	LoadDocument(ctx context.Context, room string) (LoadedDocument, error)
+	compactRoom(ctx context.Context, room string, rule compactRule, wait bool) (compactResult, error)
+	pgVersioned() *PgVersioned
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -105,6 +111,12 @@ type Service struct {
 	// keepAlive is how often a document socket's peer is sent a keep-alive (keepalive.go):
 	// documentKeepAlive, which a test shortens.
 	keepAlive time.Duration
+	// maxPendingItems is the pending queue the service's rooms decode their stored state under
+	// (Server.MaxPendingItems, which New sets from it and ygo reads as each room loads) and the
+	// queue the check a room's load is compared with takes (validateUpdate). New sets it to
+	// maxUpdateItems, whose comment states the rule; a test lowers it, and the server's, before
+	// any room opens (shrinkPendingItems).
+	maxPendingItems int
 	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
@@ -233,6 +245,10 @@ type Service struct {
 	// closes the room (evictFailed). Nil outside tests; tests use it to close and reload the room
 	// another way first.
 	beforeFailedEviction func(room string)
+	// bootstrapping runs as a room's load hook decodes state, the stored state its load read, into
+	// the room's document (bootstrapLoadedState). Nil outside tests; tests use it to count the
+	// decodes a room's load makes and to see which state each decodes.
+	bootstrapping func(room string, state []byte)
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
@@ -297,6 +313,13 @@ type Service struct {
 	// reads holds the renderings of the documents cold reads served, each under the stored state
 	// it was rendered from (coldRead).
 	reads *documentReads
+	// compactions is the queue of the documents this service compacts, whose worker New starts,
+	// Shutdown stops and Quiesce pauses (compactionQueue). Every committed append and every load
+	// notes its room there (noteStoredUpdates): an append on its own transaction (appendUpdate), a
+	// joined write's at its ledger's commit (Ledger.Commit), a settlement's repair and the block-id
+	// backfill's once their transactions commit (settleRoomWithin, backfillBlockIDs), and a load
+	// once its read ends (PgVersioned.loadStored).
+	compactions *compactionQueue
 }
 
 type artifactOwner struct {
@@ -627,20 +650,26 @@ func New(deps Deps) *Service {
 		unrecordedMarkTTL: unrecordedMarkTTL,
 		editNoticeQuiet:   editNoticeQuiet,
 		reads:             newDocumentReads(documentReadBudget),
+		maxPendingItems:   maxUpdateItems,
 	}
+	service.compactions = startCompactionQueue(service.compactionStep)
+	// The store tells the queue of every append it commits and every load it reads; a store that
+	// wraps a PgVersioned - a test's, to fail or hold one of its calls - tells it through the one
+	// it wraps.
+	note := service.noteStoredUpdates
+	persist.pgVersioned().noteStored.Store(&note)
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
 	srv.HocuspocusFraming = true
 	// Transactional server-side edits suppress one automatic ygo write and
 	// append it inside the API transaction, so persistence stays per update.
 	srv.PersistCoalesceWindow = -1
-	srv.CompactEvery = 200
-	// The rooms decode under maxUpdateItems, the queue every decode of document bytes takes (see
-	// maxUpdateItems). It is also the most a room's peers can park in it, about ten times ygo's
-	// default; bounding what one peer's update can do to a room is LEGION-487. ygo's check of each
-	// update the service broadcasts (Server.BroadcastUpdate) takes no pending queue: the room has
-	// already applied the update (reearth/ygo#268, in the pinned fork).
-	srv.MaxPendingItems = maxUpdateItems
+	// The rooms decode under the service's own cap (Service.maxPendingItems; see maxUpdateItems),
+	// which ygo reads as each room loads. It is also the most a room's peers can park in it, about
+	// ten times ygo's default; bounding what one peer's update can do to a room is LEGION-487.
+	// ygo's check of each update the service broadcasts (Server.BroadcastUpdate) takes no pending
+	// queue: the room has already applied the update (reearth/ygo#268, in the pinned fork).
+	srv.MaxPendingItems = service.maxPendingItems
 	// A room whose last peer leaves, or that only Server.Apply touches, stays resident until it has
 	// been idle for roomIdleTimeout: ygo stamps a room idle when its last peer leaves, and when an
 	// Apply on a room no peer is in returns (reearth/ygo#269, in the pinned fork). Eager eviction,
@@ -708,7 +737,14 @@ const ShutdownDrainBudget = 9 * time.Second
 // resumption (RunSettlementResumption). For each document that owed a settlement Shutdown logs
 // whether it settled or was left to resume; once the caller's deadline has passed it cannot read
 // that back, and its error names those documents.
+//
+// The compaction queue takes no note and starts no compaction once Shutdown begins, and drops the
+// documents it held, which a later process compacts. A compaction already running finishes within
+// ctx, and is cancelled once ctx ends; either way Shutdown returns only after the queue's worker
+// has, so nothing of it outlives the store's pools, which its caller closes next.
 func (s *Service) Shutdown(ctx context.Context) error {
+	s.compactions.shutDown()
+	defer s.compactions.awaitStopped(ctx)
 	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, and
 	// whether an editor was connected.
 	type loadedRoom struct {
@@ -876,8 +912,12 @@ func settlementsUnconfirmed(cause error, owed map[string]bool, rooms []string) e
 // Nothing in production calls it. It exists so the browser-test harness can truncate its
 // database between scenarios with every document the previous scenario had open already
 // written: a settlement still running would write to tables the truncate has just emptied, or
-// wait on the truncate's locks and fail once it commits.
+// wait on the truncate's locks and fail once it commits. The compaction queue is held for the
+// same reason: it takes no note while Quiesce runs, Quiesce waits for a compaction already
+// running and drops the documents the queue held, and the queue takes notes again once Quiesce
+// returns.
 func (s *Service) Quiesce(ctx context.Context) error {
+	defer s.compactions.pause(ctx)()
 	s.quiescing.Store(true)
 	defer s.quiescing.Store(false)
 	s.stopAllSettleTimers()
@@ -1627,6 +1667,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		if err := tx.Commit(ctx); err != nil {
 			return abandon(fmt.Errorf("commit superseded document identity update: %w", err))
 		}
+		s.noteStoredUpdates(room, int64(repaired))
 		finishSlots()
 		return settleOutcome{}
 	}
@@ -1653,6 +1694,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 
 	versioned := reconciled
+	// repaired is the version the settlement's repair appended, noted once the settlement commits;
+	// zero when it wrote none.
+	var repaired persistence.Version
 	if len(slots) > 0 {
 		update, err := mergeUpdates(updates)
 		if err != nil {
@@ -1662,7 +1706,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return abandon(fmt.Errorf("broadcast document closure update: %w", err))
 		}
 		closureChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, reconciled)
-		repaired, err := s.persistence.AppendUpdateTx(ctx, tx, room, update, closureChanged)
+		repaired, err = s.persistence.AppendUpdateTx(ctx, tx, room, update, closureChanged)
 		if err != nil {
 			return abandon(err)
 		}
@@ -1840,6 +1884,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return abandon(fmt.Errorf("commit document settlement: %w", err))
 	}
 	credit.consumeAskAuthors(reconciliation.indexedAskBlocks)
+	if repaired > 0 {
+		s.noteStoredUpdates(room, int64(repaired))
+	}
 	finishSlots()
 	for _, event := range published {
 		s.events.Publish(event)
@@ -2305,6 +2352,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	if err := tx.Commit(ctx); err != nil {
 		return abandon(fmt.Errorf("commit identity update: %w", err))
 	}
+	s.noteStoredUpdates(artifactID, int64(stamped))
 	s.finishSuppressedPersistence(slot, update)
 	return report
 }

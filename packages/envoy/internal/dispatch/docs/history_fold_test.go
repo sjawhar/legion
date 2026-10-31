@@ -60,9 +60,7 @@ func TestAFoldedHistoryReadsAsTheMergedHistory(t *testing.T) {
 				}
 				requireReadsAs(t, fmt.Sprintf("version %d after compaction to two", version), state, readMerged(t, history[:version]))
 			}
-			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-				t.Fatalf("compact: %v", err)
-			}
+			compactAged(t, versioned, database, artifactID)
 			if rows := storedUpdateCount(t, database, artifactID); rows != 1 {
 				t.Fatalf("compaction left %d stored updates, want 1", rows)
 			}
@@ -108,9 +106,7 @@ func TestCompactionLeavesTheStateNotTheContentItDeleted(t *testing.T) {
 	}
 	want := readMerged(t, history)
 	requireReadsAs(t, "the load", loaded.Update, want)
-	if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-		t.Fatalf("compact: %v", err)
-	}
+	compactAged(t, versioned, database, artifactID)
 	if stored := storedUpdateBytes(t, database, artifactID); stored > bound {
 		t.Fatalf("compaction stored %d bytes, want the one record's state, at most %d", stored, bound)
 	}
@@ -125,30 +121,7 @@ func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	ctx := context.Background()
-
-	writer := crdt.New(crdt.WithClientID(7))
-	text := writer.GetText("t")
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
-	base := crdt.EncodeStateAsUpdateV1(writer, nil)
-	afterBase := writer.StateVector()
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 4, " lost", nil) })
-	lost := crdt.EncodeStateAsUpdateV1(writer, afterBase)
-	afterLost := writer.StateVector()
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 9, " kept", nil) })
-	parkedInsert := crdt.EncodeStateAsUpdateV1(writer, afterLost)
-
-	other := crdt.New(crdt.WithClientID(8))
-	if err := crdt.ApplyUpdateV1(other, base, nil); err != nil {
-		t.Fatalf("open the second writer: %v", err)
-	}
-	otherText := other.GetText("t")
-	other.Transact(func(txn *crdt.Transaction) { otherText.Insert(txn, 0, "gone ", nil) })
-	gone := crdt.EncodeStateAsUpdateV1(other, afterBase)
-	afterGone := other.StateVector()
-	other.Transact(func(txn *crdt.Transaction) { otherText.Delete(txn, 0, 5) })
-	parkedDelete := crdt.EncodeStateAsUpdateV1(other, afterGone)
-
-	stored := [][]byte{base, parkedInsert, parkedDelete}
+	stored, lost, gone := parkedHistory(t)
 	artifactID := createDocument(t, database, "parked")
 	for _, update := range stored {
 		if _, err := versioned.AppendUpdate(ctx, artifactID, update); err != nil {
@@ -157,15 +130,7 @@ func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
 	}
 	arrive := func(t *testing.T, what string, state []byte) {
 		t.Helper()
-		doc := crdt.New()
-		for _, update := range [][]byte{state, lost, gone} {
-			if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
-				t.Fatalf("%s: apply: %v", what, err)
-			}
-		}
-		if got := doc.GetText("t").ToString(); got != "base lost kept" {
-			t.Fatalf("%s, once the missing updates arrive, reads %q, want %q", what, got, "base lost kept")
-		}
+		requireParkedArrive(t, what, state, lost, gone)
 	}
 	merged, err := crdt.MergeUpdatesV1(stored...)
 	if err != nil {
@@ -177,14 +142,56 @@ func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	arrive(t, "the load", loaded.Update)
-	if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-		t.Fatalf("compact: %v", err)
-	}
+	compactAged(t, versioned, database, artifactID)
 	compacted, err := versioned.Load(ctx, artifactID)
 	if err != nil {
 		t.Fatalf("load the compacted log: %v", err)
 	}
 	arrive(t, "the compacted load", compacted.Update)
+}
+
+// parkedHistory is a stored log that parks an insert whose dependency was never stored and a
+// delete of an item the log does not hold, and the two updates it lacks: lost, which the insert
+// depends on, and gone, which inserted what the delete deletes.
+func parkedHistory(t *testing.T) (stored [][]byte, lost, gone []byte) {
+	t.Helper()
+	writer := crdt.New(crdt.WithClientID(7))
+	text := writer.GetText("t")
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
+	base := crdt.EncodeStateAsUpdateV1(writer, nil)
+	afterBase := writer.StateVector()
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 4, " lost", nil) })
+	lost = crdt.EncodeStateAsUpdateV1(writer, afterBase)
+	afterLost := writer.StateVector()
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 9, " kept", nil) })
+	parkedInsert := crdt.EncodeStateAsUpdateV1(writer, afterLost)
+
+	other := crdt.New(crdt.WithClientID(8))
+	if err := crdt.ApplyUpdateV1(other, base, nil); err != nil {
+		t.Fatalf("open the second writer: %v", err)
+	}
+	otherText := other.GetText("t")
+	other.Transact(func(txn *crdt.Transaction) { otherText.Insert(txn, 0, "gone ", nil) })
+	gone = crdt.EncodeStateAsUpdateV1(other, afterBase)
+	afterGone := other.StateVector()
+	other.Transact(func(txn *crdt.Transaction) { otherText.Delete(txn, 0, 5) })
+	parkedDelete := crdt.EncodeStateAsUpdateV1(other, afterGone)
+	return [][]byte{base, parkedInsert, parkedDelete}, lost, gone
+}
+
+// requireParkedArrive fails t unless state, a state of parkedHistory's log, shows the parked
+// insert and holds the parked delete once lost and gone arrive.
+func requireParkedArrive(t *testing.T, what string, state, lost, gone []byte) {
+	t.Helper()
+	doc := crdt.New()
+	for _, update := range [][]byte{state, lost, gone} {
+		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+			t.Fatalf("%s: apply: %v", what, err)
+		}
+	}
+	if got := doc.GetText("t").ToString(); got != "base lost kept" {
+		t.Fatalf("%s, once the missing updates arrive, reads %q, want %q", what, got, "base lost kept")
+	}
 }
 
 // A stored update can hold a skipped clock range: a merge of one client's updates around a missing
@@ -219,11 +226,9 @@ func TestALogWithASkippedClockRangeFoldsIntoItsState(t *testing.T) {
 	want := rawReading(t, applied)
 	for _, step := range []string{"the load", "the load after compaction"} {
 		if step != "the load" {
-			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-				t.Fatalf("compact: %v", err)
-			}
-			if stored := storedUpdateCount(t, database, artifactID); stored != compactKeep {
-				t.Fatalf("compaction left %d stored updates, want %d", stored, compactKeep)
+			compactAged(t, versioned, database, artifactID)
+			if stored := storedUpdateCount(t, database, artifactID); stored != 1 {
+				t.Fatalf("compaction left %d stored updates, want 1", stored)
 			}
 		}
 		loaded, err := versioned.Load(ctx, artifactID)
@@ -293,9 +298,7 @@ func TestACompactionBeforeAMissingUpdateLosesNothingOnceItArrives(t *testing.T) 
 			t.Fatalf("append update %d: %v", index, err)
 		}
 		if index == 2 {
-			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-				t.Fatalf("compact: %v", err)
-			}
+			compactAged(t, versioned, database, artifactID)
 		}
 	}
 	read := func(what string, state []byte) string {
@@ -351,11 +354,9 @@ func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
 			t.Fatalf("append update %d: %v", index, err)
 		}
 		if index == 8 {
-			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-				t.Fatalf("compact: %v", err)
-			}
-			if stored := storedUpdateCount(t, database, artifactID); stored != compactKeep {
-				t.Fatalf("compaction left %d stored updates, want %d", stored, compactKeep)
+			compactAged(t, versioned, database, artifactID)
+			if stored := storedUpdateCount(t, database, artifactID); stored != 1 {
+				t.Fatalf("compaction left %d stored updates, want 1", stored)
 			}
 		}
 	}
@@ -387,23 +388,10 @@ func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
 // A log whose updates park more items than the fold's pending queue holds is not folded: the load
 // serves the stored updates merged whole, and compaction leaves every row stored.
 func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
-	writer := crdt.New(crdt.WithClientID(7))
-	text := writer.GetText("t")
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
-	base := crdt.EncodeStateAsUpdateV1(writer, nil)
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
-	rows := [][]byte{base}
-	for range 2 {
-		before := writer.StateVector()
-		writer.Transact(func(txn *crdt.Transaction) {
-			for range maxUpdateItems/2 + 1 {
-				text.Insert(txn, 0, "y", nil)
-			}
-		})
-		rows = append(rows, crdt.EncodeStateAsUpdateV1(writer, before))
-	}
+	rows, _ := unfoldableHistory()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
+	shrinkPendingItems(t, nil, versioned)
 	ctx := context.Background()
 	artifactID := createDocument(t, database, "unfoldable")
 	for index, row := range rows {
@@ -422,11 +410,63 @@ func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
 	if !bytes.Equal(loaded.Update, merged) {
 		t.Fatalf("the load returned %d bytes, want the %d-byte merge of its stored updates", len(loaded.Update), len(merged))
 	}
-	if deleted, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil || deleted != 0 {
-		t.Fatalf("compact deleted %d rows (%v), want every stored update kept", deleted, err)
+	if result := compactAged(t, versioned, database, artifactID); result.outcome != compactUnfoldable || result.deleted != 0 {
+		t.Fatalf("compaction = %+v, want every stored update kept as unfoldable", result)
 	}
 	if stored := storedUpdateCount(t, database, artifactID); stored != len(rows) {
 		t.Fatalf("compaction left %d stored updates, want %d", stored, len(rows))
+	}
+}
+
+// unfoldableHistory is a log whose updates park more items than a fold's pending queue holds: each
+// of its two later rows holds testPendingItems/2+1 inserts and depends on an insert no row holds,
+// so the fold parks both rows and refuses the second. It returns the rows and the writer that
+// wrote them, whose later updates a test appends to change the log.
+//
+// Its rows are built for testPendingItems, the queue a test shrinks a store or a service to
+// (shrinkPendingItems), which keeps them a few dozen items rather than the half million
+// maxUpdateItems takes: every test that stores them shrinks what folds them.
+func unfoldableHistory() ([][]byte, *crdt.Doc) {
+	writer := crdt.New(crdt.WithClientID(7))
+	text := writer.GetText("t")
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
+	base := crdt.EncodeStateAsUpdateV1(writer, nil)
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
+	rows := [][]byte{base}
+	for range 2 {
+		before := writer.StateVector()
+		writer.Transact(func(txn *crdt.Transaction) {
+			for range testPendingItems/2 + 1 {
+				text.Insert(txn, 0, "y", nil)
+			}
+		})
+		rows = append(rows, crdt.EncodeStateAsUpdateV1(writer, before))
+	}
+	return rows, writer
+}
+
+// testPendingItems is the pending queue shrinkPendingItems sets: small enough that a log the fold
+// cannot apply (unfoldableHistory) is a few dozen items, and far above what any other fixture of
+// the tests that shrink parks.
+const testPendingItems = 64
+
+// shrinkPendingItems lowers to testPendingItems the pending queue the decodes of service - its
+// rooms' loads, whose cap ygo reads from the server as each room loads, and the validateUpdate
+// they are compared with - and of versioned - its folds, their read-backs and the documents their
+// states decode into - take, and restores both when the test ends. Either may be nil. Call it
+// before anything decodes under them: before any room of service opens, and before any fixture
+// that parks more than testPendingItems is stored or read.
+func shrinkPendingItems(t *testing.T, service *Service, versioned *PgVersioned) {
+	t.Helper()
+	if service != nil {
+		was := service.maxPendingItems
+		service.maxPendingItems, service.srv.MaxPendingItems = testPendingItems, testPendingItems
+		t.Cleanup(func() { service.maxPendingItems, service.srv.MaxPendingItems = was, was })
+	}
+	if versioned != nil {
+		was := versioned.maxPendingItems
+		versioned.maxPendingItems = testPendingItems
+		t.Cleanup(func() { versioned.maxPendingItems = was })
 	}
 }
 
@@ -439,7 +479,7 @@ func TestAStateReadsBackOtherwiseWhenItsClocksDiffer(t *testing.T) {
 	text := writer.GetText("t")
 	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "abc", nil) })
 	state := crdt.EncodeStateAsUpdateV1(writer, nil)
-	decoded, err := readsBackOtherwise(state, crdt.StateVector{7: 3})
+	decoded, err := readsBackOtherwise(state, crdt.StateVector{7: 3}, maxUpdateItems)
 	if err != nil {
 		t.Fatalf("a state read back at the clocks that made it: %v", err)
 	}
@@ -447,7 +487,7 @@ func TestAStateReadsBackOtherwiseWhenItsClocksDiffer(t *testing.T) {
 		t.Fatalf("the read-back document reads %q, want %q", got, "abc")
 	}
 	for _, made := range []crdt.StateVector{{7: 4}, {7: 3, 8: 1}, {}} {
-		if _, err := readsBackOtherwise(state, made); err == nil {
+		if _, err := readsBackOtherwise(state, made, maxUpdateItems); err == nil {
 			t.Errorf("a state made at %v that reads back at {7:3}: no error, want the client that differs", made)
 		}
 	}
@@ -629,7 +669,7 @@ func requireLoadReadsAs(t *testing.T, versioned *PgVersioned, artifactID, what s
 	requireReadsAs(t, what, loaded.Update, want)
 }
 
-func storedUpdateCount(t *testing.T, database *store.Store, artifactID string) int {
+func storedUpdateCount(t testing.TB, database *store.Store, artifactID string) int {
 	t.Helper()
 	var rows int
 	if err := database.Pool.QueryRow(context.Background(),

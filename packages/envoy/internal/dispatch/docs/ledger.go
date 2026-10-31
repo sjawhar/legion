@@ -118,10 +118,16 @@ func collectEvent(ctx context.Context, event model.Event) {
 // operations recorded (see Ledger), and last publishes the events they appended, so a caller's
 // own events, published after Commit returns, follow them. When the commit returns an error its
 // outcome is unknown, so the rooms the transaction wrote are failed and reload the durable
-// document.
+// document. Once it has committed, it notes the head its live writes appended to the compaction
+// queue (noteStoredUpdates); a seed's row is its document's first, which leaves nothing to fold.
 func (l *Ledger) Commit(ctx context.Context) error {
 	if err := l.commit(ctx); err != nil {
 		return err
+	}
+	for _, artifactID := range l.order {
+		if versions := l.live[artifactID].versions; len(versions) > 0 {
+			l.service.noteStoredUpdates(artifactID, int64(versions[len(versions)-1]))
+		}
 	}
 	l.publish()
 	l.publishEvents()

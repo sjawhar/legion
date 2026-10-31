@@ -916,7 +916,7 @@ func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node,
 		return nil, &loaded, nil
 	}
 	doc := newDocumentCopy()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+	if err := decodeStoredState(doc, loaded.Update); err != nil {
 		// The room carries the decode failure as its cause, which a reader that meets the
 		// failed room answers as DOC_SERVICE_UNAVAILABLE; this read met the history itself.
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))

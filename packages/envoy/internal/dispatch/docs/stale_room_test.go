@@ -1853,10 +1853,10 @@ func TestARoomLoadingWhileThisProcessesWriteCommitsStandsAtTheHead(t *testing.T)
 //
 // The window is the backfill's alone: it holds no room and no document lock between the stamp
 // and the append that stores it, so a failure of that room there evicts it and the document
-// reloads under the append. A settlement cannot reach this window - its transaction holds the
-// document's advisory lock from before it reads the room until it commits, so a failed room's
-// eviction, which compacts under that lock, cannot finish, and allowInject holds every loader
-// behind that eviction.
+// reloads under the append. A settlement cannot reach this window while its document has rows
+// older than the tail - its transaction holds the document's advisory lock from before it reads
+// the room until it commits, so a failed room's eviction, which compacts those rows under that
+// lock, cannot finish, and allowInject holds every loader behind that eviction.
 func TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")

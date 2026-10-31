@@ -292,12 +292,22 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 }
 
 // newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
-// a room this server holds, the document's stored history (loadTree, validateUpdate, and the
-// fold of its stored updates and its read-back, stateThrough), or one update the store appends
-// (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the queue
-// every decode of document bytes takes (see maxUpdateItems).
+// a room this server holds, the document's stored history (loadTree, coldFork), a fork's own state
+// (refuseUndecodable), or one update the store appends (appendUpdate, AppendUpdateTx), decoded
+// alone. Its pending queue is maxUpdateItems (see maxUpdateItems for the rule every decode of
+// document bytes follows).
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
+	return newCappedDocumentCopy(maxUpdateItems, options...)
+}
+
+// newCappedDocumentCopy is newDocumentCopy with the pending queue of the instance the decode runs
+// for: the store's fold of its stored updates, that fold's read-back and the document the folded
+// state decodes into (stateThrough, readsBackOtherwise, documentThrough), each at
+// PgVersioned.maxPendingItems; the store's check of a rebuilt seed, at the same cap; and the check
+// of a history against the queue a service's rooms decode under (validateUpdate,
+// Service.maxPendingItems). See maxUpdateItems for what those caps hold.
+func newCappedDocumentCopy(maxPending int, options ...crdt.DocOption) *crdt.Doc {
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxPending))...)
 }
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's
