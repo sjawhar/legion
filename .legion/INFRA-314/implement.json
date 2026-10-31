@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-314",
-  "completed": "2026-10-31T11:35:00Z",
+  "completed": "2026-10-31T15:05:00Z",
   "proof": [
     {
       "criterion": "A1, A2, A3, A4, A9, A10, A11: the broker serves its own approval page with a sign-in on its own origin; only the signed-in approver decides, and the decision is bound to what the page showed; nothing Dispatch holds decides; the four sign-in settings are required; a sign-in crosses processes and restarts",
@@ -51,6 +51,30 @@
       "observed": "The tester's red test, committed unmodified at 51ed20ff124c, passes: a person signs in, approves her record, and the status carries that approval's time; she then resends the very same form, the broker answers 303 as before, the record is still approved with its one grant, and the status's last decision is the first approval's time, unmoved. The three Go packages are ok (approval 17.7 s, api 108.2 s, cmd/broker 256.4 s), so nothing else pinned the old behaviour, and broker-approval.e2e.ts is 5 passed: Approve from the Inbox, the lapsed session's one pass through the sign-in, \"Approve all 3 shown\", the sibling origin, and the account switch all still decide what they decided.",
       "headSha": "58f976e9bfab5daf9000a24f7ff79b4c400ce142",
       "negativeControl": "The same test's first half is the control: an approval that the broker did apply must still move the time, and it does. The change is in `decide`, which now answers whether this POST decided the record, so \"already decided\", \"expired\", \"no such record\", \"not decided: a machine login\" and \"refused: …\" write nothing, while an approval and a denial - including a denial the broker makes because the requesting enrollment is no longer live - write the time."
+    },
+    {
+      "criterion": "The review's Critical finding, and the spec's step 1: \"A Dispatch from this step with a broker from before it keeps today's flow\", with A12's \"with a broker that sends no approve_url, the row keeps today's link and agent-secrets prints today's text\"",
+      "surface": "Dispatch's Playwright suite in real Chromium against the real Dispatch server, and agent-secrets' own command tests, both reading a broker that names no page",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e?sslmode=disable bun run e2e -- broker-approval.e2e.ts machine-login.e2e.ts inbox.e2e.ts --project chromium; cd packages/envoy && go test -count=1 -run 'WaitingOn|Pending|ApproveURL|MachineLogin' ./cmd/agent-secrets/ ./cmd/agent-secrets-devrelay/",
+      "observed": "53 passed, 1 pre-existing skip. inbox.e2e.ts:998 reads 'a pending secret request with no approve_url is listed, counted, and links to the record's own Dispatch page': the row is a link to /credentials/<record> again, the only place such a request can be decided while the broker is older than Dispatch, and the 'Decided on the secrets broker.' row that linked nowhere is gone. machine-login.e2e.ts:43 drives /credentials/machine through Dispatch's own relay: alice types a code, the page shows the login's facts, Approve decides it on the broker, and a reload of the same code shows the decision the broker holds, which is A7's last clause. agent-secrets is ok: its waiting line names the broker's page when the answer carries one, the record's Dispatch page when AGENT_SECRETS_APPROVE_URL is set, and the Inbox otherwise, each wording asserted against each value of that variable.",
+      "headSha": "6fb80d4ede9e3d21f41f72bb36d1c7357906ddd0",
+      "negativeControl": "The Inbox row's own test drives three values no caller may follow - absent, a javascript: URL and a relative path - and each gives the Dispatch link rather than the broker's. agent-secrets-devrelay's tests are the other control: TestMachineApproveIsTheOnlySubcommand pins that approve and deny exit 2, and that package now passes, where at the reviewed head it failed."
+    },
+    {
+      "criterion": "A11's rollback clause: \"The broker binary from the commit before step 1 starts against a database that step 1 migrated\"",
+      "surface": "two compiled broker binaries on one real Postgres 17: this branch's own, which migrates the database, and one built from main@origin, which is the commit before step 1",
+      "command": "psql -c 'create database a11_rollback'; go build -o $TMPDIR/broker-branch ./cmd/broker and start it against a11_rollback; then git clone --depth 1 https://github.com/sjawhar/legion $TMPDIR/legion-main && cd $TMPDIR/legion-main/packages/envoy && go build -o $TMPDIR/broker-main ./cmd/broker and start it against the same database",
+      "observed": "The branch binary logged `broker listening addr=127.0.0.1:20240` and left broker_schema_migrations at version 22 with signin_status present. The binary built from main at f29f58bb9a12cd94535585f45cf00c31b13e9640 then started on that same database, logged `broker listening addr=127.0.0.1:19726`, answered GET /healthz with 200, and left the ledger at 22: it ran no migration of its own and refused nothing. Migrations 0021 and 0022 only create tables, and the older migrator passes over a version it does not know.",
+      "headSha": "6fb80d4ede9e3d21f41f72bb36d1c7357906ddd0",
+      "negativeControl": "The old binary was given no BROKER_SIGNIN_* setting at all, which it does not know, and it started; the branch binary refuses to start without all four, which the live-binary test pins. So the two are told apart by what each requires, and the rollback was not a start of the new binary by another name."
+    },
+    {
+      "criterion": "The review's CI finding: a change to the broker alone must run the browser suite that starts it, which is the only proof of A5's browser half and of A6",
+      "surface": "the repository's own CI filter checker, which recomputes each gate's read set from the commands the workflows run",
+      "command": "bash .github/scripts/check-ci-filters.sh, first with the approval package's path removed from ci.yaml's dispatch filter, then with it back",
+      "observed": "With the path removed the checker names each file and the gate that would skip it, for example `packages/envoy/internal/broker/approval/approval.go::dispatch reads ... which its filter dispatch does not match, so a change to it skips the job: packages/dispatch/e2e/run-broker.sh (started by packages/dispatch/e2e/harness-listeners.ts's realBrokerListeners, which e2e/run.ts starts in ci.yaml dispatch \"Browser-test dispatch dashboard\" for e2e/broker-approval.e2e.ts)`, down to the embedded stylesheet. With the path back it exits 0.",
+      "headSha": "6fb80d4ede9e3d21f41f72bb36d1c7357906ddd0",
+      "negativeControl": "That removal is itself the control: before this round the same removal was invisible, because ci_job_reads.py modelled run-server.sh's build and not run-broker.sh's, so the checker passed while the browser suite would never have run."
     }
   ],
   "filesChanged": [
