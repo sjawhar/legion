@@ -1110,7 +1110,6 @@ jobs:
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/*'
-              - 'packages/envoy/.changes/**'
               - 'packages/envoy/brokertest/**'
               - 'packages/envoy/cmd/**'
               - 'packages/envoy/daemonpermissions/**'
@@ -1140,6 +1139,11 @@ jobs:
               - '!packages/envoy/internal/smoke/**'
               - '!packages/envoy/deploy/**'
               - '!packages/envoy/infra/**'
+              # Changelog fragments, which the packages above match and no build reads: .dockerignore
+              # leaves them out of the context, so a pull request that only writes a changelog entry
+              # builds no worker image, and the fold that removes a package's last fragment leaves
+              # no pattern here matching nothing.
+              - '!packages/*/.changes/**'
             # lint's notices step: the Go packages it loads for every release target (`legion`,
             # the listener, the agent-secrets binaries and client, every envoy-infra command), the
             # workspaces they build in, the target lists and the notices script. Its go build lines
@@ -3106,6 +3110,12 @@ jobs:
       - name: Stall test of claude-envoy
         run: bun test tests/envoy-channel-stall.test.ts
         working-directory: packages/claude-envoy
+      # The role takeover smoke (INFRA-404, A5): one line per row of its spec's R8 table, driven
+      # with real client processes against a listener and natsd this job already sets Go up for.
+      # It needs no model provider and no deployment, so unlike the other smokes in
+      # packages/pi-envoy/scripts it runs here.
+      - name: Role takeover smoke
+        run: bash packages/pi-envoy/scripts/smoke-role-takeover.sh
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

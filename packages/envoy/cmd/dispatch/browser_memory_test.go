@@ -1687,6 +1687,12 @@ func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T)
 	requireUnderThePod(t, peak, "the growing rooms")
 }
 
+// holdsMark is whether tree carries the mark ref names. pmdoc.ListMarks lists each mark once with
+// the author its first run names, which these checks do not read.
+func holdsMark(tree *pmdoc.Node, ref pmdoc.MarkRef) bool {
+	return slices.ContainsFunc(pmdoc.ListMarks(tree), func(mark pmdoc.Marked) bool { return mark.MarkRef == ref })
+}
+
 // A server whose open documents fill the real budget - no test hook shrinks it - with every room
 // held by a socket that stays, so none can be closed, answers four things as the budget says: the
 // next browser is closed with 4503 and DOC_BUSY at its socket's upgrade, before any room is made
@@ -1751,7 +1757,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	setting.leave()
 	memory.waitForSettled(t, unheld)
 	marking.stop(t)
-	if !slices.Contains(pmdoc.ListMarks(newBrowserDocument(t, memory.storedState(t, unheld)).tree(t)), unheldMark) {
+	if !holdsMark(newBrowserDocument(t, memory.storedState(t, unheld)).tree(t), unheldMark) {
 		t.Fatalf("the document %s does not store the unrecorded mark its browser applied", unheld)
 	}
 	server := memory.start(t)
@@ -1958,19 +1964,19 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 
 		markRef := pmdoc.MarkRef{Type: commentMark, ID: markID}
 		deadline := time.Now().Add(3 * time.Minute)
-		for slices.Contains(pmdoc.ListMarks(newBrowserDocument(t, held[0].state(t)).tree(t)), markRef) {
+		for holdsMark(newBrowserDocument(t, held[0].state(t)).tree(t), markRef) {
 			if time.Now().After(deadline) {
 				t.Fatalf("the unrecorded mark %s was still in its document three minutes after it was made, want the sweep to remove it", markID)
 			}
 			time.Sleep(5 * time.Second)
 		}
 		memory.waitForStored(t, held[0].room, "the unrecorded mark's removal", func(state []byte) bool {
-			return !slices.Contains(pmdoc.ListMarks(newBrowserDocument(t, state).tree(t)), markRef)
+			return !holdsMark(newBrowserDocument(t, state).tree(t), markRef)
 		})
 		requireBusyAndUnchanged(t, memory, server, held[len(held)-3].room, grow, "an update that grows a document once the mark sweep has written")
 		t.Log("the sweep removed the unrecorded mark, and the server still refuses growth")
 		memory.waitForStored(t, unheld, "the sweep's removal of the unrecorded mark no room held", func(state []byte) bool {
-			return !slices.Contains(pmdoc.ListMarks(newBrowserDocument(t, state).tree(t)), unheldMark)
+			return !holdsMark(newBrowserDocument(t, state).tree(t), unheldMark)
 		})
 		requireClosedOnceSettled(t, memory, server, unheld, "the room the mark sweep wrote in on the full server")
 		t.Log("the sweep removed the unrecorded mark from the document no room held, and its room was closed once its settlement ended")

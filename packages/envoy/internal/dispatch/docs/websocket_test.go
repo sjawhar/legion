@@ -330,10 +330,27 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 		return loaded.loaded.Update
 	}
 
+	// The load hands ygo nothing and keeps the state on its record for the room's load to apply
+	// (applyLoadedState).
+	loadedState := func(t *testing.T) []byte {
+		t.Helper()
+		served, err := adapter.LoadDoc(artifactID)
+		if err != nil || len(served) != 0 {
+			t.Fatalf("LoadDoc handed ygo %d bytes (%v), want none", len(served), err)
+		}
+		record, ok := service.roomLoads.Load(artifactID)
+		if !ok {
+			t.Fatal("LoadDoc recorded no load")
+		}
+		taken := record.(*roomLoad).take()
+		taken.grant.release()
+		return taken.state
+	}
+
 	held := preload(t)
-	served, err := adapter.LoadDoc(artifactID)
-	if err != nil || &served[0] != &held[0] {
-		t.Fatalf("load with a current preload served %d bytes (%v), want the preloaded history itself", len(served), err)
+	served := loadedState(t)
+	if len(served) == 0 || &served[0] != &held[0] {
+		t.Fatalf("load with a current preload served %d bytes, want the preloaded history itself", len(served))
 	}
 	if _, kept := service.preloads.Load(artifactID); kept {
 		t.Fatal("a served preload stayed behind for a later load")
@@ -349,10 +366,7 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 	if _, err := service.persistence.AppendUpdate(context.Background(), artifactID, moved); err != nil {
 		t.Fatalf("append update after the check: %v", err)
 	}
-	served, err = adapter.LoadDoc(artifactID)
-	if err != nil {
-		t.Fatalf("load after the history moved: %v", err)
-	}
+	served = loadedState(t)
 	doc := crdt.New()
 	if err := crdt.ApplyUpdateV1(doc, served, nil); err != nil {
 		t.Fatalf("decode the loaded history: %v", err)

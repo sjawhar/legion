@@ -193,6 +193,29 @@ type roomInstance struct {
 	loadedHead int64
 }
 
+// loadedState is what one room load read of the store and made of it, kept on the load's record
+// from the read until the room's load takes it (roomLoad.read, roomLoad.take).
+type loadedState struct {
+	// state is the durable state the load read. The room's load applies it to the room's document
+	// itself (applyLoadedState), ygo being handed no bytes to apply it with its format cleanup on.
+	state []byte
+	// decoded is that state's one decode of the load's own (decodeStoredState): its scans are the
+	// room's scan total at its load, which onLoadDocument hands the room's scan budget (roomScans),
+	// and its copy becomes the room's replica (keepReplica). The room's own apply of the same bytes
+	// decodes them as this decode did, with the format cleanup off and the pending queue lifted
+	// (applyLoadedState), so the room holds item for item what the copy holds.
+	decoded decodedState
+	// grant is the load's part of the copy-heap bound (copyGrant), which covers LoadDoc's read -
+	// its fold of a history of several updates, covered inside the read's transaction (fold) - and
+	// its decode, and the room's own apply of the state after it; after a socket's admission, whose
+	// own grant covered its read and decode (loadTree), it covers that apply alone. LoadDoc's
+	// covers wait without deadline, ygo handing it no context, and hold no part of the bound while
+	// they wait. Whoever takes the record gives the grant back: onLoadDocument, once its apply has
+	// returned, and the room's next load, which replaces a record ygo never handed to that hook
+	// (beginRoomLoad).
+	grant *copyGrant
+}
+
 // roomLoad is one room load's record of the durable history behind the room it loads, kept from
 // before the load reads the store (servicePersistenceAdapter.LoadDoc) until the instance that
 // load leaves behind stands in its place (keepInstance, which onLoadDocument calls on the same
@@ -206,27 +229,11 @@ type roomInstance struct {
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
-	// decoded is the read state's one decode of the load's own (decodeStoredState): its scans are
-	// the room's scan total at its load, which onLoadDocument hands the room's scan budget
-	// (roomScans), and its copy becomes the room's replica (keepReplica). onLoadDocument takes it
-	// first thing (takeLoadedState), so the record, which stays until the room's document is
-	// collected (keepInstance), never holds the replica's copy. Between LoadDoc's record and that
-	// hook ygo only decodes the same bytes into the room's document, as that decode did and with
-	// the pending queue lifted (sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:1871-1890),
-	// which takes whatever this decode took; the room's next load replaces the record of one that
-	// failed there all the same (beginRoomLoad).
-	decoded decodedState
-	// grant is the load's part of the copy-heap bound (copyGrant), which covers LoadDoc's read -
-	// its fold of a history of several updates, covered inside the read's transaction (fold) - and
-	// its decode, and ygo's decode of the same bytes into the room's document after it; after a
-	// socket's admission, whose own grant covered its read and decode (loadTree), it covers ygo's
-	// decode alone. LoadDoc's covers wait without deadline, ygo handing it no context, and hold no
-	// part of the bound while they wait. Whoever takes decoded gives the grant back (take):
-	// onLoadDocument, which ygo runs once its decode is done, and the room's next load, which
-	// replaces a record ygo never handed to that hook (beginRoomLoad). ygo's decode refuses nothing
-	// LoadDoc's decode, or the admission's, of the same bytes took, its pending queue lifted where
-	// theirs is maxUpdateItems, so only a panic in it leaves a grant for the next load to give back.
-	grant *copyGrant
+	// loaded is what this load read of the store and made of it, which the room's load takes
+	// before anything that can refuse the room (takeLoadedState), so the record, which stays
+	// until the room's document is collected (keepInstance), holds neither the state nor the
+	// replica's copy for as long as that document lives.
+	loaded loadedState
 	// appended are the versions took recorded before the instance existed, folded into its cursor
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
@@ -238,45 +245,46 @@ type roomLoad struct {
 // record of the room's last load, which ygo has finished with - one room loads at a time
 // (getOrCreateRoom) - so the records never outnumber the documents this process has loaded, and
 // each goes with the document of the load that left it (keepInstance). A replaced record whose
-// load never reached onLoadDocument still holds its copy and its grant, which go with it here.
+// load never reached onLoadDocument still holds its state, its copy and its grant, which go with
+// it here.
 func (s *Service) beginRoomLoad(room string) *roomLoad {
 	load := &roomLoad{}
 	if previous, replaced := s.roomLoads.Swap(room, load); replaced {
-		previous.(*roomLoad).take()
+		previous.(*roomLoad).take().grant.release()
 	}
 	return load
 }
 
-// read records the head the load's read of the store saw, the version the room it loads holds
-// every update through, the decode of the state it read, and the grant that covers that decode
-// and ygo's decode after it.
-func (load *roomLoad) read(head persistence.Version, decoded decodedState, grant *copyGrant) {
+// read records what the load's read of the store saw: the head, the version the room it loads
+// holds every update through, the state through that head, which the room's load applies itself
+// (applyLoadedState), the decode of that state it made of its own, and the grant that covers that
+// decode and that apply after it.
+func (load *roomLoad) read(head persistence.Version, state []byte, decoded decodedState, grant *copyGrant) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
-	load.head, load.decoded, load.grant = int64(head), decoded, grant
+	load.head, load.loaded = int64(head), loadedState{state: state, decoded: decoded, grant: grant}
 }
 
-// take takes the decode off the record and gives back its grant: ygo's decode of the same bytes
-// into the room's document, which the grant covers after the record's own, is done by the time
-// anyone takes it.
-func (load *roomLoad) take() decodedState {
+// take hands over what the load read, once, so the record holds neither the state nor the copy
+// for as long as the document it loaded lives. Whoever takes it gives the grant back, once the
+// room's own apply of the state - the last thing the grant covers - has returned.
+func (load *roomLoad) take() loadedState {
 	load.mu.Lock()
 	defer load.mu.Unlock()
-	decoded := load.decoded
-	load.decoded = decodedState{}
-	load.grant.release()
-	load.grant = nil
-	return decoded
+	loaded := load.loaded
+	load.loaded = loadedState{}
+	return loaded
 }
 
-// takeLoadedState is the decode of the state room's load under way read (roomLoad.read), which it
-// takes off the load's record, giving back the load's grant (take), and whether a load of room read
-// the store through this service's persistence at all. Only the room's load takes it, once
-// (onLoadDocument), on the goroutine that recorded it (ygo's loadRoom).
-func (s *Service) takeLoadedState(room string) (decodedState, bool) {
+// takeLoadedState is what room's load under way read and decoded (roomLoad.read), which it takes
+// off the load's record (take), and whether a load of room read the store through this service's
+// persistence at all. Only the room's load takes it, once (onLoadDocument), on the goroutine that
+// recorded it (ygo's loadRoom), and before anything that can refuse the room, so a refused load
+// leaves neither the state nor the copy on the record.
+func (s *Service) takeLoadedState(room string) (loadedState, bool) {
 	value, ok := s.roomLoads.Load(room)
 	if !ok {
-		return decodedState{}, false
+		return loadedState{}, false
 	}
 	return value.(*roomLoad).take(), true
 }

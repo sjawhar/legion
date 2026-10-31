@@ -311,6 +311,10 @@ export function startPendingSync({
   let reportAgain = false;
   let storageAvailable: boolean | undefined;
   const persistedSeqByOrdinal = new Map<number, number>();
+  // The newest row this tab has asked the store to hold, by the `seq` the store assigned it: a
+  // report whose count was asked for while this grew holds a document without that row, and is
+  // dropped rather than given (`report`).
+  let recordedThrough = 0;
   let recorded: RecordedUpdate[] = [];
   let sent: SentFrame[] = [];
   // The frame this socket's server last answered as not applied.
@@ -342,8 +346,21 @@ export function startPendingSync({
         if (destroyed) {
           return;
         }
+        // Read before the count is asked for, so what the count answers for is what the store
+        // had been asked to hold when its transaction was created.
+        const countedThrough = recordedThrough;
+        const count = edits === undefined ? 0 : await edits.count();
+        // A row this tab wrote while the count was in flight is a row the count did not hold:
+        // IndexedDB runs transactions whose scopes overlap in the order they were created, so
+        // this count reads a document that has yet to hold that row, and on a document with
+        // nothing else pending it reads none pending. Whoever waits for this browser's edits to
+        // reach the server (`pending-waiter.ts`) would be answered by it while the row it waits
+        // for is still being written, so there is no report to give here: the row's own write
+        // asks for a fresh one as soon as it settles, whether the store takes the row or
+        // refuses it (`record`).
+        if (countedThrough !== recordedThrough) continue;
         const state: PendingState = {
-          count: edits === undefined ? 0 : await edits.count(),
+          count,
           readOnly,
           rebuiltAt,
           stored: edits !== undefined,
@@ -384,6 +401,7 @@ export function startPendingSync({
         }
         const row = edits.record(update);
         entry.seq = row.seq;
+        recordedThrough = row.seq;
         persistedSeqByOrdinal.set(entry.ordinal, row.seq);
         return row.written;
       })
@@ -391,6 +409,11 @@ export function startPendingSync({
         () => report(),
         (error: unknown) => {
           console.error("Could not store a pending document edit", error);
+          // The report this row's write was left to give (`report`, above) is owed whether the
+          // store took the row or refused it - the browser's quota, say: the count a report in
+          // flight dropped for this row is nowhere else, so without this the toolbar keeps the
+          // count it was showing, and a `whenSent` waiting on that report runs to its bound.
+          return report();
         }
       );
     return entry;

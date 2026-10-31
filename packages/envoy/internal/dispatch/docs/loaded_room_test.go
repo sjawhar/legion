@@ -201,7 +201,7 @@ func TestARoomsReplicaIsTheCopyItsLoadDecoded(t *testing.T) {
 			value, _ := service.roomLoads.Load(artifactID)
 			load := value.(*roomLoad)
 			load.mu.Lock()
-			kept := load.decoded.doc
+			kept := load.loaded.decoded.doc
 			load.mu.Unlock()
 			if kept != nil {
 				t.Fatal("the load's record still holds the copy its room's replica took")

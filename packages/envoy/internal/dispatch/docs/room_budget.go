@@ -1633,7 +1633,7 @@ func (s *Service) chargeLoadedRoom(room string, live *crdt.Doc, replica *rendere
 // writer, an append, a load - is pending: it will be closable once that ends, which starts a sweep
 // of its own (Service.unlockState), so the admissions waiting on the budget wait for it (await).
 // So is a room whose browsers have all gone though their handlers have not yet forgotten them
-// (roomState.departed): its last browser's leaving runs the settlement it owes before they do.
+// (roomState.departedPeers): its last browser's leaving runs the settlement it owes before they do.
 // Once nothing more can be closed it raises full if the budget is still over its limit
 // (roomBudget.swept).
 //

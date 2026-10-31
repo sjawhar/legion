@@ -26,12 +26,13 @@ import (
 // holder releases the state through its own unlock, and ygo's OnUnloadDocument releases it when
 // the room is the last thing to go (releaseUnloadedRoom).
 //
-// What a release drops - the unrecorded marks' first sightings, the writes that have logged
-// leaving the document alone at the decode cap, and the closed flag - is what a restart drops too.
+// What a release drops - the unrecorded marks' first sightings and their authors' departures, the
+// writes that have logged leaving the document alone at the decode cap, and the closed flag - is
+// what a restart drops too.
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
-	// departed is the browsers connected when ygo reported the room's last browser gone
+	// departedPeers is the browsers connected when ygo reported the room's last browser gone
 	// (settleLastPeer), each until its handler forgets it (removeConnection). ygo makes that report
 	// on the leaving browser's own socket (sjawhar/ygo v1.51.3-sami.7,
 	// provider/websocket/peer.go:619-625), before the handler that registered the browser returns
@@ -42,8 +43,8 @@ type roomState struct {
 	// refused as though a browser held it. A browser authorized in the instant before the report
 	// and registered with ygo after it is counted departed too, so an admission can wait on its
 	// room until its deadline; the room is never closed for it, since connected still names it
-	// (unusedLocked).
-	departed map[uint64]struct{}
+	// (unusedLocked). It is the browsers' own ygo ids; departed, below, is their users' logins.
+	departedPeers map[uint64]struct{}
 	// inflight is F (pending_authors.go): each browser edit's credit from the moment the room's
 	// update observer records it (creditContentChange) until the edit's append lands, keyed by its
 	// creditSeq. creditSeq is atomic so forkLive, which every document write calls, reads it for
@@ -81,7 +82,14 @@ type roomState struct {
 	// pastDecodeCap names each server write outside applyLive that has logged leaving this room's
 	// document alone because the write would carry it past the decode cap (logPastDecodeCap), nil
 	// until one has.
-	pastDecodeCap  map[string]struct{}
+	pastDecodeCap map[string]struct{}
+	// departed is when each user whose browsers have all left this room lost the last of them,
+	// under both spellings a mark's `by` can carry (recordMarkAuthorDeparture). An unrecorded
+	// mark ages from its author's entry rather than from the sweep that last saw that author, so
+	// a browser that drops between two sweeps keeps its mark for the whole TTL after the drop.
+	// Coming back clears the entry, and the sweep drops one older than the TTL, which can no
+	// longer change what it decides (sweepUnrecordedMarks).
+	departed       map[string]time.Time
 	durableAppends atomic.Int64
 	// roomGeneration moves at each of this room's own in-process invalidations (a reload, a
 	// failure, a settlement's own commit): a settlement compares the value it started at against
@@ -150,6 +158,7 @@ func newRoomState() *roomState {
 		askAuthors:        make(map[string]model.Actor),
 		pendingAskAuthors: make(map[string]model.Actor),
 		unrecorded:        make(map[pmdoc.MarkRef]time.Time),
+		departed:          make(map[string]time.Time),
 	}
 }
 
@@ -293,12 +302,13 @@ func (s *Service) unusedLocked(state *roomState) bool {
 		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0
 }
 
-// onlyDepartedLocked is whether every browser state names as connected has departed (departed):
-// true with none connected, and true for a room whose last browser ygo has reported gone while
-// the handlers of its browsers have not yet returned to forget them. Its caller holds state.mu.
+// onlyDepartedLocked is whether every browser state names as connected has departed
+// (departedPeers): true with none connected, and true for a room whose last browser ygo has
+// reported gone while the handlers of its browsers have not yet returned to forget them. Its
+// caller holds state.mu.
 func (state *roomState) onlyDepartedLocked() bool {
 	for id := range state.connected {
-		if _, gone := state.departed[id]; !gone {
+		if _, gone := state.departedPeers[id]; !gone {
 			return false
 		}
 	}
