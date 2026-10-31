@@ -296,8 +296,16 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 // fold of its stored updates and its read-back, stateThrough), or one update the store appends
 // (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the queue
 // every decode of document bytes takes (see maxUpdateItems).
+//
+// It replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each remote
+// apply that changes formatted text with a commit of its own: every update a copy applies is one
+// the room committed, and every cleanup the room made is already among them (the room's own
+// repairs and sweeps are local commits, which never clean up; a write's publish and a browser's
+// update reach the room as remote applies, and the cleanup either makes is stored), so a copy
+// that cleaned up would hold a state the room never held. A write's fork commits its own writes
+// locally, which never clean up.
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems), crdt.WithFormatCleanup(false))...)
 }
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's

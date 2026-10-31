@@ -43,6 +43,9 @@ type roomInstance struct {
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
+	// state is the durable state the load read, which the room's load takes before anything that
+	// can refuse it (takeLoadedState) and applies itself (applyLoadedState) rather than ygo.
+	state []byte
 	// appended are the versions took recorded before the instance existed, folded into its cursor
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
@@ -60,12 +63,24 @@ func (s *Service) beginRoomLoad(room string) *roomLoad {
 	return load
 }
 
-// readHead records the head the load's read of the store saw, the version the room it loads holds
-// every update through.
-func (load *roomLoad) readHead(head persistence.Version) {
+// read records what the load's read of the store saw: the head, the version the room it loads
+// holds every update through, and the state through that head, which the room's load applies next
+// (takeState).
+func (load *roomLoad) read(head persistence.Version, state []byte) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
 	load.head = int64(head)
+	load.state = state
+}
+
+// takeState hands over the state the load read, once, so the record holds no copy of it for as
+// long as the document it loaded lives.
+func (load *roomLoad) takeState() []byte {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	state := load.state
+	load.state = nil
+	return state
 }
 
 // took records version, which this process has made durable for the room while its load runs: on

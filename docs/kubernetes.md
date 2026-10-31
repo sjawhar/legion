@@ -188,7 +188,7 @@ the CodeGraph CLI, the CodeGraph plugin, TypeScript and the two npm language ser
 ### The tools a role's own work needs
 
 The image carries the five clients above
-— `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` — and for everything else the one documented step is the pinned form of the three package runners the image already has:
+— `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` — the PostgreSQL 18 server with `pgvector` and `/usr/local/bin/legion-testpg` ("A test database in the pod" below, where the roles container's launcher starts it), and for everything else the one documented step is the pinned form of the three package runners the image already has:
 `uvx`, `bunx` and `go run`, plus `uv run --with` where what a role needs is a library rather than a command.
 The two answer different halves of the question.
 The image answers the tools a role may not arrange for itself
@@ -255,6 +255,65 @@ Each item below names an option and its measurement, then the verdict on it.
 The forms a role types, the rule that a pin names a coordinate as well as a version, and the line between a sanctioned pinned run and the withheld `operator-setup` capability are a role's own documentation rather than an operator's, and they live in one place:
 `skills/legion-worker/references/tools.md`.
 The worker image ships that skill, so a role reads it where it works, and a tool no runner reaches is the image change that reference spells out, with the grep that finds its sites.
+
+### A test database in the pod
+
+A role whose change owes a Postgres test has one in its own pod.
+The image carries the PostgreSQL 18 server with `pgvector` beside the `psql` above
+— 18 is CI's version and Cloud SQL's — and `/usr/local/bin/legion-testpg`, whose `ensure` runs `initdb` if the data directory is empty, starts the server on loopback port 5433, and creates the DSN's login role.
+
+A deployment turns it on with `runtime.kubernetes.test_postgres: true`, a key of its own beside `pod` rather than inside it.
+Then:
+
+- The **roles container's launcher**, PID 1 of the one `roles` container, runs `legion-testpg
+  ensure` once at container start, before any role's agent, and every 15 seconds after, so a postmaster that exits is restarted and a start that died with the server up but its role, `vector` or database unmade is finished by the next tick:
+  what `ensure` tests is the DSN, not the port.
+  It is not `runtime.kubernetes.setup`: that command runs inside a role's own PID namespace, so the server would be a child of that role's generation and would die with it, and the next role would find a stale data directory and no postmaster.
+
+- The **daemon** puts `LEGION_TEST_PG_DSN` in every role's environment and refuses the name in `runtime.kubernetes.pod.env`, so one deployment line cannot disagree with the server the launcher started.
+
+- The **data directory** is `/var/run/legion/roles/testpg` (`LEGION_TESTPG_DIR`), a disk `emptyDir` the daemon mounts there and covers inside every role namespace, so no role can write or corrupt the cluster while its tests use it, and it dies with the pod
+  — every issue starts on an empty cluster.
+  That `emptyDir` carries no `sizeLimit`, as the role homes volume beside it does not:
+  what bounds it is the pod's own ephemeral-storage limit, and a runaway test that fills the node's disk through it is evicted with all six roles.
+  The WAL settings below bound the server's steady state, not a test writing rows.
+
+- The DSN's user is `legion_test`, created `LOGIN CREATEDB CREATEROLE NOSUPERUSER` after the start;
+  `initdb`'s superuser is the container's own OS user (`legion`).
+  A test gets `create
+  database`, `drop database` and `create role` and not the cluster superuser, because a superuser can `COPY … TO PROGRAM` and so run commands as the server's process.
+  `CREATEROLE` is there because a suite that makes a role and then connects as it
+  — CI's Postgres lets it, since every login there is a test login — would otherwise fail in the pod alone.
+  So that the role it makes can log in, `pg_hba.conf` trusts every role on loopback, and the line before that rejects the cluster's superuser over TCP:
+  a test that creates a role and connects as it works in the pod as it does in CI, and no login over the DSN's port
+  — the superuser's own name included — reaches the superuser, so the trust the created roles need cannot be turned into `COPY … TO PROGRAM`.
+
+- `ensure` is idempotent and cheap when the server is up:
+  it returns after one connection through the DSN itself (`psql … select 1`, with a connect timeout), and otherwise initialises and starts under `flock -o`.
+  The `-o` closes the lock's descriptor in the child, without which the server inherits it and every later `ensure` waits on a lock the server holds for the pod's life.
+  That connection is a connection: a suite that has taken all `max_connections=100` slots makes each tick's `ensure` fail and log, and spend a slot trying, until the suite gives them back.
+
+- Each run of the script is bounded at 60 s.
+  The first `ensure` runs before the launcher serves any role, and the daemon gives a pod 120 s to boot by default, so an `ensure` that hangs costs that pod a log line and not its boot.
+
+- A postmaster the node kills comes back within a tick, but **not with what was in it**:
+  this cluster runs `fsync=off` and `synchronous_commit=off`, so a `kill -9` can lose the last commits
+  — in the run that found this, a role created just before the kill was gone after recovery, and a later run of the same kill kept it.
+  The DSN's own role is among what can be lost, and `start()` creates it again, so the server heals itself; a test's rows do not.
+  Nothing here is a database to keep anything in.
+
+- The daemon's **image probe proves it under the runtime a pod runs on**:
+  for a deployment that sets the key, the probe Sandbox's `legion probe-image` carries `--test-postgres <its own
+  volume>`, which runs `legion-testpg check` and `ensure`, makes and drops a database through the DSN every role is told, and stops the server.
+  So a gVisor the server cannot start under refuses the daemon's boot probe (`legion probe-boot`, "Probing a configuration before the daemon boots on it") rather than every pod's first Postgres test.
+  The image build runs the same sequence in its own toolchain self-check, under the builder's runtime.
+
+- `legion-testpg ensure` refuses a DSN that carries a password or names a host that is not loopback, so a wrong deployment line logs a refusal instead of starting a server.
+  It does not stop a test from using such a DSN; the skill rule does (`skills/legion-worker/references/tools.md`, "The database your tests use").
+
+- `template1` carries the `vector` extension, so every database made from it has pgvector, and the Dispatch browser suite runs on a database a role makes for it there (`createdb`, then `DATABASE_URL`).
+
+- The image's own build runs `legion-testpg check` and a real `initdb`, start, `create database` and extension read as the runtime user, so a build whose server package or script stops working fails there rather than at every pod's start.
 
 ### Image size and pull time
 
@@ -1822,6 +1881,7 @@ runtime:
       retain_hours: 168         # default 168; how long a cache outlives its repository leaving the mapping
       resources: { cpu: 1, memory: 4Gi, ephemeral_storage: 2Gi, ephemeral_storage_request: 1Gi }   # the defaults
     setup: [/bin/sh, -c, '<command>']   # optional: run in every role's namespace before each start of its Oh My Pi (below)
+    test_postgres: true         # optional, default false: every issue pod's roles container serves its own PostgreSQL for tests (A test database in the pod, above)
 bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
 advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
 worker_stream_port: <the port advertise_host or bind serves it on>

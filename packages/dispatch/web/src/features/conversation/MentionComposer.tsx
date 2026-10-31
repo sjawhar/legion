@@ -1,5 +1,5 @@
 import { ASK_QUESTION_MAX, DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
-import type { MutationKey } from "@tanstack/react-query";
+import { hashKey, type MutationKey } from "@tanstack/react-query";
 import {
   type ClipboardEvent,
   type DragEvent,
@@ -16,7 +16,7 @@ import {
   useState,
 } from "react";
 
-import { ApiError, type ArtifactOwner, api, apiErrorMessage } from "../../api/client";
+import { type ArtifactOwner, api, apiErrorMessage, isAnchorMissing } from "../../api/client";
 import type { Agent, AskOption, AskUrgency } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
@@ -58,6 +58,7 @@ import {
 } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
+import { useComposerRegistry } from "../margin/margin-context";
 import { AgentName, type AgentText, useAgentText } from "../refs/AgentName";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
@@ -72,6 +73,7 @@ import {
 } from "./block-spans";
 import type {
   AcceptedMention,
+  AnchorRefusal,
   ComposerAnchor,
   ComposerKind,
   ComposerOwner,
@@ -394,9 +396,33 @@ function draftRefusal(
   return undefined;
 }
 
+/** What the composer shows for `refusal`: the host's own words, where it has some about the mark
+ *  this send names - the margin's, when the server refused the send for a mark it cannot see and
+ *  the margin could not write that mark again - else the words of a refusal written for the
+ *  reader (the server's missing anchor, a send they stopped), else the page's wording around what
+ *  went wrong. */
+function refusalMessage(
+  refusal: Error,
+  anchor: ComposerAnchor | undefined,
+  anchorRefusal: AnchorRefusal | undefined
+): string {
+  const anchorMissing = isAnchorMissing(refusal);
+  if (anchorMissing && anchorRefusal !== undefined && anchorRefusal.markId === anchor?.mark_id) {
+    return anchorRefusal.text;
+  }
+  return anchorMissing || refusal instanceof SendStoppedError
+    ? refusal.message
+    : `Couldn't send — ${apiErrorMessage(refusal, "network error")}`;
+}
+
 interface MentionComposerProps {
   readonly agents?: readonly Agent[];
   readonly anchor?: ComposerAnchor;
+  /** What the host says in place of the server's words when it refused this send for a mark the
+   *  document no longer holds (`ANCHOR_MISSING`) and could not write that mark again: the margin's
+   *  message, kept with the mark it answers, since the composer stays mounted when a newer compose
+   *  replaces the anchor. */
+  readonly anchorRefusal?: AnchorRefusal;
   /** Focuses the field once, on the first render this is true. A host that keeps the composer
    *  mounted out of sight - the margin's, under its collapsed sheet, its rail or the Pinned tab -
    *  passes it once the composer is on screen, since a field out of sight takes no focus. */
@@ -447,6 +473,7 @@ interface MentionComposerProps {
 export function MentionComposer({
   agents: suppliedAgents,
   anchor,
+  anchorRefusal,
   autoFocus = false,
   closed = false,
   docked = false,
@@ -472,6 +499,9 @@ export function MentionComposer({
     landed: (sent) => landed(sent),
     refused: (held) => replaceDraft(held.draft.draft),
   });
+  const registerComposer = useComposerRegistry();
+  /** This composer's send by name, which is what the margin looks it up by. */
+  const composerName = mutationKey === undefined ? undefined : hashKey(mutationKey);
   // Only the mount reads it, so it is computed once rather than on every keystroke: the held
   // send's draft, or what the channel seeds.
   const [initial] = useState(() => {
@@ -727,6 +757,16 @@ export function MentionComposer({
     window.addEventListener("pagehide", keepNow);
     return () => window.removeEventListener("pagehide", keepNow);
   }, []);
+  // The margin sends a refused margin compose again itself, once it has written the mark it is
+  // anchored to again (`reanchor` in margin-context.tsx), and that retry carries the draft the
+  // store holds. The writes above are a keystroke's wait behind what the reader has typed, so
+  // the margin asks for it first: this is what answers. A composer with no name of its own
+  // holds no send another surface can send again, so it registers nothing.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the name's hash is its identity; the key array itself is rebuilt by some hosts on every render
+  useEffect(() => {
+    if (mutationKey === undefined) return;
+    return registerComposer({ keepDraft: () => keepDraft.current(), mutationKey });
+  }, [composerName, registerComposer]);
   useEffect(() => {
     const form = formRef.current;
     if (form === null || dormant) return;
@@ -1433,14 +1473,7 @@ export function MentionComposer({
       {refusal === undefined ? null : (
         <div className="flex flex-wrap items-center gap-3">
           <QueryError
-            message={
-              (refusal instanceof ApiError &&
-                refusal.status === 409 &&
-                refusal.code === "ANCHOR_MISSING") ||
-              refusal instanceof SendStoppedError
-                ? refusal.message
-                : `Couldn't send — ${apiErrorMessage(refusal, "network error")}`
-            }
+            message={refusalMessage(refusal, anchor, anchorRefusal)}
             // Retry sends the draft as it stands, so it asks what Send asks of it.
             onRetry={canSubmit ? send : undefined}
             retrying={sending}

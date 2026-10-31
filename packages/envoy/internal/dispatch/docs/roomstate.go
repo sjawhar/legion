@@ -26,8 +26,8 @@ import (
 // holder releases the state through its own unlock, and ygo's OnUnloadDocument releases it when
 // the room is the last thing to go (releaseUnloadedRoom).
 //
-// What a release drops - the unrecorded marks' first sightings and the closed flag - is what a
-// restart drops too.
+// What a release drops - the unrecorded marks' first sightings and their authors' departures, and
+// the closed flag - is what a restart drops too.
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
@@ -67,9 +67,16 @@ type roomState struct {
 	pendingUpdates int
 	// shadow is what the latest committed live write left the room to measure again the classes
 	// of the browser updates stored after its own (roomShadow), nil while none is left.
-	shadow         *roomShadow
-	settle         *time.Timer
-	unrecorded     map[pmdoc.MarkRef]time.Time
+	shadow     *roomShadow
+	settle     *time.Timer
+	unrecorded map[pmdoc.MarkRef]time.Time
+	// departed is when each user whose browsers have all left this room lost the last of them,
+	// under both spellings a mark's `by` can carry (recordMarkAuthorDeparture). An unrecorded
+	// mark ages from its author's entry rather than from the sweep that last saw that author, so
+	// a browser that drops between two sweeps keeps its mark for the whole TTL after the drop.
+	// Coming back clears the entry, and the sweep drops one older than the TTL, which can no
+	// longer change what it decides (sweepUnrecordedMarks).
+	departed       map[string]time.Time
 	durableAppends atomic.Int64
 	// roomGeneration moves at each of this room's own in-process invalidations (a reload, a
 	// failure, a settlement's own commit): a settlement compares the value it started at against
@@ -165,6 +172,7 @@ func newRoomState() *roomState {
 		askAuthors:        make(map[string]model.Actor),
 		pendingAskAuthors: make(map[string]model.Actor),
 		unrecorded:        make(map[pmdoc.MarkRef]time.Time),
+		departed:          make(map[string]time.Time),
 	}
 }
 

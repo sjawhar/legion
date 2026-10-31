@@ -22113,6 +22113,9 @@ function mergeInterestSources(registryTopics, liveTopics) {
   }
   return interests;
 }
+function newClientInstanceID() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 function expandSubscriptionTopics(topics) {
   const expanded = new Set;
   for (const topic of topics) {
@@ -22207,6 +22210,7 @@ function createEnvoyClient(config) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      ...input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID },
       host: machineID(),
       plugin: input.plugin.name,
       plugin_version: input.plugin.version
@@ -22250,8 +22254,11 @@ function createEnvoyClient(config) {
         ...response.holder === undefined ? {} : { holder: response.holder }
       };
     },
-    unregisterSession: async (sessionID) => {
-      await request(`/v1/sessions/${encodeURIComponent(sessionID)}`, { method: "DELETE" });
+    unregisterSession: async (input) => {
+      const query = input.clientInstanceID === undefined ? "" : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
+      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
+        method: "DELETE"
+      });
     },
     setRole: async (input) => {
       const soft = input.soft === true;
