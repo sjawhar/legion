@@ -389,8 +389,8 @@ func runSuggestionRules(ctx context.Context, tx pgx.Tx, rules [3]string, args ..
 }
 
 // suggestionOutcomePass is one pass of the loop: it reads the safe horizon of the event log once
-// (events.Horizon.Safe, one observation, which waits on no transaction), judges page after page
-// up to it (sweepSuggestionOutcomePages), and answers when the loop should run again.
+// (events.Horizon.Safe, one observation; Await on a process's first pass, below), judges page
+// after page up to it (sweepSuggestionOutcomePages), and answers when the loop should run again.
 //
 // A safe of 0 is a horizon that has proven nothing yet: one snapshot never proves its own A
 // (events.Horizon), so the first pass after a process starts reads 0 however much the log holds.

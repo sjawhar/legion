@@ -9,8 +9,9 @@
 --
 -- event_id starts null: the first pass on a database runs the three rules over every pending
 -- suggestion once, as every pass of the previous release did, and records the highest event id it
--- read before them. Reading `id > event_id` skips nothing because events.id commits in id order
--- (events.Broker.Append's commit-order lock). A new table; the previous release never reads it.
+-- read before them. A pass reads only up to the event log's safe horizon (events.Horizon) and
+-- never moves event_id past it: event ids are not commit order, so an uncapped `id > event_id`
+-- read could pass an event still committing. A new table; the previous release never reads it.
 create table suggestion_outcome_cursor (
   singleton boolean primary key default true check (singleton),
   event_id bigint

@@ -733,11 +733,13 @@ replaced, so under load each runs no more often than that ticker did.
   (`suggestion_outcome_cursor`, `0153`) and at or below the event log's safe horizon, as the
   per-process relay behind a reader's events subscription reads: event ids are not commit order,
   so a cursor moved past an event that could still commit would never judge by it. The pass takes
-  that horizon once (`events.Horizon.Safe`, the server's one `Horizon`, which waits on no
-  transaction), and one left with an event above it asks for a pass 60 s on rather than re-reading
-  at once, so a horizon an open transaction holds back costs one pass a minute; the late commit's
-  own `dispatch_events` notification wakes the loop as any other does. A pass also reads the
-  suggestions no pass has judged yet (`write_suggestions.swept`, `0154`), in pages of 1,000, each
+  that horizon once (`events.Horizon.Safe`, the server's one `Horizon`; the first pass after a
+  start takes `events.Horizon.Await`, which waits until the transactions holding an event id on
+  the instance end, and ends with its context), and one left with an event above it asks for a
+  pass 60 s on rather than re-reading at once, so a horizon an open transaction holds back costs
+  one pass a minute; the late commit's own `dispatch_events` notification wakes the loop as any
+  other does. A pass also reads the suggestions no pass has judged yet (`write_suggestions.swept`,
+  `0154`), in pages of 1,000, each
   page in a transaction that holds the cursor row `for update`, and judges only the pending
   suggestions those can resolve: the newly recorded ones, against all their events, and those
   whose source issue, source document or suggested issue a page's event names. An event or
