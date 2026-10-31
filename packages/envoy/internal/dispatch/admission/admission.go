@@ -74,15 +74,19 @@ func (r *Refusal) Error() string {
 // side. 8 of the 48 are left to the pool's users that admission does not count: the websockets'
 // identity checks (whileCallerResolves), the browsers' durable document appends, the /auth routes
 // and the GitHub proxy, and the work a handler leaves running after it has answered. The other 40
-// are split so that writes, which wait on each other at the commit order, hold at most 12
-// (MaxWriteLimit), and reads at most 28 (MaxReadLimit).
+// are all admission may hand out at once, whatever the mix of classes: MaxAdmittedUnits. The
+// number is written here rather than read from the store, whose sharedPoolSize is unexported and
+// whose own comment carries the same partition of the 48, so a change to either belongs in both.
+// Under that combined cap writes, which wait on each other at the commit order, hold at most 24
+// (MaxWriteLimit) and reads at most 28 (MaxReadLimit): the two add to 52, so a class reaches its
+// own cap only while the other is quiet.
 //
 // Each class's limit follows the CPUs the process may use (runtime.GOMAXPROCS, which follows the
 // container's CPU limit) up to its cap: readsPerCPU reads and writesPerCPU writes per CPU, at least
-// one CPU's worth. Two CPUs, the production task's, already reach both caps, 28 reads and 12 writes,
-// and so does every larger pod: at 16 CPUs the limits are still 28 and 12, because the request
+// one CPU's worth. Two CPUs, the production task's, already reach both caps, 28 reads and 24 writes,
+// and so does every larger pod: at 16 CPUs the limits are still 28 and 24, because the request
 // pool's 48 connections bound what admission may let in, so a larger pod's limit comes from the
-// pool, not its cores. One CPU gets 14 reads and 6 writes.
+// pool, not its cores. One CPU gets 14 reads and 12 writes.
 //
 // INFRA-589's reproduction on 2 CPUs chose them, with INFRA-591's commit-order change in, each step
 // offered with the same seed (1x is 4 writes/s and 60 reads/s for 180 s, 10x is 40 and 600), as
@@ -99,17 +103,29 @@ func (r *Refusal) Error() string {
 //	28     8       1 s     2x limit  2.81         0 / 2
 //	28     12      1 s     2x limit  2.92         0 / 5, and 9 / 11 on a second run
 //
-// Fewer reads lift 10x commits on this box - 8 reads committed 4.46 events/s at 10x against 28
-// reads' 3.09 before INFRA-591 too - but refuse 4-6% of the reads at 1x, a load the server must
-// serve whole. At 1x on the 2-core reproduction reads stall in bursts, mostly in garbage collection
-// and system calls, with all 28 read slots busy for over a second, and a 1x write can be in flight
-// for over a second, so 28 reads, 12 writes, a 1 s wait (DefaultWait) and a queue of twice the limit
-// (queueFactor) keep 1x refusals to 0-9 reads and 5-11 writes in 180 s.
+// The combined cap is what keeps the two class caps from oversubscribing the request pool: 28
+// reads and 24 writes are 52 units against the 40 the pool has for admitted requests. Capped by
+// class alone, a 10x step is not refused here at all and queues on the pool instead - 29 waiters
+// measured - where each request ends as a 503 DATABASE_BUSY after the 3 s acquire bound rather
+// than as the 429 a refusal answers at once. The combined cap puts that refusal back here: a
+// class may take its whole cap only while the other is quiet, and every unit admission hands out
+// is one the pool can serve.
+//
+// Why writes 24: edits, issue creates and ask creates weigh 2 (their related-item check reads
+// twice, side by side), and at 1x on the same reproduction writes in flight reach 19-24 units. In
+// adjacent pairs on one pod (the same seed and offer), 28 reads and 12 writes refused at 1x 4, 32
+// and 0 writes and 0, 320 and 0 reads in three runs; 28 reads, 24 writes and a combined 40 refused
+// nothing in all three. At 10x the same pair refused only with 429 and dropped no connection:
+// 12 writes committed 4.09 events/s and served 14.2% of the requests, 24 writes under the combined
+// 40 committed 8.34 and served 8.7%, since writes then hold 24 of the 40 units and reads the rest;
+// the request pool's waiters peaked at 1 against the 29 that 24 writes without the combined cap
+// left on it.
 const (
-	MaxReadLimit  = 28
-	MaxWriteLimit = 12
-	readsPerCPU   = 14
-	writesPerCPU  = 6
+	MaxReadLimit     = 28
+	MaxWriteLimit    = 24
+	MaxAdmittedUnits = 40
+	readsPerCPU      = 14
+	writesPerCPU     = 12
 )
 
 // readLimit and writeLimit are the limits for procs usable CPUs: perCPU each, at least one CPU's
@@ -137,53 +153,75 @@ const DefaultWait = time.Second
 // a queue of two limits 112.
 const queueFactor = 2
 
-// Limits are a Limiter's concurrency limits per class, in units (a request takes its route's
-// weight), and how long a request may wait for room; a zero Wait is DefaultWait.
+// Limits are a Limiter's concurrency limits in units (a request takes its route's weight): one
+// per class, one over the two together, and how long a request may wait for room; a zero Wait is
+// DefaultWait.
 type Limits struct {
 	Read, Write int
-	Wait        time.Duration
+	// Total is the units both classes may hold together. Zero is no combined cap beyond the
+	// classes' own, Read plus Write, so a caller that raises one class - a test that wants
+	// sixteen writes at once - gets the room it asked for without naming a total;
+	// DefaultLimits sets MaxAdmittedUnits. A Total below a class's limit is allowed: that
+	// class then reaches its own limit only while the other class is empty, and never past
+	// the total.
+	Total int
+	Wait  time.Duration
 }
 
 // DefaultLimits are the limits the server runs with: reads and writes by the CPUs the process may
-// use (readLimit and writeLimit of runtime.GOMAXPROCS) and DefaultWait.
+// use (readLimit and writeLimit of runtime.GOMAXPROCS), MaxAdmittedUnits over the two of them,
+// and DefaultWait.
 func DefaultLimits() Limits {
 	procs := runtime.GOMAXPROCS(0)
-	return Limits{Read: readLimit(procs), Write: writeLimit(procs), Wait: DefaultWait}
+	return Limits{Read: readLimit(procs), Write: writeLimit(procs), Total: MaxAdmittedUnits, Wait: DefaultWait}
 }
 
-// Limiter admits requests per class under Limits. Each class runs at most its limit's units at
-// once; a request that finds no room waits in that class's queue, first come first served, for at
-// most Limits.Wait, and a request that finds the queue already holding queueFactor times the
-// limit is refused at once. A Limiter is safe for concurrent use.
+// Limiter admits requests per class under Limits. A request is admitted only while its own class
+// has room and both classes together are under Limits.Total; one that finds no room waits in its
+// class's queue, first come first served, for at most Limits.Wait, and one that finds that queue
+// already holding queueFactor times the class's limit is refused at once. A Limiter is safe for
+// concurrent use.
 type Limiter struct {
+	// mu guards every count and queue below: the combined cap is one number over both
+	// classes, so granting reads and moves the two together.
+	mu      sync.Mutex
+	used    int    // the units held across the classes
+	arrived uint64 // arrivals so far: a waiter's place in the order the two queues are served in
 	classes [classCount]*gate
+
+	total int // the combined cap, and wait, both set once by New
+	wait  time.Duration
 }
 
-// New returns a Limiter with limits. A limit below one is one.
+// New returns a Limiter with limits. A limit below one is one, and a Total of zero is Read plus
+// Write: no combined cap beyond the classes' own.
 func New(limits Limits) *Limiter {
-	wait := limits.Wait
-	if wait <= 0 {
-		wait = DefaultWait
+	l := &Limiter{wait: limits.Wait}
+	if l.wait <= 0 {
+		l.wait = DefaultWait
 	}
-	l := &Limiter{}
 	for class, limit := range [classCount]int{Read: limits.Read, Write: limits.Write} {
 		limit = max(limit, 1)
-		l.classes[class] = &gate{class: Class(class), limit: limit, wait: wait}
+		l.classes[class] = &gate{class: Class(class), limit: limit}
+		l.total += limit
+	}
+	if limits.Total > 0 {
+		l.total = limits.Total
 	}
 	return l
 }
 
 // Admit takes weight units of class for the caller, waiting in the class's queue when it has no
 // room. It returns a *Refusal when the queue is full or the wait runs out, and ctx's error when
-// ctx ends first. A weight below one is one, and one above the class's limit is the limit, so a
-// heavy route can still run alone. The caller releases the Ticket once it is done.
+// ctx ends first. A weight below one is one, and one above the class's limit or above the
+// combined cap is that cap, so a heavy route can still run alone. The caller releases the Ticket
+// once it is done.
 func (l *Limiter) Admit(ctx context.Context, class Class, weight int) (*Ticket, error) {
-	g := l.classes[class]
-	units := min(max(weight, 1), g.limit)
-	if err := g.acquire(ctx, units); err != nil {
+	units := min(max(weight, 1), l.classes[class].limit, l.total)
+	if err := l.acquire(ctx, class, units); err != nil {
 		return nil, err
 	}
-	return &Ticket{gate: g, units: units, held: true}, nil
+	return &Ticket{limiter: l, class: class, units: units, held: true}, nil
 }
 
 // ClassStats is what one class of a Limiter holds and has refused.
@@ -202,13 +240,29 @@ type ClassStats struct {
 	LongestRefusedWait time.Duration
 }
 
-// Stats reads each class's counts, reads first. The counts of one class are read together.
+// Stats reads each class's counts, reads first. Every count of both classes is read together.
 func (l *Limiter) Stats() []ClassStats {
 	stats := make([]ClassStats, 0, classCount)
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	for _, g := range l.classes {
 		stats = append(stats, g.stats())
 	}
 	return stats
+}
+
+// Totals is what a Limiter holds across both classes.
+type Totals struct {
+	// Limit is the combined cap in units (Limits.Total) and InFlight the units the admitted
+	// requests of both classes hold under it now.
+	Limit, InFlight int
+}
+
+// Totals reads the combined cap and what is held under it, the two together.
+func (l *Limiter) Totals() Totals {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return Totals{Limit: l.total, InFlight: l.used}
 }
 
 // Ticket is one admitted request's hold on its class. It rides on the request's context
@@ -216,18 +270,19 @@ func (l *Limiter) Stats() []ClassStats {
 // waits (Park) and take them back after (Resume). The methods of a nil Ticket do nothing, so a
 // caller need not ask whether its request was admitted at all.
 type Ticket struct {
-	gate  *gate
-	units int
+	limiter *Limiter
+	class   Class
+	units   int
 
 	mu       sync.Mutex
 	held     bool
 	released bool
 }
 
-// Park gives the ticket's units back to its class while its holder waits for something else
-// - a document's writer gate, where writers queued on one document would otherwise hold every
-// write unit from writers to other documents. Resume takes them back. Parking a ticket that is
-// parked or released does nothing.
+// Park gives the ticket's units back to its class, and to the combined cap, while its holder
+// waits for something else - a document's writer gate, where writers queued on one document
+// would otherwise hold every write unit from writers to other documents. Resume takes them back.
+// Parking a ticket that is parked or released does nothing.
 func (t *Ticket) Park() {
 	if t == nil {
 		return
@@ -236,7 +291,7 @@ func (t *Ticket) Park() {
 	defer t.mu.Unlock()
 	if t.held {
 		t.held = false
-		t.gate.release(t.units)
+		t.limiter.release(t.class, t.units)
 	}
 }
 
@@ -254,14 +309,14 @@ func (t *Ticket) Resume(ctx context.Context) error {
 	if !parked {
 		return nil
 	}
-	if err := t.gate.acquire(ctx, t.units); err != nil {
+	if err := t.limiter.acquire(ctx, t.class, t.units); err != nil {
 		return err
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.released {
 		// Released while it waited: the units it took are nobody's.
-		t.gate.release(t.units)
+		t.limiter.release(t.class, t.units)
 		return nil
 	}
 	t.held = true
@@ -282,7 +337,7 @@ func (t *Ticket) Release() {
 	t.released = true
 	if t.held {
 		t.held = false
-		t.gate.release(t.units)
+		t.limiter.release(t.class, t.units)
 	}
 }
 
@@ -300,13 +355,12 @@ func TicketFrom(ctx context.Context) *Ticket {
 }
 
 // gate is one class's units and wait queue: a weighted semaphore whose waiters are served in
-// arrival order, so a heavy request at the head is not overtaken by light ones behind it.
+// arrival order, so a heavy request at the head is not overtaken by light ones behind it. Its
+// Limiter's mutex guards its counts and its queue, since the combined cap ties the classes
+// together; only the refusal counters, which no decision reads, stand on their own.
 type gate struct {
-	class Class
-	limit int
-	wait  time.Duration
-
-	mu      sync.Mutex
+	class   Class
+	limit   int
 	used    int
 	waiters list.List // of *waiter, in arrival order
 
@@ -314,32 +368,37 @@ type gate struct {
 	longestRefusedWait      atomic.Int64
 }
 
-// waiter is one queued acquire; ready closes once its units are granted.
+// waiter is one queued acquire; ready closes once its units are granted. seq is its place among
+// the arrivals of both classes, which orders the two queue heads against each other.
 type waiter struct {
 	units int
+	seq   uint64
 	ready chan struct{}
 }
 
-// acquire takes units, waiting in the queue for at most g.wait.
-func (g *gate) acquire(ctx context.Context, units int) error {
-	g.mu.Lock()
-	if g.waiters.Len() == 0 && g.used+units <= g.limit {
+// acquire takes units of class, waiting in that class's queue for at most l.wait.
+func (l *Limiter) acquire(ctx context.Context, class Class, units int) error {
+	g := l.classes[class]
+	l.mu.Lock()
+	if g.waiters.Len() == 0 && l.fits(g, units) {
 		g.used += units
-		g.mu.Unlock()
+		l.used += units
+		l.mu.Unlock()
 		return nil
 	}
 	// The queue holds queueFactor times the class's limit (queueFactor says why).
 	if g.waiters.Len() >= queueFactor*g.limit {
-		g.mu.Unlock()
+		l.mu.Unlock()
 		g.queueFull.Add(1)
-		return &Refusal{Class: g.class, Reason: QueueFull}
+		return &Refusal{Class: class, Reason: QueueFull}
 	}
-	queued := &waiter{units: units, ready: make(chan struct{})}
+	l.arrived++
+	queued := &waiter{units: units, seq: l.arrived, ready: make(chan struct{})}
 	element := g.waiters.PushBack(queued)
-	g.mu.Unlock()
+	l.mu.Unlock()
 
 	queuedAt := time.Now()
-	timer := time.NewTimer(g.wait)
+	timer := time.NewTimer(l.wait)
 	defer timer.Stop()
 	var failure error
 	var waited time.Duration
@@ -349,12 +408,12 @@ func (g *gate) acquire(ctx context.Context, units int) error {
 	case <-ctx.Done():
 		failure = ctx.Err()
 	case fired := <-timer.C:
-		failure = &Refusal{Class: g.class, Reason: WaitExceeded}
+		failure = &Refusal{Class: class, Reason: WaitExceeded}
 		waited = fired.Sub(queuedAt)
 	}
 
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	select {
 	case <-queued.ready:
 		// Granted in the moment the wait ended. A caller whose wait ran out takes it, since it
@@ -363,15 +422,17 @@ func (g *gate) acquire(ctx context.Context, units int) error {
 			return nil
 		}
 		g.used -= units
-		g.grant()
+		l.used -= units
+		l.grant()
 		return ctx.Err()
 	default:
 	}
 	front := g.waiters.Front() == element
 	g.waiters.Remove(element)
 	if front {
-		// The head may have been all that held back the waiters behind it.
-		g.grant()
+		// The head may have been all that held back the waiters behind it - and, when the
+		// combined cap was what held the head, the other class's waiters too.
+		l.grant()
 	}
 	if _, refused := failure.(*Refusal); refused {
 		g.waitExceeded.Add(1)
@@ -382,34 +443,78 @@ func (g *gate) acquire(ctx context.Context, units int) error {
 	return failure
 }
 
-// release gives units back and grants the queue whatever now fits.
-func (g *gate) release(units int) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.used -= units
-	g.grant()
+// release gives units of class back and grants the queues whatever now fits.
+func (l *Limiter) release(class Class, units int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.classes[class].used -= units
+	l.used -= units
+	l.grant()
 }
 
-// grant hands room to the waiters at the head of the queue, in order, while each fits. g.mu is
-// held.
-func (g *gate) grant() {
-	for element := g.waiters.Front(); element != nil; element = g.waiters.Front() {
-		next := element.Value.(*waiter)
-		if g.used+next.units > g.limit {
+// fits reports whether units may start in g now: g's class and the combined cap both have room,
+// and no queue head is held up by the combined cap alone. Such a head arrived before this
+// request and waits for room of the whole Limiter, which this request would take from it.
+// l.mu is held.
+func (l *Limiter) fits(g *gate, units int) bool {
+	return g.used+units <= g.limit && l.used+units <= l.total && l.heldByTotal() == nil
+}
+
+// heldByTotal is the earliest waiter at the head of a class's queue that fits its own class but
+// not the combined cap, or nil when neither head is one. l.mu is held.
+func (l *Limiter) heldByTotal() *waiter {
+	var earliest *waiter
+	for _, g := range l.classes {
+		front := g.waiters.Front()
+		if front == nil {
+			continue
+		}
+		head := front.Value.(*waiter)
+		if g.used+head.units <= g.limit && l.used+head.units > l.total &&
+			(earliest == nil || head.seq < earliest.seq) {
+			earliest = head
+		}
+	}
+	return earliest
+}
+
+// grant hands room to the waiters at the heads of the two class queues, the earlier arrival of
+// the two first, while each fits. A head the combined cap alone holds up stops the pass for both
+// classes: the room it waits for is the whole Limiter's, and the later arrivals of the other
+// class would take it a unit at a time, so a weight-2 head is never starved by weight-1 requests
+// beside it. A head its own class's limit holds up stops only its own queue. l.mu is held.
+func (l *Limiter) grant() {
+	for {
+		held := l.heldByTotal()
+		var next *waiter
+		var from *gate
+		for _, g := range l.classes {
+			front := g.waiters.Front()
+			if front == nil {
+				continue
+			}
+			head := front.Value.(*waiter)
+			if g.used+head.units > g.limit || l.used+head.units > l.total {
+				continue
+			}
+			if next == nil || head.seq < next.seq {
+				next, from = head, g
+			}
+		}
+		if next == nil || (held != nil && held.seq < next.seq) {
 			return
 		}
-		g.used += next.units
-		g.waiters.Remove(element)
+		from.used += next.units
+		l.used += next.units
+		from.waiters.Remove(from.waiters.Front())
 		close(next.ready)
 	}
 }
 
+// stats is the class's counts. Its Limiter's mutex is held.
 func (g *gate) stats() ClassStats {
-	g.mu.Lock()
-	inFlight, queued := g.used, g.waiters.Len()
-	g.mu.Unlock()
 	return ClassStats{
-		Class: g.class, Limit: g.limit, InFlight: inFlight, Queued: queued,
+		Class: g.class, Limit: g.limit, InFlight: g.used, Queued: g.waiters.Len(),
 		QueueFull: g.queueFull.Load(), WaitExceeded: g.waitExceeded.Load(),
 		LongestRefusedWait: time.Duration(g.longestRefusedWait.Load()),
 	}

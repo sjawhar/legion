@@ -329,11 +329,11 @@ func TestClassOfMethods(t *testing.T) {
 	}
 }
 
-// The server reads 14 at once and writes 6 at once per CPU it may use, at least one CPU's worth
-// and at most MaxReadLimit (28) and MaxWriteLimit (12), so two CPUs already reach both caps and 16
-// get no more; each waits DefaultWait, 1 s.
+// The server reads 14 at once and writes 12 at once per CPU it may use, at least one CPU's worth
+// and at most MaxReadLimit (28) and MaxWriteLimit (24), so two CPUs already reach both caps and 16
+// get no more; the two together hold at most MaxAdmittedUnits (40), and each waits DefaultWait, 1 s.
 func TestTheDefaultLimitsFollowTheCPUs(t *testing.T) {
-	for procs, want := range map[int][2]int{0: {14, 6}, 1: {14, 6}, 2: {28, 12}, 3: {28, 12}, 16: {28, 12}, 64: {28, 12}} {
+	for procs, want := range map[int][2]int{0: {14, 12}, 1: {14, 12}, 2: {28, 24}, 3: {28, 24}, 16: {28, 24}, 64: {28, 24}} {
 		if got := [2]int{readLimit(procs), writeLimit(procs)}; got != want {
 			t.Errorf("readLimit, writeLimit(%d) = %v, want %v", procs, got, want)
 		}
@@ -343,7 +343,126 @@ func TestTheDefaultLimitsFollowTheCPUs(t *testing.T) {
 	if limits.Read != readLimit(procs) || limits.Write != writeLimit(procs) {
 		t.Errorf("DefaultLimits() = %+v, want reads %d and writes %d for GOMAXPROCS %d", limits, readLimit(procs), writeLimit(procs), procs)
 	}
+	if limits.Total != MaxAdmittedUnits {
+		t.Errorf("DefaultLimits() = %+v, want the two classes capped at %d units together", limits, MaxAdmittedUnits)
+	}
 	if limits.Wait != time.Second {
 		t.Errorf("DefaultLimits() = %+v, want a 1 s wait", limits)
+	}
+}
+
+// The class caps add up to more than the combined cap, so a class reaches its own cap only while
+// the other is quiet: with every read unit held a write class of 24 has 12 units left, and with
+// no read held it has all 24.
+func TestTheCombinedCapBoundsTheTwoClassesTogether(t *testing.T) {
+	l := New(Limits{Read: MaxReadLimit, Write: MaxWriteLimit, Total: MaxAdmittedUnits, Wait: 20 * time.Millisecond})
+	reads := admit(t, l, Read, MaxReadLimit)
+	writes := make([]*Ticket, 0, MaxWriteLimit)
+	for range MaxAdmittedUnits - MaxReadLimit {
+		writes = append(writes, admit(t, l, Write, 1))
+	}
+	if _, err := l.Admit(context.Background(), Write, 1); refusalReason(err) != WaitExceeded {
+		t.Fatalf("write %d of a class of %d, with the reads holding %d of %d units: %v, want a wait_exceeded refusal",
+			MaxAdmittedUnits-MaxReadLimit+1, MaxWriteLimit, MaxReadLimit, MaxAdmittedUnits, err)
+	}
+	if stats := classStats(l, Write); stats.InFlight != MaxAdmittedUnits-MaxReadLimit || stats.Limit != MaxWriteLimit {
+		t.Fatalf("write stats %+v, want %d of its %d units in flight", stats, MaxAdmittedUnits-MaxReadLimit, MaxWriteLimit)
+	}
+	if got := (Totals{Limit: MaxAdmittedUnits, InFlight: MaxAdmittedUnits}); l.Totals() != got {
+		t.Fatalf("totals %+v, want %+v", l.Totals(), got)
+	}
+
+	reads.Release()
+	for _, ticket := range writes {
+		ticket.Release()
+	}
+	writes = writes[:0]
+	for range MaxWriteLimit {
+		writes = append(writes, admit(t, l, Write, 1))
+	}
+	if _, err := l.Admit(context.Background(), Write, 1); refusalReason(err) != WaitExceeded {
+		t.Fatalf("write %d with no read held: %v, want a wait_exceeded refusal past the class's %d", MaxWriteLimit+1, err, MaxWriteLimit)
+	}
+	if got := (Totals{Limit: MaxAdmittedUnits, InFlight: MaxWriteLimit}); l.Totals() != got {
+		t.Fatalf("totals %+v, want %+v", l.Totals(), got)
+	}
+	for _, ticket := range writes {
+		ticket.Release()
+	}
+}
+
+// A request its own class has room for, which only the combined cap holds up, is granted by the
+// other class's release.
+func TestAWaitOnTheCombinedCapEndsWhenTheOtherClassReleases(t *testing.T) {
+	l := New(Limits{Read: 4, Write: 4, Total: 5, Wait: patient})
+	read := admit(t, l, Read, 3)
+	write := admit(t, l, Write, 2)
+	waiting := admitInBackground(t, l, context.Background(), Write, 2)
+	assertPending(t, waiting)
+	read.Release()
+	result := receive(t, waiting)
+	if result.err != nil {
+		t.Fatalf("the write waiting on the combined cap: %v", result.err)
+	}
+	if got := (Totals{Limit: 5, InFlight: 4}); l.Totals() != got {
+		t.Fatalf("totals %+v, want %+v", l.Totals(), got)
+	}
+	write.Release()
+	result.ticket.Release()
+}
+
+// A head the combined cap holds up is not overtaken by a later, lighter request of the other
+// class, which would fit both its own class and the cap: the room belongs to the head.
+func TestAHeadHeldByTheCombinedCapIsNotOvertakenByTheOtherClass(t *testing.T) {
+	l := New(Limits{Read: 4, Write: 4, Total: 4, Wait: patient})
+	read := admit(t, l, Read, 3)
+	heavy := admitInBackground(t, l, context.Background(), Write, 2)
+	light := admitInBackground(t, l, context.Background(), Read, 1)
+	assertPending(t, heavy)
+	assertPending(t, light)
+	if got := (Totals{Limit: 4, InFlight: 3}); l.Totals() != got {
+		t.Fatalf("totals %+v, want %+v: the last unit is the queued write's", l.Totals(), got)
+	}
+	read.Release()
+	granted := receive(t, heavy)
+	if granted.err != nil {
+		t.Fatalf("the write at the head: %v", granted.err)
+	}
+	behind := receive(t, light)
+	if behind.err != nil {
+		t.Fatalf("the read behind it: %v", behind.err)
+	}
+	behind.ticket.Release()
+	granted.ticket.Release()
+	if got := (Totals{Limit: 4}); l.Totals() != got {
+		t.Fatalf("totals %+v, want %+v", l.Totals(), got)
+	}
+}
+
+// A parked ticket gives its units back to the combined cap as well as to its class, so a request
+// the cap alone held up runs while its holder waits elsewhere.
+func TestAParkedTicketFreesCombinedRoom(t *testing.T) {
+	l := New(Limits{Read: 4, Write: 4, Total: 4, Wait: 20 * time.Millisecond})
+	read := admit(t, l, Read, 2)
+	parked := admit(t, l, Write, 2)
+	if _, err := l.Admit(context.Background(), Write, 2); refusalReason(err) != WaitExceeded {
+		t.Fatalf("a write its class has room for, past the combined cap: %v, want a wait_exceeded refusal", err)
+	}
+	parked.Park()
+	if got := (Totals{Limit: 4, InFlight: 2}); l.Totals() != got {
+		t.Fatalf("totals %+v after parking, want %+v", l.Totals(), got)
+	}
+	other := admit(t, l, Write, 2)
+	other.Release()
+	if err := parked.Resume(context.Background()); err != nil {
+		t.Fatalf("resume once the room came back: %v", err)
+	}
+	if got := (Totals{Limit: 4, InFlight: 4}); l.Totals() != got {
+		t.Fatalf("totals %+v after resuming, want %+v", l.Totals(), got)
+	}
+	read.Release()
+	parked.Release()
+	if got := (Totals{Limit: 4}); l.Totals() != got {
+		t.Fatalf("totals %+v after every release, want %+v", l.Totals(), got)
 	}
 }

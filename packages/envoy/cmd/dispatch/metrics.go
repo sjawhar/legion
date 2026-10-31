@@ -245,6 +245,12 @@ func newDispatchMetrics(sources metricsSources, lag *outboxLag) *metrics.Registr
 		}
 		return samples
 	})
+	registry.NewGaugeFunc(metricPrefix+"http_admitted_units", "Admission units the admitted requests of both classes hold now, under the combined cap.", func() int64 {
+		return int64(sources.Admission.Totals().InFlight)
+	})
+	registry.NewGaugeFunc(metricPrefix+"http_admitted_units_limit", "Admission units both classes may hold together: the combined cap, which is below the two class limits summed.", func() int64 {
+		return int64(sources.Admission.Totals().Limit)
+	})
 
 	registry.NewGaugeFunc(metricPrefix+"doc_writer_queued", "Writers waiting for a document's writer gate now.", sources.Docs.QueuedDocumentWriters)
 	registry.NewGaugeFunc(metricPrefix+"settlements_running", "Document settlements holding a settlement slot now.", func() int64 { return sources.Docs.SettlementLoad().Running })

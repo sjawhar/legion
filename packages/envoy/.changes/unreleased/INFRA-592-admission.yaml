@@ -2,8 +2,12 @@ kind: Changed
 body: |-
   Past what it can serve, Dispatch refuses a request at once rather than queueing it without end.
   Every `/api/v1` route but the test hooks is admitted first: reads
-  (GET, HEAD) up to 14 at once and writes up to 6 at once per CPU the server may use, at most 28
-  reads and 12 writes (28 and 12 on two CPUs or more), of the request pool's 48 connections. A
+  (GET, HEAD) up to 14 at once and writes up to 12 at once per CPU the server may use, at most 28
+  reads and 24 writes (28 and 24 on two CPUs or more) and at most 40 units of the two together,
+  which is the request pool's 48 connections less the 8 its uncounted users need. The class
+  limits add up to more than the 40, so a class reaches its own only while the other is quiet,
+  and a request past the 40 is refused here rather than left to queue on the pool and time out
+  there. A
   route that runs two reads side by side counts two: the delivery timeline, measures and pipeline
   (which now run at most two reads at once, where the timeline ran up to seven), and every route
   that runs the related-item check, whose keyword and meaning searches are two such reads - the

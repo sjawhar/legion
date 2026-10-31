@@ -447,6 +447,7 @@ Every series is read when the scrape comes, but the outbox lag, which one query 
 | `dispatch_events_committed_total` | Events this process has committed to the event log: every write that appends counts each event once it commits, so summed over the processes it grows as the `events` table does. |
 | `dispatch_http_in_flight`, `dispatch_http_queued` | Admission units held by admitted requests (a route that reads side by side holds two), and requests waiting for admission. Label `class`: `read` or `write`. |
 | `dispatch_http_refused_total` | Requests refused `429 OVERLOADED`. Labels `class` and `reason`: `queue_full` or `wait_exceeded`. |
+| `dispatch_http_admitted_units`, `dispatch_http_admitted_units_limit` | Admission units held across both classes now, and the combined cap over the two (40, below the 28 reads and 24 writes the class limits allow). No labels. |
 | `dispatch_doc_writer_queued` | Writers waiting for a document's writer gate. |
 | `dispatch_settlements_running`, `dispatch_settlements_waiting` | Document settlements holding one of the settlement slots, and waiting for one. |
 | `dispatch_log_dropped_total` | Log records dropped because the log writer fell behind. Label `level`: `debug`, `info`, `warn` or `error`. |
@@ -2419,13 +2420,18 @@ What each node type weighs:
 Past what it can serve, Dispatch refuses a request at once rather than queueing it without end,
 and tells the client when to ask again. Every `/api/v1` route but the test hooks is admitted
 before it runs: reads (GET, HEAD) and writes (every other method) each have
-a limit of the request pool's 48 connections, 14 reads and 6 writes per CPU the server may use up
-to 28 reads and 12 writes (28 and 12 on two CPUs or more). A route that runs two reads side by
+a limit of the request pool's 48 connections, 14 reads and 12 writes per CPU the server may use up
+to 28 reads and 24 writes (28 and 24 on two CPUs or more), and the two classes hold at most 40
+units together, which is what the pool has for admitted requests. The class limits add up to
+more, so a class reaches its own only while the other is quiet; a request is admitted when its
+class and the 40 both have room. A route that runs two reads side by
 side counts twice: the delivery timeline, measures and pipeline, and every route that runs the
 related-item check - the two related routes, creating an issue or an ask, and editing a document,
 whose new decision blocks are checked one after another so that one check's two reads are all the
 edit runs at once. A request that finds no room waits,
-in arrival order, at most 1 second in a queue twice as long as its class's limit. An admitted read has 20
+in arrival order, at most 1 second in a queue twice as long as its class's limit; a request the
+combined cap alone holds up waits ahead of the other class's later arrivals, so a weight-two
+write is not starved by the reads behind it. An admitted read has 20
 seconds to answer, and the four file version downloads 5 minutes; a write has no deadline and,
 once admitted, runs to completion. Every wait for a database connection is bounded too, at 3
 seconds for a request's. The document and delivery websockets are neither admitted nor bounded.
