@@ -248,7 +248,10 @@ func TestIssueRepoWalkStopsAtTheDepthCap(t *testing.T) {
 		t.Fatalf("set statement_timeout: %v", err)
 	}
 	started := time.Now()
-	rows, err := tx.Query(ctx, `select i.key, `+issueRepoColumns+` from issues i `+issueRepoLateral+` where i.project_key = 'DEEP'`)
+	rows, err := tx.Query(ctx, `
+		with recursive subjects as (select i.key from issues i where i.project_key = 'DEEP'),
+		`+issueRepoTerms+`
+		select i.key, `+issueRepoColumns+` from issues i `+issueRepoJoin+` where i.project_key = 'DEEP'`)
 	if err != nil {
 		t.Fatalf("walk %d issues: %v", length, err)
 	}

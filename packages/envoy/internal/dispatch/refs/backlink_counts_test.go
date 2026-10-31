@@ -476,7 +476,7 @@ func TestBacklinkCountStatementReadsEveryArmThroughAnIndex(t *testing.T) {
 	}
 	defer connection.Release()
 
-	firstKeys := map[string]string{}
+	firstKeys := explaintest.NewIndexKeys(fixture.database.Pool)
 	prepared := 0
 	for _, toKind := range nodeKinds {
 		ids := viewBacklinkTargets(t, fixture.database.Pool, toKind)
@@ -513,8 +513,8 @@ func TestBacklinkCountStatementReadsEveryArmThroughAnIndex(t *testing.T) {
 						// A scan carrying no condition at all is the check above's to name.
 						continue
 					}
-					firstKey := indexFirstKey(t, fixture.database.Pool, firstKeys, scan.Index)
-					if !condNamesFirstKey(scan.Cond, firstKey) {
+					firstKey := firstKeys.FirstKey(t, scan.Index)
+					if !explaintest.CondNamesFirstKey(scan.Cond, firstKey) {
 						t.Errorf("the %s backlink count excluding %v reads %s under its %s plan on `%s`, which names nothing of that index's first key column `%s`:\n%s",
 							toKind, exclusions, scan, mode, scan.Cond, firstKey, plan)
 					}
@@ -522,50 +522,6 @@ func TestBacklinkCountStatementReadsEveryArmThroughAnIndex(t *testing.T) {
 			}
 		}
 	}
-}
-
-// indexFirstKey is the first key column of the index named index, as the index itself declares
-// it: a plain column reads `session_id`, and an expression index reads its expression,
-// `((ask_id)::text)`. Each index is read from the catalog once and kept in cache, since the
-// plans of the ten node kinds name the same indexes over and over.
-func indexFirstKey(t *testing.T, q Queryer, cache map[string]string, index string) string {
-	t.Helper()
-	if definition, ok := cache[index]; ok {
-		return definition
-	}
-	var definition string
-	statement := `select pg_get_indexdef(c.oid, 1, true) from pg_class c where c.relname = $1`
-	if err := q.QueryRow(context.Background(), statement, index).Scan(&definition); err != nil {
-		t.Fatalf("read the first key column of %s: %v", index, err)
-	}
-	cache[index] = definition
-	return definition
-}
-
-// indexKeyNoise matches what a first key column's definition writes that names no column: a
-// string literal, and the type a cast names.
-var indexKeyNoise = regexp.MustCompile(`'[^']*'|::"?[a-z_][a-z0-9_]*"?`)
-
-// indexKeyWord matches one lower-case identifier of a key definition or of a plan's Index Cond.
-// A keyword Postgres deparses is upper case and so matches nothing, and a word of a longer
-// identifier is not one of these: `parent` does not match inside `parent_key`.
-var indexKeyWord = regexp.MustCompile(`[a-z_][a-z0-9_]*`)
-
-// condNamesFirstKey reports whether cond, a scan's Index Cond, reads firstKey, its index's first
-// key column as indexFirstKey reads it. The two are compared by the identifiers of the key
-// rather than as strings, because the plan writes the same expression its own way: it qualifies
-// each column with the query's alias and spaces and casts as it likes, so the names are all the
-// two spellings share. Dropping the string literals and cast types of the key definition leaves
-// its columns and its lower-case function names, and one of those appearing as a whole word of
-// cond is the scan reading the key.
-func condNamesFirstKey(cond, firstKey string) bool {
-	words := indexKeyWord.FindAllString(cond, -1)
-	for _, identifier := range indexKeyWord.FindAllString(indexKeyNoise.ReplaceAllString(firstKey, " "), -1) {
-		if slices.Contains(words, identifier) {
-			return true
-		}
-	}
-	return false
 }
 
 // customPlan is the plan Postgres builds for statement knowing the values bound to it.

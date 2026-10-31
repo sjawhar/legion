@@ -751,7 +751,7 @@ func (s *server) productionApplies(runs []delivery.DeliveryRun, jobsByRun map[in
 
 // deliveryIssue is what the timeline reads of one issue a pull request names: its project, title,
 // priority, and effective components (qualified `<project>/<id>`, resolved as every issue read
-// resolves them: the nearest issue on its parent chain that chose, through issueComponentsLateral).
+// resolves them: the nearest issue on its parent chain that chose, through issueComponentsTerms).
 type deliveryIssue struct {
 	project    string
 	title      string
@@ -765,9 +765,11 @@ func (s *server) deliveryIssueFacts(ctx context.Context, keys []string) (map[str
 		return issues, nil
 	}
 	rows, err := s.deps.Store.Pool.Query(ctx, `
+		with recursive subjects as (select i.key from issues i where i.key = any($1)),
+		`+issueComponentsTerms+`
 		select i.key, i.project_key, i.title, i.priority, coalesce(comp.ids, '{}'::text[])
 		from issues i
-		`+issueComponentsLateral+`
+		`+issueComponentsJoin+`
 		where i.key = any($1)
 	`, keys)
 	if err != nil {

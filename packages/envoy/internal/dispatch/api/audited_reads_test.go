@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
 	"slices"
 	"testing"
 
@@ -103,13 +102,14 @@ func TestTheAuditedReadsSearchTheirIndex(t *testing.T) {
 		t.Fatalf("acquire a connection for the plans: %v", err)
 	}
 	defer connection.Release()
+	firstKeys := explaintest.NewIndexKeys(database.Pool)
 	for number, read := range auditedReads {
 		t.Run(read.name, func(t *testing.T) {
 			plan := auditedReadPlan(t, ctx, connection, fmt.Sprintf("audited_read_%d", number), read)
 			if explaintest.SeqScansRelation(t, plan, read.relation) {
 				t.Fatalf("%s scans %s sequentially; want %s:\n%s", read.name, read.relation, read.index, plan)
 			}
-			firstKey := auditedIndexFirstKey(t, ctx, database, read.index)
+			firstKey := firstKeys.FirstKey(t, read.index)
 			for _, scan := range explaintest.IndexScans(t, plan) {
 				if scan.Index != read.index {
 					continue
@@ -117,7 +117,7 @@ func TestTheAuditedReadsSearchTheirIndex(t *testing.T) {
 				if scan.Cond == "" {
 					t.Fatalf("%s reads all of %s, under no index condition:\n%s", read.name, read.index, plan)
 				}
-				if !condNamesIndexKey(scan.Cond, firstKey) {
+				if !explaintest.CondNamesFirstKey(scan.Cond, firstKey) {
 					t.Fatalf("%s reads %s on `%s`, which names nothing of its first key column `%s`:\n%s",
 						read.name, read.index, scan.Cond, firstKey, plan)
 				}
@@ -170,38 +170,6 @@ func auditedReadPlan(t *testing.T, ctx context.Context, connection *pgxpool.Conn
 		t.Fatalf("explain answered %d plans; want one:\n%s", len(plans), raw)
 	}
 	return plans[0].Plan
-}
-
-// auditedIndexFirstKey is the first key column of the index named index, as the index itself
-// declares it, which is the one column an index scan narrows on
-// (refs.TestBacklinkCountStatementReadsEveryArmThroughAnIndex reads it the same way).
-func auditedIndexFirstKey(t *testing.T, ctx context.Context, database *store.Store, index string) string {
-	t.Helper()
-	var definition string
-	statement := `select pg_get_indexdef(c.oid, 1, true) from pg_class c where c.relname = $1`
-	if err := database.Pool.QueryRow(ctx, statement, index).Scan(&definition); err != nil {
-		t.Fatalf("read the first key column of %s: %v", index, err)
-	}
-	return definition
-}
-
-// indexKeyWord matches one lower-case identifier of a key definition or of a plan's Index Cond.
-// A keyword Postgres deparses is upper case and so matches nothing, and a word of a longer
-// identifier is not one of these: `issue` does not match inside `issue_key`.
-var indexKeyWord = regexp.MustCompile(`[a-z_][a-z0-9_]*`)
-
-// condNamesIndexKey reports whether cond, a scan's Index Cond, reads firstKey, its index's first
-// key column. The two are compared by the identifiers of the key rather than as strings: the
-// plan qualifies each column with the query's alias and writes casts as it likes, so the names
-// are all the two spellings share.
-func condNamesIndexKey(cond, firstKey string) bool {
-	words := indexKeyWord.FindAllString(cond, -1)
-	for _, identifier := range indexKeyWord.FindAllString(firstKey, -1) {
-		if slices.Contains(words, identifier) {
-			return true
-		}
-	}
-	return false
 }
 
 // Migration 0153 drops asks_open_artifact, so no schema this build migrates carries it. The plan

@@ -1,17 +1,23 @@
-// Package explaintest reads an `EXPLAIN (FORMAT JSON)` plan tree for the three things every
+// Package explaintest reads an `EXPLAIN (FORMAT JSON)` plan tree for the things every
 // index-pinning test in this module asks it: whether a named relation is sequentially scanned
 // anywhere in the plan, whether any scan in it reads a relation without an index condition, and
-// which index each index scan reads through, under which condition. dispatch/api, dispatch/refs
-// and broker/requests each pin an index's reach with one of these checks, so they live here once
-// rather than as a second (or third) hand copy of the same recursive walk; it is an ordinary
-// package rather than a _test.go file because Go cannot share test-only code across packages
-// (see internal/stacktest's identical reasoning).
+// which index each index scan reads through, under which condition. It also answers, from the
+// catalog, the first key column of a named index and whether a scan's condition names it, which
+// is what tells a read served by an index from one that reads the whole index and filters it.
+// dispatch/api, dispatch/refs and broker/requests each pin an index's reach with these checks,
+// so they live here once rather than as a second (or third) hand copy of the same recursive
+// walk; it is an ordinary package rather than a _test.go file because Go cannot share test-only
+// code across packages (see internal/stacktest's identical reasoning).
 package explaintest
 
 import (
+	"context"
 	"encoding/json"
+	"regexp"
 	"slices"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // indexScanTypes is every plan node that reads a relation through an index, and so every node
@@ -127,4 +133,66 @@ func describeScan(nodeType, relation, index string) string {
 		description += " using " + index
 	}
 	return description
+}
+
+// Queryer is the one call the catalog reads below need, shared by a pool and a transaction.
+type Queryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// IndexKeys reads the first key column of each index a plan names, which is the one column an
+// index scan narrows on: a scan whose condition names a column its index does not lead with
+// reads the whole index and filters it, and carries an "Index Cond" all the same. Each index is
+// read from the catalog once and kept, since one test reads the same indexes over and over.
+type IndexKeys struct {
+	queryer Queryer
+	keys    map[string]string
+}
+
+// NewIndexKeys reads its indexes through queryer.
+func NewIndexKeys(queryer Queryer) *IndexKeys {
+	return &IndexKeys{queryer: queryer, keys: map[string]string{}}
+}
+
+// FirstKey is the first key column of the index named index, as the index itself declares it: a
+// plain column reads `session_id`, and an expression index reads its expression,
+// `((ask_id)::text)`.
+func (k *IndexKeys) FirstKey(t testing.TB, index string) string {
+	t.Helper()
+	if definition, ok := k.keys[index]; ok {
+		return definition
+	}
+	var definition string
+	statement := `select pg_get_indexdef(c.oid, 1, true) from pg_class c where c.relname = $1`
+	if err := k.queryer.QueryRow(context.Background(), statement, index).Scan(&definition); err != nil {
+		t.Fatalf("read the first key column of %s: %v", index, err)
+	}
+	k.keys[index] = definition
+	return definition
+}
+
+// indexKeyNoise matches what a first key column's definition writes that names no column: a
+// string literal, and the type a cast names.
+var indexKeyNoise = regexp.MustCompile(`'[^']*'|::"?[a-z_][a-z0-9_]*"?`)
+
+// indexKeyWord matches one lower-case identifier of a key definition or of a plan's Index Cond.
+// A keyword Postgres deparses is upper case and so matches nothing, and a word of a longer
+// identifier is not one of these: `parent` does not match inside `parent_key`.
+var indexKeyWord = regexp.MustCompile(`[a-z_][a-z0-9_]*`)
+
+// CondNamesFirstKey reports whether cond, a scan's Index Cond, reads firstKey, its index's first
+// key column as FirstKey reads it. The two are compared by the identifiers of the key rather
+// than as strings, because the plan writes the same expression its own way: it qualifies each
+// column with the query's alias and spaces and casts as it likes, so the names are all the two
+// spellings share. Dropping the string literals and cast types of the key definition leaves its
+// columns and its lower-case function names, and one of those appearing as a whole word of cond
+// is the scan reading the key.
+func CondNamesFirstKey(cond, firstKey string) bool {
+	words := indexKeyWord.FindAllString(cond, -1)
+	for _, identifier := range indexKeyWord.FindAllString(indexKeyNoise.ReplaceAllString(firstKey, " "), -1) {
+		if slices.Contains(words, identifier) {
+			return true
+		}
+	}
+	return false
 }

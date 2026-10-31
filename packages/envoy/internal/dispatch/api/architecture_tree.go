@@ -146,12 +146,14 @@ type treeIssue struct {
 // effective attachment resolved, in the issue list's order (lifecycle status, then rank).
 func loadTreeIssues(ctx context.Context, q queryer, project string) ([]treeIssue, error) {
 	rows, err := q.Query(ctx, `
+		with recursive subjects as (select i.key from issues i where i.project_key = $1),
+		`+issueComponentsTerms+`
 		select i.key, i.title, i.status, i.priority, i.parent_key, i.updated_at,
 		       coalesce((select json_agg(json_build_object('url', l.url, 'kind', l.kind) order by l.url)
 		                 from issue_external_links l where l.issue_key = i.key), '[]'),
 		       `+issueComponentsColumns+`
 		from issues i
-		`+issueComponentsLateral+`
+		`+issueComponentsJoin+`
 		where i.project_key = $1
 		order by `+issueStatusCase+`, i.rank asc, i.created_at asc
 	`, project)
