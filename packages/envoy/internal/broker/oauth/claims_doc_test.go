@@ -171,11 +171,8 @@ func documentedClaims(t *testing.T) []string {
 }
 
 // claimListNames reads the claim names from the first bullet list under claimsDocHeading in doc, in
-// the list's order. The list may be tight or loose: its items may follow one another directly or be
-// separated by blank lines, as the guide's semantic-line-break layout writes every list, and a
-// wrapped item continues on the indented lines under it. The list ends at the first line that is
-// not one of those: a blank line ends it only when the next non-blank line is neither a bullet nor
-// an indented continuation, so a later list further down the section is never read as this one.
+// the list's order. The list runs through the blank lines between its items and the indented lines
+// of a wrapped item, and ends at the prose under it.
 func claimListNames(doc string) ([]string, error) {
 	lines := strings.Split(doc, "\n")
 	heading := slices.Index(lines, claimsDocHeading)
@@ -188,20 +185,8 @@ func claimListNames(doc string) ([]string, error) {
 	// The list is the section's first one: the prose lines between the heading and it are skipped.
 	for i := heading + 1; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], " ")
-		if len(claims) > 0 {
-			if line == "" {
-				next := i + 1
-				for next < len(lines) && strings.TrimSpace(lines[next]) == "" {
-					next++
-				}
-				if next < len(lines) && (strings.HasPrefix(lines[next], "- ") || strings.HasPrefix(lines[next], " ")) {
-					continue
-				}
-				break
-			}
-			if strings.HasPrefix(line, " ") {
-				continue
-			}
+		if len(claims) > 0 && (line == "" || strings.HasPrefix(line, " ")) {
+			continue
 		}
 		if !strings.HasPrefix(line, "- ") {
 			if len(claims) > 0 {

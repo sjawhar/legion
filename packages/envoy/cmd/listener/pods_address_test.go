@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -192,7 +193,7 @@ func TestSubscribeStampsAPortRegistrationWithTheAcceptingPod(t *testing.T) {
 		t.Fatalf("accepted_host after a heartbeat through pod b = %q, want pod-b", got)
 	}
 	recorder := httptest.NewRecorder()
-	roleSetHandler(podA, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+	roleSetHandler(podA, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 		strings.NewReader(`{"session_id":"ses_port","role":"stamped"}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("role set through pod a: status %d %s, want 200", recorder.Code, recorder.Body.String())

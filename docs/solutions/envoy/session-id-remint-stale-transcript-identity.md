@@ -171,3 +171,12 @@ Peers who saved the old id still cannot reach the session after a rewind (old to
 old registration expired). The notice mitigates operationally via re-announcement; a real
 fix is server-side (grace-period dual subscription vs listener aliasing) and needs a design
 decision.
+
+A held role follows the re-minted id, but not unconditionally. The new id's claim names the
+retired one as its predecessor, and since INFRA-404 the listener moves the role off that
+predecessor only when the predecessor has no live registry entry, when its live entry carries
+this client instance's own id (one Oh My Pi Envoy extension instance, one Claude Code
+channel-server process), or when either side carries no client instance id. So a fork or handoff
+inside one process keeps its role, while a claim against a session another process has resumed
+and registered is refused naming that holder. A refused session keeps running and stays
+registered, without the role.

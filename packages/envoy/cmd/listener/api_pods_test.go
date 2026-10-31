@@ -40,7 +40,7 @@ func TestSendAndRoleSetThroughAPodWhoseCacheHasNotSeenTheRegistrationAnswer200(t
 			t.Fatalf("register ses_unseen through the other pod: %v", err)
 		}
 		recorder := httptest.NewRecorder()
-		roleSetHandler(observer, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+		roleSetHandler(observer, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 			strings.NewReader(`{"session_id":"ses_unseen","role":"unseen"}`)))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("role set for a session this pod's cache has not seen: status %d %s, want 200", recorder.Code, recorder.Body.String())
@@ -71,7 +71,7 @@ func TestARoleSetOnAPodWhoseCacheTrailsKeepsTheNewerHost(t *testing.T) {
 	}
 	register("example-host-b")
 	recorder := httptest.NewRecorder()
-	roleSetHandler(observer, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+	roleSetHandler(observer, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 		strings.NewReader(`{"session_id":"ses_moved","role":"mover"}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("role set on the trailing pod: status %d %s, want 200", recorder.Code, recorder.Body.String())
@@ -83,6 +83,70 @@ func TestARoleSetOnAPodWhoseCacheTrailsKeepsTheNewerHost(t *testing.T) {
 	if got.Host != "example-host-b" || !got.SelfSubscribed {
 		t.Fatalf("stored registration after the role set = %+v, want host example-host-b, self-subscribed", got)
 	}
+}
+
+// A soft claim is weighed on the client instance its registration carries - one Oh My Pi Envoy
+// extension instance, one Claude Code channel-server process - and that id names the client, never
+// the listener pod that took the registration. Every pod of the machine serves `/v1`, so a session
+// that registers and claims through the other pod after a take-over must be answered exactly as the
+// pod that registered its predecessor would have answered: the same conversation's fork takes the
+// role, another client instance is refused. The claiming pod's cache has seen neither registration,
+// so both are read from the bucket the pods share.
+func TestASoftClaimThroughAnotherPodWeighsTheClientInstanceNotThePod(t *testing.T) {
+	const (
+		forkingInstance = "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"
+		otherInstance   = "9b8a7c6d5e4f3a2b9b8a7c6d5e4f3a2b"
+	)
+	// ses_pred registers and claims role through one pod; ses_child, belonging to
+	// claimantInstance, then registers and soft-claims role through the other.
+	claimThroughTheOtherPod := func(t *testing.T, role, claimantInstance string) (predecessorPod, claimPod *listenerDeps, recorder *httptest.ResponseRecorder) {
+		t.Helper()
+		predecessorPod, claimPod = trailingListeners(t)
+		register := func(d *listenerDeps, sessionID, instanceID string) {
+			t.Helper()
+			entry := session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true, ClientInstanceID: instanceID}
+			if err := d.sessions.Put(sessionID, entry); err != nil {
+				t.Fatalf("register %s through its own pod: %v", sessionID, err)
+			}
+		}
+		claim := func(d *listenerDeps, body string) *httptest.ResponseRecorder {
+			t.Helper()
+			recorder := httptest.NewRecorder()
+			roleSetHandler(d, "test-machine", logging.New("test")).ServeHTTP(recorder,
+				httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(body)))
+			return recorder
+		}
+		register(predecessorPod, "ses_pred", forkingInstance)
+		if seed := claim(predecessorPod, `{"session_id":"ses_pred","role":"`+role+`"}`); seed.Code != http.StatusOK {
+			t.Fatalf("ses_pred claims %s through its own pod: status %d %s", role, seed.Code, seed.Body.String())
+		}
+		register(claimPod, "ses_child", claimantInstance)
+		if _, err := claimPod.sessions.Get("ses_pred"); err == nil {
+			t.Fatal("the claiming pod's cache already holds the predecessor, so the claim never has to read the bucket")
+		}
+		return predecessorPod, claimPod, claim(claimPod,
+			`{"session_id":"ses_child","role":"`+role+`","soft":true,"previous_session_id":"ses_pred"}`)
+	}
+
+	t.Run("the predecessor's own client instance takes the role through the other pod", func(t *testing.T) {
+		predecessorPod, _, recorder := claimThroughTheOtherPod(t, "forked", forkingInstance)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("soft claim of the same client instance's role through the other pod: status %d %s, want 200", recorder.Code, recorder.Body.String())
+		}
+		if holder, err := predecessorPod.registry.RoleHolder("forked"); err != nil || holder != "ses_child" {
+			t.Fatalf("forked's holder after the claim = %q, %v; want ses_child", holder, err)
+		}
+	})
+
+	t.Run("another client instance is refused through the other pod", func(t *testing.T) {
+		predecessorPod, _, recorder := claimThroughTheOtherPod(t, "contested", otherInstance)
+		if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"holder":"ses_pred"`) {
+			t.Fatalf("soft claim naming a live predecessor of another client instance through the other pod: status %d %s, want 409 naming ses_pred", recorder.Code, recorder.Body.String())
+		}
+		if holder, err := predecessorPod.registry.RoleHolder("contested"); err != nil || holder != "ses_pred" {
+			t.Fatalf("contested's holder after the refused claim = %q, %v; want ses_pred", holder, err)
+		}
+	})
 }
 
 // racedSessionKV is a session bucket another writer races on every Create and Update, so each
@@ -124,7 +188,7 @@ func TestARoleSetWhoseRegistrationWriteLosesEveryRaceAnswers503(t *testing.T) {
 	}
 	raceSessionWrites(t, observer.sessions)
 	recorder := httptest.NewRecorder()
-	roleSetHandler(observer, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+	roleSetHandler(observer, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 		strings.NewReader(`{"session_id":"ses_raced","role":"raced"}`)))
 	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") == "" {
 		t.Fatalf("role set while every registration write races: status %d, Retry-After %q, %s; want 503 with Retry-After",
@@ -197,7 +261,7 @@ func TestAHeartbeatAndARoleSetKeepFieldsThisBuildDoesNotKnow(t *testing.T) {
 	kept("after a heartbeat")
 
 	recorder = httptest.NewRecorder()
-	roleSetHandler(d, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+	roleSetHandler(d, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 		strings.NewReader(`{"session_id":"ses_newer_build","role":"keeper"}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("role set: status %d %s, want 200", recorder.Code, recorder.Body.String())
