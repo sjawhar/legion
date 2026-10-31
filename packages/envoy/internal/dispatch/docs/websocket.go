@@ -64,11 +64,9 @@ type servicePersistenceAdapter struct {
 }
 
 // LoadDoc reads the durable state a room loads and hands ygo none of it: the state goes on the
-// load's record (roomLoad.read), and the room's own load hook (onLoadDocument) decodes it into the
-// room's document, once, under the server's pending cap and without ygo's format cleanup, and
-// fails the room for a history that does not decode (bootstrapLoadedState). ygo, given no bytes,
-// decodes nothing itself. A preload (takePreload), which the socket's admission check decoded,
-// goes on the record as a read would.
+// load's record (roomLoad.read), and the room's own load hook decodes it (bootstrapLoadedState,
+// whose comment states how). ygo, given no bytes, decodes nothing itself. A preload
+// (takePreload), which the socket's admission check decoded, goes on the record as a read would.
 //
 // It records the load before it reads, and what it read after: the room's load (onLoadDocument)
 // takes the record next on the same goroutine (ygo's loadRoom) to start the instance's roomHold
@@ -166,11 +164,11 @@ func validateUpdate(update []byte, maxPending int) error {
 // decodeStoredState applies state, a stored history, one of its rows or the state a room or cold
 // read loads, to doc, and is the one way the service decodes stored state, so every refusal of it
 // reads the same. ygo's apply names a failure as ErrInvalidUpdate followed by the decoder's reason
-// ("crdt: invalid update: encoding: unexpected end of input"). v1.54.1-sami.1, the fork release
-// this module pins (go.mod), regressed on that: where its reader of an update's structs fails it
-// reports the sentinel wrapped in itself ("crdt: invalid update: crdt: invalid update") and no
-// reason, which invalidOnce returns as the sentinel alone so the line a refusal logs states it
-// once. The fix ships in the fork's next release
+// ("crdt: invalid update: encoding: unexpected end of input"). The fork release this module pins
+// (go.mod) regressed on that: where its reader of an update's structs fails it reports the
+// sentinel wrapped in itself ("crdt: invalid update: crdt: invalid update") and no reason, which
+// invalidOnce returns as the sentinel alone so the line a refusal logs states it once. The fix
+// ships in the fork's next release
 // (dispatch://INFRA-593/artifact/ygo-truncated-reason-patch); once the pinned tag carries it,
 // delete invalidOnce, doubledInvalidUpdate and the reasonless cases of decode_reason_test.go and
 // fold_reason_test.go, which then fail saying nothing reasonless is left.
@@ -473,13 +471,11 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 
 // onLoadDocument is the room's load hook, which ygo runs once it has made room's document and set
 // its pending cap, and before it hands the document to anyone. It decodes the state the room's
-// load read (servicePersistenceAdapter.LoadDoc) into doc - the one decode of that state on the
-// room's load, under the server's pending cap and without ygo's format cleanup
-// (bootstrapLoadedState) - and a state that does not decode fails the room (failRoom) with the
-// decode's error, which it returns to ygo, so the room is not published and its next access loads
-// it afresh. Then it records what the room starts from: its issue's state, the settlement it owes,
-// its ask blocks, its replica and its instance, and the update observer that classifies and
-// credits every update the room commits.
+// load read (servicePersistenceAdapter.LoadDoc) into doc (bootstrapLoadedState), and a state that
+// does not decode fails the room (failRoom) with the decode's error, which it returns to ygo, so
+// the room is not published and its next access loads it afresh. Then it records what the room
+// starts from: its issue's state, the settlement it owes, its ask blocks, its replica and its
+// instance, and the update observer that classifies and credits every update the room commits.
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
 	// The state is taken off the load's record first, so a load refused below leaves none held.
 	stored := s.takeLoadedState(room)
@@ -511,9 +507,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	// Decoded before anything reads or observes the document. ygo set its pending cap to the
-	// service's own (Service.maxPendingItems) before this hook, so this refuses what
-	// validateUpdate refuses at that cap.
+	// Decoded before anything reads or observes the document (bootstrapLoadedState).
 	if err := s.bootstrapLoadedState(room, doc, stored); err != nil {
 		s.failRoom(room, err)
 		return err

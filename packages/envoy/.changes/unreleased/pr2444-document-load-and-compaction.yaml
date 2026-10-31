@@ -24,7 +24,7 @@ body: |-
   holds within about 75 minutes of the write (the 2-minute tail, the 15-minute age rule, the hourly
   sweep) rather than as a room closes, as the server shuts down and daily. ygo's `CompactEvery`
   setting and the outbox's daily compaction are removed. A stored history that does not decode is
-  refused naming ygo's reason once; with the pinned ygo, `v1.54.1-sami.1`, a truncated stored
+  refused naming ygo's reason once; with the pinned ygo, `v1.54.1-sami.3`, a truncated stored
   history is usually refused as `crdt: invalid update` without the decoder's reason, until the next
   fork release.
 custom:
