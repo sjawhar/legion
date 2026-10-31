@@ -1,7 +1,0 @@
-kind: Added
-body: |-
-    `WriteAdvice.superseded_approval` (`{approved_version, version, approved_by}`): the approval a
-    document write superseded, set only on the write whose version replaced the approved one.
-time: 2026-10-30T12:00:00.000000000Z
-custom:
-    Issue: legion-approved-spec-advice
