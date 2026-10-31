@@ -201,3 +201,49 @@ test("a pod record names its worker slot, and a record with no slot shows no slo
     getCredentialRecord.mockRestore();
   }
 });
+
+// A secret request is decided on the secrets broker's own page, so the record read names it and
+// this page hands the browser over rather than offering a decision Dispatch cannot make. A broker
+// older than that page names none, which the tests above cover: they all read a record with no
+// approve_url and still find the facts and the buttons.
+test("a record naming its page on the secrets broker sends the browser there", async () => {
+  const page = "https://secrets.internal.example/approve/req-1";
+  const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(
+    secretRecord({ approve_url: page })
+  );
+  const replace = spyOn(window.location, "replace").mockImplementation(() => {});
+
+  try {
+    renderPage();
+
+    const link = await screen.findByRole("link", { name: "Open its page there" });
+    expect(link.getAttribute("href")).toBe(page);
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(page));
+  } finally {
+    cleanup();
+    replace.mockRestore();
+    getCredentialRecord.mockRestore();
+  }
+});
+
+// Dispatch relays the broker's body as it stands, so approve_url is the broker's word. A value
+// that is not an absolute http(s) URL is ignored rather than followed, and the page keeps working
+// as it did.
+test("a record whose page is not an absolute http(s) URL is not followed", async () => {
+  const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(
+    secretRecord({ approve_url: "javascript:alert(1)" })
+  );
+  const replace = spyOn(window.location, "replace").mockImplementation(() => {});
+
+  try {
+    renderPage();
+
+    expect(await screen.findByText("ANTHROPIC_API_KEY")).toBeDefined();
+    expect(replace).not.toHaveBeenCalled();
+  } finally {
+    cleanup();
+    replace.mockRestore();
+    getCredentialRecord.mockRestore();
+  }
+});

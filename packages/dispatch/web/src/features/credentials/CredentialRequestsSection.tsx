@@ -12,25 +12,10 @@ import {
 } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
 import { Timestamp } from "../refs/Timestamp";
+import { brokerPage } from "./brokerPage";
 import { CredentialSessionLines } from "./CredentialSessionLines";
 import type { CredentialRequests } from "./pending";
 import { credentialSessionNamesAnyone } from "./session";
-
-/** A secret request's page on the secrets broker, where a person signed in to the broker decides
- *  it: the row's `approve_url` when it is an absolute `http:` or `https:` URL, else null. Anything
- *  else, such as a `javascript:` URL or a relative path, is treated as absent, since the row would
- *  otherwise run or open whatever the relayed body named. */
-function brokerPage(row: CredentialPendingRow): string | null {
-  if (row.approve_url === undefined) {
-    return null;
-  }
-  try {
-    const url = new URL(row.approve_url);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
-  } catch {
-    return null;
-  }
-}
 
 const rowLinkClass = `flex flex-wrap items-center gap-2 rounded-lg text-sm outline-none focus-visible:ring-2 ${focusVisibleRing} ${linkText} ${linkHoverText}`;
 
@@ -56,7 +41,7 @@ function PendingRowLine({ row }: { row: CredentialPendingRow }): ReactNode {
       </Link>
     );
   }
-  const page = brokerPage(row);
+  const page = brokerPage(row.approve_url);
   if (page === null) {
     return (
       <div className="flex flex-wrap items-center gap-2 text-sm">
