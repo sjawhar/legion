@@ -945,12 +945,6 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		return
 	}
 	mode, modeErr := envelopeDeliveryMode(item)
-	resolve := cfg.deliverer.DeliverWithResultForEntry
-	if message.mode == durableDelivery {
-		resolve = func(item contracts.Envelope, interest store.Interest, entry *session.SessionEntry) (session.DeliveryResult, error) {
-			return cfg.deliverer.Resolve(item, interest, entry, message.storedSeq())
-		}
-	}
 
 	var failed bool
 	var deadDeliveries int
@@ -961,7 +955,10 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			continue
 		}
 		deliveryTimer := metrics.NewTimer()
-		if target != nil && target.ConsumerRelaysStored(item.Topic, message.storedSeq()) {
+		// One resolution per recipient decides every outcome below, this path's push included: it
+		// reads the entry the judgement above returned and makes no call of its own.
+		delivery, err := cfg.deliverer.Resolve(item, interest, target, item.Topic, message.storedSeq())
+		if err == nil && delivery.Relayed {
 			// The session's own consumer holds this message and the relay of that consumer pushes
 			// it (sessionRelays.pushUntilAccepted), which is also what records its dedupe key, on
 			// the port's 204. Nothing is recorded here: an attempt or dedupe record this path
@@ -974,13 +971,22 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			})
 			continue
 		}
+		// The attempt is recorded before the push is made or handed over, so another copy of the
+		// same event read while it is in flight is a dedupe skip rather than a second push.
 		cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
-		delivery, err := resolve(item, interest, target)
 		if err == nil && delivery.Push {
-			if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, settle: message.settle, storedSeq: message.storedSeq(), timer: deliveryTimer}) {
-				failed = true
+			if message.mode == durableDelivery {
+				// The durable path's push waits behind the session's earlier messages in its own
+				// worker, and the message is acknowledged once that push ends.
+				if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, settle: message.settle, storedSeq: message.storedSeq(), timer: deliveryTimer}) {
+					failed = true
+				}
+				continue
 			}
-			continue
+			// The live and core paths push here, in the handler, as
+			// session.Deliverer.DeliverWithResultForEntry pushes for them elsewhere: their
+			// message is sent once to whoever is there, with nothing to acknowledge or retry.
+			err = cfg.deliverer.Push(context.Background(), item, interest.SessionID, delivery.Entry)
 		}
 		if err != nil {
 			retryable := shouldNAKFanoutDelivery(target != nil, err)

@@ -504,7 +504,8 @@ var ErrRoleViewNotReady = errors.New("the role claim view is not complete")
 // the role's claim names it; its interest record's topics say nothing about that. It answers only
 // while the view is complete (kvwatch.Watcher.Complete): the current watcher's first scan
 // delivered every claim, after any reset, and the watcher still runs. Otherwise it returns
-// ErrRoleViewNotReady, wrapped. A first scan the idle timer ended is scanned again
+// ErrRoleViewNotReady, wrapped, with the reason roleViewGeneration gives, the one test of the
+// view's state, which RoleViewErr makes too. A first scan the idle timer ended is scanned again
 // (newRoleWatcher), so the view becomes complete without a Rewatch.
 //
 // The view is read between two readings of the watcher's generation, and answers only when the
@@ -514,15 +515,9 @@ var ErrRoleViewNotReady = errors.New("the role claim view is not complete")
 // every claim present at a revision no older than the scan's, so the answer is no older than
 // that complete scan.
 func (r *Registry) RolesHeldBy(sessionID string) ([]string, error) {
-	if r.roleWatcher == nil {
-		return nil, fmt.Errorf("%w: no watcher follows the role claims", ErrRoleViewNotReady)
-	}
-	if err := r.roleWatcher.Err(); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrRoleViewNotReady, err)
-	}
-	generation, complete := r.roleWatcher.Complete()
-	if !complete {
-		return nil, fmt.Errorf("%w: its watcher has not delivered every claim", ErrRoleViewNotReady)
+	generation, err := r.roleViewGeneration()
+	if err != nil {
+		return nil, err
 	}
 	roles := []string{}
 	r.holdersMu.RLock()
@@ -539,18 +534,59 @@ func (r *Registry) RolesHeldBy(sessionID string) ([]string, error) {
 	return roles, nil
 }
 
-// WaitForCacheReady blocks until both watchers are ready (kvwatch.Watcher.Ready), each having ended
-// its first scan or failed to start, or until ctx is done. After complete scans, Match sees every
-// existing subscription in the bucket and RolesHeldBy every claim; a role claim scan nats.go's idle
-// timer ended leaves RolesHeldBy refusing (ErrRoleViewNotReady) until its rescan completes. Callers
-// bound ctx: a watcher that fails to start releases it too, and the caller then serves the
-// write-through path while /healthz exposes the unavailable registry. Its error names the cache
-// that was not ready.
+// roleViewGeneration is the one test of whether the role claim view can answer a read: nil and the
+// generation of the watcher the answer would be read under, or the wrapped ErrRoleViewNotReady
+// naming why no read is answered. RolesHeldBy and RoleViewErr both come here, so what a route
+// reads and what /healthz reports of the view are the same state, read the same way, and cannot
+// disagree. It makes no bucket call.
+func (r *Registry) roleViewGeneration() (uint64, error) {
+	if r.roleWatcher == nil {
+		return 0, fmt.Errorf("%w: no watcher follows the role claims", ErrRoleViewNotReady)
+	}
+	if err := r.roleWatcher.Err(); err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrRoleViewNotReady, err)
+	}
+	generation, complete := r.roleWatcher.Complete()
+	if !complete {
+		return 0, fmt.Errorf("%w: its watcher has not delivered every claim", ErrRoleViewNotReady)
+	}
+	return generation, nil
+}
+
+// RoleViewErr is nil while the role claim view would answer a read, and otherwise the wrapped
+// ErrRoleViewNotReady that RolesHeldBy refuses that read with, naming the same reason: both read
+// the view's state through roleViewGeneration, so a report that the view answers and a read it
+// refuses can never disagree. It makes no bucket call, so a caller reports the view without
+// waiting on the bus.
+//
+// /healthz reports it as a degraded dependency, and it is deliberately not part of Ping or
+// WatchErr: those feed the listener's self-health monitor, which restarts the listener over a
+// terminal failure that survives its recovery attempts, and no rebuild completes a scan the
+// bucket keeps timing out on. What does complete it is the role claim watcher's own rescan
+// (newRoleWatcher), which needs nothing from the listener.
+func (r *Registry) RoleViewErr() error {
+	_, err := r.roleViewGeneration()
+	return err
+}
+
+// WaitForCacheReady blocks until both views answer, or until ctx is done. The interest watcher is
+// waited for as ready (kvwatch.Watcher.WaitReady), having ended its first scan or failed to
+// start, and the role claim watcher as complete (kvwatch.Watcher.WaitComplete): the interest view
+// answers from whatever its cache holds, so a partial scan still serves, while the role claim
+// view refuses every read until its scan has delivered every claim (ErrRoleViewNotReady), so
+// readiness alone would let a caller serve a view that answers nothing. After it returns nil,
+// Match sees every existing subscription in the bucket and RolesHeldBy answers. A role claim scan
+// nats.go's idle timer ended releases readiness without completing, and the role claim watcher
+// scans the bucket again after it (newRoleWatcher's kvwatch.WithRescan), so this wait ends on
+// that rescan rather than hanging. Callers bound ctx: a watcher that fails to start releases it
+// too, and so does one that can complete no scan at all, through its terminal error or its stop;
+// the caller then serves the write-through path while /healthz exposes the unavailable registry.
+// Its error names the cache that did not answer.
 func (r *Registry) WaitForCacheReady(ctx context.Context) error {
 	if err := r.watcher.WaitReady(ctx); err != nil {
 		return fmt.Errorf("interest cache: %w", err)
 	}
-	if err := r.roleWatcher.WaitReady(ctx); err != nil {
+	if err := r.roleWatcher.WaitComplete(ctx); err != nil {
 		return fmt.Errorf("role claim cache: %w", err)
 	}
 	return nil

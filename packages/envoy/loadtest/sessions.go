@@ -224,6 +224,24 @@ func (r *registrar) register(ctx context.Context, i int) error {
 	return nil
 }
 
+// registrationFields is session s's registration with the listener: its directory, title and
+// the topics of the issues it watches. registerSessions adds a delivery field under consumer
+// delivery (registrar.register).
+func (st *step) registrationFields(s session) map[string]any {
+	topics := []string{}
+	for _, w := range s.watched {
+		topics = append(topics, st.issueTopic(w))
+	}
+	return map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
+		"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": []string{}}
+}
+
+// registrationBody is registrationFields encoded, as the listener receives it.
+func (st *step) registrationBody(s session) []byte {
+	b, _ := json.Marshal(st.registrationFields(s))
+	return b
+}
+
 // registerSessions registers every session, 16 at a time. Under consumer delivery each body asks
 // for consumer delivery with the epoch of the session's NATS connection and, once the session has
 // one, its resume point (relaySessions.delivery).
@@ -231,12 +249,7 @@ func (st *step) registerSessions(ctx context.Context, ns *natsSessions) *registr
 	reg := &registrar{url: st.cfg.ep.listener, token: st.cfg.ep.listenerToken, client: &http.Client{Timeout: 10 * time.Second},
 		bodies: make([]map[string]any, len(st.sessions)), relay: ns.relay}
 	for i, s := range st.sessions {
-		topics := []string{}
-		for _, w := range s.watched {
-			topics = append(topics, st.issueTopic(w))
-		}
-		reg.bodies[i] = map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
-			"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": []string{}}
+		reg.bodies[i] = st.registrationFields(s)
 	}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 16)

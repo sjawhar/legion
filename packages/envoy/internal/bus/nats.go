@@ -539,6 +539,13 @@ func (c *Client) Connected() bool {
 	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
 }
 
+// currentConn is the client's connection now, read under its lock.
+func (c *Client) currentConn() *nats.Conn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Conn
+}
+
 // HookedConnectionEvents is how many connection events this client's reconnect hooks have run to
 // completion for: the count the last run that succeeded began at (rewatch). It is state about the
 // client's own hooks, for a test that must wait for them and for nothing else. A hook a caller
@@ -550,13 +557,6 @@ func (c *Client) HookedConnectionEvents() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.hookedEvents
-}
-
-// currentConn is the client's connection now, read under its lock.
-func (c *Client) currentConn() *nats.Conn {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.Conn
 }
 
 // RepairGrace is how long the reconnect hooks may be uncovered before a failed run of them is an

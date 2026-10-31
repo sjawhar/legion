@@ -612,6 +612,40 @@ describe("gaps", () => {
 
     expect(gaps).toEqual([]);
   });
+
+  // The listener starts the relay before it writes the registration's answer, and the relay's
+  // frames come over NATS apart from that HTTP answer, so the first frame from the new stream can
+  // arrive before the answer that names it. The replacement is still told, once.
+  test("a frame from another stream than the seeded resume's, before the answer, is told once", () => {
+    const { delivery, gaps } = setup({
+      state: { stream_id: "stream-old", subjects: { [AGENT]: { since: 2, after: 9 } } },
+    });
+
+    delivery.registration();
+    delivery.receive(relay({ seq: 1, streamID: "stream-new" }));
+    delivery.answered(
+      { mode: "consumer", subject: deliverSubject(SESSION), stream_id: "stream-new", gap: false },
+      [AGENT]
+    );
+    delivery.receive(relay({ seq: 2, streamID: "stream-new" }));
+
+    expect(gaps.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
+  });
+
+  test("a frame from the seeded resume's own stream, before the answer, tells nothing", () => {
+    const { delivery, gaps } = setup({
+      state: { stream_id: "stream-old", subjects: { [AGENT]: { since: 2, after: 9 } } },
+    });
+
+    delivery.registration();
+    delivery.receive(relay({ seq: 10, streamID: "stream-old" }));
+    delivery.answered(
+      { mode: "consumer", subject: deliverSubject(SESSION), stream_id: "stream-old", gap: false },
+      [AGENT]
+    );
+
+    expect(gaps).toEqual([]);
+  });
 });
 
 describe("the move from the core path to consumer delivery", () => {

@@ -112,7 +112,9 @@ func ResolveStoredAgentMessage(
 	storedSeq uint64,
 ) HandleAgentResult {
 	return handleAgentMessage(item, sessionID, machineID, interest, entry, func(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
-		return deliverer.Resolve(item, interest, entry, storedSeq)
+		// An agent message is stored on the subject it names as its topic, the session's own
+		// agent subject.
+		return deliverer.Resolve(item, interest, entry, item.Topic, storedSeq)
 	})
 }
 
