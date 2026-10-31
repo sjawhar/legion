@@ -3,6 +3,12 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [15.5.1] - 2026-10-31
+
+### Changed
+
+- The daemon's role prompts for every architect, every phase worker and the controller it launches say that, under Oh My Pi, the bash tool keeps one shell for the whole session, so a variable changed or unset in one command stays so for every later one. They say never to change or unset `DISPATCH_URL`, `DISPATCH_HOST`, `DISPATCH_SESSION_ID`, `DISPATCH_TOKEN_FILE` or `ENVOY_CONFIG_FILE` there, give the command that exports a lost `DISPATCH_URL` again from the session's start environment, and say that `Unable to connect` is the server, not these variables: wait and run the same command again. An architect that unset `DISPATCH_URL` while Dispatch restarted had Dispatch off for the rest of its session.
+
 ## [15.5.0] - 2026-10-31
 
 ### Added
