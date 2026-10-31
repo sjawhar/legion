@@ -2801,38 +2801,61 @@ test("a question the reader was answering keeps its text in the column, closed, 
   }
 });
 
-test("j from a question held past its row steps on from where that row stood", async () => {
+/** Where a question the column holds past its row stood in the list, and where each key goes
+ *  from there: the step starts from the place that row held, so `k` never skips the row above
+ *  it and `j` never doubles back up the list. A step off either end of the list moves nothing,
+ *  exactly as it moves nothing from the row at that end. */
+const heldSteps = [
+  ["j", "the last row", 2, []],
+  ["k", "the last row", 2, ["ask-b"]],
+  ["j", "a middle row", 1, ["ask-c"]],
+  ["k", "a middle row", 1, ["ask-a"]],
+  ["j", "the first row", 0, ["ask-b"]],
+  ["k", "the first row", 0, []],
+] as const;
+
+test.each(
+  heldSteps
+)("%s from a question held past %s steps from where that row stood", async (key, _place, heldIndex, expected) => {
   const narrow = widenToReadingPane();
-  const first = inboxIssue("ask-a", "CORE-1", "Which approach?");
-  const second = inboxIssue("ask-b", "CORE-2", "Which format?");
-  const third = inboxIssue("ask-c", "CORE-3", "Which owner?");
-  let served = [first, second, third];
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+    inboxIssue("ask-c", "CORE-3", "Which owner?"),
+  ];
+  const held = rows[heldIndex];
+  let served: InboxRow[] = rows;
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
-  const getAsk = mockAskReads(served);
+  const getAsk = mockAskReads(rows);
   const getIssue = mockIssueReads();
   const { queryClient, unmount } = renderInbox();
 
   try {
     await screen.findByTestId("inbox-pane");
-    fireEvent.keyDown(document.body, { key: "j" });
-    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
-    // Typed and unsent: the column keeps the middle question once its row goes.
+    for (let above = 0; above < heldIndex; above += 1) {
+      fireEvent.keyDown(document.body, { key: "j" });
+      await waitFor(() => expect(selectedIds()).toEqual([rows[above + 1].id]));
+    }
+    await waitFor(() => expect(selectedIds()).toEqual([held.id]));
+    // Typed and unsent: the column keeps this question once its row goes.
     fireEvent.change(within(screen.getByTestId("inbox-pane")).getByLabelText("Your answer"), {
       target: { value: "Whichever the mirror already holds." },
     });
 
-    served = [first, third];
+    served = rows.filter((row) => row.id !== held.id);
     await act(async () => {
-      queryClient.setQueryData<AskRead>(["ask-thread", "ask-b"], retracted(second));
+      queryClient.setQueryData<AskRead>(["ask-thread", held.id], retracted(held));
       await queryClient.refetchQueries({ queryKey: ["inbox"] });
     });
-    await waitFor(() => expect(rowIds()).toEqual(["ask-a", "ask-c"]));
+    await waitFor(() => expect(rowIds()).toEqual(served.map((row) => row.id)));
     expect(selectedIds()).toEqual([]);
 
-    // The held question stood between the two rows left, so `j` goes to the row after it, not
-    // back to the top of the list.
-    fireEvent.keyDown(document.body, { key: "j" });
-    await waitFor(() => expect(selectedIds()).toEqual(["ask-c"]));
+    fireEvent.keyDown(document.body, { key });
+    // Settled first, so a row the step should have left alone has its chance to show up.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(selectedIds()).toEqual([...expected]);
   } finally {
     unmount();
     narrow();

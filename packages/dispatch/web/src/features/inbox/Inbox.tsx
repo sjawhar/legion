@@ -665,7 +665,7 @@ export function Inbox({
   const recordAnswered = (id: string) => {
     answered.current = id;
     if (paneShown && paneSelection.selectedNow.current === id) {
-      paneSelection.select(paneSelection.nextAfterSelected.current);
+      paneSelection.select(paneSelection.nextAfterSelected());
     }
     release();
   };

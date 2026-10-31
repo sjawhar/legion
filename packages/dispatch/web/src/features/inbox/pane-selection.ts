@@ -14,6 +14,13 @@ export interface PlacedRow {
   section: InboxSection;
 }
 
+/** The rows a row of the reader's stood between, as they last saw it: either is undefined
+ *  where it stood at that end of the list. */
+interface Neighbours {
+  above: string | undefined;
+  below: string | undefined;
+}
+
 export interface PaneSelectionOptions {
   /** How many rows a bulk snooze is deferring; zero while none is out. */
   bulkSnoozing: number;
@@ -55,8 +62,9 @@ export interface PaneSelection {
    * rather than when it is wanted.
    */
   showing: (listed: readonly PlacedRow[]) => InboxRow | undefined;
-  /** Where the selection goes when the row it is on leaves the bands. */
-  nextAfterSelected: RefObject<string | undefined>;
+  /** Where the selection goes when the row it is on leaves the bands: the row below where that
+   *  one stood, else the row above it, read off the list as it stood while it still held it. */
+  nextAfterSelected: () => string | undefined;
 }
 
 /**
@@ -89,17 +97,26 @@ export function usePaneSelection({
   /** The question the column is showing, as the list last held it, and whether it is being kept
    *  there past its row. */
   const paneSubject = useRef<{ ask: InboxRow; kept: boolean } | undefined>(undefined);
-  // Where the selection goes when the row it is on leaves the bands: the next row the reader
-  // can see after it, else the nearest above it, so the column always shows a question they
-  // can answer. One rule for every way a row leaves - the reader's own answer, which takes it
-  // at once below, their own snooze, which takes it once the write lands, and the server
-  // withdrawing, resolving or answering the question elsewhere - and read on every commit
-  // rather than when it is wanted, because a snooze folds its row into `Later` the moment they
-  // pick: while that write is out the read is held, so where they are sent is read off the list
-  // as it stood when they deferred. The commit that drops the row holds it for the same reason:
-  // the row is gone from that commit's list, and where it was heading is exactly what the
-  // settling effect is about to read this for.
-  const nextAfterSelected = useRef<string | undefined>(undefined);
+  // The rows the selected one stood between when the list last held it, either of them
+  // undefined where it stood at that end: where it stood, rather than the one row the
+  // selection would move to, because that one row cannot say where it stood. For the last row
+  // there is nothing below, so the row above names it, and a step reading that as the row
+  // which took its place walks up for `j` and over a row for `k`.
+  //
+  // One record for every way a row leaves - the reader's own answer, which takes it at once
+  // below, their own snooze, which takes it once the write lands, and the server withdrawing,
+  // resolving or answering the question elsewhere - and read on every commit rather than when
+  // it is wanted, because a snooze folds its row into `Later` the moment they pick: while that
+  // write is out the read is held, so where they are sent is read off the list as it stood
+  // when they deferred. The commit that drops the row holds it for the same reason: the row is
+  // gone from that commit's list, and where it was heading is exactly what the settling effect
+  // is about to read this for.
+  const stoodBetween = useRef<Neighbours>({ above: undefined, below: undefined });
+  /** Where the selection goes when the row it is on leaves the bands: the next row the reader
+   *  can see after it, else the nearest above it, so the column always shows a question they
+   *  can answer. */
+  const nextAfterSelected = (): string | undefined =>
+    stoodBetween.current.below ?? stoodBetween.current.above;
 
   const select = (askId: string | undefined): void => {
     setSelectedId(askId);
@@ -124,10 +141,14 @@ export function usePaneSelection({
       return;
     }
     // The column is holding a question past its row (their unsent answer, or one the server has
-    // not decided yet), so there is no row to step from. The row that took its place is the one
-    // `nextAfterSelected` named while the question still stood there, so stepping starts from
-    // where it stood rather than from the top of the list.
-    const stood = visible.findIndex((placed) => placed.ask.id === nextAfterSelected.current);
+    // not decided yet), so there is no row to step from: the place that row held is read off
+    // the rows it stood between, and the step runs from there rather than from the top of the
+    // list. The row it stood above took its place; where it stood last there is no such row,
+    // and the row it stood below is the one before the place it held.
+    const { above, below } = stoodBetween.current;
+    const belowAt = visible.findIndex((placed) => placed.ask.id === below);
+    const aboveAt = visible.findIndex((placed) => placed.ask.id === above);
+    const stood = belowAt !== -1 ? belowAt : aboveAt !== -1 ? aboveAt + 1 : -1;
     const next =
       stood === -1
         ? visible[delta === 1 ? 0 : visible.length - 1]
@@ -198,11 +219,11 @@ export function usePaneSelection({
     // settling effect reads this on, and the answer it wants is the one taken while the row was
     // still there.
     if (selectedId === undefined) {
-      nextAfterSelected.current = undefined;
+      stoodBetween.current = { above: undefined, below: undefined };
     } else if (!snoozing.has(selectedId) && bulkSnoozing === 0) {
       const at = visible.findIndex(({ ask }) => ask.id === selectedId);
       if (at !== -1) {
-        nextAfterSelected.current = (visible[at + 1] ?? visible[at - 1])?.ask.id;
+        stoodBetween.current = { above: visible[at - 1]?.ask.id, below: visible[at + 1]?.ask.id };
       }
     }
     return paneAsk(visible.find(({ ask }) => ask.id === selectedId)?.ask);
@@ -244,7 +265,7 @@ export function usePaneSelection({
     // The row the selection was on has left the bands - the reader deferred it, the server
     // took it away - so the selection goes where that row was heading and the address follows
     // it, down to naming no row at all when the list has none left to show.
-    const next = nextAfterSelected.current;
+    const next = nextAfterSelected();
     select(visible.some((placed) => placed.ask.id === next) ? next : visible[0]?.ask.id);
   });
 
