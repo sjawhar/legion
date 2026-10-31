@@ -2,41 +2,57 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-556",
-  "completed": "2026-10-31T07:22:00Z",
-  "round": 12,
-  "testedCodeHead": "106f21e595b76710ad85fb58bb13b8d704981cd7",
-  "scope": "INFRA-63 architect, 2026-10-31T05:41Z: confirm by fingerprint that nothing changed beyond e2a61748 and 106f21e5; the two new window tests, with their failing-first proof against dd63d61b; the earlier awareness tests under -race; the two-process file, the docs package and the browser coedit spec; the reconnect-across-processes trial on real binaries; ci-ok and the required checks at 106f21e5",
+  "completed": "2026-10-31T10:14:00Z",
+  "round": 13,
+  "testedCodeHead": "a2a0a2a1c32b",
+  "scope": "INFRA-63 architect, 2026-10-31T07:32Z and 09:43Z: confirm by fingerprint that nothing else changed; accept the deleted window-1 test only if every removal decision reads the room once; the failing-first proof of the stale-answer, purge and answer-after-removal tests against 106f21e5; the lock-order guard; the broker file equal to #2598's; -race, the two-process file and the browser coedit spec; the reconnect and departure trials on real binaries; ci-ok and pr-title at the code head",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at 106f21e5: the two-process file (ok 1102.766s), the docs package (ok 1657.059s), the -race awareness run (ok 34.292s, 23 passed), the browser coedit spec (2 of 2), and both window tests 3 of 3. Reproduced both window tests failing at dd63d61b with only the two hooks added."
+    "how": "Re-ran at a2a0a2a1: the two-process file (ok 1208.734s), the -race awareness run (ok 40.355s, 27 passed), the five new tests 3 of 3, and the browser coedit spec 2 of 2. Reproduced the four relay tests failing at 106f21e5 with only the beforeAwarenessAnswerRecord hook added."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 5: removing a departed reader never drops a client that is back, whether its return lands between the relay's reads of the room (window 1) or is recorded before the removal (window 2)",
+      "criterion": "The relay settles a removal or an answer the room has moved past against the room itself, and never lowers a client's clock: a stale answer never drops a returned reader nor relists one who left, and a removal over the reader's own heartbeat still reaches the other process after a purge",
       "surface": "the docs package's two Services on a real Postgres 17, with the relay's ordering hooks",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test -count=3 -run 'TestAReaderBackAsTheRelayReadsTheRoomForItsRemovalKeepsItsState|TestAReaderBackBeforeItsRemovalIsRecordedKeepsItsState' ./internal/dispatch/docs",
-      "observed": "Both pass 3 of 3 at head. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6540530612",
-      "headSha": "106f21e595b76710ad85fb58bb13b8d704981cd7",
-      "negativeControl": "At dd63d61b, with only e2a61748's two hooks added: window 1 fails 3 of 3 (':411 task A's relay no longer lists alice … though she is in its room', ':415' bob's reader holds map[] after 2 min) and window 2 fails 2 of 2 (:481, :485). With the window-1 hook placed before GetStates, which is outside the window, the test passes; between GetStates and Meta it fails."
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test -count=3 -run 'TestAReaderBackWhileAnOlderStateOfHersIsAnsweredToAQueryKeepsItsState|TestAReaderLeavingWhileAnOlderStateOfHersIsAnsweredToAQueryStillLeaves|TestAReaderLeavingBeforeAnOlderStateOfHersIsAnsweredToAQueryIsNotRelisted|TestAReaderLeavingOverItsOwnHeartbeatStillLeavesTheOtherProcess|TestARoomsAwarenessFiresItsObserversWithItsLockReleased|TestAReaderBackBeforeItsRemovalIsRecordedKeepsItsState' ./internal/dispatch/docs",
+      "observed": "All six pass 3 of 3 at head. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6542065230",
+      "headSha": "a2a0a2a1c32b",
+      "negativeControl": "At 106f21e5, with only the beforeAwarenessAnswerRecord hook added (field plus its one call in answer), each of the four relay tests fails 2 of 2: :449 relay drops alice while she is in the room; :584 and :591 alice relisted at clock 1 after she left; :694 bob still holds alice after 2 min. The lock guard passes there too, as expected, because it checks ygo rather than the fix."
     },
     {
-      "criterion": "A tab that drops on one process and comes back on the other is shown on both processes within 2 s",
-      "surface": "two real envoy-dispatch binaries on one Postgres, driven by document sockets (throwaway TestProbeR12ReconnectAcrossProcesses, not committed)",
-      "command": "go test -tags multiprocess -count=2 -run TestProbeR12 ./cmd/dispatch",
-      "observed": "24 of 24 trials (2 runs of 12, alternating B→A and A→B). Bob came back 11–22 ms after the drop, and carol on A and dave on B both held his new state 2 s later.",
-      "headSha": "106f21e595b76710ad85fb58bb13b8d704981cd7",
-      "negativeControl": "Each trial first requires both readers to hold bob's first state, and then checks that they hold his returned state, so a reader that lost him is counted. This outside test does not reach the race window without the ordering hooks, so the Service tests above are what separate the commits."
+      "criterion": "No removal decision reads the room twice, which is why the window-1 test can go, and the lock order record takes (r.mu, then ygo's awareness lock) is safe",
+      "surface": "awareness_relay.go at a2a0a2a1 and ygo v1.51.3-sami.4 awareness/awareness.go",
+      "command": "read touched (:822-879), record (:381-445), awarenessClientStanding (:457-465), resolve (:499-539), answer (:732-750), localRemoval (:653-663); grep ygo's a.mu and fire calls",
+      "observed": "touched decides every departure from one aw.EncodeUpdate(departed) snapshot. record settles a stale entry with one EncodeUpdate under r.mu, and a later return's observer waits on r.mu. resolve and answer read twice, but neither decides a removal. ygo's SetLocalState, Heartbeat, ApplyUpdate and RemoveExpired unlock before they fire observers, and PurgeTombstones fires none. TestARoomsAwarenessFiresItsObserversWithItsLockReleased pins this for six write kinds.",
+      "headSha": "a2a0a2a1c32b",
+      "negativeControl": "The guard's deadline fails a write whose observer runs with the awareness still locked, since the observer's reads would never return."
     },
     {
-      "criterion": "No regression from e2a61748 and 106f21e5: the awareness tests under -race, the two-process file, the docs package and the browser coedit spec",
+      "criterion": "On real binaries, a tab that drops on one process and returns on the other is shown on both within 2 s, and a tab that closes leaves the other process's reader within the relay's limit, not after the 30 s expiry",
+      "surface": "two real envoy-dispatch binaries on one Postgres, driven by document sockets (throwaway TestProbeR13ReconnectAcrossProcesses and TestProbeR13DepartureReachesTheOtherProcess, not committed)",
+      "command": "go test -tags multiprocess -count=2 -run TestProbeR13 ./cmd/dispatch",
+      "observed": "Reconnect: 24 of 24; bob came back after 11-109 ms and both readers held his new state 2 s later. Departure: 24 of 24; bob is gone from the reader on his own process in 0-1 ms and from the other process's reader in 52-57 ms, which is the 50 ms awarenessCoalesceWindow plus one NOTIFY.",
+      "headSha": "a2a0a2a1c32b",
+      "negativeControl": "Each trial first requires both readers to hold bob's state. A departure that only the 30 s expiry clears would fail the 1 s bound and the 5 s wait."
+    },
+    {
+      "criterion": "No regression: the awareness tests under -race, the two-process file and the browser coedit spec",
       "surface": "the docs package; two real envoy-dispatch binaries; Chromium on main's two-process harness",
-      "command": "CGO_ENABLED=1 go test -race -run 'Awareness|Relay|Reader' ./internal/dispatch/docs; go test -tags multiprocess -count=1 ./cmd/dispatch; go test -count=1 ./internal/dispatch/docs; cd packages/dispatch && bun run e2e:multiprocess -- coedit.multiprocess --repeat-each=2",
-      "observed": "-race: ok 34.292s, 23 passed, no data race reported. ok github.com/sjawhar/envoy/cmd/dispatch 1102.766s. ok github.com/sjawhar/envoy/internal/dispatch/docs 1657.059s. coedit.multiprocess 2 passed.",
-      "headSha": "106f21e595b76710ad85fb58bb13b8d704981cd7",
+      "command": "CGO_ENABLED=1 go test -race -run 'Awareness|Relay|Reader' ./internal/dispatch/docs; go test -tags multiprocess -count=1 ./cmd/dispatch; cd packages/dispatch && bun run e2e:multiprocess -- coedit.multiprocess --repeat-each=2",
+      "observed": "-race: ok 40.355s, 27 passed, no data race reported. ok github.com/sjawhar/envoy/cmd/dispatch 1208.734s. coedit.multiprocess 2 passed.",
+      "headSha": "a2a0a2a1c32b",
       "negativeControl": "coedit.multiprocess fails on a0f877c5, the harness without this change (round 1)"
+    },
+    {
+      "criterion": "The broker test file 7bde205e copies equals #2598's",
+      "surface": "the file's bytes at three commits",
+      "command": "sha1sum of packages/envoy/internal/broker/oauth/claims_doc_test.go at a2a0a2a1, at 930cad24 and at #2598's merge commit 1a9095e6",
+      "observed": "All three are 33ce4f48dcc438a05c2b3fed799227274275de57.",
+      "headSha": "a2a0a2a1c32b",
+      "negativeControl": "Any difference of even one byte would change the sha1."
     }
   ],
-  "ci": "Run 41173430936 at 106f21e5, read 2026-10-31T07:18Z: lint success, test success, typecheck skipped, and pr-title success (runs 41173481304 and 41173517285). ci-ok not posted yet. No lane failed. dispatch-browser-multiprocess, envoy-go-race-api and envoy-smoke succeeded. dispatch, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-go-race-docs, envoy-go-race-pmdoc, broker-multiprocess, pi-legion and dispatch-memory were queued or running. Migrations 0150-0152 overlap #2387; the architect said not to fail the round for it."
+  "ci": "At a2a0a2a1, read 2026-10-31T10:09Z: changes queued in run 41189635046; pr-title runs 41189697590 and 41189744395 queued, seven earlier runs cancelled; ci-ok not posted yet. No lane has run or failed. Migrations 0150-0152 overlap #2387; the architect said not to fail the round for it."
 }
