@@ -6,9 +6,10 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 )
 
-// The listener's durable and role-lane queue are the names cmd/listener spelled itself before they
-// moved here: a space in the machine id becomes a hyphen in both.
-func TestListenerDurableAndQueueKeepTheListenersNames(t *testing.T) {
+// The listener's durable is the name cmd/listener spelled itself before it moved here: a space in
+// the machine id becomes a hyphen. The retired role-lane group, which no listener subscribes in
+// any more and the grant admits for one release, spells a machine id the same way.
+func TestListenerDurableAndTheRetiredQueueKeepTheListenersNames(t *testing.T) {
 	for _, tc := range []struct{ machineID, durable, queue string }{
 		{"example-host-a", "listener-example-host-a", "envoy-listener-example-host-a"},
 		{"example host", "listener-example-host", "envoy-listener-example-host"},
@@ -22,8 +23,18 @@ func TestListenerDurableAndQueueKeepTheListenersNames(t *testing.T) {
 	}
 }
 
-// The live lane's queue group spells the machine id as the role lanes' does, and is a group of its
-// own: in the role lanes' group the live lane would be a member NATS could hand a role message to.
+// The group every listener subscribes the role lanes in names no machine, so a role message is
+// handed to one listener and forwarded once however many machines run one. A machine named
+// role-lane gives ListenerQueue that same name; core.ListenerPermissions writes one entry for
+// the two.
+func TestListenerRoleQueueNamesNoMachine(t *testing.T) {
+	if got := bus.ListenerRoleQueue; got != "envoy-listener-role-lane" {
+		t.Errorf("ListenerRoleQueue = %q, want %q", got, "envoy-listener-role-lane")
+	}
+}
+
+// The live lane's queue group spells the machine id, and is a group of its own: in the role lanes'
+// group the live lane would be a member NATS could hand a role message to.
 func TestListenerLiveQueueIsItsOwnGroupForTheMachine(t *testing.T) {
 	for _, tc := range []struct{ machineID, queue string }{
 		{"example-host-a", "envoy-listener-live-example-host-a"},
@@ -33,8 +44,8 @@ func TestListenerLiveQueueIsItsOwnGroupForTheMachine(t *testing.T) {
 		if got != tc.queue {
 			t.Errorf("ListenerLiveQueue(%q) = %q, want %q", tc.machineID, got, tc.queue)
 		}
-		if got == bus.ListenerQueue(tc.machineID) {
-			t.Errorf("ListenerLiveQueue(%q) = ListenerQueue's %q", tc.machineID, got)
+		if got == bus.ListenerRoleQueue {
+			t.Errorf("ListenerLiveQueue(%q) = ListenerRoleQueue's %q", tc.machineID, got)
 		}
 	}
 }

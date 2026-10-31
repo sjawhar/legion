@@ -1,0 +1,12 @@
+kind: Fixed
+body: |-
+    A role message published onto the role lane reaches its holder once, not once per machine running a listener. Every listener's role lane now subscribes `notifications.role.>` in one queue group, `envoy-listener-role-lane` (`bus.ListenerRoleQueue`), where each listener used to have a group of its own machine's, so NATS handed one publish to a member of every machine's group and each of them forwarded its own copy to the holder's agent subject, under one `event_id` and one forward dedupe key. A receiver that dedupes by `event_id` dropped the extra copies; one that does not acted on the message once per machine. The forward is a core-NATS request to the holder's agent subject and the holder is read from the shared role and session buckets, so the one listener NATS gives a message delivers to a holder registered on any machine, its own or another.
+
+    A listener's, Dispatch's and a host's NATS grant now subscribe both `notifications.role.> envoy-listener-role-lane` and the machine's own `notifications.role.> envoy-listener-<machine id>`, which the release before this one subscribed in, so a listener of either release starts against a server carrying either set of users and no deploy order is required. The group a subscription names is the client's own, so the second entry grants nothing a listener cannot already do; drop it once every listener runs the first. The live-topics lane keeps its own per-machine group, `envoy-listener-live-<machine id>`, since it delivers to the sessions on its own machine.
+
+    `GET /healthz` answers `503 {"status":"unhealthy","error":"role lane inactive"}` when the server refuses the listener's own role-lane subscription (`bus.Client.CoreSubOK` on the main client, where it was read for the live lane alone). NATS reports such a refusal asynchronously and closes nothing, and nats.go keeps the subscription, so the listener used to start, bind its durable and report ready while every role message it was handed was dropped with no delivery, no exception and no counter.
+
+    The one listener NATS gives a role message is now the only one that forwards it, so a resolution or forward failure is one `delivery_failed` or `receipt_timeout` exception for that message rather than one per machine, and no other machine's copy stands in for it; the role lane has no retry either way.
+time: 2026-10-31T06:48:56.417290465Z
+custom:
+    Issue: pr2587

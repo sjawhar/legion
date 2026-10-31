@@ -118,10 +118,12 @@ The hub refuses these before it registers anything, with an error naming the inp
 
 - `machineId`: the user of one host, whose listener and sessions all connect as it, granted
   `HostPermissions(machineId)` (see [Permission sets](../README.md#permission-sets)). Give it the
-  listener's own `machineId`: the set names that machine's durable consumer and queue group.
+  listener's own `machineId`: the set names that machine's durable consumer, and the role-lane
+  group of the release before this one, which the set admits beside the group every listener
+  subscribes in today.
 - `dispatchMachineId`: the user shared by `envoy-dispatch` and the listener beside it, granted
   `DispatchPermissions(dispatchMachineId)`. Give it that listener's `machineId`, since the set
-  names its durable consumer and queue group.
+  names its durable consumer and that same retired group.
 - `daemon: true`: the dedicated user of one Legion daemon, granted `DaemonPermissions()` (see
   [Permission sets](../README.md#permission-sets)). Its seed belongs only to that daemon.
 - `permissions`: `{publish, subscribe}`, each a `nats:Rules`, an `allow` list and an optional
@@ -169,14 +171,18 @@ more ([The hub's listener](#the-hubs-listener)).
 A user is refused when it names more than one of `machineId`, `dispatchMachineId`, `daemon: true`
 and `permissions`, or none, or when its `nkey` is empty, named by its index alone, as
 `users[1]: nkey is required`, since these come before the authorization has checked the names. A
-`machineId` or `dispatchMachineId` names the durable consumer `listener-<id>` and queue group
-`envoy-listener-<id>`. The shared machine-ID rule refuses an empty id; leading or trailing
+`machineId` or `dispatchMachineId` names the durable consumer `listener-<id>` and the retired
+role-lane group `envoy-listener-<id>`. The group every listener subscribes the role lanes in,
+`envoy-listener-role-lane`, names no machine, so every listener is one member of one group and a
+role message is forwarded to its holder once; the retired group is admitted beside it for one
+release, so a listener of either release starts against either server. The shared machine-ID rule refuses an
+empty id; leading or trailing
 whitespace; `.`, `*`, `>`, `/` or `\`; a control character; and any whitespace other than an
 ordinary space; and any id over 246 bytes, so `listener-<id>` fits NATS's 255-byte consumer-name
-limit. An ordinary space is accepted only inside the id and becomes a hyphen in both names. The refusal names the field itself, as
+limit. An ordinary space is accepted only inside the id and becomes a hyphen in the durable's name. The refusal names the field itself, as
 `users[1].dispatchMachineId contains '.', which the listener's NATS names or the hub's grant entries cannot carry`. Two ids that give one durable name, of either kind
 (`a b` and `a-b` collide), or one giving the hub's own listener's (the `hostname`'s), would put
-two listeners on one durable and queue group, so the later one is refused, as
+two listeners on one durable, so the later one is refused, as
 `users[2]: dispatchMachineId gives the same durable name as users[0].machineId` or
 `… as the hub's own listener`. Every `dispatchMachineId` user also binds Dispatch's fixed durables
 `delivery-events` and `delivery-jobs`, so a second one is refused the same way, as

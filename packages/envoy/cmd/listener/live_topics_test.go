@@ -482,7 +482,7 @@ func TestAListenerWhoseGrantRefusesEveryTopicEndsItsStart(t *testing.T) {
 authorization {
   users = [ { user: listener, password: listener, permissions: { subscribe: { allow: ["_INBOX.>", %q] } } } ]
 }
-`, contracts.RoleTopicPrefix+"> "+bus.ListenerQueue(machineID))
+`, contracts.RoleTopicPrefix+"> "+bus.ListenerRoleQueue)
 	_, uri := testnats.StartConfig(t, config, []string{"-js"}, false)
 	uri = strings.Replace(uri, "nats://", "nats://listener:listener@", 1)
 

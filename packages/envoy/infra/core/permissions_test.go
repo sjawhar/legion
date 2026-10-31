@@ -68,15 +68,18 @@ var listenerPublish = []string{
 func TestListenerPermissions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish:   core.Rules{Allow: listenerPublish},
-		Subscribe: core.Rules{Allow: []string{"_INBOX.>", "notifications.role.> envoy-listener-example-host-a"}},
+		Subscribe: core.Rules{Allow: []string{"_INBOX.>", "notifications.role.> envoy-listener-role-lane", "notifications.role.> envoy-listener-example-host-a"}},
 	}, core.ListenerPermissions("example-host-a"))
 }
 
-// A space in the machine id is a hyphen in the durable and the queue, as the listener names them.
-func TestListenerPermissionsNameTheDurableAndQueueOfAMachineIDWithASpace(t *testing.T) {
+// A space in the machine id is a hyphen in the durable and in the retired role-lane group the
+// grant still admits, as the listener named them. The group every listener subscribes in names
+// no machine, so that entry reads alike for every machine id.
+func TestListenerPermissionsNameTheDurableOfAMachineIDWithASpace(t *testing.T) {
 	p := core.ListenerPermissions("example host")
 	require.Contains(t, p.Publish.Allow, "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host")
 	require.Contains(t, p.Publish.Allow, "$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-host.>")
+	require.Contains(t, p.Subscribe.Allow, "notifications.role.> envoy-listener-role-lane")
 	require.Contains(t, p.Subscribe.Allow, "notifications.role.> envoy-listener-example-host")
 }
 
@@ -137,7 +140,8 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish: core.Rules{Allow: append(append([]string{}, listenerPublish...), "_INBOX.>", "agentstream.*.frames")},
 		Subscribe: core.Rules{Allow: []string{
-			"_INBOX.>", "notifications.role.> envoy-listener-example-host-a",
+			"_INBOX.>", "notifications.role.> envoy-listener-role-lane",
+			"notifications.role.> envoy-listener-example-host-a",
 			"notifications.>", "agentstream.*.control",
 		}},
 	}, core.HostPermissions("example-host-a"))
@@ -167,7 +171,8 @@ func TestDispatchPermissions(t *testing.T) {
 	want := core.Permissions{
 		Publish: core.Rules{Allow: dispatchPublish},
 		Subscribe: core.Rules{Allow: []string{
-			"_INBOX.>", "notifications.role.> envoy-listener-example-host-a",
+			"_INBOX.>", "notifications.role.> envoy-listener-role-lane",
+			"notifications.role.> envoy-listener-example-host-a",
 			"agentstream.*.frames",
 		}},
 	}
@@ -176,14 +181,18 @@ func TestDispatchPermissions(t *testing.T) {
 }
 
 // nats-server takes a repeated entry, so a duplicate would be noise in every rendered block; none of
-// the sets holds one, the union included.
+// the sets holds one, the union included. A machine named role-lane spells the retired role-lane
+// group as the shared one, so it is the id that would write the same subscribe entry twice.
 func TestNoSetRepeatsAnEntry(t *testing.T) {
 	sets := map[string]core.Permissions{
-		"listener": core.ListenerPermissions("example-host-a"),
-		"session":  core.SessionPermissions(),
-		"host":     core.HostPermissions("example-host-a"),
-		"daemon":   core.DaemonPermissions(),
-		"dispatch": core.DispatchPermissions("example-host-a"),
+		"listener":           core.ListenerPermissions("example-host-a"),
+		"listener role-lane": core.ListenerPermissions("role-lane"),
+		"session":            core.SessionPermissions(),
+		"host":               core.HostPermissions("example-host-a"),
+		"host role-lane":     core.HostPermissions("role-lane"),
+		"daemon":             core.DaemonPermissions(),
+		"dispatch":           core.DispatchPermissions("example-host-a"),
+		"dispatch role-lane": core.DispatchPermissions("role-lane"),
 	}
 	for name, p := range sets {
 		for direction, allow := range map[string][]string{"publish": p.Publish.Allow, "subscribe": p.Subscribe.Allow} {
