@@ -200,9 +200,11 @@ func (s *server) denyRecord(w http.ResponseWriter, r *http.Request) {
 // caller turned away with 401 or ACCOUNT_NOT_LISTED would be told the wrong thing to do. Nothing
 // is written and no body is read for that refusal. Every other record is then authenticated
 // exactly as the other account routes are (accountCaller: the ServiceAccount token and
-// BROKER_API_ACCOUNTS), and only afterwards does a record id no record has answer 404, so an
-// unauthenticated caller learns no more about which ids exist than a machine login's own answer
-// tells it. A machine login's decision is logged with the caller that relayed it and the
+// BROKER_API_ACCOUNTS), and only afterwards does a record id no record has answer 404. So an
+// unauthenticated caller does read one thing from the two answers apart: an id that names a
+// secret request answers 403 where an id no record has answers 401. A record id is a SHA-256
+// hash, so a caller that can name one already holds it, and the shared bucket bounds the asking
+// anyway. A machine login's decision is logged with the caller that relayed it and the
 // approver it named, the record of who acted, since that name is the caller's to state.
 func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bool) {
 	recordID, ok := pathRecordID(w, r, "record", "RECORD_ID_INPUT")

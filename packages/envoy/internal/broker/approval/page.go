@@ -93,7 +93,7 @@ type pageView struct {
 // ?switch=1 (a person signing in as someone else), it starts a sign-in that returns here, and a
 // signed-in person's unknown record id is a 404. The sign-in names the record's approver as
 // login_hint when the record exists and names one person, and names none otherwise, an id no
-// record has included, so the redirect reads the same whether or not the id exists. The page
+// record has included, which is the one way the two redirects differ (loginHint). The page
 // prints the record and every other pending agent_secret record the person may decide, with
 // Approve and Deny for each the person may decide and one "Approve all N shown" when N is two or
 // more, and, after a decision, one outcome line per decided record, read from the broker's own
@@ -176,9 +176,10 @@ func (p *Page) ServeRecord(w http.ResponseWriter, r *http.Request, sess Session)
 
 // loginHint is the login_hint a sign-in started from id's page names: the record's approver, when
 // the broker has that record and it names one person. An id no record has, a shared secret's
-// "anyone", and a read the database could not answer all name none, so a visitor with no session
-// gets the same redirect whether or not the id exists, and a sign-in is never held up by a
-// database that cannot answer.
+// "anyone", and a read the database could not answer all name none, so the hint is the one part
+// of the redirect that differs between an id a record has and an id none has, and a sign-in is
+// never held up by a database that cannot answer. Nothing follows from that difference: a record
+// id is a SHA-256 hash, so a caller that can name one already has it from the broker.
 func (p *Page) loginHint(r *http.Request, id string) string {
 	detail, err := p.cfg.Machine.ReadRecord(r.Context(), id)
 	if err != nil {
@@ -408,43 +409,52 @@ func (p *Page) ServeDecide(w http.ResponseWriter, r *http.Request, sess Session)
 			return
 		}
 	}
+	decided := false
 	for _, id := range decide {
+		outcome, made := p.decide(r.Context(), id, approve, sess.Login)
+		decided = decided || made
 		slog.Info("approval page decision", "login", sess.Login, "record", id, "decision", form.Get("decision"),
-			"outcome", p.decide(r.Context(), id, approve, sess.Login))
+			"outcome", outcome)
 	}
-	// One write for the POST, whatever each record became of it: what GET /signin/status
-	// answers is when a person last decided on a page, not how many records that decision
-	// named (status.go).
-	p.recordDecision(r.Context())
+	// One write for the POST, however many records it named, and none at all when it decided
+	// none: what GET /signin/status answers is when a person last approved or denied something
+	// on a page (status.go), and the rollout's step 3 opens on that answer. A form resent after
+	// its records were decided, or one a person may not decide, must leave the time where it was.
+	if decided {
+		p.recordDecision(r.Context())
+	}
 	redirect(w, http.StatusSeeOther, "/approve/"+decide[0]+"?decided="+strings.Join(decide, ","))
 }
 
-// decide decides one record as login and answers what became of it, for the log. A machine login
-// is never decided here, whatever a form says: its typed code is decided on Dispatch's page.
-func (p *Page) decide(ctx context.Context, id string, approve bool, login string) string {
+// decide decides one record as login and answers what became of it, for the log, and whether this
+// POST decided it: an approval or a denial the broker applied now, which is what the sign-in
+// status's last decision counts. A record already decided, expired, gone, or one login may not
+// decide, is decided by nobody here. A machine login is never decided here, whatever a form says:
+// its typed code is decided on Dispatch's page.
+func (p *Page) decide(ctx context.Context, id string, approve bool, login string) (string, bool) {
 	kind, err := p.cfg.Machine.RecordKind(ctx, id)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return "no such record"
+		return "no such record", false
 	case err != nil:
 		slog.Error("approval page: read the record's kind", "record", id, "error", err)
-		return "error"
+		return "error", false
 	case kind != record.KindAgentSecret:
-		return "not decided: a machine login"
+		return "not decided: a machine login", false
 	}
 	decision, err := p.cfg.Machine.ApplyDecision(ctx, id, approve, login)
 	switch {
 	case err == nil && decision.State == "denied" && approve:
-		return "denied: the requesting enrollment is no longer live"
+		return "denied: the requesting enrollment is no longer live", true
 	case err == nil:
-		return decision.State
+		return decision.State, true
 	case errors.Is(err, requests.ErrExpired):
-		return "expired"
+		return "expired", false
 	case errors.Is(err, requests.ErrTerminal):
-		return "already decided"
+		return "already decided", false
 	case errors.Is(err, record.ErrNotApprover), errors.Is(err, requests.ErrGrantChainInvalid):
-		return "refused: " + err.Error()
+		return "refused: " + err.Error(), false
 	}
 	slog.Error("approval page: decide the record", "record", id, "error", err)
-	return "error"
+	return "error", false
 }
