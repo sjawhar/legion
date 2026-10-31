@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-590",
+  "completed": "2026-10-31T16:26:30Z",
+  "round": 18,
+  "reviewedCodeHead": "6281961837c6c9de25c410ab192d4f2688f85127",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "roundShape": "Confirmation shape: the PR's own diff at 6281961 (fork point main b0cc910f5), excluding .legion/ and docs/solutions/, hashes eba4675cfe9a586a, the same as at my last approval 19cd72f2; the only extra path since 3668fb95 is packages/claude-envoy/dist/envoy-channel.js from main's rebuild f29f58bb.",
+  "ci": "At 62819618: lint, typecheck, test, pr-title, envoy-go, envoy-go-race completed success; ci-ok still queued at 16:24Z with every other job complete. The earlier head 3668fb95 had envoy-go red on main's delivery-live flakes (TestAReconnectCatchesUpWhatTheListenerMissed, fixed by #2594; TestIdenticalViewsShareOneRecompute, fix on #2406), which sent the issue back.",
+  "keyFindings": [
+    {"severity": "important", "file": "PR #2395 (mergeability)", "description": "GitHub reports the head CONFLICTING (mergeable_state dirty) again: main took #2592 (151d2d7996, a soft claim takes a role from its predecessor only within one client instance), which changes packages/envoy/cmd/listener/role_holder.go, cmd/listener/api.go, cmd/listener/api_test.go, cmd/listener/main_test.go, internal/store/kv.go, packages/envoy/AGENTS.md, docs/architecture.md and .github/workflows/ci.yaml, every one a file this PR also changes. The forward merge resolves runtime conflicts in the listener's role lane, which runs over this PR's roles.ResolveHolder, so it is a full round. Watch: #2592's soft-claim takeover rule in role_holder.go/api.go must sit on roles.ResolveHolder and roles.Fresh/Registered without a second resolver; store/kv.go's claim decode (DecodeRoleClaim exported here) and any new claim field #2592 adds must reach internal/roles' claim reads, which the outbox's role forward uses too."}
+  ],
+  "threads": "24, none unresolved."
+}
