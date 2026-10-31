@@ -231,9 +231,12 @@ type awarenessRelay struct {
 	// no later clock - a purge may have freed the departing client's tombstone by then
 	// (touched) - and what every entry is settled against as it is recorded: a removal older
 	// than the clock held here, and a state of a client this list does not hold or holds at a
-	// later clock, are a client that is in the room again or an entry of that client that
-	// arrived late, which the clocks alone cannot tell apart and record settles by reading the
-	// room (record).
+	// later clock, are a reader's first state, a client that is in the room again, or an entry
+	// of that client that arrived late, which the clocks alone cannot tell apart and record
+	// settles by reading the room (record).
+	// A flush raises it too: a client still listed stands here at the clock of the entry that
+	// flush sends for it (resolve), which is where the room holds the client now and can be a
+	// state no record of this list's has seen - a heartbeat applied while the batch waited.
 	local map[string]map[uint64]uint64
 	// closed refuses every later send; Close sets it.
 	closed bool
@@ -318,8 +321,9 @@ func (r *awarenessRelay) Close() error {
 // record puts each of entries into room's pending batch - a client's entry replacing any earlier
 // one of its own, and a nil entry leaving the flush to read that client's current state
 // (resolve) - and arms the batch's send when it is the room's first. It keeps the room's list of
-// the clients it relays (local) as it goes: a client's state puts it on the list at the clock
-// the room holds that client at, a removal takes it off and is relayed like any other entry.
+// the clients it relays (local) as it goes: a client's state puts it on the list at its own
+// clock, or at the clock the room holds that client at where the list cannot place the entry
+// (below); a removal takes it off and is relayed like any other entry.
 // What one batch can hold is what the room's sockets may announce: a change touches the clients
 // of the frame that made it, and a socket's frame touches no more than
 // maxAwarenessClientsPerSocket of them (awareness_limit.go), so a tab inventing thousands
@@ -334,10 +338,12 @@ func (r *awarenessRelay) Close() error {
 // Deciding what to send and recording it are two moments on both paths, and what the room's
 // other paths did in between is recorded first. An entry the list does not place - a removal
 // older than the clock the list holds for its client, a state of a client the list does not
-// hold or holds at a later clock - is one of two things, and its own clock does not say which:
-// the client left and is in the room again at a later clock, or this entry is a read of that
-// client that arrived late. So such an entry is settled against the room itself - aw, the
-// room's awareness, read here under mu (awarenessClientStanding), one read to an entry:
+// hold or holds at a later clock - is one of three things, and its own clock does not say
+// which: a reader's first state, which is the commonest of the three and the one a room where
+// nothing races meets; the client left and is in the room again at a later clock; or this entry
+// is a read of that client that arrived late. So such an entry is settled against the room
+// itself - aw, the room's awareness, read here under mu (awarenessClientStanding), one read to
+// an entry:
 //
 //   - a removal of a client the room holds live is dropped whole, neither the list nor the
 //     batch touched for it: the client's own later state is already recorded, and a removal
@@ -441,7 +447,7 @@ func (r *awarenessRelay) record(room string, aw *awareness.Awareness, entries []
 // (EncodeUpdate, awareness/awareness.go:458-480) - GetStates and Meta are two locks and so two
 // moments. A snapshot that does not decode - ygo's own encoding of what it holds, so nothing
 // short of a bug - reads as a client the room does not hold, which sends the removal being
-// settled rather than dropping it, and drops an answer's entry rather than relisting its
+// settled rather than dropping it, and drops a state the list cannot place rather than listing its
 // client: a cursor the relay takes away a moment early is put back by that client's own next
 // frame, where one it never takes away stays until it expires (awarenessExpiry, 30 s).
 func awarenessClientStanding(aw *awareness.Awareness, client uint64) (uint64, bool) {
@@ -484,10 +490,26 @@ func (r *awarenessRelay) flush(room string) {
 // within the window is sent where it is rather than where it was when the change was recorded.
 // A client the room no longer holds is dropped - encoding one ygo has forgotten would name it at
 // a clock of 0, which every other process drops as older than the state it holds - and dropping
-// it stands in no removal's way: a nil is left for a client the relay read live as it recorded
-// the entry (record), and the removal the room's own observer makes for a client that leaves
-// after that replaces the nil in this batch when it is recorded before the flush takes it, and
-// stands in the next batch when it is recorded after.
+// it stands in no removal's way: a nil is left for a client the room held as the entry was
+// recorded - read live where the list could not place the entry, and listed where it could,
+// which is a client that is in the room or one whose removal, not yet recorded, follows it
+// (record) - and the removal the room's own observer makes for a client that leaves after that
+// replaces the nil in this batch when it is recorded before the flush takes it, and stands in
+// the next batch when it is recorded after.
+//
+// What it sends it raises the list to (local): a client still listed stands there at the clock
+// of the entry sent for it, never below the clock the list already holds, and one the list no
+// longer holds is not put back. Without the raise the list would stand below the state the
+// other processes hold - the entry sent here is read from the room, which a heartbeat recorded
+// after this read has already moved on - and the removal that client's departure builds from
+// the list, when a purge has freed its tombstone before the relay reads it (touched), would be
+// older than that state: every other process drops it (awareness/awareness.go:566-581) and the
+// departed reader's cursor sits in their rooms until it expires (awarenessExpiry, 30 s).
+//
+// The read and the raise are two moments, and the room's own paths move the list in between: a
+// removal recorded there takes a client off it, a later state puts it on at a later clock, and
+// neither is undone here. The states are read first and mu taken after, which is the order
+// every path that takes both takes them in (record).
 func (r *awarenessRelay) resolve(room string, batch map[uint64][]byte) {
 	unread := make([]uint64, 0, len(batch))
 	for client, entry := range batch {
@@ -525,8 +547,14 @@ func (r *awarenessRelay) resolve(room string, batch map[uint64][]byte) {
 		}
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	clients := r.local[room]
 	for _, entry := range entries {
 		batch[entry.client] = entry.raw
+		if stood, listed := clients[entry.client]; listed && entry.clock > stood {
+			clients[entry.client] = entry.clock
+		}
 	}
 }
 
