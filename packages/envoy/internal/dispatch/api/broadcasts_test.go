@@ -120,7 +120,7 @@ const broadcastSessions = `[
 // excludes the sessions that cannot take the mode rather than switching them to another one.
 func TestBroadcastSendsOneMessagePerRecipientAndExcludesTheRest(t *testing.T) {
 	listener, sends := newBroadcastListener(t, broadcastSessions)
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 
 	response := postBroadcast(t, handler, map[string]any{
 		"body":     "Stand down and report status.",
@@ -144,6 +144,14 @@ func TestBroadcastSendsOneMessagePerRecipientAndExcludesTheRest(t *testing.T) {
 			t.Fatalf("%s body = %q", recipient.SessionID, recipient.Message.Body)
 		}
 		messageIDs[recipient.Message.ID] = struct{}{}
+		// Each copy is a direct message the broadcast's transaction indexed: its blocks, and no
+		// mention.
+		if got := messageBlockLayout(t, database, recipient.Message.ID); got != "b1:paragraph:Stand down and report status." {
+			t.Fatalf("%s message blocks = %q", recipient.SessionID, got)
+		}
+		if got := itemBlockRefs(t, database, "message", recipient.Message.ID); len(got) != 0 {
+			t.Fatalf("%s message block mentions = %v, want none", recipient.SessionID, got)
+		}
 	}
 	delivered := awaitBroadcastDeliveries(t, handler, created.ID)
 	for _, recipient := range delivered.Recipients {

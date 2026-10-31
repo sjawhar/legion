@@ -1,0 +1,15 @@
+kind: Changed
+body: |-
+    A daemon store migration added from now on is named for the UTC moment its author created it,
+    `YYYYMMDDHHMMSS_<slug>.up.sql` (`date -u +%Y%m%d%H%M%S`), instead of the next free number, so
+    two pull requests open at once can no longer take one version. The numbered migrations keep
+    their numbers, the series closing at `0064_pull_request_pass_settlement.up.sql`, and a daemon
+    whose embedded set holds a number above it, or a timestamp that is not a real UTC instant,
+    refuses to boot. `Migrate` applies every version `schema_version` lacks, so a migration that
+    merges below one a database already has still runs there exactly once; a migration must not
+    depend on its order relative to one written in a concurrent pull request. `schema_version`'s
+    column widens from `integer` to `bigint` in the first timestamped migration's own transaction,
+    and the daemon reads the version cast to `bigint`, so roll this release out before any release
+    that carries a timestamped migration. `schemaVersion` in the state is still the highest version
+    applied, not proof that every version below it is applied.
+time: 2026-10-31T03:36:33Z

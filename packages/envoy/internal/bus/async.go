@@ -38,9 +38,10 @@ type Sender interface {
 // a connection, and pins the window to it. Every later send goes out on that connection only while
 // it is connected and has not reconnected since; otherwise it answers ErrUnavailable at once,
 // without sending. A NATS server takes one connection's messages in the order they arrive, so the
-// stream stores, and a core subscriber receives, a window's envelopes in send order, and what of
-// them reached NATS is always a prefix of what was sent: once one is lost to the connection, none
-// sent after it can land after it on a connection that came back.
+// stream stores, and a core subscriber receives, a window's envelopes in send order, with one
+// exception, the two resends below, and what of them reached NATS is always a prefix of what was
+// sent: once one is lost to the connection, none sent after it can land after it on a connection
+// that came back.
 //
 // Each send goes on the transport Publish would use (UsesCoreTransport), under the same MsgId. An
 // outcome decided before anything was sent is in the channel when PublishAsync returns: a refusal
@@ -49,12 +50,15 @@ type Sender interface {
 // own flush, confirmed as PublishCoreTo confirms one (confirmFlushed). A JetStream acknowledgement
 // of a duplicate with no sequence (ErrNotStored) has the envelope sent once more without its
 // MsgId, as Publish does, and that send's acknowledgement, within another such timeout, answers
-// for it (sendJetStream). A core publish that its own flush cannot confirm because another
+// for it (sendJetStream). The stream does not deduplicate a copy sent without its MsgId: it
+// stores that copy as a message of its own, and the resend leaves the connection after the
+// window's later sends. A core publish that its own flush cannot confirm because another
 // publish on the connection changed its last error in the meantime is published again alone on the
 // window's connection, which answers for it: once every core flush of the window has returned, and
 // one such republish at a time, so that another of the window's denials cannot land during it and
-// leave it unconfirmed too. A republish costs a round trip of its own, so a batch in which one
-// denial left many sends unconfirmed takes that many round trips more.
+// leave it unconfirmed too. That republish also leaves after the window's later sends. A republish
+// costs a round trip of its own, so a batch in which one denial left many sends unconfirmed takes
+// that many round trips more.
 func (c *Client) Window() Sender {
 	w := &window{client: c}
 	w.settled = sync.NewCond(&w.mu)
@@ -196,31 +200,34 @@ func (w *window) flushed() {
 }
 
 // sendJetStream publishes data, item's encoding, to the stream and returns what waits for its
-// acknowledgement. An acknowledgement of a duplicate with no sequence (ErrNotStored) has the
-// envelope sent once more without its MsgId, as publishJetStream does, while the window's
-// connection is still current: the answer is that send's, and a failure of it still wraps
-// ErrNotStored. The resend goes out after the window's later sends, so the stream stores it after
-// them.
+// acknowledgement. It notes the time it put the message on the wire, which is what its
+// acknowledgement reads a denial of this send alone by (acknowledged). An acknowledgement of a
+// duplicate with no sequence (ErrNotStored) has the envelope sent once more without its MsgId, as
+// publishJetStream does, while the window's connection is still current: the answer is that send's,
+// under its own send time, and a failure of it still wraps ErrNotStored. The resend goes out after
+// the window's later sends, so the stream stores it after them.
 func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() error, error) {
 	var options []nats.PubOpt
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
 		options = append(options, nats.MsgId(ForwardMsgID(item.DedupeKey, item.Topic)))
 	}
+	sentAt := time.Now()
 	future, err := w.js.PublishMsgAsync(&nats.Msg{Subject: item.Topic, Data: data}, options...)
 	if err != nil {
 		return nil, w.unsent(err, len(data))
 	}
 	return func() error {
-		err := w.acknowledged(future)
+		err := w.acknowledged(future, item.Topic, sentAt)
 		if !errors.Is(err, ErrNotStored) {
 			return err
 		}
 		if !w.current() {
 			return fmt.Errorf("bus: %w: %w, and the window's connection was lost or reconnected before the publish to %q was sent without its id", ErrUnavailable, err, item.Topic)
 		}
+		resentAt := time.Now()
 		future, sendErr := w.js.PublishMsgAsync(&nats.Msg{Subject: item.Topic, Data: data})
 		if sendErr == nil {
-			sendErr = w.acknowledged(future)
+			sendErr = w.acknowledged(future, item.Topic, resentAt)
 		} else {
 			sendErr = w.unsent(sendErr, len(data))
 		}
@@ -231,14 +238,25 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 	}, nil
 }
 
-// acknowledged waits for future's acknowledgement and names what it came to: nil for a message the
-// stream stored or holds, ErrNotStored, ErrUnavailable when the connection failed or NATS gave no
-// answer, or the server's refusal, a full stream's as ErrStreamFull.
-func (w *window) acknowledged(future nats.PubAckFuture) error {
+// acknowledged waits for future's acknowledgement of a publish to topic, sent at sentAt, and names
+// what it came to: nil for a message the stream stored or holds, ErrNotStored, ErrPublishDenied for
+// a publish the server refused under the connection's own publish permissions, ErrUnavailable when
+// the connection failed or NATS gave no answer, or the server's refusal, a full stream's as
+// ErrStreamFull.
+func (w *window) acknowledged(future nats.PubAckFuture, topic string, sentAt time.Time) error {
 	select {
 	case ack := <-future.Ok():
 		return notStored(ack)
 	case err := <-future.Err():
+		// A denied publish is acknowledged by nothing, so the violation the connection reported
+		// (deniedPublish) is the only evidence of it, read under this send's own subject and its
+		// own send time. A window sends every destination of one event on one connection, so a
+		// grant that denies several of them has the server report a violation of each: the record
+		// answers each send with its own, where the connection's one last error held only the one
+		// that landed last and left every other denied send to report this arm's ErrUnavailable.
+		if denied := w.client.deniedPublish(topic, sentAt); denied != nil {
+			return denied
+		}
 		if !w.current() || errors.Is(err, nats.ErrDisconnected) || errors.Is(err, nats.ErrAsyncPublishTimeout) ||
 			errors.Is(err, nats.ErrNoResponders) {
 			return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)

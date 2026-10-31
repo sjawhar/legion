@@ -1,0 +1,187 @@
+name: E2E proofs
+
+# One live proof of scripts/e2e/ per job, on a GitHub-hosted runner.
+#
+# Most of those scripts need a devbox, a throwaway kind cluster or the production cluster, and
+# each says so in its own header. .github/e2e-scripts.json holds both lists: the scripts a hosted
+# runner can run, with what each one takes, and every other script with what its header says it
+# needs. The select job refuses a script of the second list by name, with that text, and that
+# refusal is a failed job, never a silent pass. Both lists together must name every
+# scripts/e2e/*.sh, so a new script joins one of them or the select job fails.
+#
+# Three starts:
+#
+#   * `workflow_dispatch` with a script name: `gh workflow run e2e.yaml -f script=<name>`, with
+#     or without the `.sh`. One proof runs.
+#   * the `e2e` label on a pull request, which runs every hosted proof. This is the one
+#     label-started workflow of this repository. A path filter decides nothing here: each proof
+#     takes minutes of a runner, and the files a change touches do not say whether a live proof
+#     is worth them, so a person asks for the run by adding the label. The workflow starts on the
+#     `labeled` event alone, and the select job runs for that one label.
+#   * a nightly schedule, which runs every hosted proof. GitHub starts a scheduled run from the
+#     default branch alone, so the nightly is main's copy of this file, of the list beside it and
+#     of the scripts, never a pull request's.
+#
+# No hosted proof here needs a secret, and none may: Sami answered that no API key goes into
+# sjawhar/legion, and that a smoke test which calls a model runs in the deployment repository on
+# workload identity federation (sjawhar/legion#2512).
+# dispatch-session-settings.sh, which drives two real models, is therefore in the refused list
+# with that reason, not in the hosted one.
+#
+# Every job uploads its evidence directory as an artifact, `if: always()`, so a failed run
+# uploads its evidence too. A reader takes the result with `gh run view` and the directory with
+# `gh run download` (scripts/e2e/README.md, "On a GitHub-hosted runner").
+
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: The scripts/e2e proof to run, with or without its .sh (merged-root-waits, say)
+        type: string
+        required: true
+  pull_request:
+    types: [labeled]
+  schedule:
+    # Nightly, at an hour no other workflow of this repository starts on (changelog-fold runs at
+    # 06:17 UTC, claude-envoy-rebuild at 05:23).
+    - cron: "41 4 * * *"
+
+# The jobs clone, download pinned tools and modules, and upload an artifact of the run's own.
+permissions:
+  contents: read
+
+# A `|` between proxy entries makes a go command fall through to the next source after ANY error,
+# where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+# proxy.golang.org reset a download mid-stream and turned a Go lane red on a module whose hash
+# go.sum already holds (sjawhar/legion#2512); with `|direct` the command fetches the same bytes
+# straight from the source and checks them against go.sum, so this is a second path, not a weaker
+# check. Each proof here builds Go binaries and installs a pinned nats-server.
+env:
+  GOPROXY: https://proxy.golang.org|direct
+
+jobs:
+  # Which proofs this run makes, read from .github/e2e-scripts.json: the one the dispatch input
+  # names, or every hosted proof for a label and for the nightly. A pull request run whose added
+  # label is not `e2e` skips this job, and the proofs with it, so another label takes no runner.
+  #
+  # .github/scripts/select-e2e-proofs.sh holds that logic, beside the repository's other checks:
+  # which rows a run selects, the matrix each one becomes, and every refusal, each of which names
+  # the file, the row and the remedy. Its harness, select-e2e-proofs.test.sh, runs in ci.yaml's
+  # test job.
+  select:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'e2e'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      proofs: ${{ steps.read.outputs.proofs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: read
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED: ${{ inputs.script }}
+        run: .github/scripts/select-e2e-proofs.sh
+
+  # One job per proof. Its limit is the script's own row, measured from that script's header with
+  # headroom: no-required-checks waits for three reads of what each base requires, so a run takes
+  # about seven minutes, and every proof builds its driver first.
+  proof:
+    needs: select
+    name: ${{ matrix.proof }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      # One failing proof hides no other, and the nightly names each one it ran. `include` alone,
+      # with no other matrix key: GitHub then makes one job of each entry the select job emitted.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.select.outputs.proofs) }}
+    services:
+      postgres:
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml): the
+        # image and the shape ci.yaml's test job declares.
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # One service for every proof here. Each script names the PostgreSQL it migrates with a
+      # variable of its own, and reads no other, so the three names below are one service, as
+      # ci.yaml's test job sets its three. Each job takes a runner and a service of its own, so
+      # two proofs never share a database. dispatch-claimant-delivery.sh resets the `public`
+      # schema of the database DATABASE_URL names, which is why it insists on a loopback host.
+      LEGION_TEST_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      LEGION_E2E_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # The directory the upload step takes. A script that reads an evidence variable writes its
+      # transcript and logs here; the run's own output goes to output.log beside them, which is
+      # what a script that takes no such variable (it keeps its work directory and prints its
+      # path) leaves a reader.
+      EVIDENCE_DIR: ${{ github.workspace }}/e2e-evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Only a proof whose own header asks for a package pays for it: stage1-skeleton.sh needs
+      # tmux, which the daemon refuses to start without, and dispatch-claimant-delivery.sh needs
+      # psql, which it resets its schema with. A proof with no package installs none.
+      - name: Install this proof's packages
+        if: matrix.apt != ''
+        env:
+          PACKAGES: ${{ matrix.apt }}
+        run: |
+          sudo apt-get update
+          # Each word is one package name of .github/e2e-scripts.json.
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $PACKAGES
+
+      # dispatch-claimant-delivery.sh runs its driver and the fake Envoy listener with bun, and
+      # both import this repository's packages.
+      - if: matrix.bun
+        uses: ./.github/actions/setup-bun
+      - if: matrix.bun
+        run: bun install --frozen-lockfile
+
+      # The three proofs that start the Go daemon: it refuses to boot without jj, and names it
+      # (`missing required daemon tools: jj`), as run 40957651922 showed. This installs the jj the
+      # worker image ships, which is the one the daemon is written for.
+      - if: matrix.jj
+        uses: ./.github/actions/install-jj
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # The module the proof builds: packages/daemon's driver, or packages/envoy's dispatch
+          # and natsd.
+          go-version-file: ${{ matrix.go_version_file }}
+          # No run of this repository outside a push to main writes an Actions cache entry, and
+          # this workflow saves none (ci.yaml's header, "Caches").
+          cache: false
+
+      - name: Run the proof
+        env:
+          SCRIPT: ${{ matrix.script }}
+          EVIDENCE_VARIABLE: ${{ matrix.evidence_variable }}
+        run: |
+          set -o pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          if [ -n "$EVIDENCE_VARIABLE" ]; then
+            export "$EVIDENCE_VARIABLE=$EVIDENCE_DIR"
+          fi
+          bash "scripts/e2e/$SCRIPT" 2>&1 | tee "$EVIDENCE_DIR/output.log"
+
+      # `always()`: a failed proof is the run whose evidence a reader wants most.
+      - name: Upload this proof's evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-${{ matrix.proof }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: e2e-evidence

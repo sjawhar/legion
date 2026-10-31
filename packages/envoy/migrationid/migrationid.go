@@ -49,8 +49,8 @@ var closings = []struct {
 	file     string
 	closedAt int
 }{
-	{series: "the Legion daemon (packages/daemon/internal/store/migrations)", file: "0061_pull_request_head_run.up.sql", closedAt: 61},
-	{series: "Dispatch (packages/envoy/internal/dispatch/store/migrations)", file: "0141_drop_broadcast_idempotency_keys.up.sql", closedAt: 141},
+	{series: "the Legion daemon (packages/daemon/internal/store/migrations)", file: "0064_pull_request_pass_settlement.up.sql", closedAt: 64},
+	{series: "Dispatch (packages/envoy/internal/dispatch/store/migrations)", file: "0149_event_horizon.up.sql", closedAt: 149},
 }
 
 // Check holds one runner's set to the rule, the runner found by the closing file the set holds

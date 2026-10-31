@@ -208,6 +208,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"message_deliveries",
 		"refs",
 		"events",
+		"event_horizon",
 		"user_issue_state",
 		"user_agent_state",
 		"document_blocks",
@@ -216,6 +217,13 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"document_block_texts",
 		"document_indexed_versions",
 		"block_grammar_owed",
+		"comment_blocks",
+		"message_blocks",
+		"comment_block_texts",
+		"comment_block_state",
+		"message_block_state",
+		"comment_block_refs",
+		"message_block_refs",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename
@@ -240,6 +248,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"issues_parent_key",
 		"artifacts_issue_key",
 		"asks_anchor_artifact",
+		"asks_anchor_artifact_id",
 		"comments_anchor_artifact",
 		"ask_followers_ask_id_text",
 		"events_ask_answered_by_user",
@@ -249,6 +258,21 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"block_refs_from_node",
 		"document_block_versions_owed",
 		"block_grammar_owed_enqueued",
+		"comment_blocks_node_id",
+		"comment_blocks_comment_id_text",
+		"message_blocks_node_id",
+		"message_blocks_message_id_text",
+		"comment_block_state_owed",
+		"message_block_state_owed",
+		"comment_block_refs_to",
+		"comment_block_refs_from_node",
+		"message_block_refs_to",
+		"message_block_refs_from_node",
+		"comments_replies_to_block",
+		"messages_replies_to_block",
+		"events_person_words",
+		"comment_deliveries_session",
+		"message_deliveries_session_created",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname

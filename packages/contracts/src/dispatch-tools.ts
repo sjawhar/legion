@@ -823,7 +823,9 @@ export const dispatchToolSpecs = [
         .string()
         .describe(
           "A comment id (uuid); replying to any comment in a thread continues that thread (an " +
-            "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " +
+            "ask's clarification thread included). A block reference to one block of the comment " +
+            "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " +
+            "passage the reply answers. To reply to an ask, use reply_to_ask with the " +
             "ask id instead."
         )
         .optional(),
@@ -918,6 +920,8 @@ export const dispatchToolSpecs = [
         .describe(
           "Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " +
             "this message under it so the reply stays with the original in the Conversation. " +
+            "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " +
+            "replies to that message and names the passage the reply answers. " +
             "A bare id with no issue answers a human's direct message to this session; a " +
             "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " +
             "reply on that issue."
@@ -1069,7 +1073,7 @@ export const dispatchToolSpecs = [
       "Do not use it for issue status, asks, or events; " +
       "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
       "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
-      "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
+      "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
       "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,
@@ -1488,6 +1492,19 @@ export const dispatchToolSpecs = [
         )
         .optional(),
     }),
+    strict: true,
+  },
+  {
+    name: "dispatch_answers",
+    example: {},
+    description:
+      "List every answer and comment a person wrote to this session in the last 72 hours, newest first, each in full: " +
+      "answers to its asks, replies on its asks and in its comment threads, comments on its documents and on issues routed to it, " +
+      "mentions of it, messages to it and replies to its messages. Each item names its time, its writer, what it is, its " +
+      "dispatch:// reference and its issue or document, an answer's question and choices, and the words, never cut. " +
+      "Run it when the list of people's answers on a model request says it left older items out. " +
+      "It reads this session's id from CLAUDE_CODE_SESSION_ID under Claude Code and DISPATCH_SESSION_ID elsewhere, so a subagent reads its parent's.",
+    arguments: () => ({}),
     strict: true,
   },
   {

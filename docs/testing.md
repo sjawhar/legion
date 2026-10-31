@@ -38,9 +38,9 @@ go test -timeout 20m ./internal/dispatch/api
 ```
 
 CI's `envoy-go` job runs it that way, alone and before the module's other packages
-(`.github/workflows/envoy-and-contracts.yaml`), and `envoy-go-race` gives it 30
-minutes. A
-command that runs one of its tests by name (`-run`) needs no deadline of its own. Run it alone
+(`.github/workflows/ci.yaml`), and `envoy-go-race-api`, the race job that runs that package by
+itself, gives it 30 minutes; `docs` runs under `-race` in `envoy-go-race-docs`, which gives it 60.
+A command that runs one of its tests by name (`-run`) needs no deadline of its own. Run it alone
 rather than beside the module's other Postgres-backed packages: together they share one database
 service and the machine's CPU, and on a small machine `api` and `docs` then each overran the default
 (`docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`).

@@ -18,12 +18,17 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { selfOwner, setRecordMode } from "@legion/envoy-client/askgate-marker";
-import { sessionDirectory, sessionStateRoot } from "@legion/envoy-client/dispatch-session-state";
+import {
+  sessionDirectory,
+  sessionStateRoot,
+} from "@legion/envoy-client/dispatch-session-directory";
+import type { SessionConfigFile } from "@legion/envoy-client/session-settings";
 import type { PiApi, PiEventContract } from "@legion/pi-shared/pi-types";
 import type { ApiKeyResolver, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { ModelLookupRegistry } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import type { RetryFallbackResolutionContext } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { sessionDispatchClient } from "../../src/dispatch-session";
 import {
   type CompleteRequest,
   type Completion,
@@ -38,14 +43,26 @@ import {
   spawnDryRun,
   type ToolCallEvent,
   type ToolCallResult,
-  type Usage,
 } from "./askgate-core";
+import {
+  createDecisionRecorder,
+  type DecisionRecorder,
+  type RecordRequest,
+} from "./decision-record";
+import type { Usage } from "./rules-check";
 
 /** What the entry hands the gate from its own extension: where the switch lives, and where notices go. */
 export interface AskGateHost {
-  /** The session's envoy.json, named in the notice for an OMP_ASKGATE the gate ignores. */
-  readonly configFile: string;
+  /**
+   * The session's envoy.json, found and read once by the extension that loads the gate: its path is
+   * named in the notice for an OMP_ASKGATE the gate ignores, and its Dispatch section is what the
+   * gate's own reads of a document and its decision records go through.
+   */
+  readonly configFile: Extract<SessionConfigFile, { error: null }>;
+  /** Where the gate's bind-time warning goes: the host shows it again at each session start. */
   readonly logger: { warn(message: string): void };
+  /** The host's plain log, for a warning one session's gated calls raise while it runs. */
+  readonly runtimeLogger: { warn(message: string): void };
 }
 
 // The core passes the host's objects through untyped: ctx is the ExtensionContext, whose
@@ -79,26 +96,67 @@ function appendDump(p: string, text: string): void {
 type ToolCallHandler = (event: ToolCallEvent, ctx: GateCtx) => Promise<ToolCallResult>;
 
 /**
+ * What the entry gets back from `registerAskGate`: the load, and the recorder for a write the
+ * gate never saw, which the `dispatch` CLI logged in the session's ledger.
+ */
+export interface AskGateRegistration {
+  /** Settles with the gate's load and rejects with its error, for the caller's notice. */
+  readonly loaded: Promise<void>;
+  /**
+   * Publishes one Dispatch decision record for a write that reached the CLI outside the form the
+   * gate reads (`decision-record.ts`). The write runs until Dispatch has answered it or the
+   * session's shutdown cuts it, and the caller awaits it outside its own handler. Answers the
+   * text for the `recordError` of the `advisor-gate-record` follow-up the caller then appends
+   * when the write failed or was given up, and undefined when it recorded or when the entry is
+   * nothing to record.
+   */
+  readonly recordUnmarked: (request: RecordRequest) => Promise<string | undefined>;
+}
+
+/**
  * Registers AskGate's one `tool_call` handler on `pi` now, synchronously, so no call can pass
  * between the load of Oh My Pi's modules and the gate's binding, and starts that load. Each call
  * waits for the load. Loaded, the handler runs the core's own; not loaded, it refuses each write
  * the gate would review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off.
- * The returned promise settles with the load and rejects with its error, for the caller's notice.
  */
-export function registerAskGate(pi: PiApi, host: AskGateHost): Promise<void> {
-  const loading = loadAskGate(pi, host);
+export function registerAskGate(pi: PiApi, host: AskGateHost): AskGateRegistration {
+  // One recorder per process for the core's records and the unmarked writes' alike: each session
+  // has one decision document, and a second recorder would upload it again under its name, which
+  // replaces it. The unmarked writes' record needs none of Oh My Pi's modules, so it works whether
+  // or not the load below settles.
+  const record = createDecisionRecorder({
+    env: process.env,
+    now: Date.now,
+    dispatchClient: (directory, signal) =>
+      sessionDispatchClient(host.configFile, directory, signal),
+  });
+  const loading = loadAskGate(pi, host, record);
   // A rejection is handled here and by the caller's notice; never an unhandled one.
   const gate: Promise<ToolCallHandler> = loading.then(
     (handler) => handler,
     (error: unknown) => {
-      const refuse = loadFailureGate(error, { env: process.env, configFile: host.configFile }, pi);
+      const refuse = loadFailureGate(
+        error,
+        { env: process.env, configFile: host.configFile.path },
+        pi
+      );
       return async (event, ctx) => refuse(event, ctx);
     }
   );
   // The host's context carries every member GateCtx reads; PiApi types only those the Envoy entry
   // reads, so the handler takes it as the core's type.
   pi.on("tool_call", async (event, ctx) => (await gate)(event, ctx as unknown as GateCtx));
-  return loading.then(() => undefined);
+  // The one owner of the records' shutdown, registered here at bind time and never anywhere else:
+  // the recorder holds the cut and its delay (`shutdown`), so the records of a gate that never
+  // loaded — the unmarked writes', which need none of Oh My Pi's modules — are given the same
+  // window as the core's own, and the core only waits on what is still pending.
+  pi.on("session_shutdown", async () => {
+    await record.shutdown();
+  });
+  return {
+    loaded: loading.then(() => undefined),
+    recordUnmarked: (request) => record.record(request),
+  };
 }
 
 /**
@@ -106,7 +164,11 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): Promise<void> {
  * handler kept back, which it returns: every other event, and `appendEntry`, reach the real `pi`.
  * Rejects when a module does not load or the core refuses to bind.
  */
-async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandler> {
+async function loadAskGate(
+  pi: PiApi,
+  host: AskGateHost,
+  record: DecisionRecorder
+): Promise<ToolCallHandler> {
   // String-literal imports: the host's loader resolves only these (see the head of this file).
   const [
     { completeSimple, retryTransientCompletion },
@@ -258,7 +320,11 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
     home: os.homedir(),
     now: Date.now,
     logger: host.logger,
-    configFile: host.configFile,
+    runtimeLogger: host.runtimeLogger,
+    configFile: host.configFile.path,
+    dispatchClient: (directory, signal) =>
+      sessionDispatchClient(host.configFile, directory, signal),
+    recordDecision: record,
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,
     complete,

@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+    A KV cache watch that a reconnect's rewatch has already replaced no longer ends at ERROR. The
+    listener's caches arm their first watch in the background, and a watch that was replaced while
+    it was still starting logged `<cache> watch failed` at ERROR, which pages an operator for a
+    watch a repair had already taken over; now it ends with one INFO line naming the rewatch. A
+    watch that fails while it is still the live one keeps its ERROR, because then nothing feeds
+    that cache.
+time: 2026-10-30T07:40:00.000000000Z
+custom:
+    Issue: pr2542
