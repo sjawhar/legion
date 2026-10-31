@@ -296,8 +296,8 @@ esac
 }
 
 // With --pod-safety (the Sandbox runtime passes it; a pane never does) the shim starts the agent on
-// the pod's baseline: the turn-scoping overlay written under LEGION_STATE_DIR and named first in
-// PI_CONFIG_FILES, ahead of the operator's, the two session-placing variables where the pod
+// the pod's baseline: PI_CONFIG_FILES as the pod carries it, the operator's overlays and the
+// role's own and no overlay of Legion's, the two session-placing variables where the pod
 // leaves them unset, Oh My Pi's profile directory made under the role's XDG_STATE_HOME, and every
 // directory the role is told to scratch in (podsafety.ScratchVariables) made on the role's own
 // scratch — its TMPDIR above all, which no tool makes for itself and whose absence fails a role's
@@ -386,7 +386,7 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 		makes     string
 		scratches bool
 	}{
-		"a pod":  {true, filepath.Join(state, podsafety.TurnScopeFile) + ":/etc/operator.yml", "file", "omp/profiles/legion", true},
+		"a pod":  {true, "/etc/operator.yml", "file", "omp/profiles/legion", true},
 		"a pane": {false, "/etc/operator.yml", "unset", "", false},
 	} {
 		// Under dir rather than t.TempDir: this row points TMPDIR at a directory nothing has made,

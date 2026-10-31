@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    The plugin declares daemon API contract 44 in `package.json`'s `legion.daemonApiVersion`:
+    a Claude Code role's start command and pane no longer carry
+    `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, so a role may leave a background task running past
+    the end of a turn and read its result in the turn Claude Code starts when it finishes.
+    `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_DISABLE_CRON=1` stay.
+time: 2026-10-30T09:45:00Z
+custom:
+    Issue: INFRA-338

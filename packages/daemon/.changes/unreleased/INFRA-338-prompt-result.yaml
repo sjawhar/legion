@@ -1,0 +1,15 @@
+kind: Fixed
+body: |-
+    With background work on, a role's own background result wakes it and starts a turn the daemon
+    never prompted. Oh My Pi's `agent_start` and `agent_end` name no prompt, so the daemon used to
+    take such a turn for its task's: it confirmed the task on that turn's start and retired it as
+    served at its end, leaving a role that was never prompted for it again and a turn that served
+    no run. The daemon now reads Oh My Pi's `prompt_result` frame, which carries the prompt's own
+    request id, as the end of a task's life: a turn that ends while the task's prompt is still
+    outstanding retires nothing, so the task reaches the role exactly once and the turn that is
+    really its own serves its run and its assignment. A `prompt_result` that says the prompt ran
+    no turn at all charges it at once rather than at the wait's timeout. The Claude Code bridge
+    writes the same frame behind the `agent_end` of the turn its prompt ran.
+time: 2026-10-30T19:40:00Z
+custom:
+    Issue: INFRA-338

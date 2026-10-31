@@ -680,52 +680,24 @@ pod_commands() {
 # could not be read is neither running nor stopped: the read fails, as the caller's wait expects.
 pod_runs() { local out; out=$(pod_commands "$1" "$2") || return 1; grep -qF -- "$3" <<<"$out"; }
 pod_file() { pod_exec "$1" "$2" test -s "$3"; }
-# takeover_lines ROW TESTER prints the daemon log's lines of a CI-red takeover, one JSON object a
-# line: the implementer's start held and going on, and the tester's claim TESTER interrupted for
-# it and its turn over. The hold is the outbox's shared retry log (outbox.go's RunOnce), logged
-# "outbox row waits" for every reason a row waits, not only this one (a held notice, a
-# suspension, a pending delivery, a tree's cleanup reservation, a close waiting for its stops); a
-# start Quiesce holds for the outgoing worker's turn is this one row's kind supervise and
-# Quiesce's own error text (ErrQuiesceHeld, supervise/quiesce.go), never a message of its own. That
-# line is not load-bearing here: RunOnce logs it at INFO only for a row's first attempt or once it
-# has waited waitWarnAttempts (7) times, DEBUG every attempt between, so a row whose first attempt
-# failed for an unrelated reason (the abort RPC itself timed out, say) and reached ErrQuiesceHeld
-# only on a later, still-early attempt never logs it at a level this evidence carries.
-# `takeover_interrupted` is not load-bearing either: Oh My Pi answers an abort only once the agent
-# is idle, so a turn that winds down between the RPC timeout (worker_rpc_timeout) and the outbox's
-# own retry interval later can have its answer arrive after Quiesce's own call already timed out —
-# interruptOver still fires and logs `takeover_over` for the row (quiesce.go's `m.interrupt` was
-# set before the abort was ever attempted), but `takeover_interrupted`'s log, guarded by the abort
-# succeeding inside Quiesce itself, never does. The row number below comes from `takeover_over`
-# instead — the tester's claim's own "the interrupted turn is over", logged whenever a start was
-# genuinely held for this claim's turn, independent of how the abort round-trip went.
-takeover_held_error="the start waits for the outgoing worker's interrupted turn to end"
-takeover_goes_on="outbox start goes on: the claim it takes the phase from is out of its turn"
-takeover_interrupted="supervise: interrupted the agent's turn: a start takes over its issue's phase"
-takeover_over="supervise: the interrupted turn is over"
-takeover_lines() {
-  jq -R -c --argjson row "$1" --arg tester "$2" --arg err "$takeover_held_error" --arg on "$takeover_goes_on" \
-    --arg interrupted "$takeover_interrupted" --arg over "$takeover_over" \
-    'fromjson? | select(.row == $row and (
-        (.msg == "outbox row waits" and .kind == "supervise" and (.error // "" | contains($err))) or
-        .msg == $on or
-        ((.msg == $interrupted or .msg == $over) and .claim == $tester)
-      ))' "$daemon_log"
+# ci_red_task_taken ISSUE: the daemon's own record that the implementer the CI red started took
+# its task — its claim is working on a delivery of the implementing phase whose turn the daemon
+# has seen start (confirmedAt). It is the start acting, read from the state rather than from the
+# agent's session, and the one fact ci-red-no-takeover times the tester's reads against: a start
+# that waited for the outgoing worker's turn, as the deleted takeover did, would not reach it
+# while the tester's own turn runs.
+ci_red_task_taken() {
+  claim_view "$1" implementer |
+    jq -e '.state == "working" and .pending != null and .pending.phase == "implementing" and (.pending.confirmedAt // "") != ""' >/dev/null
 }
-# takeover_ordered FILE TASK_AT: the takeover's lines FILE (takeover_lines) hold the start going on
-# only after the tester's turn was over, and the implementer's task, which reached its session at
-# TASK_AT, after it too. takeover_interrupted may be absent (the race the header comment above
-# names: the abort's answer arrives after Quiesce's own call already timed out) — when it is
-# present, it must still come no later than the turn being over.
-takeover_ordered() {
-  jq -s -e --arg task "$2" --arg on "$takeover_goes_on" \
-    --arg interrupted "$takeover_interrupted" --arg over "$takeover_over" '
-    def secs: (.[0:19] + "Z" | fromdateiso8601) + (.[19:] | rtrimstr("Z") | if . == "" then 0 else "0" + . | tonumber end);
-    def at($m): map(select(.msg == $m) | .time | secs) | first;
-    at($interrupted) as $i | at($over) as $o | at($on) as $g
-    | $o != null and $g != null
-      and ($i == null or $i <= $o) and $o <= $g and $o <= ($task | secs)' "$1" >/dev/null
-}
+# aborted_turns_jq selects every aborted turn of a session read as one raw string: an assistant
+# message Oh My Pi ended on an abort, which is what an interrupt of a running turn leaves behind
+# (`stopReason: "aborted"`, with `errorMessage` "Interrupted by user"). no_aborted_turn SESSION
+# holds that a session has none; the fail line and the negative control both read it through this
+# one selector, so neither can drift from the other.
+aborted_turns_jq='[split("\n")[] | fromjson?
+  | select(.type == "message" and .message.role == "assistant" and (.message.stopReason? // "") == "aborted")]'
+no_aborted_turn() { session_jq "$1" -e "$aborted_turns_jq"' | length == 0' >/dev/null; }
 # claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
 claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
 # claim_by_token TOKEN prints the claim TOKEN as `legion claims` shows it, and fails with none.
@@ -1125,10 +1097,10 @@ claim_session_text() {
 pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
 # pair_dispatch AGENT reads a reviewer session on stdin and prints what the session holds for AGENT:
 # every task call naming it, the tool result of each call (text, isError, details), the ids its
-# results name for AGENT (details.results — a task call is synchronous with async.enabled off,
-# LEGION-462), and every task-result block naming AGENT the session received, however it arrived:
-# an async-result delivery, or a `wait` result or a `read` of a `proc://` job that recovered it
-# first, neither of which a synchronous call itself needs. A delivery is that block alone, never
+# results name for AGENT (details.results — a task call runs in the background now, since
+# async.enabled is the pinned binary's own default again, INFRA-338), and every task-result block
+# naming AGENT the session received, however it arrived: an async-result delivery, or a `wait`
+# result or a `read` of a `proc://` job that recovered it first. A delivery is that block alone, never
 # the rest of a snapshot, which carries other jobs' output. Nothing else is summarised, so the
 # evidence keeps each failure's text.
 pair_dispatch() {
@@ -2576,7 +2548,7 @@ agent_pid() {
 }
 # agent_setting POD ROLE PID DIR KEY prints KEY's value, as JSON, as ROLE's Oh My Pi (PID) reads it
 # in DIR: `omp config get` run under that process's own environment (/proc/PID/environ), the one
-# that carries PI_CONFIG_FILES, so the pod baseline and the operator's overlay rank over DIR's own
+# that carries PI_CONFIG_FILES, so the operator's overlays and the role's own rank over DIR's own
 # .omp/config.yml as they do for the agent (live_operator_test.go reads one key the same way).
 agent_setting() {
   local pod=$1 role=$2 pid=$3 dir=$4 key=$5 script
@@ -4499,89 +4471,88 @@ grep -q GH_TOKEN "$evidence/github-credential-negative.txt" || fail "gh with GH_
 note "in $gh_pod the implementer's gh ($gh_bin, GH_CONFIG_DIR=$gh_config_dir) is $implement_app and the reviewer's $review_app from different hosts.yml files, each role's namespaces seeing its own gh-<role> copy and an empty roles directory, no grant file or App login is in the environment; the implementer's subagent answered $implement_app with no legion command, and its own bash ran jj undo --help; GitHub records the planner's handoff commit $plan_head as $review_app's (skip-checks: true, 0 check runs) and the implementer's head $pr_head as $implement_app's, its code head $code_head with check runs; the daemon recorded both heads as the completions"
 pass
 
-begin ci-red-takeover
+begin ci-red-no-takeover
 # CI settling red while the tester is in its turn takes the phase back without the tester's
-# completion (workflow's TriggerChecksRed). The tester runs a command that writes a file once its
-# sleep ends; the proof human commits .fail-me to the pull request's branch, and the smoke
+# completion (workflow's TriggerChecksRed) and takes nothing else: the implementer's start acts at
+# once and waits for nobody, and the tester keeps its turn, its background job, its process and
+# its session (INFRA-338, which deleted the takeover, its wait for the outgoing turn and the abort
+# frame it rode on). The tester starts a job that writes a witness file once a ten-minute sleep ends and
+# waits for it; the proof human commits .fail-me to the pull request's branch, and the smoke
 # repository's fail-on-demand check fails on that head. The daemon moves tree 1 back to
-# implementing and interrupts the tester's turn: the command's process ends and its file is never
-# written, the tester stays live on its session in its first pod, and the implementer's start,
-# held meanwhile, acts and hands the implementer its task only once that turn is over
-# (supervise.Machine.Quiesce). The control: the same command with a shorter sleep, which nothing
-# interrupts, writes its file.
+# implementing and hands the implementer its task while that sleep is still in the tester's
+# process list and the witness file is absent; nothing aborted the tester's turn; the tester is
+# told its phase ended by one message on its own role topic, which is also what ends the `wait` it
+# is in; and its job runs on, so the witness file appears after all. The control: the same chain
+# with a twenty-second sleep, run before the red, which writes its file.
 #
-# A long bash call here depends on podsafety/turnscope.yml's bash.autoBackground.enabled: false
-# (LEGION-462). Oh My Pi backgrounds a bash call left running past its own threshold under
-# `--mode rpc` by default, and a backgrounded call is a job the turn-level abort no longer reaches:
-# the abort still lands, on the `wait` tool call the agent is told to use while the job runs, but
-# the job underneath a `wait` keeps running regardless, to its own completion, since a background
-# job outlives the turn that started it. 80d0c82b ran this check before the overlay's setting
-# existed and found exactly that: its witness's `/usr/bin/sleep 1207` backgrounded at 60.006s
-# (stage4b-80d0c82b.log), and the command was still running after the daemon's interrupt. With
-# the setting in place, the one bash call this witness makes never backgrounds, so the abort that
-# ends the turn ends it too, and this check proves the guarantee directly rather than routing
-# around how it could fail.
+# The witness is a background job because that is what a long bash call is now: with
+# `bash.autoBackground.enabled` the pinned binary's own default again (nothing of Legion's turns it
+# off, INFRA-338), Oh My Pi backgrounds a bash call left running past its own threshold under
+# `--mode rpc` and hands the agent a job to `wait` on. That is the case the old takeover could
+# never stop and this rule no longer tries to: a background job outlives the turn that started it,
+# so the witness file is the proof that the role's work was left alone, where under the takeover it
+# was the proof that the turn had been killed.
 tester_pod=$(claim_sandbox "$tree1" tester) || fail "tree 1's tester has no Sandbox"
-witness=/tmp/stage4b-takeover-witness control=/tmp/stage4b-takeover-control
+witness=/tmp/stage4b-ci-red-witness control=/tmp/stage4b-ci-red-control
 send_agent "$tree1" tester "Stage 4b proof control operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 20 && date -u +%FT%TZ > $control && echo CONTROL-WRITTEN. Then reply WAITING and wait for the next targeted message."
 on_tree "$tree1" until_true 300 "the tester's control command to write $control" pod_file "$tester_pod" tester "$control"
 on_tree "$tree1" until_true 300 "tree 1's tester to go idle after the control" resident_idle "$tree1" tester
-note "the control: the tester's uninterrupted /usr/bin/sleep 20 chain wrote $control in pod $tester_pod"
-send_agent "$tree1" tester "Stage 4b proof witness operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 1207 && date -u +%FT%TZ > $witness && echo WITNESS-WRITTEN. Wait for it to finish."
-on_tree "$tree1" until_true 300 "the tester's witness command to run in its pod" pod_runs "$tester_pod" tester "/usr/bin/sleep 1207"
-issue_worker_state "$tree1" tester working || fail "the tester runs its witness command while its claim is $(claim_view "$tree1" tester | jq -c .state), not working"
-# fail_me_at is taken before the commit, not derived from a log line: the negative control below
-# needs a timestamp that can never be null (takeover_interrupted can be absent — see the comment
-# above takeover_lines) and is unconditionally before the turn could possibly be over, since CI
-# only reads red once this commit lands.
-fail_me_at=$(date -u +%FT%TZ)
-fail_me=$(jq -cn --arg branch "legion/$tree1" --arg content "$(printf 'Stage 4b CI-red takeover\n' | base64 -w0)" \
+note "the control: the tester's /usr/bin/sleep 20 chain wrote $control in pod $tester_pod"
+send_agent "$tree1" tester "Stage 4b proof witness operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 600 && date -u +%FT%TZ > $witness && echo WITNESS-WRITTEN. Oh My Pi will background the call once it outruns its own threshold; wait for that job with the wait tool until it is done, and reply WITNESS-WRITTEN then."
+on_tree "$tree1" until_true 300 "the tester's witness job to run in its pod" pod_runs "$tester_pod" tester "/usr/bin/sleep 600"
+issue_worker_state "$tree1" tester working || fail "the tester runs its witness job while its claim is $(claim_view "$tree1" tester | jq -c .state), not working"
+fail_me=$(jq -cn --arg branch "legion/$tree1" --arg content "$(printf 'Stage 4b CI red\n' | base64 -w0)" \
   '{message: "Stage 4b proof: fail-on-demand", content: $content, branch: $branch}' |
   timeout 60 gh api --method PUT "repos/$repo/contents/.fail-me" --input - --jq .commit.sha) ||
   fail "the proof human could not commit .fail-me to legion/$tree1"
-note "the proof human committed .fail-me to legion/$tree1 as $fail_me while the tester's witness command ran"
+note "the proof human committed .fail-me to legion/$tree1 as $fail_me while the tester's witness job ran"
 on_tree "$tree1" wait_for_phase "$tree1" implementing 900
-on_tree "$tree1" until_true 120 "tree 1's interrupted tester to go idle on its session in its first pod" resident_idle "$tree1" tester
-# The witness is asserted gone from a list read whole: `! pod_runs` would take a list that could
-# not be read for one with no witness on it.
-witness_commands=$(pod_commands "$tester_pod" tester) || fail "the tester's container's process list could not be read after its turn was interrupted"
-! grep -qF -- "/usr/bin/sleep 1207" <<<"$witness_commands" || fail "the tester's witness command still runs after its turn was interrupted"
-! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness"
-# The row that held the implementer's start: the tester's own "the interrupted turn is over"
-# (takeover_over), logged whenever a start was genuinely held for this claim's turn, not the
-# outbox's "outbox row waits" line (which this same event can log only at DEBUG) nor
-# takeover_interrupted (which can be absent entirely — see the comment above takeover_lines).
-takeover_row=$(jq -R -c --arg tester "$(claim_token "$tree1" tester)" --arg over "$takeover_over" \
-  'fromjson? | select(.msg == $over and .claim == $tester) | .row' "$daemon_log" |
-  jq -s -r 'last // empty')
-[ -n "$takeover_row" ] || fail "the daemon log holds no implementer start of $tree1 held for the tester's turn"
+# The start acting is read where production reads it: the daemon's own record that the implementer
+# took the red's task — its claim working on a delivery of the implementing phase it has confirmed
+# — and the task in its session. The tester's process list and its witness file are read in the
+# same breath, so what they say is what held while the start acted.
+on_tree "$tree1" until_true 900 "the implementer to be in a turn of the task the red handed it" ci_red_task_taken "$tree1"
 on_tree "$tree1" until_true 300 "the implementer's CI-red task to reach its session" session_contains "$tree1" implementer "Reason: CI is red at"
-task_at=$(claim_session_text "$tree1" implementer | jq -R -s -r '[split("\n")[] | fromjson? |
-  select(.type == "message" and .message.role == "user" and (tostring | contains("Reason: CI is red at"))) | .timestamp] | first // empty')
-[ -n "$task_at" ] || fail "the implementer's session holds no CI-red task"
-takeover_lines "$takeover_row" "$(claim_token "$tree1" tester)" >"$evidence/ci-red-takeover-log.jsonl"
-takeover_ordered "$evidence/ci-red-takeover-log.jsonl" "$task_at" ||
-  fail "the takeover's order does not hold: the tester's turn interrupted and over before the implementer's start went on and its task arrived at $task_at ($evidence/ci-red-takeover-log.jsonl)"
-# The control: the implementer's task arriving before the tester's turn was interrupted (or, where
-# that never logged — the comment above takeover_lines names the race — before the .fail-me commit
-# that starts the takeover) fails the order. The interrupt time is the tighter control (real runs
-# put it 0.1 to 1.4ms before the turn being over, fail_me_at seconds before); fail_me_at only
-# stands in when the row has no interrupt line to read, so the control never reads a null.
-control_at=$(jq -s -r --arg m "$takeover_interrupted" '[.[] | select(.msg == $m) | .time] | first // empty' "$evidence/ci-red-takeover-log.jsonl")
-[ -n "$control_at" ] || control_at=$fail_me_at
-expect_failure takeover-task-before-turn-over takeover_ordered "$evidence/ci-red-takeover-log.jsonl" "$control_at"
-note "start row $takeover_row was held, the tester's turn interrupted and over, and only then did the start go on; the implementer's task reached it at $task_at ($evidence/ci-red-takeover-log.jsonl); no witness, the tester idle in its first pod"
+witness_commands=$(pod_commands "$tester_pod" tester) || fail "the tester's container's process list could not be read while the implementer took its task"
+grep -qF -- "/usr/bin/sleep 600" <<<"$witness_commands" ||
+  fail "the tester's witness job is gone from its pod's process list while the implementer takes its task: the red stopped work it must leave alone"
+! pod_file "$tester_pod" tester "$witness" ||
+  fail "the tester's witness file $witness was written before the implementer took its task, so its absence proves nothing of the red"
+note "the implementer is in a turn of the red's task ($(claim_view "$tree1" implementer | jq -c '{state, pending: {phase: .pending.phase, confirmedAt: .pending.confirmedAt}}')) while the tester's /usr/bin/sleep 600 still runs in $tester_pod and $witness is absent"
+# The tester's turn was not taken over: no turn of its session was aborted, its claim is still the
+# one it registered with in its first pod, and nothing suspended it.
+tester_session=$evidence/ci-red-tester-session.jsonl
+claim_session_text "$tree1" tester >"$tester_session" || fail "tree 1's tester has no readable session"
+no_aborted_turn "$tester_session" ||
+  fail "tree 1's tester holds an aborted turn: $(session_jq "$tester_session" -c "$aborted_turns_jq") ($tester_session)"
+resident_kept "$tree1" tester || fail "tree 1's tester lost its first process or session across the red: $(resident_lost "$tree1" tester)"
+note "the tester's session holds no aborted turn and its claim is the one it registered with ($tester_session)"
+# The role the red left with no phase is told so on its own Envoy role topic, which is also what
+# ends the `wait` it is in (record.PhaseEnded, the outbox's role-message lane).
+on_tree "$tree1" until_true 600 "the phase-ended message to reach tree 1's tester" \
+  session_contains "$tree1" tester "CI went red, so your testing phase has ended"
+note "the tester was told on its own role topic: $(claim_session_text "$tree1" tester | grep -o 'CI went red, so your testing phase has ended[^"]*' | head -n 1)"
+# The negative control mutates the evidence alone: the same reader over a copy of the tester's
+# session with one aborted assistant turn appended must refuse it, so the pass above is the
+# session's own and not a reader that never looks.
+cp "$tester_session" "$evidence/ci-red-tester-session-aborted.jsonl"
+jq -cn '{type: "message", timestamp: "2026-01-01T00:00:00.000Z", message: {role: "assistant", stopReason: "aborted", errorMessage: "Interrupted by user", content: []}}' \
+  >>"$evidence/ci-red-tester-session-aborted.jsonl"
+expect_failure ci-red-aborted-turn no_aborted_turn "$evidence/ci-red-tester-session-aborted.jsonl"
+# The job the red left alone finishes, so the file its chain writes appears: the whole of what the
+# tester was doing survived the phase it lost.
+on_tree "$tree1" until_true 900 "the tester's witness job to write $witness" pod_file "$tester_pod" tester "$witness"
+note "the tester's witness job ran on and wrote $witness: the red took the phase, not the turn, the job, the process or the session"
 send_agent "$tree1" implementer "Stage 4b proof CI-red operation: CI on pull request #$pr_number is red because the proof committed the file .fail-me to legion/$tree1, which the smoke repository's fail-on-demand check fails on. Fetch the branch, start a new change on top of legion/$tree1@origin, delete .fail-me and change nothing else, commit it and push the issue branch (\`jj bookmark set legion/$tree1 -r @- && jj git push --bookmark legion/$tree1\`), record the required implementation handoff, then call the legion tool's handoff_complete. Do not merge."
 on_tree "$tree1" wait_for_phase "$tree1" testing 1800
 on_tree "$tree1" until_true 300 "tree 1's tester to be handed testing again in its first pod and session" resident_kept "$tree1" tester
-! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness after all"
-note "the implementer removed .fail-me and $tree1 is back in testing; the tester, in its first pod and session, still never wrote $witness"
+note "the implementer removed .fail-me and $tree1 is back in testing; the tester is in its first pod and session, the one it held through the red"
 pass
 
 begin tree-reviewed
 send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass."
 on_tree "$tree1" wait_for_phase "$tree1" reviewing 1200
-# The daemon's checks-red move back (ci-red-takeover, Testing → Implementing) counted the
+# The daemon's checks-red move back (ci-red-no-takeover, Testing → Implementing) counted the
 # implementer a round, as every move back does since #1850 (workflow/engine.go movesBack →
 # recordRound), so tree 1 stands at round 1 here and at round 2 once the review below requests
 # changes; `round_line 1` and `round_correction_pushed 1` below label the proof's correction, not

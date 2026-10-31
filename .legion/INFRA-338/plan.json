@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-338",
+  "completed": "2026-10-30T07:55:25Z",
+  "plan": "dispatch://INFRA-338/artifact/plan-md",
+  "base": "main@origin a21100c5, fetched 2026-10-30. The workspace was provisioned 304 commits behind main and every file this issue rewrites had moved; the branch now starts at main@origin, whose .omp-pin (18.12.2-sami.20261026-135627) is the binary every Legion pod runs, which A1 and A2 need. legion/INFRA-338 had never been pushed, so nothing was rewritten.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: this is a Legion phase, and its push, handoff, pull-request and completion rules are the ones the daemon enforces.",
+      "skill://legion-worker/references/pr-body.md: every one of A1-A9 must be recorded as a proof with its command, what was observed, the head and a negative control; this change carries nine.",
+      "skill://legion-worker/references/default-branch-check.md: each commit's App identity is checked before the push, and this change has many commits across Go, TypeScript, prompts, skills and scripts.",
+      "skill://legion-worker/references/cleanup-deletion.md: W4 deletes a whole mechanism (the takeover and the RPC abort) with its tests, its documentation and its e2e checkpoint.",
+      "skill://legion-worker/references/tools.md: the A9 measurement script runs in the pod against the session store, and the pod's clients and pinned runner forms are what it may use.",
+      "skill://dispatch and skill://dispatch-first: findings go to the architect or to an ask, never to a new issue, and the two devbox-only proofs are asks."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's phase, its handoff and the evidence it must carry.",
+      "skill://legion-worker/references/pr-body.md: what a proof is, and the negative control each of A1-A9 needs before the evidence counts.",
+      "skill://legion-worker/references/merge-gate.md: the order the evidence must be green in before the reviewer reads the head.",
+      "skill://legion-worker/references/tools.md: running the Go and Bun suites in a pod, including the nine internal/daemon tests a gVisor pod cannot run (docs/solutions/testing/...INFRA-388.md:34-43)."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's phase and what an approval of a head means.",
+      "skill://legion-worker/references/review-threads.md: how each finding is posted, answered and resolved on this pull request.",
+      "skill://legion-worker/references/merge-gate.md: what READY compares and which commits may sit above the approved head.",
+      "skill://legion-worker/references/pr-body.md: the body's required lines, including the `Not proven / risk:` line this change will carry for the two devbox-only proofs."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "R4 deletes the only guarantee that two roles never write one working copy (supervise/quiesce.go:25-33), and the spec covers only background jobs, not the outgoing role's running turn.",
+        "answer": "Decision D6: the phase-ended message and the worker prompt both say the role's phase is over, that it must stop writing the workspace at once and leave its edits uncommitted. Text only, inside R7's scope, since the human ruled out blocks, cancels and takeovers. Named to the architect as a risk; if it wants a mechanism, that is a new decision."
+      },
+      {
+        "finding": "R6 as written could not refuse A6's completion, because the claim's serving value only advances after the new task's turn and the daemon sends no task to a working claim.",
+        "answer": "Decision D4 names both sides: the issue side is a token minted by Engine.start in the transition's own transaction and written on the role's phases row; the claim side mirrors ServingRun's three sources. It works because Machine.queue refuses a second delivery while one is pending (supervise/delivery.go:104-112), so the old delivery stays pending and confirmed while its turn runs. Verified by the plan reviewer."
+      },
+      {
+        "finding": "Upgrade: a worker live at the release has no recorded assignment and its first completion would be refused.",
+        "answer": "Decision D5: the refusal fires only when both sides are non-empty and differ, so no backfill is needed and api/handoff_test.go:853 keeps passing. The new columns default to the empty string."
+      },
+      {
+        "finding": "R8 is unbuildable at the seam the spec names: turnStarted confirms the daemon's delivery on any agent_start with an empty delivery id, and no frame carries a correlation.",
+        "answer": "Decision D8 and W7: A7's tests are written against today's code first; if they fail, the fix is Oh My Pi's own answer, prompt_result, carried as a shimwire frame, with runtime/fake.Conn and the Claude bridge emitting it. Named as risk 3, because it would be the largest single piece of the change."
+      },
+      {
+        "finding": "R5's recipient list matches no rule the code can compute: three of its four cases are the ones takenOver excludes, and awaiting_merge is not mentioned.",
+        "answer": "Decision D1: the recipient is RoleFor(from) when it is neither empty nor the architect, computed from the transition alone and surviving R4. That covers the tester, the reviewer (round completed or not), the merger and the implementer in retro, and sends nothing from accepting (the architect has its notice) or awaiting_merge (no role holds it)."
+      },
+      {
+        "finding": "\"It does not wait behind the tree's notices\" is not achievable on either existing lane: a lane runs one issue's rows one at a time and LaneBoard carries a notice that waits indefinitely for an absent architect.",
+        "answer": "Decision D2: a third lane, LaneRoleMessage, carrying the new kind alone. The lane registry is keyed by record.LaneKey and driven from laneKinds, so the addition is the map entry plus whatever enumerates lanes; Store.UnfinishedLanes is read before the edit."
+      },
+      {
+        "finding": "Eight factual claims in the spec do not hold against the code (ClaudeDisabledFeatures, migration 0051, the takeover as a row kind, the overlay's position, the agent count, the Stage 4a reader, the claude-envoy Stop hook, the committed generated plugin).",
+        "answer": "The plan's \"Corrections to the spec's citations\" lists all eight, each verified at main@origin and each checked again by the plan reviewer. Two of them changed the work: Claude Code runs on kubernetes as well as tmux, so R3 touches the pod path; and the new migrations are 0062, 0063 and 0064, with 0016_ready_packet.up.sql:21-25 as the payload-stripping precedent."
+      },
+      {
+        "finding": "A8 is not checkable as written: neither predicate is defined, the loose reading passes trivially, and its string list pulls in the architect prompt, which R7 does not name.",
+        "answer": "W8 states both predicates exactly (the retired strings as literals, and names task(agent=\" implies names `wait`, as backticked tokens over the markdown parts alone and an explicit file list), names the architect prompt as in scope, and puts the test beside roles_test.go:247-266, the only test that walks both embed trees and so reaches claude-mechanics.md."
+      },
+      {
+        "finding": "R2 removes the enforcement of two invariants (one deep-worker at a time; the planner waits for its checks) and the spec replaces neither.",
+        "answer": "W2 moves both into the prompts that dispatch those agents (prompts/roles/implementer.md:16,19 and prompts/roles/planner.md:25,27), where W8 gives them the `wait` tool, and replaces the two deleted assertions with one that no shipped agent declares blocking."
+      },
+      {
+        "finding": "A3's live claude-backend-tmux.sh run, A4's ci-red-takeover run and A9's post-release measurement cannot be reached by the role that must prove them.",
+        "answer": "Measured: a Legion pod has no claude, docker, ss, tmux, mise, secrets or hawk-token, no kube context at all, and cannot create pods. The plan builds a pod-runnable live proof instead (W9: scripts/e2e/ci-red-no-takeover.sh with a //go:build e2e live test, in the shape of merged-root-waits.sh, booting the whole daemon on a real PostgreSQL with the fake runtime), makes the two devbox runs asks whose logs go on the pull request, and places A9 in the production check with a baseline run at the head. Recorded as two spec departures."
+      },
+      {
+        "finding": "Smaller: podsafety.Variables() and the operator-pod refusal of PI_CONFIG_FILES lose their basis; WriteReadOnly loses its callers; implementer.md:7 contradicts itself after the edit; worker-common.md:6 carries a rule R6 invalidates.",
+        "answer": "D7 moves the PI_CONFIG_FILES reservation to the composer that still owns it; W1 deletes WriteReadOnly if nothing else calls it and names every test that pins the overlay; W8 rewrites implementer.md:7 so a background local check whose exit is read with `wait` is allowed while the no-CI-polling rule stays, and rewrites worker-common.md:6's last clause, which R6 now refuses."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "A4: \"The `ci-red-takeover` checkpoint runs live and passes\", with its four checks.",
+      "plan": "The checkpoint is rewritten as `ci-red-no-takeover` and keeps all four checks, but its live run is the operator's on a devbox, requested as a dispatch ask, with its log posted on the pull request when it arrives. The implementer's own gate is a new pod-runnable live proof, scripts/e2e/ci-red-no-takeover.sh with packages/daemon/internal/daemon/ci_red_no_takeover_live_test.go, which boots the whole daemon on a real PostgreSQL with the fake runtime and proves the daemon half of A4 and A5 and A6. The merge is not held for the devbox run; it is recorded under `Not proven / risk:`.",
+      "evidence": "scripts/e2e/stage4b-sandbox-tree.sh:2706 requires docker, ss, mise, shellcheck and secrets; :2721 a runtime kube context; :2796 instance metadata; scripts/e2e/lib/free-port.sh refuses an ephemeral range under 21000 and the pod's starts at 16000. Measured in this pod: none of those binaries is present, `kubectl config get-contexts` lists no context, and `kubectl -n legion auth can-i create pods` answers no. No ssh config, host list or devbox-run convention exists in the repository.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A4: the live cluster run becomes an operator-run proof attached when it arrives, and a pod-runnable real-daemon proof gates the merge in its place."
+        ]
+      }
+    },
+    {
+      "spec": "A3: \"A live run of `scripts/e2e/claude-backend-tmux.sh` shows a Claude Code role that starts a background bash task and a background subagent, ends its turn, and reads each result in the turn that the result starts.\"",
+      "plan": "The checkpoint is written into the script, and its live run is the operator's on a devbox, requested in the same ask as A4's, with its log posted on the pull request. The implementer proves the same behaviour in CI-runnable form instead: the bridge's own tests against a scripted Claude stream, and packages/claude-envoy/tests/legion-phase-hook-claude.test.ts against the real binary where LEGION_TEST_CLAUDE names one.",
+      "evidence": "scripts/e2e/claude-backend-tmux.sh:511 requires claude, tmux, docker, mise, secrets and hawk-token, and :562 runs `docker run` for its PostgreSQL; scripts/e2e/README.md:19 says devbox only. Measured in this pod: `command -v claude` is empty, and docker, tmux, mise, secrets and hawk-token are all absent.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A3: the live devbox run becomes an operator-run proof attached when it arrives; the CI-runnable bridge and hook tests gate the merge in its place."
+        ]
+      }
+    }
+  ]
+}

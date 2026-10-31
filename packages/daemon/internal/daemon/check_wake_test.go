@@ -564,6 +564,10 @@ func (rig *checkWakeRig) reportPending(t *testing.T) {
 		t.Fatalf("the implementer's pending report = %d %s, want 200", status, body)
 	}
 	sh.send(shimwire.AgentEnd{})
+	// Oh My Pi writes the prompt's result behind that agent_end, and the task retires on it: an
+	// agent_end names no prompt, and a background result's turn ends with one just like it
+	// (INFRA-338 R8).
+	sh.send(shimwire.PromptResult{ID: prompt.ID, AgentInvoked: true})
 }
 
 // logged is how many of the daemon's log lines say msg with each of attributes, a value compared

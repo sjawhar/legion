@@ -2139,10 +2139,11 @@ func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 	}
 }
 
-// A Claude Code role is told where Claude Code keeps its state and that nothing of Claude Code's
-// own may run after a turn's last result — the harness's analogue of the turn scoping
-// `--pod-safety` writes for Oh My Pi — and an Oh My Pi role is told none of the three. The
-// directory is the role's own under its state home, so it is no sibling role's.
+// A Claude Code role is told where Claude Code keeps its state and that the clock may not prompt
+// it, and an Oh My Pi role is told neither. The directory is the role's own under its state home,
+// so it is no sibling role's. Nothing in the pod turns Claude Code's background tasks off: a task
+// that finishes wakes a turn of Claude Code's own, which the bridge reports to the daemon as a
+// turn, so the name is no longer the runtime's and an operator's pod may carry it.
 func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -2150,19 +2151,22 @@ func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
 	}
 	spec := claudeWorkerSpec(t)
 	claude := envOf(workerOf(t, r, spec))
-	for name, want := range map[string]string{
-		"CLAUDE_CONFIG_DIR":                    scratchRoot + "/state/" + string(spec.Role) + "/claude",
-		"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
-		"CLAUDE_CODE_DISABLE_CRON":             "1",
+	for name, expect := range map[string]struct {
+		want  string
+		owned bool
+	}{
+		"CLAUDE_CONFIG_DIR":                    {want: scratchRoot + "/state/" + string(spec.Role) + "/claude", owned: true},
+		"CLAUDE_CODE_DISABLE_CRON":             {want: "1", owned: true},
+		"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": {want: "", owned: false},
 	} {
-		if claude[name] != want {
-			t.Errorf("a Claude worker is told %s=%q, want %q", name, claude[name], want)
+		if claude[name] != expect.want {
+			t.Errorf("a Claude worker is told %s=%q, want %q", name, claude[name], expect.want)
 		}
 		if omp := envOf(workerOf(t, r, workerSpec(t))); omp[name] != "" {
 			t.Errorf("an Oh My Pi worker is told %s=%q, want nothing", name, omp[name])
 		}
-		if !runtimeOwned[name] {
-			t.Errorf("%s is not runtimeOwned: a spec or an operator could set it", name)
+		if owned := runtimeOwned[name]; owned != expect.owned {
+			t.Errorf("runtimeOwned[%s] = %t, want %t: the runtime owns the names it sets and no other", name, owned, expect.owned)
 		}
 	}
 }

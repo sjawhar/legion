@@ -1,0 +1,9 @@
+kind: Removed
+body: |-
+    Legion no longer writes a settings overlay of its own for a role's Oh My Pi, in a pod or in a
+    pane. `async.enabled` and `bash.autoBackground.enabled` are whatever the pinned binary makes
+    them for the protocol every role runs, and a role's `PI_CONFIG_FILES` is the operator's own
+    overlays (`runtime.tmux.pi_config_files`, `runtime.kubernetes.pod.env`) with the role's own
+    after them (`role_config_files`) and nothing else. A provider key named `PI_CONFIG_FILES` is
+    still refused, now because the runtime composes that value rather than the pod baseline.
+time: 2026-10-30T08:45:00Z

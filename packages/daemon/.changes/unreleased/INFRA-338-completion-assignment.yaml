@@ -1,0 +1,19 @@
+kind: Added
+body: |-
+    A completion now counts only for the assignment the daemon gave the role in the issue's current
+    phase. Each start that hands a role a task mints that role an assignment and writes it, in the
+    transition's own transaction, both on the role's `phases` row and on the start's payload, from
+    where it travels to the claim's delivery and, when a confirmed delivery is retired, onto the
+    claim (`supervise.Claim.ServingAssignment`, beside the run it serves). The completion route
+    refuses a completion whose turn began before that hand-over, `HANDOFF_STALE_ASSIGNMENT`, before
+    any fact is applied, so the same call at the same commit is applied once the new task's turn
+    reports it. Without it a turn that outlived its phase could complete the phase's next entry: a
+    tester still working when CI sent the issue to implementing, and an implementing round sent it
+    back to testing, reported a completion the daemon took for the new testing phase, since every
+    phase entry of one run carries that run. Migration 0067 adds the three columns, each
+    `text not null default ''`; there is no backfill, and a worker with no assignment on either
+    side — every one live at the upgrade, a resumed worker, and the implementer at a production
+    check's look, none of which hand out an assignment — is accepted as before.
+time: 2026-10-30T15:10:00Z
+custom:
+    Issue: INFRA-338

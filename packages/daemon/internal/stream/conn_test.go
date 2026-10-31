@@ -306,6 +306,34 @@ func TestTurnStartCarriesTheDeliveryIDOnlyWhenTheFrameDid(t *testing.T) {
 	}
 }
 
+// Oh My Pi's prompt_result names the `prompt` command's own request id, which Prompt builds from
+// the delivery id (promptDelivery): that is how the event names the delivery an agent_end never
+// could. A result for a request no prompt of this daemon's sent names no delivery and is dropped,
+// as every other line the daemon does not supervise on is.
+func TestAPromptResultNamesTheDeliveryItsRequestIDCarries(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	frame, result := h.prompt(p, "delivery-1", "verify #41")
+	p.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypePrompt, Success: true})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	p.send(shimwire.AgentEnd{})
+	p.send(shimwire.PromptResult{ID: "a-request-no-prompt-carried", AgentInvoked: true})
+	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: true})
+	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: false, Error: "no model"})
+	want := []Event{
+		TurnEnd{Claim: testClaim},
+		PromptResult{Claim: testClaim, DeliveryID: "delivery-1", AgentInvoked: true},
+		PromptResult{Claim: testClaim, DeliveryID: "delivery-1", Error: "no model"},
+	}
+	for _, want := range want {
+		if got := h.next(); got != want {
+			t.Fatalf("event = %#v, want %#v", got, want)
+		}
+	}
+}
+
 // An agent_start can precede the ack of the prompt that caused it; the event is emitted when
 // the frame arrives, and Prompt still returns on the ack (worker-rpc.test.ts:349-365).
 func TestAStartThatPrecedesTheAckIsStillEmitted(t *testing.T) {
@@ -561,38 +589,6 @@ func TestGetStateRefusesAnAnswerWithoutIsStreaming(t *testing.T) {
 	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeGetState, Success: true, Data: mustJSON(t, map[string]any{"model": "m"})})
 	if err := awaitResult(t, result); err == nil {
 		t.Fatal("GetState read an answer without isStreaming as a state")
-	}
-}
-
-// Abort sends OMP's abort frame and returns on OMP's answer; the turn's end is the agent_end that
-// follows the answer, which is still a TurnEnd. A refusal is the agent's answer, never a refused
-// prompt.
-func TestAbortReturnsOnTheAnswerAndTheTurnEndsOnItsAgentEnd(t *testing.T) {
-	h := startListener(t, harnessOptions{})
-	p := h.connect(testToken)
-	conn := h.conn()
-	result := async(func() error { return conn.Abort(context.Background()) })
-	p.negotiate()
-	request := p.expect(shimwire.TypeAbort).(shimwire.Abort)
-	if request.ID == "" {
-		t.Fatal("the abort frame carries no request id, so its answer could not be told apart")
-	}
-	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeAbort, Success: true})
-	if err := awaitResult(t, result); err != nil {
-		t.Fatalf("Abort = %v, want nil on OMP's answer", err)
-	}
-	p.send(shimwire.AgentEnd{})
-	if event := h.next(); event != (TurnEnd{Claim: testClaim}) {
-		t.Fatalf("event after the abort's answer = %#v, want the agent_end's TurnEnd", event)
-	}
-
-	refused := async(func() error { return conn.Abort(context.Background()) })
-	request = p.expect(shimwire.TypeAbort).(shimwire.Abort)
-	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeAbort, Success: false, Error: "no"})
-	err := awaitResult(t, refused)
-	var refusal *RefusedError
-	if !errors.As(err, &refusal) || errors.Is(err, runtime.ErrPromptRefused) {
-		t.Fatalf("a refused abort = %v, want a *RefusedError that is not a refused prompt", err)
 	}
 }
 
