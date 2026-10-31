@@ -304,8 +304,14 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 // fold of its stored updates and its read-back, stateThrough), or one update the store appends
 // (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the queue
 // every decode of document bytes takes (see maxUpdateItems).
+//
+// It replays without ygo's format cleanup (crdt.WithFormatCleanup), which follows each remote
+// apply that changes formatted text with a commit of its own: every update a copy applies is one
+// the room committed, and the room's own cleanups are already among them, so a copy that cleaned
+// up would hold a tree the room never held. A write's fork commits its own writes locally, which
+// never clean up, as the room's own writes do not.
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems), crdt.WithFormatCleanup(false))...)
 }
 
 // forkTreeCounts counts the trees read off a write transaction's fork, and the reads that taking

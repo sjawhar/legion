@@ -146,26 +146,16 @@ func (p *roomPeer) text(prefix string) *crdt.YXmlText {
 }
 
 // texts is every text node under the peer's document fragment, in document order.
-func (p *roomPeer) texts() []*crdt.YXmlText {
-	var found []*crdt.YXmlText
-	var walk func(parent *crdt.YXmlFragment)
-	walk = func(parent *crdt.YXmlFragment) {
-		for _, child := range parent.Children() {
-			switch node := child.(type) {
-			case *crdt.YXmlText:
-				found = append(found, node)
-			case *crdt.YXmlElement:
-				walk(&node.YXmlFragment)
-			}
-		}
-	}
-	walk(p.fragment)
-	return found
-}
+func (p *roomPeer) texts() []*crdt.YXmlText { return textsUnder(p.fragment, false) }
 
 // markableTexts is every text node under the peer's document fragment that a mark may cover: the
 // schema carries no mark inside a code block.
-func (p *roomPeer) markableTexts() []*crdt.YXmlText {
+func (p *roomPeer) markableTexts() []*crdt.YXmlText { return textsUnder(p.fragment, true) }
+
+// textsUnder is every text node under fragment, in document order. markable leaves out the text
+// of a code block, which the schema carries no mark in. It walks any document's fragment: a
+// peer's, a room's, or the room's replica's (replicaReplaysTheRoom).
+func textsUnder(fragment *crdt.YXmlFragment, markable bool) []*crdt.YXmlText {
 	var found []*crdt.YXmlText
 	var walk func(parent *crdt.YXmlFragment)
 	walk = func(parent *crdt.YXmlFragment) {
@@ -174,13 +164,13 @@ func (p *roomPeer) markableTexts() []*crdt.YXmlText {
 			case *crdt.YXmlText:
 				found = append(found, node)
 			case *crdt.YXmlElement:
-				if node.NodeName == "code_block" {
+				if markable && node.NodeName == "code_block" {
 					continue
 				}
 				walk(&node.YXmlFragment)
 			}
 		}
 	}
-	walk(p.fragment)
+	walk(fragment)
 	return found
 }

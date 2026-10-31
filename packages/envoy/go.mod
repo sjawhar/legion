@@ -143,8 +143,10 @@ require (
 // (INFRA-644, reearth/ygo#336); a text observer's event no longer panics, holding the document's
 // lock, on a mark whose value is a map (reearth/ygo#335); an update the pending cap refuses is
 // refused before it changes anything; a partly applied update relays what it parked; a stored
-// document with a clock past 2^53-1 or a client past 2^55-1 is refused when it loads; and the
-// fork's opt-in bounds and hooks (WithMaxIntegrateScan, WithIntegrateScanBudget,
+// document with a clock past 2^53-1 or a client past 2^55-1 is refused when it loads; a document
+// can apply remote updates without the format cleanup Yjs runs after them (WithFormatCleanup,
+// reearth/ygo#369), which every copy that replays the room's commits turns off (newDocumentCopy);
+// and the fork's opt-in bounds and hooks (WithMaxIntegrateScan, WithIntegrateScanBudget,
 // Server.OnPeerUpdate; reearth/ygo#333), which are off unless set and which Dispatch does not set.
 // The fixes the 1.51.3-sami.N line carried that upstream has merged come from v1.54.0 itself.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.1
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.3
