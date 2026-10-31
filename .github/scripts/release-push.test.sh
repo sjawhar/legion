@@ -2377,8 +2377,8 @@ check "fold-plan: a fragment of a package no spec names is one ::warning::, not 
   "$(is "$rc|$out|$(grep -c "^::warning::release-push\.sh fold-plan: packages/daemon/$u/pr-1-daemon\.yaml at HEAD: " <<<"$err")|$(grep -c '^::error::' <<<"$err")" "0|$envoy_plan|1|0")"
 check "fold-plan: that warning names the specs it was given and says what to do about the file" \
   "$(is "$(contains "$err" 'here packages/envoy=envoy-v,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to \.github/changelog-packages$')" "true|true")"
-# changelog-fold.yaml's build job runs `fold-plan $CHANGELOG_PACKAGES` on main and fails its step
-# when fold-plan exits non-zero, so a refusal there folds no package at all. An orphan fragment
+# changelog-fold.yaml's build job runs fold-plan over .github/changelog-packages on main and fails
+# its step when fold-plan exits non-zero, so a refusal there folds no package at all. An orphan fragment
 # that reaches main must not stop the fold of the packages the fold is given: the plan still lists
 # packages/envoy's fragment, and the orphan is named on stderr for someone to remove.
 check "fold-plan: an orphan fragment on main does not stop the plan of the packages the fold is given" \
