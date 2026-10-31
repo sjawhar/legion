@@ -929,22 +929,17 @@ func Load(getenv func(string) string) (Config, error) {
 // refuses: any of them missing, naming each one; an issuer that is not an absolute https URL, or
 // http to a loopback host; and an unreadable or blank secret file. No refusal carries the secret.
 func parseSignIn(getenv func(string) string, sessionLifetime time.Duration) (SignIn, error) {
-	signIn := SignIn{
-		Issuer:          strings.TrimSpace(getenv(signInIssuerSetting)),
-		ClientID:        strings.TrimSpace(getenv(signInClientIDSetting)),
-		Domain:          strings.TrimSpace(getenv(signInDomainSetting)),
-		SessionLifetime: sessionLifetime,
-	}
-	secretPath := strings.TrimSpace(getenv(signInClientSecretSetting))
+	signIn := SignIn{SessionLifetime: sessionLifetime}
+	// One destination per SignInSettings entry, read in that order, so the missing ones are named
+	// in the order every message naming them uses. The secret's path is held aside rather than
+	// kept in the SignIn, whose field carries the secret itself.
+	var secretPath string
+	into := []*string{&signIn.Issuer, &signIn.ClientID, &secretPath, &signIn.Domain}
 	var missing []string
-	for _, setting := range []struct{ name, value string }{
-		{signInIssuerSetting, signIn.Issuer},
-		{signInClientIDSetting, signIn.ClientID},
-		{signInClientSecretSetting, secretPath},
-		{signInDomainSetting, signIn.Domain},
-	} {
-		if setting.value == "" {
-			missing = append(missing, setting.name)
+	for i, setting := range SignInSettings {
+		*into[i] = strings.TrimSpace(getenv(setting))
+		if *into[i] == "" {
+			missing = append(missing, setting)
 		}
 	}
 	if len(missing) > 0 {

@@ -393,6 +393,7 @@ var (
 	pageText     = brokertest.PageText
 	decisionForm = brokertest.DecisionForm
 	decision     = brokertest.Decision
+	recordBlock  = brokertest.RecordBlock
 )
 
 // approveAll is the page's "Approve all N shown" form and its button's label, nil when it offers
@@ -407,21 +408,6 @@ func approveAll(t *testing.T, body string) (url.Values, string) {
 		}
 	}
 	return nil, ""
-}
-
-// recordBlock is the page's own block for recordID, the <article> that record's facts, sentences
-// and buttons are in, so a test reads one record's block and not the whole page's.
-func recordBlock(t *testing.T, body, recordID string) string {
-	t.Helper()
-	start := strings.Index(body, `<article class="record" id="record-`+recordID+`">`)
-	if start < 0 {
-		t.Fatalf("the page prints no block for %s:\n%s", recordID, body)
-	}
-	end := strings.Index(body[start:], "</article>")
-	if end < 0 {
-		t.Fatalf("the block for %s is not closed:\n%s", recordID, body)
-	}
-	return body[start : start+end]
 }
 
 // pendingCookie decodes a sign-in in progress from the browser's cookie, for a test that forges

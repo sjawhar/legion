@@ -119,12 +119,20 @@ func (b Pods) Enroll(by Launcher, runtimeID, account string) Pod {
 	return Pod{RuntimeID: runtimeID, Key: key, EnrollmentID: enrolled.EnrollmentID}
 }
 
-// Ask has p request the agent secret secretName and returns the broker's reply.
+// Ask has p request the agent secret secretName, naming the reason a pod names, and returns the
+// broker's reply.
 func (b Pods) Ask(p Pod, secretName string) RequestReply {
+	b.T.Helper()
+	return b.AskWithReason(p, secretName, p.RuntimeID+" needs "+secretName)
+}
+
+// AskWithReason has p request the agent secret secretName for reason, which is "" for a request
+// that names none, and returns the broker's reply.
+func (b Pods) AskWithReason(p Pod, secretName, reason string) RequestReply {
 	b.T.Helper()
 	request, err := record.Sign(p.Key, b.Base, []record.AuthorizationDetail{
 		{Type: record.KindAgentSecret, Identifier: secretName, Actions: []string{"inject"}},
-	}, p.RuntimeID+" needs "+secretName, "", nil, time.Now())
+	}, reason, "", nil, time.Now())
 	if err != nil {
 		b.T.Fatalf("sign %s's request for %s: %v", p.RuntimeID, secretName, err)
 	}

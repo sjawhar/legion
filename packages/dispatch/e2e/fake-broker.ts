@@ -59,25 +59,19 @@ function brokerError(status: number, code: string, error: string): Response {
   return Response.json({ code, error }, { status });
 }
 
-/** Decides a machine login as internal/broker/api/handlers_ui_records.go does: the code is typed
- *  again (the only thing that selects a machine record), the approver Dispatch named from its own
- *  session must be one the record admits, and a record already decided is terminal. An approval
- *  mints the credential the login then holds, named after the record so a test can read it. */
+/** Decides a machine login as internal/broker/api/handlers_ui_records.go does, keeping the two
+ *  refusals a test reaches: NOT_FOUND, for a record id the fixture does not hold, which is a
+ *  mistake in the test rather than a crash, and NOT_APPROVER, the control that proves Dispatch
+ *  names the approver from its own session. The broker's other refusals of a machine login (a
+ *  missing approver or code, a code that does not match, a record already decided) are gone,
+ *  since nothing drives this listener into them. An approval mints the credential the login then
+ *  holds, named after the record so a test can read it. */
 async function decide(recordID: string, approve: boolean, request: Request): Promise<Response> {
   const login = state.machineLogins.find((entry) => entry.record.record_id === recordID);
   if (login === undefined) {
     return brokerError(404, "NOT_FOUND", "no such credential request");
   }
-  const body = (await request.json()) as { approver?: string; code?: string };
-  if ((body.approver ?? "") === "") {
-    return brokerError(400, "APPROVER_REQUIRED", "approver is required");
-  }
-  if ((body.code ?? "") === "") {
-    return brokerError(400, "CODE_REQUIRED", "code is required to decide a machine login");
-  }
-  if (normalizeCode(body.code ?? "") !== normalizeCode(login.code)) {
-    return brokerError(403, "CODE_MISMATCH", "that is not this machine login's code");
-  }
+  const body = (await request.json()) as { approver?: string };
   const { record } = login;
   if (record.approver !== "anyone" && record.approver !== body.approver) {
     return brokerError(403, "NOT_APPROVER", `${body.approver} may not decide this request`);

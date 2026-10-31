@@ -1076,21 +1076,22 @@ func waitingOn(approver *string, recordID, brokerPage string) string {
 			return "waiting for " + *approver + " to approve it on the secrets broker: " + brokerPage
 		}
 	}
-	base := approveURL()
-	if recordID == "" {
-		base = ""
+	// The record's page in Dispatch, and "" when there is none to open: either
+	// AGENT_SECRETS_APPROVE_URL is unset, or the broker named no record to build a page from.
+	var page string
+	if base := approveURL(); base != "" && recordID != "" {
+		page = base + "/credentials/" + recordID
 	}
-	page := base + "/credentials/" + recordID
 	switch {
-	case approver == nil && base == "":
+	case approver == nil && page == "":
 		return "waiting for approval under Credential requests in the Dispatch Inbox; the broker does not say whose"
 	case approver == nil:
 		return "waiting for approval in Dispatch: " + page + "; the broker does not say whose"
-	case *approver == record.AnyoneApprover && base == "":
+	case *approver == record.AnyoneApprover && page == "":
 		return "waiting for anyone signed in to Dispatch to approve it under Credential requests in their Inbox"
 	case *approver == record.AnyoneApprover:
 		return "waiting for anyone signed in to Dispatch to approve it: " + page
-	case base == "":
+	case page == "":
 		return "waiting for " + *approver + " to approve it under Credential requests in their Dispatch Inbox"
 	default:
 		return "waiting for " + *approver + " to approve it in Dispatch: " + page

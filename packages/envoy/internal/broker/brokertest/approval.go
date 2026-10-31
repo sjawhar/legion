@@ -324,6 +324,21 @@ func PageText(t *testing.T, body string) string {
 	return text(parse(t, body))
 }
 
+// RecordBlock is the page's own block for recordID, the <article> that record's facts, its
+// sentences and its buttons are in, so a test reads one record's block and not the whole page's.
+func RecordBlock(t *testing.T, body, recordID string) string {
+	t.Helper()
+	start := strings.Index(body, `<article class="record" id="record-`+recordID+`">`)
+	if start < 0 {
+		t.Fatalf("the page prints no block for %s:\n%s", recordID, body)
+	}
+	end := strings.Index(body[start:], "</article>")
+	if end < 0 {
+		t.Fatalf("the block for %s is not closed:\n%s", recordID, body)
+	}
+	return body[start : start+end]
+}
+
 // Forms is every form of a page.
 func Forms(t *testing.T, body string) []Form {
 	t.Helper()

@@ -25,8 +25,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/config"
-	"github.com/sjawhar/envoy/internal/broker/proof"
-	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -211,51 +209,6 @@ func requireSignInRedirect(t *testing.T, issuer *oidctest.Issuer, res brokertest
 	}
 }
 
-// recordBlock is the page's own block for recordID, the <article> that record's facts, its two
-// sentences and its buttons are in, so a test reads one record's block and not the whole page's.
-func recordBlock(t *testing.T, body, recordID string) string {
-	t.Helper()
-	start := strings.Index(body, `<article class="record" id="record-`+recordID+`">`)
-	if start < 0 {
-		t.Fatalf("the page prints no block for %s:\n%s", recordID, body)
-	}
-	end := strings.Index(body[start:], "</article>")
-	if end < 0 {
-		t.Fatalf("the block for %s is not closed:\n%s", recordID, body)
-	}
-	return body[start : start+end]
-}
-
-// askWithoutReason has p ask the broker at base for secretName with no reason at all, which
-// brokertest.Pods.Ask never does, and answers the record its pending request opened: the page
-// prints "No reason given" for it.
-func askWithoutReason(t *testing.T, base string, p brokertest.Pod, secretName string) string {
-	t.Helper()
-	request, err := record.Sign(p.Key, base, []record.AuthorizationDetail{
-		{Type: record.KindAgentSecret, Identifier: secretName, Actions: []string{"inject"}},
-	}, "", "", nil, time.Now())
-	if err != nil {
-		t.Fatalf("sign %s's request for %s: %v", p.RuntimeID, secretName, err)
-	}
-	signed, err := proof.Sign(p.Key, p.EnrollmentID, http.MethodPost, base+"/v1/requests", time.Now())
-	if err != nil {
-		t.Fatalf("sign %s's proof: %v", p.RuntimeID, err)
-	}
-	status, answer := accountCall(t, base, http.MethodPost, "/v1/requests", map[string]string{"Proof": signed},
-		map[string]any{"request": request, "session_id": nil})
-	var reply struct {
-		State    string  `json:"state"`
-		RecordID *string `json:"record_id"`
-	}
-	if err := json.Unmarshal(answer, &reply); err != nil {
-		t.Fatalf("decode %s: %v", answer, err)
-	}
-	if status != http.StatusOK || reply.State != "pending" || reply.RecordID == nil {
-		t.Fatalf("%s's request with no reason = %d %s, want pending on a record", p.RuntimeID, status, answer)
-	}
-	return *reply.RecordID
-}
-
 // front is one public URL in front of whichever broker process a row routes it to, as a load
 // balancer stands in front of replicas. Every process behind it is configured with its URL as
 // BROKER_PUBLIC_URL, so each verifies records and proofs against the same audience, checks the
@@ -423,10 +376,14 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 	t.Run("A1: the page says what Approve gives and what Deny and the expiry do, and a request with no reason says so", func(t *testing.T) {
 		pods := f.pods(t, base)
 		podD := pods.Enroll(launch, "pod-d", approvalPodAccount)
-		silent := askWithoutReason(t, base, podD, approvalSecretName)
+		reply := pods.AskWithReason(podD, approvalSecretName, "")
+		if reply.State != "pending" || reply.RecordID == nil {
+			t.Fatalf("pod-d's request with no reason = %+v, want pending on a record", reply)
+		}
+		silent := *reply.RecordID
 		b := newBrowser(t)
 		b.SignIn(t, silent, brokertest.Person(ada))
-		block := brokertest.PageText(t, recordBlock(t, b.Page(t, silent).Body, silent))
+		block := brokertest.PageText(t, brokertest.RecordBlock(t, b.Page(t, silent).Body, silent))
 		t.Logf("ada's block for pod-d's request, which named no reason, reads: %s", block)
 		for _, want := range []string{
 			"Reason No reason given",
