@@ -2,26 +2,14 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-607",
-  "completed": "2026-10-31T16:06:48Z",
-  "decision": "changes_requested",
-  "reviewedCodeHead": "2814030326bc55e74be057cf968bd9d7293f518d",
-  "round": 15,
+  "completed": "2026-10-31T21:04:01Z",
+  "decision": "approved",
+  "reviewedCodeHead": "0cc849d426288ecdeba31ec3f76284d9e6af6812",
+  "round": 16,
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "scope": "28140303 merges main b4dc9f96 (with #2594) into 4ff53085 (code 04e390bf, approved in substance in round 14). round-shape.py v3 from the workspace with PR 2391: 'old head 04e390bf -> 04e390bf6e613f7ec9f07473c3ccc0ec25e588f1; new head 28140303 -> 2814030326bc55e74be057cf968bd9d7293f518d; files whose own diff differs: 0'. The one conflict, .dispatch/architecture/dispatch-docs.md, keeps main's first paragraph (#2526's awareness echo) and this PR's unchanged second paragraph. The code is otherwise approved.",
-  "ci": "At 28140303: lint, typecheck, test, pr-title and every other job green except envoy-go (job 124552903320), red on one test this PR adds; ci-ok waits on it. A re-run cannot help: run 41203627480 checks out merge sha 30a63fe3 and the PR's merge ref is now d33dca5b. The architect states ci-ok is required (my reads of main's ruleset listed lint, typecheck, test and pr-title).",
-  "decisionSource": "The architect (Envoy bba0803f, 16:06Z) chose this request over my options A (approve on the four required checks) and B (forward merge only).",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/bus/release_test.go:354",
-      "description": "TestReleaseFailedUnsubscribesWhatARestoreBound is flaky: at 28140303 envoy-go failed it with 'timed out waiting for: the fresh subscription to be handed the message' (internal/bus is byte-identical to every earlier head of this PR, all green there; once in about 13 CI runs; 120 of 120 local runs at 1, 2 and 4 CPUs passed). The test waits 10 s for a delivery rather than for the state it depends on. Find what it races (the restore's bind against the publish, or the fresh subscription's interest reaching the server) and wait for that state before publishing; prove it under -race -count=200 and with GOMAXPROCS=1 plus a CPU loader."
-    },
-    {
-      "severity": "important",
-      "file": "(branch)",
-      "description": "Merge main forward in the same push, for a fresh merge ref and CI run."
-    }
-  ]
+  "scope": "Round 15's two items. round-shape.py v3 from the workspace with PR 2391: 'old head 28140303 -> 2814030326bc55e74be057cf968bd9d7293f518d; new head 0cc849d4 -> 0cc849d426288ecdeba31ec3f76284d9e6af6812; files whose own diff differs: 1: packages/envoy/internal/bus/release_test.go'. The merge of main bb27e1ee (0cc849d4) has no conflict. 382271f8 (test only) adds awaitPushBound and, in the three tests that release or drain a restored binding, waits for the consumer to report PushBound true before the release or drain, then false after it (the false wait is the old waitFor's predicate, unchanged). No assertion is removed or loosened: SubOK, the stopped or failed handler's count of 0 and the fresh subscription's delivery are all still asserted; the added wait only makes the premise (a binding the server has applied) hold before the release. The race it closes: nats-server applies a push subscriber's interest on the consumer's goroutine, so the old test could see PushBound false before the restore's bind was applied, and the probe could then reach the released handle's inbox and wait out its AckWait. Proof: implementer 1,400 -race passes and 350 at GOMAXPROCS=1 with loaders; tester 200/200 -race each and 50/50 under load; the old wait did not fail on the pod either, so the fix rests on that reasoning and on CI.",
+  "ci": "CI head 0cc849d4 (newest pull_request run); compare 0cc849d4...ddb4cd19 is .legion/ only. Main's ruleset now requires ci-ok and pr-title (read 21:03Z); both success, and every lane green (envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, dispatch, lint, typecheck, test and the rest).",
+  "keyFindings": []
 }
