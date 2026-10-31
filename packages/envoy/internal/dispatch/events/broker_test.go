@@ -550,11 +550,14 @@ func TestAppendsOnDifferentIssuesDoNotWaitForEachOther(t *testing.T) {
 	// (storetest.WaitForQueuedBehind). A count of every backend of this database waiting on any
 	// lock answers a different question, and storetest.CountLockWaits' own callers pass a
 	// statement pattern for that reason: with the pattern "%" it also reports a waiter neither
-	// write made - an autovacuum worker, a background settlement, another fixture's setup - and
-	// fails on it, which is what took this test red on main at 4ca6415a8. The watch runs until
-	// the write answers, so a write that queued and then got through before the deadline is
-	// caught too; its own ceiling is above the write's, so the write's answer, not the watch, is
-	// what ends it.
+	// write made - an autovacuum worker, or any other backend of this cloned database - and
+	// fails on it, which is what took this test red on main at 4ca6415a8. That the counted
+	// waiter was not PP-2 waiting on PP-1 is certain rather than likely: the count was only
+	// read out after PP-2's write had committed, and PP-2 cannot commit while PP-1's write
+	// holds a lock it waits on. The watch samples every 2 ms, finer than the 10 ms ticker it
+	// replaces but not continuous, and runs until the write answers, so a write that queued and
+	// then got through before the deadline is caught; its own ceiling is above the write's, so
+	// the write's answer, not the watch, is what ends it.
 	pid := <-backends
 	answer, answered := storetest.WaitForQueuedBehind(t, open, pid, written, 2*writeDeadline)
 	if !answered {

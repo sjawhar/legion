@@ -97,12 +97,14 @@ runs the call on its own one-connection pool and polls for its pid, now around t
 write on another owner by counting, every 10 ms, the backends of its database waiting on any
 lock: `storetest.CountLockWaits(ctx, database, "%")`, the pattern that matches every statement.
 It took envoy-go red on main at 4ca6415a8 with
-`append on PP-2 committed, but 1 backend(s) waited on a lock while PP-1's write was open`, long
-after the database-wide lock behind it was removed. It now reads the second write's own backend
-from the connection its transaction holds (`tx.Conn().PgConn().PID()`) and watches that one pid
-with `storetest.WaitForQueuedBehind`. Discrimination, five runs each: restoring the removed
-`pg_advisory_xact_lock` in `Broker.Append` fails the old guard and the new one; a foreign backend
-queued behind the first write's row, with the second write held past a poll tick, fails the old
-guard with the main run's own message and passes the new one 20 of 20. A counted waiter is right
-only where the test owns every backend that can wait; where the call under test has a connection
-of its own, watch its pid.
+`append on PP-2 committed, but 1 backend(s) waited on a lock while PP-1's write was open`. The
+database-wide lock behind it had been removed by sjawhar/legion#2392, merged 19:53:05Z, and
+4ca6415a8 was committed 22:39:31Z, two hours and twelve commits later. It now reads the second
+write's own backend from the connection its transaction holds (`tx.Conn().PgConn().PID()`) and
+watches that one pid with `storetest.WaitForQueuedBehind`. Discrimination, five runs each:
+restoring the removed `pg_advisory_xact_lock` in `Broker.Append` fails the new guard on the
+queue it sees, and the old guard too, though the old one fails on the write's own timeout rather
+than on its count; a foreign backend queued behind the first write's row, with the second write
+held past a poll tick, fails the old guard with the main run's own message and passes the new
+one 20 of 20. A counted waiter is right only where the test owns every backend that can wait;
+where the call under test has a connection of its own, watch its pid.
