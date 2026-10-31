@@ -47,6 +47,19 @@ body: |-
     than its bound waits for all of it and runs alone rather than being refused, so a stored document
     always loads and no honest handoff is turned away.
 
+    What the server holds for one browser's socket is bounded as well, at 60 MiB of frames queued
+    for it and not yet written. ygo bounded that queue in frames alone - 512 of them, whatever
+    their size - so a socket that completed a room's handshake and then asked for the whole
+    document over and over without ever reading an answer was sent a whole state for each ask and
+    made the server hold all 512: 1.5 GB of a document of a mebibyte of prose for the 21 KB it
+    sent, and twenty such sockets several times what the pod has. A frame reaching such a socket
+    once its queued bytes stand at the budget is refused and the socket closed, with the room it
+    was in logged. The budget clears every frame a room can send one socket, the whole state a
+    browser hands back included, since a frame arriving while the budget or more waits closes a
+    reading browser as readily as a silent one: a browser on a slow link that falls behind a burst
+    of someone else's typing keeps its socket and ends with the whole document, and a socket the
+    budget does close reconnects and syncs afresh, as it does after any abrupt close.
+
     A document no write can change is recovered by `POST /api/v1/artifacts/{id}/rebuild`, which now
     also accepts a history that loads but stands at or near the decode cap or the room's scan total,
     rebuilds it from its own text with the edits no version holds yet, closes this server's room for it

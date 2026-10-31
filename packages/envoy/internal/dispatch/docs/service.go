@@ -703,6 +703,11 @@ func New(deps Deps) *Service {
 	// opens a document socket. It is a floor against a client that is not the editor, not the
 	// bound on what a document may hold, which is the peer update hook's (maxMessageBytes).
 	srv.MaxMessageBytes = maxMessageBytes
+	// ygo bounds a browser's write queue in frames alone without this, 512 of them whatever their
+	// size, so a socket that sends SyncStep1 frames it never reads the answers to can make the
+	// server hold 512 whole states of its room. The budget bounds those queued bytes instead, and
+	// closes a socket a frame reaches while the budget or more waits (peerWriteQueueBytes).
+	srv.PeerWriteQueueBytes = peerWriteQueueBytes
 
 	service.srv = newRoomServer(srv)
 	// A room an Apply held is looked at again once it returns: the budget's closes give up in

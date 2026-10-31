@@ -781,6 +781,28 @@ The `dispatch-memory` job runs only when a file its `dispatch_memory` filter in
 itself, so every package the server imports is in that filter; `packages/envoy/AGENTS.md` (Critical
 conventions) says what keeps it current.
 
+Three of those rows are the per-peer write-queue budget's (`write_queue_memory_test.go`). ygo
+bounds a peer's write queue in frames alone, 512 whatever their size, so a socket that completes a
+room's handshake and then sends SyncStep1 frames whose answers it never reads — each answered with
+the room's whole state, 3,005,633 bytes on a document of a mebibyte of prose — could make the
+server hold 1,538,884,096 bytes for the 20,992 bytes it uploads. The document service sets ygo's
+`Server.PeerWriteQueueBytes` from `peerWriteQueueBytes` (60 MiB,
+`internal/dispatch/docs/peer_update.go`) instead, and these drives weigh what that leaves, each
+measured over three runs: one such socket is closed with 63,117,516 bytes queued and costs the
+server 102,973,472 to 119,939,104 bytes above what it held idle with the same room open; twenty
+at once, on twenty mebibyte documents, are each closed holding 62,921,280 bytes, 1,258,425,600
+between them, with the server's peak 1,552 to 1,767 MiB of the pod's 4,096 and 1,570,798,216 to
+1,799,998,136 bytes of what its Go memory limit bounds, by both of `requireUnderThePod`'s
+readings; and an honest browser reading one frame every 250 ms through a burst of 200 keystrokes
+and the relayed whole-state handoff that ends it is never closed, ends holding the document byte
+for byte, and was 3,008,506 to 3,009,102 bytes behind at its furthest. Those twenty
+rooms hold a mebibyte of words in one run rather than `proseMarkdown`'s sections, because ygo
+closes a peer whose write has been blocked for ten seconds whatever any budget says, and twenty
+queues of prose, whose whole state is tens of thousands of structs to walk, do not reach 60 MiB
+inside that window on a two-processor pod. Each drive fails with the budget at zero: no socket is
+closed for a budget at all, and the single socket then takes the server 1,228,628,256 bytes above
+idle.
+
 The two-process tests (`multiprocess_test.go`, INFRA-66, INFRA-555) start two real Dispatch servers on one
 Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
 across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row

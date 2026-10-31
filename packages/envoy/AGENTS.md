@@ -700,6 +700,19 @@ The copy-heap bound (`copyHeapBound`, the next 393,705,336 bytes) holds the pod'
 A decode weighing more than the whole bound waits for all of it and runs alone, never refused:
 a stored document must always load.
 
+Beside those stands a bound on what one browser's socket can make the server keep for it:
+the write-queue budget (`peerWriteQueueBytes`, 60 MiB), which the service gives ygo as `Server.PeerWriteQueueBytes` and which weighs the frames queued for one peer and not yet taken off that queue by its writer.
+A frame reaching a socket whose queued bytes already reach the budget is refused and that socket closed, so the frame that crosses is queued and a socket holds the budget and one frame at most; the room's three handshake frames are neither refused nor charged, the writer credits a frame as it takes it off the queue, before it writes it, and after such a close ygo drops the input that peer had already sent.
+ygo's other bound, `PeerWriteQueueSize`, counts frames alone - 512 whatever their size - so a socket that completes a room's handshake and then sends SyncStep1 frames whose answers it never reads, each answered with the room's whole state, held 512 of them: 3,005,633 bytes a frame on a document of a mebibyte of prose, 1,538,884,096 for the 20,992 bytes it uploads.
+The close is logged at Warn, `peer queued bytes over budget; closing peer`, with the room, through the server's own `slog`.
+60 MiB clears by 6,291,456 bytes every frame a room can send one socket - F (`heaviestHandoffBound`, 44,936,089) for the room's own whole state, `maxMessageBytes` (56,623,104) for a whole state ygo relays from another browser as it arrived - because a frame arriving while the budget or more waits closes a reading peer as readily as a silent one.
+A browser reading one frame every 250 ms through a burst of 200 keystrokes and the relayed handoff that ended it fell 3,008,506 to 3,009,102 bytes behind over three runs, 4.78 per cent of the budget, and was not closed.
+Twenty sockets that never read hold 20 x 62,914,560 bytes and the frame that crossed each budget, and the frames twenty rooms can send are held by the room budget they are charged in to 425,585,911 bytes in all: 1,683,877,111, which beside a room budget charged to its limit is 3,831,360,759, inside the Go memory limit with 34,109,807 bytes left (`TestTheWriteQueueBudgetsArithmetic`).
+Measured over three runs, the twenty held 1,258,425,600 bytes and the server peaked at 1,552 to 1,767 MiB of the pod's 4,096.
+64 MiB, the figure the first draft of this took from ygo's draft, where a refused frame was never queued, is 49,776,273 bytes past that limit.
+A browser the budget closes reconnects with the provider's backoff and a fresh SyncStep1/SyncStep2, as it does for any close the dashboard does not stop on (`packages/dispatch/web/src/features/doc/connection.ts`, `onClose`).
+The three drives are `cmd/dispatch/write_queue_memory_test.go`.
+
 Every remote apply is held to an allowance of conflict scans as well (`docs/scan_budget.go`, `roomScans`):
 integrating an item scans the items between its left and right origins, so one update of items naming an early left origin and no right origin scans its list over and over.
 A browser's update gets the lesser of the per-apply ceiling, 400,000 items (`perFrameScanCeiling`, 213 to 320 ms of the room's lock measured at it), and what is left of the room's 1,000,000-item scan total (`roomScanTotal`), which counts the re-scan of the stored state the load decoded and every transaction the room has committed or refused since;
