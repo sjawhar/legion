@@ -2,43 +2,73 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-575",
-  "completed": "2026-10-31T00:45:00Z",
-  "round": 4,
+  "completed": "2026-10-31T05:10:00Z",
+  "round": 5,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 4 changes no file outside `.legion/INFRA-575/`: `git diff --name-only de8b7ea325de 15c9cc9a -- . ':(exclude).legion'` is empty, so the tree I tested in round 3 is the tree at this head and that round's verification stands as written (22 documentation shots with exit 0 and each of the four re-taken images read, the site build with every internal link valid, biome over docs/ and check-private-names clean, and the product diff docs-only since round 2). Its one proof is about GitHub rather than the tree, and I read it at the source rather than taking it: `gh api 'repos/sjawhar/legion/actions/runs?per_page=8&branch=legion%2FINFRA-575'` now lists runs at this head - CI 41150250825 and PR Title 41150303822, created 2026-10-31T00:27Z - where before this round the same read answered nothing for de8b7ea3 or 6ad7ca1f (total_count 0, check-suites 0 on both) and the newest run on the branch was 41128214713 at 93c4ab64 with its `docs / build` red. `gh pr view 2549` now answers MERGEABLE, BLOCKED (the checks have not finished). The bare gate at this head re-run here: `bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium` -> 8 passed (1.3m)."
+    "how": "The unit rows it names were re-run here: `bun test web/src/features/inbox/Inbox.test.tsx web/src/features/inbox/AskCard.test.tsx web/src/features/doc/change-set.test.ts` -> 91 pass, 0 fail, and `cd packages/proof-editor && bun run test` -> 220 pass, 0 fail. Because all five defect fixes are pinned by unit rows alone and the review found all five on the page, each was then driven on the real page with throwaway probes of my own (removed before this handoff): D1, D2, D3, D4 and D5 are listed one by one under `proof` below, four of them green on the page. Its e2e proof re-ran too, inside the whole-project run below. Its one claim I could not confirm is the whole of defect 1 and 2's story: `Enter` reaches the selected block, but it does not put the reader in the field it opens (failure 1). Its round's e2e was 7 spec files, 88 rows - not the whole chromium project, which INFRA-92 requires of a layout change and which is where failure 2 shows."
   },
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "failed": 2,
+  "failures": [
     {
-      "criterion": "Round 3's only failure is answered: a GitHub Actions run exists for the head the reviewer reads, so CI judges this pull request's code, the documentation fix included.",
-      "surface": "GitHub Actions on sjawhar/legion, read at the head under test.",
-      "command": "gh api 'repos/sjawhar/legion/actions/runs?per_page=8&branch=legion%2FINFRA-575'; gh api --paginate 'repos/sjawhar/legion/actions/runs/41150250825/jobs?filter=all&per_page=100'",
-      "observed": "CI run 41150250825 and PR Title run 41150303822 exist at 15c9cc9a987d131423b97aceb8fa01ec0d50727e, created 00:27Z. Read three times, at 00:33Z, 00:41Z and 00:48Z, the CI run was still `pending` with its first job `changes` queued and no lane scheduled - GitHub's runners were backed up that night, as the branch's earlier runs show - so every lane of it is READ AS RUNNING here, which is what a tester records for a lane that has not settled, and the daemon watches the same run and takes the issue back to implementing by itself if it settles red. The lane this round exists for, `docs / build`, runs commands I ran at this exact tree: the whole documentation shot set again at THIS head, `bun docs/site/media/shots.ts` -> every shot of both sets taken, exit 0, no failure line (round 3 also read each of the four re-taken images), and round 3's `43 page(s) built` with every internal link valid, biome over docs/ clean and check-private-names clean on the same bytes.",
-      "headSha": "15c9cc9a987d131423b97aceb8fa01ec0d50727e",
-      "negativeControl": "The two previous heads are the control, and they are what this round changes: `?head_sha=de8b7ea325de…` -> total_count 0 and `?head_sha=6ad7ca1f…` -> 0, with `commits/6ad7ca1f…/check-suites` -> 0, because that push's head carried `skip-checks: true`. The same read at this head answers with two runs, and nothing of the tree changed between them."
+      "criterion": "Enter answers the selected question: it opens a decision block's note field AND puts the reader in it, as this change's own documentation says (docs/site/src/content/docs/dispatch/keyboard.md: `Enter` - Answer the selected ask (moves into its answer box, opening the note field of a decision block first)), and as Inbox.tsx's Enter binding intends (`inAnswerHand(NOTE_DISCLOSURE_SELECTOR)?.click();` then `inAnswerHand(\"[data-ask-answer]\")?.focus()`).",
+      "evidence": "Red row `Enter opens the selected decision block's note field and puts the focus in it` in packages/dispatch/e2e/inbox-reading-pane.e2e.ts, commit d542d2dac754880a47917be4fdf99a38d89126ef, pushed. Command: `source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium -g \"note field\"`. At a87c4269 it fails: `expect(locator).toBeFocused() failed; Locator: getByTestId('inbox-pane').locator('[data-dispatch-ask-block=\"rollout-order\"]').locator('article[data-testid^=ask-]').locator('[data-ask-answer]'); Received: inactive`. A diagnostic probe printed the whole sequence on the page: after ONE Enter the disclosure reads aria-expanded=true and the card holds one [data-ask-answer] box, and document.activeElement is BODY; after a SECOND Enter the focus is that box. So the field opens and the reader is not in it, and every keystroke after it is still the Inbox's keymap - `j` walks the list while the reader believes they are writing an answer. Why the unit row misses it: `fireEvent` flushes React synchronously, so the textarea exists by the time `focus()` runs; in a browser the click's state update has not rendered yet, so `focus()` finds nothing. The fix needs the focus after the render (the box's own autofocus on open, or a focus the disclosure's own effect takes), and the red row above is the check."
     },
     {
-      "criterion": "The product and its documentation are where round 3 left them, so round 3's and round 2's verification describes this head (A1, A3 and the architect's ruling).",
-      "surface": "The branch's diff, and the Inbox page of a running Dispatch.",
-      "command": "git diff --name-only de8b7ea325de 15c9cc9a -- . ':(exclude).legion'; source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium",
-      "observed": "The diff outside `.legion/` is empty - round 4 wrote only its own handoff. The bare gate at this head: 8 passed (1.3m) - the five rows of A1, the two rows I wrote for the architect's ruling and its exception, and the implementer's refusal row. Carried forward unchanged, at the same product code: the whole chromium project (932 passed, 25 skipped, 1 failed, that one `e2e/hover-preview.e2e.ts:87`, main's own, proven on a clean export of main and green in CI's own `dispatch` lane), my four probes of the two holds (4 passed), my hand drive of a local Dispatch at 1440 and 1279 px, and round 1's negative control on the base commit 14d907b6 (7 failed, 0 passed).",
-      "headSha": "15c9cc9a987d131423b97aceb8fa01ec0d50727e",
-      "negativeControl": "The emptiness of that diff is the control for carrying the earlier rounds' evidence: one file under packages/ or docs/ in it would require the full round again. Round 1's base-commit run is the control for the feature itself, and round 3's shot run at the previous head (4 shot(s) failed) for the documentation."
-    },
-    {
-      "criterion": "A2 is the only acceptance line left, and it belongs after the merge: the production check of a change to a page a person reads in Dispatch.",
-      "surface": "The deployment's own check, run from the pod after the deploy.",
-      "command": "gh api 'repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main' -H 'Accept: application/vnd.github.raw' | bash -s -- --commit <merged sha> --page / --route /api/inbox",
-      "observed": "Not run and not runnable here: there is no merge commit yet. Recorded so the implementer's production check after the close has the command and the page the spec names (A2: `--page /`, the Inbox).",
-      "headSha": "15c9cc9a987d131423b97aceb8fa01ec0d50727e",
-      "negativeControl": "None applies to work that has not happened; the check's own last line (`all N assertions passed`) is what will decide it, never its exit status, since it runs through a pipe."
+      "criterion": "The whole chromium project is green at the head, which is how a layout change is proven (INFRA-92), and no row of the suite is left red by this round's refactor.",
+      "evidence": "`bun run e2e -- --project=chromium` at d542d2da: 931 passed, 25 skipped, 3 failed (1.0h). One failure is my red row above and one is e2e/hover-preview.e2e.ts:87, which is main's (proven in earlier rounds on a clean export of main, and fixed on main by #2581). The third is new this round: `e2e/nav.e2e.ts:14 sidebar shows Inbox, Pinned, one row per project with its open-ask badge, and Settings - never an issue row - on desktop and in the phone drawer @phone`. It reproduces with its file run alone (1 failed, 1 passed), so it is no shared-CPU failure: `expect(received).toEqual(expected)` with `Array [ \"?pinned=true\", - \"/api/v1/issues/CORE-2\" ]` - the reading column no longer makes the one per-issue read the row was taught to expect in round 1. Nothing of the head is lost with it: ReadingPaneHead.tsx:108 takes the priority from the ask row (`<PriorityControl issueKey={ask.issue_key} priority={ask.priority} />`), and e2e/inbox.e2e.ts:768, which drives that control through the pane head, is green in the same run. So this is the refactor making the column read less, and the row's expectation is now stale and this change's to correct (with the saved read named in the body, since it is an improvement worth stating). It is a failure of the round rather than a defect of the product: the implementer's own round ran 7 spec files and 88 rows, not the project, so nothing of theirs could have shown it."
     }
   ],
-  "notes": [
-    "This round's handoff push from the implementer deliberately carried no `skip-checks: true` line though it touched only `.legion/INFRA-575/`, and that is the right call here rather than a defect to report: the code head carried no run at all, so there was no verdict for the trailer to let the daemon carry, and the rule's own stated reason for retro's exception ('a base that requires a check will not merge a head whose checks never ran') is exactly this case. The daemon classifies a push by its paths, never by the trailer, so nothing downstream reads it differently.",
-    "The lesson that cost two rounds, for whoever pushes next: push a code commit in a push of its own and the handoff after it. GitHub reads only the head commit's message, so a push carrying code and a trailered handoff together gets no run for either."
+  "proof": [
+    {
+      "criterion": "Defect 1 of the review: with the pane on, Enter on a list control is that control's, not a jump into the selected question's answer box.",
+      "surface": "The Inbox page of a running Dispatch at 1440 px, driven in a real Chromium.",
+      "command": "A throwaway probe (e2e/tmp-probe-575b.e2e.ts, removed) run with: source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/tmp-probe-575b.e2e.ts --project=chromium",
+      "observed": "Green. The assignee filter button holding the focus takes Enter - it opens (aria-expanded true) and document.activeElement is not a TEXTAREA - and the selection behind it does not move; a row's own issue link takes Enter and the page lands on /issues/<key>.",
+      "headSha": "a87c4269e23390716e69561a89d656336261629a",
+      "negativeControl": "The review's own probe at the previous head is the control: `ENTER default prevented: true focus now: TEXTAREA`."
+    },
+    {
+      "criterion": "Defect 2: in a document with several open decision blocks, the digits act on the selected block, not on the first block in document order.",
+      "surface": "The same Inbox, on a seeded spec with two open decision blocks, the second named by ?item=.",
+      "command": "The same probe file and command.",
+      "observed": "Green: `1` ticks the SECOND block's first option (`The last hour`) and leaves the first block's (`Ledger first`) unticked.",
+      "headSha": "a87c4269e23390716e69561a89d656336261629a",
+      "negativeControl": "The review's finding is the control: before the fix the first open block's option was ticked. The paired Enter case is failure 1 above, so this fix is confirmed and its sibling is not."
+    },
+    {
+      "criterion": "Defect 3: Change answer then Cancel leaves no draft behind, so no card claims a recorded answer was never sent.",
+      "surface": "The Answers page (/answers), which lists the reader's own answer and opens its card with Change answer - the surface that offers Cancel - and then the document's own block card and the Inbox.",
+      "command": "The same probe file and command.",
+      "observed": "Green: after Change answer and Cancel the page holds no `closed before you sent your answer` text and no `ask-unsent-answer` anywhere, the row still shows the recorded `Ledger first`, and neither the document's decision block nor the Inbox shows the banner.",
+      "headSha": "a87c4269e23390716e69561a89d656336261629a",
+      "negativeControl": "The review's probe: `BANNER: This question closed before you sent your answer, so it was not sent. Your text is here to copy.First note`, over the reader's own recorded answer."
+    },
+    {
+      "criterion": "Defect 4: an approval's word marks land on their own characters, with a hard break before them.",
+      "surface": "The reading column's approval, on a document whose approved version holds `Line one  \\nthe canary word.` and a plain paragraph, both changed since.",
+      "command": "The same probe file and command.",
+      "observed": "Green: the column's added marks read exactly [`parrot`, `seven`] and its removed-word marks exactly [`canary`, `three`] - the first pair after a hard break, the second in a plain paragraph.",
+      "headSha": "a87c4269e23390716e69561a89d656336261629a",
+      "negativeControl": "The review's probe: the decoration drew `anary ` for `canary`, one character out per break."
+    },
+    {
+      "criterion": "Defect 5: the word diff is bounded, so two unrelated large blocks cannot hold the main thread.",
+      "surface": "The reading column's approval on a document whose two 3000-word blocks both changed whole.",
+      "command": "The same probe file and command.",
+      "observed": "Green: the column drew the marked version in 1312 ms and 1562 ms on two runs of this 2-CPU pod, and a key pressed straight after still moved the selection, so the thread was the reader's.",
+      "headSha": "a87c4269e23390716e69561a89d656336261629a",
+      "negativeControl": "The review's benchmark of the unbounded path is the control: 679 ms at 1000 words, 8.1 s at 3000, 39 s at 6000 - against 1.3 s here for two 3000-word blocks end to end, page load included."
+    },
+    {
+      "criterion": "The reading pane, the change view and the keys still do what the spec says after five fixes and thirteen refactors (A1, A3 and the architect's ruling).",
+      "surface": "The Inbox and document pages of a running Dispatch at 1440, 1280, 1279 and 390 px and in the drawer, and the whole Chromium project of the suite.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium, then bun run e2e -- --project=chromium",
+      "observed": "The reading-pane file: 8 passed before my red row was added, the two rows I wrote for the architect's ruling and the implementer's refusal row among them, all unmodified by this round (`git diff 77787bae3564 a87c4269` over that file is one addition and no change to either of mine). The whole project at d542d2da: 931 passed, 25 skipped, 3 failed, the three being my red row, main's hover-preview row and the stale nav row of failure 2.",
+      "headSha": "d542d2dac754880a47917be4fdf99a38d89126ef",
+      "negativeControl": "Round 1's run of the whole reading-pane spec on the base commit 14d907b6fdd3: 7 failed, 0 passed, which is A1's and A3's 'fails on the commit before the change'."
+    }
   ],
-  "environment": "The issue pod on the harness /legion/harness/setup.sh builds: Postgres 17 with pgvector on 127.0.0.1:55432, the tester's own databases (dispatch_tester_e2e, dispatch_tester_docs), Playwright browsers under /legion/harness/ms-playwright, 2 CPUs, one Playwright worker."
+  "ci": "Read, not re-run. The implementer's code head a395dc20 got CI run 41161396138, which was cancelled in full when my red-test push moved the branch (GitHub's pull_request concurrency), and its PR Title run 41161552105 passed. The run that now judges the branch is 41162987965 at d542d2da, queued when last read. Expect that run's dispatch lane to be RED: it carries my red row, which is the point of the row. A reviewer reading CI should read it at the head the next implement round pushes, not at this one.",
+  "environment": "The issue pod, which was recreated during this round: the browser harness (/legion/harness) went with the previous pod's disk, so every run above was made before that, on the harness /legion/harness/setup.sh builds - Postgres 17 with pgvector on 127.0.0.1:55432, the tester's own databases, Playwright browsers on the issue volume, 2 CPUs, one Playwright worker. The red row and this handoff are pushed; nothing else of that turn remains in the workspace."
 }
