@@ -6,17 +6,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/session"
 )
 
@@ -436,12 +439,99 @@ func TestTheSweepHandsOverALaneNoHandoverIsDraining(t *testing.T) {
 	}
 }
 
+// countingGetKV is a bucket that counts the reads made of it, and is otherwise the bucket itself.
+type countingGetKV struct {
+	natsgo.KeyValue
+	gets *atomic.Int64
+}
+
+func (kv countingGetKV) Get(key string) (natsgo.KeyValueEntry, error) {
+	kv.gets.Add(1)
+	return kv.KeyValue.Get(key)
+}
+
+// countSessionBucketReads counts every read sessions makes of the session bucket from here on, by
+// swapping the handle its (stopped) watcher hands out, as stallSessionReads swaps it for one that
+// never answers. A resolution of a role's holder reads the holder's session that way whenever
+// this listener's cache does not hold it (session.SessionRegistry.Refresh), so the counter is
+// that resolution made visible.
+func countSessionBucketReads(t *testing.T, sessions *session.SessionRegistry) *atomic.Int64 {
+	t.Helper()
+	gets := &atomic.Int64{}
+	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
+	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+	counted := bus.KeyValue{KeyValue: countingGetKV{KeyValue: watcher.Interface().(*kvwatch.Watcher).KV().KeyValue, gets: gets}}
+	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", counted, func(natsgo.KeyValueEntry) {}, func() {})))
+	return gets
+}
+
+// A handover of a role whose kept lane holds nothing resolves no holder at all. Every claim of a
+// role starts one and most roles have nothing kept for them, so a pass that resolved the holder
+// before it read the lane spent a claim read and a session read on every such claim - and made
+// them from a goroutine the claim's own answer had already outlived, which is how a claim's
+// handover came to read the session registry under a test that was replacing it. The pass opens
+// with the lane instead, and ends there when the lane holds nothing.
+func TestAHandoverOfAnEmptyKeptLaneResolvesNoHolder(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const (
+		empty  = "kept-empty-lane"
+		full   = "kept-filled-lane"
+		holder = "ses_kept_empty_lane"
+	)
+	lane := newKeptLaneUnderClaim(t, harness, func(int, string, contracts.Envelope) error { return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := harness.sessions.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("warm the session cache: %v", err)
+	}
+	// The holder is registered through a session registry of its own, with this listener's cache
+	// no longer watching the bucket, so resolving either role's holder must read the session
+	// bucket itself: the read a handover of a lane with nothing on it is not to make.
+	harness.sessions.StopWatch()
+	writer, err := session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the registry that registers the holder: %v", err)
+	}
+	if err := writer.Put(holder, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register %s: %v", holder, err)
+	}
+	for _, role := range []string{empty, full} {
+		if _, err := harness.registry.SetRole(holder, "test-machine", role, false); err != nil {
+			t.Fatalf("claim %s for %s: %v", role, holder, err)
+		}
+	}
+	keys := lane.keep(t, full, "kept-filled", 1)
+	reads := countSessionBucketReads(t, harness.sessions)
+
+	if err := drainKeptRole(ctx, *lane.deps.delivery, empty, time.Now); err != nil {
+		t.Fatalf("hand over role %s's empty kept lane: %v\n%s", empty, err, harness.logs.String())
+	}
+	if got := reads.Load(); got != 0 {
+		t.Fatalf("the handover of role %s, whose kept lane holds nothing, read the session bucket %d times; want no resolution at all:\n%s",
+			empty, got, harness.logs.String())
+	}
+
+	// The same counter over a lane that does hold a copy: the pass resolves the holder, reads the
+	// bucket for it and hands the copy over, so the count above is this handover's own work and
+	// not a counter that counts nothing.
+	if err := drainKeptRole(ctx, *lane.deps.delivery, full, time.Now); err != nil {
+		t.Fatalf("hand over role %s's kept lane: %v\n%s", full, err, harness.logs.String())
+	}
+	if got := reads.Load(); got == 0 {
+		t.Fatalf("the handover of role %s, whose kept lane holds a copy, read the session bucket %d times; want the holder resolved:\n%s",
+			full, got, harness.logs.String())
+	}
+	if handed := lane.keys(); !slices.Equal(handed, keys) {
+		t.Fatalf("the handover forwarded %v, want %v:\n%s", handed, keys, harness.logs.String())
+	}
+}
+
 // Dispatch's outbox publishes a role-routed event straight onto the role lane as a core message,
 // and sends it once: it marks the event published as soon as NATS accepted it, which for a role
 // topic is a flush with no receipt behind it, reads no no_holder exception and never sends that
-// event again. So an event routed to a role no session held was dropped. The envelope publishRoute
-// builds carries no keep flag, so the listener keeps it as it keeps any role message, and the
-// role's next claim is handed it.
+// event again. So an event routed to a role no session held was dropped. The role lane keeps
+// every message it finds no live holder for, so the listener keeps this one, and the role's next
+// claim is handed it.
 func TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const (
@@ -450,10 +540,9 @@ func TestADispatchRoleRoutedEventToAnUnheldRoleReachesTheNextHolder(t *testing.T
 	)
 	lane := newKeptLaneUnderClaim(t, harness, func(int, string, contracts.Envelope) error { return nil })
 
-	// The shape publishRoute hands the bus for a role route: the event's own envelope, the role
-	// topic, and no keep flag at all.
+	// The shape publishRoute hands the bus for a role route: the event's own envelope, on the
+	// role topic.
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "dispatch-route-1")
-	item.Keep = nil
 	harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
 	waitForKeptRoleMessage(t, harness.client, role, item.EventID)
 

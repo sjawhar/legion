@@ -27,17 +27,6 @@ export const EnvelopeSchema = z.object({
    * judge how old the message is.
    */
   kept_at: z.number().int().optional(),
-  /**
-   * Whether Envoy's listener may keep this message for the role's next holder when it is
-   * published straight onto a role lane and no session holds that role. Absent means keep: the
-   * listener stores the message on that role's kept lane and hands it to whoever claims the role
-   * next. A sender that keeps a queue of its own and redelivers from it sets it false, so the lane
-   * raises `no_holder` for the message and hands the next holder no copy that sender would deliver
-   * again: the Legion daemon's notice queue does, and a phase worker's stall reminder, whose next
-   * run says the same thing. Dispatch's outbox does not — it sends a role route once and reads no
-   * exception — so its role-routed events are kept like any role message.
-   */
-  keep: z.boolean().optional(),
   payload_summary: z.string().min(1),
   payload: z.string().optional(),
   payload_ref: z.string().optional(),

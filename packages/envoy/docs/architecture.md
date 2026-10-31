@@ -295,9 +295,11 @@ copy carries `kept_at`, the Unix-millisecond time the listener kept it, so the h
 the message's age. A copy the listener kept more than an hour before is dropped rather than
 forwarded, and counted on `envoy_role_kept_expired_total`. `GET /v1/roles/<role>` still answers
 404 for an unheld or lapsed role: only the publish route gained the kept answer. A sender that
-keeps a queue of its own and redelivers from it asks not to be kept (`keep: false`) and gets
-today's 404; the Legion daemon does, and Dispatch's outbox, which sends a role route once and
-reads no exception, does not: its role-routed events are kept like any role message.
+keeps a queue of its own and redelivers from it asks not to be kept (`keep: false` in the publish
+body) and gets today's 404; the Legion daemon's notice queue does, and a phase worker's stall
+reminder, whose next run says the same thing. The opt-out is the route's alone: a message published
+straight onto a role lane is always kept, Dispatch's role-routed events among them, which the
+outbox sends once and reads no exception for.
 
 An ad-hoc topic sent through the route is published over core NATS, then forwarded the same way
 to each session registered on it, on any machine, that holds its own NATS connection

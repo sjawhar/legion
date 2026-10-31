@@ -166,8 +166,9 @@ func TestAPublishToALapsedClaimIsKeptAndTheClaimIsStillReleased(t *testing.T) {
 	}
 }
 
-// A sender that holds a queue of its own asks for keep: false and gets today's answer: the 404
-// naming the state, with nothing stored for a later holder.
+// A sender that holds a queue of its own asks for keep: false on its request and gets today's
+// answer: the 404 naming the state, with nothing stored for a later holder. The flag is this
+// route's own request field, read by its give-up alone (roleSend.noHolder).
 func TestAPublishWithKeepFalseToAnUnheldRoleIsRefusedAndKeepsNothing(t *testing.T) {
 	d, client := keptRoleDeps(t)
 	const role = "kept-opted-out"
@@ -181,6 +182,102 @@ func TestAPublishWithKeepFalseToAnUnheldRoleIsRefusedAndKeepsNothing(t *testing.
 		t.Fatalf("body = %q", body)
 	}
 	assertNothingKept(t, client, role)
+}
+
+// startRawKeptStandIn is a session process that keeps every frame it is sent as the bytes it was
+// sent, and answers each with an empty receipt, so a test can judge a forwarded copy by the keys
+// it carries rather than by the fields this build decodes.
+func startRawKeptStandIn(t *testing.T, uri, sessionID string) <-chan []byte {
+	t.Helper()
+	conn := testnats.Connect(t, uri)
+	t.Cleanup(conn.Close)
+	frames := make(chan []byte, 16)
+	subscription, err := conn.Subscribe(contracts.AgentSubject(sessionID), func(message *natsgo.Msg) {
+		frames <- slices.Clone(message.Data)
+		if message.Reply != "" {
+			_ = message.Respond(nil)
+		}
+	})
+	if err != nil {
+		t.Fatalf("stand-in %s subscribe: %v", sessionID, err)
+	}
+	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("stand-in %s flush: %v", sessionID, err)
+	}
+	return frames
+}
+
+// assertNoKeepKey fails when body, the JSON of an envelope the listener wrote, carries a keep key
+// at all.
+func assertNoKeepKey(t *testing.T, what string, body []byte) {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("decode %s: %v (%s)", what, err, body)
+	}
+	if keep, ok := fields["keep"]; ok {
+		t.Fatalf("%s carries keep %s, want no such key: the flag is the publish route's request field, not the envelope's", what, keep)
+	}
+}
+
+// The keep flag is the publish route's own request field. Nothing the listener writes carries it:
+// not the copy it keeps, not the copy it forwards to the role's next holder, and not the answer
+// it gives the sender - which would otherwise tell the holder of every daemon notice and every
+// phase reminder "keep": false about a message it has just been handed.
+func TestNoKeptRoleCopyOrPublishAnswerCarriesAKeepKey(t *testing.T) {
+	d, client := keptRoleDeps(t)
+	uri := testnats.URL(t)
+	const (
+		role   = "kept-no-keep-key"
+		holder = "ses_kept_no_keep_key"
+	)
+
+	recorder, answer := publishToRole(t, d, role,
+		`{"topic":"`+contracts.RoleTopicPrefix+role+`","source":"agent","message":"nobody holds this yet","keep":true}`)
+	if recorder.Code != http.StatusAccepted || !answer.Kept {
+		t.Fatalf("publish to an unheld role: status %d, body %s; want 202 kept", recorder.Code, recorder.Body.String())
+	}
+	assertNoKeepKey(t, "the route's 202 kept answer", recorder.Body.Bytes())
+	waitForKeptRoleMessage(t, client, role, answer.EventID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stored, err := client.LastStoredMessage(ctx, bus.KeptRoleSubject(role))
+	if err != nil {
+		t.Fatalf("read role %s's kept lane: %v", role, err)
+	}
+	assertNoKeepKey(t, "the kept copy", stored.Data)
+
+	frames := startRawKeptStandIn(t, uri, holder)
+	if err := d.sessions.Put(holder, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register the claimant: %v", err)
+	}
+	claimRecorder := httptest.NewRecorder()
+	roleSetHandler(d, "test-machine").ServeHTTP(claimRecorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+		strings.NewReader(`{"session_id":"`+holder+`","role":"`+role+`"}`)))
+	if claimRecorder.Code != http.StatusOK {
+		t.Fatalf("claim of %s: status %d, body %s", role, claimRecorder.Code, claimRecorder.Body.String())
+	}
+	select {
+	case frame := <-frames:
+		assertNoKeepKey(t, "the copy handed to the role's next holder", frame)
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the claimant of %s was handed no kept copy in 30 seconds", role)
+	}
+
+	// The live send's own forward and its 200, which carry the envelope the same way.
+	liveRecorder, _ := publishToRole(t, d, role,
+		`{"topic":"`+contracts.RoleTopicPrefix+role+`","source":"agent","message":"the holder is live now"}`)
+	if liveRecorder.Code != http.StatusOK {
+		t.Fatalf("publish to the live holder of %s: status %d, body %s; want 200", role, liveRecorder.Code, liveRecorder.Body.String())
+	}
+	assertNoKeepKey(t, "the route's 200 answer", liveRecorder.Body.Bytes())
+	select {
+	case frame := <-frames:
+		assertNoKeepKey(t, "the copy forwarded to the live holder", frame)
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the live holder of %s was forwarded nothing in 30 seconds", role)
+	}
 }
 
 // The claim is where a kept message is handed over: the session that takes the role is forwarded
@@ -733,50 +830,30 @@ func TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep(t *testing.T) {
 	}
 }
 
-// A sender that keeps a queue of its own and redelivers from it says so on the envelope
-// (contracts.Envelope.Keep false), and the role lane keeps nothing for it: a copy kept here would
-// reach the role's next holder a second time. The Legion daemon's notice queue publishes that
-// way, and so does a phase worker's stall reminder, whose next run says the same thing. The lane
-// raises the no_holder it raised before the kept lane, and an ordinary raw role publish, which
-// carries no such flag - Dispatch's role-routed events among them - is kept.
-func TestTheRoleLaneKeepsNothingForASenderThatKeepsItsOwnQueue(t *testing.T) {
-	// The flag the sender sets, as the Legion daemon sets it on a notice of its own queue.
-	keepFalse := false
-	for _, tc := range []struct {
-		name string
-		role string
-		// keep is the envelope's own keep flag, nil for the raw role publish that carries none.
-		keep *bool
-		kept bool
-	}{
-		{name: "a sender that queues the message itself", role: "lane-keep-false", keep: &keepFalse},
-		{name: "an ordinary raw role publish", role: "lane-keep-absent", kept: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			harness := newListenerDeliveryHarness(t, nil)
-			topic := contracts.RoleTopicPrefix + tc.role
-			probe, err := harness.client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + topic)
-			if err != nil {
-				t.Fatalf("subscribe to the role topic's exception lane: %v", err)
-			}
-			t.Cleanup(func() { _ = probe.Unsubscribe() })
-			if err := harness.client.Conn.Flush(); err != nil {
-				t.Fatalf("flush the probe: %v", err)
-			}
-
-			item := listenerTestEnvelope(topic, "lane-keep-"+tc.role)
-			item.Keep = tc.keep
-			harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
-
-			if tc.kept {
-				waitForKeptRoleMessage(t, harness.client, tc.role, item.EventID)
-				noException(t, probe)
-				return
-			}
-			assertDeliveryException(t, probe, item, "no_holder")
-			assertNothingKept(t, harness.client, tc.role)
-		})
+// A raw role publish is kept for the role's next holder whatever its sender is: the lane honours
+// no opt-out of its own, because the one kind of sender that keeps a queue of its own and
+// redelivers from it - the Legion daemon's notice queue, and a phase worker's stall reminder -
+// publishes through the route and opts out on its request instead
+// (TestAPublishWithKeepFalseToAnUnheldRoleIsRefusedAndKeepsNothing). So an ordinary raw role
+// publish, Dispatch's role-routed events among them, is kept and raises no exception.
+func TestTheRoleLaneKeepsARawRolePublishForTheRolesNextHolder(t *testing.T) {
+	const role = "lane-keep-raw"
+	harness := newListenerDeliveryHarness(t, nil)
+	topic := contracts.RoleTopicPrefix + role
+	probe, err := harness.client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + topic)
+	if err != nil {
+		t.Fatalf("subscribe to the role topic's exception lane: %v", err)
 	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the probe: %v", err)
+	}
+
+	item := listenerTestEnvelope(topic, "lane-keep-"+role)
+	harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+
+	waitForKeptRoleMessage(t, harness.client, role, item.EventID)
+	noException(t, probe)
 }
 
 // A claim the restart grace retained is not a role without a holder: that holder re-registers

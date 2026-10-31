@@ -677,12 +677,14 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // which writes this route's one line per request with the answer; a confirmed send answers through
 // it too.
 //
-// keep is meaningful only for a role topic, and unset means true: a role message the listener
-// cannot deliver is kept on the role's kept lane and handed to the role's next holder, and the
-// send is answered 202 kept rather than 404 (roleSend.kept). A sender that holds a queue of its
-// own and must get today's answer passes keep: false, which keeps nothing and answers the 404.
-// A role token no claim can name keeps nothing either, which the keep itself refuses, for this
-// route and the role lane alike (keepForNextHolder).
+// keep is this route's own request field, meaningful only for a role topic, and unset means true:
+// a role message the listener cannot deliver is kept on the role's kept lane and handed to the
+// role's next holder, and the send is answered 202 kept rather than 404 (roleSend.kept). A sender
+// that holds a queue of its own and must get today's answer passes keep: false, which keeps
+// nothing and answers the 404. It is read by this route's give-up alone (roleSend.noHolder) and
+// rides no envelope, which travels on to the holder and back in the answer. A role token no claim
+// can name keeps nothing either, which the keep itself refuses, for this route and the role lane
+// alike (keepForNextHolder).
 func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		arrived := time.Now()
@@ -747,11 +749,6 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			dedupeKey = "publish." + request.IdempotencyKey
 		}
 		item := messageEnvelope(request.messageBody, request.Topic, dedupeKey)
-		// The request's keep flag travels on the envelope, the one place a give-up path reads it
-		// from (keepForNextHolder): a role send that finds no live holder keeps its message for
-		// the role's next holder unless its sender says it keeps a queue of its own. No flag at
-		// all means keep, so every publisher that sets none is unchanged.
-		item.Keep = request.Keep
 		record.item = &item
 		if err := item.Validate(); err != nil {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, err.Error())
@@ -760,7 +757,11 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
 			defer cancel()
-			sendToRole(ctx, w, record, d, item, role, arrived)
+			// The request's keep flag is read here and nowhere else: it belongs to this route's
+			// give-up (roleSend.noHolder) rather than to the envelope, which travels on to the
+			// holder and back in this route's own answer. No flag at all means keep, so every
+			// publisher that sets none is unchanged.
+			sendToRole(ctx, w, record, d, item, role, request.Keep == nil || *request.Keep, arrived)
 			return
 		}
 		if bus.UsesCoreTransport(request.Topic) {
@@ -1102,10 +1103,11 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 // role is a 409, a refused key a 413 or 400, and an unreadable claim the 503 or 500 it was.
 //
 // A claim that landed also hands the role's kept lane to its new holder: whatever the listener
-// kept while the role had none is forwarded to the claimant (runKeptRoleDrain, which resolves the
-// role's holder itself and so hands the lane to the claim that superseded this one when one has).
-// That runs in a goroutine under a context of its own, so this answer's status and body are
-// exactly what they were and wait for none of it.
+// kept while the role had none is forwarded to the claimant (runKeptRoleDrain, which reads the
+// lane first and resolves the role's holder itself, so a claim of a role with nothing kept for
+// it costs one stream read and no resolution at all, and a lane with copies on it goes to the
+// claim that superseded this one when one has). That runs in a goroutine under a context of its
+// own, so this answer's status and body are exactly what they were and wait for none of it.
 func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

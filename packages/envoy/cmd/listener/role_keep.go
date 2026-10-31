@@ -56,7 +56,9 @@ const roleKeepPublishWindow = 2 * time.Second
 // the sweep that started the handover. It covers roleKeepDrainMax forwards of roleReceiptTimeout
 // each, and the stream read and the claim of each of the roleKeepScanMax copies the walk may read
 // between them, so a walk whose holder answers no receipt still ends rather than outliving the
-// claim it serves.
+// claim it serves. A handover's pass takes it for the lane-head read it opens with
+// (handOverKeptRole, readKeptLaneHead), which is that walk's own opening read taken a moment
+// early.
 const roleKeepDrainWindow = 60 * time.Second
 
 // roleKeepClaimWindow is how long one walk's claim of a kept copy holds that role's lane against
@@ -113,8 +115,9 @@ const roleKeepDrainIdleRounds = 3
 const roleKeepHandoverWindow = 10 * time.Minute
 
 // roleKeepHolderWindow bounds a handover's resolution of the role's holder: the claim read, the
-// holder's session read, and at most one release of a lapsed claim. Every pass of a handover
-// resolves within it (drainKeptRole). It answers no caller - the keep's own answer is written by
+// holder's session read, and at most one release of a lapsed claim. Every pass that resolves at
+// all resolves within it, which is every pass whose lane holds copies to hand over
+// (handOverKeptRole). It answers no caller - the keep's own answer is written by
 // then - so it ends rather than waiting out a bus that is not answering, and a resolution that did
 // not answer costs only this copy's wait for the role's next claim.
 const roleKeepHolderWindow = 5 * time.Second
@@ -216,8 +219,8 @@ func (g *roleKeepGuards) guard(role string) *sync.Mutex {
 
 // hold takes role's guard for the whole of one handover and returns the release of it. It waits
 // for the handover of that role running on this listener, which is what a claim's start and a
-// keep's do: the handover ahead of them resolves the role's holder again on every pass, so the one
-// behind it finds the lane drained and ends on two stream reads.
+// keep's do: the handover ahead of them drains the lane, so the one behind it opens on a lane
+// with nothing left and ends on its two stream reads, with no holder resolved at all.
 func (g *roleKeepGuards) hold(role string) func() {
 	guard := g.guard(role)
 	guard.Lock()
@@ -289,23 +292,17 @@ func keepRoleMessage(client *bus.Client, logger *logging.Logger, role string, it
 // did not find. The handover resolves that holder itself and ends with no walk when the role has
 // none, so a keep for a role nobody holds costs one resolution.
 //
-// Two messages are not kept at all, and each leaves its caller's give-up exactly as it was before
-// the kept lane:
+// One message is not kept at all, and leaves its caller's give-up exactly as it was before the
+// kept lane: one whose role token no claim can name (isValidRole, the pattern POST /v1/roles/set
+// refuses), which both give-up paths must agree on, since a copy kept under such a token waits
+// for a claim that cannot be made and expires unread.
 //
-//   - one whose sender keeps a queue of its own and says so (contracts.Envelope.Keep false, which
-//     the publish route stamps from its request's keep field and a publisher onto the lane sets on
-//     the envelope itself). Its sender redelivers it from that queue, so a copy kept here would
-//     reach the role's next holder twice: the Legion daemon's notice queue and a phase worker's
-//     stall reminder are the two. No keep flag at all means keep, so every other publisher is
-//     unchanged, Dispatch's outbox among them - it sends a role route once and reads no exception,
-//     so its events to a role nobody holds were the dropped ones;
-//   - one whose role token no claim can name (isValidRole, the pattern POST /v1/roles/set
-//     refuses), which both give-up paths must agree on: a copy kept under such a token waits for a
-//     claim that cannot be made and expires unread.
+// A sender that keeps a queue of its own and redelivers from it - the Legion daemon's notice
+// queue and a phase worker's stall reminder - opts out on the publish route's own request field
+// instead (keep false, read by roleSend.noHolder), which is the one give-up a sender can
+// address: nothing publishes a raw role message it would redeliver, so the role lane always
+// keeps.
 func keepForNextHolder(cfg listenerDeliveryHandlerConfig, role string, item contracts.Envelope) bool {
-	if item.Keep != nil && !*item.Keep {
-		return false
-	}
 	if !isValidRole(role) {
 		return false
 	}
@@ -393,27 +390,6 @@ type roleKeepDrainResult struct {
 	passed    int
 }
 
-// roleKeepDrainAgain reports whether a handover walks the lane again after a walk that ended this
-// way, and what it waits first; backoff is the pause the handover waited before this walk, 0 when
-// the walk before it did not fail. A drained lane is the end of the handover; a walk the budget or
-// the scan ended is followed at once, since the copies behind it have senders answered 202 kept;
-// one that failed waits the next of its widening pauses (roleKeepDrainBackoff), so a bus that is
-// failing is neither walked again at once nor given up on; one that found the lane busy waits the
-// claim out, since the walk holding it can still be forwarding; and one whose holder moved is
-// followed at once, for the holder the next pass resolves.
-func roleKeepDrainAgain(end roleKeepDrainEnd, backoff time.Duration) (time.Duration, bool) {
-	switch end {
-	case roleKeepWorkLeft, roleKeepHolderMoved:
-		return 0, true
-	case roleKeepLaneBusy:
-		return roleKeepClaimWindow, true
-	case roleKeepDrainFailed:
-		return roleKeepDrainBackoff(backoff), true
-	default:
-		return 0, false
-	}
-}
-
 // roleKeepDrainBackoff is the pause a handover waits after a walk that failed, or after a
 // resolution of the role's holder that failed behind one: roleKeepDrainRetryPause for the first of
 // a run, doubling to roleKeepDrainRetryCap, where last is the pause this handover waited before
@@ -444,14 +420,20 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role 
 // handOverKeptRole is the handover itself, for a caller holding role's guard (drainKeptRole,
 // sweepKeptRoleLanes).
 //
-// Each pass resolves the role's holder by role delivery's own rule (resolveRoleHolder with
-// laneHolderFresh) within roleKeepHolderWindow, and walks the lane for the holder it found
-// (walkKeptRole). The resolution is the first thing a pass does, after the pause the walk before
-// it earned: a holder resolved before that pause can have released the role while it ran, and the
-// walk would then have spent its budget on a session that no longer holds the role, which the
-// walk's own check cannot catch (roleKeepDrainHolds reads an unclaimed role as no evidence). A
-// role whose first resolution finds no live holder is one walk's work saved: the handover ends
-// there, which is what the keep that stored a copy for a role nobody holds wants.
+// Each pass opens by reading the role's kept lane and its drain cursor (readKeptLaneHead) within
+// roleKeepDrainWindow, resolves the role's holder by role delivery's own rule (resolveRoleHolder
+// with laneHolderFresh) within roleKeepHolderWindow only when that lane holds copies its cursor
+// has not reached, and walks the lane for the holder it found (walkKeptRole). The lane is read
+// before the holder, so a pass that finds the lane empty ends the handover with no resolution at
+// all: every claim of a role starts a handover and most roles have nothing kept for them, which
+// would otherwise cost each of those claims a claim read and a session read, made from a
+// goroutine its own answer has already outlived. The resolution is taken after the pause the
+// walk before it earned rather than before it: a holder resolved before that pause can have
+// released the role while it ran, and the walk would then have spent its budget on a session
+// that no longer holds the role, which the walk's own check cannot catch (roleKeepDrainHolds
+// reads an unclaimed role as no evidence). A role whose first resolution finds no live holder is
+// one walk's work saved: the handover ends there, which is what the keep that stored a copy for
+// a role nobody holds wants.
 //
 // One walk of the lane is bounded - roleKeepDrainMax forwards, roleKeepScanMax copies read,
 // roleKeepDrainWindow of time - and nothing but a claim, a keep or a sweep ever starts a handover.
@@ -459,12 +441,16 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role 
 // every bound a walk stopped on used to strand the copies behind it on the lane until they aged
 // out unread, with every one of their senders answered 202 kept. The handover walks the lane again
 // instead, for the role's holder as it is then, until the lane is drained, the role has no live
-// holder, or the walks stop making progress (roleKeepDrainIdleRounds): what ended the walk says
-// how long it waits first (roleKeepDrainAgain). A walk that failed is not one that made no
-// progress: it is waited out on a widening cadence (roleKeepDrainBackoff) for as long as the
-// role's holder is live and ctx lives, and so is every failed resolution of the holder but the
-// first of all, since a bus that is not answering is a reason to retry rather than to strand the
-// lane. The first resolution is the keep's own case: a role nobody holds ends the handover there.
+// holder, or the walks stop making progress (roleKeepDrainIdleRounds). What ended the walk says
+// how long it waits first: a drained lane ends the handover; a walk the budget or the scan ended
+// is followed at once, since the copies behind it have senders answered 202 kept; one that found
+// the lane busy waits the claim out, since the walk holding it can still be forwarding; and one
+// whose holder moved is followed at once, for the holder the next pass resolves. A walk that
+// failed is not one that made no progress: it is waited out on a widening cadence
+// (roleKeepDrainBackoff) for as long as the role's holder is live and ctx lives, and so is every
+// read of the lane and every resolution of the holder that failed, but the first of all. That
+// first pass is the keep's own case: a role nobody holds, and a bus that answers nothing before
+// a single copy has been handed over, end the handover there.
 //
 // It returns the error of the last walk, which is the error one of these handed back, and ctx -
 // roleKeepHandoverWindow in the listener - bounds the whole handover, pauses included.
@@ -482,6 +468,22 @@ func handOverKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, ro
 		backoff time.Duration
 		pause   time.Duration
 	)
+	// failed is what a pass does with a read that did not answer: the lane's and the holder's
+	// ask it the same way, so the two cannot drift. Before this handover has walked anything it
+	// ends there, which is the keep's own case; after that it waits the next of this handover's
+	// widening pauses, since the lane then holds copies whose senders were answered 202 kept and
+	// leaving them to a claim the role's live holder will not make would strand them.
+	failed := func(line string, cause error) bool {
+		if !walked {
+			cfg.logger.LogEvent(slog.LevelDebug, line,
+				slog.String("role", role),
+				slog.String("error", cause.Error()))
+			return false
+		}
+		backoff = roleKeepDrainBackoff(backoff)
+		pause = backoff
+		return true
+	}
 	for {
 		if ctx.Err() != nil {
 			return err
@@ -489,24 +491,25 @@ func handOverKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, ro
 		if pause > 0 && waitUnlessDone(ctx, pause) != nil {
 			return err
 		}
+		headCtx, cancelHead := context.WithTimeout(ctx, roleKeepDrainWindow)
+		head, headErr := readKeptLaneHead(headCtx, cfg.client, role)
+		cancelHead()
+		if headErr != nil {
+			if !failed("listener kept role message could not read the role's kept lane", headErr) {
+				return err
+			}
+			continue
+		}
+		if !head.left {
+			return err
+		}
 		holderCtx, cancelHolder := context.WithTimeout(ctx, roleKeepHolderWindow)
 		resolved, holderErr := resolveRoleHolder(holderCtx, cfg.registry, cfg.sessions, role, laneHolderFresh)
 		cancelHolder()
 		if holderErr != nil {
-			if !walked {
-				cfg.logger.LogEvent(slog.LevelDebug, "listener kept role message could not resolve the role's holder",
-					slog.String("role", role),
-					slog.String("error", holderErr.Error()))
+			if !failed("listener kept role message could not resolve the role's holder", holderErr) {
 				return err
 			}
-			// A pass of a handover that has already walked this lane could not read the role's
-			// holder: the lane holds copies whose senders were answered 202 kept and the bus is
-			// not answering, which this handover waits out on a widening cadence rather than
-			// leaving those copies to a claim the role's live holder will not make. Only the
-			// first resolution of all ends the handover, which is the keep's own case: a role
-			// nobody holds costs one resolution and no walk.
-			backoff = roleKeepDrainBackoff(backoff)
-			pause = backoff
 			continue
 		}
 		if resolved.state != roleHolderLive {
@@ -516,25 +519,31 @@ func handOverKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, ro
 		walked = true
 		var result roleKeepDrainResult
 		result, err = walkKeptRole(ctx, cfg, role, holder, resolved.entry, now)
-		if result.forwarded > 0 || result.passed > 0 {
+		progressed := result.forwarded > 0 || result.passed > 0
+		if progressed {
 			idle, backoff = 0, 0
 		}
-		again := false
-		if pause, again = roleKeepDrainAgain(result.end, backoff); !again {
+		switch result.end {
+		case roleKeepLaneDrained:
 			return err
+		case roleKeepDrainFailed:
+			backoff = roleKeepDrainBackoff(backoff)
+			pause = backoff
+			continue
+		case roleKeepLaneBusy:
+			pause = roleKeepClaimWindow
+		case roleKeepWorkLeft, roleKeepHolderMoved:
+			pause = 0
 		}
-		if result.end == roleKeepDrainFailed {
-			backoff = pause
+		if progressed {
 			continue
 		}
-		if result.forwarded == 0 && result.passed == 0 {
-			if idle++; idle >= roleKeepDrainIdleRounds {
-				cfg.logger.LogEvent(slog.LevelDebug, "listener kept role drain gave the lane up with copies left on it",
-					slog.String("role", role),
-					slog.String("session_id", holder),
-					slog.Int("idle_walks", idle))
-				return err
-			}
+		if idle++; idle >= roleKeepDrainIdleRounds {
+			cfg.logger.LogEvent(slog.LevelDebug, "listener kept role drain gave the lane up with copies left on it",
+				slog.String("role", role),
+				slog.String("session_id", holder),
+				slog.Int("idle_walks", idle))
+			return err
 		}
 	}
 }
@@ -567,11 +576,21 @@ func startKeptRoleSweep(ctx context.Context, cfg listenerDeliveryHandlerConfig, 
 }
 
 // sweepKeptRoleLanes hands over every role whose kept lane holds copies its drain cursor has not
-// reached. It reads every kept role subject the stream holds a copy on in one call
-// (bus.Client.KeptRoleLanes), so a deployment where no role has a kept copy pays one round trip a
-// pass and no per-role work at all; a role that has one costs the two stream reads that compare
-// its lane with its cursor (keptRoleCopiesLeft), and the handover it starts resolves the role's
-// holder and ends with no walk when the role has none.
+// reached and whose role a session claims. It reads every kept role subject the stream holds a
+// copy on in one call (bus.Client.KeptRoleLanes), so a deployment where no role has a kept copy
+// pays one round trip a pass and no per-role work at all; a role that has one costs the two
+// stream reads that compare its lane with its cursor (readKeptLaneHead) and the read of its
+// claim.
+//
+// A lane whose role no session claims is passed over rather than handed over, and the find is
+// logged at debug. Nothing moves such a lane's cursor - the handover it would start resolves no
+// live holder and walks nothing - so the role stays on the stream's list of kept lanes for as
+// long as it holds those copies, which is the stream's 72 h and not roleKeepWindow's hour: at
+// Info, and with a handover started, every pass would log that lane again and spend a goroutine
+// and a resolution on it, for copies no claim is coming for. The claim is read from the
+// registry's watched copy of the role bucket, which costs no round trip
+// (store.Registry.CachedRoleHolder), and says only that a session claims the role: whether that
+// session is live is the handover's own resolution to make.
 //
 // A role whose handover is already running on this listener is left to it: the sweep takes that
 // role's guard or passes the role over, and it never waits for one (roleKeepGuards.tryHold), so
@@ -591,22 +610,33 @@ func sweepKeptRoleLanes(ctx context.Context, cfg listenerDeliveryHandlerConfig) 
 		if ctx.Err() != nil {
 			return
 		}
-		left, err := keptRoleCopiesLeft(ctx, cfg, role)
+		head, err := readKeptLaneHead(ctx, cfg.client, role)
 		if err != nil {
 			cfg.logger.LogEvent(slog.LevelDebug, "listener kept role sweep could not read a role's lane",
 				slog.String("role", role),
 				slog.String("error", err.Error()))
 			continue
 		}
-		if !left {
+		if !head.left {
+			continue
+		}
+		holder, err := cfg.registry.CachedRoleHolder(role)
+		if err != nil {
+			cfg.logger.LogEvent(slog.LevelDebug, "listener kept role sweep could not read a role's claim",
+				slog.String("role", role),
+				slog.String("error", err.Error()))
+			continue
+		}
+		if holder == "" {
 			continue
 		}
 		release, taken := cfg.roleKeepDrains.tryHold(role)
 		if !taken {
 			continue
 		}
-		cfg.logger.LogEvent(slog.LevelInfo, "listener kept role sweep found a lane no handover was draining",
-			slog.String("role", role))
+		cfg.logger.LogEvent(slog.LevelDebug, "listener kept role sweep found a lane no handover was draining",
+			slog.String("role", role),
+			slog.String("session_id", holder))
 		go func() {
 			defer release()
 			handoverCtx, cancel := context.WithTimeout(ctx, roleKeepHandoverWindow)
@@ -616,33 +646,65 @@ func sweepKeptRoleLanes(ctx context.Context, cfg listenerDeliveryHandlerConfig) 
 	}
 }
 
-// keptRoleCopiesLeft reports whether role's kept lane holds copies its drain cursor has not
-// reached, which is what makes a lane one the sweep hands over: the lane's last stored sequence
-// against the cursor's kept, the two reads a walk of the lane opens with (walkKeptRole). A lane the
-// stream holds nothing on (nats.ErrMsgNotFound) and one whose cursor is at or past its last copy
-// have none.
-func keptRoleCopiesLeft(ctx context.Context, cfg listenerDeliveryHandlerConfig, role string) (bool, error) {
-	last, err := cfg.client.LastStoredMessage(ctx, bus.KeptRoleSubject(role))
-	if errors.Is(err, nats.ErrMsgNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read role %s's kept lane: %w", role, err)
-	}
-	_, cursor, _, err := readRoleKeepCursor(ctx, cfg.client, bus.KeptRoleCursorSubject(role))
-	if err != nil {
-		return false, fmt.Errorf("read role %s's kept-lane cursor: %w", role, err)
-	}
-	return cursor.Kept < last.Sequence, nil
+// keptLaneHead is the opening read of a role's kept lane: what the stream holds on it, where the
+// role's drain cursor stands, and whether there is anything left for a walk to do
+// (readKeptLaneHead).
+type keptLaneHead struct {
+	// last is the stream sequence of the newest copy on the lane, 0 when the stream holds none.
+	last uint64
+	// cursorSeq is the stream sequence of the cursor message itself, which the walk's next
+	// compare-and-swap write of the cursor must name (writeRoleKeepCursor); 0 for a lane whose
+	// cursor has never been written.
+	cursorSeq uint64
+	// cursor is the drain cursor's body, its zero value for a lane that has never been drained.
+	cursor roleKeepCursor
+	// written is the time the stream stored the cursor, which is how old the claim it carries
+	// is; the zero time when there is no cursor, which no claim is judged against since the body
+	// claims nothing.
+	written time.Time
+	// left reports copies the cursor has not reached: the one test of whether a walk of this
+	// lane has anything to do.
+	left bool
 }
 
-// walkKeptRole is one walk of role's kept lane for holder. It reads the role's cursor and walks the
-// copies stored after it - at most roleKeepScanMax of them, and until roleKeepDrainMax have been
-// forwarded - forwarding each copy that is still inside roleKeepWindow and that beforeForward
-// allows to the holder's agent subject exactly as a live role send forwards it
-// (roleForwardDedupePrefix, contracts.AgentSubject), and reports what ended it and how far it moved
-// the role's cursor, so the handover around it knows whether the lane has copies left and whether
-// this walk brought them nearer (handOverKeptRole).
+// readKeptLaneHead reads role's kept lane and its drain cursor, the two reads every walk of that
+// lane and every test of whether one is worth making opens with: the sweep's
+// (sweepKeptRoleLanes), the handover pass's (handOverKeptRole) and the walk's own
+// (walkKeptRole), so all three ask "anything left?" in one place and of one pair of reads.
+//
+// The lane is read first, and a role nothing was ever kept for ends here, on one stream read
+// rather than two (nats.ErrMsgNotFound): the cursor says nothing a lane with no message can act
+// on. A lane the cursor has already been advanced past ends on the second read, as a
+// cursor-first read would.
+func readKeptLaneHead(ctx context.Context, client *bus.Client, role string) (keptLaneHead, error) {
+	last, err := client.LastStoredMessage(ctx, bus.KeptRoleSubject(role))
+	if errors.Is(err, nats.ErrMsgNotFound) {
+		return keptLaneHead{}, nil
+	}
+	if err != nil {
+		return keptLaneHead{}, fmt.Errorf("read role %s's kept lane: %w", role, err)
+	}
+	cursorSeq, cursor, written, err := readRoleKeepCursor(ctx, client, bus.KeptRoleCursorSubject(role))
+	if err != nil {
+		return keptLaneHead{}, fmt.Errorf("read role %s's kept-lane cursor: %w", role, err)
+	}
+	return keptLaneHead{
+		last:      last.Sequence,
+		cursorSeq: cursorSeq,
+		cursor:    cursor,
+		written:   written,
+		left:      cursor.Kept < last.Sequence,
+	}, nil
+}
+
+// walkKeptRole is one walk of role's kept lane for holder. It reads the lane and the role's
+// cursor (readKeptLaneHead) and walks the copies stored after the cursor - at most
+// roleKeepScanMax of them, and until roleKeepDrainMax have been forwarded - forwarding each copy
+// that is still inside roleKeepWindow and that beforeForward allows to the holder's agent
+// subject exactly as a live role send forwards it (roleForwardDedupePrefix,
+// contracts.AgentSubject), and reports what ended it and how far it moved the role's cursor, so
+// the handover around it knows whether the lane has copies left and whether this walk brought
+// them nearer (handOverKeptRole).
 //
 // It bounds itself at roleKeepDrainWindow, taken when the walk starts rather than when the
 // handover around it was: the handover holds the role's guard, so no part of a walk's window is
@@ -696,39 +758,30 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 	ctx, cancel := context.WithTimeout(ctx, roleKeepDrainWindow)
 	defer cancel()
 
-	// The role's kept lane is read first, and a claim of a role nothing was ever kept for ends
-	// here, on one stream read rather than two: the cursor says nothing a lane with no message
-	// can act on. A lane the cursor has already been advanced past ends on the second read, as
-	// a cursor-first walk would.
-	keptSubject := bus.KeptRoleSubject(role)
-	last, err := cfg.client.LastStoredMessage(ctx, keptSubject)
-	if errors.Is(err, nats.ErrMsgNotFound) {
-		return roleKeepDrainResult{end: roleKeepLaneDrained}, nil
-	}
+	// The lane and the role's cursor, the one pair of reads every "anything left on it?" takes:
+	// a lane with nothing left is this walk's whole work, whether the stream holds no copy for
+	// the role at all or the cursor has been advanced past every one it holds.
+	head, err := readKeptLaneHead(ctx, cfg.client, role)
 	if err != nil {
-		return roleKeepDrainResult{end: roleKeepDrainFailed}, fmt.Errorf("read role %s's kept lane: %w", role, err)
+		return roleKeepDrainResult{end: roleKeepDrainFailed}, err
 	}
-	cursorSubject := bus.KeptRoleCursorSubject(role)
-	cursorSeq, cursor, written, err := readRoleKeepCursor(ctx, cfg.client, cursorSubject)
-	if err != nil {
-		return roleKeepDrainResult{end: roleKeepDrainFailed}, fmt.Errorf("read role %s's kept-lane cursor: %w", role, err)
-	}
-	if cursor.Kept >= last.Sequence {
+	if !head.left {
 		return roleKeepDrainResult{end: roleKeepLaneDrained}, nil
 	}
 	// A copy another walk holds a claim of is that walk's to forward, so this one leaves the
 	// lane to it rather than forwarding the copy a second time; the claim is read only here,
 	// where it can be judged against the walk that wrote it, so now is asked for once per copy
 	// in the walk below and once more only while a claim is outstanding.
-	if cursor.Claiming != 0 && now().Sub(written) < roleKeepClaimWindow {
+	if head.cursor.Claiming != 0 && now().Sub(head.written) < roleKeepClaimWindow {
 		cfg.logger.LogEvent(slog.LevelDebug, "listener kept role drain left the lane to the drain holding a claim",
 			slog.String("role", role),
 			slog.String("session_id", holder),
-			slog.Uint64("claiming", cursor.Claiming))
+			slog.Uint64("claiming", head.cursor.Claiming))
 		return roleKeepDrainResult{end: roleKeepLaneBusy}, nil
 	}
 
-	lane := &roleKeepLaneCursor{cfg: cfg, role: role, holder: holder, subject: cursorSubject, seq: cursorSeq}
+	keptSubject := bus.KeptRoleSubject(role)
+	lane := &roleKeepLaneCursor{cfg: cfg, role: role, holder: holder, subject: bus.KeptRoleCursorSubject(role), seq: head.cursorSeq}
 	subject := contracts.AgentSubject(holder)
 	storedOnly := roleForwardStoredOnly(entry)
 	// The record the role lane judges a forward against, read the same way here: what the holder
@@ -737,7 +790,7 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 		return cfg.dedupeCache.Seen(key, recipient) || cfg.attemptCache.Seen(key, recipient)
 	}
 	result := roleKeepDrainResult{}
-	kept := cursor.Kept
+	kept := head.cursor.Kept
 	for scanned := 0; ; scanned++ {
 		if scanned >= roleKeepScanMax || result.forwarded >= roleKeepDrainMax {
 			result.end = roleKeepWorkLeft

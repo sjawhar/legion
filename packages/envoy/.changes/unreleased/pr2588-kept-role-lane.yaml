@@ -7,9 +7,8 @@ body: |-
   reads. The next session to claim that role is handed each kept copy once, in the order the
   copies were kept, each carrying `kept_at`. A copy kept more than an hour before the claim is
   dropped and counted on the new `envoy_role_kept_expired_total`. A sender that keeps a queue of
-  its own publishes with `keep: false` and gets the 404 unchanged, through the publish body or,
-  for a message published straight onto the lane, the envelope's own `keep` field, which the lane
-  honours the same way. A handover walks a role's lane again for the role's current holder until
+  its own publishes with `keep: false` in the publish body and gets the 404 unchanged; a message
+  published straight onto the lane is always kept, since no such publisher opts out. A handover walks a role's lane again for the role's current holder until
   the lane is empty, and a lane whose handover a restart ended is picked up by a sweep that runs
   every five minutes and at each listener's start, so no copy waits for a claim a live holder will
   not make. `notifications.role.>` is still not a stream subject, and no NATS grant changed.

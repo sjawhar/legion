@@ -200,11 +200,16 @@ func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
 // the answer. Every answer goes through record, the route's one line per request
 // (request_record.go), and is then settled: counted, and logged on the send's own delivery line.
 type roleSend struct {
-	w        http.ResponseWriter
-	record   *requestRecord
-	d        *listenerDeps
-	item     contracts.Envelope
-	role     string
+	w      http.ResponseWriter
+	record *requestRecord
+	d      *listenerDeps
+	item   contracts.Envelope
+	role   string
+	// keep is the request's keep field as the route read it, true when it set none: whether
+	// this send's give-up keeps the message for the role's next holder (noHolder). It is the
+	// send's own rather than the envelope's, so no copy the listener forwards and no answer it
+	// writes carries it.
+	keep     bool
 	arrived  time.Time
 	holder   string
 	attempts int
@@ -235,17 +240,17 @@ func (s *roleSend) delivered(outcome sendOutcome) {
 }
 
 // noHolder answers a role with no live claim. For a state the listener keeps for (roleKeepable: an
-// unclaimed role, and a lapsed claim released or already absent), it keeps the message for the
-// role's next holder and hands the lane to whoever holds the role now, both in the one keep both
-// give-up paths take (keepForNextHolder), and answers kept's 202. A keep that kept nothing - one
-// the envelope's own keep flag turned off, one under a role token no claim can name, a publish
-// that failed, logged by keepRoleMessage - is answered as a send that kept nothing is, since the
-// sender's own fallback must run when the message was not kept: writeRoleHolderError's 404
-// (unclaimed or holder_lapsed), which the Legion daemon reads as notify.ErrNoHolder, recorded
-// role_unclaimed or role_lapsed. The role lane counts an unclaimed role skipped and a lapsed
-// holder failed.
+// unclaimed role, and a lapsed claim released or already absent), and while this send's own keep
+// flag asks for it, it keeps the message for the role's next holder and hands the lane to whoever
+// holds the role now, both in the one keep both give-up paths take (keepForNextHolder), and
+// answers kept's 202. A keep that kept nothing - one this send's keep flag turned off, one under
+// a role token no claim can name, a publish that failed, logged by keepRoleMessage - is answered
+// as a send that kept nothing is, since the sender's own fallback must run when the message was
+// not kept: writeRoleHolderError's 404 (unclaimed or holder_lapsed), which the Legion daemon
+// reads as notify.ErrNoHolder, recorded role_unclaimed or role_lapsed. The role lane counts an
+// unclaimed role skipped and a lapsed holder failed.
 func (s *roleSend) noHolder(result roleHolderResult) {
-	if roleKeepable(result) && keepForNextHolder(*s.d.delivery, s.role, s.item) {
+	if s.keep && roleKeepable(result) && keepForNextHolder(*s.d.delivery, s.role, s.item) {
 		s.kept(result)
 		return
 	}
@@ -358,11 +363,12 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 // sendToRole delivers a role message through the publish route, answering through record. The
 // first resolution reads the holder as an HTTP lookup does (resolveRoleHolder with registered),
 // within sendRequestBudget of arrived as GET /v1/roles/<role> reads it, and gives its answers: a
-// role with no live claim is kept and answered 202 while the envelope asks to be kept, for the
-// states the listener keeps for (roleKeepable), else the lookup's 404 unclaimed or holder_lapsed
-// (noHolder), and a resolution that failed the lookup's 503 or 500 (unresolved), so a holder that
-// exists but has not heartbeated lately gets attempts rather than a 404. The first
-// attempt forwards to that holder when its session entry passes role delivery's freshness test
+// role with no live claim is kept and answered 202 while keep asks for it - the request's own
+// keep field, true when it set none - for the states the listener keeps for (roleKeepable), else
+// the lookup's 404 unclaimed or holder_lapsed (noHolder), and a resolution that failed the
+// lookup's 503 or 500 (unresolved), so a holder that exists but has not heartbeated lately gets
+// attempts rather than a 404. The first attempt forwards to that holder when its session entry
+// passes role delivery's freshness test
 // (laneHolderFresh), without reading the claim again; every other attempt resolves the holder
 // again by role delivery's rule (resolveRoleHolder with laneHolderFresh), so a holder that
 // relaunched under a new session between attempts gets the next one. On those attempts an
@@ -373,8 +379,8 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 // roleReceiptTimeout. Every forward carries the same Nats-Msg-Id (bus.Client.RequestCoreTo), so the
 // stream, which captures agent subjects, keeps one copy however many attempts there are. Every read
 // takes ctx, the send's window, so none outlasts it: a send whose window ends is answered 504.
-func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
-	send := &roleSend{w: w, record: record, d: d, item: item, role: role, arrived: arrived}
+func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, keep bool, arrived time.Time) {
+	send := &roleSend{w: w, record: record, d: d, item: item, role: role, keep: keep, arrived: arrived}
 	// The sender is stamped before the holder is resolved, so the copy a keep stores carries the
 	// sender's title, roles and directory exactly as the forward of a live delivery does: the
 	// envelope is kept as it is here (keepRoleMessage), and the holder that is handed it later

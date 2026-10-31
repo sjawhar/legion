@@ -2442,8 +2442,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A keep that failed leaves its branch exactly as it was:
   `no_holder` for an unclaimed role, `delivery_failed` for a lapsed holder.
   Every other reason emits an exception.
-  The lane reads no `keep` field, because a raw role publish carries none:
-  keeping is chosen on the publish route, and the one sender that opts out of it publishes through that route.
+  The lane reads no `keep` field, because a raw role publish carries none and the envelope has no such field:
+  keeping is chosen on the publish route alone, and the senders that opt out of it - the Legion daemon's notice queue and a phase worker's stall reminder - publish through that route.
   The lane's attempt cache holds an entry only while a forward is in flight and both forward failures roll it back, while the dedupe cache, which the route shares, records a forward only once it counted as delivered
   — so a publish that re-uses a `dedupe_key` after a `receipt_timeout` is forwarded again, while one after a delivered forward is skipped.
   An agent delivery this listener cannot place clears its own attempt entry before each NAK (`clearAttempt`, `agentSubjectDelivery`), because the redelivery that NAK asks for would otherwise find the entry still there and be dropped as `listener attempt-dedupe skip` before it reached the session at all.

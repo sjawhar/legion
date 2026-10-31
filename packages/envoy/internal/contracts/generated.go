@@ -20,7 +20,6 @@ type Envelope struct {
 	IssuedAt       int64           `json:"issued_at"`
 	ExpiresAt      *int64          `json:"expires_at,omitempty"`
 	KeptAt         *int64          `json:"kept_at,omitempty"`
-	Keep           *bool           `json:"keep,omitempty"`
 	PayloadSummary string          `json:"payload_summary"`
 	PayloadRef     string          `json:"payload_ref,omitempty"`
 	Payload        string          `json:"payload,omitempty"`
