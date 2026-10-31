@@ -107,6 +107,116 @@ every exit path, so a failed run leaves nothing behind either. Both smokes run
 their tmux on a private socket in their temp dir, so the kill can end only the
 session the smoke started; on the shared default server it could end anyone's.
 
+## smoke-role-takeover.sh
+
+Live proof that a soft role claim naming a predecessor takes the role only from a predecessor
+that is gone or is the claimant's own client instance (dispatch://INFRA-404, R8 and A5 of its
+spec). It is the only smoke here that needs neither a model provider nor a deployment: `go` and
+`bun` alone, so CI runs it as a step of the `envoy-session-stall` job.
+
+It builds natsd (`packages/envoy/internal/testnats/cmd/natsd`) and the listener
+(`packages/envoy/cmd/listener`) from the checkout and runs both on loopback ports of its own, as
+[`packages/envoy-client/test/envoy-stack.ts`](../../envoy-client/test/envoy-stack.ts) does, and
+drives them with real client processes:
+
+- one Bun process per Oh My Pi Envoy extension instance (`role-takeover/omp-client.ts`), each
+  loading this checkout's `extensions/envoy.ts` against the stand-in host the package's own suite
+  uses — one session manager whose id and branch the driver moves, and a heartbeat the driver
+  ticks rather than a timer. One process is one client instance, with one client instance id;
+- the real Claude Code channel server (`packages/claude-envoy/bin/envoy-channel.ts`), spawned and
+  driven over MCP by `role-takeover/claude-client.ts`, which is also the parent process whose
+  handoff file a `/clear` writes, so the server adopts the new session id on its own.
+
+Every client reaches the listener through a recording proxy of its own
+(`role-takeover/listener-proxy.ts`), so each request and the listener's answer to it is read from
+a log rather than inferred, and a request can be held: the first scenario below holds a fork's
+role claim back until another process has resumed and registered its predecessor.
+
+One line per row of R8's table is printed with its outcome:
+
+- **row 1** — a claim under the id that holds the role keeps it: an Oh My Pi plugin reload, and a
+  Claude Code channel server restart, each under the session id that holds the role.
+- **row 2** — an Oh My Pi fork gets its parent's role, because the parent's live entry carries the
+  claimant's own client instance id.
+- **row 3** — an Oh My Pi move, in one process, to a session whose records name the held role gets
+  it, by the same case.
+- **row 4** — a Claude Code `/clear` handoff gets the role: the deregistration removes the
+  process's own entry, and the claim then finds no live predecessor.
+- **row 5** — each of those after another process resumed the predecessor id and registered it
+  last is refused `409` naming the predecessor, and that process keeps the role. The fork case is
+  the spec's A5 scenario 1 and the `/clear` case its A5 scenario 2.
+- **A5** — a refused process stays registered, and after the holder exits the refused Oh My Pi
+  process takes the role on its next session event.
+
+### Usage
+
+```bash
+bash packages/pi-envoy/scripts/smoke-role-takeover.sh
+bash packages/pi-envoy/scripts/smoke-role-takeover.sh --base-rev main@origin   # must fail
+```
+
+`--base-rev <rev>` builds only the listener from that revision, leaving every client as it is in
+the working copy, which is the negative control: against `main@origin` row 5's three cases fail,
+because that listener takes a role from any predecessor a claim names, live or not. It reads the
+revision without touching the working copy (`jj --ignore-working-copy log` resolves it, `git
+archive` extracts `packages/envoy`), moves no bookmark and writes nothing outside its scratch.
+
+Prerequisites, each checked before anything starts: `go`, `bun` with the checkout's dependencies
+installed, `curl`, `jq`, and `jj`, `git` and `tar` for `--base-rev`. Everything the run writes —
+the two binaries, the JetStream store, each client's home and state directory, every proxy's
+request log — lives in one `mktemp -d` under `$TMPDIR`, which an exit trap removes after a pass
+and keeps after anything else. Nothing it starts inherits this shell's environment (`env -i` plus
+`PATH` and what the script sets), so an operator's `ENVOY_*`, `NATS_*` or `DISPATCH_*` variables
+never reach a client. A local run takes about a minute.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | `SMOKE ROLE TAKEOVER PASS:` every row held. |
+| 1 | `SMOKE ROLE TAKEOVER FAIL:` the rows that did not hold are listed, each with the check that failed and what it saw. |
+| 2 | Refused: a prerequisite is missing, the configuration is invalid, or a client or service did not start. |
+| 129, 130, 143 | Interrupted by SIGHUP, SIGINT or SIGTERM; cleanup still ran. |
+
+## smoke-registration-stall.sh
+
+Manual live smoke for the registration-stall fix (dispatch://INFRA-246): a real headless `omp`
+pane against a real Envoy listener, watched through the live registry. `--arm stall` shows that a
+pane whose registration post is wedged forever keeps refreshing past one record lifetime and says
+so exactly once; `--arm recover` shows that a pane unregistered while its process runs
+re-registers itself. `--control` is each arm's negative control (the stall control needs
+`--base-rev <rev>`, the plugin as it was then).
+
+```bash
+# against a deployment
+ENVOY_URL=<listener> ENVOY_TOKEN_FILE=<0600 file> \
+  bash packages/pi-envoy/scripts/smoke-registration-stall.sh --arm recover
+# against a listener this run starts itself
+bash packages/pi-envoy/scripts/smoke-registration-stall.sh --arm recover --local-stack
+```
+
+`--local-stack` builds natsd and the listener from the checkout and runs both on loopback ports of
+its own, as `smoke-role-takeover.sh` does, so the run needs no deployment and no bearer: it ignores
+`ENVOY_URL` and `ENVOY_TOKEN_FILE`, says so, and keeps both out of the pane it spawns. Its one
+remaining live dependency is the model provider the pane's turn needs, which the pane inherits
+from the caller's environment. `--heartbeat-ms <n>` shortens the pane's refresh interval, which
+every budget the run prints is measured in. Its scratch is a `mktemp -d` under `$TMPDIR` that an
+exit trap removes. Exit 0 is `SMOKE <arm> PASS:`, 1 is `SMOKE <arm> FAIL:` naming the observation
+that failed, and 2 is a refusal.
+
+## local-stack.sh
+
+The loopback Envoy stack the two smokes above bring up, in one sourced file: a free loopback
+port below the kernel's ephemeral range (`port_range`, `port_open`, `pick_port`), the natsd and
+listener builds (`build_natsd`, `build_listener`, each taking the `packages/envoy` directory to
+build from, which is how `smoke-role-takeover.sh --base-rev` builds the listener from another
+revision), the argv and assignments each service is run with (`set_natsd_argv`, `set_listener_env`)
+and when it is up (`natsd_serving`, `listener_healthy`, polled with `poll_until`). It is sourced,
+never run: it starts no process, so every script keeps its own isolation, logs, traps, timeouts,
+messages and exit codes. A caller defines `refuse` and sets `local_stack_fail` to the function an
+exhausted port range is reported through, `refuse` in both smokes here.
+`packages/envoy-client/test/envoy-stack.ts` is the same stack for the TypeScript suite.
+
 ## skill-scenarios/rig.sh
 
 Replays skill scenarios on real agents, to compare two versions of a skill. Each label is one

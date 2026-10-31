@@ -81,6 +81,45 @@ func TestSessionEntryFromSubscribe_DefaultsThePluginAndItsVersionEmpty(t *testin
 	}
 }
 
+// The client instance id reaches the session entry, where a soft claim naming a predecessor
+// session reads it to tell that predecessor's own instance from another instance's live session.
+func TestSessionEntryFromSubscribe_CarriesTheClientInstanceID(t *testing.T) {
+	got := sessionEntryFromSubscribe(subscribeBody{
+		SessionID:        "ses_instance",
+		Port:             42145,
+		ClientInstanceID: "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a",
+	}, "example-listener", sessionDeliveryOutcome{})
+
+	if got.ClientInstanceID != "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a" {
+		t.Fatalf("expected the client instance id to be carried from the subscribe body, got %+v", got)
+	}
+}
+
+// The id is compared as stored (session.InstanceMatches trims nothing), so the surrounding space
+// a session id loses is dropped here, where the wire value enters the entry.
+func TestSessionEntryFromSubscribe_TrimsTheClientInstanceID(t *testing.T) {
+	got := sessionEntryFromSubscribe(subscribeBody{
+		SessionID:        "ses_instance_spaced",
+		ClientInstanceID: " \t4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a\n",
+	}, "example-listener", sessionDeliveryOutcome{})
+
+	if got.ClientInstanceID != "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a" {
+		t.Fatalf("expected the client instance id to be trimmed, got %q", got.ClientInstanceID)
+	}
+}
+
+func TestSessionEntryFromSubscribe_DefaultsTheClientInstanceIDEmpty(t *testing.T) {
+	// A client predating the field sends no key; the entry invents none, and the empty id is
+	// what keeps the old soft-claim rule for it (session.InstanceMatches). The same empty id is
+	// written over any id a previous registration stored, since the entry is built fresh from
+	// the body.
+	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old"}, "example-listener", sessionDeliveryOutcome{})
+
+	if got.ClientInstanceID != "" {
+		t.Fatalf("expected no client instance id for a payload without the field, got %+v", got)
+	}
+}
+
 func TestSessionEntryFromSubscribe_DefaultsToNonDriving(t *testing.T) {
 	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_y", Port: 34751}, "devbox-sami", sessionDeliveryOutcome{})
 

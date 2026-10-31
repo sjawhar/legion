@@ -5,12 +5,46 @@ not carry — a database client, a linter, a one-off CLI — before you install,
 anything; before you measure Oh My Pi's binary; and when a test fails in your pod. Every path it
 cites is in sjawhar/legion.
 
+## The database your tests use
+
+- Never give a test, a migration or anything that creates or drops a database the URL in the
+  file `OMP_SESSION_SQL_DSN_FILE`: that is the live sessions database every pod shares, and its
+  login can create and drop databases there.
+- Give every Postgres variable a test reads `$LEGION_TEST_PG_DSN`, your pod's own server:
+  `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Each makes
+  and drops a database of its own per test, so your pod's roles can share the server.
+- Anything that migrates into the database its DSN names, rather than making one per test, needs
+  a database of your own, because a sibling role writing the same one collides with you: the
+  Dispatch browser suite's `DATABASE_URL`, which resets what it is given, and the stage scripts'
+  `LEGION_E2E_PG_DSN`, which a daemon's `postgres_dsn` becomes and migrates Legion's schema into.
+  Make one and point the variable at it:
+  `createdb -h 127.0.0.1 -p 5433 -U legion_test "e2e_$(date +%s)"`.
+- The server is empty in every new pod and dies with it. Every database made from `template1`
+  has pgvector.
+- `LEGION_TEST_PG_DSN` set and the connection refused: that is not yours to repair. Starting the
+  server is the roles container's launcher's job — it runs `legion-testpg ensure` before any role
+  starts and again every 15 seconds — so wait about that interval and try again. Never start a
+  server of your own beside it, and never reach for another DSN. Still refused after that wait:
+  report it, with the error you got and the port you used, as a fault of the pod rather than of
+  your change.
+- `LEGION_TEST_PG_DSN` unset: your deployment has not turned the pod's server on, so no launcher
+  is starting one and nothing will appear while you wait. With `legion-testpg` on `PATH`, start
+  one yourself on the issue's volume: the directory it defaults to is a 1 MiB filesystem your
+  role's own mounts cover, so `export LEGION_TESTPG_DIR=$XDG_DATA_HOME/testpg` first, then
+  `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable`
+  and `legion-testpg ensure`, which makes the cluster, the role and `vector` in `template1`. That
+  server lives in your generation: it dies when your generation ends, which takes a sibling
+  role's connections and databases with it mid-test, and the next `ensure` of either role finds
+  the same cluster on disk and serves it again. With no
+  `legion-testpg` either, stand up one with the harness below (**The worked case**) and set the DSN.
+
 ## The five clients the image already carries
 
 Check this list first: the worker image carries these five from the change that added them onward,
 and they are on a role's `PATH` once its deployment pins a digest at or after that change — a role
 still on an older digest finds none of them. Run `command -v psql redis-cli sqlite3 nc dig` to see
-which you have; those need no runner.
+which you have; those need no runner. `command -v legion-testpg` says whether your digest also
+carries the pod's own PostgreSQL server (the section above).
 
 - `psql` — the Dispatch browser suite (`bun run e2e`) resets its database for every spec through
   `packages/dispatch/e2e/psql.ts`, which `seed.ts` calls, and the local stack (`bun run
@@ -189,8 +223,9 @@ tools a role's own work needs", carries the figure), and a sanctioned install is
 issue pod, on the issue's own disk, by the issue's roles together.
 
 **The worked case, and the one a role actually meets: the Dispatch e2e stack.** A change to
-`packages/dispatch` is proved by driving its browser suite, which needs a Postgres with pgvector;
-the image carries a `psql` and no server and no pgvector, and no runner reaches either. The way
+`packages/dispatch` is proved by driving its browser suite, which needs a Postgres with pgvector.
+On a digest carrying `legion-testpg`, use the pod's own server (the first section above) and
+unpack nothing. On a digest without it, the way
 that stack is stood up here is Debian packages unpacked with `dpkg-deb -x` into one root on the
 issue's volume — the five packages and the start sequence are in
 `docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md`,

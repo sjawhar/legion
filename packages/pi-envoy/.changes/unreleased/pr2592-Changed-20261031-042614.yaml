@@ -1,0 +1,5 @@
+kind: Changed
+body: Each extension instance mints a client instance id when it starts and sends it on every registration and on the deregistration at shutdown. A soft role claim that names a forked, branched or resumed predecessor now takes the role only when that predecessor has no live registration, when its live registration carries the same instance id, or when either side carries no instance id, so a claim no longer takes a role from another process that is running the named session. A refused session keeps running and stays registered, without the role. The two serial task queues, each task deadline and fence, and the registration and role state the queued tasks write now live in one module, `src/registration-state.ts`, where a queued task acts through a handle that refuses every step past its deadline or once its session is no longer the open session.
+time: 2026-10-31T04:26:14.541239063Z
+custom:
+    Issue: pr2592

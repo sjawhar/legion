@@ -170,9 +170,23 @@ listener's bearer is the `token` the client is given (`envoySettings`); without 
 
 `subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
 `plugin_version` on every registration, and exposes listener warnings, including a topic that has
-no event in the configured stream. `getRole` returns a role holder with its last-seen timestamp,
+no event in the configured stream. It sends the client instance driving the session
+(`clientInstanceID`: one Oh My Pi Envoy extension instance, one Claude Code channel-server
+process, minted once when that instance starts) as `client_instance_id`, omitted when the host
+has none so an older listener sees an unchanged body; the listener stores it on the session's
+registry entry. `getRole` returns a role holder with its last-seen timestamp,
 and `listSessions` accepts optional directory and title filters; its rows carry `plugin` and
 `plugin_version` when the session registered them.
+
+A `setRole` soft claim (`soft`) naming a predecessor (`previousSessionID`) takes the role from it
+only when that predecessor has no live registry entry, when its live entry carries this client
+instance's own instance id, or when either side carries no instance id; any other live holder
+keeps the role and is answered as `{claimed: false, holder}`. `unregisterSession({sessionID,
+clientInstanceID?})` deletes the session's registry entry: with an instance id the listener
+deletes it only when the entry carries the same id or none, so a departing client instance never
+deletes the registration a successor instance made under the same session id, and without one it
+deletes the entry as before. The answer says whether the entry stayed, and the call resolves
+`void` because no caller acts on it: a deregistering client has nothing to retry either way.
 
 `subscribe`'s answer carries the registration's `delivery` field; a registration the listener can
 give no consumer is refused by name, and its reason (`no_grant`, `consumer_error`,

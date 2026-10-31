@@ -1097,6 +1097,56 @@ table="$work/table.txt"
 } >"$table"
 cat "$table"
 
+# compare_issue_order: compares, for both sessions, the order the followed issue's comments
+# appear in each transcript with the order the stream stored them in. It reads published_order
+# (the comment markers in stream order), written_order (the same markers in the order they were
+# written, one string), stream_seq (marker -> stream sequence) and first_line (label:marker -> the
+# first transcript line carrying it), prints one line per session naming what it compared, and
+# sets order_ok. A comparison with nothing in it, a marker the stream does not hold, a published
+# list shorter than the written one, and a comment missing from a transcript each fail it, so
+# the run can never print the order as held having compared nothing.
+compare_issue_order() {
+  local m label line last shown
+  local -a written
+  read -r -a written <<<"$written_order"
+  order_ok=1
+  if ((${#written[@]} == 0)); then
+    printf 'issue order: no comment of %s was recorded, so nothing was compared\n' "$followed_issue" | tee -a "$table"
+    order_ok=0
+    return
+  fi
+  if ((${#published_order[@]} != ${#written[@]})); then
+    printf 'issue order: %s comments of %s were written and %s read back in stream order\n' \
+      "${#written[@]}" "$followed_issue" "${#published_order[@]}" | tee -a "$table"
+    order_ok=0
+  fi
+  for m in "${published_order[@]}"; do
+    [[ -n "${stream_seq[$m]:-}" ]] || { printf 'the stream holds no comment carrying %s\n' "$m" | tee -a "$table"; order_ok=0; }
+  done
+  for label in pi cc; do
+    last=0
+    shown=""
+    for m in "${published_order[@]}"; do
+      line=${first_line[$label:$m]:-}
+      if [[ -z "$line" ]]; then
+        printf 'issue order in %s: %s (stream seq %s) is in no transcript line\n' "$label" "$m" "${stream_seq[$m]:-?}" | tee -a "$table"
+        order_ok=0
+        continue
+      fi
+      if ((line <= last)); then
+        printf 'order break in %s: %s (stream seq %s, transcript line %s) after line %s\n' "$label" "$m" "${stream_seq[$m]:-?}" "$line" "$last" | tee -a "$table"
+        order_ok=0
+      fi
+      last=$line
+      shown+=" $m@seq${stream_seq[$m]:-?}:line$line"
+    done
+    printf 'issue order compared in %s (%s comments):%s\n' "$label" "${#published_order[@]}" "$shown" | tee -a "$table"
+  done
+  if ((order_ok == 1)); then
+    printf 'issue order: every comment of %s appears in its stream order in both transcripts\n' "$followed_issue" | tee -a "$table"
+  fi
+}
+
 # The followed issue's comments, in each transcript, in their publish order: the order the stream
 # stored them in, read back from the stream. Dispatch's outbox decides that order; where it
 # differs from the order the comments were written in, the run says so, and does not judge it.
@@ -1116,25 +1166,7 @@ if [[ "${published_order[*]} " != "$written_order" ]]; then
   printf 'note: Dispatch published %s'"'"'s comments in another order than they were written: written %s; stored %s\n' \
     "$followed_issue" "$written_order" "${published_order[*]}" | tee -a "$table"
 fi
-order_ok=1
-for m in "${published_order[@]}"; do
-  [[ -n "${stream_seq[$m]:-}" ]] || { printf 'the stream holds no comment carrying %s\n' "$m" | tee -a "$table"; order_ok=0; }
-done
-for label in pi cc; do
-  last=0
-  for m in "${published_order[@]}"; do
-    line=${first_line[$label:$m]:-}
-    [[ -n "$line" ]] || continue
-    if ((line <= last)); then
-      printf 'order break in %s: %s (stream seq %s, transcript line %s) after line %s\n' "$label" "$m" "${stream_seq[$m]:-?}" "$line" "$last" | tee -a "$table"
-      order_ok=0
-    fi
-    last=$line
-  done
-done
-if ((order_ok == 1)); then
-  printf 'issue order: every comment of %s appears in its stream order in both transcripts\n' "$followed_issue" | tee -a "$table"
-fi
+compare_issue_order
 printf 'transcripts: pi %s; cc %s\n' "${transcript[pi]}" "${transcript[cc]}" | tee -a "$table"
 
 # Every entry carrying a marker whose count is wrong, for the reader.
