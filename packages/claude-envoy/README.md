@@ -32,7 +32,8 @@ events and sends them to the current Claude Code session as supported
   reached; nothing when Dispatch is not configured or a file sets `dispatch.enabled` to false,
   unless the session's missing file is what turns it off while `~/.config/opencode/envoy.json`,
   which is not read, is there: then `unavailable: <notice>`, the notice naming what to do with
-  it). Before that, whether Dispatch is on or off, a checkout's
+  it, after the lost-`DISPATCH_URL` text when `DISPATCH_TOKEN_FILE` is set). Before that, whether
+  Dispatch is on or off, a checkout's
   `.opencode/envoy.json`, which is not read, is one `envoy: <file> is not read: mkdir -p … && mv …`
   line while the checkout has no `.envoy/envoy.json`. The `dispatch` command reads the file
   `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set. A subagent's Bash can lack what the
