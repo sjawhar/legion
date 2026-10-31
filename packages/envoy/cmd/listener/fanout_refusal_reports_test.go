@@ -26,6 +26,12 @@ import (
 // (TestListenerDeliveryHandler_FanoutRefusesUnreadableOrAmbiguousDeliveryMode). The recipients
 // below are the ones they leave: a portless session on the core path, and one with no entry.
 //
+// None of them is on consumer delivery, so this test pins what the fan-out does where no consumer
+// relays the message: the two core-path rows pass on the tree before round 6's fix as after it,
+// and are not evidence for that fix. The branch the fix changes, a portless consumer session's
+// refusal, is pinned by TestTheFanoutReportsARefusalOfAPortlessSessionOnConsumerDelivery and
+// TestAPortlessConsumerSessionIsReportedAnUnreadableDeliveryMode, which fail on that tree.
+//
 // A session with no entry is the one recipient a mode cannot be judged against: it is taken, and
 // the resolution that then fails records no attempt at all, so nothing is left for the relay of a
 // session that registers again to hold a later copy under (INFRA-594).
