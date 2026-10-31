@@ -66,6 +66,11 @@ versions. Never add the module to the root `go.work`.
   with a refused input and one per missing provider, each asserting nothing registered beyond the
   test's providers. The AWS components resolve in `NatsServiceArgs.validate` and
   `WebhookListenerArgs.validate`.
+- **Reach.** A component serves this deployment's own callers on its tailnet, or inside its own
+  cluster, and never on a public address; the one that opens a port to the internet names in
+  `packages/envoy/infra/README.md` the caller outside the deployment that cannot join the tailnet,
+  as `aws:WebhookListener` names GitHub's and Slack's webhook senders. The rule is in the root
+  `AGENTS.md`, under Conventions.
 
 - **Component-built Kubernetes providers.** `gcp:Dispatch` requires the consumer's `gcp` and
   `random` providers before registering anything, then builds a Kubernetes provider from its

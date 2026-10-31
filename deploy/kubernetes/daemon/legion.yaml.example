@@ -22,6 +22,8 @@ state_dir: ./state                     # the daemon's local state
 # on, so that Service exposes worker_stream_port (13371 here, port + 1) as the same port number.
 # Running the daemon on a fixed host instead — a devbox or a VM — needs neither: bind that host's
 # own address, which pods then dial, and leave advertise_host unset.
+# Either address is one inside the deployment: the daemon's API is never reachable from the
+# internet (AGENTS.md, Conventions).
 bind: 0.0.0.0
 advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
