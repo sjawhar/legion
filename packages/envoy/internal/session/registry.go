@@ -547,9 +547,10 @@ func (r *SessionRegistry) DeleteIfInstance(ctx context.Context, sessionID, insta
 			// A value this build cannot read names no instance, so it belongs to none: it is
 			// deleted as an entry that carries no id is, and the deregistration is not blocked
 			// by a record no reader can act on. What json.Unmarshal decoded before the error
-			// is dropped for that reason: it fills the fields it read, so a value whose type
-			// error follows a client instance id would otherwise be compared against that id
-			// and kept — the opposite of what this branch decides.
+			// is dropped for that reason: on a type error it still fills every field it could
+			// read, wherever the bad field sits, so a value carrying a client instance id would
+			// otherwise be compared against that id and kept — the opposite of what this branch
+			// decides.
 			stored = SessionEntry{}
 			r.logger().Warn("session registry deleting a malformed value for a named client instance",
 				slog.String("key", entry.Key()),
