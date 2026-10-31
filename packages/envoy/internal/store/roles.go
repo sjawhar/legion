@@ -205,21 +205,16 @@ var ErrRoleViewNotReady = errors.New("the role claim view cannot be served")
 // the role's claim names it; its interest record's topics say nothing about that. It answers only
 // while that copy can be served (kvwatch.Watcher.Servable): a read of the bucket has completed and
 // the copy follows it, or stopped following it no longer ago than the stale bound. Otherwise it
-// returns ErrRoleViewNotReady, wrapped. A read whose scan timed out is read again by the watcher
-// itself, so a view it refuses becomes servable without a Rewatch.
+// returns ErrRoleViewNotReady, wrapped, with the reason RoleViewErr gives, the one test of the
+// view's state, which /healthz makes too. A read whose scan timed out is read again by the
+// watcher itself, so a view it refuses becomes servable without a Rewatch.
 //
 // The copy keeps every holder through a read and removes the ones the read found no evidence of
 // only once it completes (roleCache), so a read of it during a refill answers the copy it had, not
 // a part of the bucket, and no answer is ever a session's roles stripped by a read in flight.
 func (r *Registry) RolesHeldBy(sessionID string) ([]string, error) {
-	if r.roleWatcher == nil {
-		return nil, fmt.Errorf("%w: no watcher follows the role claims", ErrRoleViewNotReady)
-	}
-	if err := r.roleWatcher.Err(); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrRoleViewNotReady, err)
-	}
-	if err := r.roleWatcher.Servable(); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrRoleViewNotReady, err)
+	if err := r.RoleViewErr(); err != nil {
+		return nil, err
 	}
 	roles := []string{}
 	r.holdersMu.RLock()
@@ -231,6 +226,29 @@ func (r *Registry) RolesHeldBy(sessionID string) ([]string, error) {
 	r.holdersMu.RUnlock()
 	sort.Strings(roles)
 	return roles, nil
+}
+
+// RoleViewErr is nil while the role claim view would answer a read, and otherwise the wrapped
+// ErrRoleViewNotReady that RolesHeldBy refuses that read with, naming the same reason: it is the
+// one test of the view's state, so a report that the view answers and a read it refuses can never
+// disagree. It makes no bucket call, so a caller reports the view without waiting on the bus.
+//
+// /healthz reports it as a degraded dependency, and it is deliberately not part of Ping or
+// WatchErr: those feed the listener's self-health monitor, which restarts the listener over a
+// terminal failure that survives its recovery attempts, and no rebuild completes a read the
+// bucket keeps timing out on. What does complete it is the role claim watcher's own re-read,
+// which needs nothing from the listener.
+func (r *Registry) RoleViewErr() error {
+	if r.roleWatcher == nil {
+		return fmt.Errorf("%w: no watcher follows the role claims", ErrRoleViewNotReady)
+	}
+	if err := r.roleWatcher.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ErrRoleViewNotReady, err)
+	}
+	if err := r.roleWatcher.Servable(); err != nil {
+		return fmt.Errorf("%w: %w", ErrRoleViewNotReady, err)
+	}
+	return nil
 }
 
 // roleClaim reads role's claim from the bucket, waiting no longer than ctx (bus.Bounded).

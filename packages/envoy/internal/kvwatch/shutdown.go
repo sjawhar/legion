@@ -31,6 +31,9 @@ func (w *Watcher) Stop() {
 	w.clearProbeArm()
 	w.clearIdleArm()
 	w.generation++
+	// A stopped watcher completes no read, so a caller waiting for a copy it can serve stops
+	// waiting (WaitComplete).
+	w.wakeComplete()
 	w.mu.Unlock()
 }
 

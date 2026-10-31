@@ -63,18 +63,23 @@ func (c interestCache) CompleteRead(kvwatch.Read) {
 	r.cache.CompleteRead()
 }
 
-// WaitForCacheReady blocks until both watchers are ready (kvwatch.Watcher.Ready), each having
-// ended its first scan or failed to start, or until ctx is done. After complete reads, Match sees
-// every existing subscription in the bucket and RolesHeldBy every claim; a read whose scan timed
-// out leaves RolesHeldBy refusing (ErrRoleViewNotReady) until the watcher's own re-read completes.
-// Callers bound ctx: a watcher that fails to start releases it too, and the caller then serves the
-// write-through path while /healthz exposes the unavailable registry. Its error names the cache
-// that was not ready.
+// WaitForCacheReady blocks until both views answer, or until ctx is done. The interest watcher is
+// waited for as ready (kvwatch.Watcher.WaitReady), having ended its first scan or failed to
+// start, and the role claim watcher as servable (kvwatch.Watcher.WaitComplete): the interest view
+// answers from whatever its copy holds, so a partial read still serves, while the role claim view
+// refuses every read until a read of its bucket has completed (ErrRoleViewNotReady), so readiness
+// alone would let a caller serve a view that answers nothing. After it returns nil, Match sees
+// every existing subscription in the bucket and RolesHeldBy answers. A read whose scan timed out
+// releases readiness without completing, and the watcher reads the bucket again itself after it,
+// so this wait ends on that re-read rather than hanging. Callers bound ctx: a watcher that fails
+// to start releases it too, and so does one that can complete no read at all, through its
+// terminal error or its stop; the caller then serves the write-through path while /healthz
+// exposes the unavailable registry. Its error names the cache that did not answer.
 func (r *Registry) WaitForCacheReady(ctx context.Context) error {
 	if err := r.watcher.WaitReady(ctx); err != nil {
 		return fmt.Errorf("interest cache: %w", err)
 	}
-	if err := r.roleWatcher.WaitReady(ctx); err != nil {
+	if err := r.roleWatcher.WaitComplete(ctx); err != nil {
 		return fmt.Errorf("role claim cache: %w", err)
 	}
 	return nil

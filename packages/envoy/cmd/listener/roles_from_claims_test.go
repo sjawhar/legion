@@ -81,6 +81,20 @@ func sessionRows(t *testing.T, registry *store.Registry, state *listenerDeps) ma
 	return byID
 }
 
+// roleViewUnanswered reports whether recorder carries the answer a session route gives when the
+// role claim view refuses it: the 503 with Retry-After: 1 whose body begins busUnansweredPrefix
+// and carries store.ErrRoleViewNotReady's reason. The reason is part of the check because a bus
+// that did not answer earns the same status, the same header and the same prefix, and these tests
+// are about the view: an assertion that took either answer would pass for a silent bus, which is
+// not what they set up.
+func roleViewUnanswered(recorder *httptest.ResponseRecorder) bool {
+	body := recorder.Body.String()
+	return recorder.Code == http.StatusServiceUnavailable &&
+		recorder.Header().Get("Retry-After") == "1" &&
+		strings.Contains(body, busUnansweredPrefix) &&
+		strings.Contains(body, store.ErrRoleViewNotReady.Error())
+}
+
 // A session holds a role exactly when the role's claim names it, and every place that says who
 // holds a role says so from the claims: a row of GET /v1/sessions, GET /v1/registry/<session_id>
 // (which Dispatch's route roster reads) and the sender a send stamps. A session whose record keeps
@@ -181,9 +195,8 @@ func TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes(t *te
 	} {
 		recorder := httptest.NewRecorder()
 		route.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route.path, nil))
-		if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") != "1" ||
-			!strings.Contains(recorder.Body.String(), busUnansweredPrefix) {
-			t.Errorf("GET %s with a claims view that cannot answer: status %d, Retry-After %q, body %s; want the bus-unavailable 503",
+		if !roleViewUnanswered(recorder) {
+			t.Errorf("GET %s with a claims view that cannot answer: status %d, Retry-After %q, body %s; want the bus-unavailable 503 naming the role claim view's refusal",
 				route.path, recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
 		}
 	}
@@ -222,8 +235,8 @@ func (feedsNothing) Apply(kvwatch.Entry, kvwatch.Read) {}
 func (feedsNothing) CompleteRead(kvwatch.Read)         {}
 
 // requireRolesOrUnanswered fails the test unless recorder answers 200 with the session's rows
-// (rolesOf reads them) holding exactly want, or the bus-unavailable 503 with Retry-After: 1. It
-// reports whether the answer was the 200.
+// (rolesOf reads them) holding exactly want, or the role claim view's own bus-unavailable 503
+// (roleViewUnanswered). It reports whether the answer was the 200.
 func requireRolesOrUnanswered(t *testing.T, what string, recorder *httptest.ResponseRecorder, want []string, rolesOf func([]byte) []string) bool {
 	t.Helper()
 	switch recorder.Code {
@@ -233,8 +246,8 @@ func requireRolesOrUnanswered(t *testing.T, what string, recorder *httptest.Resp
 		}
 		return true
 	case http.StatusServiceUnavailable:
-		if recorder.Header().Get("Retry-After") != "1" || !strings.Contains(recorder.Body.String(), busUnansweredPrefix) {
-			t.Fatalf("%s answered 503 with Retry-After %q and body %s, want the bus-unavailable 503", what, recorder.Header().Get("Retry-After"), recorder.Body.String())
+		if !roleViewUnanswered(recorder) {
+			t.Fatalf("%s answered 503 with Retry-After %q and body %s, want the bus-unavailable 503 naming the role claim view's refusal", what, recorder.Header().Get("Retry-After"), recorder.Body.String())
 		}
 		return false
 	default:
@@ -272,9 +285,8 @@ func TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes(t
 	} {
 		recorder := httptest.NewRecorder()
 		route.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route.path, nil))
-		if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") != "1" ||
-			!strings.Contains(recorder.Body.String(), busUnansweredPrefix) {
-			t.Errorf("GET %s with a role claim view whose first scan timed out: status %d, Retry-After %q, body %s; want the bus-unavailable 503",
+		if !roleViewUnanswered(recorder) {
+			t.Errorf("GET %s with a role claim view whose first scan timed out: status %d, Retry-After %q, body %s; want the bus-unavailable 503 naming the role claim view's refusal",
 				route.path, recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
 		}
 	}

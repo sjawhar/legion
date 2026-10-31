@@ -1,7 +1,9 @@
 package kvwatch
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -31,10 +33,59 @@ func (w *Watcher) boundFor(maxAge time.Duration) time.Duration {
 func (w *Watcher) Servable() error {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
+	return w.servable()
+}
+
+// servable is Servable's reading, under mu. WaitComplete takes it together with the terminal error
+// and the stop, in one reading, so a copy whose bucket Check found recreated is never answered
+// servable while the view behind it refuses every read.
+func (w *Watcher) servable() error {
 	if w.completedOnce && (w.following || w.now().Sub(w.staleSince) <= w.bound) {
 		return nil
 	}
 	return ErrRefilling
+}
+
+// WaitComplete blocks until the copy can be served, the state Servable reports, and then returns
+// nil: a view that answers no read until then (store.Registry.RolesHeldBy) gates its caller on
+// this rather than on WaitReady, which a read whose scan timed out releases too. Being servable is
+// not one-way -- a copy that stopped following its bucket is refused again once its stale episode
+// outlasts the bound -- so this reads the state again after every wake-up and returns nil only on
+// a reading that says servable; a read whose scan timed out is read again by the watcher itself
+// until one does. It returns early, rather than waiting ctx out, when no read will complete: the
+// current watcher's terminal error (Err), which only a Rewatch clears, and a stop, after which the
+// watcher arms nothing. The error is read before servability, as RolesHeldBy reads it, so a
+// watcher Check found on a recreated bucket never answers this wait nil while that view still
+// refuses every read. Callers bound ctx, whose error it returns when ctx ends first: a bucket can
+// be unreachable.
+func (w *Watcher) WaitComplete(ctx context.Context) error {
+	for {
+		w.mu.RLock()
+		err, stopped, servable, changed := w.err, w.stopped, w.servable(), w.completeChanged
+		w.mu.RUnlock()
+		switch {
+		case err != nil:
+			return err
+		case servable == nil:
+			return nil
+		case stopped:
+			return fmt.Errorf("%s watcher stopped before a read of its bucket completed", w.name)
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// wakeComplete wakes every WaitComplete waiter, which then reads the state the caller changed.
+// The caller holds mu for writing, so a waiter that took the channel before this reading of the
+// state is woken, and one that takes it after reads the new state with the channel that replaces
+// the closed one.
+func (w *Watcher) wakeComplete() {
+	close(w.completeChanged)
+	w.completeChanged = make(chan struct{})
 }
 
 // Following reports whether the copy follows its bucket: a read has completed since the copy last

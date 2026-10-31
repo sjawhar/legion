@@ -69,6 +69,9 @@ func (w *Watcher) Check() error {
 	if !w.stopped && w.err == nil && !w.stream.IsZero() && !stream.Created.Equal(w.stream) {
 		w.err = fmt.Errorf("%s bucket %s was recreated under its watcher", w.name, w.bucket)
 		w.stopFollowing()
+		// No read completes until a Rewatch resets the cache, so a caller waiting for a copy it
+		// can serve (WaitComplete) reads this error rather than waiting its own ctx out.
+		w.wakeComplete()
 	}
 	return nil
 }

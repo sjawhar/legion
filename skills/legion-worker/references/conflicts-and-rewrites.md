@@ -8,10 +8,11 @@ Every path it cites is in sjawhar/legion.
 
 ## Reintegrating the base
 
-- **Merge the base forward only on a real conflict, a need only the base meets, or a retarget, and
-  never with `jj rebase`.**
+- **Merge the base forward only on a real conflict, a need only the base meets, a retarget, or a
+  parent's last round, and never with `jj rebase`.**
   The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
-  because of a conflict, the change needs something that exists only on the base (a fix for its
+  because of a conflict, the architect's backward move names a parent's last round,
+  the change needs something that exists only on the base (a fix for its
   only red check, or a sentence it must change), or after the pull request is retargeted to a new
   base. Otherwise, never reintegrate the base to pick up the default branch or refresh CI. Each
   merge is a new head, reruns CI and can void a review. A single failed CI job is re-run on its
@@ -26,6 +27,9 @@ Every path it cites is in sjawhar/legion.
   the fingerprint at the current tip; after pushing the merged branch, record it at the new
   tip; post one PR comment (Legion footer):
   `forward merge <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
+  In a parent's last round, end that comment with `parent's last round: full test round`, the line
+  the tester reads for a full round (`skill://legion-architect/references/acceptance.md`,
+  "The last round").
   On the tmux runtime, where issue workspaces are still jj workspaces of one shared clone,
   `jj undo`, `jj abandon` and `jj op restore` rewrite the shared operation log, so a mistake there
   is recovered forward (`jj -R "$LEGION_WORKSPACE" new`, or `jj -R "$LEGION_WORKSPACE" restore

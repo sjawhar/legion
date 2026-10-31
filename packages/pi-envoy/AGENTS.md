@@ -330,7 +330,7 @@ the listener's `GET /v1/sessions` and `GET /v1/registry/<id>`, and `envoy_sessio
 nats.js keeps nothing for a client that is disconnected, so a message published while this
 session's NATS connection, or one of its subscriptions, is down never reaches that subscription.
 The notification stream (`ENVOY_NOTIFICATIONS`, 72 hours) keeps what it captures, and the session
-reads that back from its listener, `POST /v1/replay` (the "Listener API" table of
+reads that back from its listener, `POST /v1/replay` (the "Listener API" list of
 `packages/envoy/AGENTS.md`), through the shared engine `@legion/envoy-client/replay`
 (`createReplayEngine`, whose doc comments state its rules, and which words the cards);
 `src/missed-messages.ts` holds this package's transcript entries. The live path is unchanged in
@@ -708,9 +708,11 @@ Dispatch on at load adds the `dispatch-first` context; a Dispatch call after the
 configuring Dispatch throws `Dispatch is no longer configured: <notice>`, and one after it broke
 throws `dispatch config: <error>`. A top-level `session_start` shows one notice when a section is
 off for a reason worth saying: the missing file's (`envoy: no envoy.json at <path>: Dispatch and
-Envoy are off`), a section's error, what a checkout's files hold that the session does not read, or
-that inbound messages are off; a file that turns a section off says nothing. A file location that
-cannot be worked out (a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR`)
+Envoy are off`), the lost `DISPATCH_URL` when `DISPATCH_TOKEN_FILE` is set and no server is named
+(`lostDispatchUrlNotice`), a section's error, what a checkout's files hold that the session does not
+read, or that inbound messages are off; otherwise a file that turns a section off says nothing. A
+file location that cannot be worked out (a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or
+`PI_CODING_AGENT_DIR`)
 still loads the extension, with both sections off, nothing handed on, and that refusal as the
 notice.
 

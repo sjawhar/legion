@@ -131,6 +131,16 @@ type Watcher struct {
 	generation uint64
 	stopped    bool
 	err        error
+	// completeChanged is closed, and replaced with an open channel, at every change that can end a
+	// wait (WaitComplete): a read that completed, a terminal error recorded, and the stop. A change
+	// that leaves a blocked waiter's reading as it was - a replacement watcher installed, whose
+	// copy is no more servable than before - wakes nobody, since such a waiter has already read
+	// err == nil, not stopped and a copy it cannot serve. A waiter takes the state and this channel
+	// together under mu, so a change made after that reading is already a wake-up it will see, and
+	// reads the state again on every wake-up, since being servable is not one-way. New makes it,
+	// and every replacement is made under mu, so it is never nil and no waiter blocks on a nil
+	// channel.
+	completeChanged chan struct{}
 	// repairTimer is the armed wait left by a stop nobody asked for, and is the marker that such a
 	// stop is outstanding and not yet reported: a repair that worked, and an ordered Stop, clear
 	// it, and the one report clears it too, so exactly one ERROR follows one stop. It always
@@ -218,17 +228,18 @@ type Watcher struct {
 // so every handle the store reads and writes through checks its keys.
 func New(name string, kv bus.KeyValue, cache Cache, options ...Option) *Watcher {
 	w := &Watcher{
-		name:          name,
-		bucket:        kv.Bucket(),
-		cache:         cache,
-		now:           time.Now,
-		staleBound:    defaultStaleBound,
-		probeInterval: streamProbeInterval,
-		scanIdle:      ScanIdleTimeout,
-		ready:         make(chan struct{}),
-		first:         kv,
-		kv:            kv,
-		after:         func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
+		name:            name,
+		bucket:          kv.Bucket(),
+		cache:           cache,
+		now:             time.Now,
+		staleBound:      defaultStaleBound,
+		probeInterval:   streamProbeInterval,
+		scanIdle:        ScanIdleTimeout,
+		ready:           make(chan struct{}),
+		completeChanged: make(chan struct{}),
+		first:           kv,
+		kv:              kv,
+		after:           func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
 	}
 	for _, option := range options {
 		option(w)
@@ -264,6 +275,9 @@ func (w *Watcher) Start() {
 		current := w.watcher != nil
 		if !current && !w.stopped {
 			w.err = err
+			// Nothing will complete a scan for this watcher until a Rewatch, so a caller waiting
+			// for a complete view reads this error rather than waiting its own ctx out.
+			w.wakeComplete()
 		}
 		w.mu.Unlock()
 		if current {
@@ -467,7 +481,10 @@ func (w *Watcher) watch(kv bus.KeyValue, expect uint64) error {
 	w.unreadSince = time.Time{}
 	w.err = nil
 	w.bound = w.boundFor(state.MaxAge)
-	// A new read begins: the copy stops following until it completes.
+	// A new read begins: the copy stops following until it completes. No wake here (WaitComplete):
+	// a waiter still blocked has read err == nil, not stopped and a copy it cannot serve, and this
+	// switch leaves the copy no more servable than it found it, so there is nothing it would read
+	// differently. The replacement's own read ends that wait, through completeRead's wake.
 	w.stopFollowing()
 	w.reading = true
 	w.readDisconnects = disconnects
@@ -590,6 +607,9 @@ func (w *Watcher) closed(sub *subscription, generation uint64) {
 	err := errors.New(w.name + " watcher stopped")
 	w.err = err
 	w.stopFollowing()
+	// Nothing this watcher does will complete a read now, so a caller waiting for a copy it can
+	// serve reads this error rather than waiting its own ctx out.
+	w.wakeComplete()
 	// The watcher ended on its own: the connection it was on closed, or the bucket went away. The
 	// cache is frozen until a Rewatch replaces it, and Err says so. The stop is logged at WARN and
 	// not at ERROR, because nothing repairs a watcher while the listener's connection to NATS is
@@ -695,6 +715,8 @@ func (w *Watcher) completeRead(generation uint64, read Read) {
 		w.following = true
 		w.completedOnce = true
 		w.staleSince = time.Time{}
+		// The copy can be served now, so a caller waiting for one (WaitComplete) is released.
+		w.wakeComplete()
 	}
 }
 
