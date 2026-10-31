@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/session"
 )
 
@@ -139,12 +140,19 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 		t.Fatalf("the drain that ended after its forward reported no error, so this test no longer reaches the moment it is about")
 	}
 
-	// The listener that drains the role next, with guards of its own, on a clock past
-	// roleKeepClaimWindow - which is roleKeepDrainWindow, the whole of a drain's life - so the
-	// claim the drain above left behind is one no drain can still be forwarding.
+	// The listener that drains the role next, with guards and caches of its own, which is what a
+	// second process has: the first listener recorded the copy it forwarded in its dedupe cache
+	// (finishRoleForward), and inside one process that record is what stops a copy already handed
+	// over from being handed over again. It drains on a clock past roleKeepClaimWindow - which is
+	// roleKeepDrainWindow, the whole of a drain's life - so the claim the drain above left behind
+	// is one no drain can still be forwarding.
 	past := func() time.Time { return time.Now().Add(roleKeepDrainWindow + time.Minute) }
 	next := harness.config
 	next.roleKeepDrains = newRoleKeepGuards()
+	next.dedupeCache = dedupe.New(10 * time.Minute)
+	t.Cleanup(next.dedupeCache.Stop)
+	next.attemptCache = dedupe.New(5 * time.Minute)
+	t.Cleanup(next.attemptCache.Stop)
 	next.forwardRole = record(harness.config, func() {})
 	if err := drainKeptRole(ctx, next, role, holder, entry, past); err != nil {
 		t.Fatalf("the next drain of role %s's kept lane: %v", role, err)

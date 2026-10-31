@@ -566,32 +566,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		return cfg.dedupeCache.Seen(key, recipient) || cfg.attemptCache.Seen(key, recipient)
 	})
 	if verdict.kind != forwardAllowed {
-		outcome := deliveryOutcome{sessionID: sessionID}
-		switch verdict.kind {
-		case forwardEcho:
-			outcome.metricStatus = "skipped"
-			outcome.log = func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelInfo, "listener skip role echo", sessionID, item.Topic, item.EventID, "skipped")
-			}
-		case forwardRepeat:
-			outcome.metricStatus = "dedupe"
-			outcome.log = func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelInfo, "listener role dedupe skip", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
-			}
-		case forwardModeUnreadable:
-			outcome.metricStatus = "failed"
-			outcome.log = func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelWarn, "listener role delivery mode cannot be read unambiguously", sessionID, item.Topic, item.EventID, "failed")
-			}
-			outcome.exceptionReason = "delivery_failed"
-		case forwardModeUnadvertised:
-			outcome.metricStatus = "failed"
-			outcome.log = func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelWarn, "listener role holder does not advertise delivery mode", sessionID, item.Topic, item.EventID, "failed", slog.String("mode", verdict.mode))
-			}
-			outcome.exceptionReason = "delivery_failed"
-		}
-		applyDeliveryOutcome(cfg, item, outcome)
+		applyDeliveryOutcome(cfg, item, refusedRoleForwardOutcome(verdict, item, sessionID, roleLaneRefusalLines))
 		message.finalize(false)
 		return
 	}
@@ -630,14 +605,64 @@ func handOverOrRetry(cfg listenerDeliveryHandlerConfig, message deliveryMessage,
 	message.finalize(true)
 }
 
-// finishRoleForward reports a role forward's outcome, err from its publish or its wait. A forward
-// that reached the server and drew no receipt from the live holder inside roleReceiptTimeout
-// (bus.ErrReceiptTimeout, the one error keyed on) is receipt_timeout; one the stream did not
-// acknowledge storing (bus.ErrForwardNotStored), or not known to have left this process -- the flush
-// timed out or failed, the publish failed -- is delivery_failed like a stale holder or an
-// unadvertised/unreadable delivery mode; no claim is no_holder. Either failure clears the attempt, so
-// a re-send is forwarded again; a delivered forward records the dedupe entry.
-func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, err error) {
+// roleForwardRefusalLines are one forward path's lines for each refusal beforeForward can return.
+// The role lane and the kept lane's drain each have their own wording - a copy the drain passed
+// over is not the message the lane just took - and nothing else about a refusal differs between
+// them, so each passes its lines to the one judgement both make (refusedRoleForwardOutcome).
+type roleForwardRefusalLines struct {
+	echo             string
+	repeat           string
+	modeUnreadable   string
+	modeUnadvertised string
+}
+
+// roleLaneRefusalLines are the role lane's lines for a forward beforeForward refused.
+var roleLaneRefusalLines = roleForwardRefusalLines{
+	echo:             "listener skip role echo",
+	repeat:           "listener role dedupe skip",
+	modeUnreadable:   "listener role delivery mode cannot be read unambiguously",
+	modeUnadvertised: "listener role holder does not advertise delivery mode",
+}
+
+// refusedRoleForwardOutcome is what a forward to a role's holder that beforeForward refused is
+// owed, for either path that makes one: the role lane (roleTopicDelivery) and the kept lane's
+// drain (keptRoleForwardAllowed). An echo of the holder's own message is skipped and a copy it
+// already took is a dedupe, each counted and logged and neither reported to its sender; a payload
+// its delivery modes do not take, and one whose mode cannot be read, are failed, counted and
+// answered with the delivery_failed a stale holder is answered with. extra is what the path adds
+// to every line of its own, the drain's role among them.
+func refusedRoleForwardOutcome(verdict forwardVerdict, item contracts.Envelope, sessionID string, lines roleForwardRefusalLines, extra ...slog.Attr) deliveryOutcome {
+	outcome := deliveryOutcome{sessionID: sessionID}
+	line, level, attrs := "", slog.LevelWarn, extra
+	switch verdict.kind {
+	case forwardEcho:
+		line, level, outcome.metricStatus = lines.echo, slog.LevelInfo, "skipped"
+	case forwardRepeat:
+		line, level, outcome.metricStatus = lines.repeat, slog.LevelInfo, "dedupe"
+		attrs = append(attrs, slog.String("dedupe_key", item.DedupeKey))
+	case forwardModeUnreadable:
+		line, outcome.metricStatus, outcome.exceptionReason = lines.modeUnreadable, "failed", "delivery_failed"
+	case forwardModeUnadvertised:
+		line, outcome.metricStatus, outcome.exceptionReason = lines.modeUnadvertised, "failed", "delivery_failed"
+		attrs = append(attrs, slog.String("mode", verdict.mode))
+	}
+	status := outcome.metricStatus
+	outcome.log = func(logger *logging.Logger) {
+		logger.DeliveryLog(level, line, sessionID, item.Topic, item.EventID, status, attrs...)
+	}
+	return outcome
+}
+
+// finishRoleForward reports a role forward's outcome, err from its publish or its wait, with attrs
+// on its line: the kept lane's drain names the role and the time it kept the copy there, where the
+// role lane's own forward adds nothing. A forward that reached the server and drew no receipt from
+// the live holder inside roleReceiptTimeout (bus.ErrReceiptTimeout, the one error keyed on) is
+// receipt_timeout; one the stream did not acknowledge storing (bus.ErrForwardNotStored), or not
+// known to have left this process -- the flush timed out or failed, the publish failed -- is
+// delivery_failed like a stale holder or an unadvertised/unreadable delivery mode; no claim is
+// no_holder. Either failure clears the attempt, so a re-send is forwarded again; a delivered
+// forward records the dedupe entry.
+func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, err error, attrs ...slog.Attr) {
 	item, sessionID := forward.item, forward.sessionID
 	switch {
 	case err == nil:
@@ -645,7 +670,7 @@ func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, e
 			sessionID:    sessionID,
 			metricStatus: "delivered",
 			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelInfo, "listener role forwarded", sessionID, item.Topic, item.EventID, "delivered")
+				logger.DeliveryLog(slog.LevelInfo, "listener role forwarded", sessionID, item.Topic, item.EventID, "delivered", attrs...)
 			},
 			recordDedupe: true,
 		})
@@ -654,7 +679,7 @@ func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, e
 			sessionID:    sessionID,
 			metricStatus: "receipt_timeout",
 			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelWarn, "listener role receipt timed out", sessionID, item.Topic, item.EventID, "receipt_timeout", slog.String("timeout", roleReceiptTimeout.String()))
+				logger.DeliveryLog(slog.LevelWarn, "listener role receipt timed out", sessionID, item.Topic, item.EventID, "receipt_timeout", append(attrs, slog.String("timeout", roleReceiptTimeout.String()))...)
 			},
 			exceptionReason: "receipt_timeout",
 			clearAttempt:    true,
@@ -664,7 +689,7 @@ func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, e
 			sessionID:    sessionID,
 			metricStatus: "failed",
 			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelError, "listener role forward failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
+				logger.DeliveryLog(slog.LevelError, "listener role forward failed", sessionID, item.Topic, item.EventID, "failed", append(attrs, slog.String("error", err.Error()))...)
 			},
 			exceptionReason: "delivery_failed",
 			clearAttempt:    true,

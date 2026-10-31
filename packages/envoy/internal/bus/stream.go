@@ -319,6 +319,16 @@ func purgeLegacyRoleMessages(js nats.JetStreamContext) error {
 	return nil
 }
 
+// consumerFilterSubjects is subjects without the listener's kept lane, the list a consumer's
+// filter may carry: the stream's own list holds the kept prefix (streamCarriedSubjects) and no
+// consumer filter ever does, since a kept copy still carries its role topic and a consumer handed
+// one would deliver it as a role message, and a drain cursor is no envelope at all.
+func consumerFilterSubjects(subjects []string) []string {
+	return slices.DeleteFunc(slices.Clone(subjects), func(subject string) bool {
+		return subjectsOverlap(subject, KeptTopicPrefix+">")
+	})
+}
+
 func migrateLegacyConsumerFilters(js nats.JetStreamContext, subjects []string) error {
 	for name := range js.ConsumerNames(Stream) {
 		info, err := js.ConsumerInfo(Stream, name)
@@ -330,7 +340,7 @@ func migrateLegacyConsumerFilters(js nats.JetStreamContext, subjects []string) e
 		}
 		config := info.Config
 		config.FilterSubject = ""
-		config.FilterSubjects = slices.Clone(subjects)
+		config.FilterSubjects = consumerFilterSubjects(subjects)
 		if _, err := js.UpdateConsumer(Stream, &config); err != nil {
 			return err
 		}

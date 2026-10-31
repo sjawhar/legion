@@ -717,6 +717,52 @@ func TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep(t *testing.T) {
 	}
 }
 
+// A sender that keeps a queue of its own and redelivers from it says so on the envelope
+// (contracts.Envelope.Keep false), and the role lane keeps nothing for it: Dispatch's outbox
+// publishes a role-routed event straight onto the lane and answers for its delivery itself, so a
+// copy kept here would reach the role's next holder a second time. The lane raises the no_holder
+// it raised before the kept lane, and an ordinary raw role publish, which carries no such flag, is
+// kept as it is now.
+func TestTheRoleLaneKeepsNothingForASenderThatKeepsItsOwnQueue(t *testing.T) {
+	// The flag the sender sets, as Dispatch's outbox sets it on a role-routed event.
+	keepFalse := false
+	for _, tc := range []struct {
+		name string
+		role string
+		// keep is the envelope's own keep flag, nil for the raw role publish that carries none.
+		keep *bool
+		kept bool
+	}{
+		{name: "a sender that queues the message itself", role: "lane-keep-false", keep: &keepFalse},
+		{name: "an ordinary raw role publish", role: "lane-keep-absent", kept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			harness := newListenerDeliveryHarness(t, nil)
+			topic := contracts.RoleTopicPrefix + tc.role
+			probe, err := harness.client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + topic)
+			if err != nil {
+				t.Fatalf("subscribe to the role topic's exception lane: %v", err)
+			}
+			t.Cleanup(func() { _ = probe.Unsubscribe() })
+			if err := harness.client.Conn.Flush(); err != nil {
+				t.Fatalf("flush the probe: %v", err)
+			}
+
+			item := listenerTestEnvelope(topic, "lane-keep-"+tc.role)
+			item.Keep = tc.keep
+			harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+
+			if tc.kept {
+				waitForKeptRoleMessage(t, harness.client, tc.role, item.EventID)
+				noException(t, probe)
+				return
+			}
+			assertDeliveryException(t, probe, item, "no_holder")
+			assertNothingKept(t, harness.client, tc.role)
+		})
+	}
+}
+
 // A claim the restart grace retained is not a role without a holder: that holder re-registers
 // inside the session TTL and keeps its claim, so it writes no POST /v1/roles/set and no drain
 // follows, and a copy kept for it would wait for a claim that never comes. The lane keeps nothing

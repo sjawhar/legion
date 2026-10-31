@@ -680,8 +680,9 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // keep is meaningful only for a role topic, and unset means true: a role message the listener
 // cannot deliver is kept on the role's kept lane and handed to the role's next holder, and the
 // send is answered 202 kept rather than 404 (roleSend.kept). A sender that holds a queue of its
-// own and must get today's answer passes keep: false, which keeps nothing and answers the 404,
-// and so does a role token no claim can name (isValidRole).
+// own and must get today's answer passes keep: false, which keeps nothing and answers the 404.
+// A role token no claim can name keeps nothing either, which the keep itself refuses, for this
+// route and the role lane alike (keepForNextHolder).
 func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		arrived := time.Now()
@@ -754,11 +755,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
 			defer cancel()
-			// Keeping is only for a role a claim can take. POST /v1/roles/set refuses every role
-			// outside rolePattern (isValidRole), so a copy kept under a token it refuses waits for
-			// a claim that cannot be made and expires unread, where the 404 its sender gets
-			// instead is an answer the sender can act on.
-			sendToRole(ctx, w, record, d, item, role, arrived, (request.Keep == nil || *request.Keep) && isValidRole(role))
+			sendToRole(ctx, w, record, d, item, role, arrived, request.Keep == nil || *request.Keep)
 			return
 		}
 		if bus.UsesCoreTransport(request.Topic) {

@@ -1245,6 +1245,13 @@ func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *at
 	return nil
 }
 
+// dispatchRoleKeep is the keep flag every role-routed event carries (contracts.Envelope.Keep):
+// Dispatch redelivers a role-routed event from its own outbox, on its own receipts, so a copy the
+// listener kept for the role's next holder would be a second delivery of a message this publisher
+// is still answering for. The listener's role lane reads the flag and raises no_holder for the
+// event exactly as it did before it kept anything.
+var dispatchRoleKeep = false
+
 func publishRoute(deps Deps, eventID int64, item contracts.Envelope, a *attempt, route *string) error {
 	if route == nil || *route == "" {
 		return nil
@@ -1256,6 +1263,7 @@ func publishRoute(deps Deps, eventID int64, item contracts.Envelope, a *attempt,
 	switch parsed.Kind {
 	case "role":
 		item.Topic = contracts.RoleTopicPrefix + parsed.ID
+		item.Keep = &dispatchRoleKeep
 	case "session":
 		item.Topic = contracts.AgentSubject(parsed.ID)
 	default:

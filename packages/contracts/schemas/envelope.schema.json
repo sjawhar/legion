@@ -25,6 +25,7 @@
     "issued_at": { "type": "integer" },
     "expires_at": { "type": "integer" },
     "kept_at": { "type": "integer" },
+    "keep": { "type": "boolean" },
     "payload_summary": { "type": "string", "minLength": 1 },
     "payload_ref": { "type": "string" },
     "payload": { "type": "string" },

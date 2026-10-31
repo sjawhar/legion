@@ -150,13 +150,14 @@ func pauseBeforeRetry(ctx context.Context) bool {
 }
 
 // forwardAndWait forwards item to subject through the delivery configuration's forwardRole and
-// waits for its outcome, which is the form a route needs: it answers its sender with what the
-// forward did, where the role lane hands the wait over and reports it later. storedOnly asks for a
-// forward that counts as delivered once the stream acknowledges storing it, with no receipt
-// (roleForwardStoredOnly): a holder served on a port has no NATS subscriber to answer one, and
-// takes the stored copy through its listener instead.
-func (d *listenerDeps) forwardAndWait(subject string, item contracts.Envelope, window time.Duration, storedOnly bool) error {
-	wait, err := d.delivery.forwardRole(subject, item, window, storedOnly)
+// waits for its outcome, which is the form a caller that answers for the forward needs: the
+// publish route answers its sender with what the forward did, and the kept lane's drain moves its
+// cursor past the copy (forwardKeptRoleMessage), where the role lane hands the wait over and
+// reports it later. storedOnly asks for a forward that counts as delivered once the stream
+// acknowledges storing it, with no receipt (roleForwardStoredOnly): a holder served on a port has
+// no NATS subscriber to answer one, and takes the stored copy through its listener instead.
+func (cfg listenerDeliveryHandlerConfig) forwardAndWait(subject string, item contracts.Envelope, window time.Duration, storedOnly bool) error {
+	wait, err := cfg.forwardRole(subject, item, window, storedOnly)
 	if err != nil {
 		return err
 	}
@@ -240,15 +241,15 @@ func (s *roleSend) delivered(outcome sendOutcome) {
 
 // noHolder answers a role with no live claim. With keeping on, and for a state the listener keeps
 // for (roleKeepable: an unclaimed role, and a lapsed claim released or already absent), it keeps
-// the message for the role's next holder, hands the lane to a holder that claimed it meanwhile
-// (drainAfterKeep) and answers kept's 202; a keep that failed is logged by keepRoleMessage and
+// the message for the role's next holder and hands the lane to whoever holds the role now, both
+// in the one keep both give-up paths take (keepForNextHolder), and answers kept's 202. A keep
+// that kept nothing - one it refused, a publish that failed, logged by keepRoleMessage - is
 // answered as a send that kept nothing is, since the sender's own fallback must run when the
-// message was not kept. Keeping nothing, it answers writeRoleHolderError's 404 (unclaimed or
-// holder_lapsed), which the Legion daemon reads as notify.ErrNoHolder, recorded role_unclaimed or
-// role_lapsed. The role lane counts an unclaimed role skipped and a lapsed holder failed.
+// message was not kept: writeRoleHolderError's 404 (unclaimed or holder_lapsed), which the Legion
+// daemon reads as notify.ErrNoHolder, recorded role_unclaimed or role_lapsed. The role lane counts
+// an unclaimed role skipped and a lapsed holder failed.
 func (s *roleSend) noHolder(result roleHolderResult) {
-	if s.keep && roleKeepable(result) && keepRoleMessage(s.d.client, s.d.delivery.logger, s.role, s.item) {
-		drainAfterKeep(s.d.delivery, s.role)
+	if s.keep && roleKeepable(result) && keepForNextHolder(*s.d.delivery, s.role, s.item) {
 		s.kept(result)
 		return
 	}
@@ -436,7 +437,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 				return
 			}
 			send.attempts++
-			err := d.forwardAndWait(contracts.AgentSubject(send.holder), forwarded, window, roleForwardStoredOnly(resolved.entry))
+			err := d.delivery.forwardAndWait(contracts.AgentSubject(send.holder), forwarded, window, roleForwardStoredOnly(resolved.entry))
 			if err == nil {
 				d.confirm(item.DedupeKey, send.holder)
 				send.delivered(sendDelivered)
@@ -499,7 +500,7 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 			if window <= 0 {
 				break
 			}
-			err := d.forwardAndWait(contracts.AgentSubject(sessionID), item, window, false)
+			err := d.delivery.forwardAndWait(contracts.AgentSubject(sessionID), item, window, false)
 			if err == nil {
 				d.confirm(item.DedupeKey, sessionID)
 				return sendDelivered

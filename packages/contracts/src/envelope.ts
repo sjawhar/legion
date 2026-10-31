@@ -27,6 +27,15 @@ export const EnvelopeSchema = z.object({
    * judge how old the message is.
    */
   kept_at: z.number().int().optional(),
+  /**
+   * Whether Envoy's listener may keep this message for the role's next holder when it is
+   * published straight onto a role lane and no session holds that role. Absent means keep: the
+   * listener stores the message on that role's kept lane and hands it to whoever claims the role
+   * next. A sender that keeps a queue of its own and redelivers from it sets it false — Dispatch's
+   * outbox, whose own receipts redeliver a role-routed event — so the lane raises `no_holder` for
+   * the message and hands the next holder no copy that sender would deliver again.
+   */
+  keep: z.boolean().optional(),
   payload_summary: z.string().min(1),
   payload: z.string().optional(),
   payload_ref: z.string().optional(),
