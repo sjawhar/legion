@@ -2,48 +2,40 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-31T03:15:00Z",
-  "round": 22,
-  "testedHead": "2678be4b84152baa164f065f54350e33ae432f1e",
-  "previousTestedHead": "9cabeaf6ff6d35ec0c7105e282b062d3a3e8beb5",
-  "roundShape": "Full round, as briefed: the review-round-15 fix da5762a8 changes outbox/lease.go and publisher.go (runtime); the merge 2678be4b carries main's #2422 text re-layout. Migrations 0150/0151 above main's 0149 and connections 91, unchanged.",
+  "completed": "2026-10-31T05:12:00Z",
+  "round": 23,
+  "testedHead": "b5e8445e62fbeabecc151f82b7e52762866b1572",
+  "previousTestedHead": "2678be4b84152baa164f065f54350e33ae432f1e",
+  "roundShape": "Narrow round, as the architect briefed it; round 22's live evidence at 2678be4b stands. round-shape.py v3, 2678be4b84152baa164f065f54350e33ae432f1e -> b5e8445e62fbeabecc151f82b7e52762866b1572, pull request 2395: files whose own diff differs: 4 (outbox/lease.go, outbox/owner_lane_test.go, outbox/publisher.go, scripts/e2e/README.md); nothing equal only after normalisation. lease.go's change is one comment (7fc3a1fb); owner_lane_test.go matches event_id=<id> ; publisher.go removes settlement.wrote and rewrites recordBatch's and settlement's comments.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack and TestAnOwnerLeftForTheBatchsEndLogsItsFailureOnce pass 20 of 20 at 2678be4b and fail 20 of 20 on 9cabeaf6's code with the head's owner_lane_test.go (owner_lane_test.go:202 'did not carry event 3 within 8s of its commit ... the scan read past its owner and then waited for a back-off'; owner_lane_test.go:285 'logged 2 publish lines for one attempt at event 2, want one'). The tester's TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents passes 20 of 20. The outbox package passes under CGO_ENABLED=1 -race; outbox, duty, store, bus and multiprocess ok; build, vet, gofmt and infra vets clean; the connection-count test passes."
+    "how": "Re-ran at b5e8445e on a fresh UTF8 pod Postgres 17 database: the two round-22 tests -count=5 pass 5 of 5 each; outbox, duty, store ok; outbox under CGO_ENABLED=1 -race ok; multiprocess ok; build, vet (with -tags multiprocess) and gofmt clean."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "An event committed for an owner while that owner is in flight under a silent holder is published once the owner is released, not after its back-off; one log line per failed attempt",
-      "surface": "real envoy-dispatch built at 2678be4b (and at 9cabeaf6 as the control) on a real nats-server 2.10.29, holders registered through the role and session buckets: RH-1 routed to a live holder that never answers, RH-2 to one that answers",
-      "command": "inflight.sh: RH-1's route event e1 waits for a back-off of at least 3 s; its attempt_count is raised to 8 there (so its next back-off is 4 min 20 s); 1 s into that retry's receipt wait one PATCH sets RH-1's parent to RH-3, committing RH-1 issue.updated (e2) and RH-3 child.added together, so the batch the commit wakes reads RH-3 and skips RH-1; then the time until e2's issue-topic copy is recorded",
-      "observed": "Head: e2 reached notifications.dispatch.issue.RH-1.issue.updated 3.917 s after its commit, when e1's batch ended (e1 backed off to 02:56:06, attempt 9). e1 logged 4 ERROR 'dispatch outbox: publish event' lines for its 4 attempts. The control on 9cabeaf6 did not reproduce the old defect live in 4 variants (3.885 s with the two-issue write, 3.490 s with 2 s of traffic on four other issues, 4.146 s and 1.701 s without): each time a later batch read nothing and set missed. The defect's narrow interleaving (every batch in the window reads some other owner whose send also fails) is reached by the unit test, which fails 20 of 20 at 9cabeaf6 and passes 20 of 20 here. Live logs on both builds showed one line per attempt; the double line needs the released-or-deadline settle path, which the unit test reaches.",
-      "headSha": "2678be4b84152baa164f065f54350e33ae432f1e",
-      "negativeControl": "9cabeaf6's code fails both new tests 20 of 20."
+      "criterion": "settlement.wrote removed: every former reader now reads result.fenced with the same meaning, a fenced batch and a failed write included",
+      "surface": "packages/envoy/internal/dispatch/outbox/publisher.go at b5e8445e (publishBatch, settleAndRecord, settleOwner) and batch.go (sendChains)",
+      "command": "jj diff --from 2678be4b84 --to b5e8445e62 packages/envoy/internal/dispatch/outbox/; read publisher.go:271-407 and batch.go:516-612",
+      "observed": "settleAndRecord (publisher.go:271-306) returns without writing on exactly one path, line 293, which first sets result.fenced = true; that path is also taken whenever result.fenced was already true. Every other return wrote (recordBatch at 303). So after each call, 'not written' == result.fenced. The two former readers: settleOwner (320-333) checks err first, then result.fenced where it checked !done.wrote; the batch end (387-395) checks err first, then result.fenced. A failed write (wrote was true, err set) takes the err branch first in both, before and after, so it is unchanged; a fenced batch returns err nil and is caught by result.fenced. settleOwner is called only from sendChains' settle/finish on its one goroutine (batch.go:523-612, an unlocked inflight slice), so result.fenced cannot change between a call and its read. No reader of wrote remains (rg).",
+      "headSha": "b5e8445e62fbeabecc151f82b7e52762866b1572",
+      "negativeControl": "The outbox package under -race passes (282.6 s), and TestAnOwnerLeftForTheBatchsEndLogsItsFailureOnce, which covers the early and batch-end settle of one owner, passes 5 of 5."
     },
     {
-      "criterion": "Round 21's results hold: other issues are not delayed by a silent holder; per-issue order through a SIGKILL take-over under load",
-      "surface": "the same rig at 2678be4b; then two head processes on one database",
-      "command": "stress.sh (two issues routed to the silent holder) and lat.sh (30 comments, one a second, on RH-2, latency to ses_ans's forward); load.sh x4 on LD-1..LD-20 routed to the answering holder through both processes, kill -9 of the hold's holder 4 s in, forwards checked per issue against the events table",
-      "observed": "0 of 30 comments more than 1 s late, median 0.033 s, max 0.223 s (round 21: 0 of 30; round 20: 24 of 30). The other process took the hold 5.98 s after the SIGKILL (02:53:14.856 -> 02:53:20.835); every LD event published; 185 route and comment events, 185 forwards, every issue in id order, no repeat, none missing.",
-      "headSha": "2678be4b84152baa164f065f54350e33ae432f1e",
-      "negativeControl": "Round 20's head fd93819c delayed 24 of 30 comments in the same rig."
-    },
-    {
-      "criterion": "Suites: outbox, duty, store, bus, multiprocess; build step",
-      "surface": "packages/envoy and packages/envoy/infra on fresh pod Postgres databases, -p 2 -parallel 4",
-      "command": "go test ./internal/dispatch/outbox/ ./internal/dispatch/duty/ ./internal/dispatch/store/; ./internal/bus/; CGO_ENABLED=1 go test -race ./internal/dispatch/outbox/; go test -tags multiprocess ./cmd/dispatch; go build/vet ./..., vet -tags multiprocess, gofmt; infra go vet ./..., vet -tags natslive ./core/, TestDispatchConnectionsPerPodIsTheServers",
-      "observed": "outbox ok 291.3 s, duty ok 23.6 s, store ok 263.2 s; bus ok 341.7 s; outbox -race ok 287.8 s, no data race; multiprocess ok 825.0 s, peak 4.60 GB: take-over 4.726 s after SIGKILL, 3.004 s after a NATS cut, 2.178 s after a silent cut, 5.478 s after SIGSTOP, the resumed process logged the hold lost 8 ms after it resumed, 200/80/60 comments once and in order. Build, vet, gofmt and infra vets clean; the connection-count test passes (91).",
-      "headSha": "2678be4b84152baa164f065f54350e33ae432f1e",
+      "criterion": "Suites: outbox (-race, -count=5 on the two round-22 tests), duty, store, multiprocess; build step",
+      "surface": "packages/envoy, fresh pod Postgres databases, -p 2 -parallel 4",
+      "command": "go test -count=5 -run 'TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack$|TestAnOwnerLeftForTheBatchsEndLogsItsFailureOnce$' ./internal/dispatch/outbox/; go test ./internal/dispatch/outbox/ ./internal/dispatch/duty/ ./internal/dispatch/store/; CGO_ENABLED=1 go test -race ./internal/dispatch/outbox/; go test -tags multiprocess ./cmd/dispatch; go build ./..., go vet ./..., go vet -tags multiprocess ./cmd/dispatch, gofmt -l",
+      "observed": "Both round-22 tests 5 of 5; outbox ok 280.9 s, duty ok 22.4 s, store ok 244.7 s; outbox -race ok 282.6 s, no data race; multiprocess ok 784.2 s: take-over 5.239 s after SIGKILL, 3.004 s after a NATS cut, 2.456 s after a silent cut, 5.578 s after SIGSTOP, the resumed process logged the hold lost 4 ms after it resumed, 200/80/60 comments once and in order; build, vet and gofmt clean. Peak memory 3.0 GB.",
+      "headSha": "b5e8445e62fbeabecc151f82b7e52762866b1572",
       "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the SIGSTOPped holder sent nothing after it resumed."
     },
     {
-      "criterion": "lint, typecheck, test, pr-title, envoy-go and envoy-go-race at 2678be4b",
+      "criterion": "lint, typecheck, test, pr-title, envoy-go and envoy-go-race at b5e8445e",
       "surface": "GitHub check runs",
-      "command": "gh api repos/sjawhar/legion/commits/2678be4b84152baa164f065f54350e33ae432f1e/check-runs --paginate",
-      "observed": "At 03:12Z: pr-title success; lint in progress; typecheck, test, envoy-go and envoy-go-race queued (27 queued, 2 in progress, 3 success, 2 cancelled). Unread: every lane but pr-title. #2395 MERGEABLE.",
-      "headSha": "2678be4b84152baa164f065f54350e33ae432f1e",
+      "command": "gh api repos/sjawhar/legion/commits/b5e8445e62fbeabecc151f82b7e52762866b1572/check-runs --paginate",
+      "observed": "At 05:09Z: pr-title success; lint, typecheck, test, envoy-go and envoy-go-race queued (CI run 41169407990, queued since 04:38:41Z): 29 queued, 2 success, 1 cancelled. Unread: lint, typecheck, test, envoy-go, envoy-go-race. #2395 MERGEABLE.",
+      "headSha": "b5e8445e62fbeabecc151f82b7e52762866b1572",
       "negativeControl": "none: a read of CI"
     }
   ]
