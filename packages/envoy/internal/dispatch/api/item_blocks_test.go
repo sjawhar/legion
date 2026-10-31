@@ -897,7 +897,7 @@ func TestTheBlocksRoutesListAnItemsBlocks(t *testing.T) {
 	empty, _ := read("an empty suggestion", "/api/v1/comments/"+suggestion.ID+"/blocks", true)
 	requireRead("an empty suggestion", empty, "comment", suggestion.ID, new(1), true, "")
 
-	if malformed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/7430fab3/blocks", nil, "alice"); malformed.Code != http.StatusBadRequest ||
+	if malformed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/7430fab/blocks", nil, "alice"); malformed.Code != http.StatusBadRequest ||
 		!strings.Contains(malformed.Body.String(), `"code":"COMMENT_ID_INPUT"`) {
 		t.Fatalf("a non-uuid comment id: status=%d body=%s, want 400 COMMENT_ID_INPUT", malformed.Code, malformed.Body.String())
 	}
@@ -972,7 +972,7 @@ func TestTheBlocksRoutesListAnItemsBlocks(t *testing.T) {
 		!strings.Contains(unnamed.Body.String(), `"code":"SESSION_REQUIRED"`) {
 		t.Fatalf("a bearer naming no session: status=%d body=%s, want 400 SESSION_REQUIRED", unnamed.Code, unnamed.Body.String())
 	}
-	if malformed := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/7430fab3/blocks?session=s1", nil); malformed.Code != http.StatusBadRequest ||
+	if malformed := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/7430fab/blocks?session=s1", nil); malformed.Code != http.StatusBadRequest ||
 		!strings.Contains(malformed.Body.String(), `"code":"MESSAGE_ID_INPUT"`) {
 		t.Fatalf("a non-uuid message id: status=%d body=%s, want 400 MESSAGE_ID_INPUT", malformed.Code, malformed.Body.String())
 	}

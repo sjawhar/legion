@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The Dispatch tools no longer resolve a short ask or comment id themselves: the id is sent as written with the owner the reference names, and Dispatch resolves it. A short message, document or block id therefore works too, and an ambiguous one is Dispatch''s own refusal naming the candidates. Reading an ask by the id of its `:::ask` block is unchanged, since that is a different identifier rather than a short form of the ask''s id.'
+time: 2026-10-31T05:26:50.454067517Z
+custom:
+    Issue: pr2597

@@ -210,7 +210,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, reading no issu
     await within(view.container).findByText(
       "Should we ship this on Friday or wait for the review to land…"
     );
-    expect(getAsk).toHaveBeenCalledWith("ask-1");
+    expect(getAsk).toHaveBeenCalledWith("ask-1", "CORE-1");
     expect(getIssue).not.toHaveBeenCalled();
     expect(getIssueSummary).not.toHaveBeenCalled();
   } finally {
@@ -257,7 +257,7 @@ test("Unfurl unfurls a dispatch comment reference with its own words, reading no
     // The title is the comment projected to plain words: the soft-wrapped line is one
     // paragraph (as the editor reads it), and the bold is dropped, not shown as `**`.
     await within(view.container).findByText("Looks good overall. One nit below.");
-    expect(getComment).toHaveBeenCalledWith("comment-1");
+    expect(getComment).toHaveBeenCalledWith("comment-1", "CORE-1");
     expect(getIssue).not.toHaveBeenCalled();
     expect(getIssueSummary).not.toHaveBeenCalled();
   } finally {

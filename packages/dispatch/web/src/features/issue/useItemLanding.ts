@@ -39,8 +39,8 @@ export function useItemLanding(
   issue: IssueDetails | undefined
 ): ItemLanding | undefined {
   const id = isItemRoute(route) ? route.id : undefined;
-  const comment = useQuery({ ...commentQuery(id), enabled: route.kind === "comment" });
-  const ask = useQuery({ ...askQuery(id), enabled: route.kind === "ask" });
+  const comment = useQuery({ ...commentQuery(id, route.key), enabled: route.kind === "comment" });
+  const ask = useQuery({ ...askQuery(id, route.key), enabled: route.kind === "ask" });
   const message = useQuery({ ...messageQuery(route.key, id), enabled: route.kind === "message" });
 
   if (!isItemRoute(route)) {

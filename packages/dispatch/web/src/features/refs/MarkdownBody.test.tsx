@@ -733,7 +733,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     expect(link.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
     await waitFor(() => expect(link.textContent).toBe("Ship it?"));
     expect(within(view.container).getAllByRole("link")).toHaveLength(1);
-    expect(getAsk).toHaveBeenCalledWith("ask-1");
+    expect(getAsk).toHaveBeenCalledWith("ask-1", "CORE-1");
   } finally {
     getAsk.mockRestore();
     view.unmount();
@@ -951,7 +951,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     const link = await within(view.container).findByRole("link", { name: "Ship it?" });
     expect(link.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
     expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/ask/ask-1");
-    expect(getAsk).toHaveBeenCalledWith("ask-1");
+    expect(getAsk).toHaveBeenCalledWith("ask-1", "CORE-1");
   } finally {
     getAsk.mockRestore();
     view.unmount();

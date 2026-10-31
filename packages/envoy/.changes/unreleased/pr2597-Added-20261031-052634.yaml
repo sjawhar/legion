@@ -1,0 +1,5 @@
+kind: Added
+body: 'Dispatch resolves a short item id - the first 8 hex digits or more of an uuid, hyphens optional - wherever a route takes a full one: an ask, a comment, a message, a document and a broadcast by `{id}`, a short `ask_id` in a reply, and a document''s block. It resolves it within the issue or document the link names (`?issue=`, `?artifact=`, or the route''s own `{key}`); a short id that names more than one record is `409 AMBIGUOUS_ID` naming the candidates rather than a guess, one that names none is `404 NOT_FOUND` saying where it looked, and fewer than 8 hex digits stays `400 <KIND>_ID_INPUT`.'
+time: 2026-10-31T05:26:34.403944053Z
+custom:
+    Issue: pr2597

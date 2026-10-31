@@ -2283,6 +2283,33 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `GET /api/v1/agents` is readable by any authenticated caller (a session picks a message target by the `capabilities` it advertises);
   the issue-less `POST /api/v1/agents/{session_id}/messages` and `GET /api/v1/agents/{session_id}/messages` stay human-only.
 
+A link written by hand carries the first characters of an item's uuid, so every route whose
+`{id}` names one resolves a **short id** before its handler runs (`internal/dispatch/api/short_id.go`,
+`resolveShortIDs`, the innermost layer `Register` wraps each route in). It reads the route's
+pattern: the segment an `{id}` follows names the item (`asks`, `comments`, `messages`,
+`artifacts`, `broadcasts`; a segment absent from `shortIDItems` — `runs`, `session-groups`,
+`credential-requests`, `credential-grants`, `machine-logins`, `agent-tokens`, `threads` — carries
+an id of another shape or of a record no link addresses, and is left as written). A value that
+parses as a uuid, or that is not 8 or more hex digits (hyphens ignored), is passed straight
+through, so the common request pays one `uuid.Parse` and no query. A short id is the inclusive
+uuid range its digits name — zeros below, fs above — read as `id between $1 and $2`, a range
+scan of the table's own primary key, so there is no index and no migration for it; the request's
+caller is resolved first and kept on the request, so an unauthenticated caller reaches no lookup
+and the handler's own read of the caller costs nothing more. The candidates are then held to the
+scope the link names — `?issue=`/`?artifact=`, or the route's own `{key}` — and `SetPathValue`
+hands the handler the full id. Exactly one match resolves; none is `404 NOT_FOUND` naming where
+it looked (a scope that holds no match never falls back to another owner's record); more than
+one is `409 AMBIGUOUS_ID` naming the candidates, because a short id resolved to the wrong record
+silently is worse than a link that does not open. 8 is the minimum because an item id is a
+version-4 uuid, so 8 hex digits are 32 random bits, and because 8 is the length the links
+already written carry. `POST /api/v1/issues/{key}/comments` resolves a short `ask_id` in its body
+the same way, under the thread's own owner (`resolveShortAsk`), and
+`GET /api/v1/artifacts/{id}/blocks/{block_id}` resolves a short block id against the document's
+own block ids after the exact id misses (`resolveShortBlockID`): a block id is text, which a
+document can carry as an author wrote it, so the exact id always wins. `GET /api/v1/references`
+takes a whole reference and is not part of this: the graph is keyed on exact node addresses, so
+`?to=dispatch://KEY/spec#b-<short>` still answers 404.
+
 - `GET /api/v1/dashboard/builds` (any authenticated caller, `api/dashboard_builds.go`) answers `{serving, live}`:
   `serving` is the entry chunk (`/assets/index-*.js`) of the dashboard build this process serves (`api.Deps.DashboardEntry`, which `cmd/dispatch` takes from its boot's `dashboard.Publish`;
   `""` when it serves none), and `live` the distinct entry chunks of the builds the live server processes serve (`processes.Live` joined to `dashboard_builds` on the build id, `routes.DashboardBuild`'s hex), sorted, `[]` when none.

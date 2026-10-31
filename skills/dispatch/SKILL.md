@@ -79,7 +79,9 @@ dispatch://PROJECT/artifact/<slug>/ask/<id>
 dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id or filename is not a reference. Write each id whole, from `dispatch read`'s `Ask id:` or the page URL: the command takes a prefix, a person's link does not.
+A bare id or filename is not a reference. Write each id whole, from `dispatch read`'s `Ask id:` or the page URL.
+
+Dispatch resolves a **short id** — the first 8 hex digits or more of an item's uuid, hyphens optional — wherever it takes a full one: the API, a `dispatch://` reference and a dashboard link, for an ask, a comment, a message, a document, a broadcast and a document's block. It resolves it within the issue or document the link names, so the same short id can mean a different ask on another issue. A short id that names more than one record is refused with `409 AMBIGUOUS_ID` naming the candidates, never resolved to one of them; one that names none is `404 NOT_FOUND` saying where it looked; fewer than 8 hex digits is `400 <KIND>_ID_INPUT`. 8 is a minimum, not a format: a full id is never ambiguous, so write one.
 
 ## Setup and the HTTP API
 

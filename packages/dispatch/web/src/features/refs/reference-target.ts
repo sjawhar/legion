@@ -112,18 +112,20 @@ export const artifactTextQuery = (id: string | undefined, version: number | unde
         : api.getArtifactVersion(id ?? "", version),
   });
 
-/** One ask with its thread, followers, and edits. */
-export const askQuery = (id: string | undefined) =>
+/** One ask with its thread, followers, and edits. `issue` is the issue the link being followed
+ *  names, which scopes a short id's resolution on the server; it is part of the key, so a read
+ *  under one issue never answers a read under another. */
+export const askQuery = (id: string | undefined, issue?: string) =>
   queryOptions({
-    queryKey: ["ask", id],
-    queryFn: () => api.getAsk(id ?? ""),
+    queryKey: ["ask", id, issue],
+    queryFn: () => api.getAsk(id ?? "", issue),
   });
 
-/** One comment with its replies. */
-export const commentQuery = (id: string | undefined) =>
+/** One comment with its replies, scoped as `askQuery` is. */
+export const commentQuery = (id: string | undefined, issue?: string) =>
   queryOptions({
-    queryKey: ["comment", id],
-    queryFn: () => api.getComment(id ?? ""),
+    queryKey: ["comment", id, issue],
+    queryFn: () => api.getComment(id ?? "", issue),
   });
 
 /** `GET /api/v1/references?to=<reference>`: the node a reference names and the edges pointing at
@@ -248,10 +250,10 @@ export function prefetchReference(queryClient: QueryClient, route: DispatchRefer
       void queryClient.prefetchQuery(messageQuery(route.key, route.id));
       return;
     case "ask":
-      void queryClient.prefetchQuery(askQuery(route.id));
+      void queryClient.prefetchQuery(askQuery(route.id, route.key));
       return;
     case "comment":
-      void queryClient.prefetchQuery(commentQuery(route.id));
+      void queryClient.prefetchQuery(commentQuery(route.id, route.key));
       return;
     case "document": {
       if (route.item?.kind === "ask") {
@@ -322,6 +324,9 @@ export function useReferenceData(
     route?.kind === "artifact" || route?.kind === "document" || route?.kind === "agent-artifact"
       ? route.version
       : undefined;
+  // The issue a reference names scopes the server's resolution of a short id; a reference to a
+  // project document's item names no issue, and the server resolves it across the workspace.
+  const itemIssue = record?.kind === "ask" || record?.kind === "comment" ? record.key : undefined;
   const askId =
     record?.kind === "ask"
       ? record.id
@@ -367,8 +372,11 @@ export function useReferenceData(
     ...artifactTextQuery(artifact?.id, version),
     enabled: options.text && artifact?.kind === "doc",
   });
-  const ask = useQuery({ ...askQuery(askId), enabled: askId !== undefined });
-  const comment = useQuery({ ...commentQuery(commentId), enabled: commentId !== undefined });
+  const ask = useQuery({ ...askQuery(askId, itemIssue), enabled: askId !== undefined });
+  const comment = useQuery({
+    ...commentQuery(commentId, itemIssue),
+    enabled: commentId !== undefined,
+  });
   return {
     issue: issue.data,
     artifact,
