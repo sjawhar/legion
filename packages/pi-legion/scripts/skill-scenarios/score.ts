@@ -99,12 +99,16 @@ const nonEmpty = z.string().min(1);
  * (`schemaVersion` 1, `phase` test, its `issue`, and `previousHandoff`, the commit carrying its
  * previous handoff of this phase, empty when there is none), the implementer's proof verdict, the
  * failures, and the tester's own proof, each entry's six fields non-empty.
+ * `previousHandoff` is optional because the score reads the runs of every label at once while each
+ * label's agent gets the role prompt of its own checkout: a checkout whose prompt predates the
+ * field writes a handoff without it, and requiring it would fail those runs on the prompt the
+ * comparison varies rather than on the rule the score measures.
  * Nothing stamps a handoff for the tester: it writes the whole file with `write`. */
 export const TestHandoff = z.looseObject({
   schemaVersion: z.literal(1),
   phase: z.literal("test"),
   issue: nonEmpty,
-  previousHandoff: z.string(),
+  previousHandoff: z.string().optional(),
   implementerProof: z.looseObject({ verdict: z.enum(["verified", "rejected"]), how: nonEmpty }),
   failures: z.array(z.looseObject({ criterion: z.string(), evidence: z.string() })).optional(),
   proof: z
