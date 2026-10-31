@@ -801,6 +801,9 @@ func TestRoleHolderLapsedResponseDoesNotInventLastSeen(t *testing.T) {
 // claimant just wrote: either way the observer's cache answers from what it last applied, while a
 // role claim is read from the role bucket itself. During a rolling deploy the old task is the
 // observer of every claim the replacement accepts.
+// Each listener's interest and role claim caches are waited for (waitForRegistry) before the
+// observer stops following the session bucket, so a route either of them serves reports the
+// session's roles rather than the bus-unavailable 503 an incomplete claims view earns.
 func trailingListeners(t *testing.T) (claimant, observer *listenerDeps) {
 	t.Helper()
 	client := setupPublishTestClient(t)
@@ -810,6 +813,7 @@ func trailingListeners(t *testing.T) (claimant, observer *listenerDeps) {
 		if err != nil {
 			t.Fatalf("open the %s's interest registry: %v", name, err)
 		}
+		waitForRegistry(t, registry)
 		sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 		if err != nil {
 			t.Fatalf("open the %s's session registry: %v", name, err)

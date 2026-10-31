@@ -1298,8 +1298,6 @@ func setupAdminTestRegistry(t *testing.T, interests map[string][]string) *store.
 			t.Fatalf("failed to upsert interest for %s: %v", sessionID, err)
 		}
 	}
-	// Allow watcher to propagate all Upsert events to cache
-	time.Sleep(500 * time.Millisecond)
 	return registry
 }
 
@@ -1632,8 +1630,6 @@ func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[st
 			t.Fatalf("failed to put session entry for %s: %v", sessionID, err)
 		}
 	}
-	// Allow watcher to propagate interest events to cache
-	time.Sleep(500 * time.Millisecond)
 	return registry, sessions
 }
 
@@ -1648,7 +1644,16 @@ func claimRoles(t *testing.T, registry *store.Registry, sessionID string, roles 
 	}
 }
 
-// waitForRegistry waits for the registry's interest and role claim caches to load the buckets.
+// waitForRegistry runs over a test's registry the gate the listener's own start runs
+// (store.Registry.WaitForCacheReady): the interest cache is waited for as ready, and the role
+// claim view as complete, not merely ready. After it returns, Match sees every existing
+// subscription in the interest bucket and RolesHeldBy answers, so a route that reports a session's
+// roles - GET /v1/sessions and GET /v1/registry/<session_id> - is served rather than refused the
+// bus-unavailable 503 store.ErrRoleViewNotReady earns, and the sender a send or a publish stamps
+// carries its roles rather than leaving them out (senderStamp drops them on a view that refuses).
+// A test that drives one of those routes waits here once, after its registry is open and before
+// its first request; a test that puts the view where it cannot answer and asserts the refusal
+// waits before the freeze, never after.
 func waitForRegistry(t *testing.T, registry *store.Registry) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1735,7 +1740,7 @@ func TestSessionsHandler_IncludesTitle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("failed to put session entry: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	waitForRegistry(t, registry)
 
 	handler := sessionsHandler(registry, sessions)
 	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
