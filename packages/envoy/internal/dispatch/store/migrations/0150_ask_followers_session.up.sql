@@ -1,0 +1,11 @@
+-- 0150_ask_followers_session.up.sql
+-- The followed_by arm of graph_edges reads ask_followers by session_id, and refs.BacklinkCounts
+-- now reads that arm directly rather than the whole view, so the arm needs an index of its own:
+-- the table's primary key is (ask_id, session_id), whose leading column cannot serve a session_id
+-- predicate, and its only other index, ask_followers_ask_id_text (0032), is on the ask. Without
+-- this index every count of a session's backlinks scans ask_followers.
+-- A plain `create index`, as every migration's is (the runner applies each inside one
+-- transaction, where `concurrently` cannot run): the build holds `SHARE` on ask_followers, so it
+-- waits out a write of a follower already open and holds off a new one for the moment it reads
+-- the table; reads are not held.
+create index ask_followers_session_id on ask_followers (session_id);
