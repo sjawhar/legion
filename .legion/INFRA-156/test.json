@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-156",
+  "completed": "2026-10-31T09:05:00Z",
+  "headTested": "cecaddc344cfa15c7ac2b1b3706fd39cc46c1795",
+  "previousHeadTested": "672c0c3956b3625cdbe7c504ade167ed9ff7f3b0",
+  "fingerprint": "843d32dbeb93f230",
+  "fingerprintCheck": "forward-merge re-check 672c0c39 -> cecaddc3 (code b1bf182e, main 1a9095e6): fingerprint unchanged, bare gates only.",
+  "provider": "Anthropic (anthropic/claude-opus-5-5), the model that answered this testing session",
+  "outcome": "Pass on the bare gates. CI run 41186416039 at cecaddc3 (b1bf182e plus .legion/ only; b1bf182e itself has no run) was queued when read, envoy-go and ci-ok included, so the claims test's CI result is not read yet: queued, not passed. GitHub: MERGEABLE.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Bare gates at cecaddc3 on a database first migrated by main 1a9095e6: t.py 80/80, which carries the implementer's A3 steps 1, 5 and 12 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6541432136)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Migration 0150_block_pointer_links applies on a database at main's 0149 and keeps every existing edge, comment and message blocks included",
+      "surface": "main's Dispatch server at 1a9095e6, then the head's server on the same Postgres 17 + pgvector database",
+      "command": "bash $TMPDIR/infra156-tester/upgrade.sh <main 1a9095e6 binary> <head binary> infra156_tester_up19 8795 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6541432136)",
+      "observed": "schema_version 149 -> 150; graph_edges holds block_ref_listed; the same four mentions edges (spec, document, comment and message blocks citing a callout) before and after",
+      "headSha": "cecaddc344cfa15c7ac2b1b3706fd39cc46c1795",
+      "negativeControl": "a block[] pointer to a callout on the upgraded database is refused 400 INVALID_MARKDOWN (t.py check 1f)"
+    },
+    {
+      "criterion": "A3: a block[] attribute accepts a valid block reference, refuses a malformed one and a block of a disallowed type, and a saved block makes a link named by the attribute",
+      "surface": "the head's real Dispatch server with the scratch block[] schema, over HTTP",
+      "command": "python3 $TMPDIR/infra156-tester/t.py http://127.0.0.1:8795 on the upgraded database (https://github.com/sjawhar/legion/pull/2394#issuecomment-6541432136)",
+      "observed": "80/80",
+      "headSha": "cecaddc344cfa15c7ac2b1b3706fd39cc46c1795",
+      "negativeControl": "serves naming a callout -> 400 INVALID_MARKDOWN 'block pointer refused'"
+    },
+    {
+      "criterion": "The CI path filters cover every file each job reads",
+      "surface": ".github/scripts/check-ci-filters.sh in a scratch clone (PyYAML via uv run --with pyyaml==6.0.2)",
+      "command": "uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh at cecaddc3 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6541432136)",
+      "observed": "exit 0",
+      "headSha": "cecaddc344cfa15c7ac2b1b3706fd39cc46c1795",
+      "negativeControl": "at 32100b14, with text/* removed from envoy_go_race_pmdoc: exit 1, 8 uncovered (comment 6535802243)"
+    }
+  ]
+}
