@@ -333,12 +333,6 @@ export SEED_COUNTS_SQL
 
 # ---- the replay's inputs ------------------------------------------------------------------------------
 
-# sha256_of FILE: FILE's sha256, in hex.
-sha256_of() { sha256sum -- "$1" | cut -d' ' -f1; }
-
-# joined_sha256 FILE...: the sha256 of the files' concatenation.
-joined_sha256() { cat -- "$@" | sha256sum | cut -d' ' -f1; }
-
 # replay_download OUT ISSUE SLUG VERSION: one version of a Dispatch file artifact into OUT, with
 # the caller's DISPATCH_URL and the bearer token in DISPATCH_TOKEN_FILE. The scripts run in the
 # caller's environment (stack.sh starts only its stack processes under env -i), and the token

@@ -193,20 +193,22 @@
 # Every name the copy answers to is fixed -- the pods runner and postgres-0, the deployments
 # dispatch and listener, the lock ConfigMap -- so each of them reaches whatever run holds the
 # namespace now. Everything that writes into, kills in or removes from them goes through five
-# helpers, each of which reads the lock first (copy_is_ours) and does nothing once it names
-# another run: runner_exec and postgres_exec (every kubectl exec that writes, kills or removes in
-# the runner or in postgres-0), psql_write (through postgres_exec), runner_put (the kubectl cp
-# into the runner) and scale_to (the deployments dispatch and listener). Reads are unguarded,
-# the retried ones (psql_at, the kube_read execs that cat, test or sha256sum) and the streams
-# that read a pod (a step's files and its heap.txt copied back, the bundle verified, the
-# stored-order check, loadgen replay-checksum) alike, and so is every path that is this
-# run's by construction: up before and at kube_lock_take, down's label-scoped delete and its
-# refusal of another run's lock, the heartbeat's JSON-patch test op, the sampler's and
-# stop_daemon's own processes, nats_box, which picks its pod by the run label, apply_manifest,
-# whose three callers run after kube_lock_take (up_run), after stop_copy (resize_postgres) and
-# after scale_to dispatch 0 (redeploy), and the replay's two long streams, which kube's 300 s
-# would cut: the seed dump into postgres-0 with the pg_restore that reads it, both after
-# stop_copy, and the bundle into the runner, after runner_exec reset its directories. A command
+# helpers, each of which reads the lock first (copy_is_ours) and does nothing unless that read
+# names this run or finds no lock: runner_exec and postgres_exec (every kubectl exec that
+# writes, kills or removes in the runner or in postgres-0, the replay's two long streams among
+# them, which carry the bound kube's 300 s would cut them at: runner_exec -t and postgres_exec
+# -t), psql_write (through postgres_exec), runner_put (the kubectl cp into the runner) and
+# scale_to (the deployments dispatch and listener). The guard fails closed: a read of the lock
+# that fails is tried LOCK_READ_TRIES times, LOCK_READ_RETRY_SECONDS apart, and once every try
+# has failed the copy counts as another run's, so the caller stops and removes nothing of it.
+# Reads are unguarded, the retried ones (psql_at, the kube_read execs that cat, test or
+# sha256sum) and the streams that read a pod (a step's files and its heap.txt copied back, the
+# bundle verified, the stored-order check, loadgen replay-checksum) alike, and so is every path
+# that is this run's by construction: up before and at kube_lock_take, down's label-scoped
+# delete and its refusal of another run's lock, the heartbeat's JSON-patch test op, the
+# sampler's and stop_daemon's own processes, nats_box, which picks its pod by the run label,
+# and apply_manifest, whose three callers run after kube_lock_take (up_run), after stop_copy
+# (resize_postgres) and after scale_to dispatch 0 (redeploy). A command
 # whose --run names a run other than the one the lock names is refused outright, naming both;
 # status (which reads), collect (which reads this pod's run directory) and down (whose deletes
 # are scoped to the run's label) run then.
@@ -235,6 +237,11 @@ CLUSTER_ROOT=${LOADTEST_CLUSTER_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest-cluster}
 # run while it exists: holder-pod, holder-uid, issue, run, started, heartbeat.
 LOCK=dispatch-loadtest-lock
 STALE_SECONDS=900
+# What the guard (copy_is_ours) gives a read of the lock that fails: how many tries in all, and
+# how long it waits between two of them. A guarded write that reaches this many failed reads
+# stops, since a lock that cannot be read may name another run.
+LOCK_READ_TRIES=3
+LOCK_READ_RETRY_SECONDS=2
 RUN_LABEL=dispatch-loadtest/run
 ROLE_LABEL=dispatch-loadtest/role
 LEGION_REPO=sjawhar/legion
@@ -634,7 +641,7 @@ pg_tier() {
 # use_run [any-run]: RUN from --run, else from the lock. A --run that names a run other than the
 # lock's is refused: the fixed names its commands would reach (the pods runner and postgres-0,
 # the deployments dispatch and listener) belong to the run the lock names. Two kinds of command
-# neither compare nor read the lock when --run names their run: collect, which passes any-run and
+# pass any-run, so that a --run of theirs neither compares nor reads the lock: collect, which
 # only reads the run's directory on this pod (cmd_collect, collect_run), and the daemons, whose
 # parent came through here already -- a lock read of theirs would be an API call with no retry
 # before they write the pidfile that start_daemon waits 5 s for, and a lock that names another
@@ -643,7 +650,7 @@ pg_tier() {
 # (pid_ns_check); then this command is registered as one that holds the run alive.
 use_run() {
   local run=${OPT[run]:-} lock lock_run=""
-  if [ -z "$run" ] || { [ "${1:-}" != any-run ] && [[ $CMD != _* ]]; }; then
+  if [ -z "$run" ] || [ "${1:-}" != any-run ]; then
     lock=$(kube_lock_get)
     [ -z "$lock" ] || lock_run=$(jq -r '.data.run // ""' <<<"$lock")
   fi
@@ -801,28 +808,33 @@ kube_lock_get() {
   kube get configmap "$LOCK" --ignore-not-found -o json || die "kubectl could not read ConfigMap $LOCK in $NS"
 }
 
-# lock_names_other_run: the namespace's lock names a run that is not this one, so this run is over
-# whatever the pids on this pod still look like. A daemon of a step (the disk watcher, the wait on
-# a runner job) asks this before it stops a job in the runner, because job names and pods repeat
-# across runs. A read that failed, and a namespace with no lock at all, say nothing: the caller
-# then acts as it would have.
-lock_names_other_run() {
-  local lock
-  lock=$(kube_lock_get 2>/dev/null) || return 1
-  [ -n "$lock" ] || return 1
-  [ "$(jq -r '.data.run // ""' <<<"$lock")" != "$RUN" ]
-}
-
 # copy_is_ours WHAT: the lock still names this run, so WHAT -- a pod, a deployment, a runner job
 # or a file of the copy, each of which carries the same fixed name in every run -- is this run's
-# to stop, kill or remove. Once the lock names another run (lock_names_other_run) the copy those
-# names reach is that run's: it returns 1, naming WHAT, and its caller ends nothing. Its callers
-# are the guarded helpers the header lists (runner_exec, postgres_exec, psql_write, runner_put,
+# to stop, kill or remove. It reads the lock itself, LOCK_READ_TRIES tries
+# LOCK_READ_RETRY_SECONDS apart, and never dies: a read of its own is the one thing a guarded
+# write may not be refused for. Once the lock names another run the copy those names reach is
+# that run's, and once every try failed nothing here knows whose that copy is: either way it
+# returns 1, naming WHAT and why, and its caller ends nothing. A read that found no lock at all
+# (the namespace has none) says nothing, and the caller acts as it would have. Its callers are
+# the guarded helpers the header lists (runner_exec, postgres_exec, psql_write, runner_put,
 # scale_to), beside which that paragraph names every path that is exempt, and pg_disk_watch,
 # which asks once more before it records a failure of its own.
 copy_is_ours() {
-  lock_names_other_run || return 0
-  note "the lock no longer names run $RUN, so $1 is another run's now; this run stops and removes nothing of it"
+  local lock try rc
+  for ((try = 1; try <= LOCK_READ_TRIES; try++)); do
+    rc=0
+    # kube_lock_get dies in this command substitution's subshell alone, so a failed read is this
+    # loop's to answer for.
+    lock=$(kube_lock_get 2>/dev/null) || rc=$?
+    if ((rc == 0)); then
+      [ -n "$lock" ] || return 0
+      [ "$(jq -r '.data.run // ""' <<<"$lock")" != "$RUN" ] || return 0
+      note "the lock no longer names run $RUN, so $1 is another run's now; this run stops and removes nothing of it"
+      return 1
+    fi
+    ((try == LOCK_READ_TRIES)) || sleep "$LOCK_READ_RETRY_SECONDS"
+  done
+  note "could not read the lock $LOCK in $NS after $LOCK_READ_TRIES tries, so whether $1 is still this run's is not known; this run stops and removes nothing"
   return 1
 }
 
@@ -939,7 +951,7 @@ stop_daemon() {
 # command restarts the heartbeat (ensure_daemons), and the sampler ends with the heartbeat.
 cmd__heartbeat() {
   parse "namespace run" "" "$@"
-  use_run
+  use_run any-run
   printf '%s\n' "$$" >"$RUN_DIR/heartbeat.pid"
   local patch out lock
   while :; do
@@ -1088,7 +1100,7 @@ sample_role_once() {
 # sampler_wait says the run is over.
 cmd__sampler() {
   parse "namespace run" "" "$@"
-  use_run
+  use_run any-run
   printf '%s\n' "$$" >"$RUN_DIR/sampler.pid"
   local role
   for role in "${SAMPLE_ROLES[@]}"; do
@@ -1139,14 +1151,26 @@ psql_write() {
   postgres_exec psql -X -U dispatch -d "$1" -v ON_ERROR_STOP=1 -At -c "$2"
 }
 
-# postgres_exec ARGS: ARGS in the Postgres pod's postgres container, for a call that writes or
-# removes something there (psql_write's SQL, the replay dump removed). The pod is postgres-0 in
-# every run, so the lock is read first: once it names another run nothing runs, and the status is
-# 1 with copy_is_ours's note, which the caller's own die or note follows. A read of that pod goes
-# through psql_at or kube_read exec instead, unguarded and retried.
+# postgres_exec [-t SECONDS] [-i] ARGS: ARGS in the Postgres pod's postgres container, for a
+# call that writes or removes something there (psql_write's SQL, the replay dump streamed in,
+# restored and removed). With -t it is bounded at SECONDS (kube_for) instead of kube's 300 s,
+# which a long stream or a pg_restore would be cut at; with -i, ARGS read this command's
+# standard input. The pod is postgres-0 in every run, so the lock is read first: once it names
+# another run, or cannot be read at all, nothing runs, and the status is 1 with copy_is_ours's
+# note, which the caller's own die or note follows. A read of that pod goes through psql_at or
+# kube_read exec instead, unguarded and retried.
 postgres_exec() {
+  local seconds=300 stdin=()
+  [ "${1:-}" != -t ] || {
+    seconds=$2
+    shift 2
+  }
+  [ "${1:-}" != -i ] || {
+    stdin=(-i)
+    shift
+  }
   copy_is_ours "the Postgres pod postgres-0" || return 1
-  kube exec postgres-0 -c postgres -- "$@"
+  kube_for "$seconds" exec "${stdin[@]}" postgres-0 -c postgres -- "$@"
 }
 
 db_exists() { [ "$(psql_at postgres "select count(*) from pg_database where datname = '$1'")" = 1 ]; }
@@ -1282,8 +1306,9 @@ pg_disk_watch() {
     # From here the watcher records and stops; a TERM of a step that ends at this moment
     # (pg_disk_watch_stop) waits for that instead of cutting it in half.
     trap '' TERM
-    # A lock that names another run is this run's end, whatever the step shell still looks like;
-    # a read that failed says nothing, and the step shell above is alive, so the watcher acts.
+    # A lock that names another run is this run's end, whatever the step shell still looks like,
+    # and a lock the guard could not read leaves the same doubt: either way the watcher records
+    # nothing and stops no job, as every other guarded path does.
     if ! copy_is_ours "the runner job $job of step $name"; then
       note "step $name: the disk watcher stops, recording nothing and stopping no job"
       return 0
@@ -1323,12 +1348,13 @@ nats_box() {
 
 # scale_to DEPLOYMENT N [SECONDS]: scale it; with 0, wait until none of its pods is left, else
 # until its rollout is done (at most SECONDS, default 900). Deployment names repeat across runs,
-# so a copy the lock no longer gives this run (copy_is_ours) is not scaled at all: no command may
-# start or stop another run's Dispatch or listener under it.
+# so a copy the lock no longer gives this run, or that the guard could not read the lock for
+# (copy_is_ours), is not scaled at all: no command may start or stop another run's Dispatch or
+# listener under it.
 scale_to() {
   local d=$1 n=$2 seconds=${3:-900} deadline pods
   copy_is_ours "deployment $d" ||
-    die "refusing to scale deployment $d to $n in $NS: that deployment is another run's now, and scaling it would start or stop that run's copy under it"
+    die "refusing to scale deployment $d to $n in $NS: the lock does not give this run that deployment (above), and scaling it would start or stop another run's copy under it"
   kube scale deployment "$d" --replicas "$n" >/dev/null || die "kubectl could not scale deployment $d to $n"
   if ((n == 0)); then
     deadline=$((EPOCHSECONDS + 180))
@@ -1456,26 +1482,32 @@ reset_copy() {
 
 # ---- the runner -----------------------------------------------------------------------------------
 
-# runner_exec [-i] ARGS: ARGS in the runner pod's runner container, for a call that writes, kills
-# or removes something there (with -i, on this command's standard input). The pod is named runner
-# in every run, so the lock is read first: once it names another run nothing runs, and the status
-# is 1 with copy_is_ours's note, which the caller's own die or note follows. A read of the runner
-# goes through kube_read exec instead, unguarded and retried.
+# runner_exec [-t SECONDS] [-i] ARGS: ARGS in the runner pod's runner container, for a call that
+# writes, kills or removes something there (with -i, on this command's standard input; with -t,
+# bounded at SECONDS (kube_for) instead of kube's 300 s, which the replay's bundle stream would
+# be cut at). The pod is named runner in every run, so the lock is read first: once it names
+# another run, or cannot be read at all, nothing runs, and the status is 1 with copy_is_ours's
+# note, which the caller's own die or note follows. A read of the runner goes through kube_read
+# exec instead, unguarded and retried.
 runner_exec() {
-  local stdin=()
+  local seconds=300 stdin=()
+  [ "${1:-}" != -t ] || {
+    seconds=$2
+    shift 2
+  }
   [ "${1:-}" != -i ] || {
     stdin=(-i)
     shift
   }
   copy_is_ours "the runner pod" || return 1
-  kube exec "${stdin[@]}" runner -c runner -- "$@"
+  kube_for "$seconds" exec "${stdin[@]}" runner -c runner -- "$@"
 }
 
 # runner_put FILE DEST: FILE copied into the runner as DEST. A kubectl cp is no exec, so this is
 # the one copy into the runner and it reads the lock itself: a command never overwrites the files
 # of the run the runner pod belongs to now.
 runner_put() {
-  copy_is_ours "the runner pod" || die "refusing to copy $1 into another run's runner"
+  copy_is_ours "the runner pod" || die "refusing to copy $1 into the runner: the lock does not give this run that pod (above)"
   kube cp "$1" "runner:$2" -c runner >/dev/null || die "kubectl cp of $1 into the runner failed"
 }
 
@@ -2797,7 +2829,7 @@ replay_prepare_run() {
   t0=$EPOCHREALTIME
   note "streaming the seed dump (sha256 $dump_sha) into postgres-0:$REPLAY_POD_DUMP"
   # shellcheck disable=SC2016 # expanded by the pod's sh
-  cat -- "${seed_parts[@]}" | kube_for 3600 exec -i postgres-0 -c postgres -- sh -c 'cat >"$1"' sh "$REPLAY_POD_DUMP" ||
+  cat -- "${seed_parts[@]}" | postgres_exec -t 3600 -i sh -c 'cat >"$1"' sh "$REPLAY_POD_DUMP" ||
     die "streaming the seed dump into the Postgres pod failed"
   local got
   got=$(kube_for 900 exec postgres-0 -c postgres -- sha256sum "$REPLAY_POD_DUMP" | cut -d' ' -f1)
@@ -2806,7 +2838,7 @@ replay_prepare_run() {
   t0=$EPOCHREALTIME
   local log=$RUN_DIR/logs/replay-restore.log
   note "pg_restore --no-owner --no-privileges -j 8 of the seed dump into database dispatch; log $log"
-  if ! kube_for 7200 exec postgres-0 -c postgres -- pg_restore --no-owner --no-privileges -j 8 -U dispatch -d dispatch "$REPLAY_POD_DUMP" >"$log" 2>&1; then
+  if ! postgres_exec -t 7200 pg_restore --no-owner --no-privileges -j 8 -U dispatch -d dispatch "$REPLAY_POD_DUMP" >"$log" 2>&1; then
     postgres_exec rm -f "$REPLAY_POD_DUMP" >/dev/null ||
       note "removing $REPLAY_POD_DUMP from the Postgres pod failed too; it stays there"
     tail -n 20 -- "$log" >&2 || true
@@ -2941,7 +2973,7 @@ run_replay() {
     newest_migration: $p[0].schema_version}' >"$dir/envoy-dispatch.json"
   runner_exec sh -c 'rm -rf /work/bundle /work/root && mkdir -p /work/meta /work/steps /work/root/replay /work/root/bin' ||
     die "replay $name: preparing the runner's directories failed"
-  tar -C "$RUN_DIR/replay" -cf - bundle | kube_for 900 exec -i runner -c runner -- tar -C /work -xf - ||
+  tar -C "$RUN_DIR/replay" -cf - bundle | runner_exec -t 900 -i tar -C /work -xf - ||
     die "copying the bundle into the runner failed"
   kube exec runner -c runner -- /work/loadgen replay-verify-bundle -dir /work/bundle >/dev/null ||
     die "the bundle copied into the runner does not verify"

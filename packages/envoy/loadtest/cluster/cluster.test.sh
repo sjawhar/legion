@@ -128,8 +128,13 @@
 # stop_copy (scale_to) refuse outright, each saying which pod or deployment it left alone, a
 # command whose --run names this run is refused, naming both runs, and collect, which reads this
 # pod's run directory and no pod of the copy, packs and uploads that run with such a --run,
-# reading not even the lock; (z) the daemons write their pidfile without reading the lock, so up
-# starts both although every read of the lock after it took one fails.
+# reading not even the lock; (z) the daemons write their pidfile without reading the lock, so
+# both start although every read of the lock fails, while that same failure stops up itself at
+# its first write into the copy; (aa) a guarded write, kill or removal whose every read of the
+# lock fails stops after 3 tries 2 s apart, touching nothing of the copy and saying so, and one
+# whose read answers after a failed try acts; the replay's three long writes (the seed dump
+# streamed into postgres-0, its pg_restore, the bundle into the runner) go through those
+# guarded helpers, each with a bound of its own.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -193,11 +198,18 @@ case $verb in
     case "$*" in
       *"configmap dispatch-loadtest-lock"*)
         # FAKE_LOCK_GET_FAIL: a read of the lock fails with a refused API server connection once
-        # the lock exists, so the command that takes it goes on and every read after that -- the
-        # daemons', which start then -- fails.
+        # the lock exists, so the command that takes it goes on and every read after that fails.
+        # FAKE_LOCK_GET_FAIL_TIMES=N: only the first N of those reads fail (the count lives in
+        # FAKE_DIR/lock-get-fails, since each call is a process of its own), and the reads after
+        # them answer the lock, so a caller that reads again gets through.
         if [ -n "${FAKE_LOCK_GET_FAIL:-}" ] && [ -f "$FAKE_DIR/lock.json" ]; then
-          echo 'The connection to the server 10.0.0.1:443 was refused - did you specify the right host or port?' >&2
-          exit 1
+          fails=0
+          [ ! -f "$FAKE_DIR/lock-get-fails" ] || fails=$(cat "$FAKE_DIR/lock-get-fails")
+          if [ -z "${FAKE_LOCK_GET_FAIL_TIMES:-}" ] || ((fails < FAKE_LOCK_GET_FAIL_TIMES)); then
+            printf '%s\n' "$((fails + 1))" >"$FAKE_DIR/lock-get-fails"
+            echo 'The connection to the server 10.0.0.1:443 was refused - did you specify the right host or port?' >&2
+            exit 1
+          fi
         fi
         [ ! -f "$FAKE_DIR/lock.json" ] || cat "$FAKE_DIR/lock.json"
         ;;
@@ -727,7 +739,8 @@ export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
 unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET FAKE_STORED_ORDER \
   FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR FAKE_COPY_BACK_FAIL \
-  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_HEAP_COPY_FAIL FAKE_HEAP_EXISTS_FAIL FAKE_HEAP_KEEP_REMOVE_FAIL FAKE_LOCK_GET_FAIL
+  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_HEAP_COPY_FAIL FAKE_HEAP_EXISTS_FAIL FAKE_HEAP_KEEP_REMOVE_FAIL \
+  FAKE_LOCK_GET_FAIL FAKE_LOCK_GET_FAIL_TIMES
 export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
 # The manifest names no issue: the operator does, and replay-prepare refuses without it.
 export LOADTEST_REPLAY_ISSUE=INFRA-639
@@ -835,7 +848,7 @@ write_pods() {
 
 reset_fake() {
   rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]* \
-    "$fake/runner-stops" "$fake/rc-polls" "$fake/df-seq" "$fake/runner-heap-kept" \
+    "$fake/runner-stops" "$fake/rc-polls" "$fake/df-seq" "$fake/runner-heap-kept" "$fake/lock-get-fails" \
     "$fake/sleep.log" "$fake/apply-errors" "$fake/replay-template" "$fake/restores" "$fake/pod-dump" \
     "$fake/stored-order.log" "$fake/go-dispatch.log" "$fake/go-browsertype.log" "$fake/git.log" \
     "$fake/go-dispatch-tree.log" "$fake/go-subcommands.go"
@@ -855,6 +868,36 @@ run_cluster() {
 # no_create: no kubectl call so far created or applied anything.
 no_create() {
   ! grep -qE "^-n $ns (create|apply) " "$fake/kubectl.log" 2>/dev/null
+}
+
+# guarded_by_lock_read PATTERN: the last kubectl call whose logged line holds PATTERN came right
+# after a read of the lock, which is what a write through a guarded helper (runner_exec,
+# postgres_exec and the rest) looks like in the log: copy_is_ours reads the lock, and the write
+# is the next kubectl call.
+guarded_by_lock_read() {
+  local n
+  n=$(grep -nF -- "$1" "$fake/kubectl.log" | tail -n1 | cut -d: -f1)
+  { [ -n "$n" ] && ((n > 1)); } || return 1
+  sed -n "$((n - 1))p" "$fake/kubectl.log" | grep -q 'get configmap dispatch-loadtest-lock'
+}
+
+# all_gone PID...: none of the pids is a live process any more.
+all_gone() {
+  local pid
+  for pid in "$@"; do
+    if kill -0 "$pid" 2>/dev/null; then return 1; fi
+  done
+}
+
+# await_gone PID...: wait until none of the pids is a live process. What ends them is their own
+# next poll, whose naps the fake sleep returns from at once, so this waits on the processes, not
+# on a stretch of wall clock; the 300 s is a hang's backstop, never a timing assertion.
+await_gone() {
+  local deadline=$((SECONDS + 300))
+  while ! all_gone "$@"; do
+    ((SECONDS < deadline)) || return 1
+    sleep 0.05
+  done
 }
 
 # logged_steps PREFIX: the step names, in argument order, of the last loadgen call that started
@@ -1241,6 +1284,13 @@ done
 cmp -s "$fake/pod-dump" "$fake/parts/fake-seed-dump-part00" || fail "the dump streamed into the Postgres pod is not the seed part"
 grep -q -- '^pg_restore --no-owner --no-privileges .*-d dispatch /var/lib/postgresql/copy/replay-seed.dump$' "$fake/restores" ||
   fail "replay-prepare did not pg_restore --no-owner --no-privileges into database dispatch: $(cat "$fake/restores" 2>/dev/null)"
+# The two long writes of replay-prepare, which kube's 300 s would cut, carry a bound of their own
+# (postgres_exec -t) and go through the guard with every other write into postgres-0: each is the
+# kubectl call right after a read of the lock.
+guarded_by_lock_read 'exec -i postgres-0 -c postgres -- sh -c cat >"$1"' ||
+  fail "the seed dump streamed into postgres-0 did not go through postgres_exec: no lock read came right before it ($(grep -nF -- 'sh -c cat >"$1"' "$fake/kubectl.log" | tail -n1))"
+guarded_by_lock_read 'exec postgres-0 -c postgres -- pg_restore' ||
+  fail "the pg_restore of the seed dump did not go through postgres_exec: no lock read came right before it ($(grep -nF -- 'pg_restore' "$fake/kubectl.log" | tail -n1))"
 [ -f "$fake/replay-template" ] || fail "replay-prepare did not rename the database to dispatch_replay"
 jq -e --arg dump "$(jq -r .seed.dump_sha256 "$seeded")" --arg tar "$(jq -r .bundle.tar_zst_sha256 "$seeded")" \
   '.seed_dump_sha256 == $dump and .bundle_tar_zst_sha256 == $tar and .migration_before == 121 and .migration_after == 121
@@ -1283,6 +1333,10 @@ grep -qx -- "codepaths -step $run_dir/steps/r16 -out $run_dir/steps/r16 -heap-st
     "- Seed versions with the size change's sign flipped (seed check): not recorded."
 } | cmp -s - "$run_dir/replay-residual.md" || fail "the run's replay-residual.md is not the residual notes and the seed check's lines: $(cat "$run_dir/replay-residual.md")"
 grep -qx r16 "$run_dir/phases/replay" || fail "replay r16 is not in the phase replay"
+# The replay's own long write, the bundle into the runner, carries its bound (runner_exec -t) and
+# goes through the guard too.
+guarded_by_lock_read 'exec -i runner -c runner -- tar -C /work -xf -' ||
+  fail "the bundle streamed into the runner did not go through runner_exec: no lock read came right before it ($(grep -nF -- 'tar -C /work -xf -' "$fake/kubectl.log" | tail -n1))"
 [ "$(grep -c -- "^-n $ns cp $run_dir/loadgen runner:/work/loadgen " "$fake/kubectl.log")" = 1 ] ||
   fail "loadgen was copied into the runner again although the runner held it since up"
 pass "replay-prepare downloads, streams, restores and prepares dispatch_replay; replay r16 resets from it and runs loadgen run -source replay at rate 1 over 0-39m with codepaths beside the outage"
@@ -2452,59 +2506,61 @@ df_seq "$pg_size $pg_used_low $pg_free_low"
 FAKE_PG_DF_SEQ=$fake/df-seq FAKE_RC_UNTIL_STOP=1 FAKE_FAST_SLEEP=30 \
   bash "$cluster" step --namespace "$ns" pgkill 1 --duration 1m >"$tmp/out" 2>&1 &
 kill_step=$!
+# The waits in this case are the step's own doing, never a stretch of wall clock: this one ends
+# at the watcher's first nap, which the fake sleep records, and at once if the step ends first.
 watching=no
-for ((i = 0; i < 600; i++)); do
+while kill -0 "$kill_step" 2>/dev/null; do
   if grep -qx 30 "$fake/sleep.log"; then
     watching=yes
     break
   fi
-  sleep 0.1
+  sleep 0.05
 done
-[ "$watching" = yes ] || fail "the step read the volume through no 30 s watcher in 60 s: $(cat "$tmp/out")"
+[ "$watching" = yes ] ||
+  fail "the step ended before its disk watcher took its first 30 s nap, so it read the volume through no watcher: $(cat "$tmp/out")"
+# The two subshells the SIGKILL leaves behind: the disk watcher, and the wait on the runner job
+# in its command substitution. Each ends at its own next poll, and the assertions below wait for
+# exactly these pids, so no clock decides how long a loaded box may take to reach that poll.
+mapfile -t kill_kids < <(pgrep -P "$kill_step")
+((${#kill_kids[@]} >= 2)) ||
+  fail "the step shell has ${#kill_kids[@]} children, not its disk watcher and its wait on the runner job: $(cat "$tmp/out")"
 kill -KILL "$kill_step"
 # The zombie reaped, so the pid the watcher and the wait hold names no process any more. A watcher
 # that is gone takes no 30 s nap and reads the volume no more; the step's runner_wait, in a
 # command substitution the kill leaves behind too, sleeps a real 15 s and reads no volume, so the
-# fake kubectl's df is the watcher's read alone, and it ends at the poll after that sleep, which
-# the assertions below wait for. The wait here is the watcher's one poll, not an assertion: a
-# watcher that polls on fails the counts.
+# fake kubectl's df is the watcher's read alone, and it ends at the poll after that sleep. The
+# wait here is for the watcher's own poll after the kill, which it says it stops at, and it gives
+# up as soon as both subshells are gone; it is no assertion, since a watcher that polls on fails
+# the counts below.
 wait "$kill_step" 2>/dev/null || true
-for ((i = 0; i < 100; i++)); do
-  if grep -q 'disk watcher' "$tmp/out"; then break; fi
-  sleep 0.1
+until grep -q 'disk watcher' "$tmp/out" || all_gone "${kill_kids[@]}"; do
+  sleep 0.05
 done
 # From here the volume is under the threshold: a watcher still polling records the dead step
 # failed and stops the job step-pgkill, which a later run of a step of that name would be.
 df_seq "$pg_size $pg_used_high $pg_free_high"
 : >"$fake/sleep.log"
 kill_dfs=$(grep -c -- 'df -B1 --output' "$fake/kubectl.log" || true)
-# 2 s, never 3, which the fake sleep returns from at once.
-sleep 2
+# The step's wait on its runner job is a command substitution, a subshell of its own that the
+# SIGKILL does not reach either. Left alone it polls /work/logs/step-pgkill.rc on and, at the
+# step's deadline, TERMs the pid that job's .pid file names in whatever pod is named runner --
+# which a later run's step of that name would be. Given the step shell's pid and start time it
+# ends at its next poll instead, as the watcher does, so the kill leaves nothing of the step
+# running here and no job is stopped. Nothing but cluster.sh ends them: the cleanup's pkill runs
+# long after this.
+await_gone "${kill_kids[@]}" ||
+  fail "the step's disk watcher and its wait on the runner job ($(pgrep -af "$cluster step --namespace $ns " | tr '\n' ';')) still run after the step shell was killed: they poll on, so the watcher records pg_disk in a dead step's directory and the wait stops the job step-pgkill at the step's deadline, which a later run's step of that name would be"
 kill_dfs_after=$(grep -c -- 'df -B1 --output' "$fake/kubectl.log" || true)
 ! grep -qx 'step-pgkill' "$fake/runner-stops" 2>/dev/null ||
   fail "the disk watcher of a killed step stopped the runner job step-pgkill after the kill: $(cat "$fake/runner-stops")"
 [ ! -f "$kill_dir/step-failed.json" ] ||
   fail "the disk watcher of a killed step recorded it failed: $(cat "$kill_dir/step-failed.json")"
 [ "$kill_dfs_after" = "$kill_dfs" ] ||
-  fail "the killed step's disk watcher made $((kill_dfs_after - kill_dfs)) more reads of the volume in the 2 s after it was reaped: it reads on for ever"
+  fail "the killed step's disk watcher made $((kill_dfs_after - kill_dfs)) more reads of the volume before it ended: it reads on under the threshold"
 ! grep -qx 30 "$fake/sleep.log" ||
   fail "the killed step's disk watcher took $(grep -cx 30 "$fake/sleep.log") more 30 s naps after it was reaped: it polls on for ever"
-# The step's wait on its runner job is a command substitution, a subshell of its own that the
-# SIGKILL does not reach either. Left alone it polls /work/logs/step-pgkill.rc on and, at the
-# step's deadline, TERMs the pid that job's .pid file names in whatever pod is named runner --
-# which a later run's step of that name would be. Given the step shell's pid and start time it
-# ends at its next poll instead, so the kill leaves nothing of the step running here and no job
-# is stopped. Nothing but cluster.sh ends it: the cleanup's pkill runs long after this.
-kill_left=yes
-for ((i = 0; i < 400; i++)); do
-  if ! pgrep -f "$cluster step --namespace $ns " >/dev/null 2>&1; then
-    kill_left=no
-    break
-  fi
-  sleep 0.1
-done
-[ "$kill_left" = no ] ||
-  fail "40 s after the step shell was killed, the step still runs here ($(pgrep -af "$cluster step --namespace $ns " | tr '\n' ';')): its wait on the runner job polls on, and at the step's deadline it stops the job step-pgkill, which a later run's step of that name would be"
+! pgrep -f "$cluster step --namespace $ns " >/dev/null 2>&1 ||
+  fail "the step still runs here although its disk watcher and its wait on the runner job ended: $(pgrep -af "$cluster step --namespace $ns " | tr '\n' ';')"
 ! grep -qx 'step-pgkill' "$fake/runner-stops" 2>/dev/null ||
   fail "the killed step's wait on its runner job stopped step-pgkill: $(cat "$fake/runner-stops")"
 unset FAKE_FAST_SLEEP
@@ -2769,22 +2825,40 @@ run_cluster down --namespace "$ns" --run "$own_run"
 rm -f -- "$fake/lock.json"
 pass "with the lock naming another run, runner_stop, runner_step_remove and typing_stop touch nothing of the copy, runner_start, runner_put, typing_start's token write, psql_write and stop_copy refuse outright, each naming the pod or deployment it left alone, a command whose --run names this run is refused, naming both runs, and collect packs and uploads that run without reading the lock"
 
-# (z) The daemons' lock read. cmd__heartbeat and cmd__sampler come through use_run, and a lock
-# read there is a plain kubectl get that nothing retries; only after it do they write the pidfile
-# that start_daemon waits about 5 s for. So a refused API server connection, or a round trip
-# longer than that wait, would kill both daemons and the command that started them -- up right
-# after it took the lock, every later command at ensure_daemons -- although the parent read the
-# lock already and the heartbeat's own loop was built to outlive exactly these errors (its patch
-# tests the lock's run id, and a lock that names another run ends it).
+# (z) The daemons' lock read. cmd__heartbeat and cmd__sampler come through use_run any-run,
+# which reads no lock when --run names their run, as the daemons' own --run does; only after
+# that do they write the pidfile that start_daemon waits about 5 s for. So a refused API server
+# connection, or a round trip longer than that wait, would kill both daemons and the command
+# that started them -- up right after it took the lock, every later command at ensure_daemons --
+# although the parent read the lock already and the heartbeat's own loop was built to outlive
+# exactly these errors (its patch tests the lock's run id, and a lock that names another run
+# ends it).
+#
+# The guard fails closed ((aa) below), so up itself now stops at the first write into the copy
+# it cannot read the lock for -- the scale that starts Dispatch and the listener, which comes
+# after the heartbeat and before the sampler. This case takes that refusal and starts the
+# sampler the way up starts it, the reads still failing, so that both daemons' pidfiles are
+# still proved written with no lock read of their own.
 reset_fake
 export LOADTEST_CLUSTER_ROOT=$tmp/root-lockread
-FAKE_LOCK_GET_FAIL=1 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
-((RC == 0)) ||
-  fail "up exited $RC although only the reads of the lock after it took one failed: $(cat "$tmp/out")"
+FAKE_LOCK_GET_FAIL=1 FAKE_FAST_SLEEP=2 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC != 0)) ||
+  fail "up ran through although no read of the lock answered after it took one: the guard before a write into the copy fails closed: $(cat "$tmp/out")"
+grep -qF "could not read the lock dispatch-loadtest-lock in $ns after 3 tries" "$tmp/out" ||
+  fail "up did not stop at the guard of a write into the copy, naming the reads that failed: $(cat "$tmp/out")"
 lockread_dir=$LOADTEST_CLUSTER_ROOT/$(jq -r .data.run "$fake/lock.json")
+# The sampler, which up starts after that scale, started here exactly as up starts it.
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  NS=$ns
+  set_run "${lockread_dir##*/}"
+  export FAKE_LOCK_GET_FAIL=1
+  start_daemon sampler
+) || fail "the sampler did not start while every read of the lock fails: $(cat "$lockread_dir/logs/sampler.log" 2>/dev/null)"
 for daemon in heartbeat sampler; do
   [ -f "$lockread_dir/$daemon.pid" ] ||
-    fail "up started no $daemon: it writes its pidfile only after a lock read that nothing retries ($(cat "$lockread_dir/logs/$daemon.log" 2>/dev/null))"
+    fail "no $daemon started: it writes its pidfile only after a lock read that nothing retries ($(cat "$lockread_dir/logs/$daemon.log" 2>/dev/null))"
   kill -0 "$(<"$lockread_dir/$daemon.pid")" 2>/dev/null ||
     fail "the $daemon of run ${lockread_dir##*/} is not running: $(cat "$lockread_dir/logs/$daemon.log" 2>/dev/null)"
   ! grep -q 'could not read ConfigMap' "$lockread_dir/logs/$daemon.log" ||
@@ -2793,4 +2867,72 @@ done
 unset FAKE_LOCK_GET_FAIL
 run_cluster down --namespace "$ns"
 ((RC == 0)) || fail "down exited $RC: $(cat "$tmp/out")"
-pass "the daemons write their pidfile without reading the lock, so up starts both although every read of the lock after it took one fails"
+pass "the daemons write their pidfile without reading the lock, so both start although every read of the lock fails, while the guard stops up itself at the first write into the copy"
+
+# (aa) The guard fails closed. Reading the lock is how a write, a kill or a removal in the copy's
+# fixed names -- the pods runner and postgres-0, the deployments dispatch and listener -- tells
+# this run's copy from the copy of the run that holds the namespace now. A read that fails says
+# nothing about whose that copy is, so it may not pass for this run's: the guard reads again, 3
+# tries 2 s apart, and once every try has failed it stops its caller, which then kills, removes
+# and writes nothing there and says why. A read that answers after one that failed is an answer,
+# and the caller acts on it.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-lockclosed
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) || fail "up exited $RC: $(cat "$tmp/out")"
+closed_run=$(jq -r .data.run "$fake/lock.json")
+closed_out=$tmp/guard-closed.out
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  NS=$ns
+  set_run "$closed_run"
+  # The 2 s between two tries is the guard's own nap, which the fake sleep records and returns
+  # from at once.
+  export FAKE_FAST_SLEEP=2 FAKE_LOCK_GET_FAIL=1
+  rm -f -- "$fake/runner-stops" "$fake/lock-get-fails"
+  : >"$fake/sleep.log"
+  reads=$(grep -c 'get configmap dispatch-loadtest-lock' "$fake/kubectl.log" || true)
+  guard_rc=0
+  runner_stop step-closed 2>"$closed_out" || guard_rc=$?
+  ((guard_rc != 0)) || fail "runner_stop returned 0 although no read of the lock answered"
+  [ ! -s "$fake/runner-stops" ] ||
+    fail "runner_stop TERMed the runner job step-closed although it could not read the lock: $(cat "$fake/runner-stops")"
+  grep -qF "could not read the lock dispatch-loadtest-lock in $ns after 3 tries" "$closed_out" ||
+    fail "runner_stop did not say that no read of the lock answered: $(cat "$closed_out")"
+  grep -qF 'the runner pod' "$closed_out" ||
+    fail "runner_stop did not name the pod it left alone: $(cat "$closed_out")"
+  tries=$(($(grep -c 'get configmap dispatch-loadtest-lock' "$fake/kubectl.log" || true) - reads))
+  ((tries == 3)) || fail "the guard read the lock $tries times, not the 3 tries it gives a read that fails"
+  [ "$(grep -cx 2 "$fake/sleep.log")" = 2 ] ||
+    fail "the guard waited $(grep -cx 2 "$fake/sleep.log") times 2 s between its tries, not twice"
+  guard_rc=0
+  runner_step_remove closed 2>"$closed_out" || guard_rc=$?
+  ((guard_rc != 0)) || fail "runner_step_remove returned 0 although no read of the lock answered"
+  ! grep -q -- 'exec runner -c runner -- rm -rf /work/steps/closed ' "$fake/kubectl.log" ||
+    fail "runner_step_remove removed a step directory from a runner pod it could not read the lock for"
+  grep -qF 'they stay at /work/steps/closed' "$closed_out" ||
+    fail "runner_step_remove did not say what it left in the runner: $(cat "$closed_out")"
+  guard_rc=0
+  removals=$(grep -c -- 'exec postgres-0 -c postgres -- rm -f' "$fake/kubectl.log" || true)
+  postgres_exec rm -f /var/lib/postgresql/copy/replay-seed.dump 2>"$closed_out" || guard_rc=$?
+  ((guard_rc != 0)) || fail "postgres_exec returned 0 although no read of the lock answered"
+  [ "$(grep -c -- 'exec postgres-0 -c postgres -- rm -f' "$fake/kubectl.log" || true)" = "$removals" ] ||
+    fail "postgres_exec removed the replay dump from a Postgres pod it could not read the lock for: $(grep -- 'exec postgres-0 -c postgres -- rm -f' "$fake/kubectl.log" | tail -n1)"
+  grep -qF "could not read the lock dispatch-loadtest-lock in $ns after 3 tries" "$closed_out" ||
+    fail "postgres_exec did not say that no read of the lock answered: $(cat "$closed_out")"
+  grep -qF 'the Postgres pod postgres-0' "$closed_out" ||
+    fail "postgres_exec did not name the pod it left alone: $(cat "$closed_out")"
+  # The other side: the first read fails and the next answers the lock, which names this run, so
+  # the caller acts.
+  export FAKE_LOCK_GET_FAIL_TIMES=1
+  rm -f -- "$fake/lock-get-fails" "$fake/runner-stops"
+  runner_stop step-closed 2>"$closed_out" ||
+    fail "runner_stop returned non-zero although the read after the failed one answered the lock: $(cat "$closed_out")"
+  grep -qx step-closed "$fake/runner-stops" 2>/dev/null ||
+    fail "runner_stop TERMed no job although the read after the failed one answered the lock: $(cat "$closed_out")"
+)
+run_cluster down --namespace "$ns"
+((RC == 0)) || fail "down exited $RC: $(cat "$tmp/out")"
+rm -f -- "$fake/lock-get-fails"
+pass "a guarded write, kill or removal whose every read of the lock fails stops after 3 tries 2 s apart, touching nothing of the copy and saying so, and one whose read answers after a failed try acts"

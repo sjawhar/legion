@@ -477,13 +477,20 @@ func commitOrderLockTable(md *markdown, steps []stepData) {
 }
 
 // liveTransport is the dashboard stream the step's streams ran on, from summary.json's
-// config.dashboard (probeDashboard). A step of a run from before that probe has no such field:
-// every one of those followed the live socket.
+// config.dashboard (probeDashboard). A step of a run that wrote live.transport instead (ws, sse
+// or none) is read from that field; a step of a run from before either has neither, and every
+// one of those followed the live socket.
 func (s stepData) liveTransport() string {
-	if s.sum.Config.Dashboard == "" {
-		return dashboardLive
+	if s.sum.Config.Dashboard != "" {
+		return s.sum.Config.Dashboard
 	}
-	return s.sum.Config.Dashboard
+	// An older run of this branch wrote live.transport instead: sse for the SSE endpoint, under
+	// the name dashboardSSE carries; ws for the live socket; and none for a step with -live 0,
+	// which opened no stream and reads here as the live socket, as a step with neither field does.
+	if s.sum.Live.Transport == dashboardSSE {
+		return dashboardSSE
+	}
+	return dashboardLive
 }
 
 func liveTable(md *markdown, steps []stepData) {
@@ -510,8 +517,8 @@ func liveTable(md *markdown, steps []stepData) {
 		md.row(cells...)
 	}
 	if named {
-		md.line("\ntransport: how the step's dashboard streams followed the event feed. `%s`: the dashboard live socket, `GET /ws/live`. `%s`: the SSE endpoint `GET /api/v1/events`, which a Dispatch that serves no such socket is followed on instead. A step of a run from before that probe, whose summary.json has no `config.dashboard`, reads `%s`.",
-			dashboardLive, dashboardSSE, dashboardLive)
+		md.line("\ntransport: how the step's dashboard streams followed the event feed. `%s`: the dashboard live socket, `GET /ws/live`. `%s`: the SSE endpoint `GET /api/v1/events`, which a Dispatch that serves no such socket is followed on instead. A step whose summary.json has no `config.dashboard` is read from the older `live.transport` (`sse` there is this `%s`, `ws` and `none` are `%s`), and a step with neither field reads `%s`.",
+			dashboardLive, dashboardSSE, dashboardSSE, dashboardLive, dashboardLive)
 	}
 	commitsUnreadNote(md, unread, "the NATS delivery latencies from sent and the live frame latencies from write response (both take only committed writes' primary events)", "show")
 }

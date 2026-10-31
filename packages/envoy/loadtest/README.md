@@ -1423,7 +1423,7 @@ The columns below are the same for either stream; `config.dashboard` names which
 | `live frame ms from write response p50 / p99` | ms | The frame time minus the time when the client read the write's response. Only the frame of a primary event counts. Its write must be in the window, have a 2xx status and be committed. A write with no complete response has no response time, so its frames do not count. `-` when the commit rows were not read. | `live.live_frame_ms_from_write_response` |
 | `live frames` | count | The event frames of all dashboard streams that arrived in the window. | `live.live_frames` |
 | `live order violations` | count | The frames whose event id is not more than the event id of the previous frame on the same connection. The check starts again on each new connection. A value above 0 means that a stream sent events out of id order. | `live.live_order_violations` |
-| `transport` | name | The dashboard stream the step's streams ran on: `live` (`GET /ws/live`) or `sse` (`GET /api/v1/events`). The column is there only when a step used something other than `live`. A step of a run from before the dashboard probe, whose `summary.json` has no `config.dashboard`, reads `live`. | `config.dashboard` |
+| `transport` | name | The dashboard stream the step's streams ran on: `live` (`GET /ws/live`) or `sse` (`GET /api/v1/events`). The column is there only when a step used something other than `live`. A step whose `summary.json` has no `config.dashboard` is read from the older `live.transport` (`sse` there is `sse` here, `ws` and `none` are `live`), and one with neither field, from a run before either, reads `live`. | `config.dashboard`, else `live.transport` |
 
 ### Ungranted locks
 
@@ -2240,10 +2240,13 @@ holds in whatever pod is then named `runner` — a later run's step of the same 
 
 The same names are why nothing of one run touches the copy once the lock names another: before
 it stops a runner job, removes a step's files or the browser typing token from the runner, scales
-`dispatch` or `listener`, resets the runner's own directories or removes the replay dump from
-`postgres-0`, `cluster.sh` reads the lock and leaves all of it alone when the run there is not
-its own, saying which copy it left. A step that ends because its wait found the lock renamed
-therefore stops no typing job and deletes no token of the run that holds the namespace now.
+`dispatch` or `listener`, resets the runner's own directories or streams the replay's bundle into
+it, or streams, restores or removes the replay dump in `postgres-0`, `cluster.sh` reads the lock
+and leaves all of it alone when the run there is not its own, saying which copy it left. That
+guard fails closed: a read of the lock that fails is tried three times, 2 s apart, and once
+every try has failed the run stops and removes nothing there either, since a lock it cannot read
+may name another run. A step that ends because its wait found the lock renamed therefore stops
+no typing job and deletes no token of the run that holds the namespace now.
 
 ## What this harness does not do
 
