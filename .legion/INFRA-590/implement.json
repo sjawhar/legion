@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-31T03:10:00Z",
+  "completed": "2026-10-31T05:10:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "2678be4b84152baa164f065f54350e33ae432f1e",
-  "round": "22 (review round 15, changes requested at 9cabeaf6): a scan that read past an owner in flight reads again once that owner is back (lanes.reserve reports excluded owners; missed set from batchResult.excluded, not sendable == 0); one settleAndRecord helper for the early and batch-end settle, so each attempt logs once; loadLookups holds the statement gate across its reads (gated/gatedRows removed); stale text and the unanswered wording fixed (da5762a8). Then a merge of main 21b403599 (2678be4b): #2422's one-sentence-per-line layout of AGENTS.md and cmd/dispatch/README.md with this PR's content re-applied; no code conflict; migrations 0150/0151 and 91 connections unchanged. One code push, then the handoff. Diff-check comment 6537870873.",
+  "head": "b5e8445e62fbeabecc151f82b7e52762866b1572",
+  "round": "23 (review round 16, changes requested only for the forward merge; the code was ready): merge of main d7e1daaaaf keeping the reviewer's comment-only 7fc3a1fb. scripts/e2e/README.md takes #2474's one-sentence-per-line layout with this PR's one change (publishClaimantRoute -> addClaimantRoute) re-applied; semantic-line-breaks passes. The review's two fix-while-there items in the same push: settlement.wrote removed (it always equalled !result.fenced), and the log-count test matches event_id=<id>. No code conflict; migrations 0150/0151 and 91 connections unchanged. Diff-check comment 6539106967.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -222,6 +222,14 @@
       "observed": "At da5762a8: outbox ok 285.4 s, duty ok, store ok 250.6 s, -race outbox ok 285.4 s, bus ok 341.4 s, cmd/dispatch ok 260.1 s, multiprocess ok 800.5 s, the lane tests -count=20 ok (240.4 s). At 2678be4b: build and vet clean, semantic-line-breaks.ts passes on both merged docs, CI filter check 0 uncovered.",
       "headSha": "2678be4b84152baa164f065f54350e33ae432f1e",
       "negativeControl": "At 9cabeaf6: TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack fails 'did not carry event 3 within 8s of its commit (8.003s ago): the scan read past its owner and then waited for a back-off'; TestAnOwnerLeftForTheBatchsEndLogsItsFailureOnce fails 'logged 2 publish lines for one attempt at event 2, want one'."
+    },
+    {
+      "criterion": "The forward-merged head keeps the reviewed outbox behaviour: the round-22 lane and settle tests pass, and the outbox package passes.",
+      "surface": "outbox package on in-process NATS and pod Postgres 17 (fresh UTF8 database)",
+      "command": "cd packages/envoy && go build ./... && go vet ./internal/dispatch/outbox/ && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -p 2 -parallel 4 -count=1 ./internal/dispatch/outbox/ && go test -count=5 -run 'TestAnOwnerLeftForTheBatchsEndLogsItsFailureOnce|TestAnEventCommittedWhileItsOwnerIsInFlight' ./internal/dispatch/outbox/; bun scripts/semantic-line-breaks.ts scripts/e2e/README.md",
+      "observed": "build and vet clean; outbox ok 272.6 s; the two round-22 tests -count=5 ok; semantic-line-breaks exit 0 on scripts/e2e/README.md.",
+      "headSha": "b5e8445e62fbeabecc151f82b7e52762866b1572",
+      "negativeControl": "Before the merge, git merge-tree reported 'CONFLICT (content): Merge conflict in scripts/e2e/README.md' against main d7e1daaaaf and GitHub showed the head CONFLICTING."
     }
   ],
   "filesChanged": [
