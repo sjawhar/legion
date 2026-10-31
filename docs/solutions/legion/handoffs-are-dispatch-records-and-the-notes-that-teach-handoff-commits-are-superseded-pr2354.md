@@ -73,6 +73,8 @@ in the past tense, beside one sentence that says what holds now:
 - `docs/solutions/legion/a-description-edit-clears-pr-title-but-not-lint-….md`, its sentence
   about a handoff-only push;
 - `docs/solutions/legion/a-forward-merge-after-retro-reinstalls-….md`, its retro removal step;
+- `docs/solutions/legion/a-mass-re-layout-of-a-file-many-pull-requests-edit-is-a-script-and-each-merge-of-main-reruns-it-pr2422.md`,
+  where a regeneration script lives once retro deletes nothing;
 - `docs/solutions/legion/a-proof-pastes-every-commit-sha-….md`, the handoff push as the
   checkpoint that resolves each SHA;
 - `docs/solutions/legion/a-proofs-round-key-follows-the-engines-rule-….md`, the harness helpers
@@ -99,6 +101,8 @@ in the past tense, beside one sentence that says what holds now:
   the handoff as the file a merge meets;
 - `docs/solutions/legion/rebasing-a-branch-across-a-refactor-of-its-own-call-sites.md`, the
   handoff commits above the chain;
+- `docs/solutions/legion/retro-does-not-freeze-a-regeneration-script-a-refused-ready-can-need-one-more-anchor-pr2422.md`,
+  the script's return in the round's handoff push;
 - `docs/solutions/legion/review-thread-replies-fan-out-pr-review-wakes.md`, the clean round's
   `commented` verdict;
 - `docs/solutions/legion/schema-bump-branch-rechecks-mains-version-at-every-rebase.md`, the
@@ -118,6 +122,8 @@ in the past tense, beside one sentence that says what holds now:
 - `docs/solutions/legion/the-record-is-not-the-reader-….md`, the grep over the handoff files;
 - `docs/solutions/legion/the-trailer-on-a-pushs-tip-suppresses-the-runs-of-every-code-commit-beneath-it-pr2542.md`,
   the inherited handoff trailer, the rewrite it guarded and the handoff-only cause of no runs;
+- `docs/solutions/legion/when-runners-queue-longer-than-a-review-round-make-one-code-push-per-round-pr2422.md`,
+  the handoff pushes that followed the round's one code push;
 - `docs/solutions/testing/a-docker-free-rig-renders-the-real-authorization-….md`, where the rig
   lives;
 - `docs/solutions/testing/fresh-state-dir-boot-beside-a-busy-rig.md`, the `.legion/`-only pushes
