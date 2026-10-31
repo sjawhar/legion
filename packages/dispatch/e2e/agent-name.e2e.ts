@@ -62,7 +62,9 @@ interface Seeded {
 
 /** Real session writes from three sessions while all three are listed, then two of them leave
  *  the listener's list before any page loads. The running agent's claim is written with a
- *  personal token, so its label carries the owner suffix. */
+ *  personal token, so its label carries the owner suffix. The writes no row reads in order - the
+ *  two claims, the three messages, the two asks - go together; the two margin comments stay in
+ *  order behind them, since each anchors into the same spec. */
 async function seed(): Promise<Seeded> {
   await createProject({ key: "AGT", name: "Agents" });
   const runIssue = await createIssue({
@@ -77,33 +79,31 @@ async function seed(): Promise<Seeded> {
   ]);
   await setLiveSessions(liveSessions);
   const token = await mintAgentToken("agent-name-e2e", "alice");
-  await claimIssue(runIssue.key, { ...writer(runId, runStamped), token });
-  await claimIssue(stopIssue.key, writer(stopId, stopStamped));
-  const runMessage = await createMessage(
-    runIssue.key,
-    { body: "Message from the running agent" },
-    writer(runId, runStamped)
-  );
-  const stopMessage = await createMessage(
-    runIssue.key,
-    { body: "Message from the stopped agent" },
-    writer(stopId, stopStamped)
-  );
-  const untitledMessage = await createMessage(
-    runIssue.key,
-    { body: "Message from the untitled agent" },
-    writer(untitledId)
-  );
-  const runAsk = await createAsk(
-    runIssue.key,
-    { question: "Question from the running agent" },
-    writer(runId, runStamped)
-  );
-  const stopAsk = await createAsk(
-    runIssue.key,
-    { question: "Question from the stopped agent" },
-    writer(stopId, stopStamped)
-  );
+  const [, , runMessage, stopMessage, untitledMessage, runAsk, stopAsk] = await Promise.all([
+    claimIssue(runIssue.key, { ...writer(runId, runStamped), token }),
+    claimIssue(stopIssue.key, writer(stopId, stopStamped)),
+    createMessage(
+      runIssue.key,
+      { body: "Message from the running agent" },
+      writer(runId, runStamped)
+    ),
+    createMessage(
+      runIssue.key,
+      { body: "Message from the stopped agent" },
+      writer(stopId, stopStamped)
+    ),
+    createMessage(runIssue.key, { body: "Message from the untitled agent" }, writer(untitledId)),
+    createAsk(
+      runIssue.key,
+      { question: "Question from the running agent" },
+      writer(runId, runStamped)
+    ),
+    createAsk(
+      runIssue.key,
+      { question: "Question from the stopped agent" },
+      writer(stopId, stopStamped)
+    ),
+  ]);
   const runComment = await createComment(
     runIssue.key,
     { anchor: { artifact: "spec", quote: "comments here" }, body: "Margin from the running agent" },
@@ -186,6 +186,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): the seed's session writes and four page views - the issue, the Conversation, the
+// Inbox and the margin - which are the four places the row holds the component to.
 test("Claimed by, a Conversation turn, an Inbox ask card and a margin comment show the agent's current name, whether it runs, and a live link @phone", async ({
   browser,
 }, testInfo) => {
@@ -257,6 +259,8 @@ test("Claimed by, a Conversation turn, an Inbox ask card and a margin comment sh
   }
 });
 
+// SLOW(>=2s): the seed's session writes and the two navigations the live links make, which are
+// what the row proves.
 test("the live link opens that agent's conversation, running or not @phone", async ({
   browser,
 }, testInfo) => {
@@ -367,12 +371,12 @@ test("the page reads the agent list once, asks nothing per agent, and shows a re
   browser,
 }, testInfo) => {
   // The open page learns of a rename and then of a stop only from the shell's 15 s registry
-  // poll, so this row waits for up to two polls of 30 s each on top of its seeding.
-  test.setTimeout(120_000);
+  // poll, which this row's page clock fires: no row-level timeout is needed for it.
   const seeded = await seed();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    await page.clock.install();
     const registryReads: string[] = [];
     const perAgentReads: string[] = [];
     page.on("request", (request) => {
@@ -401,14 +405,22 @@ test("the page reads the agent list once, asks nothing per agent, and shows a re
       expect(widths.scroll).toBe(widths.client);
     }
 
-    // The listener renames the running agent, then drops it: the open page follows both.
+    // The listener renames the running agent, then drops it: the open page follows both. The page
+    // learns of each only on the shell's 15 s registry poll, which the clock fires rather than
+    // the row waiting it out; each jump also trips the live socket's own 15 s silence check, so
+    // the tab reconnects, which changes neither count below (a reconnect reads no agent).
     await setLiveSessions([{ session_id: runId, title: "Running agent (renamed)" }]);
-    await expect(claim).toContainText("Running agent (renamed)", { timeout: 30_000 });
+    await page.clock.fastForward(15_000);
+    // TanStack's notifyManager batches its delivery on a zero-delay page timer.
+    await page.clock.runFor(1);
+    await expect(claim).toContainText("Running agent (renamed)");
     await expect(agentIn(messageTurn(page, seeded.runMessage), runId)).toContainText(
       "Running agent (renamed)"
     );
     await setSessionLive(runId, false);
-    await expect(claim).toHaveAttribute("data-agent-state", "not-running", { timeout: 30_000 });
+    await page.clock.fastForward(15_000);
+    await page.clock.runFor(1);
+    await expect(claim).toHaveAttribute("data-agent-state", "not-running");
     await expect(claim.getByRole("img", { exact: true, name: "Not running" })).toBeVisible();
     expect(perAgentReads).toEqual([]);
   } finally {
@@ -416,6 +428,8 @@ test("the page reads the agent list once, asks nothing per agent, and shows a re
   }
 });
 
+// SLOW(>=2s): the seed's session writes and the Board and List tours, whose six navigations are
+// the keyboard openings the row proves.
 test("a claimed List row and Board card open their issue by keyboard, and the claim's agent link opens the agent @phone", async ({
   browser,
 }, testInfo) => {

@@ -8,7 +8,7 @@ import {
 } from "@playwright/test";
 
 import { createAsk, createComment, createIssue, createMessage, createProject } from "./api";
-import { type Box, boxesApart } from "./layout";
+import { boxesApart } from "./layout";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -55,33 +55,33 @@ async function openPhonePage(context: BrowserContext): Promise<Page> {
   return page;
 }
 
-/** Waits until `card` has finished rendering: visible, then its box unchanged across 30
- *  consecutive samples 50 ms apart, all within 20 s. It only samples: nothing here scrolls,
- *  focuses, taps or hovers, so where the page put the card is where it is measured. */
+/** Waits until `card` has finished rendering: visible, then its rect unchanged over 10
+ *  consecutive frames, sampled in the page so the whole stillness costs one round trip rather
+ *  than one per sample. It only samples: nothing here scrolls, focuses, taps or hovers, so where
+ *  the page put the card is where it is measured. */
 async function settle(card: Locator, label: string): Promise<void> {
-  const deadline = Date.now() + 20_000;
   await expect(card, `${label}: the newest card`).toBeVisible({ timeout: 20_000 });
-  let last: Box | null = null;
-  let unchanged = 0;
-  while (unchanged < 30) {
-    if (Date.now() > deadline) {
-      throw new Error(
-        `${label}: the newest card's box never held still for 30 samples within 20 s (last ${JSON.stringify(last)})`
-      );
-    }
-    const tick = Promise.withResolvers<void>();
-    setTimeout(tick.resolve, 50);
-    await tick.promise;
-    const box = await card.boundingBox();
-    const same =
-      box !== null &&
-      last !== null &&
-      box.x === last.x &&
-      box.y === last.y &&
-      box.width === last.width &&
-      box.height === last.height;
-    unchanged = same ? unchanged + 1 : 0;
-    last = box;
+  const never = await card.evaluate(
+    (element) =>
+      new Promise<string | null>((resolve) => {
+        const deadline = Date.now() + 20_000;
+        let last = "";
+        let unchanged = 0;
+        const sample = () => {
+          const rect = JSON.stringify(element.getBoundingClientRect());
+          unchanged = rect === last ? unchanged + 1 : 0;
+          last = rect;
+          if (unchanged >= 10) resolve(null);
+          else if (Date.now() > deadline) resolve(last);
+          else requestAnimationFrame(sample);
+        };
+        sample();
+      })
+  );
+  if (never !== null) {
+    throw new Error(
+      `${label}: the newest card's box never held still for 10 frames within 20 s (last ${never})`
+    );
   }
 }
 
@@ -121,78 +121,99 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+/** The three reads the Conversation's list is built from. */
+const READS = ["asks", "comments", "messages"] as const;
+
+/** Matches the Conversation's read `read` for `issueKey`. */
+function conversationRead(issueKey: string, read: (typeof READS)[number]): (url: URL) => boolean {
+  return read === "asks"
+    ? asksThreadRead(issueKey)
+    : (url) => url.pathname === `/api/v1/issues/${issueKey}/${read}`;
+}
+
+/** Opens the Conversation on a fresh page with `last` held until the other two reads have
+ *  answered and the page has had time to place itself on what they brought, then lets `last`
+ *  answer: the open the reader gets when that read is the one that answers last. */
+async function openWithReadLast(
+  context: BrowserContext,
+  issueKey: string,
+  last: (typeof READS)[number],
+  label: string
+): Promise<Page> {
+  const page = await openPhonePage(context);
+  // A new page has no history entry to restore a scroll position from: it starts at the top.
+  expect(
+    await page.evaluate(() => ({ history: history.length, scrollY: window.scrollY })),
+    `${label}: the new page before it navigates`
+  ).toEqual({ history: 1, scrollY: 0 });
+  const held: Route[] = [];
+  const heldRead = conversationRead(issueKey, last);
+  const hold = (route: Route) => {
+    held.push(route);
+  };
+  await page.route(heldRead, hold);
+  const answered = READS.filter((read) => read !== last).map((read) =>
+    page.waitForEvent("requestfinished", {
+      predicate: (request) => conversationRead(issueKey, read)(new URL(request.url())),
+    })
+  );
+  await page.goto(`/issues/${issueKey}/conversation`);
+  await Promise.all(answered);
+  await expect.poll(() => held.length).toBe(1);
+  // No in-page signal says the page has seen the partial data, so this fixed margin - two
+  // macrotasks, two frames and 300 ms - is the defended choice; the repeat-each red against
+  // the unfixed page is its proof.
+  await page.evaluate(async () => {
+    for (let i = 0; i < 2; i++) {
+      const turn = Promise.withResolvers<void>();
+      setTimeout(turn.resolve, 0);
+      await turn.promise;
+    }
+    for (let i = 0; i < 2; i++) {
+      const frame = Promise.withResolvers<void>();
+      requestAnimationFrame(() => frame.resolve());
+      await frame.promise;
+    }
+    const margin = Promise.withResolvers<void>();
+    setTimeout(margin.resolve, 300);
+    await margin.promise;
+  });
+  expect(held, `${label}: the tab made exactly one ${last} read while it was held`).toHaveLength(1);
+  await held[0]?.continue();
+  // A refetch of that read after the hold is the page's own business, not this fixture's.
+  await page.unroute(heldRead, hold);
+  return page;
+}
+
 // INFRA-303: the Conversation's list is built from three reads, asks, comments and messages, and
 // shows nothing until all three answer. The first placement on the newest turn must not be spent
 // while one of them is still pending: a newest message known from the messages read before the
 // asks read answers otherwise lands the reader at the top of the page, the newest message under
-// the docked composer, and the asks answering later changes nothing that brings them back.
+// the docked composer, and the asks answering later changes nothing that brings them back. Each
+// read is held last in turn, which is the title's claim and strictly more than a loop of opens
+// hoping to meet each order.
+// SLOW(>=2s): three opens, each a fresh page because only a page with no history entry is a
+// first open (`history.length` 1 above), each holding the 300 ms margin the partial-data state
+// has no in-page signal for, plus the top-of-page control the fixture needs to stay honest.
 test("on a phone, the Conversation opens with its newest message in view whichever read answers last @phone", async ({
   browser,
 }) => {
-  test.setTimeout(240_000);
   const { issue, newest } = await seedConversation("Landing on the newest message");
-  const conversation = `/issues/${issue.key}/conversation`;
   const alice = await asUser(browser, "alice");
 
   try {
-    // Forced: the messages and comments reads answer while the asks read is held, then it answers.
-    const forced = await openPhonePage(alice);
-    const heldAsks: Route[] = [];
-    await forced.route(asksThreadRead(issue.key), (route) => {
-      heldAsks.push(route);
-    });
-    const reads = ["messages", "comments"].map((read) =>
-      forced.waitForEvent("requestfinished", {
-        predicate: (request) =>
-          new URL(request.url()).pathname === `/api/v1/issues/${issue.key}/${read}`,
-      })
-    );
-    await forced.goto(conversation);
-    await Promise.all(reads);
-    await expect.poll(() => heldAsks.length).toBe(1);
-    // No in-page signal says the page has seen the partial data, so this fixed margin - two
-    // macrotasks, two frames and 300 ms - is the defended choice; the repeat-each red against
-    // the unfixed page is its proof.
-    await forced.evaluate(async () => {
-      for (let i = 0; i < 2; i++) {
-        const turn = Promise.withResolvers<void>();
-        setTimeout(turn.resolve, 0);
-        await turn.promise;
-      }
-      for (let i = 0; i < 2; i++) {
-        const frame = Promise.withResolvers<void>();
-        requestAnimationFrame(() => frame.resolve());
-        await frame.promise;
-      }
-      const margin = Promise.withResolvers<void>();
-      setTimeout(margin.resolve, 300);
-      await margin.promise;
-    });
-    expect(heldAsks, "the tab made exactly one asks read while it was held").toHaveLength(1);
-    await heldAsks[0]?.continue();
-    await settle(newestTurn(forced, newest.id), "forced open");
-    await expectNewestInView(forced, newestTurn(forced, newest.id), "forced open");
-    await forced.close();
-
-    // Unforced: each open a fresh page, the reads answering in whatever order they do.
     let page: Page | undefined;
-    for (let open = 1; open <= 20; open += 1) {
-      const label = `unforced open ${open}`;
-      page = await openPhonePage(alice);
-      // A new page has no history entry to restore a scroll position from: it starts at the top.
-      expect(
-        await page.evaluate(() => ({ history: history.length, scrollY: window.scrollY })),
-        `${label}: the new page before it navigates`
-      ).toEqual({ history: 1, scrollY: 0 });
-      await page.goto(conversation);
+    for (const last of READS) {
+      const label = `${last} answering last`;
+      await page?.close();
+      page = await openWithReadLast(alice, issue.key, last, label);
       await settle(newestTurn(page, newest.id), label);
       await expectNewestInView(page, newestTurn(page, newest.id), label);
-      if (open < 20) await page.close();
     }
 
     // The fixture still hides the newest message at the top of the page, which is where the
     // fault leaves the reader; otherwise every assertion above would pass whether or not it did.
-    if (page === undefined) throw new Error("expected the last unforced open's page");
+    if (page === undefined) throw new Error("expected the last open's page");
     await page.evaluate(() => window.scrollTo(0, 0));
     await settle(newestTurn(page, newest.id), "at the top of the page");
     const top = await landing(page, newestTurn(page, newest.id));
@@ -215,6 +236,9 @@ test("on a phone, the Conversation opens with its newest message in view whichev
 // resumes the event feed, which Dispatch replays in full (`replay_complete` on `events_start`), so
 // the page refreshes nothing for that gap (`api/event-feed.ts`). The row depends on the focus
 // path: if a focus stops refetching a read in error, this row stops seeing a refetch.
+// SLOW(>=2s): the app's own retries of the failed asks read must all fail before the error text
+// shows (two retries 500 ms apart, `web/src/api/query-client.ts`), which is the production
+// behaviour this row is about.
 test("on a phone, a Conversation whose read failed opens on its newest message once a refetch brings the list @phone", async ({
   browser,
 }) => {
