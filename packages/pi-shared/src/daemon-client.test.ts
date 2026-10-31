@@ -186,6 +186,8 @@ test("a state from a daemon a release ahead parses without its unknown top-level
     issue: "LEGION-208",
     role: "implementer",
     secret: "U2VjcmV0",
+    claimToken: "legion-legion-legion-208-implementer",
+    generation: 1,
   };
 
   await expect(client.state()).resolves.toEqual(state as never);

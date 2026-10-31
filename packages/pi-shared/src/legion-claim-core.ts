@@ -83,6 +83,8 @@ export async function bootLegionClaim(host: LegionClaimHost): Promise<void> {
       issue: claim.issue,
       role: claim.role,
       secret: claim.secret,
+      claimToken: claim.claimToken,
+      generation: claim.generation,
     });
     await host.claimRole(claim.claimToken);
     const capabilities = await measuring;

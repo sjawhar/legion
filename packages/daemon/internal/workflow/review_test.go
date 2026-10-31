@@ -186,6 +186,50 @@ func TestAnApprovalOnAHeadGitHubWillNotMergeTellsTheArchitectOnce(t *testing.T) 
 	}
 }
 
+// A merge state is GitHub's answer about the head as GitHub holds it now, and it changes under a
+// head nobody pushed to: a check the base requires that has not run reads `blocked`, and the same
+// head reads `clean` once it runs. So the stuck round an approval on a blocked head leaves is
+// there to stop a second notice, never to stop the move: the read that answers clean for that very
+// head ends the round and moves the issue to accepting, as it would have had GitHub answered clean
+// the first time. The architect and the reviewer are told once, when the head was blocked, and the
+// clean read tells neither of them again - it is the answer they were waiting for, not news of a
+// round that goes nowhere.
+func TestAnApprovalOnABlockedHeadGitHubLaterReportsCleanMovesOnAndTellsOnce(t *testing.T) {
+	pool := migratedPool(t)
+	seedMergeStateRound(t, pool, record.MergeStateUnread)
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+
+	apply("approve", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head",
+		HeadSHA: "head", Author: testReviewApp, Body: "ship it"})
+	if got := issuePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("after the approval the issue is in %s, want reviewing: GitHub has not answered for the head", got)
+	}
+
+	apply("blocked", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head",
+		Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateBlocked})
+	if got := issuePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("after GitHub reported the head blocked the issue is in %s, want reviewing: GitHub would not merge the head", got)
+	}
+	told := reviewStuckNotices(t, pool)
+	if len(told) != 1 || !strings.Contains(told[0].Reason, "approved head head on pull request #42") ||
+		!strings.Contains(told[0].Reason, "GitHub reports that head blocked") {
+		t.Fatalf("review-stuck notices %+v, want one naming the pull request, the head and blocked", told)
+	}
+	stuck := []record.RoleMessage{{Role: treeRoleToken(t, "LEGION-208", claim.RoleReviewer),
+		Body: "The round you approved is stuck: " + told[0].Reason + "."}}
+	assertRoleMessages(t, pool, "LEGION-208", stuck)
+
+	apply("clean", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", HeadSHA: "head",
+		Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateClean})
+	if got := issuePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("after GitHub reported the same head clean the issue is in %s, want accepting: the round recorded stuck stops a second notice, not the approval", got)
+	}
+	if again := reviewStuckNotices(t, pool); len(again) != 1 {
+		t.Fatalf("the architect was told %d times (%+v), want the one notice of the blocked head: the clean read is the answer it waited for", len(again), again)
+	}
+	assertRoleMessages(t, pool, "LEGION-208", stuck)
+}
+
 // The notice of a head GitHub will not merge from is read by a person deciding what to push next,
 // so it names GitHub's state and every check GitHub reported on that head with its conclusion.
 // The daemon reads no repository ruleset (dispatch://INFRA-714/spec R1), so it cannot name the

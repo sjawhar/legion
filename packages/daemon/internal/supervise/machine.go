@@ -137,6 +137,12 @@ type Claim struct {
 	// idle since yesterday, and a claim rebuilt without them would look as if it had never worked.
 	LastTurnStart time.Time
 	LastTurnEnd   time.Time
+	// TurnOutcomes are the newest turns the claim's agent ended that its backend's producer
+	// reported, in (generation, sequence) order and bounded by the launch failure limit
+	// (recordTurnOutcome). They are the window RefusedRun derives the run of refused turns from,
+	// and they are persisted, so a daemon restart reads the run the reports before it left rather
+	// than starting the count again. They go with the session whose turns they are (freshRun).
+	TurnOutcomes []TurnOutcome
 	// LastDeathCause is why the claim's process was last found gone — the runtime's own account of
 	// the death (runtime.Observation.Detail: an OOM kill, a node that went away, a pod the cluster
 	// evicted) — and LastStartFailure why its last start did not produce a running agent — a
@@ -1260,9 +1266,12 @@ func deathCause(observation runtime.Observation) string {
 }
 
 // forgetSession drops the session the claim recorded, leaving the claim as one no agent has
-// registered for: the next launch is a fresh spawn that provisions its workspace anew.
+// registered for: the next launch is a fresh spawn that provisions its workspace anew. The turns
+// reported for that session go with it (freshRun): the next agent is one the provider has refused
+// nothing of.
 func (m *Machine) forgetSession() {
 	m.claim.Session, m.claim.SessionFile = "", ""
+	m.freshRun()
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -1559,9 +1568,13 @@ func claimOf(ev Event) claim.Token {
 		return ev.Claim
 	case RequestOperatorRetry:
 		return ev.Claim
+	case RequestForgetSession:
+		return ev.Claim
 	case RequestDeliver:
 		return ev.Claim
 	case RequestExit:
+		return ev.Claim
+	case RequestTurnOutcome:
 		return ev.Claim
 	}
 	return ""
@@ -1582,5 +1595,6 @@ func copyClaim(c Claim) Claim {
 	}
 	c.BootTokenHash = bytes.Clone(c.BootTokenHash)
 	c.CapabilityHash = bytes.Clone(c.CapabilityHash)
+	c.TurnOutcomes = slices.Clone(c.TurnOutcomes)
 	return c
 }

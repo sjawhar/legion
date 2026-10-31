@@ -48,6 +48,8 @@ const implementer: ClaimCapability = {
   issue: "LEGION-208",
   role: "implementer",
   secret: "U2VjcmV0",
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 1,
 }
 
 const grantRequest = {

@@ -452,4 +452,22 @@ package api
 // sjawhar/legion#2538 is taking 44, so this branch takes the number above it, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
-const DaemonAPIVersion = 45
+//
+// 46: dispatch://INFRA-714 -- every turn a session ends is reported to the daemon by the producer
+// that ended it, over `POST /legion/v1/claims/turn-outcome`: `{claimToken, sessionId, secret,
+// generation, sequence, outcome, message}`, authenticated by the registration's secret as the
+// ready and the exit are, answering `{refusedRun, failed}`. `sequence` is the producer's own count
+// of the turns it has ended at that generation, from 1, and `outcome` is `clean` or `refused`,
+// `message` the provider's words for a refusal. The daemon keeps the newest reports per claim,
+// keyed by (generation, sequence), derives the trailing run of refused turns from them on every
+// report, and fails the claim once that run reaches `launch_failure_limit` — the fault that left an
+// implementer's every turn refused by its provider with its claim never failing. A plugin built
+// before 46 reports no turn, so its session's refusals are counted by nobody, and a plugin from
+// this contract posting to a daemon before 46 is answered "no route" for every turn it ends; the
+// boot gate and `legion probe-image` refuse the mixed pair. `legion claims retry` gains the
+// optional body `{freshSession}` (`--fresh-session`), which starts the claim in a new session
+// rather than resuming the recorded one; a claim the provider refused out of its budget takes one
+// whoever retries it. That retry also reaches a phase worker an operator stopped, which is
+// retired: the route starts the worker's phase again — restoring a held one, as the architect's
+// retry_or_escalate does — so the session it starts, new or kept, is given that phase's task.
+const DaemonAPIVersion = 46

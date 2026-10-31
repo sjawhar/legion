@@ -361,9 +361,11 @@ func TestTheOperatorsRetryOfAClaimThatHasNotFailedIsRefused(t *testing.T) {
 	}
 }
 
-// The operator's retry is an architect's alone: a failed phase worker is retried by its architect's
-// retry_or_escalate while its issue is held, and by the next start of its role otherwise, so the
-// operator's retry of one is refused, naming who retries it, and the worker stays failed.
+// The operator's retry of a claim of its own is an architect's alone: a phase worker is retried
+// through its issue's phase — its architect's retry_or_escalate while its issue is held, the
+// operator's own retry while the issue stands in that worker's phase, and the next start of its
+// role otherwise — so the retry of a worker whose issue the record does not hold at all is
+// refused, naming who retries it, and the worker stays failed.
 func TestTheOperatorsRetryOfAFailedPhaseWorkerIsRefused(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
@@ -384,7 +386,7 @@ func TestTheOperatorsRetryOfAFailedPhaseWorkerIsRefused(t *testing.T) {
 	}
 
 	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict,
-		"retry refused: the operator's retry relaunches only an architect; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise")
+		"retry refused: the operator's retry relaunches only an architect; a phase worker is retried through its issue's phase: its architect's retry_or_escalate while the issue is held, the operator's retry while the issue stands in that worker's phase, and the next start of its role otherwise")
 
 	after := h.stored(workerToken)
 	if after.State != before.State || after.Generation != before.Generation || after.Budgets != before.Budgets {
@@ -519,7 +521,7 @@ func TestTheOperatorsRetryOfAFailedPhaseWorkerHeldForAnotherRoleIsRefused(t *tes
 	calls := len(h.runtime.Calls())
 
 	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict,
-		"retry refused: the operator's retry relaunches only an architect; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise")
+		"retry refused: the operator's retry relaunches only an architect; a phase worker is retried through its issue's phase: its architect's retry_or_escalate while the issue is held, the operator's retry while the issue stands in that worker's phase, and the next start of its role otherwise")
 	if applied := facts.recorded(); len(applied) != 0 {
 		t.Errorf("the retry applied %#v, want nothing: the issue is held for the tester", applied)
 	}

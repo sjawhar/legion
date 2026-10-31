@@ -13,14 +13,17 @@ import {
 } from "./daemon-client";
 
 /** The claim a session registered, as the phase ops need it, and as the claim boot
- * (`legion-claim-core`) records it: its own id, the daemon's answer for tree, issue and role, and
- * the secret every grant is minted with. */
+ * (`legion-claim-core`) records it: its own id, the daemon's answer for tree, issue and role, the
+ * secret every grant is minted with, and the claim token and launch generation the routes that
+ * name the claim itself rather than a grant — `claims/ready`, `claims/turn-outcome` — carry. */
 export interface ClaimCapability {
   readonly sessionID: string;
   readonly tree: string;
   readonly issue: string;
   readonly role: LegionRole;
   readonly secret: string;
+  readonly claimToken: string;
+  readonly generation: number;
 }
 
 /**

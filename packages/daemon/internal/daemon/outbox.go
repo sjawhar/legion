@@ -1017,19 +1017,22 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			}
 		}
 		// A claim that, once relaunched, still holds a task of this row's phase and run that it will
-		// work is given that task: one not yet confirmed (a failed claim keeps the task it held, and a
-		// death in a turn takes the task back unconfirmed, behind the sentence saying so), or one
-		// confirmed in the turn the claim is working. The row's own task would follow it as a second
-		// prompt for work already under way, so it is not delivered when it is the phase's resume task
-		// (promotion's) or the row relaunched a failed claim (the architect's retry of the held phase,
-		// or a later transition). A confirmed task on a claim not working is over: the relaunch's
+		// work is given that task: one not yet confirmed (a claim whose process is gone keeps the task
+		// it held, and a death in a turn takes the task back unconfirmed, behind the sentence saying
+		// so), or one confirmed in the turn the claim is working. The row's own task would follow it
+		// as a second prompt for work already under way, so it is not delivered when it is the phase's
+		// resume task (promotion's) or the row relaunched a claim that was running nothing — one that
+		// failed, as the architect's retry of the held phase relaunches it, or one an operator stopped,
+		// as the operator's retry of its phase relaunches it. A confirmed task on a claim not working
+		// is over: the relaunch's
 		// decision retired it here, or retires it first when a launch whose outcome was uncertain is
 		// released and spawned again, after this start, so the row's task goes in its place. A check
 		// start names no phase, so it is never one of these: each look's task is delivered, its row
 		// id its delivery's, and a delivery with no phase is held by nothing (supervise's
 		// phaseHolds), so the task reaches the implementer whatever the issue's phase.
 		held := machine.Claim()
-		if pending := held.Pending; (payload.ResumeTask || state == supervise.StateFailed) && pending != nil && payload.Phase != "" &&
+		ranNothing := state == supervise.StateFailed || state == supervise.StateRetired
+		if pending := held.Pending; (payload.ResumeTask || ranNothing) && pending != nil && payload.Phase != "" &&
 			pending.StillWorked(payload.Generation, payload.Phase, held.State) {
 			r.log.Info("outbox start of a claim that holds its phase's task; not delivered again", "row", row.ID, "issue", issue.Key,
 				"role", payload.Role, "phase", payload.Phase, "held", pending.ID)

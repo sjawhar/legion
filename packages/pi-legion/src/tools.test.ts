@@ -66,6 +66,8 @@ function claimSession(role: LegionRole, issue = "LEGION-208"): LegionToolSession
     tree: "LEGION-208",
     issue,
     secret: "claim-secret",
+    claimToken: `legion-legion-${issue.toLowerCase()}-${role}`,
+    generation: 1,
   };
 }
 

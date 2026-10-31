@@ -160,6 +160,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.sessionStoreFault(ctx, tx, fact)
 	case intake.RetryOrEscalate:
 		return e.retryOrEscalate(ctx, tx, fact)
+	case intake.RestartPhase:
+		return e.restartPhase(ctx, tx, fact)
 	case intake.BackwardMove:
 		return e.backward(ctx, tx, fact)
 	case intake.SignOff:
@@ -827,43 +829,77 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 		return intake.Result{}, err
 	}
-	from := issue.Hold.From
-	issue.Phase, issue.Hold = from, nil
-	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
+	return intake.Result{}, e.retryPhase(ctx, tx, *issue, issue.Hold.From, "retry held phase")
+}
+
+// restartPhase is the operator's retry of a phase worker whose issue stands in that worker's own
+// phase, through `legion claims retry` (api's retryClaim): the worker failed, or an operator
+// stopped it, and a stop is no death, so no hold is waiting for its architect to decide. The phase
+// is started again, which is what gives the worker — a new session when the operator asked for one
+// — the task of the phase it is to work. An issue held for this role takes the same path, so the
+// hold it was given is restored from; one whose phase another role works, or that has left the
+// workflow, is refused, since starting that phase under this claim's name would run the wrong
+// role.
+func (e *Engine) restartPhase(ctx context.Context, tx pgx.Tx, fact intake.RestartPhase) (intake.Result, error) {
+	issue, err := e.store.Issue(ctx, tx, fact.Issue)
+	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	// The retry restores the phase the hold came from and starts its worker. It re-decides no CI
-	// result: a settlement that reached the issue while it was held moved nothing, as it would
-	// have moved nothing had it arrived with the issue in its phase (dispatch://INFRA-714/spec
-	// R1), so there is no standing red left for the retry to act on, and the restored worker reads
-	// the head's checks itself. From
-	// reviewing a review round held open may already have both of its halves - the reviewer
-	// completed before the hold, and its review was recorded while held - and ends here
-	// (reviewRound); the reviewer is started only if the round is still open, since a second
-	// completion of the same commit would be refused as not new. A round its reviewer completed that
-	// nothing would end is stuck: the reviewer's task says why, so the restarted reviewer decides
-	// it. The architect, who ordered the retry, is told nothing: a notice now would read as the
-	// reviewer's answer to its request.
-	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+	working := workingPhase(*issue)
+	if !InWorkflow(*issue) || RoleFor(working) != fact.Role {
+		return refused("PHASE_NOT_RESTARTED", fmt.Sprintf("the %s does not work %s's phase %s, so nothing restarted it",
+			fact.Role, issue.Key, working)), nil
+	}
+	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	reason := "retry held phase"
+	if lingers {
+		return refusedLingering(*issue, fmt.Sprintf("the operator's restart of the %s", fact.Role)), nil
+	}
+	return intake.Result{}, e.retryPhase(ctx, tx, *issue, working, "the operator retried this phase's worker")
+}
+
+// retryPhase gives issue the phase from back — a held issue leaves its hold — and starts that
+// phase's worker, told why it runs again. It re-decides no CI
+// result: a settlement that reached the issue while it was held moved nothing, as it would
+// have moved nothing had it arrived with the issue in its phase (dispatch://INFRA-714/spec
+// R1), so there is no standing red left for the retry to act on, and the restored worker reads
+// the head's checks itself. From
+// reviewing a review round held open may already have both of its halves - the reviewer
+// completed before the hold, and its review was recorded while held - and ends here
+// (reviewRound); the reviewer is started only if the round is still open, since a second
+// completion of the same commit would be refused as not new. A round its reviewer completed that
+// nothing would end is stuck: the reviewer's task says why, so the restarted reviewer decides
+// it. The architect, who ordered the retry, is told nothing: a notice now would read as the
+// reviewer's answer to its request.
+//
+// Its callers have established that the tree does not linger, which is what holds every member
+// where it stood.
+func (e *Engine) retryPhase(ctx context.Context, tx pgx.Tx, issue record.Issue, from phase.Phase, reason string) error {
+	issue.Phase, issue.Hold = from, nil
+	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
+		return err
+	}
+	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+	if err != nil {
+		return err
+	}
 	if from == phase.Reviewing {
 		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 		if err != nil {
-			return intake.Result{}, err
+			return err
 		}
 		// The retry tells nothing of a stuck round: passed as its own before, it is stuck the same way.
-		r := e.reviewRound(*issue, reviewer, pr)
-		if moved, err := e.settleRound(ctx, tx, *issue, reviewer, pr, r, ""); err != nil || moved {
-			return intake.Result{}, err
+		r := e.reviewRound(issue, reviewer, pr)
+		if moved, err := e.settleRound(ctx, tx, issue, reviewer, pr, r, ""); err != nil || moved {
+			return err
 		}
 		if r.outcome == roundStuck {
 			reason += ": " + r.reason
 		}
 	}
-	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, pr, reason), "")
+	return e.start(ctx, tx, issue, RoleFor(from), task(issue, record.PhaseRow{}, pr, reason), "")
 }
 
 func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMove) (intake.Result, error) {

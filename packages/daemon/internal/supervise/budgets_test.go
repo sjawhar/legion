@@ -575,15 +575,15 @@ func TestRetryRelaunchesAFailedClaimOnItsSessionWithFreshBudgets(t *testing.T) {
 	}
 }
 
-// The operator's retry is an architect's alone. A failed phase worker is its architect's to retry,
-// and the daemon's controller its keeper's, so the operator's retry of either is refused, naming
-// that retry, and changes nothing.
+// The operator's retry is an architect's alone. A failed phase worker is retried through its
+// issue's phase, and the daemon's controller by its keeper, so the operator's retry of either
+// claim is refused, naming that retry, and changes nothing.
 func TestTheOperatorsRetryOfAFailedClaimThatIsNotAnArchitectsIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name, names string
 		claim       Claim
 	}{
-		{"a phase worker", "its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise", queuedClaim()},
+		{"a phase worker", "its architect's retry_or_escalate while the issue is held, the operator's retry while the issue stands in that worker's phase, and the next start of its role otherwise", queuedClaim()},
 		{"the controller", "the daemon's controller keeper retries the controller", controllerClaim()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

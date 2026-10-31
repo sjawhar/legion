@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+  A Claude Code phase worker whose turn ended on an API error is no longer reminded for it. Claude
+  Code runs `StopFailure` instead of `Stop` for such a turn, and its `${last_assistant_message}` is
+  the error text rather than anything the worker said, so that hook is the provider refusing the
+  turn and the phase-stall machine takes it as one: reminding the session would only buy another
+  refusal. What ends a session the provider keeps refusing is the daemon failing its claim on the
+  turn outcomes the bridge reports, and the reminder's record check now drops every reminder once
+  the daemon has failed this role's claim. `legion.daemonApiVersion` is 46, the contract that adds
+  `POST /legion/v1/claims/turn-outcome`.

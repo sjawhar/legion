@@ -144,6 +144,8 @@ function toolFor(
       tree,
       issue: "LEGION-208",
       secret: "claim-secret",
+      claimToken: `legion-legion-legion-208-${role}`,
+      generation: 1,
     }),
     controllerGrant: async () => {
       throw new Error("no controller grant expected");

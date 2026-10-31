@@ -179,14 +179,23 @@ func claimRequest(request string) command {
 
 // runClaimsRetry retries --claim, or with --failed every claim the daemon holds failed, in the
 // order the daemon lists them: an architect is relaunched on its session with fresh budgets, a
-// phase worker whose issue holds its phase is relaunched through that phase's retry, and the daemon
-// refuses the rest, naming why (api's retryClaim). Under --failed each retried claim prints its
-// line as --claim prints it, each refusal is reported naming its claim, and the command fails once
-// any was refused, having asked for every one.
+// phase worker is relaunched by the start of its issue's phase — the phase it is held from, or the
+// one it stands in, which is where an operator's stop leaves it — and the daemon refuses the rest,
+// naming why (api's retryClaim). Under --failed each retried claim prints its line as --claim
+// prints it, each refusal is reported naming its claim, and the command fails once any was
+// refused, having asked for every one. A claim an operator stopped is retired rather than failed,
+// so --failed passes over it: name it with --claim.
+//
+// --fresh-session starts the claim in a new session rather than resuming the recorded one, which
+// is what a claim whose provider refused its session needs: resuming it would be refused again.
+// The daemon starts one of its own accord for a claim the provider refused out of its budget,
+// whoever retried it, so the flag is for every other reason an operator has to leave a session
+// behind — an agent wedged in a way no budget counts among them.
 func runClaimsRetry(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	c := newClaimsCall("retry", stdout, stderr)
 	token := c.flags.String("claim", "", "the claim's token (this, or --failed)")
 	failed := c.flags.Bool("failed", false, "retry every claim the daemon holds failed")
+	fresh := c.flags.Bool("fresh-session", false, "start the claim in a new session rather than resuming the recorded one")
 	if code, ok := c.parse(args); !ok {
 		return code
 	}
@@ -203,8 +212,14 @@ func runClaimsRetry(ctx context.Context, args []string, stdout, stderr io.Writer
 	if !ok {
 		return 1
 	}
+	// A retry that asks for nothing sends no body at all, as every retry before the flag did: the
+	// daemon reads the body only when one is there.
+	var retry any
+	if *fresh {
+		retry = api.RetryRequest{FreshSession: true}
+	}
 	if !*failed {
-		return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/retry", nil, printClaim)
+		return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/retry", retry, printClaim)
 	}
 	_, answer, ok := c.request(ctx, op, http.MethodGet, claimsRoute, nil)
 	if !ok {
@@ -220,7 +235,7 @@ func runClaimsRetry(ctx context.Context, args []string, stdout, stderr io.Writer
 		if supervise.ClaimState(held.State) != supervise.StateFailed {
 			continue
 		}
-		if c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(string(held.Token))+"/retry", nil, printClaim) != 0 {
+		if c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(string(held.Token))+"/retry", retry, printClaim) != 0 {
 			fmt.Fprintf(c.stderr, "%s: %s was not retried\n", c.name, held.Token)
 			code = 1
 		}

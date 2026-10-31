@@ -211,15 +211,39 @@ type RequestOperatorClose struct{ Claim claim.Token }
 // RequestRetry relaunches a failed or retired claim's session with fresh budgets: the workflow's
 // decision that the role runs again — the tree's architect retrying a held phase, or a closed tree
 // re-admitted after its linger stopped every claim.
-type RequestRetry struct{ Claim claim.Token }
+//
+// FreshSession asks for a new session in place of the recorded one. It is a field rather than an
+// event of its own, as the closes are, because both answers are the same decision made by the same
+// caller — the claim runs again — and neither skips a check the other makes: it says only which
+// session the retry starts. A retry that asks for none still starts one when the provider refused
+// the recorded session out of its budget (freshSession).
+type RequestRetry struct {
+	Claim        claim.Token
+	FreshSession bool
+}
 
 // RequestOperatorRetry is the operator relaunching a failed architect through the API: the retry
 // RequestRetry makes, fresh budgets and the same session, from failed alone, for the root and
 // sub-architects nothing else relaunches (operatorRetry). A retired claim belongs to its tree's
 // lifecycle, which the workflow decides, so the operator's retry refuses it, as it refuses every
 // claim that has not failed. It is its own event, as the closes are, so the table answers each
-// caller's retry its own way.
-type RequestOperatorRetry struct{ Claim claim.Token }
+// caller's retry its own way. FreshSession is `legion claims retry --fresh-session`, as
+// RequestRetry takes it.
+type RequestOperatorRetry struct {
+	Claim        claim.Token
+	FreshSession bool
+}
+
+// RequestForgetSession drops the session a claim that runs nothing recorded, so that whatever
+// launches it next spawns a fresh agent instead of resuming those turns: `legion claims retry
+// --fresh-session` of a phase worker that failed or that an operator stopped, whose session is the
+// operator's to leave behind (api's retryClaim).
+//
+// It launches nothing, which is what makes it its own event rather than another retry: a phase
+// worker is relaunched by the workflow's start of its phase, so the two halves of that retry have
+// different owners — which session the claim starts on is the operator's to say, and when it
+// starts is the workflow's.
+type RequestForgetSession struct{ Claim claim.Token }
 
 // RequestDeliver gives the claim a task. ID is a durable outbox delivery id when an outbox row
 // drives the request; an empty ID asks the machine to mint an ordinary operator delivery id.
@@ -246,6 +270,23 @@ type RequestExit struct {
 	Reason     string
 }
 
+// RequestTurnOutcome is the outcome of one turn, reported by the producer that ended it: the
+// pi-legion agent_end hook for an Oh My Pi session, the Claude bridge for a Claude Code one, each
+// over the claim's own HTTP route. Sequence is that producer's own count of the turns it has
+// ended at Generation, from 1, and the pair is the key the claim keeps the report under
+// (recordTurnOutcome).
+//
+// Neither is fenced. A report naming a generation the claim has left is not stale: it is a turn of
+// that generation, which belongs in its own place in the order the run is derived in, and the
+// secret the route authenticates is the current registration's either way.
+type RequestTurnOutcome struct {
+	Claim      claim.Token
+	Generation uint64
+	Sequence   uint64
+	Refused    bool
+	Message    string
+}
+
 func (RuntimeObservation) isEvent()   {}
 func (StreamHello) isEvent()          {}
 func (StreamTurnStart) isEvent()      {}
@@ -268,8 +309,10 @@ func (RequestIssueClose) isEvent()    {}
 func (RequestOperatorClose) isEvent() {}
 func (RequestRetry) isEvent()         {}
 func (RequestOperatorRetry) isEvent() {}
+func (RequestForgetSession) isEvent() {}
 func (RequestDeliver) isEvent()       {}
 func (RequestExit) isEvent()          {}
+func (RequestTurnOutcome) isEvent()   {}
 
 // eventKind is what the table is keyed on beside the state: an event's type, with a Timer split
 // by its kind, because the six waits mean six different things.
@@ -302,8 +345,10 @@ const (
 	onOperatorClose eventKind = "request_operator_close"
 	onRetry         eventKind = "request_retry"
 	onOperatorRetry eventKind = "request_operator_retry"
+	onForgetSession eventKind = "request_forget_session"
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
+	onTurnOutcome   eventKind = "request_turn_outcome"
 
 	onStalePlugin eventKind = "stale_plugin"
 
@@ -356,10 +401,14 @@ func kindOf(ev Event) eventKind {
 		return onRetry
 	case RequestOperatorRetry:
 		return onOperatorRetry
+	case RequestForgetSession:
+		return onForgetSession
 	case RequestDeliver:
 		return onDeliver
 	case RequestExit:
 		return onExit
+	case RequestTurnOutcome:
+		return onTurnOutcome
 	}
 	return ""
 }
@@ -383,10 +432,14 @@ func requestName(ev Event) (string, bool) {
 		return "close", true
 	case RequestRetry, RequestOperatorRetry:
 		return "retry", true
+	case RequestForgetSession:
+		return "forget session", true
 	case RequestDeliver:
 		return "deliver", true
 	case RequestExit:
 		return "exit", true
+	case RequestTurnOutcome:
+		return "turn outcome", true
 	}
 	return "", false
 }
@@ -617,6 +670,16 @@ func fillTable(t *builder) {
 	t.ignore(onOperatorRetry, "a suspended claim is resumed, not retried", StateSuspended)
 	t.ignore(onOperatorRetry, "a retired claim runs again only when the workflow starts it", StateRetired)
 
+	// The session a claim that runs nothing is to leave behind, asked of a failed claim and of one
+	// an operator stopped: those two are where no agent is reading the session, and where the
+	// claim's next launch is still to come.
+	t.row(onForgetSession, "forget the recorded session, so whatever launches the claim next spawns a new one",
+		forgetRecordedSession, nil, StateFailed, StateRetired)
+	t.ignore(onForgetSession, "a queued claim records no session; its launch spawns one", StateQueued)
+	t.ignore(onForgetSession, "the previous launch's pane is still uncertain", StateLaunchUncertain)
+	t.ignore(onForgetSession, "a suspended claim keeps its session for its resume; stop it to leave that session behind", StateSuspended)
+	t.ignore(onForgetSession, "the claim's agent is running the session; stop the claim before giving it another", live...)
+
 	t.row(onDeliver, "queue the task; it goes when the claim is next ready or idle", deliverLater, nil,
 		StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateWorking)
 	t.ignore(onDeliver, "the previous launch's pane is still uncertain", StateLaunchUncertain)
@@ -630,6 +693,18 @@ func fillTable(t *builder) {
 		[]ClaimState{StateRetired, StateSuspended}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onExit, "the exit of a process the daemon already ended", nothingToDo, nil, gone...)
 	t.ignore(onExit, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
+
+	// The outcome of a turn, from the producer that ended it. Every live state takes one: the
+	// report is the producer's HTTP call, which races the turn's end on the worker stream and the
+	// relaunch of a process that is coming up, and a report is about the provider rather than
+	// about where the claim stands.
+	t.row(onTurnOutcome, "record the turn's outcome; the claim fails once the provider's refusals reach the launch failure limit",
+		turnOutcome, []ClaimState{StateFailed}, live...)
+	t.ignore(onTurnOutcome, "no launch has minted a boot token", StateQueued)
+	t.ignore(onTurnOutcome, "the previous launch's pane is still uncertain", StateLaunchUncertain)
+	t.ignore(onTurnOutcome, "the claim is suspended and its process stopped", StateSuspended)
+	t.ignore(onTurnOutcome, failedClaim, StateFailed)
+	t.ignore(onTurnOutcome, retiredClaim, StateRetired)
 }
 
 type builder struct{ rules map[key]rule }
@@ -1127,16 +1202,28 @@ func resumeByRule(m *Machine, ctx context.Context, ev Event) error {
 // retry is a failed or retired claim given another run: its budgets start over, and its session,
 // when it has one, is relaunched after the process the claim last ran is gone. A pending delivery
 // the claim kept goes once the agent is ready.
-func retry(m *Machine, ctx context.Context, _ Event) error {
+//
+// A retry that asks for a new session, and one of a claim whose provider refused the recorded
+// session out of its budget, forgets that session instead, so the launch spawns a fresh agent
+// (freshSession): relaunching a session every turn of which was refused would be refused again,
+// and the claim would fail its way through another budget having done nothing.
+func retry(m *Machine, ctx context.Context, ev Event) error {
 	m.claim.Budgets = Budgets{}
+	if fresh, why := freshSession(ev, m.claim, m.deps.Limits.LaunchFailures); fresh {
+		m.log.Info("supervise: retrying in a new session", "why", why, "session", m.claim.Session,
+			"refusedRun", m.claim.RefusedRun())
+		m.forgetSession()
+	}
 	return m.revive(ctx)
 }
 
 // operatorRetry is the operator's retry of a failed claim: retry, for an architect, whether its
 // tree's root or a sub-architect, which nothing else relaunches. Any other claim has a retry of its
-// own, so it is refused, naming that retry: a phase worker's is its architect's retry_or_escalate
-// while its issue is held and the next start of its role otherwise, and the daemon's controller's is
-// its keeper. A claim's role never changes, so the refusal cannot race the decision it guards.
+// own, so it is refused, naming that retry: a phase worker's goes through its issue's phase — the
+// architect's retry_or_escalate while the issue is held, the operator's own `legion claims retry`
+// while the issue stands in that worker's phase (api's retryClaim), and the next start of its role
+// otherwise — and the daemon's controller's is its keeper. A claim's role never changes, so the
+// refusal cannot race the decision it guards.
 func operatorRetry(m *Machine, ctx context.Context, ev Event) error {
 	switch m.claim.Role {
 	case claim.RoleArchitect:
@@ -1146,8 +1233,19 @@ func operatorRetry(m *Machine, ctx context.Context, ev Event) error {
 			Err: fmt.Errorf("%w; the daemon's controller keeper retries the controller", ErrRetryArchitectOnly)}
 	default:
 		return &RefusedError{State: m.claim.State, Request: "retry",
-			Err: fmt.Errorf("%w; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise", ErrRetryArchitectOnly)}
+			Err: fmt.Errorf("%w; a phase worker is retried through its issue's phase: its architect's retry_or_escalate while the issue is held, the operator's retry while the issue stands in that worker's phase, and the next start of its role otherwise", ErrRetryArchitectOnly)}
 	}
+}
+
+// forgetRecordedSession drops the session a claim that runs nothing recorded (forgetSession) and
+// launches nothing: whatever starts the claim next — for a phase worker, the workflow's own start
+// of its phase — then spawns a fresh agent rather than resuming the turns the operator asked to
+// leave behind.
+func forgetRecordedSession(m *Machine, ctx context.Context, _ Event) error {
+	m.log.Info("supervise: forgetting the recorded session at the operator's ask", "session", m.claim.Session,
+		"sessionFile", m.claim.SessionFile, "state", string(m.claim.State))
+	m.forgetSession()
+	return m.persist(ctx)
 }
 
 // stop ends one claim: the runtime releases it, and it retires. A release that fails changes

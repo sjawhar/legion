@@ -11,7 +11,12 @@ const implementer = {
   issue: "LEGION-208",
   role: "implementer",
   secret: "secret",
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 1,
 } as const;
+
+/** A turn the worker ended by saying `text`, as `turnEndOf` classifies it on Oh My Pi. */
+const said = (text: string) => ({ kind: "settle", lastAssistantText: text }) as const;
 
 // A daemon that never answers the record check: the check fails open once its bound passes, and
 // the read it started is aborted then rather than left open, one request per reminder.
@@ -35,7 +40,7 @@ test("the record check aborts a daemon read that outlives its bound, and reminds
   });
   reminder.apply({ kind: "assignment" });
 
-  const continuation = await reminder.settle("Pushed.");
+  const continuation = await reminder.settle(said("Pushed."));
 
   expect(continuation).toBeString();
   expect(handed).toHaveLength(1);
@@ -119,8 +124,8 @@ test("a notice accepted after its run ended acknowledges nothing of the next run
 
   // The run's continuation, then the timer reminder that brings the count to the threshold, whose
   // publish the listener has not answered yet.
-  expect(await reminder.settle("Pushed.")).toBeString();
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Pushed."))).toBeString();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   const delivered = fireLast(timers);
   await reached.promise;
   const firstKey = published[0]?.idempotencyKey;
@@ -128,7 +133,7 @@ test("a notice accepted after its run ended acknowledges nothing of the next run
 
   // The worker answers in the reminder's own turn, and its next settle opens a new run.
   reminder.apply({ kind: "tool-call" });
-  expect(await reminder.settle("Working on it.")).toBeString();
+  expect(await reminder.settle(said("Working on it."))).toBeString();
 
   listener.resolve({});
   await delivered;
@@ -140,7 +145,7 @@ test("a notice accepted after its run ended acknowledges nothing of the next run
   });
 
   // The new run reaches the threshold and tells the architect under a key of its own.
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   await fireLast(timers);
   expect(published).toHaveLength(2);
   expect(published[1]?.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
@@ -165,8 +170,8 @@ test("a notice the listener failed is published again by the run's next reminder
     },
   });
 
-  expect(await reminder.settle("Pushed.")).toBeString();
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Pushed."))).toBeString();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   await fireLast(timers);
   expect(published).toHaveLength(1);
   expect(warned).toEqual(["legion: the architect was not told its worker is stalled"]);
@@ -174,14 +179,14 @@ test("a notice the listener failed is published again by the run's next reminder
   expect(failed).toMatchObject({ count: 2, reported: false });
   expect(failed?.reportKey).toBe(published[0]?.idempotencyKey);
 
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   await fireLast(timers);
   expect(published).toHaveLength(2);
   expect(published[1]?.idempotencyKey).toBe(failed?.reportKey);
   expect(entries.at(-1)).toMatchObject({ count: 3, reported: true, reportKey: failed?.reportKey });
 
   // Accepted once is told once.
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   await fireLast(timers);
   expect(published).toHaveLength(2);
 });
@@ -197,8 +202,8 @@ test("a reminder the host failed to deliver is not counted, and the next is arme
     },
   });
 
-  expect(await reminder.settle("Pushed.")).toBeString();
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Pushed."))).toBeString();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   expect(timers).toHaveLength(1);
   await fireLast(timers);
 
@@ -230,8 +235,8 @@ test("a failed delivery arms nothing once a turn has started meanwhile", async (
     },
   });
 
-  expect(await reminder.settle("Pushed.")).toBeString();
-  expect(await reminder.settle("Still here.")).toBeUndefined();
+  expect(await reminder.settle(said("Pushed."))).toBeString();
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
   const delivered = fireLast(timers);
   await writing.promise;
   reminder.turnStarted();
@@ -239,4 +244,76 @@ test("a failed delivery arms nothing once a turn has started meanwhile", async (
   await delivered;
 
   expect(timers).toHaveLength(1);
+});
+
+// The whole of dispatch://INFRA-264: every turn of that implementer was refused by the provider,
+// and every reminder bought another refused turn. A refused turn earns neither the continuation
+// nor a timer, so the reminding stops until something the worker can read happens.
+test("a turn the provider refused earns no reminder and arms no timer", async () => {
+  const { reminder, timers, sent, entries } = rig({});
+  const recorded = entries.length;
+
+  expect(
+    await reminder.settle({ kind: "refused", message: "Overloaded: the model is busy" })
+  ).toBeUndefined();
+
+  expect(timers).toEqual([]);
+  expect(sent).toEqual([]);
+  // Nothing of the state moved, the words the worker last said included: the provider's are not
+  // the worker's, and the architect's notice quotes the worker.
+  expect(entries).toHaveLength(recorded);
+
+  // The next turn the worker does answer is reminded as any first settle of a run is.
+  expect(await reminder.settle(said("Pushed."))).toBeString();
+});
+
+// The daemon failing this role's claim is its word that the session is finished: the retry runs
+// in a session of its own, and a reminder written into this one reaches nobody who can act on it.
+// It is what stops the reminding on Claude Code, whose turns this host does not settle.
+test("no reminder is sent once the daemon has failed this role's claim", async () => {
+  // Only the two fields the record check reads, cast because the state's own schema would demand
+  // the whole daemon document for them; `rig` above reads its empty state the same way.
+  const failed = {
+    issues: {
+      "LEGION-208": {
+        phase: "implementing",
+        workers: { implementer: { claim: { state: "failed" } } },
+      },
+    },
+  } as unknown as LegionState;
+  const timers: ArmedTimer[] = [];
+  const sent: string[] = [];
+  const debugged: string[] = [];
+  const reminder = createPhaseReminder({
+    sendReminder: (text) => {
+      sent.push(text);
+    },
+    armTimer: (callback, delayMs) => {
+      timers.push({ callback, delayMs });
+    },
+    saveEntry: () => {},
+    claim: () => implementer,
+    readState: async () => failed,
+    publisher: () => undefined,
+    project: "legion",
+    limits: DEFAULT_STALL_LIMITS,
+    log: { debug: (message) => debugged.push(message), warn: () => {} },
+  });
+  // The continuation this first settle of a run would earn: the record check drops it.
+  reminder.apply({ kind: "assignment" });
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
+  expect(timers).toEqual([]);
+
+  // And the timer's reminder, for a run the worker has already been reminded of once: that one
+  // is armed without a check and dropped by the check the timer runs.
+  reminder.restore({ state: "open", count: 1, reported: false });
+  expect(await reminder.settle(said("Still here."))).toBeUndefined();
+  expect(timers).toHaveLength(1);
+  await fireLast(timers);
+
+  expect(sent).toEqual([]);
+  expect(debugged).toEqual([
+    "legion: the daemon has failed this claim; no reminder is sent",
+    "legion: the daemon has failed this claim; no reminder is sent",
+  ]);
 });

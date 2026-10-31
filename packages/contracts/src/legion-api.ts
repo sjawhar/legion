@@ -558,6 +558,36 @@ export const LegionReadyRequest = z.strictObject({
 
 export type LegionReadyRequestBody = z.output<typeof LegionReadyRequest>;
 
+/** `claim.TurnOutcomeRequest`, the body of `POST /legion/v1/claims/turn-outcome`: how one turn of
+ * the claim's agent ended, reported by the producer that ended it — pi-legion's `agent_end` hook
+ * for an Oh My Pi session — authenticated by the registration's secret as the ready is.
+ * `sequence` is that producer's own count of the turns it has ended at `generation`, from 1, and
+ * the daemon keeps the report under the pair, so a report that arrives late or out of order lands
+ * in its own place and the run of refused turns it derives is the same either way. `message` is
+ * what the provider said about a refusal, and a clean turn carries none. */
+export const LegionTurnOutcomeRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  generation: z.number().int().positive(),
+  sequence: z.number().int().positive(),
+  outcome: z.enum(["clean", "refused"]),
+  message: z.string().optional(),
+});
+
+export type LegionTurnOutcomeRequestBody = z.output<typeof LegionTurnOutcomeRequest>;
+
+/** `claim.TurnOutcomeResponse`, the answer to a reported turn: `refusedRun` is the run of refused
+ * turns the claim's reports now end with, and `failed` whether this report took that run to
+ * `launch_failure_limit` and failed the claim. The producer acts on neither — its turn is over —
+ * and logs them, which is where an operator sees the count that failed a claim being made. */
+export const LegionTurnOutcomeResponse = z.strictObject({
+  refusedRun: z.number().int().nonnegative(),
+  failed: z.boolean(),
+});
+
+export type LegionTurnOutcome = z.output<typeof LegionTurnOutcomeResponse>;
+
 /** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
  * fetched, or a daemon-launched controller's own boot token): the project's controller role token,
