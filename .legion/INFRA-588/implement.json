@@ -2,167 +2,74 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-30T00:33:03Z",
-  "round": "review round 7 answered: worker_image filter, deterministic closings, stale text, autodeploy helper, operator section",
+  "completed": "2026-10-31T04:20:01Z",
+  "round": "final integration round: main forward-merged after INFRA-629/630/631/632; INFRA-633 acceptance checks run from main",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "073ea88737c4f30bf562b53c4d1e20fbc8f95c9e",
-  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6511905286",
-  "reviewAnswered": "Review round 7 (1 Important, 4 Minor) in 073ea88737c4; 4 threads answered and resolved. Finding 2 is fixed in the architect's form (red test a25cec37291a calls Check(versions) unmodified): closings is an unexported slice, one entry per runner; Check needs exactly one closing file (none or two is an error); CheckClosedAt takes an explicit number for crafted sets.",
+  "head": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
+  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6538908248",
+  "reviewAnswered": "Architect: final integration round (one forward merge, fragment not CHANGELOG edit, layout checker exit 0, closings raised to main last numbers, INFRA-633 checks 1-5)",
   "proof": [
     {
-      "criterion": "The required lint job's image-trigger check passes with migrationid in the worker image",
-      "surface": ".github/scripts/check-image-trigger-paths.sh and check-ci-filters.sh, which the lint and ci-filters jobs run",
-      "command": "PYTHONUSERBASE=$TMPDIR/pyuser bash .github/scripts/check-image-trigger-paths.sh; .github/scripts/check-ci-filters.sh",
-      "observed": "every image trigger covers every input its build reads (5 image build(s)), exit 0; 25 gates exit 0",
-      "headSha": "073ea88737c4f30bf562b53c4d1e20fbc8f95c9e",
-      "negativeControl": "with packages/envoy/migrationid/** removed from worker_image: exit 1, 'packages/envoy/migrationid/migrationid.go is built into the image'"
+      "criterion": "INFRA-633 #1 changelog fragments",
+      "surface": "git merge-tree on commits built off main d7e1daaaaf70; changelog-fold.yaml run on main",
+      "command": "bash $TMPDIR/i588/acc12.sh d7e1daaaaf70 (dispatch://INFRA-588/artifact/integration-merge-checks-txt); git diff e65900f4438b cc825086d07c",
+      "observed": "two fragments in packages/envoy, and envoy+daemon fragments: exit 0 both ways; fold run 41098469188 pushed e65900f44..cc825086d: 54 fragments deleted, 7 CHANGELOG.md files gained lines, 0 removed",
+      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
+      "negativeControl": "the before window: 89 of 253 conflicting merges were changelog-only when entries were edited into CHANGELOG.md"
     },
     {
-      "criterion": "A branch taking the next number fails on its own, deterministically, and both red tests pass unmodified",
-      "surface": "branches off the head (nextnumber.sh) and each package's identifier tests; go test suites on the real Postgres",
-      "command": "bash $TMPDIR/i588/nextnumber.sh 073ea887 $TMPDIR/i588/nn2; go test (daemon ./internal/store/... ./internal/api/; envoy ./migrationid/ ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/); LOCPATH=$TMPDIR/locales-out bash packages/envoy/deploy/scripts/autodeploy_test.sh",
-      "observed": "next-number branch alone fails both tests ('the numbered migrations ended at 61' / '141'); timestamp branches pass alone and merged; TestLoadRefusesANewMigrationNumberedAfterTheShippedSet and TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet pass, files unchanged; all suites ok; autodeploy PASS",
-      "headSha": "073ea88737c4f30bf562b53c4d1e20fbc8f95c9e",
-      "negativeControl": "TestCheckFindsTheSeriesByItsClosingFile: a set with no closing file and a set with two series' closing files are refused; TestEachSeriesClosesOnce refuses a duplicate entry"
+      "criterion": "INFRA-633 #2 built claude-envoy files",
+      "surface": "git merge-tree from main; bun run check-dist; claude-envoy-rebuild.yaml on main",
+      "command": "bash acc12.sh d7e1daaaaf70; (cd packages/claude-envoy && bun run check-dist); gh run list --workflow claude-envoy-rebuild.yaml --branch main",
+      "observed": "two skills, and contracts+envoy-client: exit 0 both ways, 0 built files in each branch; check-dist: dist/ and legion/ match a fresh build; run 41164510507 at d7e1daaaaf70 success",
+      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
+      "negativeControl": "before the fix packages/claude-envoy/legion/** conflicted in 25 merges (by-glob table)"
     },
     {
-      "criterion": "Migration identifiers two concurrent pull requests cannot both claim: a branch that takes the next number fails on its own",
-      "surface": "branches built off the head with git plumbing (nextnumber.sh), and each package's identifier test on each tree",
-      "command": "bash $TMPDIR/i588/nextnumber.sh 0288986f $TMPDIR/i588/nn",
-      "observed": "next-number branch alone (daemon 0062_proof_nx, Dispatch 0142_proof_nx): both tests FAIL naming the file and the closing file; timestamp branch alone and two timestamp branches merged (merge-tree exit 0): both ok",
-      "headSha": "0288986f2521c4350029355134ab7989a6a9876b",
-      "negativeControl": "the same next-number branch passed both tests at 9ce23f73feea (tester, test.json round 8)"
+      "criterion": "INFRA-633 #3 restructured guides",
+      "surface": "git merge-tree on commits off main d7e1daaaaf70 and off c892b97d",
+      "command": "bash $TMPDIR/i588/guides/merge-check.sh",
+      "observed": "5 guides x {sentence pair, list pair}: exit 0 both ways on main",
+      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
+      "negativeControl": "the same 10 pairs on each file at c892b97d: exit 1 both ways, conflict naming the file"
     },
     {
-      "criterion": "The tester's red tests pass unmodified, and the store suites and filter check pass",
-      "surface": "go test against the real Postgres; check-ci-filters.sh",
-      "command": "go test ./internal/store/... (daemon); go test ./migrationid/ ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/ (envoy); .github/scripts/check-ci-filters.sh",
-      "observed": "TestLoadRefusesANewMigrationNumberedAfterTheShippedSet and TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet pass, files unchanged against 7feb642d6bbb and a25cec37291a; all suites ok (dispatch/store 272.461s); 25 gates exit 0",
-      "headSha": "0288986f2521c4350029355134ab7989a6a9876b",
-      "negativeControl": "TestCheckRefusesANumberAboveTheFileTheSeriesClosedAt: a closed set plus the next number is refused naming it"
+      "criterion": "INFRA-633 #4 guidance",
+      "surface": "git grep on main",
+      "command": "git grep on origin/main for changelog-fragment, semantic-line-break and built-file guidance",
+      "observed": "AGENTS.md fragment convention, layout rule AGENTS.md:6-9,574-578 and packages/envoy/AGENTS.md:5-8, claude-envoy AGENTS.md:82,99,249 and README.md:298 say a PR never commits dist/ or legion/; no guide tells a PR to commit them",
+      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
+      "negativeControl": "grep for commit-the-built-files wording returns only README.md:174 naming main committed bundle"
     },
     {
-      "criterion": "Main's 0141 and the identifier rule: both packages' identifier tests pass on main's set and on a merged tree of two concurrent migrations, with no last number recorded",
-      "surface": "git merge-tree on two branches off the head, and go test on the merged tree",
-      "command": "bash $TMPDIR/i588/concurrent.sh 9ce23f73 $TMPDIR/i588/cc4; go test ./internal/store/migrations/ (daemon) and ./internal/dispatch/store/ -run TestMigrationSetTakesNumbersThenTimestamps (envoy) in cc4/merged and cc4/clash",
-      "observed": "merge-tree both ways exit 0 (tree 51e0a00b278e); merged tree (Dispatch 0001..0141 plus two timestamps): both tests ok",
-      "headSha": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
-      "negativeControl": "cc4/clash (b renamed to a's timestamp, no git conflict): both tests FAIL naming 20261030100000_concurrent_a.up.sql and _b.up.sql"
+      "criterion": "INFRA-633 #5 measurement",
+      "surface": "scripts/conflicts/measure.ts against sjawhar/legion GitHub history",
+      "command": "bun scripts/conflicts/measure.ts --since 2026-10-28T09:12:59Z --until 2026-10-31T04:00:00Z --branch-prefix legion/ --compare-with before.json --fixed (8 globs, the four sibling merges)",
+      "observed": "exit 0, 291 s, 864M workdir; 130 PRs read, 403 conflicting merges; 0 merges in the after state for every fixed glob; changelog-only 89/253 (35.2%) -> 14/403 (3.5%); output dispatch://INFRA-588/artifact/conflict-integration-2026-10-28-to-31-txt",
+      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
+      "negativeControl": "every fixed-file conflict in the window is before (branch cut before the fix) or transition, none after"
     },
     {
-      "criterion": "The auto-deployer's rollback guard detects a migration applied below the highest version",
-      "surface": "packages/envoy/deploy/scripts/autodeploy_test.sh (fake docker/psql, the deployer's real --once path)",
-      "command": "LOCPATH=$TMPDIR/locales-out bash packages/envoy/deploy/scripts/autodeploy_test.sh",
-      "observed": "PASS, including the new case: set 1..112 plus applied 20260115123000, the failed image applies 113, max unchanged, the deployer refuses the rollback; and the old-form record case",
-      "headSha": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
-      "negativeControl": "the guard reverted to comparing max(version) (every older case green) fails exactly the new case: rolling back to old-image (schema 20260115123000 (114 applied))"
-    },
-    {
-      "criterion": "Each migration runs once on main-migrated, pre-merge, out-of-order and fresh databases, and no prepared read fails during a rolling deploy",
-      "surface": "each tree's real runner and Dispatch Pool.Healthy on PostgreSQL 18.6 + pgvector",
-      "command": "bash $TMPDIR/i588/pgproof2.sh $TMPDIR/i588/cc4; bash $TMPDIR/i588/rollproof2.sh $TMPDIR/i588/cc4",
-      "observed": "every database ends with both timestamps x1, 1 row in each new table, bigint, second migrate 0 (Dispatch from main 141 -> 20261030110000); main's pod over this head: 41 reads 0 failed, column integer; this release's pod over the merged tree: 41 reads 0 failed, column bigint",
-      "headSha": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
-      "negativeControl": "the widen-every-boot head c635b7a9 over main's pod: 1 of 41 reads failed, cached plan must not change result type"
-    },
-    {
-      "criterion": "The suites and the router's filter check pass at the head",
-      "surface": "go test against the real Postgres; check-ci-filters.sh; scripts/conflicts lanes",
-      "command": "daemon go vet -tags e2e ./... and go test ./internal/store/... ./internal/api/; envoy go vet ./... and go test ./migrationid/ ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/ and ./cmd/dispatch -run 'Healthz|Census|Migrat'; .github/scripts/check-ci-filters.sh; biome and bun test scripts/conflicts",
-      "observed": "all ok (daemon store 92.112s, api 195.396s; dispatch/store 268.393s); check-ci-filters 25 gates exit 0; conflicts 40 pass",
-      "headSha": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
-      "negativeControl": "migrationid tests refuse a gap, a 13-digit value, month 13, 31 February and a 15-digit value, and report every problem joined"
-    },
-    {
-      "criterion": "After the version columns widen from int4 to bigint, no prepared or cached read of them fails, including old pods' open connections during a rolling deploy",
-      "surface": "a rolling deploy on PostgreSQL 18.6 + pgvector: the old release's real Pool.Healthy every 50 ms on one connection while the new release's real store.Migrate boots on the same database (rollproof.sh)",
-      "command": "bash $TMPDIR/i588/rollproof.sh (cc3 binaries built from the fork point on main, this head, and a merged tree with two timestamped migrations) plus the whole path main -> this release -> later release",
-      "observed": "this release over main's pod: 41 reads, 0 failed, column stays integer; a later release with timestamped migrations over this release's pods: 41 reads, 0 failed, column bigint; whole path from main: 0 failed, bigint at the end",
-      "headSha": "7ab3f40f9cdf4e72ede9d871ece4dc13901d0a36",
-      "negativeControl": "the previous head c635b7a9 (widening at every boot) over main's pod: 'cached plan must not change result type', 1 of 41 reads failed"
-    },
-    {
-      "criterion": "The tester's red test passes unmodified, and the migrate tests still pass",
-      "surface": "go test against the real Postgres",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable' go test ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/ and ./cmd/dispatch -run 'Healthz|Census|Migrat'",
-      "observed": "all ok (dispatch/store 289.528s); TestMigrateWithNoTimestampedMigrationKeepsThePreviousReleasesHealthProbeAnswering, TestHealthyAnswersAcrossTheWideningOfTheVersionColumn, TestMigrateWidensAnIntegerVersionColumnAndRecordsATimestamp, both out-of-order tests, TestMigrateCreatesEmptySchemaAndIsIdempotent and TestMigrateSkipsVersionRecordedOutsideTheRunner pass; the red test's file is unchanged against 017d1df01dcb",
-      "headSha": "7ab3f40f9cdf4e72ede9d871ece4dc13901d0a36",
-      "negativeControl": "the red test fails on 7fcdf0e1 with 'cached plan must not change result type' (tester, test.json)"
-    },
-    {
-      "criterion": "Two concurrent branches that each add a migration to each runner merge in either order with no conflict",
-      "surface": "git merge-tree on commits built off the head with git plumbing (concurrent.sh)",
-      "command": "bash $TMPDIR/i588/concurrent.sh c635b7a9 $TMPDIR/i588/cc2 (branch a 20261030100000_concurrent_a, branch b 20261030110000_concurrent_b; daemon and Dispatch with census)",
-      "observed": "merge-tree a into b and b into a: exit 0, the same tree ce3554a71b75972d4b78654845feed6f6136f45a",
-      "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
-      "negativeControl": "the same tree with b renamed to a's timestamp also merges in git, and both packages' identifier tests fail on it naming 20261030100000_concurrent_a and _b"
-    },
-    {
-      "criterion": "Each migration runs exactly once on a database migrated before either merge and on a fresh one, against a real Postgres",
-      "surface": "each tree's own runner (store.Open + Migrate) on PostgreSQL 18.6 + pgvector 0.8.7",
-      "command": "bash $TMPDIR/i588/pgproof2.sh $TMPDIR/i588/cc2 (databases migrated by main's code, at this head, with b merged first, and fresh; then the merged tree twice)",
-      "observed": "every database ends with 20261030100000 x1 and 20261030110000 x1 recorded, 1 row in each new table and a bigint version column; daemon from main applied=2 then 0, b-first applied=1 then 0, fresh 63 then 0; Dispatch from main reads schema_version 140 -> 20261030110000",
-      "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
-      "negativeControl": "before c635b7a9 the main-to-merged Dispatch run read 140 -> 0; TestHealthyAnswersAcrossTheWideningOfTheVersionColumn fails with cached plan must not change result type without it"
-    },
-    {
-      "criterion": "A test in each package fails when two migration files share an identifier; existing migrations unchanged; the suites and the router's filter check pass",
-      "surface": "go test against the real Postgres, and .github/scripts/check-ci-filters.sh",
-      "command": "go test ./internal/store/... ./internal/api/ (daemon); go test ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/ and ./cmd/dispatch -run 'Healthz|Census|Migrat' (envoy); .github/scripts/check-ci-filters.sh",
-      "observed": "all ok (daemon store 99.983s, api 201.983s; dispatch/store 277.887s); check-ci-filters exit 0, 25 gates; the new daemon files are selected by the test job and the Dispatch ones by envoy-go; 0 existing migration .sql files changed",
-      "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
-      "negativeControl": "CheckIdentifiers refuses a missing number, a new next-number file, a 13-digit and an impossible timestamp (asserted in both packages)"
-    },
-    {
-      "criterion": "The scripts/conflicts steps run in ci.yaml's router only when the script can change, and check-ci-filters.sh passes",
-      "surface": "ci.yaml's changes filter and router job, read by .github/scripts/check-ci-filters.sh and workflow_paths.PathsFilter (dorny/paths-filter's model)",
-      "command": ".github/scripts/check-ci-filters.sh; .github/scripts/check-ci-filters.test.sh; .github/scripts/ci-ok.test.sh; PathsFilter(conflicts_script).covers(<path>) over sample paths",
-      "observed": "check-ci-filters exit 0: conflicts-script: 37 files, 0 uncovered (filter conflicts_script), 25 gates; tests 127 and 40 passed; selects scripts/conflicts/**, package.json, bun.lock, .bun-version, biome.json, ci.yaml; skips scripts/dispatch/ask-census.ts, packages/envoy/CHANGELOG.md, packages/daemon/main.go, docs/kubernetes.md; GitHub reports the PR MERGEABLE at ddd6873c284d",
-      "headSha": "ddd6873c284d518d8e05eeb16e7ecc7ee04b20e8",
-      "negativeControl": "the gate's read pointed at scripts/dispatch/** -> check-ci-filters exit 1, conflicts-script: 41 files, 19 uncovered, each named (restored after)"
-    },
-    {
-      "criterion": "The script and its tests are unchanged and green at the merge head",
-      "surface": "bun test scripts/conflicts and the lint and typecheck lanes the new job runs",
-      "command": "jj diff --stat --from 49f9e1af --to ddd6873c284d scripts/conflicts; bunx biome check --error-on-warnings scripts/conflicts; bunx tsc --noEmit -p scripts/conflicts; bun test scripts/conflicts",
-      "observed": "0 files changed; biome clean on 14 files; tsc exit 0; 40 pass, 0 fail",
-      "headSha": "ddd6873c284d518d8e05eeb16e7ecc7ee04b20e8",
-      "negativeControl": "rounds 0-2 negative controls (PR comment 6448930344) stand, the code being byte-identical"
-    },
-    {
-      "criterion": "The port reproduces the before measurement (P1, before numbers unchanged)",
-      "surface": "the CLI on the Python run's raw records, fetched again from dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json into the recreated scratch volume",
-      "command": "dispatch doc-read --issue INFRA-588 --artifact conflict-baseline-2026-10-20-to-27-json | tail -n +3 > \"$TMPDIR/i588/before.json\" && bun scripts/conflicts/measure.ts --from-json \"$TMPDIR/i588/before.json\" --branch-prefix legion/",
-      "observed": "exit 0; 126 PRs read (68 merged, 58 other), 80 carrying, 253 conflicting merges, tiers 89 and 108, packages/envoy/CHANGELOG.md 89 events in 39 PRs: the same numbers as rounds 0-2",
-      "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
-      "negativeControl": "rounds 0-2 (PR comment 6448930344): JSON without prs and records without createdAt -> exit 2"
-    },
-    {
-      "criterion": "Live measurement, fix states and the comparison (P2-P4)",
-      "surface": "the CLI against sjawhar/legion on GitHub",
-      "command": "as recorded in round 2 at this same code head: --since 2026-10-20 --until 2026-10-27T11:21:00Z --branch-prefix legion/ (fresh workdir); plus --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496'; and --since 2026-10-27T11:21:00Z --compare-with before.json",
-      "observed": "round 2 at 5cfd10800698 (code unchanged since): 141 listed, 128 read, merged section byte-equal to P1; envoy CHANGELOG 79/10/2; comparison before column 126/80/253/89/108 (https://github.com/sjawhar/legion/pull/2411#issuecomment-6448930344)",
-      "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
-      "negativeControl": "records with merge cd3c748767ee's upstream parent absent, --fixed on --from-json -> exit 1 naming the merge and parent (round 2)"
+      "criterion": "forward merge keeps approved migration code",
+      "surface": "Go suites on PostgreSQL 18.6 + pgvector at the merge",
+      "command": "go test ./internal/store/... ./internal/api/ (daemon); ./migrationid/ ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/ ./cmd/dispatch -run Healthz|Census|Migrat (envoy); autodeploy_test.sh; loadtest/common.test.sh",
+      "observed": "all ok; red tests unchanged; diff from fe1d38fe8378 in identifier files is the two closings and main horizon pool only",
+      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
+      "negativeControl": "without raising the closings, main 0062-0064/0142-0149 would fail migrationid.Check (numbers above the closing file)"
     }
   ],
   "filesChanged": [
-    ".github/workflows/ci.yaml",
-    "packages/envoy/migrationid/migrationid.go",
-    "packages/envoy/migrationid/migrationid_test.go",
-    "packages/daemon/internal/store/migrations/embed.go",
-    "packages/daemon/internal/store/migrations/embed_test.go",
-    "packages/envoy/internal/dispatch/store/store_test.go",
-    "packages/envoy/internal/pgmigrate/set.go",
-    "packages/envoy/cmd/dispatch/README.md",
-    "packages/envoy/deploy/scripts/autodeploy.sh",
-    "docs/kubernetes.md"
+    "merge of main d7e1daaaaf70: conflicts resolved in docs/kubernetes.md, packages/envoy/cmd/dispatch/README.md, packages/envoy/loadtest/{README.md,common.sh,stack.sh} onto main layout and code",
+    "packages/envoy/migrationid/migrationid.go (closings 0064 daemon, 0149 Dispatch)",
+    "packages/daemon/internal/store/migrations/embed.go (comment names 0064)",
+    "packages/daemon/.changes/unreleased/pr-2411-migration-timestamps.yaml (new fragment)",
+    "packages/envoy/internal/dispatch/store/README.md (one sentence per line)"
   ],
   "trickyParts": [
-    "The reviewer asked for Check(versions, closedAt) with constants beside each runner's set; the architect required the tester's unmodified Dispatch red test (Check(versions)) to keep working, so the closings stay in migrationid, made deterministic and unexported."
+    "loadtest seed check: main changed how the built Dispatch is recorded (bin/envoy-dispatch.json); the merged check compares the set of versions when both records hold one, and the highest only when an older record holds none"
   ],
   "deviations": [
-    "Finding 2 implemented as the architect directed (deterministic series by closing file), not the reviewer's signature change."
+    "The merge commit also carries the daemon changelog fragment and the store README relayout (written before the merge was described), not separate commits."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
