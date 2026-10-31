@@ -2,23 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-707",
-  "completed": "2026-10-31T00:38:00Z",
-  "round": 2,
-  "reviewedCodeHead": "f33d68d2ab3e52e2973b230926e64c7fd8001d70",
-  "decision": "changes_requested",
+  "completed": "2026-10-31T06:04:30Z",
+  "round": 3,
+  "reviewedCodeHead": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
-  "ci": "CI head f33d68d2 (the tester's two test commits sit on the implementer's 00441179). At 00:37Z run 41150116149 (CI) was pending, with only `changes` queued, and pr-title was queued; no required check had a result. The request for changes does not wait on CI; the next round reads it at the new code head.",
-  "round1Threads": "All nine round-1 findings fixed in 00441179 (AppendRoomFlush; RoomFlush.appended and advanceRoomCursorThrough; backfill through storeRepair/commitSettlement with closureChangedMarkdown deleted; roomcursor.go, pending_authors.go 725 lines; flushRead/storeRead/ran deleted; errForkReleased wraps ErrServiceUnavailable, 503 tested in 4d40f2b2; README vacuum note; AGENTS.md and retrySettleSoon comments). Each thread was resolved by the implementer; I replied on each with its fixing commit.",
+  "important": 0,
+  "minor": 2,
+  "roundDelta": "b67efab8 (backfill takes lockDocumentRoom right after Begin; Ledger.ownTx; takeRoomCursors pairs once; comments; TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice; TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt) and 6b5c1050, a forward merge of main f4ec92ee whose remerge-diff touches packages/envoy/AGENTS.md alone, in main's layout with this PR's three corrections.",
+  "round2Threads": "All four round-2 findings fixed in b67efab8. The implementer declined the hook-before-Begin option because an eviction there drops the stamp's class (the deep review confirmed: failRoomLocked purges the slot, StoreUpdateContext's failed-room path finishes the class, repairClass then refuses; the backfill reports an error for that one document and a rerun stamps it). The rewritten stale-room test asserts the eviction waits on the advisory lock until the stamp commits. I accept both.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at f33d68d2; Minor: the backfill's unlocked queue read allows a latent double store; appendingCursor comment wrong.",
-    "codeQuality": "Verdict: CHANGES at f33d68d2; High (latent): the same double store; Minor: backfill reuses `settling` against Ledger's doc; takeRoomCursors decides the write/flush pairing twice."
+    "deepReview": "Verdict: APPROVE at 6b5c1050; no deadlock, no double store; takeRoomCursors advances the same runs in every case; merge resolution only AGENTS.md; main's docs changes add no durable writer.",
+    "codeQuality": "Verdict: CHANGES at 6b5c1050; finding 2 (appendingCursor comment wrong for a live write's own flush) fixed by my prose commit 4a9fcec3; finding 1 (the afterAppendCommit hold setup copied between backfill_order_test.go and stale_room_test.go) judged Minor and not a defect: two test hooks for different windows with different payloads, no behaviour, error or gate involved."
   },
+  "proseFix": "4a9fcec3: roomcursor.go appendingCursor comment names the write branch as the one that decides a live write's own flush appends (the round-2 wording, which followed my own round-2 comment, said the flush branch).",
+  "ci": "Required set (rulesets): ci-ok, pr-title. Approval only once both are green at the head my prose push made.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/service.go", "description": "backfillBlockIDs reads the room's queue in flushThrough before it holds the document's advisory lock. A worker flush that has committed class A but not yet marked it stored passes the gate, so the backfill stores A a second time. The only guard is the assumption that the backfill's service serves no browser, and the PR's own TestStoredOrderBackfillStampOverAnUnstoredEdit breaks that assumption. Fix: lockDocumentRoom right after Begin; move the stale-room test's window to a hook before Begin; delete the exception text in service.go and flush.go."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/ledger.go", "description": "The backfill builds a Ledger with settling: true, but ledger.go:25-34 says settlement's and the joined ledger are the only two. Update the doc, or rename the field to what it means (a transaction of its own)."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/ledger.go", "description": "takeRoomCursors decides twice, with opposite tests, whether a write and a flush share an instance (:240 and :248). Decide it once."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/roomcursor.go", "description": "appendingCursor's comment says a joined transaction's flush is read by the room-cursor branch; flushThrough passes flush to every flush append, so the flush branch decides those, and the ledger lookup serves only the repairs storeRepair appends."}
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/roomcursor.go", "description": "appendingCursor's comment said the flush branch decides a joined transaction's flush appends; for a live write's own flush the write branch decides. Fixed in 4a9fcec3."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/backfill_order_test.go", "description": "The afterAppendCommit hold setup repeats stale_room_test.go:1441-1456. Not a defect: test scaffolding for two different windows."}
   ]
 }
