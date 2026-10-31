@@ -2,72 +2,46 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-369",
-  "completed": "2026-10-31T00:43:15Z",
-  "round": 2,
-  "decision": "changes_requested",
-  "reviewedHead": "the handoff head this commit makes, above code head dd2f17197c3ffbb053dd11d687ff57f8dde8f118",
+  "completed": "2026-10-31T04:47:16Z",
+  "round": 3,
+  "decision": "approved",
+  "reviewedHead": "the head this commit makes: code b290218745ac0425fa4b903250f3bb243e814d89 plus the reviewer's prose commit 'docs(dispatch): reply_to_block's field doc, a stale ItemBlockNode citation, and an option part's label-alone text'",
   "critical": 0,
-  "important": 3,
-  "minor": 8,
-  "previousRound": "Of the thirteen findings of the review at f11d32e5, eleven are fixed in dd2f1719 (threads accepted by id in the review). Finding 1's code is fixed, but the contract and route-index texts its thread asked to change still state the old rule. Finding 13 is partly fixed: 0150_ask_blocks.up.sql lines 15, 19 and 96-97 remain.",
-  "thermonuclear": "Run once at 158e057e (code dd2f1719): deep review CHANGES (one Medium, four Minor), code quality CHANGES (two Medium, two Low, three prose). The reviewer checked each finding below against the code.",
-  "ci": "CI run 41147479424 at code head dd2f1719 was still queued when this review was written; PR Title 41148680941 success. CI run 41128293217 at the previous code head 1b191490 failed the pi-legion and claude-envoy jobs, and the reviewer reproduced both typecheck failures at dd2f1719 in the pod (`bun run typecheck` in each package). contracts, envoy-client, pi-envoy, envoy-plugin, pi-shared and dispatch typecheck clean.",
+  "important": 0,
+  "minor": 6,
+  "previousRound": "All eleven findings of the review at 5775f9cf are fixed in 1b769383: the pi-legion and claude-envoy typechecks are clean (reviewer ran bun run typecheck in pi-legion, claude-envoy, contracts, envoy-client and dispatch at b2902187, all exit 0); the five reply-rule texts match namedReplyBlock; askPartLinks is one fragment; refs.AskPartIDs owns the matching with named results; the hint strips the pin; ItemBlockNode is gone; one ITEM_KINDS; the prose items are corrected. The two threads left standing (P5, Qp) are fixed too. The forward merge b2902187 changed only packages/envoy/AGENTS.md and cmd/dispatch/README.md; both thermonuclear agents checked the resolution against main and the code.",
+  "thermonuclear": "Run once at a46a6f82 (code b2902187): deep review APPROVE (four Minor), code quality CHANGES (three code items, three prose). The reviewer judged the three code items not defects (below) and fixed the inaccurate prose in its own commit.",
+  "ci": "The approval waits on the required lint, typecheck, test and pr-title checks of the run GitHub starts for the reviewer's prose head, read on GitHub before the review is submitted. At b2902187 CI run 41166230738 was still queued at 04:29Z, behind a busy queue.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/pi-legion/scripts/skill-scenarios/seed.ts:372",
-      "description": "`bun run typecheck` in packages/pi-legion fails: TurnState's `options: Required<AskOption>[]` now requires the `id` this PR adds to AskOption, so seed.ts:384 and seed.test.ts:687 do not typecheck (TS2322, TS2769). CI's pi-legion job failed on exactly this at 1b191490, and ci-ok with it. Fix: type the seed's options as `Required<Omit<AskOption, \"id\">>` (or `Pick<AskOption, \"label\" | \"description\">` made required), since a seeded open ask carries no part id."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy-client/src/dispatch-execute.ts:2442",
-      "description": "`bun run typecheck` in packages/claude-envoy fails on envoy-client's `{ ...edge, block: undefined }` (TS2375, TS2379), because claude-envoy compiles envoy-client under `exactOptionalPropertyTypes: true`. CI's claude-envoy job failed on this at 1b191490. Fix: drop the key (`const { block: _held, ...rest } = edge`) instead of setting it to undefined."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/routes_table.go:142",
-      "description": "The fix changed the reply rule (reply_to + reply_to_block names a block of that comment, even in an ask's thread; only ask_id names an ask part), but five published texts still give the old rule: the route description GET /api/v1 serves (this line), CreateCommentInput.reply_to_block in contracts/src/dispatch-api.ts:2872-2876, Comment.reply_block and ReplyBlock.node (dispatch-api.ts:1326, :1331, which name only a comment block), packages/envoy/cmd/dispatch/AGENTS.md:640 (which still says reply_to_block in an ask's thread is 400), and the envoy changelog fragment pr2546-ask-parts.yaml. The previous round's thread asked for the first two. A client that follows them sends reply_to=<comment in the thread> to mean the ask's option and has the reply stored against the comment's block."
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/comment_create.go:24",
+      "description": "Fixed by the reviewer: the ReplyToBlock field doc gave only the reply_to half of the rule; it now names namedReplyBlock and the ask_id half."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/refs/graph.go:205",
-      "description": "asksCitingTheDocument copies refs/closure.go:46-51's ask_block_refs arm, half-generic (tables() plus a hard-coded r.ask_id), and takes graph.go from 971 to 1024 lines. Extract one ask-only fragment, 'links the current parts of an ask hold, sourced as the ask', into refs/ask_blocks.go and use it in both."
+      "file": "packages/envoy/internal/dispatch/refs/item_block_nodes.go:215",
+      "description": "Fixed by the reviewer: the comment cited ItemBlockNode, which 1b769383 deleted; it now cites ParseItemBlockNode."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/ask_rows.go:211",
-      "description": "The api package re-derives the index's part identity (type and text_sha256) and reads the ids back by refs.AskParts' layout (index+1 for options, the last for the answer). Move readAskParts and idsOf into refs, which writes the rows, and return named results (options []string, answer string)."
+      "file": "packages/envoy/internal/dispatch/store/migrations/0150_ask_blocks.up.sql:5",
+      "description": "Fixed by the reviewer: the header gave an option part's text as '<label> — <description>' only; askOptionText writes the label alone when there is no description."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy-client/src/dispatch-execute.ts:1257",
-      "description": "innerRefProblem's reply_to_ask hint passes refText verbatim, so for a pinned part (#b-b2@v2) it suggests a value replyBlockProblem then refuses ('drop @v2'). Strip the pin in the hint."
+      "file": "packages/envoy/internal/dispatch/refs/graph.go:1",
+      "description": "Not a defect: the file is 1003 lines (940 on main). The repository has no length rule, and dispatch already holds non-test files of 1500 to 2700 lines (docs/service.go, docs/mutation.go, model/model.go). Moving the item-kind helpers is a design preference, not worth a test round."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/refs/item_blocks.go:63",
-      "description": "ItemBlockNode is exported but only tests call it, and its doc claims to be the one shape every reference resolves through, which production (text.TargetID, the SQL at item_blocks.go:499) does not use. Move it into a _test.go file."
+      "file": "packages/envoy-client/src/dispatch-execute.ts:716",
+      "description": "Not a defect: replyBlockProblem maps three item kinds to their reply field in a three-arm ternary. A lookup table would be tidier, but the behaviour is right, each arm is tested, and a fourth kind is not planned."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy-client/src/dispatch-execute.ts:2096",
-      "description": "ITEM_KINDS is a fourth copy of the 'ask' | 'comment' | 'message' union in envoy-client (dispatch-owner.ts:56, :94, dispatch-execute.ts:704). Export one set from dispatch-owner.ts and type the three unions from it. Its doc (:2091) also says these kinds are numbered by their own revisions; a message has none."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy-client/src/dispatch-execute.ts:724",
-      "description": "Prose: the replyBlockProblem refusal reads 'a reply in an ask's thread answers a part of that ask', the old rule; write 'reply_to_ask answers a part of the ask it names'. The same old rule is in 0150_ask_blocks.up.sql:96-97 and in test comments (store/graph_edges_test.go:182, api/ask_parts_test.go:904, e2e/acceptance/block-graph.sh:15, :1210, :1366)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/store/migrations/0150_ask_blocks.up.sql:15",
-      "description": "Prose: 'A node id is the ask's uuid, '#' and a block id' (it is ask/<uuid>#<id>, as line 7 says), and line 19 'position is the part's place in the ask's current body' (an ask has no body), which the previous round's thread named."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/AGENTS.md:2763",
-      "description": "Prose: AGENTS.md:2763-2772 and cmd/dispatch/README.md (~1672-1679) give a part's identity as type and text only; the answer part's includes the answerer (askAnswerPart). AGENTS.md:2787-2788 names only ask.opened as a payload carrying no id; a superseded ask.answered carries none too (events.go:322-324)."
+      "file": "packages/envoy-client/src/__tests__/dispatch-execute.test.ts:9523",
+      "description": "Not a defect: two tests capture a ToolInputError inline where the file's refusal() helper would do it; test style, with no effect on what they prove. ITEM_KINDS losing its satisfies clause is also not a defect: isItemKind's `kind is ItemKind` predicate must be assignable to GraphNode['kind'], so drift still fails to compile."
     }
-  ],
-  "bodyEdits": "The reviewer corrected the PR body's census itself: the hit list per file (ask-part-references.e2e.ts in, text/refs_test.go out), the false sentence that no code on this branch writes an ask-part URL, and a rollback line. It also corrected the Threads line (thirteen threads exist), the Thermo line, Look at first and Not proven / risk."
+  ]
 }
