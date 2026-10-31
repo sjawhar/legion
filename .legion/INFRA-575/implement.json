@@ -2,61 +2,57 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-575",
-  "completed": "2026-10-31T06:15:00Z",
-  "round": 6,
+  "completed": "2026-10-31T09:10:00Z",
+  "round": 7,
   "answersTestFailures": [
-    "Failure 1 of .legion/INFRA-575/test.json round 5: one Enter opened the selected decision block's note field but left the reader out of it, so every keystroke after it was still the Inbox's keymap. Fixed, and the tester's red row passes unmodified.",
-    "Failure 2: e2e/nav.e2e.ts:14 expected a per-issue read the column no longer makes. The expectation is corrected, with a comment saying what the Inbox reads now; the row's own subject, that the sidebar makes no per-issue request, is untouched."
+    "The only failure of .legion/INFRA-575/test.json round 6: CI's `dispatch` lane was red at the code head b1e074f1 on e2e/references.e2e.ts:26, `Error: locator.screenshot: Element is not attached to the DOM`, taken straight after `setViewportSize({ width: 1440 })`. The row is this change's own: below 1280 px the card lives in the Inbox row, and from 1280 px the row becomes a short row and the card is drawn again in the reading column, so the resize unmounts the node the locator resolved at 390 px. Fixed in the row, with no product change."
   ],
   "proof": [
     {
-      "criterion": "One Enter opens the selected decision block's note field and puts the reader in it, in a real browser; what they type then reaches the answer and the selection does not move.",
-      "surface": "The Inbox page of a running Dispatch at 1440 px - the built SPA served by the real Go server against a real Postgres, driven in a real Chromium - with a decision block in the column.",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium -g \"note field\"",
-      "observed": "Green: the tester's own row, `Enter opens the selected decision block's note field and puts the focus in it`, unmodified (e2e/inbox-reading-pane.e2e.ts:742, commit d542d2dac754).",
-      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
-      "negativeControl": "With the fix's one line neutered (`focusNoteOnOpen.current = false`) and the tree otherwise final, that row fails at its focus assertion: `expect(locator).toBeFocused() failed … unexpected value \"inactive\"`. A unit row cannot be this control: `fireEvent` wraps the click in `act()`, which flushes the render and its effects inside the press, so the defective code passed a one-press unit row too. The browser row is the proof, and the unit rows beside it say so."
-    },
-    {
-      "criterion": "The sidebar still makes no per-issue request, and the row says so against what the Inbox reads today.",
-      "surface": "The same running Dispatch, at the desktop width and in the phone drawer.",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/nav.e2e.ts --project=chromium (and --project=iphone)",
-      "observed": "Green on both projects. The recorded requests are now `[\"?pinned=true\"]`: the list is one GET /inbox, the column draws the selected question from the row it already holds, and only a decision-block question has its issue read, for the one closed_at field the live document is handed - which these three ordinary asks are not.",
-      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
-      "negativeControl": "The row was red at d542d2da with `Array [ \"?pinned=true\", - \"/api/v1/issues/CORE-2\" ]`, and reproduced with its file run alone, so it was no shared-CPU failure: the expectation, not the page, was stale."
+      "criterion": "e2e/references.e2e.ts:26 takes its 1440 px shot of the card the 1440 px layout draws, so nothing races the width switch's unmount.",
+      "surface": "The Inbox page of a running Dispatch, driven in a real Chromium at 390 px and then at 1440 px - the width switch this change introduced.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/references.e2e.ts --project=chromium",
+      "observed": "10 passed (34.7s). After the resize the row resolves the card through the shared helper that reads which layout this width draws (`askCard`, e2e/inbox-pane.ts), opens that card's own backlink panel - a fresh mount in the column, so its panel starts collapsed - waits for the panel's text, and only then screenshots.",
+      "headSha": "24f71ce731e79507568c94cec7334a27a8163ec7",
+      "negativeControl": "The tester's own measurement is the control for the race: a probe held the element Playwright holds while it waits for stability and resized 390 -> 1440, reading `before={\"connected\":true,\"inRow\":true} after={\"connected\":false,\"inRow\":true} cards drawn now=1`. The row passed on this pod three times out of three and failed on CI's machine, which is what a race looks like; waiting on the column's own card after the switch removes it rather than hides it."
     },
     {
       "criterion": "The whole layout change, not one row (INFRA-92), at the head that merges.",
       "surface": "The whole Chromium project of the Dispatch browser suite.",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- --project=chromium",
-      "observed": "959 rows: 933 passed, 25 skipped, 1 failed (1.0h) at head b1e074f1a8ec. The one failure is e2e/hover-preview.e2e.ts:87, which is main's own. Both of the tester's round-5 failures are green in this run, and no other row is red.",
-      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
-      "negativeControl": "The tester's own run at d542d2da is the control: 931 passed, 25 skipped, 3 failed - its red row, the nav row and hover-preview. Two of the three are green here and the third is unchanged."
+      "observed": "959 rows: 933 passed, 25 skipped, 1 failed (1.0h) at head 24f71ce731e7. The one failure is e2e/hover-preview.e2e.ts:87, main's own. references.e2e.ts is green inside this run as well as on a run of its own.",
+      "headSha": "24f71ce731e79507568c94cec7334a27a8163ec7",
+      "negativeControl": "The run at the previous head is the control: the same project run was green there too, which is exactly why the row needed CI's slower machine to show its race - a project run that passed is no proof a racing row is sound, and the fix is what makes it sound."
     },
     {
-      "criterion": "Everything static is green here before the push, and CI runs on the code head.",
-      "surface": "The repository's own gates, and GitHub Actions.",
-      "command": "bunx biome check packages/dispatch/; bun run typecheck and bun run test in packages/dispatch; gh api 'repos/sjawhar/legion/actions/runs?head_sha=b1e074f1a8ec…'",
-      "observed": "biome `Checked 733 files, No fixes applied`; typecheck clean; 3061 pass, 0 fail. GitHub created two runs for this head, CI 41171179735 (queued when read) and PR Title 41171179693 (success). I did not wait for CI: the daemon reads it.",
-      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
-      "negativeControl": "The run at the tester's head d542d2da is red by design, since it carries the tester's red row; this head's run is the first to judge the fixed code."
+      "criterion": "No product file moved, so the tester's round-6 verification of the pane carries to this head.",
+      "surface": "The branch's own diff.",
+      "command": "jj diff --from 908b79fb0fb5 --to 24f71ce731e7 --stat",
+      "observed": "One file: packages/dispatch/e2e/references.e2e.ts. Nothing under web/src, nothing in packages/proof-editor.",
+      "headSha": "24f71ce731e79507568c94cec7334a27a8163ec7",
+      "negativeControl": "The claim is the diff itself: a file under web/src in that listing would refute it."
+    },
+    {
+      "criterion": "CI runs on the code head, which is what the round is about.",
+      "surface": "GitHub Actions.",
+      "command": "gh api 'repos/sjawhar/legion/actions/runs?head_sha=24f71ce731e7…'",
+      "observed": "Two runs for this head: CI 41182693696 (queued when read) and PR Title 41182693695 (success). The handoff commit above it carries the skip-checks trailer, so the daemon carries this run's verdict to it. I did not wait for CI.",
+      "headSha": "24f71ce731e79507568c94cec7334a27a8163ec7",
+      "negativeControl": "Round 4's reading of the same question is the control for the push shape: a head carrying the trailer answered total_count 0, an untrailered head answers with its runs."
     }
   ],
   "filesChanged": [
-    "packages/dispatch/web/src/features/inbox/AskCard.tsx - the compact card's note disclosure focuses the field it reveals, in the commit that mounts it, when the open was the control's own; the reason field beside it already followed this pattern",
-    "packages/dispatch/web/src/features/inbox/Inbox.tsx - Enter presses the disclosure and leaves the focus to the card; its own focus() call remains for a box that already exists",
-    "packages/dispatch/e2e/nav.e2e.ts - the expectation and a comment saying what the Inbox reads now",
-    "packages/dispatch/web/src/__tests__/ask-card.test.tsx and features/inbox/Inbox.test.tsx - the unit rows, each saying that the browser row is what proves the focus"
+    "packages/dispatch/e2e/references.e2e.ts - the 1440 px half of the backlink row: the card resolved again where that width draws it, its own panel opened and waited for, then the shot"
   ],
   "trickyParts": [
-    "A reader who opens the note disclosure with the pointer now lands in the field too. That is the deliberate consequence of putting the fix where the field is revealed rather than in the key that asked for it, and no row of the suite depended on the focus staying put after that click.",
-    "The defect was invisible to unit tests by construction: `fireEvent` wraps a click in `act()`, which flushes the render and its effects inside the press, so the box exists synchronously there and the defective code passed. Only the browser shows the commit happening after the handler returns. Any later change to this path is judged by the browser row, not by a unit row."
+    "A locator held across `setViewportSize` is a handle to a node, and this change makes 1280 px a remount boundary for every Inbox card: below it the card is the row's, from it the card is the column's. Any row that resolves a card at one width and acts on it at another must resolve it again after the switch. e2e/inbox-pane.ts's `askCard` is the helper that reads which layout a width draws; use it rather than `page.getByTestId('ask-<id>')` in a row that resizes.",
+    "A harness note, paid for the hard way this round: /legion/harness is shared by every role of the issue and only the databases are per lane. Its setup script now refuses to start Postgres while `pg_isready -h 127.0.0.1 -p 55432` answers, because neither obvious guard works across roles - `pg_ctl status` reads a pid file a pod move leaves stale, and `pgrep` cannot see another role's postmaster at all, since each role has its own PID namespace. Trusting the pid file started a second postmaster, whose failure to bind made the running one shut itself down; the tester lost nothing only because its measurements had already landed. The three facts are written above that guard in the script."
   ],
   "deviations": [],
   "openQuestions": [
-    "e2e/hover-preview.e2e.ts:87 is main's own and is fixed on main by sjawhar/legion#2581 at df771175, which I confirmed green in this pod. The architect has ruled against a forward merge to pick it up, since CI's own dispatch lane passed that row at our head, and sjawhar/legion has no merge queue, so this pull request merges on its own head's required checks."
+    "e2e/hover-preview.e2e.ts:87 is main's own and is fixed on main by sjawhar/legion#2581 at df771175, which I confirmed green in this pod. The architect has ruled against a forward merge to pick it up, since CI's own dispatch lane passed that row at an earlier head of this branch, and sjawhar/legion has no merge queue, so this pull request merges on its own head's required checks."
   ],
   "discoveredComplexity": [
-    "The Inbox's keys reach controls that other components own and draw. Two rounds of defects came from that seam: the keys reaching the wrong block's card, and the key reaching a box that did not exist yet. Both are fixed by letting the owner do the work - the selected ask's own card, and the disclosure that reveals the field."
+    "Three of this issue's last four rounds were spent on what a test harness or a lane said rather than on the change: a conflicting pull request that got no CI at all, a push shape that started no run, and now a row that raced the width switch and so was green here and red on CI's machine. The change itself has not moved since round 6."
   ]
 }
