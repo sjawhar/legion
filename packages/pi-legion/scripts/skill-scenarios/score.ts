@@ -96,9 +96,9 @@ const World = z.object({
 const nonEmpty = z.string().min(1);
 /** The tester's handoff as the tester role's prompt spells it (the `test` shape; nothing in the
  * daemon holds it to one), as far as the score reads it: the stamps the tester writes itself
- * (`schemaVersion` 1, `phase` test, its `issue`, and `previousHandoff`, the commit carrying its
- * previous handoff of this phase, empty when there is none), the implementer's proof verdict, the
- * failures, and the tester's own proof, each entry's six fields non-empty.
+ * (`schemaVersion` 1, `phase` test, its `issue`, and `previousHandoff`, the newest commit on the
+ * branch that changed its handoff's file, empty when there is none), the implementer's proof
+ * verdict, the failures, and the tester's own proof, each entry's six fields non-empty.
  * `previousHandoff` is optional because the score reads the runs of every label at once while each
  * label's agent gets the role prompt of its own checkout: a checkout whose prompt predates the
  * field writes a handoff without it, and requiring it would fail those runs on the prompt the

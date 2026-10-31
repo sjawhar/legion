@@ -52,12 +52,13 @@ predecessor's decision, counts and findings then writes the same bytes: `jj spli
 completion `HANDOFF_NOT_NEW`, because it compares the reported commit with the role's last
 recorded one (`packages/daemon/internal/workflow/engine.go`).
 
-The replacement, `previousHandoff`, is the commit that carried the role's previous handoff of the
-phase, read with a command rather than recalled. It is a writer-side token, so the residual is
-real and was measured instead of argued: three rounds in a scratch jj repository showed round 2
-with the field set producing a non-empty commit the revset answers, and a byte-identical round 3
-producing an empty commit and the previous answer — the refusal the field exists to close, still
-reachable by a writer that does not run the command.
+The replacement, `previousHandoff`, is the newest commit on the branch that changed the handoff's
+file (usually the role's previous handoff of the phase; after a retro, retro's removal), read with
+a command rather than recalled. It is a writer-side token, so the residual is real and was measured
+instead of argued: three rounds in a scratch jj repository showed round 2 with the field set
+producing a non-empty commit the revset answers, and a byte-identical round 3 producing an empty
+commit and the previous answer — the refusal the field exists to close, still reachable by a writer
+that does not run the command.
 
 Related: `docs/solutions/legion/a-round-that-changes-no-code-writes-its-handoff-again-so-its-completion-keys-to-a-fresh-commit-and-strips-the-four-keys-the-cli-stamps-LEGION-629.md`
 records the same refusal from the writer's side.
