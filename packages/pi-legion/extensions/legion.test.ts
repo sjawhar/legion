@@ -706,6 +706,9 @@ async function claimPane(options: {
       options.readyPosted?.();
       return (await options.ready?.(readyAttempts)) ?? new Response(null, { status: 204 });
     }
+    if (url.pathname === "/legion/v1/claims/turn-outcome") {
+      return Response.json({ refusedRun: 0, failed: false });
+    }
     if (url.pathname === "/legion/v1/grants") {
       grants += 1;
       return Response.json({ grantId: `grant-${grants}`, expiresAt: "2099-01-01T00:00:00Z" });
@@ -1574,6 +1577,21 @@ describe("Legion OMP extension", () => {
       stop_hook_active: false,
       signal,
     });
+    /** The run Oh My Pi ends when the provider refuses the turn: the last assistant reply is
+     * stopped at `error`, with the provider's words beside it, and nothing was said. */
+    const refusedBy = (message: string, signal = new AbortController().signal) => ({
+      messages: [],
+      turn_id: 0,
+      last_assistant_message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: message,
+      },
+      session_id: "ses_stall",
+      stop_hook_active: false,
+      signal,
+    });
     /** An assistant message that ran a real tool call, as Oh My Pi hands it to `message_end`: its
      * tool-call block is `toolCall` (`packages/pi-envoy/src/agent-stream.ts` reads the same
      * shape), not Claude Code's `tool_use`. */
@@ -1591,6 +1609,10 @@ describe("Legion OMP extension", () => {
       arrives: (message: unknown) => hook(handlers, "message_start")(message, context),
       settles: (text: string, signal?: AbortSignal) =>
         hook(handlers, "session_stop")(settlingOn(text, signal), context),
+      /** A turn the provider refused, as `session_stop` sees it. */
+      refuses: (message: string) => hook(handlers, "session_stop")(refusedBy(message), context),
+      /** The run's end, which is what reports the turn's outcome to the daemon. */
+      ends: (event: unknown) => hook(handlers, "agent_end")(event, context),
     });
     /** jj's root commit: `@-` of a workspace fresh from `jj git init`, which is what a phase that
      * writes no handoff (retro, here) reports as the commit it stands on. */
@@ -1648,7 +1670,7 @@ describe("Legion OMP extension", () => {
           withoutWebhookApp: [],
           caches: [],
         },
-        settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
+        settings: { review_round_cap: 3, worker_boot_timeout_seconds: 120 },
         consumers: [],
       };
       const booted = await bootPane({
@@ -1748,6 +1770,61 @@ describe("Legion OMP extension", () => {
         { state: "open", count: 0, reported: false },
         { state: "open", count: 0, reported: false, lastMessage: said },
         { state: "open", count: 1, reported: false, lastMessage: said },
+      ]);
+    });
+
+    // dispatch://INFRA-264: every turn of that implementer was refused by its provider, and every
+    // reminder it earned bought another refused turn. The worker read nothing and said nothing,
+    // so the turn earns neither the continuation nor a timer, and the record stands as the last
+    // real turn left it.
+    test("a turn the provider refused earns no reminder, no timer and no record", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
+      const before = recorded(worker);
+
+      expect(await worker.refuses("Overloaded: the model is busy")).toBeUndefined();
+
+      expect(worker.timers).toEqual([]);
+      expect(steered(worker)).toEqual([]);
+      expect(recorded(worker)).toEqual(before);
+    });
+
+    // The daemon's own counter: every turn's end is reported, under a sequence this plugin counts
+    // itself within the claim's launch generation, so the daemon can fail a claim whose provider
+    // refuses turn after turn.
+    test("every turn's end reports its outcome to the daemon, in sequence", async () => {
+      const worker = await bootStalling({});
+      const outcomes = () =>
+        daemonRequests(worker.requests)
+          .filter((request) => request.path === "/legion/v1/claims/turn-outcome")
+          .map((request) => request.body);
+
+      await worker.ends({ messages: [{ role: "assistant", stopReason: "stop" }] });
+      await worker.ends({
+        messages: [
+          { role: "assistant", stopReason: "error", errorMessage: "Overloaded: the model is busy" },
+        ],
+      });
+
+      expect(outcomes()).toEqual([
+        {
+          claimToken: worker.claimToken,
+          sessionId: "ses_stall",
+          secret: "secret-ses_stall",
+          generation: 2,
+          sequence: 1,
+          outcome: "clean",
+        },
+        {
+          claimToken: worker.claimToken,
+          sessionId: "ses_stall",
+          secret: "secret-ses_stall",
+          generation: 2,
+          sequence: 2,
+          outcome: "refused",
+          message: "Overloaded: the model is busy",
+        },
       ]);
     });
 
@@ -2071,7 +2148,6 @@ describe("Legion OMP extension", () => {
             grantId: "grant-stall",
             summary: "Done.",
             verdict: "",
-            ready: false,
             commit: ROOT_COMMIT,
           },
         },
@@ -3315,7 +3391,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const requestsBeforeTool = controller.requests.length;
     await expect(
       legion.execute("start-turn-state", { op: "read_state" }, undefined, undefined, context)
-    ).resolves.toMatchObject({ details: { daemon: { project: "OMP" } } });
+    ).resolves.toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("project OMP") }],
+    });
     await expect(
       legion.execute(
         "start-turn-status",
@@ -3343,7 +3421,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     // Still registered once the claim has failed.
     await expect(
       legion.execute("after-refusal-state", { op: "read_state" }, undefined, undefined, context)
-    ).resolves.toMatchObject({ details: { daemon: { project: "OMP" } } });
+    ).resolves.toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("project OMP") }],
+    });
 
     const registrations = () =>
       controller.requests.filter((request) => request.path === "/legion/v1/claims/register");
@@ -3485,7 +3565,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     if (legion === undefined) throw new Error("the controller's legion tool was not registered");
     await expect(
       legion.execute("after-switch-state", { op: "read_state" }, undefined, undefined, after)
-    ).resolves.toMatchObject({ details: { daemon: { project: "OMP" } } });
+    ).resolves.toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("project OMP") }],
+    });
     expect(registrations()).toHaveLength(2);
 
     refuseRole = false;
@@ -4291,7 +4373,12 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     await expect(
       legion.execute("controller-state", { op: "read_state" }, undefined, undefined, context)
     ).resolves.toMatchObject({
-      details: { daemon: { project: "OMP" }, issues: expect.any(Object) },
+      content: [
+        {
+          type: "text",
+          text: expect.stringMatching(/project OMP[\s\S]*\nissues [0-9]+\n/),
+        },
+      ],
     });
     await expect(
       legion.execute(

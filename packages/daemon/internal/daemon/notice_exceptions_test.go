@@ -839,7 +839,7 @@ func TestAReadyArchitectsNoticesAreReleasedOffTheReadyRoute(t *testing.T) {
 	architectClaimOn(t, sup, "LEGION-1", supervise.StateRegistered, "ses_arch")
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: 1}, time.Now().Add(noticeReholdDelays[1])))
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", now: time.Now}
-	w := &workflowRuntime{outbox: runner, log: quietLogger(), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1)}
+	w := &workflowRuntime{outbox: runner, log: quietLogger(), readied: newWakeSet[claim.Token]()}
 	due := func() bool {
 		t.Helper()
 		var due bool

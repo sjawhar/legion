@@ -29,8 +29,9 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.session_file, c.locator, c.state, c.failure, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.last_start_row, c.serving_generation,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
-	c.plugin_contract, c.plugin_relaunch_for,
-	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
+	c.plugin_contract, c.plugin_relaunch_for, c.last_turn_start, c.last_turn_end,
+	c.last_death_cause, c.last_start_failure, c.last_ready, c.turn_outcomes,
+	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.prompted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
 // PutClaim persists an admitted claim's state: every write a claim's machine makes. A claim enters
@@ -54,6 +55,16 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		}
 		locator = encoded
 	}
+	// The window is written as the array it is, never jsonb null: a claim with no report yet reads
+	// back as the empty array the column defaults to.
+	outcomes := []byte("[]")
+	if len(c.TurnOutcomes) > 0 {
+		encoded, err := json.Marshal(c.TurnOutcomes)
+		if err != nil {
+			return fmt.Errorf("put claim %s: encode its turn outcomes: %w", c.Token, err)
+		}
+		outcomes = encoded
+	}
 	var enrollmentID, enrollmentIncarnation *string
 	if c.Enrollment != nil {
 		enrollmentID = &c.Enrollment.ID
@@ -65,8 +76,9 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		session, session_file, locator, state, failure, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, last_start_row,
 		serving_generation, agent_secrets_enrollment, agent_secrets_enrollment_incarnation, suspended_by,
-		plugin_contract, plugin_relaunch_for)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+		plugin_contract, plugin_relaunch_for, last_turn_start, last_turn_end,
+		last_death_cause, last_start_failure, last_ready, turn_outcomes)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -82,13 +94,17 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		suspended_by = excluded.suspended_by,
 		plugin_contract = excluded.plugin_contract,
 		plugin_relaunch_for = excluded.plugin_relaunch_for,
+		last_turn_start = excluded.last_turn_start, last_turn_end = excluded.last_turn_end,
+		last_death_cause = excluded.last_death_cause, last_start_failure = excluded.last_start_failure,
+		last_ready = excluded.last_ready, turn_outcomes = excluded.turn_outcomes,
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State), c.Failure,
 		c.Budgets.LaunchFailures, c.Budgets.Deaths, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.LastStartRow, int64(c.ServingGeneration),
 		enrollmentID, enrollmentIncarnation, string(c.SuspendedBy),
-		c.PluginContract, c.PluginRelaunchFor,
+		c.PluginContract, c.PluginRelaunchFor, instant(c.LastTurnStart), instant(c.LastTurnEnd),
+		c.LastDeathCause, c.LastStartFailure, instant(c.LastReady), outcomes,
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -259,15 +275,15 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
 	}
 	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, generation, queued_at, delivered_at, marked_by, confirmed_at, interrupted)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		phase, generation, queued_at, delivered_at, marked_by, confirmed_at, interrupted, prompted)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
 		queued_at = excluded.queued_at,
 		delivered_at = excluded.delivered_at, marked_by = excluded.marked_by, confirmed_at = excluded.confirmed_at,
-		interrupted = excluded.interrupted`,
+		interrupted = excluded.interrupted, prompted = excluded.prompted`,
 		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
-		instant(d.ConfirmedAt), d.Interrupted,
+		instant(d.ConfirmedAt), d.Interrupted, d.Prompted,
 	)
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
@@ -326,14 +342,18 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		enrollmentID, enrollmentIC *string
 		queuedAt, delivered        *time.Time
 		confirmed                  *time.Time
-		interrupted                *bool
+		interrupted, prompted      *bool
+		turnStart, turnEnd         *time.Time
+		lastReady                  *time.Time
+		outcomes                   []byte
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Failure, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak,
 		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC, &by,
-		&c.PluginContract, &c.PluginRelaunchFor,
-		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
+		&c.PluginContract, &c.PluginRelaunchFor, &turnStart, &turnEnd,
+		&c.LastDeathCause, &c.LastStartFailure, &lastReady, &outcomes,
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &prompted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -342,6 +362,18 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	}
 	c.Token, c.Role, c.State, c.SuspendedBy = claim.Token(token), claim.Role(role), supervise.ClaimState(state), supervise.SuspendSource(by)
 	c.Generation, c.TreeEpoch, c.ServingGeneration = uint64(generation), uint64(treeEpoch), uint64(servingGeneration)
+	if len(outcomes) > 0 {
+		if err := json.Unmarshal(outcomes, &c.TurnOutcomes); err != nil {
+			return supervise.Claim{}, fmt.Errorf("read claim %s: decode its turn outcomes: %w", token, err)
+		}
+		if len(c.TurnOutcomes) == 0 {
+			// The column's empty array is a claim no turn has been reported for, which is the
+			// claim a machine holds before its first report: it reads back as that claim, not as
+			// an empty window of its own.
+			c.TurnOutcomes = nil
+		}
+	}
+	c.LastTurnStart, c.LastTurnEnd, c.LastReady = orZero(turnStart), orZero(turnEnd), orZero(lastReady)
 	if locator != nil {
 		var loc runtime.Locator
 		if err := json.Unmarshal(locator, &loc); err != nil {
@@ -366,6 +398,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			MarkedBy:    *markedBy,
 			ConfirmedAt: orZero(confirmed),
 			Interrupted: orFalse(interrupted),
+			Prompted:    orFalse(prompted),
 		}
 	}
 	return c, nil

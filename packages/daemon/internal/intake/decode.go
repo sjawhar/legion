@@ -643,6 +643,9 @@ func decodePullRequest(repository ghrepo.Repository, raw map[string]json.RawMess
 	}
 	repo := repository.String()
 	sha, _ := rawString(raw, "head_sha")
+	// The listener normalizes GitHub's base.ref to base_ref; one that predates the field carries
+	// none, and the base is then left as the record has it, for the next read to fill.
+	base, _ := rawString(raw, "base_ref")
 	body, _ := rawString(raw, "body")
 	updatedAt, _ := rawTimestamp(raw, "updated_at")
 	switch action {
@@ -652,14 +655,14 @@ func decodePullRequest(repository ghrepo.Repository, raw map[string]json.RawMess
 			return nil, nil
 		}
 		url, _ := rawString(raw, "url")
-		return PullRequestOpened{Repo: repo, Number: number, Branch: branch, HeadSHA: sha, Body: body, URL: url, UpdatedAt: updatedAt, Reopened: action == "reopened"}, nil
+		return PullRequestOpened{Repo: repo, Number: number, Branch: branch, HeadSHA: sha, Base: base, Body: body, URL: url, UpdatedAt: updatedAt, Reopened: action == "reopened"}, nil
 	case "synchronize":
 		if sha == "" {
 			return nil, nil
 		}
 		before, _ := rawString(raw, "before")
 		sender, _ := rawString(raw, "sender")
-		return PullRequestSynchronized{Repo: repo, Number: number, Branch: branch, Before: before, Sender: sender, HeadSHA: sha, Body: body, UpdatedAt: updatedAt}, nil
+		return PullRequestSynchronized{Repo: repo, Number: number, Branch: branch, Before: before, Sender: sender, HeadSHA: sha, Base: base, Body: body, UpdatedAt: updatedAt}, nil
 	case "closed":
 		merged, _ := rawString(raw, "merged")
 		if merged == "true" {
@@ -705,20 +708,33 @@ func decodeReview(repository ghrepo.Repository, raw map[string]json.RawMessage) 
 		CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body, BodyTruncated: bodyTruncated == "true"}, unread, nil
 }
 
-// decodePush decodes a push to an issue's branch (claim.BranchIssue). A push to any other branch is
-// no fact, so it is acknowledged without a transaction: the workflow applies a push only to the pull
-// request it records on the push's branch, and it records one only on an issue's branch. A mapped
-// repository that other automation pushes to many times a minute would otherwise cost the daemon one
-// transaction under the fact lock (ApplyFact) for every push, all of them changing nothing.
+// decodePush decodes a push to a branch: to an issue's branch (claim.BranchIssue) it is the Push
+// the workflow applies to the pull request it records there, and to any other branch it is a
+// BasePush, the only notice the daemon gets that a pull request's base moved. GitHub recomputes
+// whether each head on a base still merges into it when the base moves and sends no event for the
+// pull request itself, so a head the record holds as clean goes behind or dirty unheard.
+//
+// A base push costs the daemon one transaction under the fact lock (ApplyFact), which a mapped
+// repository that other automation pushes to many times a minute pays per push; the cost is paid
+// because the alternative is a mergeability the record cannot know is stale. The handler's first
+// read is one indexed lookup of the open pull requests recorded on that base
+// (record.Store.OpenPullRequestsOnBase), and it ends the transaction at once when there are none,
+// which is every push to a branch Legion has no pull request on.
+//
+// A push to anything but a branch - a tag - is no fact, and neither is one that names no branch or
+// no commit it left.
 func decodePush(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
 	ref, _ := rawString(raw, "ref")
 	branch, isHead := strings.CutPrefix(ref, "refs/heads/")
-	if _, isIssueBranch := claim.BranchIssue(branch); !isHead || !isIssueBranch {
+	if !isHead || branch == "" {
 		return nil, nil
 	}
 	after, ok := rawString(raw, "after")
 	if !ok || after == "" {
 		return nil, nil
+	}
+	if _, isIssueBranch := claim.BranchIssue(branch); !isIssueBranch {
+		return BasePush{Repo: repository.String(), Branch: branch, After: after}, nil
 	}
 	changedPaths := rawStringPointer(raw, "changed_paths")
 	truncated := rawStringPointer(raw, "changed_paths_truncated")

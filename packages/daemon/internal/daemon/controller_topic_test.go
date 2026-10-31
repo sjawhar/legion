@@ -127,8 +127,15 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 	if err := json.Unmarshal([]byte(taken.Payload), &payload); err != nil {
 		t.Fatalf("decode the controller's payload %q: %v", taken.Payload, err)
 	}
+	// The hold names what failed, and the two causes the claim recorded with it: the controller
+	// reading this line has no other way to learn either (dispatch://INFRA-714 R6).
+	reason, named := payload["reason"].(string)
+	if !named || !strings.Contains(reason, "launch failures ran out") || !strings.Contains(reason, "its last failed start:") {
+		t.Fatalf("the controller's payload = %v, want its reason to name the failure and the claim's last failed start", payload)
+	}
+	delete(payload, "reason")
 	if want := map[string]any{"kind": "held", "role": "planner", "phase": "planning"}; !maps.Equal(payload, want) {
-		t.Fatalf("the controller's payload = %v, want %v", payload, want)
+		t.Fatalf("the controller's payload = %v, want %v beside its reason", payload, want)
 	}
 }
 

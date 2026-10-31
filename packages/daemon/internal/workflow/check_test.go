@@ -73,7 +73,7 @@ func childCheckRig(t *testing.T, builtFrom string) checkRig {
 func rootCheckRig(t *testing.T) checkRig {
 	t.Helper()
 	rig := newCheckRig(t, "")
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "U", LastDispatchSeq: 1})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 7, Status: "retro", Rank: "U", LastDispatchSeq: 1})
 	parent := "LEGION-208"
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V", LastDispatchSeq: 1})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
@@ -173,8 +173,9 @@ func TestAPassOfARootsCheckClosesItsImplementerAndSuspendsTheIssue(t *testing.T)
 }
 
 // A report is refused, and changes nothing, on an issue with no open check (none, or one closed),
-// on a look that is not the open one (ended by its bound or a hold, or an earlier look), and with
-// a verdict other than pass, pending or fail.
+// on a look that is not the check's current one (an earlier look, the check having moved on), and
+// with a verdict other than pass, pending or fail. A report of the current look is taken however
+// that look ended (TestALateReportOfTheCurrentLookIsRecorded).
 func TestACheckReportIsRefusedWhereNoLookIsOpenToIt(t *testing.T) {
 	rig := childCheckRig(t, "")
 	if got := refusalCode(rig.apply("no-check", intake.CheckReport{Issue: "LEGION-208", Look: 1, Verdict: "pass"})); got != "CHECK_NOT_OPEN" {
@@ -184,16 +185,16 @@ func TestACheckReportIsRefusedWhereNoLookIsOpenToIt(t *testing.T) {
 		t.Fatalf("a report with verdict maybe = %q, want CHECK_VERDICT_REQUIRED", got)
 	}
 	if got := refusalCode(rig.apply("wrong-look", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pass"})); got != "CHECK_LOOK_NOT_OPEN" {
-		t.Fatalf("a report naming look 2 while look 1 is open = %q, want CHECK_LOOK_NOT_OPEN", got)
+		t.Fatalf("a report naming look 2 while the check is at look 1 = %q, want CHECK_LOOK_NOT_OPEN", got)
 	}
 	if check := productionCheck(t, rig.pool, "LEGION-209"); check == nil || !check.Open() || !check.LookOpen || check.Looks != 1 {
 		t.Fatalf("the check after the refused reports = %+v, want it untouched at look 1 open", check)
 	}
 	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
-	if got := refusalCode(rig.apply("old-look", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pass"})); got != "CHECK_LOOK_NOT_OPEN" {
-		t.Fatalf("a second report of look 1 = %q, want CHECK_LOOK_NOT_OPEN", got)
-	}
 	rig.apply("deployed", intake.IssueDeployed{Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, RunID: 77, CompletedAt: checkOpened.Add(time.Hour)})
+	if got := refusalCode(rig.apply("old-look", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pass"})); got != "CHECK_LOOK_NOT_OPEN" {
+		t.Fatalf("a report of look 1 once the check is at look 2 = %q, want CHECK_LOOK_NOT_OPEN", got)
+	}
 	rig.apply("pass", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pass"})
 	if got := refusalCode(rig.apply("closed", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pass"})); got != "CHECK_NOT_OPEN" {
 		t.Fatalf("a report on a closed check = %q, want CHECK_NOT_OPEN", got)
@@ -270,7 +271,7 @@ func TestAWakeDuringAnOpenLookIsKeptForTheNextLook(t *testing.T) {
 // and none with no commit or with no repository configured.
 func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 	rig := childCheckRig(t, "sjawhar/legion")
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-300", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-300", Project: "LEGION", Title: "widgets", Phase: phase.AwaitingMerge, Generation: 2, Status: "retro", Rank: "W"})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-300", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-300", Project: "LEGION", Title: "widgets", Phase: phase.Merging, Generation: 2, Status: "retro", Rank: "W"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-300", Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-300", HeadSHA: "w", Failing: []string{}})
 	rig.apply("widgets-merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 7, MergeSHA: "merge-w"})
 
@@ -693,24 +694,24 @@ func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 }
 
 // The boot's sweep closes a migrated issue that awaits a merge GitHub already reported, as the
-// merge would have: a root with no running child, and an issue held from awaiting_merge, whose
+// merge would have: a root with no running child, and an issue held from merging, whose
 // hold the close clears, each with a check opened on no merge commit yet. A root with a child still
 // in the workflow stays, and closes when that child leaves; an issue whose pull request is open,
 // and another project's, stay as they are. The boot writes its "closes" line only where it closed,
 // and no notice at all: the architect was told of the wait when the close entered it.
 func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t *testing.T) {
 	rig := newCheckRig(t, "")
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-301", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-301", Project: "LEGION", Title: "alone", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "A"})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-301", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-301", Project: "LEGION", Title: "alone", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "A"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-301", Repo: "sjawhar/legion", Number: 1, Branch: "legion/LEGION-301", HeadSHA: "h1", Failing: []string{}})
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-302", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-302", Project: "LEGION", Title: "parent", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-302", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-302", Project: "LEGION", Title: "parent", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-302", Repo: "sjawhar/legion", Number: 2, Branch: "legion/LEGION-302", HeadSHA: "h2", MergeSHA: "m2", Failing: []string{}})
 	parent := "LEGION-302"
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-303", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-302", Project: "LEGION", Title: "running child", Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "C", LastDispatchSeq: 1})
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-304", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-304", Project: "LEGION", Title: "held", Phase: phase.Held, Hold: &record.Hold{From: phase.AwaitingMerge}, Generation: 1, Status: "retro", Rank: "D"})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-304", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-304", Project: "LEGION", Title: "held", Phase: phase.Held, Hold: &record.Hold{From: phase.Merging}, Generation: 1, Status: "retro", Rank: "D"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-304", Repo: "sjawhar/legion", Number: 4, Branch: "legion/LEGION-304", HeadSHA: "h4", Failing: []string{}})
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-305", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-305", Project: "LEGION", Title: "open", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "E"})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-305", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-305", Project: "LEGION", Title: "open", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "E"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-305", Repo: "sjawhar/legion", Number: 5, Branch: "legion/LEGION-305", HeadSHA: "h5", Failing: []string{}})
-	seedIssue(t, rig.pool, record.Issue{Key: "OTHER-1", Repo: "acme/other", DefaultBranch: "main", GitHubRepo: "acme/other", Tree: "OTHER-1", Project: "OTHER", Title: "elsewhere", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "F"})
+	seedIssue(t, rig.pool, record.Issue{Key: "OTHER-1", Repo: "acme/other", DefaultBranch: "main", GitHubRepo: "acme/other", Tree: "OTHER-1", Project: "OTHER", Title: "elsewhere", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "F"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestMerged, Issue: "OTHER-1", Repo: "acme/other", Number: 6, Branch: "legion/OTHER-1", HeadSHA: "h6", Failing: []string{}})
 
 	rig.apply("boot", intake.DaemonBooted{Boot: 1})
@@ -730,7 +731,7 @@ func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t
 		phases[key], lingering[key] = p, lingers
 	}
 	rows.Close()
-	for key, want := range map[string]phase.Phase{"LEGION-301": phase.Done, "LEGION-302": phase.AwaitingMerge, "LEGION-303": phase.Implementing, "LEGION-304": phase.Done, "LEGION-305": phase.AwaitingMerge, "OTHER-1": phase.AwaitingMerge} {
+	for key, want := range map[string]phase.Phase{"LEGION-301": phase.Done, "LEGION-302": phase.Merging, "LEGION-303": phase.Implementing, "LEGION-304": phase.Done, "LEGION-305": phase.Merging, "OTHER-1": phase.Merging} {
 		if phases[key] != want || lingering[key] != (want == phase.Done) {
 			t.Fatalf("%s after the boot = %s lingering %t, want %s", key, phases[key], lingering[key], want)
 		}

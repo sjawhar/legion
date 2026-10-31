@@ -8,7 +8,7 @@ tags:
   - census
   - ruling
 date: 2026-10-10
-status: active
+status: superseded in part by INFRA-714 — the invariant its census is written around, `READY_HEAD_CARRIES_HANDOFFS` and the rest of the READY vocabulary, is deleted; the pattern, that a ruling pins the old phrase's absence across every part, stands and is what INFRA-714 itself ran
 module: packages/daemon/internal/prompts
 related_issues:
   - "LEGION-631"

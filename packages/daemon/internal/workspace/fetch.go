@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -54,14 +55,16 @@ type FetchRequest struct {
 	// fetched while GitHub has it. Empty, there is none (the cache's own process, a daemon from
 	// before the runtime told it).
 	RecordedDefault string
-	// Bound is the time the fetch's transfers and checks get once it may start, in place of
+	// Bound is the time each clocked stage of the fetch gets once it may start, in place of
 	// FetchTimeout when set: the repository cache's own process sets CacheFetchTimeout for its first
 	// clone, the repository's one full download, which an issue pod's bound cannot hold for a large
 	// repository. Its refresh fetches keep FetchTimeout, since they hold the lock every tar waits on.
+	// The stream from the repository cache is no stage of this kind: it holds the low-speed bound
+	// (CacheStreamLowSpeedBytes) and no clock at all.
 	Bound time.Duration
 }
 
-// bound is the time the fetch's transfers and checks get once it may start: Bound, or FetchTimeout.
+// bound is the time each clocked stage of the fetch gets once it may start: Bound, or FetchTimeout.
 func (r FetchRequest) bound() time.Duration {
 	if r.Bound > 0 {
 		return r.Bound
@@ -118,16 +121,20 @@ type FetchReport struct {
 // cache's own process does. Provision then clones the shared clone from the feed with no
 // credential.
 //
-// Each size-following stage of a fetch gets its own bound, FetchTimeout unless the request sets
-// Bound (the repository cache's own first clone), and none starts past the one it is in: from the
-// cache, the stream and its verification share one and the delta from GitHub has another; without
-// a cache, the clone or fetch from GitHub has one. So an issue pod's fetch ends its waits,
-// transfers and checks within FetchBudget, however long it waited on the cache, and a slow stream
-// never leaves the delta minutes to run in: nine of one deployment's issue pods died in the delta
-// on 2026-10-26, the stream and its verification having used most of the one bound they then
-// shared (sjawhar/legion#2235). The repository cache's first clone, which waits on nothing, may
-// take its whole CacheFetchTimeout, within FetchBudget too, and is no issue pod's. The few local
-// git commands around them (reading refs, writing the feed's configuration) keep CommandTimeout
+// Each size-following stage of a fetch that holds a clock gets its own bound, FetchTimeout unless
+// the request sets Bound (the repository cache's own first clone), and none starts past the one it
+// is in: from the cache, the verification of what was streamed has one, counted from the stream's
+// end, and the delta from GitHub has another; without a cache, the clone or fetch from GitHub has
+// one. The stream from the cache holds no clock: it ends when it falls below the low-speed bound
+// (CacheStreamLowSpeedBytes, CacheStreamLowSpeedTime) and otherwise runs as long as the repository
+// needs, so a download that is still receiving is never thrown away and begun again from nothing
+// (INFRA-495). So an issue pod's fetch ends its waits and its clocked stages within FetchBudget,
+// however long it waited on the cache, and a slow stream never leaves the verification or the
+// delta minutes to run in: nine of one deployment's issue pods died in the delta on 2026-10-26,
+// the stream and its verification having used most of the one bound they then shared
+// (sjawhar/legion#2235). The repository cache's first clone, which waits on nothing, may take its
+// whole CacheFetchTimeout, within FetchBudget too, and is no issue pod's. The few local git
+// commands around them (reading refs, writing the feed's configuration) keep CommandTimeout
 // each and take moments. Every attempt of a transfer from GitHub reads
 // the provisioning token anew as it starts (FetchRequest.Token, fetchCredential.renew), so it
 // presents the token as its file stands then, not as it stood when the fetch began. A transfer
@@ -216,12 +223,13 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	if err := waitForCache(ctx, request); err != nil {
 		return FetchReport{}, err
 	}
-	cached := request.Clock.Now().Add(request.bound())
 	started := request.Clock.Now()
-	streamed, err := unpackCache(ctx, run, request, staging, cached)
+	streamed, err := unpackCache(ctx, run, request, staging)
 	verifying := request.Clock.Now()
 	if err == nil {
-		err = verifyCache(ctx, run, request, staging, cached)
+		// The verification's bound is counted from the stream's end: the stream holds the low-speed
+		// bound rather than a clock, so there is no shared bound left for it to have spent.
+		err = verifyCache(ctx, run, request, staging, verifying.Add(request.bound()))
 	}
 	if err != nil {
 		return FetchReport{}, fmt.Errorf("fill the feed from the repository cache %s: %w", request.CacheURL, err)
@@ -511,17 +519,20 @@ const CachePoll = 10 * time.Second
 // three times as long to reach its launch_failure_limit.
 const CacheWaitTimeout = CacheFetchTimeout + 10*time.Minute
 
-// FetchBudget bounds a fetch's waits, transfers and checks, end to end: at most CacheWaitTimeout
-// waiting for the repository cache, then FetchTimeout for the cache's stream and its verification,
-// then FetchTimeout for the delta from GitHub, which has a bound of its own so that a slow stream
-// cannot leave the delta minutes to run in (sjawhar/legion#2235). A fetch with no cache holds one
-// bound for its clone or its fetch, FetchTimeout or the repository cache's first clone's
-// CacheFetchTimeout (FetchRequest.Bound), both well inside this. The few local git commands around
-// them keep CommandTimeout each
-// and take moments, which the launch's boot timeout past ProvisionBound covers. The Sandbox runtime
-// allows a launching pod's provisioning this much and the shared clone's (sandbox.Runtime.
-// ProvisionBound), so a fetch that runs out of it fails, naming why, before the launch would give
-// up on it.
+// FetchBudget bounds a fetch's waits and its clocked stages: at most CacheWaitTimeout waiting for
+// the repository cache, then FetchTimeout for the verification of what the cache streamed, then
+// FetchTimeout for the delta from GitHub, which has a bound of its own so that a slow verification
+// cannot leave the delta minutes to run in (sjawhar/legion#2235). The cache's stream is outside
+// it: it holds the low-speed bound (CacheStreamLowSpeedBytes, CacheStreamLowSpeedTime) rather than
+// a clock, so a fetch whose stream keeps receiving runs past this budget, and its launch waits it
+// out for as long as the pod reads as provisioning (sandbox.Runtime.ProvisionBound). A fetch with
+// no cache holds one bound for its clone or its fetch, FetchTimeout or the repository cache's
+// first clone's CacheFetchTimeout (FetchRequest.Bound), both well inside this. The few local git
+// commands around them keep CommandTimeout each
+// and take moments, which the launch's boot timeout past ProvisionBound covers. The Sandbox
+// runtime allows a launching pod's provisioning this much and the shared clone's (sandbox.Runtime.
+// ProvisionBound), so a fetch that runs out of one of these bounds fails, naming why, before the
+// launch would give up on it.
 const FetchBudget = CacheWaitTimeout + FetchTimeout + FetchTimeout
 
 // waitForCache asks the repository cache's GET <cache>/healthz every CachePoll until it answers
@@ -622,34 +633,35 @@ func askCache(ctx context.Context, request FetchRequest, path string, withToken 
 }
 
 // unpackCache streams the repository cache's GET <cache>/tar into staging, a bare repository it
-// makes first (`git init --bare`, whose configuration, hooks and info are the feed's own), before
-// deadline, and returns the tar's length; Fetch then verifies what it wrote (verifyCache). The
-// answer must be the request's repository's (askCache) before any of it is read. Every entry must
-// be a regular file or a directory whose cleaned name stays inside staging and is one of a
-// repository's refs or packs (FeedEntry); the first that is not ends the stream, refused by name,
-// and the caller removes what was written. The stream is read to its end, so a transfer the cache
-// broke off is a failure, not a short repository.
-func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging string, deadline time.Time) (int64, error) {
+// makes first (`git init --bare`, whose configuration, hooks and info are the feed's own), and
+// returns the tar's length; Fetch then verifies what it wrote (verifyCache). The ask and the
+// stream it answers hold the low-speed bound and no clock (countingReader.watchStall): a cache
+// that answers nothing, and a stream that falls below the bound, are ended naming it, while a
+// stream that keeps receiving runs for as long as the repository needs. The answer must be the
+// request's repository's (askCache) before any of it is read. Every entry must be a regular file
+// or a directory whose cleaned name stays inside staging and is one of a repository's refs or
+// packs (FeedEntry); the first that is not ends the stream, refused by name, and the caller
+// removes what was written. The stream is read to its end, so a transfer the cache broke off is a
+// failure, not a short repository.
+func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging string) (int64, error) {
 	if _, err := RunChecked(ctx, run, []string{"git", "init", "--bare", "--quiet", staging}, isolatedGitConfig, ""); err != nil {
 		return 0, err
 	}
-	left, err := remaining(request, deadline, "the stream from the repository cache")
-	if err != nil {
-		return 0, err
-	}
-	bounded, cancel := context.WithTimeout(ctx, left)
+	bounded, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stream := &countingReader{window: time.After}
+	go stream.watchStall(bounded, cancel)
 	response, err := askCache(bounded, request, "/tar", true)
 	if response != nil {
 		defer response.Body.Close()
 	}
 	if err != nil {
-		return 0, err
+		return 0, stream.stalledBy(err)
 	}
 	if response.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("GET %s answered %s", response.Request.URL, response.Status)
 	}
-	stream := &countingReader{reader: response.Body}
+	stream.reader = response.Body
 	archive := tar.NewReader(stream)
 	for {
 		header, err := archive.Next()
@@ -666,7 +678,7 @@ func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging 
 	if _, err := io.Copy(io.Discard, stream); err != nil {
 		return 0, fmt.Errorf("read the repository cache's tar: %w", err)
 	}
-	return stream.read, nil
+	return stream.read.Load(), nil
 }
 
 // verifyCache holds the history the cache streamed into staging to what a feed takes: every pack's
@@ -696,8 +708,8 @@ func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging 
 // A pack that arrived without its index is indexed here, as every pack was before: then the feed,
 // and not the cache, writes the index git reads. A pack that does not verify and a history that is
 // not whole are refused, naming what failed. Each git command runs within what remains before
-// deadline, the bound the stream and its verification share; one with nothing left fails the
-// fetch, naming the bound.
+// deadline, the verification's own bound, counted from the stream's end (Fetch); one with nothing
+// left fails the fetch, naming the bound.
 func verifyCache(ctx context.Context, run Runner, request FetchRequest, staging string, deadline time.Time) error {
 	packs, err := filepath.Glob(filepath.Join(staging, "objects", "pack", "pack-*.pack"))
 	if err != nil {
@@ -874,17 +886,62 @@ func unpackEntry(staging string, header *tar.Header, body io.Reader) error {
 	return file.Close()
 }
 
-// countingReader counts what it reads.
+// countingReader counts what it reads and holds the repository cache's answer to the low-speed
+// bound: its watch ends an ask the cache never answers and a stream that falls below the bound
+// (watchStall), and a stream above it runs for as long as the repository needs. reader is the
+// answer's body, set once the ask has answered, since the watch starts before the ask: a cache
+// that takes a connection and sends nothing has delivered nothing, which is the bound's own case.
 type countingReader struct {
 	reader io.Reader
-	read   int64
+	// window answers a channel that delivers once d has passed: time.After in a pod, a test's own
+	// clock. The watch waits on it beside its context rather than on the request's Clock, whose
+	// Sleep cannot be waited on beside a Read that has blocked, which is the stall that matters.
+	window  func(d time.Duration) <-chan time.Time
+	read    atomic.Int64
+	stalled atomic.Bool
 }
 
 func (r *countingReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
-	r.read += int64(n)
-	return n, err
+	r.read.Add(int64(n))
+	return n, r.stalledBy(err)
 }
+
+// watchStall ends the cache's answer, by stop, the cancel of the context the ask and every Read of
+// its body run under, once a whole CacheStreamLowSpeedTime has passed in which fewer than
+// CacheStreamLowSpeedBytes arrived. It reads the count the Reads keep rather than checking inside
+// one, so a stream whose Read has blocked on a cache that sends nothing is ended at the same
+// bound as one that dribbles. It returns when ctx ends, which unpackCache's own cancel does as
+// soon as the answer has been read to its end.
+func (r *countingReader) watchStall(ctx context.Context, stop context.CancelFunc) {
+	for at := r.read.Load(); ; {
+		select {
+		case <-ctx.Done():
+			return
+		case <-r.window(CacheStreamLowSpeedTime):
+		}
+		read := r.read.Load()
+		if read-at < CacheStreamLowSpeedBytes {
+			r.stalled.Store(true)
+			stop()
+			return
+		}
+		at = read
+	}
+}
+
+// stalledBy names the low-speed bound in err once the watch has ended the answer: every failure
+// the ask and the body's Reads give after that is the cancelled context's, which says nothing of
+// why. An err of nil, io.EOF included, passes through as it is.
+func (r *countingReader) stalledBy(err error) error {
+	if err == nil || !r.stalled.Load() {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errStreamStalled, err)
+}
+
+// errStreamStalled is what a stream the low-speed bound ended says of itself, naming the bound.
+var errStreamStalled = fmt.Errorf("the repository cache delivered less than %d bytes in %s, the low-speed bound below which its stream is ended", CacheStreamLowSpeedBytes, CacheStreamLowSpeedTime)
 
 // feedTransfer is how Fetch brings the repository from GitHub: verb names each attempt in the
 // log and in a failure, argv is the attempt, and destination, for a clone, is the temporary

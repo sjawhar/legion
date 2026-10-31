@@ -46,14 +46,11 @@ type Runtime interface {
 	// when it recorded none, and a hint: a runtime that finds a claim's process by the claim's own
 	// place, as a sandbox finds a role's launcher in its issue's pod, waits out whatever runs
 	// there even when prev is nil. A claim resumes the agent it recorded or none: a fresh agent on
-	// a claim that had one is the failure the same-agent refusal exists to catch, so a session file
-	// found nowhere is a refusal, charged as any launch failure is, and the claim keeps its
-	// session. The one exception is the operator's takeover of another runtime's claims (the tmux
-	// runtime's `runtime.tmux.take_over`): while that key is set, any Resume whose session file is
-	// found nowhere the agent would run — the taken-over runtime's session or this host's own,
-	// which nothing tells apart — returns an error wrapping ErrSessionFileMissing, having started
-	// nothing, and the caller then forgets the session and starts a fresh agent. On
-	// an error the caller owns stopping prev (Suspend), and Resume has stopped any process it
+	// a claim that had one is the failure the same-agent refusal exists to catch. A session the
+	// runtime looked for and did not find is ErrSessionFileMissing, and a session store that could
+	// not be asked at all is ErrSessionStore; every runtime answers both the same way, having
+	// started nothing, and the caller tells them apart by what it does next (supervise's start).
+	// On an error the caller owns stopping prev (Suspend), and Resume has stopped any process it
 	// started itself.
 	Resume(ctx context.Context, prev *Locator, spec SpawnSpec) (Locator, error)
 	// Suspend stops the process gracefully, within the runtime's stop grace, and keeps everything
@@ -116,14 +113,21 @@ type Runtime interface {
 	CleanupTree(ctx context.Context, tree string) error
 }
 
-// ErrSessionFileMissing is a Resume made while the operator's takeover of another runtime's claims
-// is on (the tmux runtime's `runtime.tmux.take_over: kubernetes`) that found the spec's
-// ResumeSessionFile nowhere the agent would run. Most such sessions are the taken-over runtime's,
-// kept where this one cannot read it, and neither the recorded path nor the previous incarnation
-// tells them from this host's own, so every missing session is this error while the key is set.
-// Nothing was started, and the caller starts a fresh agent in the session's
-// place. A session file missing with the key off is a refusal that does not wrap it.
+// ErrSessionFileMissing is a Resume whose spec.ResumeSessionFile is held by no store the runtime
+// can resume it from: no folder the tmux runtime searched holds that session, or the session table
+// the Kubernetes launcher reads has no row for it. The session is gone, not unreachable, so the
+// caller starts a fresh agent in its place, charged nothing and reported (supervise's start).
+// Nothing was started. Both runtimes answer this for that one fact, whatever else is configured —
+// the operator's takeover of another runtime's claims (`runtime.tmux.take_over`) changes which
+// sessions are found, never what a session found nowhere means.
 var ErrSessionFileMissing = errors.New("the recorded session file is missing")
+
+// ErrSessionStore is a Resume whose session store could not be asked: the table does not exist, or
+// the store did not answer. It says nothing about the claim's session, so it is neither a missing
+// session nor the claim's own failure: the caller keeps the session, charges nothing, and starts
+// again every minute until the store answers (supervise's startWaitsForStore). Nothing was
+// started.
+var ErrSessionStore = errors.New("the session store could not be asked")
 
 // IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch
 // lock, says the issue's durable close and its complete stored role population allow it (false

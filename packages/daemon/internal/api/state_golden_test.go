@@ -74,10 +74,7 @@ projects:
     slack_channels: [C0123ABCD, C0123ABCE]
     deploys:
       - {repo: sjawhar/legion, workflow: .github/workflows/release.yaml, step: Apply}
-  WIDGETS:
-    merge_queue_role: merge-queue
-    merge:
-      by_hand: ['^deploy/', '\.sql$']
+  WIDGETS: {}
 gates:
   design: root-issues
 github_apps:
@@ -98,7 +95,6 @@ github_apps:
 linger_hours: 1.5
 production_check_hours: 240
 review_round_cap: 4
-max_fix_attempts: 5
 controller: daemon
 worker_backends: {tester: omp}
 capabilities:
@@ -243,6 +239,7 @@ func populatedState(t *testing.T) State {
 							},
 						},
 						HandoffCommit: "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+						Pass:          0,
 						Rounds:        0,
 					},
 					claim.RoleImplementer: {
@@ -268,7 +265,11 @@ func populatedState(t *testing.T) State {
 							},
 						},
 						HandoffCommit: "",
-						Rounds:        2,
+						// Three passes through the stretch, two of them ended by a review that
+						// requested changes: the third went back on something else, a tester's fail
+						// or a red, which the review rounds do not count.
+						Pass:   3,
+						Rounds: 2,
 					},
 				},
 				PullRequest: &PullRequestView{
@@ -276,9 +277,7 @@ func populatedState(t *testing.T) State {
 					Number:         1247,
 					Head:           "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
 					State:          "open",
-					ChecksVerdict:  "pending",
 					ReviewDecision: "changes_requested",
-					FixAttempts:    1,
 				},
 				DesignGate: &GateView{
 					ArtifactID:      "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
@@ -299,7 +298,7 @@ func populatedState(t *testing.T) State {
 				DefaultBranch: "release/v7.1",
 				HoldReason:    "escalated",
 				Workers: map[claim.Role]PhaseView{
-					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
+					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Pass: 1, Rounds: 1},
 				},
 			},
 			// LEGION-212's architect asked a person a question and handed the turn back, which gave
@@ -330,7 +329,7 @@ func populatedState(t *testing.T) State {
 				Repo:          "acme/widgets",
 				DefaultBranch: "main",
 				Workers: map[claim.Role]PhaseView{
-					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_207", State: "working"}, HandoffCommit: "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40", Rounds: 1},
+					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_207", State: "working"}, HandoffCommit: "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40", Pass: 1, Rounds: 1},
 				},
 				PullRequest: &PullRequestView{
 					Repo:           "acme/widgets",
@@ -392,7 +391,7 @@ func populatedState(t *testing.T) State {
 			},
 			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
 			// Dispatch's GitHub App is not installed on zeta/tools, which is served all the same.
-			WithoutWebhookApp: []WebhookAppGapView{{Repo: "zeta/tools", Reason: "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"}},
+			WithoutWebhookApp: []WebhookAppGapView{{Repo: "zeta/tools", Reason: "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events, nothing redelivers them, and no periodic pass makes up for them, so its issues stand still until the App is installed"}},
 			Caches: []CacheView{{
 				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
 			}},
@@ -721,7 +720,7 @@ func TestTask310RouteGoldens(t *testing.T) {
 	golden(t, "grant.json", GrantResponse{
 		GrantID: "grant-for-one-command", ExpiresAt: "2026-09-23T12:01:00Z",
 	})
-	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: "pull request #312 is already merged, so READY was published without reading its head's handoffs"})
+	golden(t, "handoff-complete.json", HandoffCompleteResponse{})
 	golden(t, "issue-status.json", IssueStatusResponse{})
 	golden(t, "gate-register.json", GateRegisterResponse{})
 	golden(t, "wave-release.json", WaveReleaseResponse{Released: []string{"LEGION-209"}})

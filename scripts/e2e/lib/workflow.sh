@@ -595,13 +595,13 @@ smoke_main_leftovers() {
   gh api "repos/$repo/git/trees/main?recursive=1" \
     --jq '.tree[] | select(.type == "blob") | .path | select(startswith(".legion/") or startswith("docs/solutions/"))'
 }
-# merge_when_clean REPO PR MERGE_FLAG... is the proof human's merge of a pull request no accepted
-# READY covers — one merged before its READY, or one whose merger is held at its assignment, as the
-# 4b.13b acceptance holds its — and records who merged it: merge_when_clean_by is "the daemon's
-# submission" or "the proof human", and merge_when_clean_commit the merge commit GitHub records. A
-# pull request an accepted READY covers is await_ready_merge's: the daemon submits that merge
-# itself, and a hand merge would perform the product's own step. merge_when_clean reads the pull
-# request's state first, in one GraphQL query (gh 2.98's `pr view --json` has no merge-queue
+# merge_when_clean REPO PR MERGE_FLAG... is the proof human's merge of a pull request the merger
+# does not merge — one merged before the issue reaches merging, or one whose merger is held at its
+# assignment, as the 4b.13b acceptance holds its — and records who merged it: merge_when_clean_by
+# is "the merger's own merge" or "the proof human", and merge_when_clean_commit the merge commit
+# GitHub records. A pull request the merger reaches is await_merger_merge's: the merge is the
+# merger's own step, and a hand merge would perform it for the agent. merge_when_clean reads the
+# pull request's state first, in one GraphQL query (gh 2.98's `pr view --json` has no merge-queue
 # field): a merged pull request is asserted, MERGED with a merge commit, and merged no further
 # (`gh pr merge` on a merged pull request fails, and would fail the run); an enqueued or auto-merge
 # armed one is never merged by hand, since GitHub merges it the moment the repository's rules are
@@ -619,10 +619,10 @@ smoke_main_leftovers() {
 # request's head existing, and a timeout names the actual state, mergeStateStatus, what is armed
 # and every check that is not a completed success, not only that time ran out. --match-head-commit
 # holds the hand merge to the head this call last read, so a push between the poll and the merge
-# is refused by its own sha instead of silently merging a later one. A merge the daemon submitted
-# can land on the same CLEAN the hand merge acts on, and then refuses it ("Pull request #n is
+# is refused by its own sha instead of silently merging a later one. The merger's own merge can
+# land on the same CLEAN the hand merge acts on, and then refuses it ("Pull request #n is
 # already merged"), so a refused hand merge is followed by one re-read: MERGED with a merge commit
-# is the daemon's outcome, not a failure; a hand merge that succeeds is re-read too, so the record
+# is the merger's outcome, not a failure; a hand merge that succeeds is re-read too, so the record
 # is GitHub's state, not gh's exit status; the hand merge runs as an `if` test, where neither
 # `set -e` nor the ERR trap acts on its failure, so the re-read judges it. When --delete-branch is
 # among the flags and the merge was not the proof human's, the head branch is deleted here, as the
@@ -677,7 +677,7 @@ merge_when_clean() {
     [ "$pull_request_state" != CLOSED ] || fail "$repo_name#$pr was closed without a merge"
     if [ -n "$pull_request_armed" ] && [ "$armed" != "$pull_request_armed" ]; then
       armed=$pull_request_armed
-      note "$repo_name#$pr is armed by the daemon's submission ($armed; mergeStateStatus $pull_request_merge_state): no hand merge, waiting for it to land"
+      note "$repo_name#$pr is armed ($armed; mergeStateStatus $pull_request_merge_state): no hand merge, waiting for it to land"
     fi
     [ -n "$pull_request_armed" ] || [ "$pull_request_merge_state" != CLEAN ] || break
     if ((SECONDS - beat >= 60)); then
@@ -687,14 +687,14 @@ merge_when_clean() {
     sleep "$poll"
   done
   if [ "$pull_request_state" = MERGED ]; then
-    merge_when_clean_by="the daemon's submission"
+    merge_when_clean_by="the merger's own merge"
   elif [ -z "$pull_request_armed" ] && [ "$pull_request_merge_state" = CLEAN ]; then
     note "$repo_name#$pr reads CLEAN with nothing armed; the proof human merges it by hand at $pull_request_head"
     if gh -R "$repo_name" pr merge "$pr" --match-head-commit "$pull_request_head" "$@"; then
       merge_when_clean_by="the proof human"
     else
-      note "the hand merge of $repo_name#$pr was refused (gh's reason is above); re-reading it, since the daemon's submission may have landed first"
-      merge_when_clean_by="the daemon's submission"
+      note "the hand merge of $repo_name#$pr was refused (gh's reason is above); re-reading it, since the merger's own merge may have landed first"
+      merge_when_clean_by="the merger's own merge"
     fi
     merge_when_clean_read "$repo_name" "$pr"
   else
@@ -702,22 +702,21 @@ merge_when_clean() {
   fi
   merge_when_clean_record "$repo_name" "$pr" "$delete_branch"
 }
-# await_ready_merge REPO PR [--delete-branch] sees the merge the daemon submits for an accepted
-# READY land, and never merges by hand: the daemon submits READY's merge itself — a merge queue
-# enqueues it, a pull request GitHub reports mergeable merges at once, a repository that allows
-# auto-merge arms it, and in one that allows neither, as sjawhar/legion-smoke does, the daemon
-# merges it once GitHub reports it mergeable — so a hand merge here would perform the product's own
-# step and hide its failure. It polls merge_when_clean_read within merge_when_clean's bound and
-# poll, fails at once on a pull request closed without a merge, and on a timeout names the state,
-# what is armed and every unsettled check. merge_when_clean_by is "the daemon's submission", and
-# --delete-branch deletes the head branch once it has merged (merge_when_clean_record).
-await_ready_merge() {
+# await_merger_merge REPO PR [--delete-branch] sees the merger's own merge land, and never merges
+# by hand: the merge is the merger agent's step — `gh pr merge --squash --match-head-commit` at the
+# head it read, with the subject and the empty body it passes itself, or an enqueue on a
+# merge-queue base — so a hand merge here would perform the product's own step and hide its
+# failure. It polls merge_when_clean_read within merge_when_clean's bound and poll, fails at once
+# on a pull request closed without a merge, and on a timeout names the state, what is armed and
+# every unsettled check. merge_when_clean_by is "the merger's own merge", and --delete-branch
+# deletes the head branch once it has merged (merge_when_clean_record).
+await_merger_merge() {
   local repo_name=$1 pr=$2 delete_branch=
   [ "${3:-}" != --delete-branch ] || delete_branch=1
   local bound=${MERGE_WHEN_CLEAN_BOUND:-300} poll=${MERGE_WHEN_CLEAN_POLL:-0.5}
   local started=$SECONDS beat=$SECONDS polls=0
   merge_when_clean_by='' merge_when_clean_commit=''
-  note "waiting up to ${bound}s for the daemon's submission of $repo_name#$pr to merge it; nothing merges it by hand"
+  note "waiting up to ${bound}s for the merger of $repo_name#$pr to merge it; nothing merges it by hand"
   while ((SECONDS - started < bound)); do
     polls=$((polls + 1))
     merge_when_clean_read "$repo_name" "$pr"
@@ -725,12 +724,12 @@ await_ready_merge() {
     [ "$pull_request_state" != CLOSED ] || fail "$repo_name#$pr was closed without a merge"
     if ((SECONDS - beat >= 60)); then
       beat=$SECONDS
-      note "still waiting for the daemon to merge $repo_name#$pr: poll $polls, $((SECONDS - started))s of ${bound}s, now ${pull_request_state:-unread}${pull_request_merge_state:+ $pull_request_merge_state}${pull_request_armed:+, $pull_request_armed}"
+      note "still waiting for the merger to merge $repo_name#$pr: poll $polls, $((SECONDS - started))s of ${bound}s, now ${pull_request_state:-unread}${pull_request_merge_state:+ $pull_request_merge_state}${pull_request_armed:+, $pull_request_armed}"
     fi
     sleep "$poll"
   done
   [ "$pull_request_state" = MERGED ] || merge_when_clean_timeout "$repo_name" "$pr" "$started" "$polls"
-  merge_when_clean_by="the daemon's submission"
+  merge_when_clean_by="the merger's own merge"
   merge_when_clean_record "$repo_name" "$pr" "$delete_branch"
 }
 # merge_when_clean_timeout REPO PR STARTED POLLS fails naming the pull request's last read and every
@@ -968,10 +967,10 @@ close_unpassed_run_pull_requests() {
 # The record keeps each role's phase row: the commit the role's `handoff_complete` reported at the
 # completion the daemon accepted (for a file-backed phase the pushed commit carrying the handoff,
 # which the `legion` tool finds in the pane and refuses unpushed, so a push before the completion
-# is the role's rule; for retro and READY the commit the workspace stands on), emptied when the
+# is the role's rule; for retro and the merger the commit the workspace stands on), emptied when the
 # role's next phase starts, and, on the implementer's row, the review round (its returns to
-# implementing). The issue moves out of implementing, retro, and merging only on that phase's
-# completion, so a checker reads the row right after the transition it follows, before the role's
+# implementing). The issue moves out of implementing and retro only on that phase's completion, and
+# out of merging on the daemon's read of the merged pull request,
 # next phase can empty it. A production check's look is no phase: its report moves no phase and
 # writes no handoff (a verdict and a summary, no commit), so it is read from the daemon's state's
 # `check`, below, never from this record.
@@ -1140,7 +1139,7 @@ assert_review_of_own_handoff() {
 }
 # retro_reported ISSUE: the daemon applied the implementer's retro completion, the one way out of
 # retro.
-retro_reported() { [ -n "$(role_handoff "$1" implementer merging awaiting_merge)" ]; }
+retro_reported() { [ -n "$(role_handoff "$1" implementer merging done)" ]; }
 # assert_round_handoff ISSUE ROUND: the issue reached testing on the implementer's own completion
 # of that implementing round, never on a push alone carrying an earlier round's handoff.
 assert_round_handoff() {
@@ -1151,7 +1150,7 @@ assert_round_handoff() {
 
 # ---- the production check after the close ---------------------------------------------------------
 
-# The merge closes the issue (awaiting_merge and a merged pull request write done), and the
+# The merge closes the issue (the daemon's read of the merged pull request writes done), and the
 # implementer's production check is work after the close: the daemon opens it on the merge commit,
 # hands the implementer its first look, and `legion state --json` shows it as `.issues[KEY].check`
 # (repo, pullRequest, mergeCommit, openedAt, looks, lookOpen, lastWake{kind, detail, at},

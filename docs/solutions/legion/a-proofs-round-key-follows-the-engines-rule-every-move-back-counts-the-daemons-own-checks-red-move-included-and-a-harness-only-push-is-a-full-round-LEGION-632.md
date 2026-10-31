@@ -9,7 +9,7 @@ tags:
   - e2e-harness
   - unchanged-diff-fingerprint
 date: 2026-10-10
-status: active
+status: superseded in part by INFRA-714 — the daemon's own `checks-red` move for CI is gone: a red check moves the issue nowhere, so the only daemon move left to count is the conflict move. Every other move back still counts a round
 module: scripts/e2e/stage4b-sandbox-tree.sh, scripts/e2e/lib/workflow.sh, packages/daemon/internal/workflow
 related_issues:
   - "LEGION-632"

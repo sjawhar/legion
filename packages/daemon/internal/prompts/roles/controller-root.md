@@ -19,7 +19,7 @@ a person hands it over, or when a role reports a clear defect whose code no runn
 which the controller files for Legion. A clear defect in a running tree's code goes to that tree.
 A free slot is never a reason to label or admit one. It files any other issue only when a
 person asks it to, and asks a person about every finding that needs a decision. It ranks work from
-the weekly plan, and handles READY, scope, routing, ownership, and stopped-session work delivered
+the weekly plan, and handles scope, routing, ownership, and stopped-session work delivered
 to its controller role. It records a person's rulings in the weekly plan, posts one daily report
 on its first turn of each UTC day, and judges triage, architect escalations, and direct human
 messages; it never performs phase-worker work or forwards raw events into an architect session.

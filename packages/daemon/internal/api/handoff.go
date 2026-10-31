@@ -10,9 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
-	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -36,17 +34,12 @@ type HandoffCompleteRequest struct {
 	GrantID string `json:"grantId"`
 	Summary string `json:"summary"`
 	Verdict string `json:"verdict"`
-	Ready   bool   `json:"ready"`
 	Commit  string `json:"commit,omitempty"`
 }
 
-// HandoffCompleteResponse confirms that the completion fact committed. Note is what READY answers
-// when it has something to say about the merge it is publishing: that the pull request was already
-// merged, so its head was published unread (readyChecks), or that a person merges this one
-// (mergeReadyPolicy's by-hand note); every other completion answers none.
-type HandoffCompleteResponse struct {
-	Note string `json:"note,omitempty"`
-}
+// HandoffCompleteResponse confirms that the completion fact committed. It carries nothing: the
+// daemon merges nothing and reads no head, so no completion has anything to answer with.
+type HandoffCompleteResponse struct{}
 
 // handoffComplete records a phase completion or a production check report (checkReport). The grant
 // is redeemed and the record read before the two are told apart, so an invalid grant is refused
@@ -68,10 +61,6 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if grant.Controller {
 		writeFailure(w, http.StatusForbidden, "GRANT_INVALID", "grant is unavailable")
-		return
-	}
-	if req.Ready && grant.Role != claim.RoleMerger {
-		writeFailure(w, http.StatusBadRequest, "READY_ROLE_FORBIDDEN", "only a merger may report ready")
 		return
 	}
 	if s.pool == nil || s.records == nil {
@@ -125,35 +114,18 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "HANDOFF_STALE_GENERATION", staleCompletion(grant.Issue, issue.Generation, serving, machine.Claim().Pending))
 		return
 	}
-	treeGeneration, round := position.treeGeneration, position.round
-	// READY is held to the pull request's head on GitHub before the fact is applied: a refusal the
-	// workflow committed would be recorded as processed under this completion's key, which leaves
-	// the summary out, while a refusal here records nothing, and the corrected retry at the same
-	// commit is applied. That holds for the packet's length too. The daemon posts the packet it tells
-	// (record.ReadyPacket: the merger's packet, with a by-hand READY's note above it) as one Dispatch
-	// message, the outbox's marker appended, and Dispatch refuses a longer body on every attempt, so
-	// a packet over record.MessagePostLimit would never reach the human; refused only by the
-	// workflow, the shortened packet at the same commit would be answered HANDOFF_ALREADY_RECORDED
-	// and the issue would stay in merging.
-	var answer readyAnswer
-	if req.Ready {
-		if answer, ok = s.readyNote(w, r, grant, issue, req.Commit); !ok {
-			return
-		}
-		if length := dispatch.MessageBodyLength(record.ReadyPacket(req.Summary, answer.mergeNote)); length > record.MessagePostLimit {
-			writeFailure(w, http.StatusBadRequest, "READY_PACKET_TOO_LONG", fmt.Sprintf(
-				"the READY packet%s is %d characters over the %d the daemon can post as one Dispatch message (%d/%d): link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
-				byHandShare(answer.mergeNote), length-record.MessagePostLimit, record.MessagePostLimit, length, record.MessagePostLimit))
-			return
-		}
-	}
+	treeGeneration, pass := position.treeGeneration, position.pass
 	// One phase's completion is identified by where the issue stands — its generation, phase, and
-	// review round — with the role and what it reported: the commit, the verdict, and READY. A
+	// pass through that phase — with the role and what it reported: the commit and the verdict. A
 	// retried call for the same phase is the same fact; the next phase's completion at the same
-	// commit (the implementer's retro, standing on its implementing round's last push) is a
-	// different one, and so is a corrected report at the same commit (a merger's ready: true after
-	// READY_REQUIRED), since a refusal the workflow commits is recorded as processed. The position is
-	// read before the fact's own transaction: should the issue move in between, the engine re-reads
+	// commit (the implementer's retro, standing on its implementing pass's last push) is a
+	// different one, since the phase and the role are in the key; and so is a second report of the
+	// same phase at the same commit that names another verdict — the tester's corrected pass or
+	// fail, the only field a role may report differently of one commit — since a refusal the
+	// workflow commits is recorded as processed, and a corrected report must not be answered as
+	// that refusal's duplicate. The summary is left out on purpose: a call that only rewords it is
+	// the same completion, and the first one is what the workflow took. The position is read before
+	// the fact's own transaction: should the issue move in between, the engine re-reads
 	// it there and refuses a completion whose role no longer owns the phase, or whose run is no
 	// longer the issue's (workflow's HANDOFF_STALE_GENERATION guard).
 	//
@@ -168,36 +140,35 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// by bumping only the root's, and restarts a child's worker in the phase it stood in, so a
 	// child's completion refused before (while the tree lingered, or while the old gate was closed)
 	// would otherwise take the new generation's key.
-	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
+	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, pass, req.Commit, req.Verdict)
 	if grant.Role == claim.RoleImplementer && issue.Phase == phase.Implementing && !position.lingers && req.Commit != position.lastHandoff {
 		if !s.implementationPullRequest(w, r, issue, position.pullRequest, eventID) {
 			return
 		}
 	}
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim,
-		Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit, MergeNote: answer.mergeNote,
-		RecordedHead: answer.recordedHead, RecordedHeadAt: answer.recordedHeadAt, HeadAt: answer.headAt}, s.handlers...)
+		Summary: req.Summary, Verdict: req.Verdict, Commit: req.Commit}, s.handlers...)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply handoff fact")
 		return
 	}
 	if result.Duplicate {
 		writeFailure(w, http.StatusConflict, "HANDOFF_ALREADY_RECORDED", fmt.Sprintf(
-			"the %s completion of phase %s (round %d) at commit %s was already received; this call changed nothing",
-			grant.Role, issue.Phase, round, req.Commit))
+			"the %s completion of phase %s (pass %d through it) at commit %s was already received; this call changed nothing",
+			grant.Role, issue.Phase, pass, req.Commit))
 		return
 	}
 	if result.Refusal != nil {
-		// A refused READY, the design gate's among them, keeps its by-hand note in the refusal: the
-		// daemon submits a gate-refused READY's merge when the gate opens, and never a by-hand one's.
-		message := result.Refusal.Message
-		if answer.mergeNote != "" {
-			message += " " + answer.mergeNote
-		}
-		writeFailure(w, result.Refusal.Status, result.Refusal.Code, message)
+		writeFailure(w, result.Refusal.Status, result.Refusal.Code, result.Refusal.Message)
 		return
 	}
-	writeJSON(w, http.StatusOK, HandoffCompleteResponse{Note: answer.note})
+	// The completion is recorded and its transaction committed, so the daemon's read of the issue's
+	// pull request judges what this phase left; the hook only queues that read, which runs on the
+	// daemon's own goroutine, so this answer waits for no GitHub call.
+	if s.handoffCompleted != nil {
+		s.handoffCompleted(grant.Issue)
+	}
+	writeJSON(w, http.StatusOK, HandoffCompleteResponse{})
 }
 
 // staleCompletion is the refusal of a completion attributed to a run the issue has left. It names
@@ -214,11 +185,12 @@ func staleCompletion(issue string, current, serving uint64, pending *supervise.D
 
 // implementationPullRequest is the implementer's completion's read of GitHub: in implementing, a
 // completion moves its issue to testing only on a pull request recorded open or merged for it
-// (workflow's TriggerImplementationReady), and only the opened webhook, or the required-checks
-// pass reading for one that webhook lost, records one open. So before the completion is applied,
-// the open pull request on the issue's branch (claim.IssueBranch) is read as the implement App,
-// minted for the owner of the issue's repository in GitHub's spelling (record.Issue.GitHubRepo,
-// which the webhook's facts name it by), and it says whether the completion goes on:
+// (workflow's TriggerImplementationReady), and only the opened webhook, or the daemon's per-issue
+// read standing in for one that webhook lost (readIssuePullRequest), records one open. So before
+// the completion is applied, the open pull request on the issue's branch (claim.IssueBranch) is
+// read as the implement App, minted for the owner of the issue's repository in GitHub's spelling
+// (record.Issue.GitHubRepo, which the webhook's facts name it by), and it says whether the
+// completion goes on:
 //
 //   - one open: when the record does not already hold it open, the intake.PullRequestOpened its
 //     webhook would have carried is applied first, a reopen when the record holds the same pull
@@ -234,8 +206,8 @@ func staleCompletion(issue string, current, serving uint64, pending *supervise.D
 //     decides the phase.
 //   - unreadable (a repository the record cannot name, a failed token mint or a failed read,
 //     GitHub's rate limit among them): logged WARN, and the completion is applied as it was before
-//     this read, so GitHub's trouble never blocks it; the required-checks pass records the pull
-//     request when it finds one.
+//     this read, so GitHub's trouble never blocks it; the per-issue read records the pull request
+//     when it finds one.
 //
 // A completion the workflow refuses whatever GitHub shows reads nothing: the route calls this only
 // for one that is not already applied (eventID, its key, read with intake.Applied), whose tree does
@@ -263,7 +235,7 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 		if errors.As(err, &answer) {
 			attributes = append(attributes, "status", answer.Status)
 		}
-		s.log.Warn("api: read the open pull request on a completing implementer's branch; the completion is applied unread, and the required-checks pass records the pull request it finds", attributes...)
+		s.log.Warn("api: read the open pull request on a completing implementer's branch; the completion is applied unread, and the per-issue read records the pull request it finds", attributes...)
 	}
 	repository, err := ghrepo.Parse("the GitHub repository of "+issue.Key, issue.GitHubRepo)
 	if err != nil {
@@ -314,12 +286,12 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 // (CHECK_VERDICT_REQUIRED). No commit is read: the look pushed nothing. No run is read either: the
 // check fences itself on the issue and the look the route read as the current one, which the
 // engine holds the report to (CHECK_LOOK_NOT_OPEN), rather than on the claim's run, since the look's
-// task is no phase's run and a woken session may hold an older one. The event is the issue, the
+// task is no phase's run and a woken session may hold an older one. However that look ended, its
+// report counts while the check is open (dispatch://INFRA-714/spec R12). The event is the issue, the
 // check (record.ProductionCheck.ID: a later merge of the same issue replaces the check and counts
 // its looks from one again, and the rerun's report on look 1 is a new fact, not the first check's),
-// the look and the verdict: a retried report of the same look is the same fact, and a refusal — the
-// look ended by its bound before the report landed — is recorded as processed under it, so the
-// report of the next look is a new fact.
+// the look and the verdict: a retried report of the same look is the same fact, and one the engine
+// refuses is left unmarked (intake's ApplyFact), so the implementer's next send of it applies.
 func (s *server) checkReport(w http.ResponseWriter, r *http.Request, grant credential.Grant, check *record.ProductionCheck, req HandoffCompleteRequest) {
 	if check == nil || !check.Open() {
 		writeFailure(w, http.StatusConflict, "CHECK_NOT_OPEN", fmt.Sprintf("%s has no open production check; this completion changed nothing", grant.Issue))
@@ -348,88 +320,9 @@ func (s *server) checkReport(w http.ResponseWriter, r *http.Request, grant crede
 	writeJSON(w, http.StatusOK, HandoffCompleteResponse{})
 }
 
-// byHandShare is the clause READY_PACKET_TOO_LONG names a by-hand note's share of the packet with,
-// empty when READY carries none.
-func byHandShare(mergeNote string) string {
-	if mergeNote == "" {
-		return ""
-	}
-	return ", with the by-hand note the daemon tells above it,"
-}
-
-// readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub, in
-// the repository issue's record names, for a merger's ready: true, and is what they leave
-// (readyAnswer). Every refusal is written before the fact is applied, so nothing is recorded under
-// the completion's key and the corrected retry at the same commit is applied:
-//
-//   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
-//     READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE
-//     (unreviewedChange: the head is not the review round's approved head plus retro's commits),
-//     READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED, READY_DISARM_PENDING.
-//   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
-//
-// The reads are made as the implement App, minted for the repository's owner, whose token never
-// leaves the daemon; a runtime that boots without Apps publishes no READY (leaseForGrant).
-func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue, readyHead string) (answer readyAnswer, ok bool) {
-	repository, err := issue.Repository()
-	if err != nil {
-		s.log.Error("api: read the repository of a completing issue", "issue", issue.Key, "error", err)
-		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", fmt.Sprintf("the record of %s names no repository its pull request can be read in", issue.Key))
-		return readyAnswer{}, false
-	}
-	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement, repository.Owner())
-	if !ok {
-		return readyAnswer{}, false
-	}
-	ctx := r.Context()
-	pr, disarmPending, approvedHead, err := s.readyRecord(ctx, issue.Key)
-	if err != nil {
-		s.log.Error("api: read the pull request and approved head of a completing issue", "issue", issue.Key, "error", err)
-		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", "could not read the issue's pull request and approved head")
-		return readyAnswer{}, false
-	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(s.githubAPI, repository)}
-	var rules config.MergeRules
-	if s.mergeRules != nil {
-		rules = s.mergeRules(issue.Project)
-	}
-	answer, refused := readyChecks(ctx, github, rules, issue.Key, readyHead, approvedHead, pr, disarmPending)
-	if refused != nil {
-		refused.write(w)
-		return readyAnswer{}, false
-	}
-	return answer, true
-}
-
-// readyRecord reads, in one repeatable-read snapshot, issue's recorded pull request (nil when it
-// has none), whether its unfinished disarm keeps an earlier auto-merge arm standing
-// (record.Store.DisarmPending; by-hand READY refuses on that barrier, ordinary READY does not wait
-// for it), and the head its review round approved, "" when it recorded none (record.ApprovedHead),
-// which READY holds the pull request's head to (unreviewedChange).
-func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullRequest, bool, string, error) {
-	if s.pool == nil || s.records == nil {
-		return nil, false, "", errors.New("record dependencies are unavailable")
-	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly, IsoLevel: pgx.RepeatableRead})
-	if err != nil {
-		return nil, false, "", err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	pr, err := s.records.PullRequest(ctx, tx, issue)
-	if err != nil {
-		return nil, false, "", err
-	}
-	pending, err := s.records.DisarmPending(ctx, tx, issue)
-	if err != nil {
-		return nil, false, "", err
-	}
-	head, err := record.ApprovedHead(ctx, s.records, tx, issue)
-	return pr, pending, head, err
-}
-
 // completionPosition is where issue key stands as the completion route reads it, in one repeatable-read
 // snapshot: the issue record, its tree's generation (the root's) and whether the tree lingers, its
-// review round — the implementer's count of returns to implementing, which tells each implementing,
+// pass — the implementer's count of returns to an earlier phase, which tells each implementing,
 // testing, and reviewing pass from the last — and the commit the implementer last reported for a
 // file-backed phase (record.PhaseRow.LastHandoff), its pull request record while it is implementing
 // (the one phase the route reads it in), nil in any other phase or while none is recorded, and its
@@ -438,7 +331,7 @@ type completionPosition struct {
 	issue          *record.Issue
 	treeGeneration uint64
 	lingers        bool
-	round          int
+	pass           int
 	lastHandoff    string
 	pullRequest    *record.PullRequest
 	check          *record.ProductionCheck
@@ -469,10 +362,10 @@ func (s *server) handoffPosition(ctx context.Context, key string) (completionPos
 	if err != nil {
 		return completionPosition{}, err
 	}
-	round, lastHandoff := 0, ""
+	pass, lastHandoff := 0, ""
 	for _, row := range rows {
 		if row.Role == claim.RoleImplementer {
-			round, lastHandoff = row.Rounds, row.LastHandoff
+			pass, lastHandoff = row.Pass, row.LastHandoff
 		}
 	}
 	var pr *record.PullRequest
@@ -485,6 +378,6 @@ func (s *server) handoffPosition(ctx context.Context, key string) (completionPos
 	if err != nil {
 		return completionPosition{}, err
 	}
-	return completionPosition{issue: issue, treeGeneration: root.Generation, lingers: root.Lingers(), round: round, lastHandoff: lastHandoff,
+	return completionPosition{issue: issue, treeGeneration: root.Generation, lingers: root.Lingers(), pass: pass, lastHandoff: lastHandoff,
 		pullRequest: pr, check: check}, tx.Commit(ctx)
 }

@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,8 +95,8 @@ type workflowRuntime struct {
 	// it logs while NATS has not reconnected: zero means the production defaults. A test
 	// shortens both to bound how long the warning takes to observe.
 	reconnectPollInterval, reconnectWarnEvery time.Duration
-	// githubAPI is the GitHub REST root the workflow calls: watchRequiredChecks reads under it, and
-	// the outbox's issue_branch rows create branches under it. Empty, in production, is
+	// githubAPI is the GitHub REST root the workflow calls: the per-issue read reads under it, and
+	// the outbox's issue_branch and approval_carry rows call under it. Empty, in production, is
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
 	// defaultBranches is each repository as GitHub names it and its default branch, read under
@@ -141,10 +139,6 @@ type workflowRuntime struct {
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
 	reviewAppLogin string
-	// reviewAppID is the review App's id as the configuration names it (github_apps.review.app_id,
-	// the id GitHub's GET /app answers for it): a check run named tester or architect counts as a
-	// Legion verdict only when that App created it, as Envoy's listener counts it (readSettlement).
-	reviewAppID string
 	// build is the daemon's own build (Build): what the boot fact carries as the revision it
 	// compares the open production checks against, and the guard on whether Dispatch's build is
 	// read and compared too.
@@ -157,28 +151,45 @@ type workflowRuntime struct {
 	permissions   map[permissionKey]time.Time
 	permissionTTL time.Duration
 	limitedUntil  time.Time
-	// refusedReviews is every review, by GitHub's review id, whose author the pass's read of a pull
+	// refusedReviews is every review, by GitHub's review id, whose author a read of a pull
 	// request's reviews found the workflow does not let decide (reviewToApply), so this process
 	// judges each such review once, as a webhook's review is judged once when it is delivered: an
 	// account given write access later never turns a review the read refused into a decision. It is
-	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
-	// then. Only the pass touches it.
-	refusedReviews map[int64]bool
+	// held in memory only, so a restart's first read judges again with the permission GitHub gives
+	// then.
+	//
 	// uncarried is every comparison of an approved head with a recorded head, by repository, pull
 	// request and the two heads, that GitHub answered and that does not carry the approval
-	// (readApprovalCarry), so the pass does not ask again: the compare of two fixed commits never
-	// changes its answer. It is held in memory only; a restart's first pass asks again. Only the
-	// pass touches it.
-	uncarried map[string]bool
+	// (readApprovalCarry), so no read asks again: the compare of two fixed commits never
+	// changes its answer. It is held in memory only; a restart's first read asks again.
+	//
+	// readMemoMu guards both: the per-issue read (readIssuePullRequest) and the outbox's approval
+	// carry judge reviews and compare heads on goroutines of their own (reviewRefused,
+	// carryRefused).
+	readMemoMu     sync.Mutex
+	refusedReviews map[int64]bool
+	uncarried      map[string]bool
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
 	failed chan error
 	// readied is the architects claimReady recorded whose waiting notices releaseReadied has not
-	// released yet; readyWake, holding at most one wake, tells it there are some.
-	readyMu   sync.Mutex
-	readied   map[claim.Token]bool
-	readyWake chan struct{}
+	// released yet.
+	readied *wakeSet[claim.Token]
+	// handedOff is each issue whose agent's handoff the API recorded (handoffCompleted) that
+	// readHandedOff has not read the pull request of yet, which is what makes a second completion
+	// of the same issue, while the first is still queued, one read rather than two.
+	handedOff *wakeSet[string]
+	// mergeStates is each issue a fact left waiting on GitHub's merge state (queueMergeState,
+	// the engine's Config.ReadMergeState) that readMergeStates has not started a ladder for yet,
+	// and mergeStateRunning each issue whose ladder is still reading, which is why a second fact
+	// of an issue already being read starts no second ladder. mergeStateRetry is how long a
+	// ladder waits between reads of a state GitHub answers `unknown` for, mergeStateLadderWait
+	// when zero, which a test shortens.
+	mergeStates       *wakeSet[string]
+	mergeStateMu      sync.Mutex
+	mergeStateRunning map[string]bool
+	mergeStateRetry   time.Duration
 }
 
 // readyReleaseTimeout bounds one release of ready architects' waiting notices
@@ -208,9 +219,10 @@ func appTransient(err error) bool {
 // appLoginsAtBoot reads each App's bot login under its own JWT (appauth.Logins), which needs no
 // installation, so a daemon serving no repository yet still knows the review App's login, as one
 // attempt run again after a failure GitHub reports as its own trouble (appauth.TransientError); any
-// other failure is refused at once. It returns the review App's login: the engine judges a push by
-// its pusher against it, so one App configured for both roles would make every implementer push the
-// review App's and count no fix attempt, and is refused, as is a review App that names no login.
+// other failure is refused at once. It returns the review App's login: the engine judges a review
+// by the login that authored it (workflow's byReviewer), so one App configured for both roles
+// would submit every role's review under the one login, and is refused, as is a review App that
+// names no login.
 func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger) (string, error) {
 	logins := map[appauth.AppRole]string{}
 	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
@@ -277,8 +289,10 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	w := &workflowRuntime{
 		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos, build: build,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
-		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
-		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
+		failed: make(chan error, 1), mappingChanged: make(chan struct{}, 1),
+		readied: newWakeSet[claim.Token](), handedOff: newWakeSet[string](), mergeStates: newWakeSet[string](),
+		mergeStateRunning: map[string]bool{},
+		controllerWake:    cfg.ControllerWakeInterval, githubAPI: githubAPI,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
 	}
 	log.Info("legion workflow boot stage", "stage", "dispatch")
@@ -303,7 +317,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
-	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
+	engineCfg.Repositories, engineCfg.NoteUnread, engineCfg.ReadMergeState = w, w.noteUnread, w.queueMergeState
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
 	// The mirror runs before both deciders, and that order is load-bearing. The engine decides
@@ -329,18 +343,18 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 }
 
 // engineConfig is the workflow engine's configuration from the daemon's, the review App's bot
-// login from its boot lease and the daemon's own build: its own project's merge_queue_role is the
-// role the merger's READY is published to, its own project's deploys are the workflows whose runs
-// wake its production checks, and the repository the binary is built from is the one whose open
-// production checks a build is compared against — only for a release build, one with a revision,
-// since nothing else names a commit a merge could be in; a build with none compares nothing,
-// Dispatch's announcement that every server process serves a build (server.started) included.
+// login from its boot lease and the daemon's own build: its own project's deploys are the
+// workflows whose runs wake its production checks, and the repository the binary is built from is
+// the one whose open production checks a build is compared against — only for a release build,
+// one with a revision, since nothing else names a commit a merge could be in; a build with none
+// compares nothing, Dispatch's announcement that every server process serves a build
+// (server.started) included.
 func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflow.Config {
 	project := cfg.Projects[cfg.Project]
 	engine := workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
-		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
-		ReviewAppLogin: reviewAppLogin, MergeQueueRole: project.MergeQueueRole, Deploys: project.Deploys,
+		Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
+		ReviewAppLogin: reviewAppLogin, Deploys: project.Deploys,
 	}
 	if build.Revision != "" {
 		engine.BuiltFrom = build.Repository
@@ -727,7 +741,7 @@ func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, 
 	case supervise.StateReady:
 		fact = intake.ClaimReady{Issue: c.Issue, Role: c.Role, Launch: c.Generation}
 	case supervise.StateFailed:
-		fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role, Reason: c.Failure}
+		fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role, Reason: c.Failure, Death: c.LastDeathCause, StartFailure: c.LastStartFailure}
 	default:
 		return fmt.Errorf("claim %s has non-terminal workflow state %s", c.Token, state)
 	}
@@ -780,7 +794,17 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		return nil
 	})
 	group.Go(func() error {
-		w.watchRequiredChecks(running)
+		// The start read is the daemon's one read of every issue in the workflow: it covers the
+		// deliveries GitHub made while the daemon was down, which nothing redelivers.
+		w.readIssuesAtStart(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.readHandedOff(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.readMergeStates(running)
 		return nil
 	})
 	group.Go(func() error {
@@ -1061,13 +1085,7 @@ func (w *workflowRuntime) claimReady(c supervise.Claim) {
 	if c.Role != claim.RoleArchitect {
 		return
 	}
-	w.readyMu.Lock()
-	w.readied[c.Token] = true
-	w.readyMu.Unlock()
-	select {
-	case w.readyWake <- struct{}{}:
-	default:
-	}
+	w.readied.add(c.Token)
 }
 
 // taskConfirmed applies the fact that a role's agent took the work the daemon gave it
@@ -1094,19 +1112,50 @@ func (w *workflowRuntime) taskConfirmed(c supervise.Claim) {
 	}()
 }
 
+// sessionLost applies the fact that a claim's recorded session is in no session store any more
+// and a fresh agent is running in its place (supervise's Deps.SessionLost): the workflow tells
+// the issue, its architect and the controller. The event id carries the claim's launch, so the
+// one launch that lost the session reports once however often the fact is applied.
+func (w *workflowRuntime) sessionLost(c supervise.Claim, detail string) {
+	w.applySessionFact(c, fmt.Sprintf("session-lost:%s:%d", c.Token, c.Generation),
+		intake.SessionLost{Issue: c.Issue, Role: c.Role, Detail: detail}, "apply a claim's lost session")
+}
+
+// sessionStoreFault applies the fact that a start could not reach the session store at all
+// (supervise's Deps.SessionStoreFault): the workflow tells the issue and the controller. The
+// machine decides how often this is called — at the first such start, then hourly — so each call
+// is a report, and the event id names the moment rather than the launch.
+func (w *workflowRuntime) sessionStoreFault(c supervise.Claim, detail string) {
+	w.applySessionFact(c, fmt.Sprintf("session-store-fault:%s:%d", c.Token, time.Now().UnixNano()),
+		intake.SessionStoreFault{Issue: c.Issue, Role: c.Role, Detail: detail}, "apply a session store fault")
+}
+
+// applySessionFact applies one of the two session facts on a goroutine of its own, bounded like a
+// terminal fact: the machine calls both inside its own decision, so neither waits for the
+// database. A failure is logged and is not the daemon's end — the report is a report, and the
+// start it describes has already been decided. A claim on no issue, the daemon's own controller,
+// has nobody to tell.
+func (w *workflowRuntime) applySessionFact(c supervise.Claim, id string, fact intake.Fact, what string) {
+	if c.Issue == "" || c.Role == claim.RoleController {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
+		defer cancel()
+		if _, err := intake.ApplyFact(ctx, w.pool, "supervise", id, fact, w.handlers...); err != nil {
+			w.log.Warn(what, "claim", c.Token, "error", err)
+		}
+	}()
+}
+
 // releaseReadied releases, until ctx ends, the waiting notices of the architects claimReady
 // recorded: each wake takes every architect recorded since the last one, in one release.
 func (w *workflowRuntime) releaseReadied(ctx context.Context) {
 	for {
-		select {
-		case <-ctx.Done():
+		architects, ok := w.readied.take(ctx)
+		if !ok {
 			return
-		case <-w.readyWake:
 		}
-		w.readyMu.Lock()
-		architects := slices.Collect(maps.Keys(w.readied))
-		clear(w.readied)
-		w.readyMu.Unlock()
 		if len(architects) == 0 {
 			continue
 		}

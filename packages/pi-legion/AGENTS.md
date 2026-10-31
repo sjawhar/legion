@@ -471,7 +471,7 @@ uncommitted change, is missing, is not committed on this branch, is carried by a
 pane's `JJ_USER`/`JJ_EMAIL` authored, or is not yet on `legion/<issue>@origin` (push the issue
 branch, then complete again); for every other phase the commit the workspace stands on, `@-`. It
 then posts
-`POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`). The implementer's
+`POST /legion/v1/handoff/complete` (`summary`, `verdict`, `commit`). The implementer's
 report on a look of its closed issue's production check is the one call that finds no commit: the
 operation reads the daemon's state first, and an implementer's call on an issue in `done` whose
 `check` is open is a check report, posted with its `verdict` (`pass`, `pending` or `fail`, required
@@ -483,13 +483,8 @@ reported for its previous phase); for the implementer's completion of implementi
 pull request on `legion/<issue>` as the implement App, records one the webhook has not, and refuses
 `HANDOFF_NO_PULL_REQUEST` when there is none and the record holds none merged (naming a recorded
 pull request closed without merging, which is the architect's to decide), applying the completion
-unread when GitHub cannot be read;
-and for the merger's `ready: true` it reads the pull request's
-head on GitHub and refuses a packet the workflow must not take on, each refusal named in the
-merger's role prompt
-(`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's
-`note` is the already-merged sentence, for a pull request merged before READY, or the by-hand note
-(`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
+unread when GitHub cannot be read; a refusal changed nothing, and an accepted completion is
+answered with an empty object, since the merger merges and the daemon submits no merge. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
 pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's
 `gh` and `git`, which read the role's App tokens from the gh bundle under `LEGION_GH_OWNERS_DIR`; no
@@ -550,10 +545,27 @@ head of the
 worker's last message under one idempotency key, minted at the first attempt and kept until the
 count resets, so a listener that holds no architect session yet is tried again by the next
 reminder. A reminder is dropped when the daemon's record says this role no longer works this phase
-(the `read_record` state, bounded at 5 s and failing open, since an unreachable daemon is exactly
-when a stalled worker must still be nudged). A worker the daemon relaunched into an open phase is
+or that the daemon has failed this role's claim (the `read_record` state, bounded at 5 s and
+failing open otherwise, since an unreachable daemon is exactly when a stalled worker must still be
+nudged). A worker the daemon relaunched into an open phase is
 reminded from a timer `LEGION_STALL_RESUME_MS` after its claim boots, since nothing else would
 wake it.
+
+A turn the provider refused earns no reminder at all, neither the continuation nor a timer's.
+`session_stop` classifies the settling message (`turnEndOf`): a reply Oh My Pi stopped at `error`
+is the provider refusing the turn, worded by the host's `errorMessage`, and it is an input of the
+machine of its own (`refused`) rather than a check on the reminder's answer. Reminding such a
+session only buys another refused turn, which is what left dispatch://INFRA-264's implementer
+reminded for ever. What ends it instead is the daemon: `src/turn-outcome.ts` reports every turn
+this pane's claim ends — clean or refused — to `POST /legion/v1/claims/turn-outcome` from
+`agent_end`, under a sequence this plugin counts itself, monotonic from 1 within the claim's
+launch generation. The daemon keys each outcome by `(generation, sequence)` and derives the
+trailing run of refusals, so a report that arrives late lands in its own place, a repeat writes
+the same cell, and the claim fails once the run reaches `launch_failure_limit`. A report that
+cannot be sent is retried only while the daemon is restarting and otherwise warned about once:
+a turn the daemon never hears of is counted neither way. The reporter runs for an architect's
+claim as well as a phase worker's, and for a `task` subagent, whose instance registers no claim,
+not at all.
 
 Four variables tune it, read from the worker's own environment (`@legion/pi-shared/stall-limits`;
 the daemon passes on whichever its own environment holds, to a pane and to a pod alike):

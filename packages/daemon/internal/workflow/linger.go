@@ -31,10 +31,9 @@ import (
 // keeps running in a pod of its own. A child closed as done at its merge still owes its
 // production check: five of its claims are closed, the implementer's is not, no IssueSuspend is
 // written, and the check opens in the implementer's live session; the check's close writes the
-// suspension (closeCheck). A done child set back to todo starts fresh. An issue leaving disarms
-// its open pull request (disarmOpen), as a root's linger disarms every member's.
+// suspension (closeCheck). A done child set back to todo starts fresh.
 //
-// A member's leave may be the last its root waited for: a merged root stands in awaiting_merge
+// A member's leave may be the last its root waited for: a merged root stands in merging
 // while any other issue of its tree is in the workflow (closeMerged), and closes once the last of
 // them leaves (closeAwaitingRoot). Every way a member stops holding it runs this function — a
 // status moving to backlog, icebox, triage or done (dispatchIssue), a phase reaching done
@@ -66,13 +65,10 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		return e.openCheckIfMerged(ctx, tx, issue, false)
 	}
 	if issue.Phase != phase.Done {
-		issue.Phase, issue.Hold, issue.ReadyPendingVersion = phase.Done, nil, nil
+		issue.Phase, issue.Hold = phase.Done, nil
 		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 			return err
 		}
-	}
-	if err := e.disarmOpen(ctx, tx, issue.Key); err != nil {
-		return err
 	}
 	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
 	if err != nil {
@@ -147,7 +143,7 @@ func (e *Engine) operatorHoldsTree(ctx context.Context, tx pgx.Tx, root record.I
 func (e *Engine) leaveUnderOperator(ctx context.Context, tx pgx.Tx, root record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: a waiting root left the workflow while the operator runs a tree under its key; the operator's tree is left alone",
 		"issue", root.Key, "tree", root.Tree, "status", status)
-	root.Phase, root.Hold, root.Awaiting, root.ReadyPendingVersion = phase.Done, nil, nil, nil
+	root.Phase, root.Hold, root.Awaiting = phase.Done, nil, nil
 	return e.store.PutIssue(ctx, tx, root)
 }
 
@@ -176,7 +172,7 @@ func (e *Engine) openCheckIfMerged(ctx context.Context, tx pgx.Tx, issue record.
 }
 
 // closeAwaitingRoot closes root when its merge was waiting on the rest of its tree: a merged root
-// stands in awaiting_merge (or held from it) while any other member of its tree is in the workflow
+// stands in merging (or held from it) while any other member of its tree is in the workflow
 // (closeMerged), and closes, as its merge would have, once the last of them leaves. Which members
 // still hold it is closeMerged's to judge, so this runs on every issue that leaves the workflow
 // and changes nothing for any other root. It tells nobody: the architect heard the wait when the
@@ -197,10 +193,12 @@ func (e *Engine) closeAwaitingRoot(ctx context.Context, tx pgx.Tx, root record.I
 	return nil
 }
 
-// awaitsMerge says whether issue awaits its merge: in awaiting_merge, or held from it, the hold
-// the upgrade's data move left an issue that was held in production_check.
+// awaitsMerge says whether issue awaits its merge: in merging with its pull request merged, or
+// held from merging, the hold the upgrade's data move left an issue that was held in
+// production_check. The merge is what ends merging, so a merged pull request there is a close
+// still waiting on the rest of the tree rather than a merger still at work.
 func awaitsMerge(issue record.Issue) bool {
-	return issue.Phase == phase.AwaitingMerge || issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.AwaitingMerge
+	return issue.Phase == phase.Merging || issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.Merging
 }
 
 // InWorkflow says whether an issue is in the workflow: its status is one the workflow runs in and
@@ -229,9 +227,6 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	}
 	for _, member := range members {
 		if err := e.everyClaim(ctx, tx, member, "suspend", fmt.Sprintf("the tree of %s lingers", root.Key), ""); err != nil {
-			return err
-		}
-		if err := e.disarmOpen(ctx, tx, member.Key); err != nil {
 			return err
 		}
 		if err := e.enqueue(ctx, tx, member.Key, record.IssueSuspend{

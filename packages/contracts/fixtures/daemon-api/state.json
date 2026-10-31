@@ -47,6 +47,7 @@
             "pluginContract": 0
           },
           "handoffCommit": "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+          "pass": 1,
           "rounds": 1
         }
       },
@@ -55,8 +56,7 @@
         "number": 1239,
         "head": "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
         "state": "merged",
-        "reviewDecision": "approved",
-        "fixAttempts": 0
+        "reviewDecision": "approved"
       },
       "check": {
         "repo": "acme/widgets",
@@ -128,6 +128,7 @@
             },
             "pluginContract": 0
           },
+          "pass": 3,
           "rounds": 2
         },
         "planner": {
@@ -149,6 +150,7 @@
             "pluginContract": 0
           },
           "handoffCommit": "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+          "pass": 0,
           "rounds": 0
         }
       },
@@ -157,9 +159,7 @@
         "number": 1247,
         "head": "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
         "state": "open",
-        "checksVerdict": "pending",
-        "reviewDecision": "changes_requested",
-        "fixAttempts": 1
+        "reviewDecision": "changes_requested"
       },
       "designGate": {
         "artifactId": "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
@@ -186,6 +186,7 @@
             "state": "failed",
             "pluginContract": 0
           },
+          "pass": 1,
           "rounds": 1
         }
       }
@@ -388,7 +389,7 @@
     "withoutWebhookApp": [
       {
         "repo": "zeta/tools",
-        "reason": "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"
+        "reason": "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events, nothing redelivers them, and no periodic pass makes up for them, so its issues stand still until the App is installed"
       }
     ],
     "caches": [
@@ -510,9 +511,6 @@
     "dispatch_url": "https://dispatch.internal.example",
     "projects": {
       "LEGION": {
-        "merge": {
-          "by_hand": []
-        },
         "slack_channels": [
           "C0123ABCD",
           "C0123ABCE"
@@ -526,13 +524,6 @@
         ]
       },
       "WIDGETS": {
-        "merge_queue_role": "merge-queue",
-        "merge": {
-          "by_hand": [
-            "^deploy/",
-            "\\.sql$"
-          ]
-        },
         "slack_channels": [],
         "deploys": []
       }
@@ -558,7 +549,6 @@
     "linger_hours": 1.5,
     "production_check_hours": 240,
     "review_round_cap": 4,
-    "max_fix_attempts": 5,
     "controller": "daemon",
     "capabilities": {
       "decided": {

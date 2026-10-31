@@ -93,9 +93,13 @@ var repackTimeout = 2 * time.Hour
 // rate evenly, so with no bound every stream slows as the next pod launches, and a large launch
 // leaves none of them done: on 2026-10-26 a 4.0 GB clone's cache sent about 400 MB/s in all over
 // 290 streams at once, about 48 minutes before any reached its last byte, past the 30 minutes an
-// issue pod's fetch gives the stream and its verification (workspace.FetchTimeout), so every fetch
-// failed and started over. Bounded, a stream takes its share of the rate among maxStreams, and the
-// queue drains at the same total rate.
+// issue pod's fetch then gave the stream and its verification together, so every fetch failed and
+// started over. A stream that keeps receiving is no longer ended by a clock: it holds the
+// low-speed bound instead, 1 MiB in 5 minutes (workspace.CacheStreamLowSpeedBytes), which a share
+// of that rate is far above, so those 290 would now each reach their last byte. The bound stays
+// because a launch waits out its pod's fetch (sandbox.Runtime.ProvisionBound), holding the node it
+// reserved and the issue's lifecycle lane for as long as the stream runs. Bounded, a stream takes
+// its share of the rate among maxStreams, and the queue drains at the same total rate.
 var maxStreams = 32
 
 // Serve listens, then clones the repository onto the volume — or, when the volume holds it, fetches
@@ -300,9 +304,10 @@ func (c *cache) recordRepack(at time.Time) {
 }
 
 // fetch fetches the clone under the write lock and publishes what it holds, answering when. The
-// first clone gets workspace.CacheFetchTimeout rather than an issue pod's FetchTimeout, since it is
-// the repository's one full download; a fetch into the clone keeps FetchTimeout, since it holds the
-// lock every tar waits on and brings only what GitHub gained.
+// cache fills its own clone from GitHub, so every stage of this fetch is clocked, with no stream
+// from a cache among them: the first clone gets workspace.CacheFetchTimeout rather than an issue
+// pod's FetchTimeout, since it is the repository's one full download; a fetch into the clone keeps
+// FetchTimeout, since it holds the lock every tar waits on and brings only what GitHub gained.
 func (c *cache) fetch(ctx context.Context) (time.Time, error) {
 	c.lock.Lock()
 	defer c.lock.Unlock()

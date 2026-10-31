@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -30,6 +31,31 @@ type operatorCall struct {
 	configPath     *string
 	port           *int
 	stdout, stderr io.Writer
+	// wait is the bound the command's whole call runs under, when the command takes one
+	// (withWait), and until the moment that bound expires, fixed when the flags are parsed. Every
+	// request the command makes is bounded by that one moment, so a command that reads the claims
+	// in a loop is bounded by its --wait and not by --wait per request.
+	wait  *time.Duration
+	until time.Time
+}
+
+// withWait gives the command a --wait flag bounding its whole call, which every `legion claims`
+// subcommand takes: a command that does not answer is worse than one that refuses, and an
+// operator waiting on a worker whose pod is coming up has waited minutes for a suspend with no
+// answer at all (dispatch://INFRA-714 R10). The daemon's own work is bounded by the daemon's own
+// deadlines: a call this bound ends says what it asked for and that the daemon goes on with it,
+// and never cancels the decision the daemon is making.
+func (c *operatorCall) withWait(usage string) {
+	c.wait = c.flags.Duration("wait", time.Minute, usage)
+}
+
+// bound is ctx under the command's remaining --wait, and ctx itself for a command that takes no
+// --wait. The deadline is the one parse fixed, so every request shares it.
+func (c *operatorCall) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.until.IsZero() {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, c.until)
 }
 
 // newOperatorCall is the `legion <sub>` command's flag set with the three flags every operator
@@ -49,7 +75,8 @@ func newOperatorCall(sub, usage, tokenUsage string, stdout, stderr io.Writer) *o
 
 // parse reads args, then refuses a word that is not a flag and any required flag left out or
 // empty, by name — each a usage error, before anything is read or sent. A false ok carries the
-// exit code, 0 for a help request (parseFlags).
+// exit code, 0 for a help request (parseFlags). A command that takes a --wait starts its bound
+// here, before its first request, so the bound covers the whole call (bound).
 func (c *operatorCall) parse(args []string, required ...string) (code int, ok bool) {
 	if code, ok := parseFlags(c.flags, args); !ok {
 		return code, false
@@ -65,6 +92,9 @@ func (c *operatorCall) parse(args []string, required ...string) (code int, ok bo
 			c.flags.Usage()
 			return 2, false
 		}
+	}
+	if c.wait != nil && *c.wait > 0 {
+		c.until = time.Now().Add(*c.wait)
 	}
 	return 0, true
 }
@@ -94,11 +124,6 @@ func (c *operatorCall) connect() (operator, bool) {
 // send makes one request of the daemon and reports its answer: a 2xx is handed to print, and
 // anything else is the daemon's refusal, printed with its status and sentence, and the command
 // fails.
-//
-// The request carries no deadline of its own. What it asks for may wait on the runtime — a suspend
-// or stop waits out the worker's stop grace, a resume that and a launch — and every step is
-// bounded by the daemon's configuration, which this command may not have read; a signal to this
-// process ends the wait.
 func (c *operatorCall) send(ctx context.Context, op operator, method, path string, body any, print func(io.Writer, []byte) error) int {
 	_, answer, ok := c.request(ctx, op, method, path, body)
 	if !ok {
@@ -110,9 +135,22 @@ func (c *operatorCall) send(ctx context.Context, op operator, method, path strin
 // request makes one request of the daemon and answers its 2xx status and body. A request that got
 // no answer, or an answer outside 2xx — the daemon's refusal, with its status and sentence — is
 // reported and answers false.
+//
+// It runs under the command's --wait, which bounds the whole call rather than this one request
+// (bound). What it asks for may wait on the runtime — a suspend or stop waits out the worker's
+// stop grace, a resume that and a launch — so a bound that runs out is reported as what it is: the
+// command refuses with a reason, and the daemon goes on with what it began under its own
+// deadlines, which this bound never cancels.
 func (c *operatorCall) request(ctx context.Context, op operator, method, path string, body any) (int, []byte, bool) {
-	status, answer, err := op.do(ctx, method, path, body)
+	bounded, cancel := c.bound(ctx)
+	defer cancel()
+	status, answer, err := op.do(bounded, method, path, body)
 	if err != nil {
+		if bounded.Err() != nil && ctx.Err() == nil {
+			fmt.Fprintf(c.stderr, "%s: %s %s was not answered within the --wait bound of %s; the daemon goes on with it under its own deadlines. Read `legion claims list` to see where the claim stood, and ask again\n",
+				c.name, method, op.base+path, *c.wait)
+			return 0, nil, false
+		}
 		fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
 		return 0, nil, false
 	}

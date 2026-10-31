@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -47,76 +45,38 @@ func (t handoffTokens) ReadToken(ctx context.Context, role appauth.AppRole, owne
 	return lease, err
 }
 
-// handoffFile is a handoff of phase word as a worker stamps it for issue: READY reads only whether
-// the head still carries the directory, never what a file holds.
-func handoffFile(word, issue string) string {
-	return fmt.Sprintf(`{"schemaVersion":1,"phase":%q,"issue":%q}`, word, issue)
-}
-
 // handoffGitHub is GitHub's REST API for one repository, acme/widgets unless a test names another
-// (repo), as a completion reads it: READY's reads of the files at each commit (whether a head
-// still carries .legion/<issue>/) and of pull request #42 on main, and the implementer's
-// completion's list of the open pull requests on its branch, which lists #42 while it is open,
-// whatever head the list asks for. A test changes what it serves between calls; every call's
-// bearer, every path it is asked for (served) and every contents read are recorded.
+// (repo), as a completion reads it: pull request #42 on main, and the implementer's completion's
+// list of the open pull requests on its branch, which lists #42 while it is open, whatever head
+// the list asks for. A test changes what it serves between calls; every call's bearer and every
+// path it is asked for (served) are recorded.
 type handoffGitHub struct {
 	url  string
 	mu   sync.Mutex
 	repo string
-	// files is the content of each path at each commit, by sha then path; a directory is listed
-	// when a path is under it.
-	files map[string]map[string]string
 	// fail is the status GitHub answers every route under the given path prefix with instead of
 	// its answer: GitHub's trouble.
 	fail map[string]int
 	// pull request #42, on legion/LEGION-208: its head, its mergeable_state, its state, whether it
-	// is merged, and its updated_at. merge is the project's merge policy, and pullFiles the JSON
-	// array GitHub answers for the pull request's changed files.
+	// is merged, and its updated_at. pullFiles is the JSON array GitHub answers for the pull
+	// request's changed files.
 	pullHead       string
 	mergeableState string
 	pullState      string
 	merged         bool
 	pullUpdatedAt  time.Time
-	merge          config.MergeRules
 	pullFiles      string
-	// What GitHub would answer for main and for the head, none of which READY reads: the rulesets'
-	// rules (with the status the read answers when not 200), the branch's protection, and the
-	// head's check runs and commit statuses. A READY that judged the head's checks itself would
-	// read the last two, and served is what proves it does not.
-	rules       string
-	rulesStatus int
-	mainBranch  string
-	checkRuns   string
-	statuses    string
-	bearers     []string
-	// served is each path the stand-in was asked for, relative to the repository, and contentsRead
-	// each path read through the contents API, as path@ref.
-	served       []string
-	contentsRead []string
-	// compare is GitHub's answer to the compare of approvedSHA with pullHead, the pull request's
-	// head; compareAnswers holds the answer to any other basehead (<base>...<head>), and one in
-	// neither is GitHub's 404 (fail makes the compare fail outright); compareRead is each basehead
-	// READY asked it for.
-	compare        string
-	compareAnswers map[string]string
-	compareRead    []string
+	bearers        []string
+	// served is each path the stand-in was asked for, relative to the repository.
+	served []string
 }
 
 func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	t.Helper()
 	g := &handoffGitHub{
-		files: map[string]map[string]string{}, fail: map[string]int{}, repo: "acme/widgets",
+		fail: map[string]int{}, repo: "acme/widgets",
 		pullFiles: `[{"filename":"src/main.go"}]`,
 		pullHead:  headSHA, mergeableState: "clean", pullState: "open", pullUpdatedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC),
-		rules:      `[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
-		mainBranch: `{"name":"main","protection":{"required_status_checks":{"contexts":["legacy"],"checks":[{"context":"legacy"}]}}}`,
-		checkRuns:  `[{"id":1,"name":"ci","status":"completed","conclusion":"success"}]`,
-		statuses:   `[{"context":"legacy","state":"success"}]`,
-		compare:    retroCompare,
-	}
-	notFound := func(w http.ResponseWriter, message string) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = fmt.Fprintf(w, `{"message":%q,"status":"404"}`, message)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
@@ -136,10 +96,7 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 				return
 			}
 		}
-		ref := r.URL.Query().Get("ref")
 		switch {
-		case path == "branches/main":
-			_, _ = io.WriteString(w, g.mainBranch)
 		case path == "pulls/42":
 			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"base":{"ref":"main"},"mergeable_state":%q,"state":%q,"merged":%t,"updated_at":%q}`,
 				g.pullHead, g.mergeableState, g.pullState, g.merged, g.pullUpdatedAt.Format(time.RFC3339))
@@ -150,43 +107,8 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 			}
 			_, _ = fmt.Fprintf(w, `[{"number":42,"state":"open","html_url":"https://github.com/%s/pull/42","body":"Dispatch: LEGION-208","head":{"ref":"legion/LEGION-208","sha":%q},"base":{"ref":"main"},"updated_at":%q}]`,
 				g.repo, g.pullHead, g.pullUpdatedAt.Format(time.RFC3339))
-		case path == "rules/branches/main":
-			if g.rulesStatus != 0 {
-				w.WriteHeader(g.rulesStatus)
-			}
-			_, _ = io.WriteString(w, g.rules)
-		case strings.HasSuffix(path, "/check-runs"):
-			_, _ = fmt.Fprintf(w, `{"total_count":%d,"check_runs":%s}`, strings.Count(g.checkRuns, `"name"`), g.checkRuns)
-		case strings.HasSuffix(path, "/status"):
-			_, _ = fmt.Fprintf(w, `{"statuses":%s}`, g.statuses)
 		case path == "pulls/42/files":
 			_, _ = io.WriteString(w, g.pullFiles)
-		case strings.HasPrefix(path, "contents/"):
-			file := strings.TrimPrefix(path, "contents/")
-			g.contentsRead = append(g.contentsRead, file+"@"+ref)
-			var listing []string
-			for name := range g.files[ref] {
-				if strings.HasPrefix(name, file+"/") {
-					listing = append(listing, fmt.Sprintf(`{"name":%q,"path":%q,"type":"file"}`, strings.TrimPrefix(name, file+"/"), name))
-				}
-			}
-			if len(listing) == 0 {
-				notFound(w, "Not Found")
-				return
-			}
-			_, _ = io.WriteString(w, "["+strings.Join(listing, ",")+"]")
-		case strings.HasPrefix(path, "compare/"):
-			basehead := strings.TrimPrefix(path, "compare/")
-			g.compareRead = append(g.compareRead, basehead)
-			answer, known := g.compareAnswers[basehead]
-			if basehead == approvedSHA+"..."+g.pullHead {
-				answer, known = g.compare, true
-			}
-			if !known {
-				notFound(w, "Not Found")
-				return
-			}
-			_, _ = io.WriteString(w, answer)
 		default:
 			http.NotFound(w, r)
 		}
@@ -196,28 +118,11 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	return g
 }
 
-// put is content at path of commit sha.
-func (g *handoffGitHub) put(sha, path, content string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.files[sha] == nil {
-		g.files[sha] = map[string]string{}
-	}
-	g.files[sha][path] = content
-}
-
 // set changes what the fake serves, under its lock.
 func (g *handoffGitHub) set(change func(g *handoffGitHub)) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	change(g)
-}
-
-// reads is each contents read made so far, as path@ref.
-func (g *handoffGitHub) reads() []string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return append([]string(nil), g.contentsRead...)
 }
 
 // serves is each path the stand-in was asked for so far, relative to the repository.
@@ -227,23 +132,8 @@ func (g *handoffGitHub) serves() []string {
 	return append([]string(nil), g.served...)
 }
 
-// compares is each basehead READY's compare was asked for so far.
-func (g *handoffGitHub) compares() []string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return append([]string(nil), g.compareRead...)
-}
-
-// approvedSHA is the head LEGION-208's review round approved, below headSHA: what READY compares
-// retro's last push with unless a test names another.
-const approvedSHA = "a99e0000000000000000000000000000000000ff"
-
-// retroCompare is GitHub's compare of approvedSHA with headSHA as READY reads it: retro's learning
-// added, and its last commit's removal of the issue's handoffs.
-const retroCompare = `{"status":"ahead","files":[{"filename":".legion/LEGION-208/review.json","status":"removed"},{"filename":"docs/solutions/legion/retro-LEGION-208.md","status":"added"}]}`
-
 // newHandoffHarness serves the daemon's routes over a real Postgres, reading GitHub at github as
-// the implement App for READY and for the implementer's completion, with facts recording every
+// the implement App for the implementer's completion, with facts recording every
 // fact the routes apply, refused as refusal says. The issue's repository is acme/widgets, so a
 // read minted for anyone but acme shows.
 func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder) {
@@ -258,12 +148,6 @@ func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.G
 		Controller: h.store, Grants: grants, Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{}, PluginRelaunchable: true,
 		Tokens: handoffTokens{}, GitHubAPI: github.url,
-		MergeRules: func(project string) config.MergeRules {
-			if project != testProject {
-				return config.MergeRules{}
-			}
-			return github.merge
-		},
 	}).Handler
 	return h, facts
 }
@@ -275,7 +159,7 @@ func newWorkflowHandoffHarness(t *testing.T, github *handoffGitHub, logs io.Writ
 	t.Helper()
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
@@ -326,8 +210,7 @@ func seedPullRequestAt(t *testing.T, h *harness, key, head string, at time.Time)
 }
 
 // seedReviewDecision records decision as key's review round's decision, on its reviewer's row: an
-// approval names the head READY compares the pull request's head with, and nil is a round that
-// recorded none.
+// approval names the head the round approved, and nil is a round that recorded none.
 func seedReviewDecision(t *testing.T, h *harness, key string, decision *record.ReviewDecision) {
 	t.Helper()
 	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
@@ -440,10 +323,7 @@ func TestHandoffCompleteRecordsTheCommitTheWorkerReportsAndTheOpenPullRequestGit
 		t.Fatalf("GitHub was asked for %v for a completion refused for its fields, want nothing", served)
 	}
 
-	answer := completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA}))
-	if answer.Note != "" {
-		t.Fatalf("answer = %+v, want no note outside READY", answer)
-	}
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA}))
 	at, row, pr := handoffRecord(t, h, "LEGION-208")
 	if at != phase.Testing {
 		t.Fatalf("after the completion LEGION-208 is in %s, want testing", at)
@@ -580,9 +460,6 @@ func TestHandoffCompleteEnforcesRoleSpecificFieldsAndDeduplicatesTheCommit(t *te
 	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
 	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Verdict: "pass", Commit: "bbccdd"}), http.StatusBadRequest, "VERDICT_ROLE_FORBIDDEN")
 
-	worker := newLiveClaim(t, h, "LEGION-208", claim.RoleReviewer)
-	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: worker.grant(t), Summary: "reviewed", Ready: true, Commit: "ccddee"}), http.StatusBadRequest, "READY_ROLE_FORBIDDEN")
-
 	request := HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", Commit: "ddeeff"}
 	completion(t, h.complete(request))
 	// A retried completion of the same phase at the same commit changes nothing, and says so.
@@ -617,9 +494,6 @@ func TestHandoffCompleteRecordsRetroAtTheCommitItStandsOn(t *testing.T) {
 	}
 	if fact, ok := got[0].(intake.HandoffComplete); !ok || fact.Summary != "retro done" || fact.Commit != "c0ffee" {
 		t.Fatalf("handoff fact = %#v, want summary %q at c0ffee", got[0], "retro done")
-	}
-	if reads := github.reads(); len(reads) != 0 {
-		t.Fatalf("contents reads = %v, want none for phases that write no file", reads)
 	}
 }
 
@@ -675,10 +549,7 @@ func TestHandoffCompleteRecordsACheckReportOfTheOpenLookWithoutACommit(t *testin
 	implementer := liveClaim{h: h, token: token, session: "ses_implementer_untasked", secret: registration.Secret, tree: "LEGION-208", issue: "LEGION-208"}
 
 	for _, verdict := range []string{"pending", "fail", "pass"} {
-		answer := completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked: " + verdict, Verdict: verdict}))
-		if answer.Note != "" {
-			t.Fatalf("answer = %+v, want no note on a check report", answer)
-		}
+		completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked: " + verdict, Verdict: verdict}))
 		want := intake.CheckReport{Issue: "LEGION-208", Claim: token, Look: 2, Verdict: verdict, Summary: "looked: " + verdict}
 		if got := lastCheckReport(t, facts); got != want {
 			t.Fatalf("check report = %+v, want %+v", got, want)
@@ -701,7 +572,7 @@ func TestHandoffCompleteRecordsACheckReportOfTheOpenLookWithoutACommit(t *testin
 }
 
 // A check report names its verdict: one of pass, pending or fail, and nothing else, with nothing
-// recorded otherwise. Ready stays the merger's alone, as on every other call.
+// recorded otherwise.
 func TestHandoffCompleteRefusesACheckReportWithoutOneOfTheThreeVerdicts(t *testing.T) {
 	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Done)
@@ -713,7 +584,6 @@ func TestHandoffCompleteRefusesACheckReportWithoutOneOfTheThreeVerdicts(t *testi
 			t.Fatalf("refusal of verdict %q = %q, want the three named", verdict, message)
 		}
 	}
-	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pass", Ready: true}), http.StatusBadRequest, "READY_ROLE_FORBIDDEN")
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("facts = %#v, want none", got)
 	}
@@ -827,73 +697,6 @@ func TestHandoffCompleteReadsTheCommitOnlyForAPhaseCompletionAfterTheGrant(t *te
 	}
 }
 
-// READY is read against the issue's pull request in the repository the issue's record names, as
-// the implement App minted for that repository's owner: an issue on a second owner's repository
-// is read there, with that owner's token alone.
-func TestHandoffCompleteReadyReadsTheIssuesRecordedRepositoryAsItsOwner(t *testing.T) {
-	github := newHandoffGitHub(t)
-	github.set(func(g *handoffGitHub) { g.repo = "zeta/tools" })
-	h, facts := newHandoffHarness(t, github, nil, nil)
-	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
-		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "LEGION-208", Repo: "zeta/tools", DefaultBranch: "main", GitHubRepo: "zeta/tools", Tree: "LEGION-208",
-			Project: testProject, Title: "LEGION-208", Phase: phase.Merging, Generation: 1, Status: "in_progress"}); err != nil {
-			return err
-		}
-		return records.PutPullRequest(context.Background(), tx, record.PullRequest{
-			State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "zeta/tools", Number: 42, Branch: "legion/LEGION-208", HeadSHA: headSHA,
-		})
-	}); err != nil {
-		t.Fatal(err)
-	}
-	seedApproval(t, h, "LEGION-208", approvedSHA)
-	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY on zeta/tools", Ready: true, Commit: headSHA}))
-	if got := facts.recorded(); len(got) != 1 {
-		t.Fatalf("handoff facts = %#v, want the READY", got)
-	}
-	github.mu.Lock()
-	defer github.mu.Unlock()
-	if len(github.bearers) == 0 {
-		t.Fatal("READY read nothing of GitHub")
-	}
-	for _, bearer := range github.bearers {
-		if bearer != "Bearer implement-token-for-zeta" {
-			t.Fatalf("GitHub was read with %q, want the implement App's token for zeta, the recorded repository's owner, alone", bearer)
-		}
-	}
-}
-
-// GitHub failing to answer a READY read is GitHub's failure, not the head's: the completion is
-// refused to complete again, nothing is recorded, and the same READY once GitHub answers is applied
-// rather than answered already received. The reads are made as the implement App, minted for the
-// repository's owner, whose token never leaves the daemon.
-func TestHandoffCompleteReadyRefusesWhenGitHubFailsToAnswerAndAppliesTheRetry(t *testing.T) {
-	github := newHandoffGitHub(t)
-	h, facts, merger := newReadyHarness(t, github)
-	github.set(func(g *handoffGitHub) { g.fail = map[string]int{"pulls/": http.StatusInternalServerError} })
-	if code, body := ready(t, h, merger); code != http.StatusBadGateway || !strings.HasPrefix(body, "GITHUB_READ_FAILED: ") || !strings.Contains(body, "with 500") || !strings.HasSuffix(body, "GitHub's failure, not the head's: complete again") {
-		t.Fatalf("READY while the pull request read fails = %d %q", code, body)
-	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts after GitHub's failure = %#v, want none", got)
-	}
-	github.set(func(g *handoffGitHub) { g.fail = map[string]int{} })
-	if code, body := ready(t, h, merger); code != http.StatusOK || body != "" {
-		t.Fatalf("READY once GitHub answers = %d %q; want it published", code, body)
-	}
-	if fact := lastCompletion(t, facts); !fact.Ready || fact.Commit != headSHA {
-		t.Fatalf("completion = %+v, want READY at %s", fact, headSHA)
-	}
-	github.mu.Lock()
-	defer github.mu.Unlock()
-	for _, bearer := range github.bearers {
-		if bearer != "Bearer implement-token-for-acme" {
-			t.Fatalf("GitHub was read with %q, want the implement App's token for acme, the repository's owner, alone", bearer)
-		}
-	}
-}
-
 func TestHandoffCompleteRefusesAnUnrecordedIssue(t *testing.T) {
 	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
 	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
@@ -924,73 +727,6 @@ func TestHandoffCompleteRefusesExpiredAndRevokedGrants(t *testing.T) {
 	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: grant, Summary: "implemented again", Commit: "ccddee"}), http.StatusForbidden, "GRANT_REVOKED")
 	if got := facts.recorded(); len(got) != 1 {
 		t.Fatalf("handoff facts = %#v, want only the completion made before the claim was replaced", got)
-	}
-}
-
-// A merger whose completion was refused READY_REQUIRED corrects it with ready: true at the same
-// commit. The refusal is recorded as processed, so the corrected call must be a different fact: it
-// reaches the workflow, and only a true retry of it is answered "already received". Otherwise the
-// issue stays in merging with no way out but a new commit nothing asks for.
-func TestHandoffCompleteAppliesTheMergersCorrectedReadyAtTheSameCommit(t *testing.T) {
-	github := newHandoffGitHub(t)
-	h, facts := newHandoffHarness(t, github, nil, &intake.Refusal{Status: http.StatusConflict, Code: "READY_REQUIRED", Message: "call the legion tool's handoff_complete with ready: true"})
-	seedIssueAt(t, h, "LEGION-208", phase.Merging)
-	seedPullRequest(t, h, "LEGION-208", headSHA)
-	seedApproval(t, h, "LEGION-208", approvedSHA)
-	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
-	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "merge-ready", Commit: headSHA}), http.StatusConflict, "READY_REQUIRED")
-
-	facts.mu.Lock()
-	facts.refusal = nil
-	facts.mu.Unlock()
-	corrected := HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "merge-ready", Ready: true, Commit: headSHA}
-	completion(t, h.complete(corrected))
-	corrected.GrantID = merger.grant(t)
-	assertFailure(t, h.complete(corrected), http.StatusConflict, "HANDOFF_ALREADY_RECORDED")
-	got := facts.recorded()
-	if len(got) != 2 {
-		t.Fatalf("handoff facts = %#v, want the refused completion and the corrected READY", got)
-	}
-	if fact, ok := got[1].(intake.HandoffComplete); !ok || !fact.Ready || fact.Commit != headSHA {
-		t.Fatalf("corrected fact = %#v, want READY at %s", got[1], headSHA)
-	}
-}
-
-// The daemon posts the READY packet as one Dispatch message with the outbox's marker, so a packet
-// over record.MessagePostLimit would be refused by Dispatch on every attempt. The route refuses it
-// before the fact is applied, naming how far over it is, and records nothing: the merger's
-// shortened packet at the same commit, the call the refusal asks for, is applied. The limit counts
-// UTF-16 units, as Dispatch does, so a character outside the Basic Multilingual Plane counts twice.
-func TestHandoffCompleteRefusesAREADYPacketTheDaemonCannotPostAndAppliesTheShortenedRetry(t *testing.T) {
-	github := newHandoffGitHub(t)
-	h, facts := newHandoffHarness(t, github, nil, nil)
-	seedIssueAt(t, h, "LEGION-208", phase.Merging)
-	seedPullRequest(t, h, "LEGION-208", headSHA)
-	seedApproval(t, h, "LEGION-208", approvedSHA)
-	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
-	const emoji = "\U0001F600"
-	over := emoji + strings.Repeat("x", record.MessagePostLimit-1)
-	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: over, Ready: true, Commit: headSHA})
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("READY one unit over the limit = %d, want 400; body %s", recorder.Code, recorder.Body)
-	}
-	var failure Failure
-	decodeInto(t, recorder, &failure)
-	if want := fmt.Sprintf("1 characters over the %d the daemon can post as one Dispatch message (%d/%d)", record.MessagePostLimit, record.MessagePostLimit+1, record.MessagePostLimit); failure.Code != "READY_PACKET_TOO_LONG" || !strings.Contains(failure.Error, want) {
-		t.Fatalf("refusal = %+v, want READY_PACKET_TOO_LONG naming %q", failure, want)
-	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts after the refusal = %#v, want none recorded", got)
-	}
-
-	shortened := emoji + strings.Repeat("x", record.MessagePostLimit-2)
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: shortened, Ready: true, Commit: headSHA}))
-	got := facts.recorded()
-	if len(got) != 1 {
-		t.Fatalf("handoff facts = %#v, want the shortened READY", got)
-	}
-	if fact, ok := got[0].(intake.HandoffComplete); !ok || !fact.Ready || fact.Commit != headSHA || fact.Summary != shortened {
-		t.Fatalf("applied fact = %#v, want the shortened READY at %s", got[0], headSHA)
 	}
 }
 
@@ -1058,7 +794,7 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 	h := newHarness(t)
 	github := newHandoffGitHub(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	facts := &factRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
@@ -1126,17 +862,18 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 
 // A pull request waiting to be merged that starts conflicting with its base is sent back to the
 // implementer, which merges the base forward in the same run, with the same claim. The key the
-// route builds tells one implementing pass from the last by the round, so that conflict round has
-// to open a round of its own: otherwise a completion that pushed no new handoff reports the branch
-// head of the round before at the same round, takes that completion's key and is answered
-// HANDOFF_ALREADY_RECORDED, which tells the worker it was received when nothing moved. The workflow
-// sees it instead and refuses it naming the handoff the round must write, and the completion that
-// carries one moves the issue on to testing.
-func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) {
+// route builds tells one implementing pass from the last by the pass count, so that conflict pass
+// has to open a pass of its own: otherwise a completion that pushed no new handoff reports the
+// branch head of the pass before at the same count, takes that completion's key and is answered
+// HANDOFF_ALREADY_RECORDED, which tells the worker it was received when nothing moved. The
+// workflow sees it instead and refuses it naming the handoff the pass must write, and the
+// completion that carries one moves the issue on to testing. The conflict is no review, so it
+// counts no review round; the pass it counts is the one the key is built on.
+func TestAConflictPassesCompletionIsTheNewPassesAndNotTheLastOnes(t *testing.T) {
 	github := newHandoffGitHub(t)
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
@@ -1167,38 +904,38 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 		return got
 	}
 
-	// The first round's handoff is the pushed commit carrying it, which the tool found in the pane.
+	// The first pass's handoff is the pushed commit carrying it, which the tool found in the pane.
 	if recorder := complete("handoff-1"); recorder.Code != http.StatusOK || phaseNow() != phase.Testing {
-		t.Fatalf("the first round's completion = %d (%s), phase %s; want 200 and testing", recorder.Code, recorder.Body, phaseNow())
+		t.Fatalf("the first pass's completion = %d (%s), phase %s; want 200 and testing", recorder.Code, recorder.Body, phaseNow())
 	}
-	// Testing, review, retro and the merger's READY pass; the issue waits on a human's merge.
-	issue.Phase, issue.Status = phase.AwaitingMerge, "retro"
+	// Testing, review and retro pass; the issue stands in merging.
+	issue.Phase, issue.Status = phase.Merging, "retro"
 	h.recordIssue(issue)
 	if result, err := intake.ApplyFact(ctx, h.store.Pool(), "github", "mergeability-conflicting", intake.PullRequestMergeability{
-		Repo: "acme/widgets", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting,
+		Repo: "acme/widgets", Number: 42, Base: "main", HeadSHA: "head", Mergeable: record.MergeabilityConflicting,
 	}, engine); err != nil || result.Refusal != nil {
 		t.Fatalf("apply the conflicting read = %+v, %v", result.Refusal, err)
 	}
 	if got := phaseNow(); got != phase.Implementing {
 		t.Fatalf("after the conflicting read the issue is in %s, want implementing", got)
 	}
-	// The implementer takes the conflict round's task, a task of the run it already serves.
+	// The implementer takes the conflict pass's task, a task of the run it already serves.
 	machine, ok := h.supervisor.Machine(implementer.token)
 	if !ok {
 		t.Fatal("no machine for the implementer")
 	}
 	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer.token}); err != nil {
-		t.Fatalf("end the first round's turn: %v", err)
+		t.Fatalf("end the first pass's turn: %v", err)
 	}
 	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: implementer.token, Task: "merge main forward", ID: "outbox:conflict", Generation: 1}); err != nil {
-		t.Fatalf("deliver the conflict round's task: %v", err)
+		t.Fatalf("deliver the conflict pass's task: %v", err)
 	}
 	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: implementer.token, DeliveryID: "outbox:conflict"}); err != nil {
-		t.Fatalf("start the conflict round's turn: %v", err)
+		t.Fatalf("start the conflict pass's turn: %v", err)
 	}
 
 	// It merges main forward and completes without writing a new handoff: the carrying commit the
-	// tool finds is still the first round's.
+	// tool finds is still the first pass's.
 	stale := complete("handoff-1")
 	var failure Failure
 	decodeInto(t, stale, &failure)
@@ -1208,9 +945,9 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 	if got := phaseNow(); got != phase.Implementing {
 		t.Fatalf("after the refused completion the issue is in %s, want implementing", got)
 	}
-	// With the conflict round's handoff written and committed, its completion moves the issue on.
+	// With the conflict pass's handoff written and committed, its completion moves the issue on.
 	if recorder := complete("handoff-2"); recorder.Code != http.StatusOK || phaseNow() != phase.Testing {
-		t.Fatalf("the conflict round's completion = %d (%s), phase %s; want 200 and testing", recorder.Code, recorder.Body, phaseNow())
+		t.Fatalf("the conflict pass's completion = %d (%s), phase %s; want 200 and testing", recorder.Code, recorder.Body, phaseNow())
 	}
 }
 
@@ -1528,449 +1265,5 @@ func TestHandoffCompleteCarriesTheRunOfTheTaskBeingWorked(t *testing.T) {
 				t.Fatalf("the completion names generation %d, want the delivery's %d", completion.Generation, delivered)
 			}
 		})
-	}
-}
-
-// newReadyHarness is the merger of LEGION-208 at merging, with its pull request acme/widgets#42
-// recorded at headSHA, retro's last push, and its review round's approval of approvedSHA: what a
-// READY is read against.
-func newReadyHarness(t *testing.T, github *handoffGitHub) (*harness, *factRecorder, liveClaim) {
-	t.Helper()
-	h, facts := newHandoffHarness(t, github, nil, nil)
-	seedIssueAt(t, h, "LEGION-208", phase.Merging)
-	seedPullRequest(t, h, "LEGION-208", headSHA)
-	seedApproval(t, h, "LEGION-208", approvedSHA)
-	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
-	return h, facts, merger
-}
-
-func TestHandoffCompleteReadyRefusesAHeadThatMovedBeforeTheMergerCanArmIt(t *testing.T) {
-	const movedHead = "f00d00000000000000000000000000000000ff"
-	github := newHandoffGitHub(t)
-	github.set(func(g *handoffGitHub) { g.pullHead = movedHead })
-	h, facts, merger := newReadyHarness(t, github)
-
-	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at the old head", Ready: true, Commit: headSHA})
-	if message := refused(t, recorder, http.StatusConflict, "READY_HEAD_MOVED"); !strings.Contains(message, movedHead) {
-		t.Fatalf("READY head-moved refusal = %q, want it to name %s", message, movedHead)
-	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts after stale READY = %#v, want none", got)
-	}
-
-	recorder = h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at the moved head", Ready: true, Commit: movedHead})
-	completion(t, recorder)
-	if got := facts.recorded(); len(got) != 1 {
-		t.Fatalf("handoff facts after the re-posted READY = %#v, want one at %s", got, movedHead)
-	}
-	if got := lastCompletion(t, facts).Commit; got != movedHead {
-		t.Fatalf("re-posted READY commit = %s, want %s", got, movedHead)
-	}
-}
-
-// The route holds READY's commit to GitHub's head and passes the workflow the record as it read it,
-// head and clock, which follows GitHub by webhook and a periodic read and can lag, and GitHub's clock in that read.
-// Here the record still holds an earlier push, at an earlier clock, while GitHub and the commit are
-// at retro's last: the READY passes, and its fact carries the lagging record and GitHub's clock, so
-// the workflow takes the record as lagging, not moved, and stamps the READY's head with that clock.
-func TestHandoffCompleteReadyPassesTheRecordedHeadItRead(t *testing.T) {
-	recordedAt, githubAt := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC), time.Date(2026, 10, 12, 10, 5, 0, 0, time.UTC)
-	github := newHandoffGitHub(t)
-	github.set(func(g *handoffGitHub) { g.pullUpdatedAt = githubAt })
-	h, facts, merger := newReadyHarness(t, github)
-	seedPullRequestAt(t, h, "LEGION-208", "stale", recordedAt)
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at retro's last push", Ready: true, Commit: headSHA}))
-	got := lastCompletion(t, facts)
-	if got.Commit != headSHA || got.RecordedHead != "stale" || !got.RecordedHeadAt.Equal(recordedAt) || !got.HeadAt.Equal(githubAt) {
-		t.Fatalf("the READY fact = commit %q, recorded %q at %s, GitHub's clock %s; want %q, the record's %q at %s, and %s",
-			got.Commit, got.RecordedHead, got.RecordedHeadAt, got.HeadAt, headSHA, "stale", recordedAt, githubAt)
-	}
-}
-
-// GitHub can answer a read from a replica that has not seen the newest push, while the daemon's
-// record already holds it from that push's webhook: the record is then ahead of GitHub's answer,
-// and a READY at the head GitHub showed names a head the pull request has left. Both clocks are the
-// pull request's updated_at, to the second, so a record at another head whose clock is not before
-// GitHub's answer, a same-second tie included, may be ahead of it, and READY is refused, naming the
-// recorded head, with nothing recorded. A tie costs one retry, until the head's own webhook lands.
-func TestHandoffCompleteReadyRefusesWhenTheRecordIsAheadOfGitHubsAnswer(t *testing.T) {
-	const newer = "beef00000000000000000000000000000000ff"
-	githubAt := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
-	for _, tc := range []struct {
-		name       string
-		recordedAt time.Time
-	}{
-		{"a record later than GitHub's answer", githubAt.Add(5 * time.Minute)},
-		{"a record in the same second as GitHub's answer", githubAt},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			github := newHandoffGitHub(t)
-			github.set(func(g *handoffGitHub) { g.pullUpdatedAt = githubAt })
-			h, facts, merger := newReadyHarness(t, github)
-			seedPullRequestAt(t, h, "LEGION-208", newer, tc.recordedAt)
-			recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at the head GitHub showed", Ready: true, Commit: headSHA})
-			if message := refused(t, recorder, http.StatusConflict, "READY_HEAD_MOVED"); !strings.Contains(message, newer) {
-				t.Fatalf("READY with the record ahead of GitHub = %q, want it to name the recorded head %s", message, newer)
-			}
-			if got := facts.recorded(); len(got) != 0 {
-				t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
-			}
-		})
-	}
-}
-
-// A pull request closed without merging has no merge left to arm, so READY is refused there by
-// GitHub's own state, rather than accepted and left waiting on whether the close's webhook arrives
-// in time to tell the architect: the READY's advance of the record can make that webhook look
-// older than the record, and drop it.
-func TestHandoffCompleteReadyRefusesAPullRequestClosedWithoutMerging(t *testing.T) {
-	github := newHandoffGitHub(t)
-	github.set(func(g *handoffGitHub) { g.pullState = "closed" })
-	h, facts, merger := newReadyHarness(t, github)
-	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY on a closed pull request", Ready: true, Commit: headSHA})
-	if message := refused(t, recorder, http.StatusConflict, "READY_PULL_REQUEST_CLOSED"); !strings.Contains(message, "#42") {
-		t.Fatalf("READY on a closed pull request = %q, want it to name pull request #42", message)
-	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
-	}
-}
-
-// A pull request whose change touches a by_hand path is READY for a person to merge, never armed:
-// the answer carries MANUAL_MERGE_REQUIRED, and a rename counts both of its paths, so moving a
-// protected file out of a by_hand path is by hand too.
-// The completion the workflow records carries the note too, so the packet the daemon tells carries
-// it and nobody it reaches arms the pull request.
-func TestHandoffCompleteReadyMarksAByHandPullRequestWithoutAutoArmingIt(t *testing.T) {
-	for _, tc := range []struct {
-		name, files string
-	}{
-		{"a by_hand path", `[{"filename":"migrations/versions/0001_init.py"}]`},
-		{"a rename out of a by_hand path", `[{"filename":"src/legacy.py","previous_filename":"migrations/versions/0001_init.py","status":"renamed"}]`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			github := byHandGitHub(t, tc.files)
-			h, facts, merger := newReadyHarness(t, github)
-			code, body := ready(t, h, merger)
-			if code != http.StatusOK || !strings.HasPrefix(body, "MANUAL_MERGE_REQUIRED:") {
-				t.Fatalf("READY for a by-hand pull request = %d %q", code, body)
-			}
-			if got := lastCompletion(t, facts).MergeNote; got != body {
-				t.Fatalf("the recorded READY's by-hand note = %q, want the answer's %q", got, body)
-			}
-		})
-	}
-}
-
-// A by-hand READY the design gate refuses keeps its note in the refusal, so the merger, which
-// submits the merge on the architect's word once the gate opens, already knows a person merges it.
-func TestHandoffCompleteReadyKeepsTheByHandNoteInADesignGateRefusal(t *testing.T) {
-	github := byHandGitHub(t, `[{"filename":"migrations/versions/0001_init.py"}]`)
-	h, facts := newHandoffHarness(t, github, nil, &intake.Refusal{Status: http.StatusConflict, Code: "DESIGN_GATE_CLOSED", Message: "READY refused: approve design version 4 before requesting READY."})
-	seedIssueAt(t, h, "LEGION-208", phase.Merging)
-	seedPullRequest(t, h, "LEGION-208", headSHA)
-	seedApproval(t, h, "LEGION-208", approvedSHA)
-	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
-	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "gate facts hold", Ready: true, Commit: headSHA})
-	if message := refused(t, recorder, http.StatusConflict, "DESIGN_GATE_CLOSED"); !strings.Contains(message, "MANUAL_MERGE_REQUIRED: pull request #42") {
-		t.Fatalf("the design gate's refusal of a by-hand READY = %q, want it to carry the by-hand note", message)
-	}
-	if got := lastCompletion(t, facts).MergeNote; !strings.HasPrefix(got, "MANUAL_MERGE_REQUIRED:") {
-		t.Fatalf("the refused READY's by-hand note = %q, want it recorded for the approval to tell", got)
-	}
-}
-
-// The packet the daemon tells for a by-hand READY carries its note above the merger's packet, so it
-// is the told packet that must fit one Dispatch message. A packet that fits alone but not with the
-// note is refused, naming the note's share, and records nothing.
-func TestHandoffCompleteReadyRefusesAByHandPacketTooLongWithItsNote(t *testing.T) {
-	h, facts, merger := newReadyHarness(t, byHandGitHub(t, `[{"filename":"migrations/versions/0001_init.py"}]`))
-	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: strings.Repeat("x", record.MessagePostLimit), Ready: true, Commit: headSHA})
-	if message := refused(t, recorder, http.StatusBadRequest, "READY_PACKET_TOO_LONG"); !strings.Contains(message, "by-hand note") {
-		t.Fatalf("a by-hand READY whose packet fits only alone = %q, want it refused naming the by-hand note", message)
-	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
-	}
-}
-
-// byHandGitHub is a GitHub whose pull request #42 changes files, under a by_hand rule for
-// migrations/versions/.
-func byHandGitHub(t *testing.T, files string) *handoffGitHub {
-	t.Helper()
-	github := newHandoffGitHub(t)
-	github.set(func(g *handoffGitHub) {
-		g.merge.ByHand = []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}}
-		g.pullFiles = files
-	})
-	return github
-}
-
-// GitHub lists at most 3,000 of a pull request's changed files, so a by_hand path past that limit
-// is never read. With by_hand rules configured, READY refuses a pull request at the limit, naming
-// why, rather than calling an unread path safe to arm.
-func TestHandoffCompleteReadyRefusesAFileListGitHubTruncated(t *testing.T) {
-	files := make([]string, 3000)
-	for i := range files {
-		files[i] = fmt.Sprintf(`{"filename":"src/file%04d.go"}`, i)
-	}
-	github := newHandoffGitHub(t)
-	github.set(func(g *handoffGitHub) {
-		g.merge.ByHand = []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}}
-		g.pullFiles = "[" + strings.Join(files, ",") + "]"
-	})
-	h, facts, merger := newReadyHarness(t, github)
-	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_FILES_TRUNCATED:") {
-		t.Fatalf("READY of a pull request with 3,000 changed files = %d %q", code, body)
-	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
-	}
-}
-
-// A disarm row and the READY merge row a new READY queues each decide by GitHub and then the record
-// when they run, in whichever order the outbox runs them: a disarm still unfinished when a new READY
-// is accepted keeps any arm at the new READY head, and the READY merge submits nothing while an arm
-// stands. READY therefore does not wait for it.
-func TestHandoffCompleteReadyDoesNotWaitForAnUnfinishedDisarm(t *testing.T) {
-	github := newHandoffGitHub(t)
-	h, facts, merger := newReadyHarness(t, github)
-	row, err := record.NewOutboxRow("LEGION-208", record.AutoMergeDisable{Number: 42}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error { return record.NewStore().Enqueue(context.Background(), tx, row) }); err != nil {
-		t.Fatalf("queue the disarm: %v", err)
-	}
-	if code, body := ready(t, h, merger); code != http.StatusOK || body != "" {
-		t.Fatalf("READY with the issue's disarm unfinished = %d %q, want it published", code, body)
-	}
-	if got := facts.recorded(); len(got) != 1 {
-		t.Fatalf("handoff facts = %#v, want the one READY", got)
-	}
-}
-
-// A by-hand READY never leaves an arm from an earlier ordinary READY standing. A push that starts
-// touching a by_hand path queues its disarm before the merger reaches READY again; while that
-// durable disarm has not finished, the by-hand READY waits rather than accepting a head GitHub
-// could still merge automatically.
-func TestHandoffCompleteReadyByHandWaitsForAnUnfinishedDisarm(t *testing.T) {
-	github := byHandGitHub(t, `[{"filename":"migrations/versions/0002_by_hand.py"}]`)
-	h, facts, merger := newReadyHarness(t, github)
-	row, err := record.NewOutboxRow("LEGION-208", record.AutoMergeDisable{Number: 42}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error { return record.NewStore().Enqueue(context.Background(), tx, row) }); err != nil {
-		t.Fatalf("queue the disarm: %v", err)
-	}
-	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_DISARM_PENDING:") {
-		t.Fatalf("by-hand READY with the issue's disarm unfinished = %d %q, want it held", code, body)
-	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts = %#v, want none until the disarm finishes", got)
-	}
-}
-
-// ready posts the merger's READY and returns its answer: the note when it was published, or the
-// refusal's code and sentence.
-func ready(t *testing.T, h *harness, merger liveClaim) (code int, body string) {
-	t.Helper()
-	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "gate facts hold", Ready: true, Commit: headSHA})
-	if recorder.Code == http.StatusOK {
-		var response HandoffCompleteResponse
-		decodeInto(t, recorder, &response)
-		return recorder.Code, response.Note
-	}
-	var failure Failure
-	decodeInto(t, recorder, &failure)
-	return recorder.Code, failure.Code + ": " + failure.Error
-}
-
-// A merger's READY names the head the daemon will submit, and GitHub, under the base branch's own
-// rules, decides whether that head merges: the daemon neither judges the head's checks nor reads
-// them. READY is published at a head whose required check failed, at one whose required status
-// failed, at one that reports no result at all (a push that skipped CI when it should not have),
-// and at one still running; the submission of the merge waits on GitHub for whatever the base
-// requires of the head, and the workflow withdraws the READY if the head's CI turns red. The
-// proof is the two routes a judgment of READY's own would read and this one asks for neither of:
-// the head's check runs, and its commit statuses.
-func TestHandoffCompleteReadyAcceptsAHeadWithoutReadingItsChecks(t *testing.T) {
-	const (
-		ciGreen      = `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`
-		ciFailed     = `{"id":1,"name":"ci","status":"completed","conclusion":"failure"}`
-		ciRunning    = `{"id":1,"name":"ci","status":"in_progress","conclusion":null}`
-		legacyGreen  = `{"context":"legacy","state":"success"}`
-		legacyFailed = `{"context":"legacy","state":"failure"}`
-	)
-	for _, tc := range []struct {
-		name, checkRun, status string
-	}{
-		{"a required check that failed", ciFailed, legacyGreen},
-		{"a required status that failed", ciGreen, legacyFailed},
-		{"a head whose push skipped CI, with no result for either", "", ""},
-		{"a required check still running", ciRunning, legacyGreen},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			github := newHandoffGitHub(t)
-			github.set(func(g *handoffGitHub) {
-				g.checkRuns, g.statuses = "["+tc.checkRun+"]", "["+tc.status+"]"
-			})
-			h, facts, merger := newReadyHarness(t, github)
-			if code, body := ready(t, h, merger); code != http.StatusOK || body != "" {
-				t.Fatalf("READY = %d %q; want it published with no note", code, body)
-			}
-			if fact := lastCompletion(t, facts); !fact.Ready || fact.Commit != headSHA {
-				t.Fatalf("completion = %+v, want READY at %s", fact, headSHA)
-			}
-			for _, path := range github.serves() {
-				if strings.HasSuffix(path, "/check-runs") || strings.HasSuffix(path, "/status") {
-					t.Fatalf("READY read %q while it judged the packet, want no read of the head's checks", path)
-				}
-			}
-		})
-	}
-}
-
-// A merger's READY names the head a human merges, and a squash merge commits that head merged into
-// the default branch: the issue's own handoffs, .legion/<issue>/, must be gone from it (retro's last
-// commit removes them; dispatch://LEGION-605). READY reads the head's tree on GitHub and is refused,
-// naming the head and the directory, while it still holds .legion/<issue>/, and published once
-// GitHub answers that the head has none. A read GitHub fails leaves the head unknown, and READY is
-// refused as GitHub's failure to retry, never sending the issue back to retro. A pull request a
-// person already merged is published unread, its answer saying so: its head can no longer change,
-// and the workflow takes it on to the production check only on that READY.
-func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *testing.T) {
-	const (
-		stillCarries  = `READY_HEAD_CARRIES_HANDOFFS: head c0de00000000 of pull request #42 still carries .legion/LEGION-208/`
-		readRefused   = `GITHUB_READ_FAILED: GitHub's read of .legion/LEGION-208/ at head c0de00000000 of pull request #42 failed, so whether the head still carries it is unknown: complete again`
-		alreadyMerged = `pull request #42 is already merged, so READY was published without reading its head's handoffs`
-	)
-	for _, tc := range []struct {
-		name      string
-		merged    bool
-		carries   bool
-		readFails bool
-		want      string
-	}{
-		{"a head that still carries them", false, true, false, stillCarries},
-		{"a head retro removed them from", false, false, false, ""},
-		{"a head whose tree GitHub fails to read", false, false, true, readRefused},
-		{"a pull request a person merged while its head still carried them", true, true, false, alreadyMerged},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			github := newHandoffGitHub(t)
-			github.set(func(g *handoffGitHub) {
-				g.merged = tc.merged
-				if tc.readFails {
-					g.fail["contents/"] = http.StatusInternalServerError
-				}
-			})
-			h, facts, merger := newReadyHarness(t, github)
-			if tc.carries {
-				github.put(headSHA, ".legion/LEGION-208/implement.json", handoffFile("implement", "LEGION-208"))
-			}
-			code, body := ready(t, h, merger)
-			switch {
-			case tc.merged:
-				if code != http.StatusOK || body != alreadyMerged {
-					t.Fatalf("READY of a merged pull request = %d %q; want it published saying %q", code, body, alreadyMerged)
-				}
-				if reads := github.reads(); len(reads) != 0 {
-					t.Fatalf("READY read %v of a merged pull request's head, want nothing", reads)
-				}
-			case tc.want == "":
-				if code != http.StatusOK || body != "" {
-					t.Fatalf("READY = %d %q; want it published", code, body)
-				}
-				if reads := github.reads(); len(reads) != 1 || reads[0] != ".legion/LEGION-208@"+headSHA {
-					t.Fatalf("READY read %v, want the handoffs directory at the pull request's head", reads)
-				}
-			case tc.readFails:
-				if code != http.StatusBadGateway || !strings.HasPrefix(body, tc.want) {
-					t.Fatalf("READY = %d %q; want %q", code, body, tc.want)
-				}
-			default:
-				if code != http.StatusConflict || !strings.HasPrefix(body, tc.want) {
-					t.Fatalf("READY = %d %q; want %q", code, body, tc.want)
-				}
-			}
-			if recorded := len(facts.recorded()); (recorded == 1) != (code == http.StatusOK) {
-				t.Fatalf("READY = %d with %d facts recorded; want one exactly when it was published", code, recorded)
-			}
-		})
-	}
-}
-
-// What the base branch requires of a head is GitHub's business, and READY reads none of it: its
-// refusals hold the same on a base that requires a check of every head and on one that requires
-// nothing, and a rulesets read that would fail - a private repository on a plan without rulesets
-// answers it 403, "make this repository public to enable this feature"
-// (docs/solutions/legion/controller-gate-2-required-checks-live-reads.md) - refuses no READY,
-// since READY makes no such read.
-func TestHandoffCompleteReadyRefusesTheSameWhateverTheBaseRequires(t *testing.T) {
-	const (
-		unprotected  = `{"name":"main","protected":false}`
-		protected    = `{"name":"main","protected":true,"protection":{"required_status_checks":{"contexts":["legacy"]}}}`
-		requiresCI   = `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`
-		stillCarries = `READY_HEAD_CARRIES_HANDOFFS: head c0de00000000 of pull request #42 still carries .legion/LEGION-208/`
-		conflicts    = `READY_HEAD_CONFLICTS: head c0de00000000 of pull request #42 conflicts with its base main`
-	)
-	for _, base := range []struct {
-		name, rules, branch string
-		rulesStatus         int
-	}{
-		{"a base requiring a check of every head", requiresCI, protected, 0},
-		{"a base requiring none", `[]`, unprotected, 0},
-		{"a repository whose rulesets read fails", `{"message":"Server Error"}`, unprotected, http.StatusInternalServerError},
-	} {
-		t.Run(base.name, func(t *testing.T) {
-			for _, tc := range []struct {
-				name, mergeableState, want string
-				carries                    bool
-			}{
-				{"a head retro removed the handoffs from", "clean", "", false},
-				{"a head that still carries them", "clean", stillCarries, true},
-				{"a head that conflicts with its base", "dirty", conflicts, false},
-			} {
-				t.Run(tc.name, func(t *testing.T) {
-					github := newHandoffGitHub(t)
-					github.set(func(g *handoffGitHub) {
-						g.rules, g.rulesStatus, g.mainBranch, g.mergeableState = base.rules, base.rulesStatus, base.branch, tc.mergeableState
-					})
-					h, facts, merger := newReadyHarness(t, github)
-					if tc.carries {
-						github.put(headSHA, ".legion/LEGION-208/implement.json", handoffFile("implement", "LEGION-208"))
-					}
-					code, body := ready(t, h, merger)
-					switch {
-					case tc.want == "":
-						if code != http.StatusOK || body != "" {
-							t.Fatalf("READY = %d %q; want it published", code, body)
-						}
-					case code != http.StatusConflict || !strings.HasPrefix(body, tc.want):
-						t.Fatalf("READY = %d %q; want %q", code, body, tc.want)
-					}
-					if recorded := len(facts.recorded()); (recorded == 1) != (code == http.StatusOK) {
-						t.Fatalf("READY = %d with %d facts recorded; want one exactly when it was published", code, recorded)
-					}
-				})
-			}
-		})
-	}
-}
-
-// READY is read against the issue's recorded pull request: a merger whose issue has none recorded
-// is refused before GitHub is asked about any pull request.
-func TestHandoffCompleteReadyNeedsTheIssuesRecordedPullRequest(t *testing.T) {
-	github := newHandoffGitHub(t)
-	h, facts := newHandoffHarness(t, github, nil, nil)
-	seedIssueAt(t, h, "LEGION-208", phase.Merging)
-	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
-	if code, body := ready(t, h, merger); code != http.StatusConflict || body != "NO_PULL_REQUEST: LEGION-208 has no pull request recorded" {
-		t.Fatalf("READY without a pull request = %d %q", code, body)
-	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts = %#v, want none", got)
 	}
 }

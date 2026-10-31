@@ -18,8 +18,8 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -56,8 +56,7 @@ const (
 	messageReadSkew = 5 * time.Second
 	// waitWarnAttempts is when a waiting row is logged as a warning: past the backoff's climb to
 	// its cap, a wait of about two minutes, what it waits on is not ending on its own, and an
-	// operator should look. A READY merge only GitHub's own rules hold back (routineWait) stays
-	// debug at every attempt.
+	// operator should look.
 	waitWarnAttempts = 7
 	// issueBranchTimeout bounds one issue_branch row's GitHub calls, its token's mint with them:
 	// the row runs on its issue's lifecycle lane, one row at a time, so a call GitHub never
@@ -68,6 +67,10 @@ const (
 	// the row runs on its issue's lifecycle lane, one row at a time, so a call GitHub never
 	// answers would hold every later lifecycle row of the issue behind it.
 	checkCompareTimeout = 30 * time.Second
+	// approvalCarryTimeout bounds one approval_carry row's compare and its token's mint, as
+	// checkCompareTimeout bounds a check compare's: both run on the issue's lifecycle lane, one
+	// row at a time.
+	approvalCarryTimeout = 30 * time.Second
 )
 
 // outbox runs each effect that the workflow transaction committed, one lane per issue and kind of
@@ -109,8 +112,9 @@ type outbox struct {
 	// git configuration and its bookmarks corrupt or refuse when two write at once. Lanes and
 	// launches run issues side by side, so several issues' provisions are in flight together.
 	provisions provisionLocks
-	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
-	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
+	// githubAPI is the GitHub REST root a row's GitHub call is made under — an issue_branch row's
+	// create, a check_compare's and an approval_carry's compare: the workflow's
+	// (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
 	// limits is every GitHub rate limit a row met, by the budget it exhausted, held until its
 	// deadline: a row that spends one of those budgets waits for the latest deadline among them
@@ -199,21 +203,19 @@ func (r *outbox) settle(ctx context.Context, row record.OutboxRow, err error) {
 	if err != nil {
 		r.noteLimit(row, err)
 		// A failure no retry repairs is not logged as the row failing: once its finish commits,
-		// finishRefused's own line says what became of the row (a person's dequeue of a READY merge,
-		// say, is no failure of the daemon's), and a finish that does not commit is logged below with
-		// it as the cause. A wait that ends the row (a stalled ghautomerge.Lagging) logs as a wait too.
-		permanent := permanentRefusal(row, err, r.now().UTC())
+		// finishRefused's own line says what became of the row, and a finish that does not commit
+		// is logged below with it as the cause.
+		permanent := permanentRefusal(row, err)
 		if errors.Is(err, wait.ErrWaiting) {
 			// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
 			// for a turn, a task behind the claim's pending delivery, a tree's cleanup reservation,
-			// a close waiting for its stops, or a READY merge GitHub does not allow, or has not
-			// made, yet. The row runs again on its backoff, logged when it first waits and as a
-			// warning once it has waited long, unless only GitHub's own rules hold it back.
+			// or a close waiting for its stops. The row runs again on its backoff, logged when it
+			// first waits and as a warning once it has waited long.
 			level := slog.LevelDebug
 			switch {
 			case row.Attempts == 0:
 				level = slog.LevelInfo
-			case row.Attempts >= waitWarnAttempts && !routineWait(err):
+			case row.Attempts >= waitWarnAttempts:
 				level = slog.LevelWarn
 			}
 			r.log.Log(ctx, level, "outbox row waits", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
@@ -275,17 +277,12 @@ func (r *outbox) finish(ctx context.Context, row record.OutboxRow) error {
 
 // finishRefused finishes a row whose failure no retry repairs (permanentRefusal), its follow-up in
 // the same transaction and only while the row's lease still holds (FinishLeasedOutbox), so a worker
-// whose lease expired, or was taken by a reopen (record's readyMergeConflict), commits nothing
-// beside the one that holds the row now.
+// whose lease expired commits nothing beside the one that holds the row now.
 //
 // A status row Dispatch refused finishes so it no longer holds its issue's later writes back. A
 // hand-over's row drops its fence with it: the write that would hand the child to Legion never
 // lands, so no admission consumes the fence, and one left behind would keep naming the child's own
 // tree as its Sandbox's home (store.IssueSandboxHome) for good. The child stays where it is until
-// a person labels it, which admits it as an orphan. A READY merge row tells the issue's architect
-// why it ended without a merge (readyMergeEnded): its notice row is written in the finish's own
-// transaction, which owns the commit hook that write registers (projectRecords, intake.OnCommit),
-// so the notice's lane is woken as the finish commits and the notice is published without a sweep.
 func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause error) error {
 	payload, err := record.DecodeOutboxPayload(row)
 	if err != nil {
@@ -308,22 +305,6 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 				r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
 					"row", row.ID, "issue", row.Issue, "tree", value.HandOverTree, "linger", value.HandOverLinger)
 			}
-		}
-	case record.ReadyMerge:
-		notice, err := record.NewOutboxRow(row.Issue, readyMergeEnded(cause), r.now().UTC())
-		if err != nil {
-			return err
-		}
-		follow = func(tx pgx.Tx) error { return r.records.Enqueue(scoped, tx, notice) }
-		// Someone removing the arm is a person's act, told to the architect; GitHub refusing the
-		// submission or a webhook the daemon never received is a fault.
-		level := slog.LevelError
-		var removed *ghautomerge.Removed
-		if errors.As(cause, &removed) {
-			level = slog.LevelWarn
-		}
-		told = func() {
-			r.log.Log(scoped, level, "outbox READY merge ended without a merge; its architect is told", "row", row.ID, "issue", row.Issue, "error", cause)
 		}
 	}
 	if err := pgx.BeginFunc(scoped, r.pool, func(tx pgx.Tx) error {
@@ -380,14 +361,12 @@ type rateLimit struct {
 }
 
 // githubBudgets is the GitHub budgets a row of each kind spends, as the implement App: its REST
-// calls (an issue branch's create, a production check's compare) the REST core's, its GraphQL
-// calls (a disarm, a READY merge) GraphQL's, and every call GitHub's secondary limit. A kind it
-// does not name calls no GitHub API.
+// calls (an issue branch's create, a production check's compare) the REST core's, and every call
+// GitHub's secondary limit. A kind it does not name calls no GitHub API.
 var githubBudgets = map[record.OutboxKind][]githubrest.Budget{
-	record.OutboxKindIssueBranch:      {githubrest.BudgetCore, githubrest.BudgetSecondary},
-	record.OutboxKindAutoMergeDisable: {githubrest.BudgetGraphQL, githubrest.BudgetSecondary},
-	record.OutboxKindReadyMerge:       {githubrest.BudgetGraphQL, githubrest.BudgetSecondary},
-	record.OutboxKindCheckCompare:     {githubrest.BudgetCore, githubrest.BudgetSecondary},
+	record.OutboxKindIssueBranch:   {githubrest.BudgetCore, githubrest.BudgetSecondary},
+	record.OutboxKindCheckCompare:  {githubrest.BudgetCore, githubrest.BudgetSecondary},
+	record.OutboxKindApprovalCarry: {githubrest.BudgetCore, githubrest.BudgetSecondary},
 }
 
 // standingLimit is the limit in limits, among the budgets a row of kind spends, that still stands
@@ -414,33 +393,13 @@ func retryBackoff(attempts int) time.Duration {
 
 // permanentRefusal is a row's failure no retry repairs, so the row is finished with its follow-up
 // (finishRefused) rather than retried: a Dispatch status write Dispatch refuses the same way every
-// time (dispatch.PermanentRefusal), which would hold every later status of its issue behind it, and
-// a READY merge GitHub refuses where it still stands (ghautomerge.Refused), whose pull request
-// GitHub has shown closed or at another head than the record awaits for longer than
-// ghautomerge.LagBound at now (ghautomerge.Lagging.Stalled), or whose arm or merge-queue entry
-// someone else removed without a merge (ghautomerge.Removed), which a retry must not undo.
-func permanentRefusal(row record.OutboxRow, err error, now time.Time) bool {
-	switch row.Kind {
-	case record.OutboxKindDispatchStatus:
-		_, permanent := dispatch.PermanentRefusal(err)
-		return permanent
-	case record.OutboxKindReadyMerge:
-		var refused *ghautomerge.Refused
-		var removed *ghautomerge.Removed
-		var lagging *ghautomerge.Lagging
-		return errors.As(err, &refused) || errors.As(err, &removed) || errors.As(err, &lagging) && lagging.Stalled(now)
-	default:
+// time (dispatch.PermanentRefusal), which would hold every later status of its issue behind it.
+func permanentRefusal(row record.OutboxRow, err error) bool {
+	if row.Kind != record.OutboxKindDispatchStatus {
 		return false
 	}
-}
-
-// routineWait is a wait only GitHub's own rules hold back, which ends without anyone acting for
-// Legion: a pull request armed or queued at READY's head (ghautomerge.Armed), one GitHub reports not
-// mergeable yet for a reason its rules end (ghautomerge.Unmergeable.Routine), or one the merge queue
-// took out to merge, which GitHub has yet to show merged (ghautomerge.Merging).
-func routineWait(err error) bool {
-	var routine interface{ Routine() bool }
-	return errors.As(err, &routine) && routine.Routine()
+	_, permanent := dispatch.PermanentRefusal(err)
+	return permanent
 }
 
 func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
@@ -478,20 +437,18 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		})
 	case record.WorkspaceRemove:
 		return r.removeWorkspace(ctx, row, value)
-	case record.MergeQueuePublish:
-		return r.mergeQueue(ctx, row, value)
+	case record.RoleMessage:
+		return r.roleMessage(ctx, row, value)
 	case record.IssueBranch:
 		return r.issueBranch(ctx, row, value)
-	case record.AutoMergeDisable:
-		return r.autoMergeDisable(ctx, row, value)
-	case record.ReadyMerge:
-		return r.readyMerge(ctx, row, value)
 	case record.CheckCompare:
 		return r.checkCompare(ctx, row, value)
 	case record.CheckLook:
 		return r.checkLook(ctx, row, value)
 	case record.CheckBound:
 		return r.checkBound(ctx, row)
+	case record.ApprovalCarry:
+		return r.approvalCarry(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -532,15 +489,120 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	// A done write's reason goes on the issue first: Dispatch refuses a message on a closed issue.
 	// It is posted as this row's message, so a retry after a failed write finds it and posts none.
+	// The post is an event of the issue and moves its sequence, so the issue read above is stale
+	// the moment it lands and the write is fenced on a read made after it (writeStatus). Fenced on
+	// the older read, the first write of every row carrying a reason would be refused
+	// (ISSUE_CHANGED) and pay another issue read, a fact transaction on the apply-fact lock
+	// (applyRead) and a record read before making the write that was always going to land.
 	if payload.Reason != "" {
 		if err := r.message(ctx, row, record.MessagePost{Body: payload.Reason}); err != nil {
 			return err
 		}
+		if issue, err = r.dispatch.GetIssue(ctx, row.Issue); err != nil {
+			return fmt.Errorf("read Dispatch issue %s after posting the reason of its status write: %w", row.Issue, err)
+		}
 	}
-	if _, err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
-		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
+	return r.writeStatus(ctx, row, payload, issue)
+}
+
+// statusWriteReads bounds how often one status row reads its issue again after Dispatch refused
+// the write at the sequence that row read (ISSUE_CHANGED). Every event moves an issue's sequence,
+// the daemon's own message posts among them, so a refusal usually says only that the read was
+// overtaken and the next one wins; a run of them is an issue being edited faster than the daemon
+// writes, which the row's own backoff waits out rather than this loop spinning on.
+const statusWriteReads = 3
+
+// writeStatus writes payload's status on the sequence of the read this row has just made
+// (dispatch.Client.SetStatusAt), so a change Dispatch recorded after that read is refused rather
+// than written over (dispatch://INFRA-714/spec R4). The sequence is the read's, never the one the
+// phase decision saw: every event moves it, the daemon's own posts included, so a row carrying
+// that older number would be refused almost every time.
+//
+// ISSUE_CHANGED is no failure of the write and no permanent refusal (dispatch.PermanentRefusal),
+// so nothing is dropped over it. The row reads the issue again, applies what Dispatch then shows
+// to the record as the event that made it would (applyRead) — which is how a close the daemon
+// learns of only here takes its issue out of the workflow — and writes again only while that
+// fresh read passes what the first attempt required of its own read (status): the issue still
+// shows the status the row observed, and is still in the workflow and not closed
+// (statusStillWanted). A read already at the status the row carries is this write's work, done by
+// someone else; a read at any other status is a change made after the row's read, which the row
+// never writes over, whether it took the issue out of the workflow or moved it along within one.
+func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) error {
+	for range statusWriteReads {
+		_, err := r.dispatch.SetStatusAt(ctx, read, payload.Status)
+		if err == nil {
+			return nil
+		}
+		var refusal *dispatch.Error
+		if !errors.As(err, &refusal) || refusal.Code != "ISSUE_CHANGED" {
+			return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
+		}
+		if read, err = r.dispatch.GetIssue(ctx, row.Issue); err != nil {
+			return fmt.Errorf("read Dispatch issue %s again after it changed under the status write: %w", row.Issue, err)
+		}
+		if err := r.applyRead(ctx, read); err != nil {
+			return err
+		}
+		if read.Status == payload.Status {
+			r.log.Info("outbox status write found Dispatch already at its status after the issue changed under it",
+				"row", row.ID, "issue", row.Issue, "status", payload.Status)
+			return nil
+		}
+		if read.Status != payload.ObservedStatus {
+			r.log.Info("outbox status write finished without writing: its issue was moved to another status after the row read it",
+				"row", row.ID, "issue", row.Issue, "status", payload.Status, "observed", payload.ObservedStatus, "dispatch", read.Status)
+			return nil
+		}
+		wanted, err := r.statusStillWanted(ctx, row, payload, read)
+		if err != nil || !wanted {
+			return err
+		}
+	}
+	return fmt.Errorf("set Dispatch issue %s to %s: it changed under each of the %d reads this attempt made",
+		row.Issue, payload.Status, statusWriteReads)
+}
+
+// applyRead applies what Dispatch shows of an issue to the record, through the fact path every
+// event takes (intake.ReadIssue), under the read's own sequence as its fact id: the change that
+// refused this row's write reaches the workflow now rather than whenever the consumer delivers
+// its event, so a close learned of here takes the issue out of the workflow and a park stops it.
+// A read Dispatch answered with no sequence carries no fence and applies nothing.
+func (r *outbox) applyRead(ctx context.Context, read dispatch.Issue) error {
+	if read.LastSeq <= 0 || r.pool == nil {
+		return nil
+	}
+	if _, err := intake.ApplyFact(ctx, r.pool, "dispatch-read", fmt.Sprintf("status:%s:%d", read.Key, read.LastSeq),
+		intake.ReadIssue(read), r.handlers...); err != nil {
+		return fmt.Errorf("apply what Dispatch shows of %s at sequence %d: %w", read.Key, read.LastSeq, err)
 	}
 	return nil
+}
+
+// statusStillWanted says whether a row may write its status after its issue changed under it: the
+// fresh read shows a status still in the workflow — neither done nor parked
+// (record.OutOfWorkflow) — and the record, which has just taken that read (applyRead), still has
+// the issue in the workflow too. A close or a park is the issue's state now, and the status this
+// row carries is of a workflow the issue has left, so the row finishes having written nothing. An
+// issue the daemon keeps no record of is judged by the read alone.
+func (r *outbox) statusStillWanted(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) (bool, error) {
+	left := record.OutOfWorkflow(read.Status)
+	if !left {
+		var issue *record.Issue
+		if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+			var err error
+			issue, err = r.records.Issue(ctx, tx, row.Issue)
+			return err
+		}); err != nil {
+			return false, fmt.Errorf("read workflow issue %s after it changed under its status write: %w", row.Issue, err)
+		}
+		left = issue != nil && !workflow.InWorkflow(*issue)
+	}
+	if left {
+		r.log.Info("outbox status write finished without writing: its issue left the workflow while the write was on its way",
+			"row", row.ID, "issue", row.Issue, "status", payload.Status, "dispatch", read.Status)
+		return false, nil
+	}
+	return true, nil
 }
 
 // consumeHandover applies the hand-over to the record once Dispatch shows it: the row's hand-over
@@ -727,38 +789,38 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	return fmt.Errorf("%w: %s holds no role for %s: %w", errNoticeWaits, architect, row.Issue, published)
 }
 
-// mergeQueue publishes the merger's READY packet, or the daemon's withdrawal of it, to the
-// project's merge queue role, keyed by the row so a retried row is one delivery. A role with no
-// live holder refuses every attempt until someone claims it, so does a holder that does not
-// advertise the packet's delivery mode (notify.ErrRefusedByHolder) until another session holds the
-// role, and so does the listener's own NATS grant when it denies the forward
-// (notify.ErrPublishDenied) until an operator changes it, so waiting would retry forever; the
-// Dispatch message the same READY posted already carries the packet, and the issue's status shows
-// a withdrawal, so the issue is told the role had no holder (as the merger's prompt,
-// internal/prompts/go/merger.md, says the daemon does), that its holder refused the packet, or that
-// the listener was denied the forward, and the row is done. A holder that did not confirm the packet
-// in time (notify.ErrNotDelivered) is retried on the row's backoff as any failed publish is: the
-// holder, or the session that next claims the role, can take it.
-func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
+// roleMessage publishes one message to a role's topic, keyed by the row so a retried row is one
+// delivery (record.RoleMessage). A role with no live holder is told nothing and the row is done:
+// the message reports a moment - a head's checks as they settled - that has passed by the time
+// anyone claims the role, and every recipient reads the pull request on GitHub for itself, so
+// waiting would retry forever for a message that is stale when it lands. A holder that refuses
+// the message's delivery mode (notify.ErrRefusedByHolder), and the listener's own NATS grant
+// denying the forward (notify.ErrPublishDenied), end the row the same way, since both refuse
+// every attempt until a session or an operator changes them; a holder that did not confirm in
+// time (notify.ErrNotDelivered) is retried on the row's backoff as any failed publish is.
+func (r *outbox) roleMessage(ctx context.Context, row record.OutboxRow, payload record.RoleMessage) error {
 	if r.notices == nil {
-		return errors.New("merge queue executor has no Envoy publisher")
+		return errors.New("role message executor has no Envoy publisher")
 	}
-	err := r.notices.Publish(ctx, notify.RoleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
-	if errors.Is(err, notify.ErrNoHolder) {
-		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
-	}
+	err := r.notices.Publish(ctx, notify.RoleTopicPrefix+payload.Role, payload.Body, payload.Body, record.OutboxKey(row.ID))
 	var refused notify.ErrRefusedByHolder
-	if errors.As(err, &refused) {
-		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s refused the packet: its holder %s does not advertise the delivery mode, at %s",
-			payload.Role, refused.Holder, r.now().UTC().Format(time.RFC3339))})
-	}
 	var denied notify.ErrPublishDenied
-	if errors.As(err, &denied) {
-		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s: the listener's NATS grant denied the forward (%s), at %s",
-			payload.Role, denied.Message, r.now().UTC().Format(time.RFC3339))})
+	switch {
+	case errors.Is(err, notify.ErrNoHolder):
+		r.log.Info("outbox role message finished undelivered: its role has no live holder",
+			"row", row.ID, "issue", row.Issue, "role", payload.Role)
+		return nil
+	case errors.As(err, &refused):
+		r.log.Info("outbox role message finished undelivered: its role's holder does not advertise the delivery mode",
+			"row", row.ID, "issue", row.Issue, "role", payload.Role, "holder", refused.Holder)
+		return nil
+	case errors.As(err, &denied):
+		r.log.Error("outbox role message finished undelivered: the listener's own NATS grant denied the forward",
+			"row", row.ID, "issue", row.Issue, "role", payload.Role, "denial", denied.Message)
+		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)
+		return fmt.Errorf("publish %s's message to role %s: %w", row.Issue, payload.Role, err)
 	}
 	return nil
 }
@@ -838,6 +900,9 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return nil
 			}
 		}
+		if err := r.mergerWaitsForTheDesignGate(ctx, issue, payload.Role); err != nil {
+			return err
+		}
 		// A child carried into a tree of its own — a finished root's hand-over, or a person's label
 		// on a child its tree left mid-run — may still run a role of its old tree: one in a turn when
 		// the old tree's close held its suspension, which that close's row, now of an earlier
@@ -869,8 +934,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
 			}
 		}
-		// A start that takes the phase over from a role still at work in it (CI settled red before
-		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
+		// A start that takes the phase over from a role still at work in it (the head started
+		// conflicting with its base while that role worked, or the reviewer's own review decided
+		// a round it had not completed) does nothing — no claim, no working-copy adoption, no
+		// task — until
 		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
 		// workspace together. A retry of a start that has already run against its claim (the claim's
 		// newest start, which StartedBy persists) is past that wait.
@@ -950,19 +1017,22 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			}
 		}
 		// A claim that, once relaunched, still holds a task of this row's phase and run that it will
-		// work is given that task: one not yet confirmed (a failed claim keeps the task it held, and a
-		// death in a turn takes the task back unconfirmed, behind the sentence saying so), or one
-		// confirmed in the turn the claim is working. The row's own task would follow it as a second
-		// prompt for work already under way, so it is not delivered when it is the phase's resume task
-		// (promotion's) or the row relaunched a failed claim (the architect's retry of the held phase,
-		// or a later transition). A confirmed task on a claim not working is over: the relaunch's
+		// work is given that task: one not yet confirmed (a claim whose process is gone keeps the task
+		// it held, and a death in a turn takes the task back unconfirmed, behind the sentence saying
+		// so), or one confirmed in the turn the claim is working. The row's own task would follow it
+		// as a second prompt for work already under way, so it is not delivered when it is the phase's
+		// resume task (promotion's) or the row relaunched a claim that was running nothing — one that
+		// failed, as the architect's retry of the held phase relaunches it, or one an operator stopped,
+		// as the operator's retry of its phase relaunches it. A confirmed task on a claim not working
+		// is over: the relaunch's
 		// decision retired it here, or retires it first when a launch whose outcome was uncertain is
 		// released and spawned again, after this start, so the row's task goes in its place. A check
 		// start names no phase, so it is never one of these: each look's task is delivered, its row
 		// id its delivery's, and a delivery with no phase is held by nothing (supervise's
 		// phaseHolds), so the task reaches the implementer whatever the issue's phase.
 		held := machine.Claim()
-		if pending := held.Pending; (payload.ResumeTask || state == supervise.StateFailed) && pending != nil && payload.Phase != "" &&
+		ranNothing := state == supervise.StateFailed || state == supervise.StateRetired
+		if pending := held.Pending; (payload.ResumeTask || ranNothing) && pending != nil && payload.Phase != "" &&
 			pending.StillWorked(payload.Generation, payload.Phase, held.State) {
 			r.log.Info("outbox start of a claim that holds its phase's task; not delivered again", "row", row.ID, "issue", issue.Key,
 				"role", payload.Role, "phase", payload.Phase, "held", pending.ID)
@@ -1359,6 +1429,41 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 	return nil
 }
 
+// designGateClosed says whether the design gate of the issue's tree is closed, which holds the
+// merger's start (supervise): the gate is the tree root's, so every member of the tree reads the
+// same one, and a tree with no gate recorded — nothing registered one, or the project's design
+// gate is off, which registers it approved — holds nothing. It is read just before the row acts,
+// as every other fence of a row is.
+func (r *outbox) designGateClosed(ctx context.Context, issue record.Issue) (bool, error) {
+	var gate *record.DesignGate
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		gate, err = r.records.Gate(ctx, tx, issue.Tree)
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("read the design gate of %s: %w", issue.Tree, err)
+	}
+	return gate != nil && !classify.DesignGateOpen(*gate), nil
+}
+
+// mergerWaitsForTheDesignGate is the one role fence a start carries: the merger merges nothing
+// while its tree's design gate is closed, because a new version of the spec is with its reviewer
+// and what may merge is what that review decides (dispatch://INFRA-714/spec R5). It answers a
+// wait error for a merger start the gate holds, which leaves the start on the row's backoff as a
+// check start waits on its look (checkLookHolds), and nil for every other role and an open gate.
+// The gate opening releases the row's next try, and tells every phase holder of the tree as well
+// (workflow's tellGateMoved).
+func (r *outbox) mergerWaitsForTheDesignGate(ctx context.Context, issue record.Issue, role claim.Role) error {
+	if role != claim.RoleMerger {
+		return nil
+	}
+	closed, err := r.designGateClosed(ctx, issue)
+	if err != nil || !closed {
+		return err
+	}
+	return wait.Errorf("the merger of %s waits for the design gate of %s to open", issue.Key, issue.Tree)
+}
+
 // checkLookHolds is the production check a check start row still has a look to start in, nil for
 // none: its issue's production check is open, the one the row names (record.ProductionCheck.NamedBy),
 // at the look the row names, with that look open, and the issue out of the workflow. A check closed
@@ -1453,6 +1558,70 @@ func (r *outbox) checkBound(ctx context.Context, row record.OutboxRow) error {
 	return nil
 }
 
+// approvalCarry is the compare that carries a reviewer's approval across a handoff-only push
+// (record.ApprovalCarry), read from GitHub as the implement App. The push that left the approval
+// set aside below the pull request's head queued the row (workflow's carryApproval), because the
+// push webhook's own file list did not show the push to be handoff-only: it was truncated, forced,
+// or carried by a listener that says nothing about paths. The compare, and the apply of the push
+// it shows, are the daemon's one carry (daemon's carryApproval), the same the per-issue read
+// makes and under the same event id, so whichever of the two gets there first carries the
+// approval and the other applies nothing.
+//
+// The row acts only while the record still stands where the push left it: its pull request open,
+// the one the row names, at the head the row names, with the approval still set aside
+// (classify.ApprovalSetAside). A head that moved since has a row of its own from its own push,
+// which compares the heads that stand then; this one finishes without acting. A comparison GitHub
+// answers that does not carry the approval finishes the row: the compare of two fixed commits
+// never changes its answer, so there is nothing to ask again. Any other failure is the row's to
+// retry on its backoff, a rate limit as every GitHub row's (noteLimit, deferral).
+func (r *outbox) approvalCarry(ctx context.Context, row record.OutboxRow, payload record.ApprovalCarry) error {
+	ctx, cancel := context.WithTimeout(ctx, approvalCarryTimeout)
+	defer cancel()
+	var pr *record.PullRequest
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		pr, err = r.records.PullRequest(ctx, tx, row.Issue)
+		return err
+	}); err != nil {
+		return fmt.Errorf("read the pull request record of %s to carry its approval: %w", row.Issue, err)
+	}
+	if pr == nil || pr.State != record.PullRequestOpen || pr.Number != payload.Number || pr.HeadSHA != payload.Head {
+		r.log.Info("outbox approval carry finished without acting: the record no longer stands at the head the row names",
+			"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head)
+		return nil
+	}
+	if !classify.ApprovalSetAside(*pr, payload.Approved) {
+		r.log.Info("outbox approval carry finished without acting: the approval is no longer set aside below the head",
+			"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head)
+		return nil
+	}
+	if r.tokens == nil {
+		return errors.New("approval carry executor has no GitHub App token manager")
+	}
+	repository, err := ghrepo.Parse("the pull request's repository", payload.Repo)
+	if err != nil {
+		return fmt.Errorf("carry the approval on %s: %w", row.Issue, err)
+	}
+	github, err := implementClient(ctx, r.tokens, r.githubAPI, repository)
+	if err != nil {
+		return fmt.Errorf("mint implement App token: %w", err)
+	}
+	push, aside, carried, err := carryApproval(ctx, r.pool, r.dispatchProject, github, *pr, payload.Approved, r.handlers)
+	switch {
+	case err != nil && carried:
+		return fmt.Errorf("apply the handoff-only push GitHub's compare shows above %s's approved head: %w", row.Issue, err)
+	case err != nil:
+		return fmt.Errorf("compare the approved head %s of %s with its head %s: %w", payload.Approved, row.Issue, payload.Head, err)
+	case aside != "":
+		r.log.Info("outbox approval carry finished without acting: the reviewer's approval stays set aside below the head; only an APPROVE of the head or a REQUEST_CHANGES ends the round",
+			"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head, "reason", aside)
+		return nil
+	}
+	r.log.Warn("outbox approval carry: only the issue's handoffs changed above the approved head, and no recorded push says so; the push GitHub's compare shows is applied",
+		"row", row.ID, "issue", row.Issue, "pullRequest", payload.Number, "approved", payload.Approved, "head", payload.Head, "paths", *push.ChangedPaths)
+	return nil
+}
+
 // checkCompare is a build or a deploy run compared against an issue's open production check
 // (record.CheckCompare), read from GitHub as the implement App, the App that merged the check's
 // pull request. A check closed since, or whose last look has started, is compared with nothing,
@@ -1492,11 +1661,10 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 	if err != nil {
 		return fmt.Errorf("compare %s's production check: %w", row.Issue, err)
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, repository.Owner())
+	github, err := implementClient(ctx, r.tokens, r.githubAPI, repository)
 	if err != nil {
 		return fmt.Errorf("mint implement App token: %w", err)
 	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repository)}
 	if payload.Deploy != nil {
 		return r.checkDeployRun(ctx, row, payload, check, github)
 	}
@@ -1809,11 +1977,10 @@ func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 	if err != nil {
 		return err
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+	github, err := implementClient(ctx, r.tokens, r.githubAPI, repo)
 	if err != nil {
 		return fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)
 	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repo)}
 	return ghbranch.Create(ctx, github, repo, workspace.Bookmark(issue.Key), issue.DefaultBranch)
 }
 

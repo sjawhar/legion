@@ -556,12 +556,6 @@ assert_held_snapshot() {
     .issues[$issue].phase == "held" and .issues[$issue].workers.implementer.claim.state == "failed"
   ' "$file" >/dev/null
 }
-assert_ready_gate_closed() {
-  local file=$1
-  jq -e --arg issue "$root_issue" '
-    .issues[$issue].phase == "merging" and .issues[$issue].designGate.currentVersion > .issues[$issue].designGate.approvedVersion
-  ' "$file" >/dev/null
-}
 # await_tree_suspended ISSUE WHAT waits for ISSUE's tree architect to be suspended once its tree
 # lingers. The daemon holds that suspension for the architect's turn and names it no deadline
 # (packages/daemon/internal/supervise/suspend.go, holdSuspension), so the wait's bound is the
@@ -581,42 +575,6 @@ report_architect_suspension() {
     jq -c --arg issue "$suspension_issue" '[.claims[] | select(.issue == $issue and .role == "architect")
       | {state, suspensionHeld: (.suspensionHeld // false), suspendedBy: (.suspendedBy // null), pending: (.pending.id // null)}]')"
 }
-# The design gate in the daemon's state: closed while the spec's current version is past the one a
-# human approved, open while the approved version is the current one; design_gate_version ISSUE
-# prints the spec version the gate currently names.
-design_gate_closed() {
-  daemon_state | jq -e --arg issue "$1" '.issues[$issue].designGate.currentVersion > .issues[$issue].designGate.approvedVersion' >/dev/null
-}
-design_gate_open() {
-  daemon_state | jq -e --arg issue "$1" '.issues[$issue].designGate.approvedVersion == .issues[$issue].designGate.currentVersion' >/dev/null
-}
-design_gate_version() { daemon_state | jq -er --arg issue "$1" '.issues[$issue].designGate.currentVersion'; }
-# spec_event ISSUE TYPE VERSION: the issue's Dispatch event log carries the TYPE event
-# (artifact.version or artifact.approved) naming the spec ($artifact_id) at VERSION; spec_event_in
-# TYPE VERSION reads a saved log on stdin. The spec is not the issue's only document (the planner's
-# plan is another), so the event is matched by artifact as well as by version: the number an
-# artifact.approved payload carries bare and an artifact.version payload as its version record's.
-spec_event() { dispatch_events "$1" | spec_event_in "$2" "$3"; }
-spec_event_in() {
-  jq -e --arg type "$1" --argjson version "$2" --arg artifact "$artifact_id" '
-    any(.[]; .type == $type and .payload.artifact_id == $artifact
-      and (.payload.version | if type == "object" then .number else . end) == $version)
-  ' >/dev/null
-}
-# The decision block the proof inserts into the spec as an architect would (skills/dispatch/
-# SKILL.md, "Asks and ask blocks"), and its question, by which the ask settlement indexes
-# from it is found.
-carry_question='Stage 3 proof question: keep or drop the smoke paragraph?'
-carry_block=$(printf ':::ask{urgency="high" multiple="false"}\n%s\n\n- Keep: the paragraph stays.\n- Drop: the paragraph goes.\n:::\n' "$carry_question")
-# spec_block_ask ISSUE prints the id of the open ask Dispatch's settlement indexed from the proof's
-# decision block (the ask with that block's question and a block_id), and fails while there is none.
-spec_block_ask() {
-  dispatch_get "issues/$1/asks?state=open" |
-    jq -er --arg question "$carry_question" 'first(.[] | select(.block_id != null and .question == $question)) | .id'
-}
-# approval_requests_in counts the approval requests ever opened on an issue in the event log it
-# reads on stdin: the ask.opened events whose ask is an approval, not a question.
-approval_requests_in() { jq '[.[] | select(.type == "ask.opened" and .payload.kind == "approval")] | length'; }
 
 begin prerequisites
 refuse_leftovers legion-e2e3
@@ -831,7 +789,7 @@ note "$(wc -l <"$evidence/pane-endpoints-checked.txt") pane checks: DISPATCH_URL
 pass
 
 # The first issue end to end: the gate, every phase, three review rounds, the architect's acceptance,
-# the READY gate, the daemon's merge, which closes the issue, and the production check after the
+# the merger's own merge, which closes the issue, and the production check after the
 # close, through the bound's last look.
 primary_issue() {
   begin primary-architect-posts-and-registers-spec
@@ -1017,93 +975,24 @@ primary_issue() {
   note "the implementer's retro completion advanced $root_issue to merging"
   pass
 
-  begin ready-gated-on-new-spec-version
-  # A named primary-artifact upload creates version two and emits artifact.version. The gate must
-  # close on it, and this first closing is the gate-state negative control for the approval carry
-  # below: a human's whole-document upload is nobody's answer to a decision block, so Dispatch
-  # carries no approval to it (no artifact.approved names its version, no review is pinned to it)
-  # and only the human's own review reopens the gate. No READY is held yet, so that reopening
-  # releases nothing: a merging stint has one refusal-and-release cycle (a held READY is accepted at
-  # the first reopening, the daemon's advancePendingReady), and this proof spends it on the carry.
-  dispatch_human POST "issues/$root_issue/artifacts" \
-    "$(jq -cn --arg name spec.md --arg content "# Stage 3 smoke\n\nThe human revised this proof specification before READY.\n" '{name:$name,content:$content,summary:"Stage 3 gate re-close"}')" >/dev/null
-  until_true 120 "the human's new primary spec version to close the gate" design_gate_closed "$root_issue"
-  uploaded_version=$(design_gate_version "$root_issue")
-  until_true 60 "the artifact.version event naming spec version $uploaded_version on $root_issue" spec_event "$root_issue" artifact.version "$uploaded_version"
-  dispatch_events "$root_issue" >"$evidence/ready-gate-upload-events.json"
-  if spec_event_in artifact.approved "$uploaded_version" <"$evidence/ready-gate-upload-events.json"; then
-    fail "an artifact.approved event names spec version $uploaded_version, the human's whole-document upload, which answers no decision block"
-  fi
-  dispatch_get "artifacts/$artifact_id/reviews" >"$evidence/ready-gate-upload-reviews.json"
-  if jq -e --argjson version "$uploaded_version" 'any(.[]; .version == $version)' "$evidence/ready-gate-upload-reviews.json" >/dev/null; then
-    fail "a review is pinned to spec version $uploaded_version before anyone reviewed it"
-  fi
-  dispatch_human POST "artifacts/$artifact_id/reviews" '{"state":"approved"}' >/dev/null
-  until_true 120 "the human's review of spec version $uploaded_version to reopen the gate" design_gate_open "$root_issue"
-  note "the gate closed on spec version $uploaded_version, a whole-document upload, with no approval carried to it, and the human's own review reopened it"
-  # The decision block an architect would write, inserted at the end of the spec in a stand-in
-  # session's name through the edits route (dispatch_agent): its version closes the gate again, and
-  # that version is the one the merger's READY meets.
-  dispatch_agent POST "artifacts/$artifact_id/edits" \
-    "$(jq -cn --arg markdown "$carry_block" '{ops: [{op: "insert", after: "end", markdown: $markdown}]}')" >/dev/null
-  until_true 120 "the decision block's spec version to close the gate" design_gate_closed "$root_issue"
-  state_file ready-refused
-  send_agent "$root_issue" merger "Stage 3 proof READY operation: call the legion tool's handoff_complete with summary 'stage 3 ready gate proof' and ready true now. Record its exact refusal and then wait; do not retry it."
-  until_true 180 "merger to observe the READY 409 refusal naming the new version" session_contains "$root_issue" merger "READY refused: approve design version"
-  assert_ready_gate_closed "$evidence/ready-refused.json" || fail "the versioned design gate did not close before READY"
-  jq '.issues["'"$root_issue"'"].designGate.currentVersion = .issues["'"$root_issue"'"].designGate.approvedVersion' \
-    "$evidence/ready-refused.json" >"$evidence/ready-open-negative.json"
-  expect_failure ready-gate-not-reclosed assert_ready_gate_closed "$evidence/ready-open-negative.json"
-  assert_ready_gate_closed "$evidence/ready-refused.json" || fail "the READY gate did not restore after its negative control"
-  new_version=$(design_gate_version "$root_issue")
-  # The carry: the proof human answers the block, and nothing else changed since the version he
-  # approved, so Dispatch records his approval of the version the answer settles into itself. No
-  # review goes through the reviews route from here to awaiting_merge; the daemon's gate reopens on
-  # the carried artifact.approved, which releases the held READY.
-  until_true 60 "settlement to index the decision block as an open ask on $root_issue" spec_block_ask "$root_issue"
-  block_ask=$(spec_block_ask "$root_issue")
-  approval_requests_before=$(dispatch_events "$root_issue" | approval_requests_in)
-  dispatch_human POST "asks/$block_ask/answer" '{"selected":["Keep"],"expected_edited_at":null}' >/dev/null
-  wait_for_phase "$root_issue" awaiting_merge
-  carried_version=$((new_version + 1))
-  daemon_state | jq -e --arg issue "$root_issue" --argjson version "$carried_version" \
-    '.issues[$issue].designGate.approvedVersion == $version and .issues[$issue].designGate.currentVersion == $version' >/dev/null ||
-    fail "the daemon's gate is $(daemon_state | jq -c --arg issue "$root_issue" '.issues[$issue].designGate'), want spec version $carried_version, the answer's, approved and current"
-  # The newest review is the carry: pinned to the answer's version, in the proof human's own name,
-  # answering no approval request, with the carry's reason.
-  dispatch_get "artifacts/$artifact_id/reviews" >"$evidence/ready-gate-carry-reviews.json"
-  carried_review=$(jq -c '.[0]' "$evidence/ready-gate-carry-reviews.json")
-  jq -e --argjson version "$carried_version" --arg user "$proof_human_user" \
-    '.version == $version and .state == "approved" and .actor.kind == "user" and .actor.id == $user and .ask_id == null and ((.reason // "") | length > 0)' \
-    <<<"$carried_review" >/dev/null ||
-    fail "the newest review of $artifact_id is $carried_review, want the proof human's (user $proof_human_user) carried approval of version $carried_version with a reason and no ask"
-  dispatch_events "$root_issue" >"$evidence/ready-gate-carry-events.json"
-  approval_requests_after=$(approval_requests_in <"$evidence/ready-gate-carry-events.json")
-  [ "$approval_requests_after" = "$approval_requests_before" ] ||
-    fail "the carry opened an approval request on $root_issue: $approval_requests_before opened before the answer, $approval_requests_after after"
-  spec_event_in artifact.approved "$carried_version" <"$evidence/ready-gate-carry-events.json" ||
-    fail "no artifact.approved event names spec version $carried_version, the carried approval"
-  note "READY refused at unapproved spec version $new_version, the stand-in architect's decision block; the human's answer carried his approval of version $uploaded_version forward to version $carried_version (review by user $proof_human_user, reason $(jq -r .reason <<<"$carried_review")), no approval request was opened, and the carried approval advanced awaiting_merge without another READY"
-  pass
-
-  begin daemon-merge
-  # The daemon submits the merge of the READY head itself once it accepts READY, as the implement
-  # App. sjawhar/legion-smoke allows no auto-merge, so the daemon merges it once GitHub reports it
-  # mergeable under the `gate` ruleset; await_ready_merge only reads the pull request and never
-  # merges it by hand, so a merge here is the daemon's. The smoke main is held from here until
-  # smoke-main-clean has emptied it (hold_smoke_main), on an open descriptor: start no background
-  # child before release_smoke_main, or it inherits the descriptor and holds the smoke main past
-  # this run's window.
+  begin merger-merge
+  # The merger merges the pull request itself, as the implement App, at the head it read:
+  # `gh pr merge --squash --match-head-commit` with the subject and the empty body it passes, since
+  # sjawhar/legion-smoke's base carries no merge queue. await_merger_merge only reads the pull
+  # request and never merges it by hand, so a merge here is the agent's. The smoke main is held
+  # from here until smoke-main-clean has emptied it (hold_smoke_main), on an open descriptor: start
+  # no background child before release_smoke_main, or it inherits the descriptor and holds the
+  # smoke main past this run's window.
   hold_smoke_main
-  await_ready_merge "$repo" "$pr_number" --delete-branch
-  # The merge closes the issue: awaiting_merge and a merged pull request write done, the daemon's
-  # one status write after retro. A root's close frees its slot and lingers the tree, every member's
+  await_merger_merge "$repo" "$pr_number" --delete-branch
+  # The merge closes the issue: the daemon's read of the merged pull request writes done, its one
+  # status write after retro. A root's close frees its slot and lingers the tree, every member's
   # claims suspended, and opens the production check on the merge commit, whose first look the
   # daemon hands the implementer in its live pane: its claim alone comes back, resumed on its kept
   # session, while the other five stay suspended.
   wait_for_phase "$root_issue" "done" 300
-  phase_change_logged "$root_issue" awaiting_merge "done" pull_request_merged ||
-    fail "the daemon log has no \"workflow: phase changed\" line moving $root_issue from awaiting_merge to done on pull_request_merged"
+  phase_change_logged "$root_issue" merging "done" pull_request_merged ||
+    fail "the daemon log has no \"workflow: phase changed\" line moving $root_issue from merging to done on pull_request_merged"
   until_true 60 "the daemon's done status on the Dispatch board" dispatch_status_is "$root_issue" "done"
   check_opened_on "$root_issue" "$merge_when_clean_commit" ||
     fail "$root_issue's production check reads $(daemon_state | jq -c --arg issue "$root_issue" '.issues[$issue].check'), want it open on merge commit $merge_when_clean_commit at its first look, woken by the merge"
@@ -1126,7 +1015,7 @@ primary_issue() {
   until_true 300 "the pending report to suspend the implementer's claim beside the five suspended claims of $root_issue" claim_states_are "$root_issue" suspended suspended
   [ -n "$(issue_worker_session "$root_issue" implementer)" ] || fail "the implementer's claim lost its session at its suspension between looks"
   state_file check-look-1
-  note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit, which closed $root_issue (phase changed awaiting_merge → done on pull_request_merged; the board done) and opened its production check on that commit; the close suspended the architect, planner, tester, reviewer and merger and handed the implementer the first look in its live pane (claims at the look: $first_look_claims); its pending report left the check open ($(jq -c --arg issue "$root_issue" '.issues[$issue].check | {looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")) and suspended its claim, session kept"
+  note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit, which closed $root_issue (phase changed merging → done on pull_request_merged; the board done) and opened its production check on that commit; the close suspended the architect, planner, tester, reviewer and merger and handed the implementer the first look in its live pane (claims at the look: $first_look_claims); its pending report left the check open ($(jq -c --arg issue "$root_issue" '.issues[$issue].check | {looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")) and suspended its claim, session kept"
   pass
 
   begin smoke-main-clean

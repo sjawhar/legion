@@ -8,7 +8,7 @@ executable form of that order. The deployment instructions name the weekly-plann
 ## Controller routing address
 
 Claim no Envoy role other than `legion-<project>-controller`, your startup role, because changing
-roles ends the controller's wake delivery. READY packets, scope questions and routing requests
+roles ends the controller's wake delivery. Scope questions, routing requests and findings
 reach you on `notifications.role.legion-<project>-controller`.
 
 ## Reconcile the weekly plan
@@ -49,9 +49,8 @@ daemon state. You decide labels, the statuses `todo`, `backlog` and `icebox`, an
 Answer a scope question from the weekly plan and the deployment instructions. Anything else goes
 with `envoy_send` to the session the plan's one-owner map names for that issue.
 
-For a READY packet, confirm the Dispatch record and leave the merge to the daemon. Never merge or
-use a GitHub credential to merge from the controller, because the daemon submits the merge itself
-at READY's head.
+Never merge or use a GitHub credential to merge from the controller, because the merger merges the
+pull request itself, at the head it read and under the repository's own rules.
 
 ## The owner audit
 

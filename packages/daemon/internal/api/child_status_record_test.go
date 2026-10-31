@@ -170,8 +170,8 @@ func TestRerunChildStartsTheNextRunWithoutWaitingForItsDispatchEvent(t *testing.
 		t.Fatalf("Dispatch writes = %#v, want %#v", statuses.writes, want)
 	}
 	rerun := recordedChild(t, h, statusChild)
-	if rerun == nil || rerun.Phase != phase.Planning || rerun.Status != "todo" || rerun.LastDispatchSeq != 6 || rerun.Generation != 2 {
-		t.Fatalf("the child's record once rerun_child answered = %#v, want its next run (generation 2) planning at its write's sequence 6", rerun)
+	if rerun == nil || rerun.Phase != phase.Planning || rerun.Status != "in_progress" || rerun.LastDispatchSeq != 6 || rerun.Generation != 2 {
+		t.Fatalf("the child's record once rerun_child answered = %#v, want its next run (generation 2) planning and in_progress at its write's sequence 6", rerun)
 	}
 	if got := superviseRows(t, h, "start", claim.RolePlanner); got != planners+1 {
 		t.Fatalf("planner start rows = %d, want the rerun to start the planner once more than the %d before it", got, planners)

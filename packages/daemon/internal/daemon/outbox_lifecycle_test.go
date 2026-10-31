@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -404,131 +403,6 @@ func TestAnIssuesCloseWaitsForTheWorkersTurnToEnd(t *testing.T) {
 	}
 }
 
-// CI settling red while the tester is in a turn — running a tool, its phase not completed — takes
-// the phase back to implementing with nobody's completion. The tester's turn is interrupted, not its
-// process: the implementer's start waits, sending the implementer nothing, until the tester's turn
-// has ended, and then hands the implementer the CI-red task. The tester keeps its launch, its
-// session and its capability, and nothing stops it.
-func TestACIRedSendBackInterruptsTheTestersTurnBeforeTheImplementerStarts(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U", LastDispatchSeq: 5}
-	putOutboxIssue(t, pool, records, issue)
-	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: issue.Key, Repo: "acme/widgets", Number: 86, Branch: "legion/LEGION-208", HeadSHA: "sha-1",
-			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}, Required: []string{"ci"}})
-	}); err != nil {
-		t.Fatalf("seed the pull request: %v", err)
-	}
-	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
-	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds
-	boot := func(role claim.Role, task string, p phase.Phase) (*supervise.Machine, *fake.Conn) {
-		t.Helper()
-		token, err := claim.NewToken("legion", issue.Key, role)
-		if err != nil {
-			t.Fatal(err)
-		}
-		machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: role, State: supervise.StateQueued}, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		conn := fake.NewConn()
-		sup.deps.Conns.(*fake.Conns).Register(token, conn)
-		if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
-			t.Fatalf("spawn the %s: %v", role, err)
-		}
-		generation := machine.Claim().Generation
-		for _, ev := range []supervise.Event{
-			supervise.StreamHello{Claim: token, Generation: generation},
-			supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-" + string(role), SessionFile: "/tmp/" + string(role) + ".jsonl", CapabilityHash: []byte(role)},
-			supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-" + string(role)},
-		} {
-			if err := machine.Handle(ctx, ev); err != nil {
-				t.Fatalf("boot the %s: handle %T: %v", role, ev, err)
-			}
-		}
-		if task != "" {
-			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: task, Phase: p, Generation: 1}); err != nil {
-				t.Fatalf("deliver the %s's task: %v", role, err)
-			}
-			machine.Wait()
-			if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token}); err != nil {
-				t.Fatalf("start the %s's turn: %v", role, err)
-			}
-		}
-		return machine, conn
-	}
-	// The implementer finished implementing and is idle; the tester is in its testing turn.
-	implementer, implementerConn := boot(claim.RoleImplementer, "", "")
-	tester, testerConn := boot(claim.RoleTester, "Continue Workflow. Issue: LEGION-208. Phase: testing.", phase.Testing)
-	before := tester.Claim()
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
-	clock := time.Now()
-	runner := &outbox{
-		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
-		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "testing"}}, notices: &outboxPublisher{},
-		handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
-	}
-	run := func(what string) {
-		t.Helper()
-		clock = clock.Add(time.Hour)
-		if err := runner.RunOnce(ctx); err != nil {
-			t.Fatalf("run %s: %v", what, err)
-		}
-		implementer.Wait()
-	}
-	ciRedTasks := func() int {
-		t.Helper()
-		count := 0
-		for _, prompt := range implementerConn.Prompts() {
-			if strings.Contains(prompt.Message, "Phase: implementing.") && strings.Contains(prompt.Message, "CI is red at sha-1: ci") {
-				count++
-			}
-		}
-		return count
-	}
-
-	if result, err := intake.ApplyFact(ctx, pool, "github", "red", intake.PullRequestChecks{Repo: "acme/widgets", Number: 86, HeadSHA: "sha-1",
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}, engine); err != nil || result.Refusal != nil {
-		t.Fatalf("apply the red verdict = %+v, %v", result, err)
-	}
-	run("the send-back's effects")
-	run("the start's first retry, the tester's turn still running")
-	if got := tester.Claim(); got.State != supervise.StateWorking || testerConn.Aborts() != 1 || ciRedTasks() != 0 || len(implementerConn.Prompts()) != 0 {
-		t.Fatalf("while the tester's turn runs it is %s with %d aborts and the implementer got %d prompts; want working, interrupted once, and nothing sent to the implementer",
-			got.State, testerConn.Aborts(), len(implementerConn.Prompts()))
-	}
-
-	if err := tester.Handle(ctx, supervise.StreamTurnEnd{Claim: before.Token}); err != nil {
-		t.Fatalf("end the tester's interrupted turn: %v", err)
-	}
-	run("the start once the tester's turn is over")
-	testwait.Eventually(t, "the implementer to be handed its CI-red task", func() bool { return ciRedTasks() == 1 })
-	after := tester.Claim()
-	if after.State != supervise.StateIdle || after.Generation != before.Generation || after.Session != before.Session || after.Locator == nil ||
-		*after.Locator != *before.Locator || !bytes.Equal(after.CapabilityHash, before.CapabilityHash) || testerConn.Aborts() != 1 {
-		t.Fatalf("after the takeover the tester is %+v with %d aborts, want idle on its launch, session and capability, interrupted once", after, testerConn.Aborts())
-	}
-	for _, method := range []string{"Suspend", "Release"} {
-		for _, call := range rt.CallsOf(method) {
-			if call.Locator.Claim == before.Token {
-				t.Fatalf("the runtime was asked to %s the tester: %+v", method, call)
-			}
-		}
-	}
-	// The tester's next turn, a question asked through Envoy, is not interrupted for the start it
-	// already let go.
-	if err := tester.Handle(ctx, supervise.StreamTurnStart{Claim: before.Token}); err != nil {
-		t.Fatalf("start the tester's later turn: %v", err)
-	}
-	run("the rows due after the tester's later turn starts")
-	if testerConn.Aborts() != 1 || ciRedTasks() != 1 {
-		t.Fatalf("the tester's later turn: %d aborts and %d CI-red tasks, want the one abort and the one task", testerConn.Aborts(), ciRedTasks())
-	}
-}
-
 // A role that finished its phase stays resident, so its process dying is recovered like any other:
 // the same session is relaunched, it is handed nothing, and the issue stays in the phase another role
 // works. When its relaunches run out, the claim fails, and the architect is told in a worker-died
@@ -669,7 +543,7 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 			return err
 		}
 		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: key, Repo: "acme/widgets", Number: 86, Branch: "legion/" + key, HeadSHA: "sha-1",
-			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}, FixAttempts: 2})
+			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}})
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}

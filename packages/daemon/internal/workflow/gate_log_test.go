@@ -50,9 +50,16 @@ func TestTheDesignGateLogsItsRegistrationAndEachOpenOrClose(t *testing.T) {
 		{"a new version", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "art-1", Kind: intake.DispatchArtifactVersion, Version: 3},
 			nil},
 		{"the approval", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "art-1", Kind: intake.DispatchArtifactApproved, Version: 3},
-			[]string{`msg="workflow: design gate opened" issue=LEGION-1 artifact=art-1 event=approved version=3`}},
+			[]string{
+				`msg="workflow: design gate opened" issue=LEGION-1 artifact=art-1 event=approved version=3`,
+				`msg="workflow: the design gate moved and every phase holder of the tree is told" issue=LEGION-1 tree=LEGION-1 version=3 open=true told=1`,
+			}},
 		{"a version after the approval", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "art-1", Kind: intake.DispatchArtifactVersion, Version: 4},
-			[]string{`msg="workflow: design gate closed" issue=LEGION-1 artifact=art-1 event=version version=4`}},
+			[]string{
+				`msg="workflow: design gate closed" issue=LEGION-1 artifact=art-1 event=version version=4`,
+				// The approval started the root's planning, so the close reaches its planner too.
+				`msg="workflow: the design gate moved and every phase holder of the tree is told" issue=LEGION-1 tree=LEGION-1 version=4 open=false told=2`,
+			}},
 	} {
 		if got := apply(step.name, step.fact); strings.Join(got, "\n") != strings.Join(step.want, "\n") {
 			t.Fatalf("%s logged %q; want %q", step.name, got, step.want)

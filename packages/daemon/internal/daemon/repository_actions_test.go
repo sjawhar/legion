@@ -112,11 +112,7 @@ func TestEachIssuesActionsActOnTheRepositoryItsRecordNames(t *testing.T) {
 		if err := runner.provisionWorkspace(context.Background(), issue); err != nil {
 			t.Fatalf("provision the workspace of %s: %v", issue.Key, err)
 		}
-		row := mustOutboxRow(t, issue.Key, record.AutoMergeDisable{Number: 42}, time.Now())
-		if err := runner.autoMergeDisable(context.Background(), row, record.AutoMergeDisable{Number: 42}); err != nil {
-			t.Fatalf("disarm the pull request of %s: %v", issue.Key, err)
-		}
-		row = mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Linger: 1}, time.Now())
+		row := mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Linger: 1}, time.Now())
 		if err := runner.removeWorkspace(context.Background(), row, record.WorkspaceRemove{Linger: 1}); err != nil {
 			t.Fatalf("remove the workspace of %s: %v", issue.Key, err)
 		}
@@ -125,10 +121,8 @@ func TestEachIssuesActionsActOnTheRepositoryItsRecordNames(t *testing.T) {
 	want := []string{
 		"GET /repos/acme/widgets/git/ref/heads/main implement-app-token-for-acme",
 		"POST /repos/acme/widgets/git/refs implement-app-token-for-acme",
-		"GRAPHQL acme/widgets implement-app-token-for-acme",
 		"GET /repos/zeta/tools/git/ref/heads/release/v7.1 implement-app-token-for-zeta",
 		"POST /repos/zeta/tools/git/refs implement-app-token-for-zeta",
-		"GRAPHQL zeta/tools implement-app-token-for-zeta",
 	}
 	if got := github.called(); !slices.Equal(got, want) {
 		t.Fatalf("GitHub calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -160,7 +154,6 @@ func TestARowQueuedBeforeTheFillActsOnTheFilledRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	enqueueOutbox(t, pool, records.Store, mustOutboxRow(t, "LEGION-7", record.IssueBranch{Generation: 1}, time.Now()))
-	enqueueOutbox(t, pool, records.Store, mustOutboxRow(t, "LEGION-7", record.AutoMergeDisable{Number: 42}, time.Now()))
 
 	named := newRepositoryGitHubFor(t, "Zeta/Tools", "release/v7.1")
 	client := &listingDispatch{summaries: []dispatch.IssueSummary{{Key: "LEGION-7", ResolvedRepo: "zeta/tools"}}}
@@ -178,7 +171,6 @@ func TestARowQueuedBeforeTheFillActsOnTheFilledRepository(t *testing.T) {
 	want := []string{
 		"GET /repos/Zeta/Tools/git/ref/heads/release/v7.1 implement-app-token-for-Zeta",
 		"POST /repos/Zeta/Tools/git/refs implement-app-token-for-Zeta",
-		"GRAPHQL Zeta/Tools implement-app-token-for-Zeta",
 	}
 	if got := github.called(); !slices.Equal(got, want) {
 		t.Fatalf("GitHub calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

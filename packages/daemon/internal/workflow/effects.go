@@ -18,9 +18,8 @@ import (
 
 // RoleFor is the role that works a phase: the one a transition starts, and the one whose handoff
 // the `legion` tool's `handoff_complete` resolves the carrying commit of for a file-backed phase
-// (packages/pi-shared/src/handoff-commit.ts). A phase no role works — awaiting_person,
-// awaiting_merge, done, held —
-// has none. Accepting is the tree architect's, a claim per tree that no row starts: every site
+// (packages/pi-shared/src/handoff-commit.ts). A phase no role works — awaiting_person, done, held
+// — has none. Accepting is the tree architect's, a claim per tree that no row starts: every site
 // that starts, resumes or reports a phase's worker skips it (start, admit's startMidPhaseMembers,
 // booted, Stranded).
 //
@@ -45,16 +44,27 @@ func RoleFor(p phase.Phase) claim.Role {
 	}
 }
 
-// ResumePhase is the phase a re-admitted tree resumes its mid-phase child in: the child's own,
-// except that a child left awaiting its merge resumes in merging. The tree's linger disarmed its
-// pull request (beginLinger), and re-admission clears its merger's READY with the rest of the old
-// generation's handoffs (record.Store.ClearTreeGeneration), so nothing is armed and no READY is left
-// to arm it again: only a new READY from its merger moves it.
-func ResumePhase(child record.Issue) phase.Phase {
-	if child.Phase == phase.AwaitingMerge {
-		return phase.Merging
+// PhaseFinished says whether issue's phase is over by its own terminating fact rather than by its
+// worker's completion, so no worker of it is started or resumed for it. Merging's fact is the pull
+// request being merged: the merger merges, the daemon merges nothing, and a merged root then
+// stands in merging until the rest of its tree leaves the workflow (closeMerged), which can be
+// days. Accepting's is the architect's sign-off, which moves the issue on in the transaction that
+// records it, so an issue standing in accepting is always still waiting for it; every other
+// phase ends with its worker's completion, which moves the issue too. A recorded completion
+// answers nothing here: the merger's is recorded and moves no issue.
+func PhaseFinished(ctx context.Context, store record.Store, tx pgx.Tx, issue record.Issue) (bool, error) {
+	if issue.Phase != phase.Merging {
+		return false, nil
 	}
-	return child.Phase
+	pr, err := store.PullRequest(ctx, tx, issue.Key)
+	if err != nil || pr == nil {
+		return false, err
+	}
+	return pr.State == record.PullRequestMerged, nil
+}
+
+func (e *Engine) phaseFinished(ctx context.Context, tx pgx.Tx, issue record.Issue) (bool, error) {
+	return PhaseFinished(ctx, e.store, tx, issue)
 }
 
 // workingPhase is the phase issue's worker works: its phase, or, while it is held, the phase its
@@ -201,12 +211,12 @@ func refusedLingering(issue record.Issue, request string) intake.Result {
 	return refused("TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s of %s changed nothing", issue.Tree, request, issue.Key))
 }
 
-// clearHandoff empties the handoff a role reported for its previous phase — its commit, verdict,
-// summary and by-hand note, and the review round's decision, which ends with the round — keeping
-// its claim and the review rounds, when a transition starts it on a new phase. A role's recorded
-// handoff is then always its current phase's: the implementer's round-1 commit cannot advance
-// round 2, a merger sent back to verify again has no READY packet until its next one, and no round
-// inherits an earlier decision. The architect reports no handoff and has no row to clear.
+// clearHandoff empties the handoff a role reported for its previous phase — its commit, verdict
+// and summary, and the review round's decision, which ends with the round — keeping its claim and
+// the review rounds, when a transition starts it on a new phase. A role's recorded handoff is then
+// always its current phase's: the implementer's round-1 commit cannot advance round 2, a merger
+// sent back has no summary until its next one, and no round inherits an earlier decision. The
+// architect reports no handoff and has no row to clear.
 func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) error {
 	if role == "" || role == claim.RoleArchitect {
 		return nil
@@ -216,7 +226,7 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 		return err
 	}
 	cleared := row
-	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt, cleared.MergeNote = "", "", "", nil, time.Time{}, ""
+	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt = "", "", "", nil, time.Time{}
 	if cleared == row {
 		return nil
 	}
@@ -228,10 +238,6 @@ func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: role, Generation: issue.Generation, Reason: reason})
 }
 
-// approvedHeadLabel labels the head a merger's task carries. The merger's prompt reads its task by
-// this label (prompts/roles/merger.md, step 2), which a test ties to it.
-const approvedHeadLabel = "Approved head"
-
 // testerVerdictLabel labels the tester's verdict a started worker's task carries. The reviewer's
 // prompt names it as the tester's result rather than its own (prompts/go/reviewer.md), which a test
 // ties to it.
@@ -240,42 +246,14 @@ const testerVerdictLabel = "Tester's verdict"
 // start starts the phase worker of the issue's current phase, a start stamped with that phase. A
 // start that takes the phase over from a role still at work in it names that role, quiesce, so it
 // waits for that role's turn to end (record.SuperviseRequest's Quiesce); every other start names
-// none. A merger is told the head the review round approved (withApprovedHead), the one head its
-// READY may name, so it never chooses among the pull request's reviews itself. A phase with no
-// worker, and accepting, whose architect admission started with the tree, start nobody.
+// none. A phase with no worker, and accepting, whose architect admission started with the tree,
+// start nobody.
 func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string, quiesce claim.Role) error {
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
-	task, err := withApprovedHead(ctx, e.store, tx, issue.Key, role, task)
-	if err != nil {
-		return err
-	}
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
 		Generation: issue.Generation, Phase: issue.Phase, Quiesce: quiesce})
-}
-
-// withApprovedHead is a merger's task with the head the issue's review round approved appended
-// under approvedHeadLabel, and any other role's task as it is. That head is the reviewer row's
-// recorded decision (record.ApprovedHead; the review that ended the round, review.go); the task
-// gets no line when the round recorded no approval, and READY refuses that round too
-// (READY_NOT_APPROVED). The reviewer's row keeps that decision until the reviewer starts
-// again (clearHandoff), until a re-admission of the tree clears the generation's handoffs with it
-// (record.ClearTreeGeneration), so a merger resumed into a re-admitted tree is told no head and
-// refuses, and the round is reviewed again rather than merged on the last generation's approval.
-// A hand-over keeps the row, so a carried merger is told the head the carried round approved.
-func withApprovedHead(ctx context.Context, store record.Store, tx pgx.Tx, issue string, role claim.Role, task string) (string, error) {
-	if role != claim.RoleMerger {
-		return task, nil
-	}
-	head, err := record.ApprovedHead(ctx, store, tx, issue)
-	if err != nil {
-		return "", err
-	}
-	if head == "" {
-		return task, nil
-	}
-	return task + " " + approvedHeadLabel + ": " + head + ".", nil
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue
@@ -313,13 +291,9 @@ func ResumePhaseTask(issue record.Issue) string {
 	return continueLine(issue) + " Resume the existing phase work."
 }
 
-// ResumeTask is the task admission gives role when it resumes issue's phase at promotion:
-// ResumePhaseTask, with a merger also told its approved head (withApprovedHead). The mid-phase
-// children of a tree it re-admits had the round's decision cleared with the generation, so their
-// merger is told none and sends the round back for review; a carried root kept its round, so its
-// merger is told the head that round approved.
+// ResumeTask is the task admission gives role when it resumes issue's phase at promotion.
 func ResumeTask(ctx context.Context, store record.Store, tx pgx.Tx, issue record.Issue, role claim.Role) (string, error) {
-	return withApprovedHead(ctx, store, tx, issue.Key, role, ResumePhaseTask(issue))
+	return ResumePhaseTask(issue), nil
 }
 
 // HeldNotice is the notice of issue's hold as its architect answers one, with a retry or an

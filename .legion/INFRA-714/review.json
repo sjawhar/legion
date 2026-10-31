@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-714",
+  "completed": "2026-10-31T01:40:00Z",
+  "decision": "changes_requested",
+  "reviewedHead": "a22fdd7c098ecabb2ac484be5390533013e7ec01",
+  "critical": 2,
+  "important": 9,
+  "minor": 6,
+  "thermonuclear": "deep-review and code-quality both ran at a22fdd7c; both CHANGES. Findings below are the ones verified against the code at that head.",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head 5e1d0c16 (run 41149496883) still queued; head a22fdd7c has 0 check runs; GitHub reports the pull request mergeable_state dirty (conflicts with main 8fd342e4).",
+  "keyFindings": [
+    {"severity": "critical", "file": "packages/daemon/internal/workflow/review.go:482", "description": "An approval moves to accepting only when GitHub's merge state is clean/unstable/has_hooks, but the reviewer always approves its own handoff head, which carries skip-checks: true and runs no workflow. On a base with required checks (sjawhar/legion: lint, typecheck, test, pr-title) GitHub reports such a head blocked (GitHub docs, 'Skipping workflow runs'; head a22fdd7c has 0 check runs). Every approval stays in reviewing for good, and round{} tells nobody. Needs the architect's decision (the spec's 'a head with no checks is CLEAN' holds only on a base that requires none)."},
+    {"severity": "critical", "file": "packages/daemon/internal/store/migrations/0073_drop_the_daemons_merge_rows.up.sql:10", "description": "Deletes every pending auto_merge_disable row and nothing disarms an auto-merge the old daemon armed; spec Rollout says the migrated merger's task tells it to turn off any such auto-merge. Four open pull requests are armed by the implement App today (sjawhar/legion#2321, #2295, #2176, theorem-labs/agent-infra#1040). A later head move then merges unreviewed code."},
+    {"severity": "important", "file": "(pull request)", "description": "The head conflicts with main 8fd342e4 (12 files changed on both sides, from #2576 among others); GitHub runs no CI on it and the CI run of code head 5e1d0c16 is still queued. Merge main forward."},
+    {"severity": "important", "file": "packages/daemon/internal/classify/decisions.go:138", "description": "The recorded merge state and mergeability are not tied to a head: advance moves HeadSHA and keeps both, and PullRequestMergeability carries no head, so an approval can move on a state GitHub gave for an older head."},
+    {"severity": "important", "file": "packages/daemon/internal/workflow/gate.go:747", "description": "R5: a running merger told the gate closed reads 'Your phase goes on'; neither merger prompt says to merge nothing and dequeue (spec R5 asks for dequeuePullRequest)."},
+    {"severity": "important", "file": "packages/daemon/internal/supervise/budgets.go:88", "description": "turnOpen stays true after a death inside a turn (LastTurnEnd is written only at a normal end), so later deaths of the idle relaunched agent are charged and the claim fails."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/outbox.go:546", "description": "R4: after ISSUE_CHANGED the retry writes again without the observed-status fence status() applies at line 465, so a person's in-workflow change made after the read is written over."},
+    {"severity": "important", "file": "packages/pi-shared/src/legion-phase-ops.ts:156", "description": "The legion tool still describes READY, its refusals and MANUAL_MERGE_REQUIRED (also handoff-commit.ts:22, pi-legion/AGENTS.md:474-492); api/handoff.go keeps Ready and READY_ROLE_FORBIDDEN and contracts still requires ready. The plugin ships with this contract bump, so cut it now."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/repositories.go:409", "description": "Operator-visible strings promise the deleted two-minute pass: legion state's webhook-App line and intake/consume.go:257's warn line."},
+    {"severity": "important", "file": "docs/site/src/content/docs/legion/running-legion.md:116", "description": "Docs still describe the two-minute pass, awaiting_merge and checksVerdict/fixAttempts (running-legion.md, troubleshooting.md, concepts.md), plus design-gate.md:5 ready-refused, AGENTS.md:156 'a merge the daemon submits', prompts/go/reviewer.md:11, release-bump.sh:18, ci.yaml/docs-pages.yaml path filters of deleted packages."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/approval_reads.go:36", "description": "The approval carry exists twice (per-issue read and outbox row) under different event ids, with a duplicated implementClient and a comment claiming they share a memo they do not."},
+    {"severity": "minor", "file": "packages/daemon/internal/workflow/base_push.go:27", "description": "Comments falsified by this change (two-minute pass, standingRed, CI-red move, 'decides nothing on'), including in new migrations 0065, 0068 and 0069."},
+    {"severity": "minor", "file": "packages/daemon/internal/api/credentials.go:233", "description": "Dead code left by the deletions: appLease, githubrest GraphQLAPI/Client.GraphQL/BudgetGraphQL."},
+    {"severity": "minor", "file": "packages/daemon/internal/record/outbox.go:739", "description": "validNoticeKind keeps ready-refused though 0073 deletes its rows."},
+    {"severity": "minor", "file": "packages/daemon/internal/daemon/merge_state_reads.go:45", "description": "mergeStateTrigger re-derives what reviewRound computes and drops; merger gate hold sits in the generic supervise executor; a third hand-written wake queue."},
+    {"severity": "minor", "file": "packages/daemon/internal/supervise/machine.go:166", "description": "Claim.SessionLost is a one-call mode flag on the persisted Claim; launcher.go passes 1000 lines on duplicated session sentinels and two booleans that never coexist; tellChecks and tellGateMoved duplicate recipient collection with different error policies."},
+    {"severity": "minor", "file": "packages/daemon/internal/workflow/review.go:221", "description": "Security[prompt] hardening: check-run names go undelimited into role messages."}
+  ],
+  "proseFixedByReviewer": "Commit f4105533: the six changelog fragments renamed INFRA-714-<slug>.yaml -> pr2539-<slug>.yaml; AGENTS.md's fragment rule counts eight fold packages, daemon included."
+}

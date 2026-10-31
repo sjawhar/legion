@@ -10,7 +10,7 @@ import (
 )
 
 // Settings is the daemon's resolved legion.yaml as `GET /legion/v1/state` carries it (contract
-// 35): the values the daemon runs on, defaults included (a file that omits `max_fix_attempts`
+// 35): the values the daemon runs on, defaults included (a file that omits `review_round_cap`
 // answers 3), keyed as the file is. The route is unauthenticated, so the audience is every pod of
 // the deployment and anything else that reaches the daemon's API port; the block therefore leaves
 // out every credential, every source of one (a secretsd or Secret key, a key command) and every
@@ -70,7 +70,6 @@ type Settings struct {
 	LingerHours          float64                 `json:"linger_hours"`
 	ProductionCheckHours float64                 `json:"production_check_hours"`
 	ReviewRoundCap       int                     `json:"review_round_cap"`
-	MaxFixAttempts       int                     `json:"max_fix_attempts"`
 	Controller           config.ControllerLaunch `json:"controller"`
 	Capabilities         CapabilitiesSettings    `json:"capabilities"`
 	// WorkerBackends is `worker_backends`, the roles that run on a backend other than Oh My Pi by
@@ -185,10 +184,8 @@ type PluginsSettings struct {
 // ProjectSettings is one `projects.<KEY>` entry; its repositories are Dispatch's mapping, which
 // the state's `repositories` shows, never this file's.
 type ProjectSettings struct {
-	MergeQueueRole string           `json:"merge_queue_role,omitempty"`
-	Merge          MergeSettings    `json:"merge"`
-	SlackChannels  []string         `json:"slack_channels"`
-	Deploys        []DeploySettings `json:"deploys"`
+	SlackChannels []string         `json:"slack_channels"`
+	Deploys       []DeploySettings `json:"deploys"`
 }
 
 // DeploySettings is one `projects.<KEY>.deploys` entry as the file writes it: the repository as
@@ -197,11 +194,6 @@ type DeploySettings struct {
 	Repo     string `json:"repo"`
 	Workflow string `json:"workflow"`
 	Step     string `json:"step"`
-}
-
-// MergeSettings is a project's `merge` policy: the by-hand expressions as written, never compiled.
-type MergeSettings struct {
-	ByHand []string `json:"by_hand"`
 }
 
 // GatesSettings is `gates`.
@@ -269,7 +261,6 @@ func SettingsOf(cfg config.Config) Settings {
 		LingerHours:                             cfg.Linger.Hours(),
 		ProductionCheckHours:                    cfg.ProductionCheckBound.Hours(),
 		ReviewRoundCap:                          cfg.ReviewRoundCap,
-		MaxFixAttempts:                          cfg.MaxFixAttempts,
 		Controller:                              cfg.ControllerLaunch,
 		Capabilities:                            CapabilitiesSettings{Decided: make(map[string]string, len(cfg.Capabilities.Decided))},
 		WorkerBackends:                          make(map[string]string, len(cfg.WorkerBackends)),
@@ -283,13 +274,8 @@ func SettingsOf(cfg config.Config) Settings {
 	}
 	for key, project := range cfg.Projects {
 		entry := ProjectSettings{
-			MergeQueueRole: project.MergeQueueRole,
-			Merge:          MergeSettings{ByHand: make([]string, len(project.Merge.ByHand))},
-			SlackChannels:  stringsOf(project.SlackChannels),
-			Deploys:        make([]DeploySettings, len(project.Deploys)),
-		}
-		for i, pattern := range project.Merge.ByHand {
-			entry.Merge.ByHand[i] = pattern.Expression
+			SlackChannels: stringsOf(project.SlackChannels),
+			Deploys:       make([]DeploySettings, len(project.Deploys)),
 		}
 		for i, deploy := range project.Deploys {
 			entry.Deploys[i] = DeploySettings{Repo: deploy.Repo.String(), Workflow: deploy.Workflow, Step: deploy.Step}

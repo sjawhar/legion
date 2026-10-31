@@ -23,20 +23,39 @@ import (
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
 // runs — a fetch, a jj operation, or a git configuration edit — each bounded independently. The
-// exceptions are the fetch's transfers and the checks of what the repository cache streamed, under
-// FetchTimeout (the repository cache's own first clone under CacheFetchTimeout instead), the
-// shared clone's own clone, under CloneTimeout (both below), and the cache's repack
-// (repocache.repackTimeout, through FeedGitWithin).
+// exceptions are the fetch's checks of what the repository cache streamed and its transfers from
+// GitHub, under FetchTimeout (the repository cache's own first clone under CacheFetchTimeout
+// instead), the stream from the repository cache, under the low-speed bound and no clock at all
+// (CacheStreamLowSpeedBytes), the shared clone's own clone, under CloneTimeout (all below), and
+// the cache's repack (repocache.repackTimeout, through FeedGitWithin).
 const CommandTimeout = 5 * time.Minute
 
-// FetchTimeout is the bound of each stage of a fetch whose duration follows the repository's size
-// and the network's speed, once it may start (Fetch): a feed filled from the repository cache gets
-// one for the cache's stream and its verification together and another for the delta from GitHub,
-// every attempt of it included; a clone or a fetch from GitHub alone gets one. It is long enough
-// for a large repository's slow but steadily progressing transfer to finish. A request may set its
-// own (FetchRequest.Bound), which the repository cache does for its first clone alone
-// (CacheFetchTimeout).
+// FetchTimeout is the bound of each clocked stage of a fetch whose duration follows the
+// repository's size and the network's speed, once it may start (Fetch): a feed filled from the
+// repository cache gets one for the verification of what was streamed, counted from the stream's
+// end, and another for the delta from GitHub, every attempt of it included; a clone or a fetch
+// from GitHub alone gets one. It is long enough for a large repository's slow but steadily
+// progressing transfer to finish. A request may set its own (FetchRequest.Bound), which the
+// repository cache does for its first clone alone (CacheFetchTimeout). The stream from the
+// repository cache is no stage of this kind: it is held to its own speed instead
+// (CacheStreamLowSpeedBytes).
 const FetchTimeout = 30 * time.Minute
+
+// CacheStreamLowSpeedBytes and CacheStreamLowSpeedTime bound the stream a feed is filled from the
+// repository cache with, in place of a clock: the stream ends once a whole CacheStreamLowSpeedTime
+// has passed in which fewer than CacheStreamLowSpeedBytes arrived, and one that keeps receiving
+// more than that runs for as long as the repository needs (countingReader.watchStall). The rule
+// is git's own for the transfers it makes, http.lowSpeedLimit over http.lowSpeedTime, here 1 MiB
+// in 5 minutes: about 3.5 KiB/s, far under the share of a cache's sending rate a pod gets even
+// when every stream the cache allows at once is running (repocache.maxStreams), so only a
+// transfer that has stopped falls below it. A clock in its place threw away a download that was
+// still arriving, killed at 30 minutes with the feed it had written, and launched the issue again
+// into the same wait (INFRA-495): what tells a dead transfer from a long one is its speed, not
+// how long it has run.
+const (
+	CacheStreamLowSpeedBytes = 1 << 20
+	CacheStreamLowSpeedTime  = 5 * time.Minute
+)
 
 // CloneTimeout is the one bound ensureRepoClone gives its size-following steps, together, as the
 // fetch's share FetchTimeout: from GitHub, a `jj git clone` that copies and imports every object;

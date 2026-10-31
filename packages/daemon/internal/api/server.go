@@ -101,12 +101,10 @@ type Options struct {
 	// Trees is the store's durable tree barrier, which the operator routes open a root's tree
 	// through and reserve and finish a closed tree's cleanup through.
 	Trees TreeLifecycles
-	// GitHubAPI is GitHub's REST root, which the handoff route reads an issue branch's head, its
-	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
+	// GitHubAPI is GitHub's REST root, which the daemon's own reads of a pull request and its
+	// compares go under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
 	GitHubAPI string
-	// MergeRules is the merge policy an issue's project configures. Nil has no special policy.
-	MergeRules func(project string) config.MergeRules
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -137,6 +135,13 @@ type Options struct {
 	// took the role back. A ready the claim refuses tells no one. Nil tells no one. It is called
 	// before the route answers the agent, so it returns at once.
 	ClaimReady func(c supervise.Claim)
+	// HandoffCompleted is told of the issue of each phase completion the workflow recorded, once
+	// the fact has committed: the daemon reads that issue's pull request from GitHub then, as the
+	// backstop for a webhook that never arrived (the daemon's readIssuePullRequest). A completion
+	// the route or the workflow refused, and a production check report, tell no one. Nil tells no
+	// one. It is called before the route answers the agent, so it returns at once, and this
+	// package reads no GitHub for it.
+	HandoffCompleted func(issue string)
 	// PromptAgents is the sorted names of every task agent the role prompts dispatch
 	// (prompts.RoleReferences), which the registration answers so a session's capability report
 	// measures the agents its role is told to run (LEGION-663). Nil or empty answers an empty list.
@@ -182,7 +187,6 @@ type server struct {
 	tokens       appauth.Tokens
 	githubOwners func() []string
 	githubAPI    string
-	mergeRules   func(project string) config.MergeRules
 	grants       *credential.Grants
 	releaser     store.TreeReleaser
 	trees        TreeLifecycles
@@ -195,6 +199,8 @@ type server struct {
 	records      record.Store
 	dispatch     dispatch.Client
 	claimReady   func(c supervise.Claim)
+	// handoffCompleted is Options.HandoffCompleted.
+	handoffCompleted func(issue string)
 	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
@@ -231,7 +237,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
 		githubAPI:          opts.GitHubAPI,
-		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
 		grants:             opts.Grants,
@@ -244,6 +249,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		records:            opts.Record,
 		dispatch:           opts.Dispatch,
 		claimReady:         opts.ClaimReady,
+		handoffCompleted:   opts.HandoffCompleted,
 		promptAgents:       opts.PromptAgents,
 		capabilityReported: opts.CapabilityReported,
 		log:                opts.Log,
@@ -279,6 +285,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/register", s.register)
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
+	mux.HandleFunc("POST /legion/v1/claims/turn-outcome", s.turnOutcome)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
 	mux.HandleFunc("POST /legion/v1/controller/github-credential", s.controllerGitHubCredential)

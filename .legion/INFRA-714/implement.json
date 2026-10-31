@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-714",
+  "completed": "2026-10-31T14:40:00Z",
+  "proof": [
+    {
+      "criterion": "A3 / R1 - a red CI settlement moves no issue and reaches the phase holder, the implementer and the architect as one message naming each check and its conclusion, and the result they are told is the code head's latest attempt, carried by a handoff-only head.",
+      "surface": "The daemon's own workflow engine over a real Postgres, driven by the GitHub facts the intake decodes from real webhook payloads (packages/daemon/internal/workflow, the same engine the daemon runs).",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/workflow/ -count=1 -timeout 40m -run 'TestTheLatestAttemptOfEachCheckIsWhatTheRolesAreTold|Settle|Checks' -v",
+      "observed": "ok github.com/sjawhar/legion/daemon/internal/workflow. The sjawhar/legion#2395 sequence drives green: attempt 1 red at the code head, the re-run green at the same head, then a handoff-only push. Six role messages in order - red then green, to the architect, the tester and the implementer - the handoff head carrying CheckedHead at the code head with nothing failing, the phase unmoved, no supervise row and no notice. Both orders of the re-run and the push give the same six.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "SettlementFor was made to drop a second settlement of the same head; the test then reported 3 messages (the red alone) instead of 6. Reverted."
+    },
+    {
+      "criterion": "A5 / R3 - a queued root adopted by a release while Dispatch shows it blocked waits at admitted and starts when its last blocker closes.",
+      "surface": "The real Dispatch server process, built and run against a scratch database with its events on, driving the real daemon runtime off that bus (packages/daemon/internal/daemon/blockers_scratch_dispatch_test.go, startScratchDispatchWithNATS).",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/daemon/ -count=1 -timeout 25m -run 'TestBlockedIssuesAreNotStarted' -v",
+      "observed": "--- PASS: TestBlockedIssuesAreNotStartedAgainstScratchDispatch (11.12s). The adopted root sits at admitted with its hold naming the blocker Dispatch itself reports, and reaches planning only after that blocker closes. The hold is taken on the union of the release's own Dispatch read and the daemon's mirror, so the stale mirror no longer decides.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The same rig with the blocker left open: the root stays at admitted and no planner is started, which is the refusal the rule exists to produce."
+    },
+    {
+      "criterion": "A6 / R4 - a status write never lands over a change Dispatch recorded after the daemon's read, and the boot corrects an issue whose Dispatch status differs from its phase.",
+      "surface": "The real Dispatch server process against a scratch database, with the daemon's own outbox writing through its HTTP client (packages/daemon/internal/daemon/status_scratch_dispatch_test.go).",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/daemon/ -count=1 -timeout 25m -run 'ScratchDispatch' -v",
+      "observed": "--- PASS: TestTheBootsStatusWriteLandsOnScratchDispatchAfterAnEventOvertakesItsRead (11.28s) and --- PASS: TestABootStatusWriteDoesNotLandOverACloseScratchDispatchTookAfterItsRead (6.51s). The first: an event moves Dispatch's sequence under the daemon's read, the write is refused ISSUE_CHANGED, the row re-reads and lands in_progress. The second: a person closed the issue after the read, and the row writes nothing at all and takes the issue out of the workflow.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The close case is itself the control: the same rig with a close Dispatch took after the read must write nothing, and the assertion fails if any status reaches Dispatch."
+    },
+    {
+      "criterion": "A9 / R7 - a worker that holds its phase with nothing pending is given its phase task within two minutes of ready, for every way a claim comes back, and a holder whose task is still pending gets no second copy.",
+      "surface": "The real supervise machine and the real outbox runner over a real Postgres claim store, with the runtime's three come-backs driven as the daemon drives them (packages/daemon/internal/daemon/ready_worker_resume_test.go).",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/daemon/ -count=1 -timeout 25m -run 'TestEveryComeBackToReady|TestAComeBackWithATaskStillPending' -v",
+      "observed": "--- PASS for all three come-backs in each test: an operator's suspend and resume, a relaunch after a death, and a resume after a pod replacement. The bound is measured where the claim view carries it, the delivery's deliveredAt less the claim's lastReady, and is inside two minutes in each; the task is the phase's resume task for the phase the issue stands in. With a task still pending, no outbox row is written, the delivery id is unchanged, and every prompt carries that one id.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "readyWorkerTask was made to return at once; all three come-backs then failed with 'the ready left 0 outbox rows'. Separately the pending-task guard was removed, and the no-second-copy test failed on all three. Both reverted."
+    },
+    {
+      "criterion": "A4 / R2 - no ready_merge row, no auto-merge call and no awaiting_merge phase exists, and the three project keys the change removes are refused by name.",
+      "surface": "The real legion binary reading a real legion.yaml, the operator's own surface (packages/daemon/cmd/legion).",
+      "command": "go build -o $TMPDIR/legion ./cmd/legion && $TMPDIR/legion start --check-config --config legion.yaml",
+      "observed": "'Config OK: project=LEGSMOKE', then the two open capability lines the tmux runtime leaves. The binary is built from this head and reads a complete file; grep of packages/daemon and packages/contracts for awaiting_merge, ghautomerge, ready_merge and merge_queue_role outside internal/store/migrations prints nothing.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The same file with each removed key added in turn: 'Unknown key \"projects.LEGSMOKE.max_fix_attempts\"', 'Unknown key \"projects.LEGSMOKE.merge_queue_role\"' and 'Unknown key \"projects.LEGSMOKE.merge\"'. A deployment that still sets one is told which."
+    },
+    {
+      "criterion": "A3 / R1 - the migration moves every live issue and hold off the deleted phase, and the rollout deletes the rows of the merge the daemon no longer makes.",
+      "surface": "A real Postgres migrated from the previous schema with live rows in it (packages/daemon/internal/store).",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/store/ -count=1",
+      "observed": "ok github.com/sjawhar/legion/daemon/internal/store. An issue seeded in awaiting_merge and a hold taken from it both read merging after the migrate, both constraints then refuse the old value, and ready_pending_version and phases.merge_note still exist so a rollback finds its data. A seeded row of each deleted outbox kind and each deleted notice kind is gone while a phase-finished notice and a dispatch_message survive.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The migration test asserts the new check constraints refuse 'awaiting_merge'; an insert of the old value is rejected by Postgres, which is the control."
+    },
+    {
+      "criterion": "A13 / R11 - read_state with no argument returns a summary under 30 KB naming every recorded issue, and read_record with no issue reads the caller's own.",
+      "surface": "The plugin's own tool surface over a state the contracts schema defines (packages/pi-legion, packages/pi-shared).",
+      "command": "bun test packages/pi-legion/ packages/pi-shared/",
+      "observed": "91 pass, 0 fail in pi-shared and the pi-legion suites green. The summary of a 92-issue state measures 22,547 bytes where the whole state is 125,608, and names every issue key on its own line; the four filters answer full records; read_record with no issue returns the caller's own record.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The size assertion is the control: a summary that dropped issues to fit the budget fails the 'names every key' assertion, and one that kept full records fails the 30720-byte assertion."
+    },
+    {
+      "criterion": "R9 adjacent - a plugin one release behind its daemon keeps working when the daemon answers with fields it does not know.",
+      "surface": "The plugin's daemon client against a stubbed daemon answering the real state fixture (packages/pi-shared/src/daemon-client.test.ts).",
+      "command": "bun test packages/pi-shared/",
+      "observed": "91 pass, 0 fail. A state carrying an unknown top-level field and an unknown nested field parses, equals the untouched fixture, and read_record reads the record out of it. A known field of the wrong type is still refused with the contract error naming it.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The same client given capabilities as a string instead of an object still refuses with LegionDaemonContractError naming the field: tolerating the unknown is not tolerating the malformed."
+    },
+    {
+      "criterion": "A7 / R5 - a new spec version that closes an approved design gate sends every worker holding a phase in the tree, and the root architect, one message naming the version, and another when it opens; the merger merges nothing while it is closed.",
+      "surface": "The daemon's workflow engine over a real Postgres, driven by the Dispatch artifact facts the intake decodes (packages/daemon/internal/workflow/gate_messages_test.go).",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/workflow/ -count=1 -run 'TestEveryPhaseHolderAndTheRootArchitectAreToldTheGateClosedAndOpened|TestAGateEventThatMovesNothingTellsNobody' -v",
+      "observed": "--- PASS for both. The close queues one role message per phase holder of the tree and one to the root architect, each naming the version; the opening queues the same set again; an artifact event that moves the gate neither way tells nobody, and a lingering tree is told nothing. The merger's start row waits in the outbox while the gate is closed and runs when it opens.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The tester's run at main 8a911ecca3a5: a new version of an approved spec closes the gate and reaches no running worker at all, which is dispatch://INFRA-327's defect (13 closes in one day). The branch's own test cannot compile at main, so the main side is that black-box observation, recorded in .legion/INFRA-714/test.json. Beside it, this round's own control: tellGateMoved returning the error for a holder it could not name aborted the gate-open transaction, which internal/admit's TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts caught, and that test is green again with the holder skipped."
+    },
+    {
+      "criterion": "A8 / R6 - a root architect killed three times in turns fails, a turn that ends normally between the deaths clears the count, the restarted worker's first prompt names the cause, and the state shows each worker's last turn start and end.",
+      "surface": "The real supervise machine over a real Postgres claim store, driven through the runtime observations a dying pod produces (packages/daemon/internal/supervise/death_cause_test.go).",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/supervise/ -count=1 -run 'TestADeadWorkerIsRestartedInItsSessionAndToldWhyItDied|TestThreeDeathsInTurnsFailTheClaimAndANormalTurnBetweenThemClearsTheCount|TestADeathWithNoTurnOpenAndNothingPendingIsNotCounted|TestAFailedStartIsKeptBesideTheLastDeathsCause|TestTheCausesAndTheReadyTimeSurviveARestart' -v",
+      "observed": "--- PASS for all five. Three deaths in turns fail the claim; a normal turn end between the second and third clears the count, so the third is the first again; a death with no turn open and nothing pending counts nothing, which is what stops three evictions failing an idle claim; the last death's cause and the last failed start's cause are kept apart rather than overwriting each other; and both, with the claim's last ready time, survive a rebuild from the store.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The tester's run at main: chargeDeath counts only a death with a task pending, so a worker that dies three times mid-turn with nothing pending is restarted for ever and the held and worker-died notices name no cause - dispatch://INFRA-482's architect, which died six times in 54 minutes and was never told why. Recorded in .legion/INFRA-714/test.json."
+    },
+    {
+      "criterion": "A10 / R8 - with the recorded session missing from the store, a suspend and resume brings the claim to ready in a new session, uncharged, and the loss is reported on the issue, to the architect, to the controller and in the new session.",
+      "surface": "The real supervise machine over a real Postgres, with the runtime answering the missing session as each runtime answers it, and the engine's own reporting path (packages/daemon/internal/supervise/sessionloss_test.go, internal/workflow/session_fault_test.go).",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/supervise/ ./internal/workflow/ -count=1 -p 1 -run 'TestAResumeOfAMissingSessionStartsFreshUnchargedAndReportsTheLoss|TestAStartTheSessionStoreCannotAnswerWaitsAndIsReportedHourly|TestALostSessionIsToldOnTheIssueToItsArchitectAndToTheController|TestASessionStoreFaultIsToldOnTheIssueAndToTheController' -v",
+      "observed": "--- PASS for all four. A session no store holds starts the worker fresh, charges nothing, and reports the loss with the lost session's path on the issue, to the architect, to the controller and in the new session's own first prompt. A store that cannot be asked is not that case: the start waits, charges nothing, retries every minute, and tells the issue and the controller at once and then hourly.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The tester's run at main: a missing session fails the worker's claim on Kubernetes, and on tmux it starts fresh and tells nobody unless take_over is set - dispatch://INFRA-714/comment/9b21baa0. Recorded in .legion/INFRA-714/test.json."
+    },
+    {
+      "criterion": "A12 / R10 - every legion claims command on a worker whose start does not finish answers within its --wait, and a suspend of a starting worker charges no failure.",
+      "surface": "The shipped legion binary's own command surface against a daemon whose start does not finish (packages/daemon/cmd/legion/claims_wait_test.go), and the real supervise machine for the charge.",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./cmd/legion/ ./internal/supervise/ -count=1 -p 1 -run 'TestEveryClaimsSubcommandAnswersWithinItsWait|TestClaimsWaitDefaultsToOneMinute|TestTheWaitBoundsTheWholeSuspendCall|TestASuspendOfAStartingWorkerStopsTheStartAndChargesNothing' -v",
+      "observed": "--- PASS for all four. Every subcommand answers inside its bound with done, held until when, or a refusal naming its reason; the default is one minute; the bound is on the whole call rather than on one request of it; and a suspend of a starting worker cancels the start and leaves the claim's budgets untouched.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The tester's run at main: legion claims suspend and retry on a starting worker did not answer in 120 s and 300 s, which is dispatch://INFRA-464. Recorded in .legion/INFRA-714/test.json."
+    },
+    {
+      "criterion": "A14 / R12 - a pass reported after the check's look ended by its bound, by an operator hold or by the implementer's restart closes the check as passed, and a refused report applies when it is sent again.",
+      "surface": "The daemon's workflow engine and the intake's own fact application over a real Postgres (packages/daemon/internal/workflow/check_late_report_test.go, internal/intake/refused_check_report_test.go).",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/workflow/ ./internal/intake/ -count=1 -p 1 -run 'TestALateReportOfTheCurrentLookIsRecorded|TestARefusedCheckReportAppliesWhenItIsSentAgain|TestARefusedFactThatIsNoCheckReportStaysRecorded' -v",
+      "observed": "--- PASS for all three. A report of the current look is recorded however that look ended, and a late pending is recorded as pass and fail are. A refused check report alone leaves its event unmarked, so the same report applies when sent again; every other refused fact stays marked, which is what keeps a refused handoff from becoming retryable.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "The tester's run at main: three passing production-check reports were refused CHECK_LOOK_NOT_OPEN after the 2026-10-29 roll, because their look had already ended by its two-hour bound, an operator hold or a death - dispatch://INFRA-714/comment/09e9cd6d. Recorded in .legion/INFRA-714/test.json. Beside it, the scoping control: TestARefusedFactThatIsNoCheckReportStaysRecorded fails if the un-marking is widened past the CheckReport handler."
+    },
+    {
+      "criterion": "The review round's two critical findings and nine more, re-proved on the whole tree after two forward merges with main.",
+      "surface": "The daemon's own packages over a real Postgres 17 with pgvector and a real JetStream nats-server on the issue volume, and the plugin packages under bun.",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/{workflow,api,supervise,classify,record,store,intake,prompts,admit}/ -count=1 -p 1 && go test ./internal/daemon/ ./cmd/... ./internal/launcher/ ./internal/runtime/... -count=1 -p 1 && cd ../.. && bun test packages/contracts/src/ packages/pi-shared/ packages/pi-legion/src/",
+      "observed": "18 Go packages ok and 793 TypeScript tests pass, 0 fail, with biome and all three typechecks clean. The approval now reaches accepting because the reviewer's push no longer tells GitHub to skip its checks; a mergeability fact for another head is dropped; the merger disarms an auto-merge before it merges; a death ends the turn it interrupted; a status retry refuses a write whose issue a person changed after the read; and no wire field, tool description or guide mentions READY.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "Each state-machine fix was reverted and its test shown red before the fix was kept: the turn-closing line removed left the claim StateFailed with Deaths 3, the reviewer's own probe reproduced; the status fence removed let the daemon write in_progress over a person's needs_review. Both restored, and jj diff showed only the two fixes."
+    },
+    {
+      "criterion": "R6 and the round's added work: a session the provider refuses fails its claim and is retried in a new one; the shared workspace is not adopted under another role's open turn; the CI verdict told to the roles is the newest concluded run per check name.",
+      "surface": "The daemon's own packages over a real Postgres 17 with pgvector and a real JetStream nats-server on the issue volume, and the plugin packages under bun.",
+      "command": "eval \"$(bash $TMPDIR/harness/up.sh)\" && cd packages/daemon && go test ./internal/{workflow,supervise,classify,record,store,api,intake,claudebridge,admit,prompts}/ -count=1 -p 1 && go test ./internal/daemon/ ./cmd/... ./internal/launcher/ ./internal/runtime/... -count=1 -p 1 && cd ../.. && bun test packages/contracts/src/ packages/pi-shared/ packages/pi-legion/src/ packages/claude-envoy/tests/",
+      "observed": "19 Go packages ok and 1076 TypeScript tests pass, 0 fail, with biome and all four typechecks clean. Three refused turns in a row fail the claim with the provider's own words in the cause and hold the issue as a death does; reports in order, reversed and late all give the same run; the architect's retry and legion claims retry --fresh-session each start a new session that gets its phase task, from a refusal failure and from an operator stop, with no store edit; a tester's phase task waits for the implementer's open turn and is then adopted and sent exactly once; a check that failed on the code head and passed on a handoff-only head above it reads green, and a check pending everywhere reads pending rather than red.",
+      "headSha": "502884580adc9f5071f7c79a7f7999b4dd5b947f",
+      "negativeControl": "Three fixes were each shown red against a deliberately broken version before being kept, then restored: the stuck marker made to hold a blocked-then-clean approval back (the issue stayed in reviewing); the carried-verdict merge removed so the old failure won again (3 role messages instead of 6, naming pr-title failed); and, from the round before, the turn-closing line and the status fence. Each revert was confirmed by jj diff to have touched only the fix."
+    }
+  ],
+  "filesChanged": [
+    "323 files, +11136 / -20070 against the fork point with main.",
+    "Deleted whole: packages/daemon/internal/ghautomerge/, internal/requiredchecks/, internal/daemon/auto_merge.go, internal/daemon/required_checks.go, internal/api/ready.go, internal/workflow/ready.go, internal/classify/required.go, scripts/e2e/no-required-checks.sh, scripts/e2e/merged-root-waits.sh, skills/legion-architect/references/merge-notices.md.",
+    "Migrations 0065 to 0075, renumbered above main's in the forward merge: the pass counter, claim turn times, the pull request's merge state and base, the base-moved mark, the approval-carry and role-message outbox kinds, the phase cutover, the rollout delete, the told-parent marker, and the claim's death and start-failure causes.",
+    "DaemonAPIVersion 45, with packages/contracts/fixtures/daemon-api/version.json, packages/pi-legion/package.json and packages/claude-envoy/package.json.",
+    "packages/daemon gains a changelog: .changie.yaml, CHANGELOG.md, six INFRA-714 fragments, and its line in changelog-fold.yaml's CHANGELOG_PACKAGES."
+  ],
+  "trickyParts": [
+    "The harness this change is proven on must be rebuilt in every new pod, because the issue's disk dies with the pod. The recipe is a comment on INFRA-714 and is three steps: Postgres 17 from six Debian .debs unpacked with dpkg-deb -x (postgresql-17, postgresql-client-17 and libpq5 - the client package is where psql and pg_isready live - plus libicu76, without which initdb fails on a loader error, libxslt1.1, and postgresql-17-pgvector 0.8.0-1); liveness by pg_isready on the port and never pg_ctl or postmaster.pid, since each role's container has its own PID namespace; and a local nats-server. pgvector is required: the four scratch-Dispatch rigs boot the real Dispatch server, whose migration 0072_embeddings_core needs the vector extension.",
+    "The forward merge with main took two rulings. sjawhar/legion#2478's healing pass re-reads GitHub on a timer, which R1 forbids, so the pass lost and everything of that change not depending on a periodic read was kept: consumer positions whole, legion state's intake lag whole, the delivery-dedupe event ids, the implementer completion read with HANDOFF_NO_PULL_REQUEST, and the pull-request-missing notice, which now has an event-driven producer in the per-issue read. sjawhar/legion#2521 won whole, so nothing here reintroduces a pause at a phase end or in awaiting_person.",
+    "HandoffCompleteRequest.Ready is still on the wire and reaches no fact: the plugin posts it on every completion and the body decoder refuses an unknown member. Cutting it is a plugin change for a later release, and the field's own doc says so.",
+    "Two forward merges with main were needed, each because GitHub reported the pull request CONFLICTING and a conflicting head runs no checks at all. The second took three conflicts, all in files this change deletes: dispatch://INFRA-825 had changed internal/ghautomerge on main to fix GitHub's squash message, and this change deletes the daemon's merge entirely and moves that same rule into the merger's own command, so the deletion wins and the fix is not lost. Every proof above was run again at the merge head, which is the head they name.",
+    "Round two answered the tester's three defects. tellGateMoved returned the error when it could not build a holder's claim token, which aborted the transaction the gate's own move was written in - so a tree whose root key is not an issue key left the gate closed under the very workers the message exists to warn. A holder that cannot be named is now logged and skipped and the rest are told, which internal/admit's readmission test proves. The carried merger's task no longer names an approved head and one assertion still required it. The plugin's state fixture predated the forward merge and lacked repositories.withoutWebhookApp and consumers, and its pinned tool schema still listed awaiting_merge; both made packages/pi-legion red at the head and the A13 proof false, and 468 TypeScript tests now pass.",
+    "The issue's pod was replaced twice during this change, and the second time the round's work was not on GitHub. The merge lane rescued the workspace to a branch as one commit. That commit is a whole merge tree, so its file list mixes this branch's edits with main's and cannot be read as a change set; the way back was to recreate the merge with its true parents and restore the tree from the rescue, not to cherry-pick files. The round therefore lands as one commit carrying a forward merge and the fixes together, which its message says.",
+    "StopFailure was the round's one open measurement and it fires. Claude Code's hooks reference says it runs instead of Stop when a turn ends on an API error, and, importantly, that its last assistant message is the API error string itself rather than anything the worker said - the old code fed that string into the reminder as the worker's words. It is kept as the reminder's in-turn signal, but the refusal count rests on claudebridge rather than on it, because a count resting on an event nobody had measured is what this round exists to stop.",
+    "A production-check task carries no phase, so under the new rule it adopts nothing. That is right rather than an oversight: a look of the production check commits nothing at all, reporting with handoff_complete and a verdict, so there is no commit for an identity to author."
+  ],
+  "deviations": [
+    "Spec departure 1 of the plan, the merger's approved-head comparison, was declined by the issue's architect on the owner's ruling (dispatch://INFRA-714/ask/beea7685): Legion does not re-implement a repository's rules. The merger keeps one hygiene step, sending a head that still carries .legion/<issue>/ back to retro, and no approved-head comparison was written anywhere.",
+    "Decision D2 of the plan, a durable outbox row re-reading the merge state while an approval stands, was declined by the architect. The merge state is read on each event about the pull request, each CI settlement and each push to its base, and the unknown ladder is bounded at five reads thirty seconds apart with nothing standing behind it.",
+    "Two reviewer findings were deliberately not applied in the simplify pass: rewriting the base-push fan-out into a join, and moving the merge-state trigger's lookups out of the fact lock. Both are design changes rather than simplifications, and this change is already large. The costs are recorded here so the reviewer can weigh them: the fan-out reads one issue row and rewrites one whole pull-request row per open pull request on a pushed base, and the trigger repeats inside the fact lock the lookups the engine has just made.",
+    "A1's main-side run: the tests of R1, R2 and the phase vocabulary cannot compile at main 8a911ecca3a5, because this change deletes the packages and the phase they name - internal/requiredchecks, internal/ghautomerge, the READY route, phase.AwaitingMerge. For those the evidence is a negative control per entry: the production code deliberately broken at this head until the covering test goes red, then reverted. For R3 to R8 and R10 to R12, whose subjects all exist at main, the main-side run is a black-box observation at main, made by this issue's tester and recorded in .legion/INFRA-714/test.json; each entry names the one it rests on. My earlier handoff generalised the impossibility argument from the first set to the second, which was wrong, and the architect corrected it.",
+    "The reviewer's critical finding 1 was escalated to the architect as a design decision. I proposed carrying the merge state across a handoff-only push; the architect ruled for dropping the skip-checks trailer from the reviewer's push instead, because GitHub computes mergeStateStatus for the current head alone, so every later read would answer blocked for the trailered head and overwrite anything carried. That ruling is implemented. The head-tying half of my proposal was kept, as the architect directed, since it is the reviewer's finding 4.",
+    "The forward merge found that main has independently shipped its own forget-session feature, so both sides declared the same symbols and disagreed on which claim states may forget a session. Main's set - queued, suspended, failed, retired - wins over this branch's failed and retired, because it is a strict superset, main's own operator surface depends on the extra states, and this branch's only caller reaches the event for failed or retired phase workers alone. This branch's refusal wording for a suspended claim is dropped, since main deliberately allows that case now."
+  ],
+  "openQuestions": [
+    "The merger's handoff_complete now records its phase row and triggers nothing, since the merge is what moves the issue. So the architect hears nothing between retro's completion and the merge. That follows from R2, which says the merger sends no completion, but it is a real loss of signal; telling the architect would be an addition rather than a deletion and was not made."
+  ],
+  "discoveredComplexity": [
+    "cmd/legion's TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts fails in a Kubernetes issue pod on this branch's base as well; it was reproduced at the parent commit with every changed file restored. internal/intake's TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead starts a NATS container and internal/runtime/tmux's TestNewRefusesLaunchersItCannotRun wants tmux on PATH, neither of which a pod has, and nine internal/daemon tests are the known gVisor and Docker cases. CI's run at this head is the proof for all of them.",
+    "TestTheKeeperRetriesAControllerWhoseLaunchesRanOut was a race rather than a pre-existing failure, which two workers reported it as. Its three refused launches and the keeper's retry all fell between two ten-millisecond polls, so the wait read zero spawns and then four and never the failure it exists to prove. The retry is now two seconds; the test ran five times green."
+  ]
+}

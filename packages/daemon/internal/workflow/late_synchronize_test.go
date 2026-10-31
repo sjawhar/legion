@@ -13,7 +13,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
-	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -129,50 +128,6 @@ func TestALateSynchronizeOnlyNamesTheMoveAWaitingArrivalTook(t *testing.T) {
 	}
 }
 
-// A red that settles at a head whose arrival waits for a late synchronize is held; the late
-// synchronize then names the skipped move, the head run closes, and the red is decided at once, as
-// the push that closed a run would decide it (decideChecks): the issue in reviewing goes back to
-// implementing with checks-red, whichever of the late synchronize and the red comes first, as it
-// does with no move named. A synchronize never delivered leaves the red held until the hold lapses,
-// when the required-checks pass decides it.
-func TestARedHeldForALateSynchronizeIsDecidedWhenItArrives(t *testing.T) {
-	const dev = "legion-implementer[bot]"
-	skipped, arrived := time.Date(2026, 9, 22, 23, 50, 0, 0, time.UTC), time.Date(2026, 9, 22, 23, 51, 0, 0, time.UTC)
-	pushes := []intake.Fact{sentPush("head", "h1", dev), sentPush("h1", "h2", dev), namedSync("h1", "h2", dev, arrived)}
-	red := settledAt("h2", "ci", 2, "ci")
-	late := namedSync("head", "h1", dev, skipped)
-	for _, tc := range []struct {
-		name  string
-		facts []intake.Fact
-		pass  bool
-	}{
-		{"the late synchronize after the red", []intake.Fact{red, late}, false},
-		{"the late synchronize before the red", []intake.Fact{late, red}, false},
-		{"the synchronize never delivered", []intake.Fact{red}, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedReviewOf(t, pool, "head", "green")
-			engine := testEngine(config.DesignGateRootIssues, nil)
-			applyRefusingNothing(t, pool, engine, pushes...)
-			applyRefusingNothing(t, pool, engine, tc.facts...)
-			if tc.pass {
-				if got := issuePhase(t, pool); got != phase.Reviewing {
-					t.Fatalf("the red held while its arrival waits: phase %s, want reviewing", got)
-				}
-				later := readyEngineAt("", time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC).Add(redHold+time.Minute))
-				applyRefusingNothing(t, pool, later, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{"ci"}})
-			}
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("phase %s, want implementing", got)
-			}
-			if got := noticeKinds(t, pool, "LEGION-208"); !containsNotice(got, "checks-red") {
-				t.Fatalf("notices %v, want checks-red", got)
-			}
-		})
-	}
-}
-
 // Two moves in one second of GitHub's clock, head..h1 and h1..h2, their synchronizes delivered in
 // the reverse of their order: the older synchronize is not late by the clock (LateLifecycle), so it
 // moves the record's head back to h1, as on main - the floor of two moves in one GitHub second
@@ -250,21 +205,19 @@ func TestAMoveAfterAMissedResetInTheSameSecondMovesTheHead(t *testing.T) {
 }
 
 // The push handler records each push's sender, and the synchronize's sender picks its move's push
-// by it: two pushes of head..h1 on their way, the review App's first and the implementer's second,
-// and h1's synchronize naming the implementer. The implementer's code onto the red counts a fix
-// attempt; the review App's push, which a push recorded with no sender would let stand for any,
-// would spare it.
+// by it: two pushes of head..h1 on their way, the review App's first and the implementer's
+// second, and h1's synchronize naming the implementer. The implementer's push is the one the move
+// takes, so the head run closes on it, and neither push is left recorded without its sender.
 func TestASynchronizesSenderPicksItsPushInTheWorkflow(t *testing.T) {
 	const dev = "legion-implementer[bot]"
 	pool := migratedPool(t)
 	seedReviewOf(t, pool, "head", "red")
 	engine := testEngine(config.DesignGateRootIssues, nil)
-	before := probePullRequest(t, pool)
 	applyRefusingNothing(t, pool, engine, sentPush("head", "h1", testReviewApp), sentPush("head", "h1", dev),
 		namedSync("head", "h1", dev, time.Date(2026, 9, 22, 23, 51, 0, 0, time.UTC)))
 	after := probePullRequest(t, pool)
-	if after.HeadSHA != "h1" || after.Run != nil || after.FixAttempts != before.FixAttempts+1 || after.PlannedRed {
-		t.Fatalf("at %s, run open %v, fix=%d planned=%v; want h1, closed, fix=%d and unplanned: the implementer's push", after.HeadSHA, after.Run != nil, after.FixAttempts, after.PlannedRed, before.FixAttempts+1)
+	if after.HeadSHA != "h1" || after.Run != nil {
+		t.Fatalf("at %s, run open %v; want h1 with the run closed: the implementer's push", after.HeadSHA, after.Run != nil)
 	}
 	for _, p := range append(append([]record.ClassifiedPush{}, after.Pushes...), after.Moves[len(after.Moves)-1].Repeats...) {
 		if p.Before == "head" && p.SHA == "h1" && p.Sender == "" {

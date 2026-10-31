@@ -347,13 +347,13 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "pull request opened",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-opened.json",
-			want:    PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", URL: "https://github.com/sjawhar/legion/pull/42", UpdatedAt: updatedAt},
+			want:    PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", Base: "main", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", URL: "https://github.com/sjawhar/legion/pull/42", UpdatedAt: updatedAt},
 		},
 		{
 			name:    "pull request synchronized",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-synchronized.json",
-			want:    PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", Before: "head-before", Sender: "legion-implementer[bot]", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", UpdatedAt: updatedAt},
+			want:    PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", Before: "head-before", Sender: "legion-implementer[bot]", HeadSHA: "head-captured", Base: "main", Body: "Dispatch: LEGION-208", UpdatedAt: updatedAt},
 		},
 		{
 			name:    "pull request closed",
@@ -384,6 +384,12 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			subject: "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208",
 			file:    "github/push.json",
 			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "before-captured", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false"), Pusher: "author", Sender: "author"},
+		},
+		{
+			name:    "base branch push",
+			subject: "notifications.github.sjawhar.legion.push.branch.main",
+			file:    "github/push-base.json",
+			want:    BasePush{Repo: "sjawhar/legion", Branch: "main", After: "base-captured"},
 		},
 		{
 			name:    "comment",
@@ -459,7 +465,7 @@ func TestASynchronizeFromAListenerWithoutBeforeNamesNoMove(t *testing.T) {
 	if older == noSender || noSender == string(data) {
 		t.Fatal("captured synchronize fixture carries no before or no sender to take out")
 	}
-	want := PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208",
+	want := PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Base: "main", Body: "Dispatch: LEGION-208",
 		UpdatedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)}
 	for _, tc := range []struct {
 		name, data string
@@ -775,9 +781,10 @@ func TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt(t *testing.T) {
 // its webhook fixtures) are the subjects its listener publishes. For each, the consumer configured
 // with the payload's repository filters on a prefix of the golden's topic and decodes the workflow
 // fact the golden carries: the two sides spell a repository's subject segments alike, a dotted name
-// included. A push and a pull request event decode to a fact only on an issue's branch, so the
-// golden push, which is to main, and the golden pull requests, on a branch of their own, decode to
-// none, and the same event on an issue's branch decodes to its fact.
+// included. The golden push, which is to main, decodes to the BasePush of that base, and the same
+// push to an issue's branch decodes to its Push. A pull request event decodes to a fact only on an
+// issue's branch, so the golden pull requests, on a branch of their own, decode to none, and the
+// same event on an issue's branch decodes to its fact.
 func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
 	goldens, err := filepath.Glob(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "*.json"))
 	if err != nil || len(goldens) == 0 {
@@ -826,11 +833,14 @@ func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
 			kind := golden.Payload["kind"]
 			switch kind {
 			case "push":
-				if decoded.Fact != nil {
-					t.Fatalf("%s's push to %v decoded %#v, want no fact for a branch that is no issue's", repository, golden.Payload["ref"], decoded.Fact)
+				if base, ok := decoded.Fact.(BasePush); !ok || base.Branch != "main" {
+					t.Fatalf("%s's push to %v decoded %#v, want the base push of main", repository, golden.Payload["ref"], decoded.Fact)
 				}
 				golden.Payload["ref"] = "refs/heads/" + claim.IssueBranch("GOLDEN-1")
 				decoded = decode()
+				if push, ok := decoded.Fact.(Push); !ok || push.Branch != claim.IssueBranch("GOLDEN-1") {
+					t.Fatalf("%s's push to an issue's branch decoded %#v, want its push", repository, decoded.Fact)
+				}
 			case "pr":
 				if decoded.Fact != nil {
 					t.Fatalf("%s's pull request on %v decoded %#v, want no fact for a branch that is no issue's", repository, golden.Payload["head_ref"], decoded.Fact)
@@ -1170,12 +1180,12 @@ func TestConsumeAcknowledgesAnotherRepositorysGitHubEventWithoutApplyingIt(t *te
 	}
 }
 
-// A mapped repository can take many pushes a minute to branches no issue is on: other automation's
-// branches, its default branch. Legion applies a push only to the pull request it records on the
-// push's branch, and records one only on an issue's branch, legion/<KEY>. A push to any other branch
-// is acknowledged untouched, with no transaction (no processed_events mark, no handler), while a push
-// to an issue's branch is applied once, as before.
-func TestConsumeAppliesOnlyAPushToAnIssuesBranch(t *testing.T) {
+// A push to an issue's branch, legion/<KEY>, is the Push the workflow applies to the pull request it
+// records there; a push to any other branch is the BasePush that says a pull request's base may have
+// moved. Both are applied once and marked once. A push to anything that is not a branch - a tag -
+// is no fact of either kind, and is acknowledged untouched, with no transaction (no
+// processed_events mark, no handler).
+func TestConsumeAppliesAPushToAnIssuesBranchAndToABase(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
 	js, stream := testJetStream(t)
@@ -1184,15 +1194,15 @@ func TestConsumeAppliesOnlyAPushToAnIssuesBranch(t *testing.T) {
 	defer stop()
 
 	captured := capturedGitHubEnvelope(t, "push.json")
-	for i, branch := range []string{"main", "bot/nightly-sweep-7", "legion/main", "legion/LEGION-208-extra", "legion/legion-208"} {
-		foreign := bytes.ReplaceAll(captured, []byte("refs/heads/legion/LEGION-208"), []byte("refs/heads/"+branch))
-		foreign = bytes.ReplaceAll(foreign, []byte(`"task315-push"`), []byte(fmt.Sprintf(`"foreign-push-%d"`, i)))
-		publish(t, js, "notifications.github.sjawhar.legion.push.branch."+branch, foreign)
-	}
+	tagged := bytes.ReplaceAll(captured, []byte("refs/heads/legion/LEGION-208"), []byte("refs/tags/v1.0.0"))
+	tagged = bytes.ReplaceAll(tagged, []byte(`"task315-push"`), []byte(`"tag-push"`))
+	publish(t, js, "notifications.github.sjawhar.legion.push.tag.v1.0.0", tagged)
+	base := capturedGitHubEnvelope(t, "push-base.json")
+	publish(t, js, "notifications.github.sjawhar.legion.push.branch.main", base)
 	last := publish(t, js, "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208", captured)
 	assertAcknowledgedThrough(t, stream, githubConsumerName(spec.Project), last)
-	if got := writeHandlers(t, pool); !slices.Equal(got, []string{"push"}) {
-		t.Fatalf("handler writes = %q, want one, for the push to the issue's branch", got)
+	if got := writeHandlers(t, pool); !slices.Equal(got, []string{"push", "push"}) {
+		t.Fatalf("handler writes = %q, want one for the push to the base and one for the push to the issue's branch", got)
 	}
 	rows, err := pool.Query(context.Background(), `select event_id from processed_events where source = 'github' order by event_id`)
 	if err != nil {
@@ -1202,27 +1212,34 @@ func TestConsumeAppliesOnlyAPushToAnIssuesBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read processed_events: %v", err)
 	}
-	if !slices.Equal(marks, []string{"github.task315-push"}) {
-		t.Fatalf("processed_events = %q, want only the push to the issue's branch marked", marks)
+	if !slices.Equal(marks, []string{"github.task315-push", "github.task714-push-base"}) {
+		t.Fatalf("processed_events = %q, want the push to the issue's branch and the push to the base marked, and the tag push unmarked", marks)
 	}
 }
 
-// A push decodes to a fact only on a branch that is legion/ followed by an issue key
-// (claim.BranchIssue), the one shape the workflow records a pull request on.
-func TestDecodeAPushOnlyOnAnIssuesBranch(t *testing.T) {
+// A push to a branch that is legion/ followed by an issue key (claim.BranchIssue) decodes to the
+// Push the workflow applies to the pull request it records there; a push to a branch of any other
+// shape decodes to the BasePush that says a pull request's base may have moved, since that is the
+// shape of a branch pull requests sit on. A push to a ref that is no branch at all decodes to
+// neither.
+func TestDecodeAPushIsAPushOnAnIssuesBranchAndABasePushOnAnyOther(t *testing.T) {
 	captured := capturedGitHubEnvelope(t, "push.json")
 	for _, tc := range []struct {
-		ref    string
+		ref string
+		// branch is the issue branch the push decodes to a Push on, base the branch it decodes to a
+		// BasePush on; both empty is a ref that decodes to no fact.
 		branch string
+		base   string
 	}{
 		{ref: "refs/heads/legion/LEGION-208", branch: "legion/LEGION-208"},
 		{ref: "refs/heads/legion/ACME-19", branch: "legion/ACME-19"},
-		{ref: "refs/heads/main"},
-		{ref: "refs/heads/legion/main"},
-		{ref: "refs/heads/legion/legion-208"},
-		{ref: "refs/heads/legion/LEGION-208/x"},
-		{ref: "refs/heads/bot/LEGION-208"},
+		{ref: "refs/heads/main", base: "main"},
+		{ref: "refs/heads/legion/main", base: "legion/main"},
+		{ref: "refs/heads/legion/legion-208", base: "legion/legion-208"},
+		{ref: "refs/heads/legion/LEGION-208/x", base: "legion/LEGION-208/x"},
+		{ref: "refs/heads/bot/LEGION-208", base: "bot/LEGION-208"},
 		{ref: "refs/tags/legion/LEGION-208"},
+		{ref: "refs/heads/"},
 	} {
 		t.Run(tc.ref, func(t *testing.T) {
 			data := bytes.ReplaceAll(captured, []byte("refs/heads/legion/LEGION-208"), []byte(tc.ref))
@@ -1230,12 +1247,15 @@ func TestDecodeAPushOnlyOnAnIssuesBranch(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			push, ok := decoded.Fact.(Push)
+			push, isPush := decoded.Fact.(Push)
+			basePush, isBase := decoded.Fact.(BasePush)
 			switch {
-			case tc.branch == "" && decoded.Fact != nil:
-				t.Fatalf("fact = %#v, want none for a branch that is no issue's", decoded.Fact)
-			case tc.branch != "" && (!ok || push.Branch != tc.branch):
+			case tc.branch == "" && tc.base == "" && decoded.Fact != nil:
+				t.Fatalf("fact = %#v, want none for a ref that is no branch", decoded.Fact)
+			case tc.branch != "" && (!isPush || push.Branch != tc.branch):
 				t.Fatalf("fact = %#v, want a push to %s", decoded.Fact, tc.branch)
+			case tc.base != "" && (!isBase || basePush.Branch != tc.base || basePush.After != "head-captured"):
+				t.Fatalf("fact = %#v, want a base push to %s at head-captured", decoded.Fact, tc.base)
 			}
 		})
 	}

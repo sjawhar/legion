@@ -1,0 +1,16 @@
+kind: Changed
+body: |-
+    The controller's `read_state` answers a summary, and `read_record` defaults to the caller's own
+    issue (dispatch://INFRA-714 R11, dispatch://INFRA-329). `read_state` with no field returns a
+    line-oriented summary the plugin builds from the state the daemon already serves — the project,
+    the admission lists, each capability's status, one line per recorded issue with its phase and
+    status, and, under each issue Legion still runs, its slot, its hold, its design gate and every
+    claim's state with that claim's last turn times. It names every recorded issue whatever the
+    state's size: 22,547 bytes for 92 issues with 46 of them running, where the whole state is
+    125 KB of JSON and the tool's output reached the controller cut at about 41 KB. `read_state`
+    with `issue`, `issues`, `phase` or `settings` returns the full records that filter selects, so
+    nothing the summary leaves out is more than one call away. `read_record` called with no issue
+    reads the record of the issue the caller's claim holds instead of refusing.
+time: 2026-10-30T00:00:00.000000000Z
+custom:
+    Issue: INFRA-714

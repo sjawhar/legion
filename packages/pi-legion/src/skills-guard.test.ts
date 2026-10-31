@@ -76,15 +76,19 @@ test("every legion-worker reference is linked from a skill or a prompt", () => {
   expect(unlinked).toEqual([]);
 });
 
-// The daemon submits the merge itself once it accepts READY, and Legion enforces no GitHub
-// restriction the repository itself does not: no skill a Legion pane loads, and no daemon prompt,
-// says Legion never merges.
-test("no skill or prompt says Legion never merges", () => {
+// The merger merges the pull request itself, at the head it read, and the daemon submits no merge
+// and changes no merge setting (dispatch://INFRA-714, R2): no skill a Legion pane loads, and no
+// daemon prompt, may hand the merge back to the daemon. The pattern matches the claim made of the
+// daemon and not its denial, so the verb follows `daemon` directly and names what is merged.
+test("no skill or prompt says the daemon merges", () => {
   const saying = [staged, promptsRoot]
     .flatMap(files)
     .filter(
       (file) =>
-        file.endsWith(".md") && /never merges|merges? nothing/i.test(readFileSync(file, "utf8"))
+        file.endsWith(".md") &&
+        /daemon\s+(submits|arms|enqueues|enables|merges|turns)\s+(the|a|an|that|its|it|ready|auto)\b/i.test(
+          readFileSync(file, "utf8")
+        )
     )
     .map((file) => path.relative(REPO_ROOT, file));
   expect(saying).toEqual([]);

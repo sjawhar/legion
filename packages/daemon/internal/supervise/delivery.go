@@ -24,10 +24,11 @@ import (
 // because a refusal that arrives after the acknowledgement takes the confirmation back.
 //
 // DeliveredAt carries that second meaning because a refusal of that prompt clears it: an agent
-// that refused it, in a turn of its own or with no turn at all, never read the task, and the claim
-// must not attribute a completion to a run whose task nobody has read (Claim.ServingRun). A task
+// that refused it, in a turn of its own or with no turn at all, never read the task. A task
 // acknowledged and waiting for a turn keeps the mark — the turn may be this task's, starting late
-// — and so does one the wait for its turn re-queued.
+// — and so does one the wait for its turn re-queued. It is what a worker's read of its task is
+// judged by wherever the claim has a run behind it; a claim that has served no run at all is
+// working the one task it holds whether or not that mark is set (Claim.ServingRun).
 //
 // The id is the daemon's and travels on the prompt frame; a shim that sees the same id twice
 // answers it without a second turn. The id is kept across a send that failed in transit, so a
@@ -65,6 +66,13 @@ type Delivery struct {
 	// task is sent behind interruptedTask from then on (message). The task text stays as the
 	// workflow wrote it.
 	Interrupted bool
+	// Prompted says the daemon has put a prompt of this task to the agent, whatever came of it —
+	// a refusal, a busy answer, an acknowledgement, a turn. It is set when the send goes out
+	// (startSend) and by any outcome of such a send (markRead, clearReadMark), never cleared while
+	// the task lives, and persisted, because it is what tells a task nobody has read from one the
+	// daemon has not sent at all: a claim that has served no run is working the task it holds
+	// unless a prompt of that task has already come to nothing (Claim.ServingRun).
+	Prompted bool
 }
 
 // StillWorked says whether a claim in state will still work this task as the task of generation's
@@ -76,10 +84,10 @@ func (d Delivery) StillWorked(generation uint64, p phase.Phase, state ClaimState
 }
 
 // message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
-// died in a turn of it.
-func (d Delivery) message() string {
+// died in a turn of it, which names the death's cause the claim recorded (Claim.LastDeathCause).
+func (d Delivery) message(deathCause string) string {
 	if d.Interrupted {
-		return interruptedTask + d.Task
+		return interruptedTask(deathCause) + d.Task
 	}
 	return d.Task
 }
@@ -261,9 +269,15 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) (streaming, 
 	return state.IsStreaming, true
 }
 
-// startSend runs one prompt on its own goroutine and posts its outcome back to the machine.
+// startSend runs one prompt on its own goroutine and posts its outcome back to the machine. The
+// task is marked as put to the agent before the goroutine starts (Delivery.Prompted), whatever
+// the agent then answers: from here on, a prompt of it has gone out.
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
+	prompt := d.message(m.claim.LastDeathCause)
+	if p := m.claim.Pending; p != nil && p.ID == d.ID {
+		p.Prompted = true
+	}
 	m.send, m.helloDuringSend = &sending{id: d.ID, generation: generation}, false
 	if seq := conn.Sequence(); seq > m.sentThrough {
 		m.sentThrough = seq
@@ -273,7 +287,7 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 		err := m.adopt(role, loc)
 		if err == nil {
 			sending, cancel := context.WithTimeout(m.ctx, m.deps.Timeouts.RPC)
-			err = conn.Prompt(sending, d.ID, d.message())
+			err = conn.Prompt(sending, d.ID, prompt)
 			cancel()
 		}
 		var ev Event = PromptAcked{Claim: token, Generation: generation, DeliveryID: d.ID}
@@ -375,9 +389,22 @@ func (m *Machine) promptFailed(ctx context.Context, why string, read bool) error
 // interruptedTask begins a task re-sent because the process running its turn died. Oh My Pi does
 // not continue an interrupted turn when its session is resumed, and the resumed session already
 // holds the task, so the agent is told to carry on from where the turn stopped, not start over.
-const interruptedTask = "Your previous turn on this task was interrupted when your process died. " +
-	"Before repeating anything, check what that turn already did in your workspace and on the " +
-	"issue's branch, then continue the task.\n\n"
+// It says why the process died, in the runtime's own words (Claim.LastDeathCause), and what the
+// death took with it: a tool call in flight answered nobody, and every subagent and background job
+// of that turn is gone, neither of which the resumed transcript shows as missing — a worker
+// relaunched six times in an hour and told none of this read its own transcript as work in
+// progress (dispatch://INFRA-714 R6). A death the daemon recorded no cause for says so plainly
+// rather than inventing one.
+func interruptedTask(cause string) string {
+	if cause == "" {
+		cause = "the daemon recorded no cause for it"
+	}
+	return "Your previous turn on this task was interrupted when your process died: " + cause + ". " +
+		"Your tool calls in flight were never answered, and the subagents and background jobs of that " +
+		"turn are gone; your transcript does not say so. " +
+		"Before repeating anything, check what that turn already did in your workspace and on the " +
+		"issue's branch, then continue the task.\n\n"
+}
 
 // interrupted takes back the pending task whose turn the claim's process can no longer finish — it
 // died, or a forced stop is about to end it — so the relaunched agent's ready sends it again: Oh My
@@ -418,13 +445,15 @@ const (
 // markRead and clearReadMark are the only writers of the pending task's read mark: its
 // acknowledgement time (DeliveredAt) and the delivery id the acknowledged prompt carried
 // (MarkedBy) are set together and cleared together, so the prompt a late refusal is judged against
-// is always the one whose acknowledgement set the mark standing now.
+// is always the one whose acknowledgement set the mark standing now. Each also records that a
+// prompt of this task went out (Delivery.Prompted), as the send itself does: an outcome of either
+// kind is proof that the agent was put to it.
 func (m *Machine) markRead(p *Delivery) {
-	p.DeliveredAt, p.MarkedBy = m.deps.Clock.Now(), p.ID
+	p.DeliveredAt, p.MarkedBy, p.Prompted = m.deps.Clock.Now(), p.ID, true
 }
 
 func (m *Machine) clearReadMark(p *Delivery) {
-	p.DeliveredAt, p.MarkedBy = time.Time{}, ""
+	p.DeliveredAt, p.MarkedBy, p.Prompted = time.Time{}, "", true
 }
 
 // markUnread drops the pending task's read mark without touching its id or its budget: an

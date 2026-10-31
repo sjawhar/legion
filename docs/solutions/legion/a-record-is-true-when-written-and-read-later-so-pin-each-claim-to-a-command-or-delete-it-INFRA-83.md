@@ -8,7 +8,7 @@ tags:
   - testing
   - pull-request-body
 date: 2026-10-25
-status: active
+status: superseded in part by INFRA-714 — the records its examples pin, `READY_CHECKS_NOT_GREEN` and the `merge-waiting` notice, are deleted; the rule, that a claim is pinned to a command or deleted, stands
 module: packages/daemon
 related_issues:
   - "INFRA-83"

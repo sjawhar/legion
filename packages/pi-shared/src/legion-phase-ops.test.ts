@@ -28,6 +28,8 @@ const implementer: ClaimCapability = {
   issue: "LEGION-208",
   role: "implementer",
   secret: "U2VjcmV0",
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 1,
 };
 
 /** A runtime over a stub daemon answering the golden fixtures, recording each route it is sent. */
@@ -63,7 +65,6 @@ test("the phase ops' fields, as a host declares them, are every field of every o
       issue: { type: "string" },
       summary: { type: "string" },
       verdict: { enum: ["pass", "pending", "fail"] },
-      ready: { type: "boolean" },
       to: { enum: [...LEGION_PHASE_BACKWARD_TARGETS] },
       reason: { type: "string" },
     },
@@ -91,7 +92,7 @@ test("the description sets the host's sentences before and after handoff_complet
     "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. handoff_complete (phase workers"
   );
   expect(placed).toContain(
-    "arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. The controller's read_state returns the daemon's whole state. What a later phase needs"
+    "complete again. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. The controller's read_state returns the daemon's whole state. What a later phase needs"
   );
   expect(placed.endsWith("role topic with mcp__legion__envoy_publish.")).toBe(true);
 });
@@ -106,14 +107,10 @@ test("each op refuses its arguments whole before any daemon request, naming ever
       "handoff_complete's verdict is pass, pending or fail",
     ],
     [
-      { op: "handoff_complete", summary: "x", ready: "yes" },
-      "handoff_complete's ready is true or false",
-    ],
-    [
       { op: "handoff_complete", summary: "x", phase: "plan", other: 1 },
       'handoff_complete does not accept field "phase"; handoff_complete does not accept field "other"',
     ],
-    [{ op: "read_record" }, "read_record requires issue"],
+    [{ op: "read_record", issue: 44 }, "expected string"],
     [{ op: "request_backward_move", reason: "r" }, "request_backward_move requires to"],
     [{ op: "request_backward_move", to: " ", reason: "r" }, "request_backward_move requires to"],
     [{ op: "request_backward_move", to: 44, reason: "r" }, "request_backward_move requires to"],
@@ -150,7 +147,7 @@ test("a root architect's handoff_complete is refused as unavailable before its o
   for (const input of [
     { op: "handoff_complete" },
     { op: "handoff_complete", summary: "x" },
-    { op: "handoff_complete", summary: " ", verdict: "maybe", ready: "yes" },
+    { op: "handoff_complete", summary: " ", verdict: "maybe" },
   ]) {
     await expect(executePhaseOp(root.ops, input)).rejects.toThrow(new Error(refusal));
   }
@@ -217,25 +214,14 @@ test("the implementer's report on its closed issue's production check carries a 
       grantId: "grant-for-one-command",
       summary: `Look 2: ${verdict}.`,
       verdict,
-      ready: false,
     });
   }
   expect(posted).toHaveLength(6);
 
-  // Refused after the record is read, with nothing minted or posted: a report with no verdict,
-  // and one sent as READY.
-  for (const [input, message] of [
-    [
-      { op: "handoff_complete", summary: "Looked." },
-      "handoff_complete on a production check names a verdict of pass, pending or fail",
-    ],
-    [
-      { op: "handoff_complete", summary: "Looked.", verdict: "pass", ready: true },
-      "handoff_complete on a production check is no READY: leave ready out",
-    ],
-  ] as const) {
-    await expect(executePhaseOp(ops, input)).rejects.toThrow(new Error(message));
-  }
+  // Refused after the record is read, with nothing minted or posted: a report with no verdict.
+  await expect(executePhaseOp(ops, { op: "handoff_complete", summary: "Looked." })).rejects.toThrow(
+    new Error("handoff_complete on a production check names a verdict of pass, pending or fail")
+  );
   expect(posted).toHaveLength(6);
 
   // Only the implementer reports on the check: any other role's completion on the closed issue is
@@ -259,7 +245,6 @@ test("the implementer's report on its closed issue's production check carries a 
     grantId: "grant-for-one-command",
     summary: "Looked.",
     verdict: "",
-    ready: false,
   });
 });
 
@@ -346,12 +331,26 @@ test("request_backward_move names the issue an architect returns from accepting,
   expect(posted).toHaveLength(before + 2);
 });
 
-test("read_record answers the issue's record, or names an issue the daemon has none for; request_backward_move posts with a fresh grant", async () => {
+test("read_record answers the issue's record, or the claim's own when it names none, and names an issue the daemon has none for; request_backward_move posts with a fresh grant", async () => {
   const { ops, routes } = runtime();
   const state = daemonFixture("state.json") as { issues: Record<string, unknown> };
   await expect(executePhaseOp(ops, { op: "read_record", issue: "LEGION-208" })).resolves.toEqual({
     record: state.issues["LEGION-208"],
   });
+  // The claim's own issue, which the daemon already told it: a worker reads the issue it works
+  // far more often than another, and naming none is no refusal.
+  await expect(executePhaseOp(ops, { op: "read_record" })).resolves.toEqual({
+    record: state.issues["LEGION-208"],
+  });
+  await expect(executePhaseOp(ops, { op: "read_record", issue: "  " })).resolves.toEqual({
+    record: state.issues["LEGION-208"],
+  });
+  await expect(
+    executePhaseOp(
+      { ...ops, claim: { ...implementer, issue: "LEGION-210" } },
+      { op: "read_record" }
+    )
+  ).resolves.toEqual({ record: state.issues["LEGION-210"] });
   await expect(executePhaseOp(ops, { op: "read_record", issue: "LEGION-999" })).rejects.toThrow(
     "The daemon has no record for LEGION-999"
   );
@@ -362,5 +361,5 @@ test("read_record answers the issue's record, or names an issue the daemon has n
       reason: "The plan misses X.",
     })
   ).resolves.toEqual({});
-  expect(routes.slice(2)).toEqual(["/legion/v1/grants", "/legion/v1/phase/backward"]);
+  expect(routes.slice(5)).toEqual(["/legion/v1/grants", "/legion/v1/phase/backward"]);
 });

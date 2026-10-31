@@ -405,8 +405,8 @@ func (r *mergedRootWaitsLive) rootMergeWaits() {
 	got := r.waitFor("the merge recorded on the root's pull request", r.parent, func(got api.Issue) bool {
 		return got.PullRequest != nil && got.PullRequest.State == string(record.PullRequestMerged)
 	})
-	if got.Phase != phase.AwaitingMerge {
-		t.Fatalf("%s is in %s after its merge, want awaiting_merge: its close waits for %s", r.parent, got.Phase, r.child)
+	if got.Phase != phase.Merging {
+		t.Fatalf("%s is in %s after its merge, want merging: its close waits for %s", r.parent, got.Phase, r.child)
 	}
 	if got.Status == "done" {
 		t.Fatalf("%s is done on Dispatch after its merge, want the status its wait leaves", r.parent)
@@ -437,15 +437,15 @@ func (r *mergedRootWaitsLive) rootMergeWaits() {
 }
 
 // seedArcTwo puts the tree at the step the merge is driven from: the root through retro and
-// merging to awaiting_merge on its open pull request, the child back in the workflow under it and
+// merging on its open pull request, the child back in the workflow under it and
 // implementing, as its architect's release left it, and the child's implementer claim as a launch
 // a previous daemon began and never recorded, serving the run of the task it took. The restart of
 // step 5 relaunches that claim, which is where step 3's session comes from.
 func (r *mergedRootWaitsLive) seedArcTwo() {
 	t := r.t
 	t.Helper()
-	r.seedIssue("the root in awaiting_merge, as its retro and its merger's READY left it", r.parent, func(issue *record.Issue) {
-		issue.Phase = phase.AwaitingMerge
+	r.seedIssue("the root in merging, as its retro left it", r.parent, func(issue *record.Issue) {
+		issue.Phase = phase.Merging
 	})
 	r.seedIssue("the child implementing and back in the workflow", r.child, func(issue *record.Issue) {
 		issue.Phase, issue.Status = phase.Implementing, "in_progress"
@@ -485,8 +485,8 @@ func (r *mergedRootWaitsLive) childCompletesItsPhase() {
 	}
 	r.note("read back: %s is in %s", r.child, got.Phase)
 	parent := r.issue(r.parent)
-	if parent.Phase != phase.AwaitingMerge {
-		t.Fatalf("%s is in %s, want awaiting_merge while its child runs on", r.parent, parent.Phase)
+	if parent.Phase != phase.Merging {
+		t.Fatalf("%s is in %s, want merging while its child runs on", r.parent, parent.Phase)
 	}
 	r.note("read back: %s still waits in %s", r.parent, parent.Phase)
 }
@@ -494,7 +494,7 @@ func (r *mergedRootWaitsLive) childCompletesItsPhase() {
 // Step 7. A pull request opens from the waiting root's branch: GitHub's opened, for a pull request
 // of this run's own that is neither the root's nor the child's, from legion/<root>. GitHub never
 // sends the root's merge again, so the opened must leave the merge the root waits on standing: the
-// root stays in awaiting_merge on its merged pull request, and step 4 closes it on that merge.
+// root stays in merging on its merged pull request, and step 4 closes it on that merge.
 // Before this change the opened replaced the merged pull request and the root never closed. The
 // workflow only logs the opened it leaves, so the state shows nothing new to wait for; the step
 // instead waits for the daemon's processed_events row for the envelope, which the intake writes in
@@ -509,7 +509,7 @@ func (r *mergedRootWaitsLive) openedLeavesTheMerge() {
 	deadline := time.Now().Add(liveSettle)
 	for time.Now().Before(deadline) {
 		got := r.issue(r.parent)
-		if got.Phase != phase.AwaitingMerge || got.PullRequest == nil ||
+		if got.Phase != phase.Merging || got.PullRequest == nil ||
 			got.PullRequest.Number != r.parentPR || got.PullRequest.State != string(record.PullRequestMerged) {
 			t.Fatalf("after the opened of #%d %s is in %s on pull request %+v, want it still awaiting its merge of #%d",
 				r.openedPR, r.parent, got.Phase, got.PullRequest, r.parentPR)
@@ -535,7 +535,7 @@ func (r *mergedRootWaitsLive) restartLeavesTheWait() {
 	r.note("drove a restart of the daemon at the waiting root's state; boot %d, its reconciliation run", r.d.state().Daemon.Boots)
 	deadline := time.Now().Add(liveSettle)
 	for time.Now().Before(deadline) {
-		if got := r.issue(r.parent); got.Phase != phase.AwaitingMerge || got.PullRequest.State != string(record.PullRequestMerged) {
+		if got := r.issue(r.parent); got.Phase != phase.Merging || got.PullRequest.State != string(record.PullRequestMerged) {
 			t.Fatalf("after the restart %s is in %s on a %s pull request, want it still awaiting its merge", r.parent, got.Phase, got.PullRequest.State)
 		}
 		if told := r.architectNotices(r.parent, "pr-merged"); len(told) != before {
@@ -554,8 +554,8 @@ func (r *mergedRootWaitsLive) restartLeavesTheWait() {
 // on the root's merged pull request, the one step 7's opened left standing.
 func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 	t := r.t
-	r.seedIssue("the child in awaiting_merge, as its testing, review, acceptance, retro and merger left it", r.child, func(issue *record.Issue) {
-		issue.Phase, issue.Status = phase.AwaitingMerge, "retro"
+	r.seedIssue("the child in merging, as its testing, review, acceptance and retro left it", r.child, func(issue *record.Issue) {
+		issue.Phase, issue.Status = phase.Merging, "retro"
 	})
 	suspendsBefore := len(r.rt.CallsOf("Suspend"))
 	r.publishMerge(r.child, r.childPR, mergedRootWaitsChildMerge)

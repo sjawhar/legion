@@ -1,8 +1,7 @@
 # The root spec and the design gate
 
 Part of `skill://legion-architect`, section 1. Read it before you write the root spec, before any
-edit to an approved root spec, and on `design-approved`, `design-changes-requested` or
-`ready-refused`.
+edit to an approved root spec, and on `design-approved` or `design-changes-requested`.
 
 ## Writing the root spec
 
@@ -144,8 +143,7 @@ to the version it writes. Once they have answered:
   version N on <date> by <who>.`, and its `Show diff` control carries the detail). The rewrite
   closes the gate until they approve;
   work the daemon started at the answer keeps running. Release no new wave until the `design-approved`
-  after the rewrite; work already in flight continues. Every merger's `READY` in the tree is
-  refused until a human approves the latest version.
+  after the rewrite; work already in flight continues, through its merge.
 
 A settled decision is the human's. A plan that would overturn one goes back to the planner with the
 decision kept, unless the planner brings evidence the human did not weigh that would change it

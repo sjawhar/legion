@@ -878,7 +878,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	// among them, stays its own tree (workflow's RanAsRoot) and records no chain to be held under.
 	stored.Ancestry = nil
 	if !orphan {
-		stored.Phase, stored.Hold, stored.Awaiting, stored.ReadyPendingVersion = phase.Admitted, nil, nil, nil
+		stored.Phase, stored.Hold, stored.Awaiting = phase.Admitted, nil, nil
 		// Another tree's work arriving without its run: the run it had was that tree's.
 		if !claim.IsTreeRoot(stored.Key, oldTree) {
 			stored.TakenBack = false
@@ -1489,15 +1489,12 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 
 // startMidPhaseMembers starts each previous run that promotion brings back, the re-admitted root
 // included. A hand-over turns a child into that root while preserving its phase, so its phase role
-// needs the same resume start ordinary mid-phase children receive (workflow.ResumeTask, which tells
-// a carried merger its carried approved head). A root promoted held, which only a hand-over leaves
-// (every other re-admission starts its root at admitted), starts no worker, and the hold's notice
-// went to the architect of the tree it was handed over from, so its own architect is told of the
-// hold (workflow.HeldNotice), whether or not it carried a gate. Promotion already queued the root's
-// branch; each other member queues its own before starting. Every member resumes in
-// workflow.ResumePhase, recorded before its start: a child of a re-admitted tree, and a root a
-// hand-over created, left awaiting its merge resume in merging, since the old tree's linger disarmed
-// the pull request (beginLinger) and only a new READY, whose merge the daemon submits, arms it again.
+// needs the same resume start ordinary mid-phase children receive (workflow.ResumeTask). A root
+// promoted held, which only a hand-over leaves (every other re-admission starts its root at
+// admitted), starts no worker, and the hold's notice went to the architect of the tree it was
+// handed over from, so its own architect is told of the hold (workflow.HeldNotice), whether or not
+// it carried a gate. Promotion already queued the root's branch; each other member queues its own
+// before starting.
 //
 // What an issue waits on is deliberately not read here: every member this starts is mid-phase,
 // work already under way, and the only member it leaves at phase.Admitted is left alone anyway,
@@ -1516,15 +1513,17 @@ func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root re
 		if member.Tree != root.Tree || record.OutOfWorkflow(member.Status) {
 			continue
 		}
-		if resume := workflow.ResumePhase(member); resume != member.Phase {
-			member.Phase = resume
-			if err := a.store.PutIssue(ctx, tx, member); err != nil {
-				return fmt.Errorf("resume %s in %s: %w", member.Key, resume, err)
-			}
-		}
-		// Accepting's role is the tree's architect, which promotion already started: nothing to resume.
+		// Accepting's role is the tree's architect, which promotion already started: nothing to
+		// resume. Nor is a phase its own terminating fact has already met (workflow.PhaseFinished).
 		role := workflow.RoleFor(member.Phase)
 		if role == "" || role == claim.RoleArchitect {
+			continue
+		}
+		finished, err := workflow.PhaseFinished(ctx, a.store, tx, member)
+		if err != nil {
+			return err
+		}
+		if finished {
 			continue
 		}
 		token, err := claim.NewToken(project, member.Key, role)

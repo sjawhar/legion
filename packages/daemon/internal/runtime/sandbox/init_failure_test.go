@@ -9,7 +9,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// A pod whose init container ended non-zero is Gone for every role, and says so: no launcher could
+// A pod whose workspace-init ended non-zero is Gone for every role, and says so: no launcher could
 // have started in it. The mapping classifies it a failed init, whatever the exit code, which is
 // what keeps it out of ends() and so out of the displaced reading.
 func TestRestartingInitFailureIsGoneForEveryRole(t *testing.T) {
@@ -91,5 +91,59 @@ func TestColdInitFailureReachesSupervisionWithoutWaitingForLauncher(t *testing.T
 	obs, err := g.r.Probe(g.ctx, launched.loc)
 	if err != nil || obs.Kind != runtime.Gone || !g.initFailed(launched.loc) {
 		t.Fatalf("supervisor cannot observe the confirmed init failure: %+v, %v", obs, err)
+	}
+}
+
+// The kubelet restarts a failed init container by itself under restartPolicy Always, and a
+// workspace-fetch that comes back carries on with the feed its own pod's disk already holds. So
+// each of its first three restarts is the pod still provisioning — to failedInit, which an
+// observation reads a pod's death out of, and to provisioning, which a launch's wait reads a pod
+// coming up by, alike — and the fourth restart is the pod's death. workspace-init is given no such
+// grace, and neither is a fetch in a pod that has already failed, where nothing is started again.
+// Reading a restart as a death threw away a download that was still arriving and launched the
+// issue again into the same wait (INFRA-495).
+func TestAFetchsFirstThreeRestartsAreStartingAndItsFourthIsAFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		container  string
+		restarts   int32
+		terminated bool
+		phase      corev1.PodPhase
+		dead       bool
+	}{
+		{name: "a fetch that just ended, before the kubelet restarts it", container: fetchContainer, terminated: true},
+		{name: "a fetch's first restart", container: fetchContainer, restarts: 1},
+		{name: "a fetch's third restart", container: fetchContainer, restarts: 3},
+		{name: "a fetch's fourth restart", container: fetchContainer, restarts: 4, dead: true},
+		{name: "a fetch restarting in a pod that has failed", container: fetchContainer, restarts: 1, phase: corev1.PodFailed, dead: true},
+		{name: "workspace-init's first failure", container: initContainer, terminated: true, dead: true},
+		{name: "workspace-init restarting", container: initContainer, restarts: 1, dead: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			phase := corev1.PodPending
+			if tc.phase != "" {
+				phase = tc.phase
+			}
+			ended := &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}
+			status := corev1.ContainerStatus{Name: tc.container, RestartCount: tc.restarts}
+			if tc.terminated {
+				status.State.Terminated = ended
+			} else {
+				status.State.Waiting = &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}
+				status.LastTerminationState.Terminated = ended
+			}
+			pod := &corev1.Pod{Status: corev1.PodStatus{Phase: phase, InitContainerStatuses: []corev1.ContainerStatus{status}}}
+
+			named, failed := failedInit(pod)
+			if (failed != nil) != tc.dead {
+				t.Errorf("failedInit = %q, %+v; want the pod dead %t", named, failed, tc.dead)
+			}
+			if tc.dead && named != tc.container {
+				t.Errorf("failedInit named %q, want the pod's %s", named, tc.container)
+			}
+			if got := provisioning(pod); got == tc.dead {
+				t.Errorf("provisioning = %t while failedInit reads the pod dead %t: the two readings of %s disagree", got, tc.dead, tc.container)
+			}
+		})
 	}
 }

@@ -81,6 +81,14 @@ type bridge struct {
 	// user message whose result Claude Code has yet to give. Within a turn the bridge is always
 	// stepping: each result either sends the next message or ends the turn.
 	inRun, stepping bool
+	// refusal is what the provider said about a step of the turn running that it refused, and ""
+	// for a turn no step of which has failed: the turn's own outcome, reported when the turn ends.
+	// It begins each turn empty, so a turn is refused when a step of it failed, however many steps
+	// the turn took.
+	refusal string
+	// reports is this backend's producer of turn outcomes, nil for a pane that names no daemon
+	// (turnoutcome.go).
+	reports *turnReports
 	// queue is the Envoy deliveries waiting for the next step or turn.
 	queue []delivery
 	// interrupt is the request id of the interrupt sent in this step; abortIDs are the daemon's
@@ -119,6 +127,7 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 	}
 	b := &bridge{cfg: cfg, log: log.New(logOut, "[claude-bridge] ", 0)}
 	b.frames = shimwire.NewWriter(&b.encoded)
+	b.reports = startTurnReports(cfg, b.log)
 	// stop ends the outputs' writers and every reader's send, once Run returns. It does not
 	// interrupt a readLines blocked in ReadBytes, and Run does not wait for those readers.
 	stop := make(chan struct{})
@@ -429,9 +438,10 @@ func (b *bridge) deliver(d delivery) {
 	b.startRun(d.content)
 }
 
-// startRun tells the daemon a turn starts and sends its first message.
+// startRun tells the daemon a turn starts and sends its first message. The turn begins with no
+// refusal against it: what the provider said about an earlier turn is not this turn's outcome.
 func (b *bridge) startRun(message string) {
-	b.inRun = true
+	b.inRun, b.refusal = true, ""
 	b.emit(shimwire.AgentStart{})
 	b.step(message)
 }
@@ -527,6 +537,11 @@ func (b *bridge) controlResponse(raw json.RawMessage) {
 
 // result ends a step. The seed's ends the seeding; a turn's step is followed by the next Envoy
 // delivery, else the turn's end. A step an interrupt ended ends the turn at once.
+//
+// A step the provider refused is the turn's outcome: it is kept against the turn (refusal) and
+// reported when the turn ends, clean or refused, with the bridge's own sequence (turnoutcome.go).
+// An aborted step is not a refusal — the daemon asked for that interrupt — and is reported as the
+// clean turn it is.
 func (b *bridge) result(subtype string, isError bool, errs []string) {
 	if b.seeding {
 		b.seeding = false
@@ -554,8 +569,10 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 	b.stepping = false
 	if isError && !b.aborted {
 		// Oh My Pi reports a failed step as the assistant message that ends it, stopReason "error";
-		// the daemon reads neither, so the log line is what puts the failure on the pane.
+		// the daemon reads neither, so the log line is what puts the failure on the pane and the
+		// turn's own report is what the daemon counts.
 		failure := "Claude Code: " + subtype + " " + strings.Join(errs, "; ")
+		b.refusal = failure
 		b.log.Printf("the step failed: %s", failure)
 		b.emitRaw(map[string]any{"type": "message_end", "message": map[string]any{
 			"role": "assistant", "stopReason": "error", "errorMessage": failure}})
@@ -566,8 +583,10 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 		b.step(next.content)
 		return
 	}
-	b.inRun, b.aborted, b.interrupt = false, false, ""
+	refusal := b.refusal
+	b.inRun, b.aborted, b.interrupt, b.refusal = false, false, "", ""
 	b.emit(shimwire.AgentEnd{})
+	b.reports.turnEnded(refusal)
 	if len(b.queue) > 0 {
 		next := b.queue[0]
 		b.queue = b.queue[1:]

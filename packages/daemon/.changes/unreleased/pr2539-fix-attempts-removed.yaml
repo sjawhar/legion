@@ -1,0 +1,6 @@
+kind: Removed
+body: |-
+  Fix-attempt counting, the `max_fix_attempts` configuration key, the tester's planned red, and the
+  `merge.by_hand` and `merge_queue_role` project keys. A round is now a review that requested
+  changes and nothing else; a separate pass counter tells one pass through a phase from the last,
+  which is what keeps a completion at a commit an earlier pass reported a fact of its own.

@@ -77,6 +77,45 @@ type ExitRequest struct {
 	Reason     string `json:"reason"`
 }
 
+// Turn outcomes are what a producer reports a turn ended as: the provider took the turn, or
+// refused it. They are the two values of TurnOutcomeRequest.Outcome, and nothing else is accepted.
+const (
+	TurnClean   = "clean"
+	TurnRefused = "refused"
+)
+
+// TurnOutcomeRequest is the outcome of one turn, reported by the producer that ended it: the
+// pi-legion agent_end hook for an Oh My Pi session, `legion claude-bridge` for a Claude Code one.
+// Sequence is that producer's own count of the turns it has ended at Generation, from 1, and the
+// daemon keeps the report under the pair: a report that arrives late or out of order lands in its
+// own place, and the run of refused turns the daemon derives is the same either way. Message is
+// what the provider said about a refusal, and is left out of a clean turn.
+//
+// A producer that holds the registration's secret names the claim and authenticates with it, as
+// every other claim route is authenticated. The Claude bridge holds none — the registration is its
+// pane's plugin's, and the secret never leaves that process — so it presents the launch's own boot
+// token instead, which names the same claim (api's turnOutcome). Exactly one of the two.
+type TurnOutcomeRequest struct {
+	ClaimToken Token  `json:"claimToken,omitempty"`
+	SessionID  string `json:"sessionId,omitempty"`
+	Secret     string `json:"secret,omitempty"`
+	BootToken  string `json:"bootToken,omitempty"`
+	Generation uint64 `json:"generation"`
+	Sequence   uint64 `json:"sequence"`
+	Outcome    string `json:"outcome"`
+	Message    string `json:"message,omitempty"`
+}
+
+// TurnOutcomeResponse is what the daemon made of the report: the run of refused turns the claim's
+// reports now end with (RefusedRun), and whether this report took that run to the launch failure
+// limit and failed the claim. A producer acts on neither — its turn is over — but a pane's log
+// saying the daemon has counted three refusals in a row is the one place an operator sees the
+// count that failed the claim being made.
+type TurnOutcomeResponse struct {
+	RefusedRun int  `json:"refusedRun"`
+	Failed     bool `json:"failed"`
+}
+
 // Refusal is one of the ways a claim route says no: the status it answers with and the sentence
 // it puts in the body. Both halves are a contract with the plugins, whose shared claim boot stops
 // the agent on any 4xx from the registration (`bootLegionClaim` in

@@ -1693,7 +1693,7 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	}
 	assertCredentialedEnvironmentBounded(t, fetch, fetch.Timeout)
 	if fetch.Timeout > FetchTimeout || fetch.Timeout < FetchTimeout-time.Minute {
-		t.Errorf("the delta was given %s, want its own %s, not what the stream and its verification left", fetch.Timeout, FetchTimeout)
+		t.Errorf("the delta was given %s, want its own %s, not what the verification of the cache's stream left", fetch.Timeout, FetchTimeout)
 	}
 	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false"} {
 		if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "config", "--get", key)); got != want {
@@ -1774,15 +1774,15 @@ func TestFetchFailsWhenTheRepositoryCacheIsNeverReady(t *testing.T) {
 	}
 }
 
-// The cache's stream and its verification share one FetchTimeout, counted from when the cache is
-// ready, and the delta from GitHub gets a FetchTimeout of its own, so the fetch's waits, transfers
-// and checks end within FetchBudget however long it waited and however slow the stream was. A
-// cache ready 35 minutes in, whose history takes 25 minutes to check, gives the delta its whole
-// bound, and the fresh feed is filled. So does a cache ready on the wait's last ask, 129 min 50 s
-// in, whose history takes that whole first bound: before the delta had a bound of its own, the
-// fetch died there and its replacement streamed the cache again (sjawhar/legion#2235). The
-// fetch still ends inside FetchBudget.
-func TestFetchGivesTheCachesStreamAndTheDeltaTheirOwnBounds(t *testing.T) {
+// The verification of what the cache streamed gets one FetchTimeout, counted from the stream's
+// end, and the delta from GitHub one of its own, so the fetch's waits and its clocked stages end
+// within FetchBudget however long it waited; the stream between them holds the low-speed bound
+// and no clock at all (CacheStreamLowSpeedBytes). A cache ready 35 minutes in, whose history
+// takes 25 minutes to check, gives the delta its whole bound, and the fresh feed is filled. So
+// does a cache ready on the wait's last ask, 129 min 50 s in, whose history takes that whole
+// bound: before the delta had a bound of its own, the fetch died there and its replacement
+// streamed the cache again (sjawhar/legion#2235). The fetch still ends inside FetchBudget.
+func TestFetchGivesTheCachesVerificationAndTheDeltaTheirOwnBounds(t *testing.T) {
 	polls := func(d time.Duration) int { return int(d / CachePoll) }
 	for _, tc := range []struct {
 		name     string

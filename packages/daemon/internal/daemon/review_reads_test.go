@@ -39,7 +39,7 @@ func listedReviewWithBody(id int64, login, state, commit, submitted, body string
 	return fmt.Sprintf(`{"id":%d,"user":{"login":%q},"body":%q,"state":%q,"commit_id":%q%s}`, id, login, body, state, commit, when)
 }
 
-// reviewsStandIn is GitHub's REST API for acme/widgets as the required-checks pass reads it: pull
+// reviewsStandIn is GitHub's REST API for acme/widgets as the per-issue read reads it: pull
 // request 86 on base main, whose rulesets require pr-checks-result and whose branch protection
 // requires nothing, whose reviews are what reviews answers when asked (a JSON array), each read
 // counted in reads, and on which a-writer has write access and an-outsider read access.
@@ -59,7 +59,7 @@ func reviewsStandInWith(t *testing.T, reviews func() string, reads *atomic.Int64
 		}
 		switch r.URL.Path {
 		case "/repos/acme/widgets/pulls/86":
-			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":true}`))
+			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":true,"mergeable_state":"clean"}`))
 		case "/repos/acme/widgets/pulls/86/reviews":
 			reads.Add(1)
 			w.Write([]byte(reviews()))
@@ -111,14 +111,14 @@ func reviewerDecision(t *testing.T, pool *pgxpool.Pool) (string, int) {
 }
 
 // A review whose pull_request_review webhook never reached the daemon still decides its round: the
-// required-checks pass reads the pull request's reviews and applies the newest deciding one as the
+// per-issue read reads the pull request's reviews and applies the newest deciding one as the
 // webhook would have, by the same rules - the review App's, or an account's with write access to
 // the repository, ordered by when it was submitted rather than where
 // GitHub lists it. The reviewer completed its round first, as when a delivery is lost: before the
 // pass, the round sits in reviewing with its decision unread on GitHub. A comment, a dismissed
 // review, a pending draft and an outsider's approval decide nothing, as they decide nothing by
 // webhook. A round held from reviewing records the decision for the retry to end it on.
-func TestAReviewWhoseWebhookNeverArrivedDecidesItsRoundOnThePass(t *testing.T) {
+func TestAReviewWhoseWebhookNeverArrivedDecidesItsRoundOnTheRead(t *testing.T) {
 	const (
 		early = "2026-10-08T22:15:40Z"
 		late  = "2026-10-08T22:15:52Z"
@@ -158,15 +158,15 @@ func TestAReviewWhoseWebhookNeverArrivedDecidesItsRoundOnThePass(t *testing.T) {
 			}
 			var reads atomic.Int64
 			api := reviewsStandIn(t, func() string { return "[" + strings.Join(tc.reviews, ",") + "]" }, &reads).URL
-			reviewReadRuntime(pool, api).readRequiredChecks(context.Background())
+			readCapture(t, reviewReadRuntime(pool, api))
 			if got, _ := capturePhase(t, pool); got != tc.want {
-				t.Fatalf("after the pass the issue is in %s, want %s", got, tc.want)
+				t.Fatalf("after the read the issue is in %s, want %s", got, tc.want)
 			}
 			if got, _ := reviewerDecision(t, pool); got != tc.decision {
 				t.Fatalf("the round's recorded decision = %q, want %q", got, tc.decision)
 			}
 			if got := reads.Load(); got != 1 {
-				t.Fatalf("the pass read the pull request's reviews %d times, want once", got)
+				t.Fatalf("the read read the pull request's reviews %d times, want once", got)
 			}
 		})
 	}
@@ -188,7 +188,7 @@ func holdFromReviewing(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
-// The pass decodes GitHub's own answer, not just the stand-in's shape:
+// The read decodes GitHub's own answer, not just the stand-in's shape:
 // testdata/legion-smoke-pull-550-reviews.json is GET /repos/sjawhar/legion-smoke/pulls/550/reviews
 // as GitHub answered it, formatted, with the review App's comments and its request for changes at
 // an earlier head, two other Apps' comments, and the review App's approval of the head last. With
@@ -214,9 +214,9 @@ func TestTheReviewsReadDecodesGitHubsOwnAnswer(t *testing.T) {
 		t.Fatalf("move CAPTURE-1's head to the approved commit: %v", err)
 	}
 	var reads atomic.Int64
-	reviewReadRuntime(pool, reviewsStandIn(t, func() string { return string(answer) }, &reads).URL).readRequiredChecks(context.Background())
+	readCapture(t, reviewReadRuntime(pool, reviewsStandIn(t, func() string { return string(answer) }, &reads).URL))
 	if got, _ := capturePhase(t, pool); got != phase.Accepting {
-		t.Fatalf("after the pass the issue is in %s, want accepting", got)
+		t.Fatalf("after the read the issue is in %s, want accepting", got)
 	}
 	var state, approved string
 	if err := pool.QueryRow(context.Background(), "select decision->>'state', decision->>'head' from phases where issue = 'CAPTURE-1' and role = 'reviewer'").Scan(&state, &approved); err != nil {
@@ -227,20 +227,20 @@ func TestTheReviewsReadDecodesGitHubsOwnAnswer(t *testing.T) {
 	}
 }
 
-// One review decision delivered both by its webhook and by the pass's read of GitHub acts once,
+// One review decision delivered both by its webhook and by the read's read of GitHub acts once,
 // whichever comes first: the pull request's newest deciding review (record.PullRequest.ReviewSeen)
 // orders both copies alike, since both carry GitHub's review id and submission time. The first
 // copy ends round 1; the second, arriving while the work is back in implementing, then again once
 // round 2 is open and its reviewer has completed, decides nothing and counts no round - the
 // webhook's second copy is a new Envoy envelope, as GitHub's redelivery is, so the daemon's
-// processed events do not catch it. The pass reads the reviews in implementing too, and finds
+// processed events do not catch it. The read reads the reviews in implementing too, and finds
 // nothing newer to apply; round 2's own review, once GitHub lists it, still ends round 2.
 func TestAReviewDecisionDeliveredTwiceActsOnce(t *testing.T) {
 	round1 := listedReview(11, reviewReadApp, "CHANGES_REQUESTED", "code", "2026-10-08T22:15:40Z")
 	webhook := intake.PullRequestReview{Repo: "acme/widgets", Number: 86, ID: 11, SubmittedAt: time.Date(2026, 10, 8, 22, 15, 40, 0, time.UTC),
 		State: "changes_requested", CommitID: "code", HeadSHA: "code", Author: reviewReadApp, Body: "review 11"}
-	for _, passFirst := range []bool{false, true} {
-		t.Run(fmt.Sprintf("the pass first: %t", passFirst), func(t *testing.T) {
+	for _, readFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("the read first: %t", readFirst), func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			ctx := context.Background()
 			seedCapture(t, pool, phase.Reviewing, "needs_review", completedReviewer("review-1"))
@@ -255,8 +255,8 @@ func TestAReviewDecisionDeliveredTwiceActsOnce(t *testing.T) {
 			}
 			deliver := func(first bool, copy string) {
 				t.Helper()
-				if first == passFirst {
-					w.readRequiredChecks(ctx)
+				if first == readFirst {
+					readCapture(t, w)
 					return
 				}
 				apply("delivery-11-"+copy, webhook)
@@ -275,8 +275,8 @@ func TestAReviewDecisionDeliveredTwiceActsOnce(t *testing.T) {
 			readsBefore := reads.Load()
 			deliver(false, "while implementing")
 			expect("the second copy while implementing", phase.Implementing, "changes_requested", 1)
-			if !passFirst && reads.Load() == readsBefore {
-				t.Fatalf("the pass in implementing read no reviews")
+			if !readFirst && reads.Load() == readsBefore {
+				t.Fatalf("the read in implementing read no reviews")
 			}
 
 			apply("implementer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "round-2"})
@@ -284,24 +284,24 @@ func TestAReviewDecisionDeliveredTwiceActsOnce(t *testing.T) {
 			apply("reviewer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-2"})
 			expect("round 2's completion", phase.Reviewing, "", 1)
 			apply("delivery-11-in-round-2", webhook)
-			w.readRequiredChecks(ctx)
+			readCapture(t, w)
 			expect("round 1's review delivered again in round 2", phase.Reviewing, "", 1)
 
 			listed = append(listed, listedReview(12, reviewReadApp, "APPROVED", "code", "2026-10-08T23:24:06Z"))
-			w.readRequiredChecks(ctx)
+			readCapture(t, w)
 			expect("round 2's own review", phase.Accepting, "approved", 1)
 		})
 	}
 }
 
 // A deciding review submitted while no round is open, whose webhook never arrived, decides no later
-// round: the pass reads it while the work is in testing, or back in implementing after CI's red
+// round: the read reads it while the work is in testing, or back in implementing after CI's red
 // ended a round inside the two minutes, and the workflow records it as the pull request's newest
 // deciding review and decides nothing with it, as it does a webhook's out-of-round review. The
 // round that opens afterwards starts with no decision, its reviewer completes before its own review
 // arrives, and the round is stuck undecided - told to the architect, no round counted - rather than
 // sent back on the earlier request for changes, or ended in retro on the earlier approval of the
-// head. A later pass finds nothing newer to apply.
+// head. A later read finds nothing newer to apply.
 func TestADecidingReviewOutsideARoundDecidesNoLaterRound(t *testing.T) {
 	const stale = "2026-10-08T22:15:40Z"
 	for _, tc := range []struct {
@@ -337,15 +337,15 @@ func TestADecidingReviewOutsideARoundDecidesNoLaterRound(t *testing.T) {
 				}
 			}
 
-			w.readRequiredChecks(ctx)
-			expect("the pass in "+string(tc.from), tc.from)
+			readCapture(t, w)
+			expect("the read in "+string(tc.from), tc.from)
 			if tc.from == phase.Implementing {
 				apply("implementer", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "round-1"})
 			}
 			apply("tester", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", Commit: "test-1"})
 			apply("reviewer", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
-			w.readRequiredChecks(ctx)
-			expect("the reviewer's completion and the next pass", phase.Reviewing)
+			readCapture(t, w)
+			expect("the reviewer's completion and the next read", phase.Reviewing)
 			stuck := noticeReasons(t, pool, "review-stuck")
 			if len(stuck) != 1 || !strings.Contains(stuck[0], "with no review that decides it") {
 				t.Fatalf("review-stuck notices %q, want one saying no review decides the round", stuck)
@@ -357,9 +357,9 @@ func TestADecidingReviewOutsideARoundDecidesNoLaterRound(t *testing.T) {
 	}
 }
 
-// The same holds between two rounds, after the pass has already applied a decision: round 1's
+// The same holds between two rounds, after the read has already applied a decision: round 1's
 // request for changes sends the work back, and while it is in implementing a writer submits a
-// request for changes, or an approval of the head, whose webhook never arrives. The pass in
+// request for changes, or an approval of the head, whose webhook never arrives. The read in
 // implementing records it and decides nothing. Round 2 opens with no decision and its reviewer
 // completes, and the round stays open and undecided with one round counted, rather than going back
 // to implementing a second time or on to retro on that review.
@@ -388,24 +388,24 @@ func TestADecidingReviewBetweenRoundsDecidesNoLaterRound(t *testing.T) {
 				}
 			}
 
-			w.readRequiredChecks(ctx)
+			readCapture(t, w)
 			expect("round 1's review", phase.Implementing, "changes_requested", 1)
 			listed = append(listed, listedReview(21, "a-writer", state, "code", "2026-10-08T22:40:00Z"))
-			w.readRequiredChecks(ctx)
-			expect("the pass in implementing", phase.Implementing, "changes_requested", 1)
+			readCapture(t, w)
+			expect("the read in implementing", phase.Implementing, "changes_requested", 1)
 			apply("implementer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "round-2"})
 			apply("tester-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", Commit: "test-2"})
 			apply("reviewer-round-2", intake.HandoffComplete{Generation: 1, Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-2"})
-			w.readRequiredChecks(ctx)
-			expect("round 2's completion and the next pass", phase.Reviewing, "", 1)
+			readCapture(t, w)
+			expect("round 2's completion and the next read", phase.Reviewing, "", 1)
 		})
 	}
 }
 
 // Within one daemon process the read judges whether a review's author may decide once, as a
 // webhook's review is judged once when it is delivered: an outsider's approval of the head is
-// refused on the first pass, and after GitHub starts giving that account write access - past the
-// permission answer's own window - the next pass neither asks about it again nor lets the approval
+// refused on the first read, and after GitHub starts giving that account write access - past the
+// permission answer's own window - the next read neither asks about it again nor lets the approval
 // end the round. Its webhook, judged at delivery, would not have ended it either.
 func TestTheReadJudgesEachReviewOnce(t *testing.T) {
 	pool := isolatedOutboxPool(t)
@@ -422,13 +422,13 @@ func TestTheReadJudgesEachReviewOnce(t *testing.T) {
 	}, &outsiderReads).URL
 	w := reviewReadRuntime(pool, api)
 	w.permissionTTL = time.Nanosecond
-	w.readRequiredChecks(context.Background())
+	readCapture(t, w)
 	if got, _ := capturePhase(t, pool); got != phase.Reviewing || outsiderReads.Load() != 1 {
-		t.Fatalf("after the first pass the issue is in %s and the outsider's permission was read %d times, want reviewing and once", got, outsiderReads.Load())
+		t.Fatalf("after the first read the issue is in %s and the outsider's permission was read %d times, want reviewing and once", got, outsiderReads.Load())
 	}
 	promoted.Store(true)
 	time.Sleep(time.Millisecond)
-	w.readRequiredChecks(context.Background())
+	readCapture(t, w)
 	if got, _ := capturePhase(t, pool); got != phase.Reviewing {
 		t.Fatalf("after the account was given write access the issue is in %s, want reviewing: its approval was judged when the account could not write", got)
 	}
@@ -441,7 +441,7 @@ func TestTheReadJudgesEachReviewOnce(t *testing.T) {
 // login. The read tells the reviewer's own review from any other review-App session's as the
 // webhook's delivery does (workflow.Engine.DecidesRound with the reviewer's recorded session): a
 // review-App review whose Legion footer names another session is set aside, judged once and kept as
-// refused, and the reviewer's own, though older, decides the round. Without it the pass would apply
+// refused, and the reviewer's own, though older, decides the round. Without it the read would apply
 // the controller's review every two minutes and the workflow set it aside every time.
 func TestTheReadSetsAsideAReviewAppReviewFromAnotherSession(t *testing.T) {
 	pool := isolatedOutboxPool(t)
@@ -460,9 +460,9 @@ func TestTheReadSetsAsideAReviewAppReviewFromAnotherSession(t *testing.T) {
 			listedReviewWithBody(41, reviewReadApp, "CHANGES_REQUESTED", "code", "2026-10-08T22:15:52Z", footer("ses-controller")) + "]"
 	}, &reads).URL
 	w := reviewReadRuntime(pool, api)
-	w.readRequiredChecks(context.Background())
+	readCapture(t, w)
 	if got, _ := capturePhase(t, pool); got != phase.Accepting {
-		t.Fatalf("after the pass the issue is in %s, want accepting: the reviewer's own approval decides, the controller's newer request for changes is set aside", got)
+		t.Fatalf("after the read the issue is in %s, want accepting: the reviewer's own approval decides, the controller's newer request for changes is set aside", got)
 	}
 	if got, _ := reviewerDecision(t, pool); got != "approved" {
 		t.Fatalf("the round's recorded decision = %q, want approved", got)
@@ -470,17 +470,17 @@ func TestTheReadSetsAsideAReviewAppReviewFromAnotherSession(t *testing.T) {
 	if !w.refusedReviews[41] || w.refusedReviews[40] {
 		t.Fatalf("refused reviews = %v, want the controller's review 41 alone", w.refusedReviews)
 	}
-	w.readRequiredChecks(context.Background())
+	readCapture(t, w)
 	if got, _ := capturePhase(t, pool); got != phase.Accepting || reads.Load() != 2 {
-		t.Fatalf("after the second pass the issue is in %s and the reviews were read %d times, want accepting and twice: the set-aside review is not judged again", got, reads.Load())
+		t.Fatalf("after the second read the issue is in %s and the reviews were read %d times, want accepting and twice: the set-aside review is not judged again", got, reads.Load())
 	}
 }
 
-// GitHub's rate limit on the reviews read ends the pass there, as it ends the pass on any of its
+// GitHub's rate limit on the reviews read ends the read there, as it ends the read on any of its
 // reads: every later read on the implement App's installation meets the same limit, and the panes
 // share it. The stand-in answers the first pull request's own read and refuses its reviews read; a
 // second open pull request is recorded, and nothing of either is read after the refusal.
-func TestARateLimitOnTheReviewsReadEndsThePass(t *testing.T) {
+func TestARateLimitOnTheReviewsReadEndsTheRead(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	seedCapture(t, pool, phase.Reviewing, "needs_review", completedReviewer("review-1"))
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
@@ -506,8 +506,8 @@ func TestARateLimitOnTheReviewsReadEndsThePass(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	reviewReadRuntime(pool, server.URL).readRequiredChecks(context.Background())
+	readCapture(t, reviewReadRuntime(pool, server.URL))
 	if len(paths) != 2 || paths[1] != "/repos/acme/widgets/pulls/"+strings.TrimPrefix(paths[0], "/repos/acme/widgets/pulls/")+"/reviews" {
-		t.Fatalf("the pass read %q, want one pull request and then its reviews, and nothing after the rate limit", paths)
+		t.Fatalf("the read read %q, want one pull request and then its reviews, and nothing after the rate limit", paths)
 	}
 }

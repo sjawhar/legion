@@ -33,7 +33,7 @@ func TestATaskInterruptedByADeathIsResentToTheRelaunchedAgent(t *testing.T) {
 		if resent.DeliveryID == sent {
 			t.Fatalf("death %d: the task was re-sent as %s, the id the dead process's turn ran under", death, sent)
 		}
-		if want := interruptedTask + "implement the plan"; resent.Message != want {
+		if want := interruptedTask(h.claim().LastDeathCause) + "implement the plan"; resent.Message != want {
 			t.Fatalf("death %d: re-sent %q, want %q", death, resent.Message, want)
 		}
 		if p := h.pending(); !p.ConfirmedAt.IsZero() || p.ID != resent.DeliveryID {

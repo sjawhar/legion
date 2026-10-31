@@ -30,6 +30,11 @@ type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
 	SetStatus(ctx context.Context, key, status string) (Issue, error)
+	// SetStatusAt is SetStatus on the issue's sequence as the caller read it, so a change Dispatch
+	// recorded since that read is refused rather than overwritten: the daemon's own queued writes
+	// (the outbox's status row) go through it, while a route that writes a status on a person's or
+	// an architect's command takes SetStatus, having read nothing to be overtaken.
+	SetStatusAt(ctx context.Context, issue Issue, status string) (Issue, error)
 	HandOver(ctx context.Context, issue Issue, status string) error
 	PostMessage(ctx context.Context, key, body string) error
 	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)

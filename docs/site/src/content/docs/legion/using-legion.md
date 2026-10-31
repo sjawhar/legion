@@ -77,8 +77,7 @@ options and a recommendation, and it reaches your Inbox.
    asks again.
 
 No code is written until you approve. The approval is for that version of the spec: if the spec
-changes afterwards, you are asked again, and Legion will not send `READY` for the change until you
-approve the new version. (A deployment can turn the design gate off with `gates.design: off`; then
+changes afterwards, you are asked again. (A deployment can turn the design gate off with `gates.design: off`; then
 the work starts as soon as the spec is written, and nobody is asked.)
 
 If a phase gets stuck, or the architect hits something only a person can decide, it asks you the
@@ -118,19 +117,16 @@ the default branch; the pull request's file list shows them only until that comm
 
 ## Merge
 
-When the change is tested, reviewed and approved, the merger sends **READY**. The daemon accepts it
-on the approved head plus retro's notes, reading no check of that head, and posts it on the
-Dispatch issue as one message:
+When the change is tested, reviewed and approved, the merger merges the pull request itself, as
+the implement App and at the head it read, which it names as the head GitHub must match. It
+writes the squash commit's message itself — the pull request's title and number, and an empty
+body — so GitHub's own default, which joins every commit message of the branch, never puts
+Legion's internal trailers on your default branch. On a base with a merge queue it enqueues the
+pull request instead.
 
-```text
-READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pull request url>)
-```
-
-followed by the pull request's outcome and its known risks. The daemon then submits the merge
-itself, and the repository's branch protection and code-owner rules decide when it lands: a review
-only you can give is waited for. A pull request the project's `merge.by_hand` paths match is
-merged by a person instead, and its READY says so. Nothing in Legion approves a pull request on
-your behalf or changes who may merge.
+The repository's branch protection and code-owner rules decide when it lands: a review
+only you can give is waited for. Legion turns auto-merge on nowhere, approves no pull request on
+your behalf and changes nobody's right to merge.
 
 The merge closes the issue: it moves to `done` the moment GitHub reports the pull request merged.
 A root with work still running beneath it is the exception: its merge is recorded and the issue
@@ -167,8 +163,8 @@ architect is told who wrote it; only a person's move in the dashboard, the contr
 | `icebox` | a person or the controller | Parked for the long term. Legion does not run it. |
 | `backlog` | a person or the controller | Should not run now: it waits on a decision or a deploy. Legion does not run it. |
 | `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child in `todo` runs under its tree. |
-| `in_progress` | the daemon | Admitted: the architect is writing the spec or waiting for your approval, or the planner or implementer is working. Work sent back by a failed test, red CI or a review returns here. |
+| `in_progress` | the daemon | Admitted: the architect is writing the spec or waiting for your approval, or the planner or implementer is working. Work sent back by a failed test, a review, or a head that conflicts with its base returns here. |
 | `testing` | the daemon | The implementer opened the pull request and finished; the tester is checking the change. |
 | `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing, and once it approves the architect reads the evidence and accepts the change or sends it back. Your GitHub review counts now. |
-| `retro` | the daemon | The architect accepted. The issue stays here through retro, `READY` and the wait for the merge — and, for a root whose tree still runs, through the wait between its merge and its close. |
+| `retro` | the daemon | The architect accepted. The issue stays here through retro and the merge — and, for a root whose tree still runs, through the wait between its merge and its close. |
 | `done` | the daemon at the merge, or a person | Finished: the pull request merged. A root whose tree is still running waits in `retro` until the last of it is done or parked, then closes. The implementer's production check follows on the pull request; the tree lingers, then closes. |

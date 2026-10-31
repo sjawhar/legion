@@ -665,8 +665,10 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	if _, touched := api.deleted(rootSandbox); touched || api.pvcRequests != 0 {
 		t.Fatalf("the child's close deleted the root's Sandbox (%t) or sent %d PVC requests, want neither", touched, api.pvcRequests)
 	}
-	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != "" || got.SessionFile != "" || got.Locator != nil {
-		t.Fatalf("done child's planner after the close = %+v, want retired with no session and no locator", got)
+	// The claim keeps the session it recorded: a done issue is reopened, and its roles are then
+	// started again on the same issue (dispatch://INFRA-714 R8).
+	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != "saved-planner" || got.Locator != nil {
+		t.Fatalf("done child's planner after the close = %+v, want retired with its session and no locator", got)
 	}
 	if got := storedClaim(architect.Token); got.State != supervise.StateWorking || got.Session != "saved-architect" {
 		t.Fatalf("root architect after the child's close = %+v, want it working with its session", got)
@@ -701,7 +703,8 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	}
 
 	// (b) The done child set back to todo re-enters under its live tree and its planner starts
-	// again: a fresh spawn into a new Sandbox whose workspace-init expects no volume. The fixture
+	// again: a new Sandbox whose workspace-init expects no volume, resuming the planner's own
+	// recorded session. The fixture
 	// runs no controller, so the launch ends at its wait for a pod; what it asked of the API is
 	// what the assertion reads.
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-todo", intake.DispatchIssue{Key: done.Key, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.updated", Status: "todo", Title: done.Title, Parent: root.Key, Rank: "V"}, engine, admission); err != nil {
@@ -719,7 +722,11 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	if !slices.Contains(env, "PATH") {
 		t.Fatalf("the re-entered child's workspace-init environment %v names no PATH; the Running patch wrote no pod template", env)
 	}
-	if got := storedClaim(planner.Token); got.SessionFile != "" {
-		t.Fatalf("re-entered child's planner = %+v, want a fresh launch with no session to resume", got)
+	// The pod and its disk are new, and the session is not: the planner that worked this issue
+	// resumes the session it recorded, where a fresh agent would have read none of its own earlier
+	// work (dispatch://INFRA-714 R8). The session lives in the session store, not on the disk the
+	// close deleted.
+	if got := storedClaim(planner.Token); got.SessionFile != "/legion/sessions/planner.jsonl" {
+		t.Fatalf("re-entered child's planner = %+v, want the session it recorded kept for its resume", got)
 	}
 }

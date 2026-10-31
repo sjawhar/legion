@@ -1232,7 +1232,7 @@ one whose label is taken off leaves the line with no linger, so its Sandbox goes
 Taken out by its label, once it is `todo` with the label again it waits in the line and is admitted into the phase it stood in, continuing its run in a pod of its own from the issue's branch:
 its roles' sessions continue from the session table, and whatever the pod it had was working on went with that pod's disk ([The disk dies with its pod](#the-disk-dies-with-its-pod)).
 Taken out by a status, it comes back as any root does after its linger:
-a new generation at `admitted`, its design gate, handoffs and pending READY cleared (`ClearTreeGeneration`), its architect starting over from the issue's branch.
+a new generation at `admitted`, its design gate and handoffs cleared (`ClearTreeGeneration`), its architect starting over from the issue's branch.
 A hand-over fence counts only while the child's record still names the tree the fence was written for, and a hand-over Dispatch refuses permanently drops its fence with its row (`finishRefused`, `internal/daemon/outbox.go`).
 Past that the Sandbox is an orphan, which the sweep deletes, fenced and logged, taking its pod and the disk that pod owns.
 A child re-admitted after its old tree's cleanup took its Sandbox, one that had left the workflow before the close (a parked child the close does not hand over), finds no Sandbox and makes one at its next launch;
@@ -4645,14 +4645,17 @@ The reverse, a project moved from pods onto one tmux host, keeps its store:
 the Go tmux daemon takes over the Kubernetes daemon's claims once every pod of the project is gone and its `legion.yaml` sets `runtime.tmux.take_over: kubernetes` (docs/deployment.md, "Moving a project onto tmux").
 
 **`--resume` keeps the same-agent invariant, and the table is what keeps it.**
-The tmux runtime looks for the recorded session file on the daemon host, in the other folders of the same sessions directory and of the pane's own sessions directory too, and refuses to spawn when it is found nowhere (a silent fresh agent would lose the session), the launch charged and the session kept.
-The one exception holds while `take_over` is set:
-every session found nowhere starts a fresh agent that registers its own, logged and charged nothing, because neither the recorded path nor the previous incarnation tells a claim taken over from a pod, whose session may never have been carried, from a session of this host's own (docs/deployment.md, "Moving a project onto tmux", step 5, which is when to remove the key).
+The tmux runtime looks for the recorded session file on the daemon host, in the other folders of the same sessions directory and of the pane's own sessions directory too.
+A session found nowhere is a session no store holds, whether or not `take_over` is set:
+the claim starts a fresh agent, charged nothing, and the loss is posted on the issue and told to its architect, to the controller and to the new agent in its own prompt (dispatch://INFRA-714 R8), so a lost session is loud rather than silent.
 Oh My Pi itself does not refuse: verified against the pinned build (`omp --resume=<missing path> --mode rpc`), it exits 0, answers `ready`, and runs as a fresh agent, with no error frame and no mention of the file.
 Under Kubernetes there is no file to look for and no init container that looks for one:
 every session is a row in the session database, and the pod's disk, which dies with the pod, never holds a transcript.
 The role's own launcher makes the check instead, inside the pod and before it starts the child:
-it looks the recorded session up in the table through the mounted URL file and refuses the start when the table holds none (`resume session <path>: the session table holds no such session`), which the daemon counts as a launch failure, three of them retiring the claim.
+it looks the recorded session up in the table through the mounted URL file and names which of two things it met in one field of its start answer, `session`, rather than in prose.
+A table that holds no such session (`gone`) is that session gone, and the daemon starts the fresh agent above.
+A table that does not exist, or a store that does not answer (`store-unreachable`), is a deployment fault that says nothing about the session:
+the claim keeps it, nothing is charged, the start is tried again every minute, and the issue and the controller are told at once and then hourly until the store answers.
 Should a resume reach Oh My Pi with its row gone anyway, it starts a fresh session with a new id that the daemon refuses to register (`409 Worker respawn must resume the same agent session`), so the pod exits and the launch failure is counted there.
 Either way the respawn fails loudly rather than quietly starting a new agent under the old role token (see [Selecting the store](#selecting-the-store)).
 
@@ -4794,7 +4797,7 @@ The controller is the one Legion session a person talks to.
 `controller: daemon` needs `dispatch_url` (`controller: daemon needs dispatch_url: …`), and the loader refuses any value but the two.
 
 Under either mode a controller reads its daemon's resolved settings
-— `max_fix_attempts`, `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential, credential source and credential file path left out
+— `review_round_cap`, `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential, credential source and credential file path left out
 — from `read_state`'s `settings` (contract 35, LEGION-791), never from the ConfigMap in `legion-system`, which `legion-worker` may not read.
 
 ### Controller liveness

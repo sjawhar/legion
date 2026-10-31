@@ -1,30 +1,29 @@
 ---
 name: legion-retro
-description: "Use when the Legion daemon starts you, the implementer, on `Phase: retro` after the architect accepted the reviewed head, or when READY was refused `READY_HEAD_CARRIES_HANDOFFS` and the issue came back to retro. Also when the `.legion/<issue>/` handoff directory must be removed from the head that merges."
+description: "Use when the Legion daemon starts you, the implementer, on `Phase: retro` after the architect accepted the reviewed head, or when the merger found the head still carrying `.legion/<issue>/` and the issue came back to retro. Also when the `.legion/<issue>/` handoff directory must be removed from the head that merges."
 ---
 
 # Legion retro
 
 If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-Retro runs on the reviewed head, after the architect's acceptance and before the merger's READY
-(its `handoff_complete` with `ready: true`, which the daemon checks;
-`skill://legion-worker/references/merge-gate.md` has the whole order). `<issue>` is your
+Retro runs on the reviewed head, after the architect's acceptance and before the merger merges it
+(`skill://legion-worker/references/merge-gate.md` has the whole order). `<issue>` is your
 `LEGION_ISSUE`. Run steps 1-8 even when the change looks mechanical; each gives its reason.
 
-## What READY refuses
+## What sends the issue back here
 
-- **A change after the approved head outside `docs/solutions/` and `.legion/<issue>/`**
-  (`READY_UNREVIEWED_CHANGE`): the daemon diffs the reviewer's approved head against the head on
-  GitHub, and the issue goes back to the reviewer for another review. Commits that change only
-  `docs/solutions/`, and the one that removes `.legion/<issue>/`, leave the approval standing.
-- **A head that still holds `.legion/<issue>/`** (`READY_HEAD_CARRIES_HANDOFFS`), because a squash
-  merge would carry the handoffs onto the base, where nothing reads them. Every implement, test or
+- **A head that still holds `.legion/<issue>/`**, because a squash merge would carry the handoffs
+  onto the base, where nothing reads them. The merger reads the head for that directory before it
+  merges and sends the issue back to retro rather than merging it; nothing in the daemon reads the
+  head for it, so that read is the only one. Every implement, test or
   review phase after a retro writes the directory again, so every retro ends with the removal.
+- Nothing else: no Legion check compares the head that merges with the one the review approved, so
+  whether a push made after the approval must be reviewed again is the repository's own rule.
 
 Work on the existing issue branch: never rebase it onto another base, never make another branch or
-bookmark, and push only fast-forward, because READY reads this branch's head and a forced push can
-drop another role's commits. Reordering your own unpushed commits (the `jj rebase -r @- -B` in
+bookmark, and push only fast-forward, because the merger merges this branch's head and a forced
+push can drop another role's commits. Reordering your own unpushed commits (the `jj rebase -r @- -B` in
 `pr-body-content.md`) is not a rebase of the branch. The one exception is the rewrite in
 `skill://legion-retro/references/pr-body-content.md#a-pushed-head-that-carries-skip-checks`.
 
@@ -61,7 +60,7 @@ missing proof goes back as step 1 says. The Dispatch message (step 7) is for a f
 4. **Commit the removal last**, after every learning commit, touching nothing else:
 
    ```bash
-   cd -- "$LEGION_WORKSPACE" && if [ -e ".legion/${LEGION_ISSUE:?}" ]; then rm -r -- ".legion/${LEGION_ISSUE:?}" && jj -R "$LEGION_WORKSPACE" split -m "retro: remove .legion/${LEGION_ISSUE:?}/ before READY" ".legion/${LEGION_ISSUE:?}"; fi
+   cd -- "$LEGION_WORKSPACE" && if [ -e ".legion/${LEGION_ISSUE:?}" ]; then rm -r -- ".legion/${LEGION_ISSUE:?}" && jj -R "$LEGION_WORKSPACE" split -m "retro: remove .legion/${LEGION_ISSUE:?}/ before the merge" ".legion/${LEGION_ISSUE:?}"; fi
    ```
 
    When an earlier retro removed it and no phase ran since, this does nothing.
@@ -112,8 +111,8 @@ missing proof goes back as step 1 says. The Dispatch message (step 7) is for a f
 ## Before you complete
 
 - Before the push, `jj -R "$LEGION_WORKSPACE" diff --from "legion/${LEGION_ISSUE:?}@origin" --to @- --name-only`
-  lists only `docs/solutions/` and `.legion/<issue>/` paths. It covers your commits; READY checks
-  the approved head the review round recorded, which `read_record` does not show.
+  lists only `docs/solutions/` and `.legion/<issue>/` paths: retro's commits are the only ones that
+  leave the reviewer's approval standing, and the repository's own rules decide the rest.
 - `jj -R "$LEGION_WORKSPACE" file list -r @- "root:.legion/${LEGION_ISSUE:?}"` prints nothing.
 - Each body line you added or changed that says work was done names work your commits did.
 - `gh pr view <n> -R <owner>/<repo> --json headRefOid -q .headRefOid` is your `@-`, and the

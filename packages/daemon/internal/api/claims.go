@@ -221,6 +221,97 @@ func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// turnOutcome is a producer reporting how one turn of its agent ended, clean or refused by the
+// provider, with its own sequence within the launch generation. The daemon keeps the report and
+// derives the claim's run of refused turns from the reports it holds (supervise's turnOutcome),
+// failing the claim once that run reaches the launch failure limit; the answer says what the run
+// now is and whether this report failed the claim.
+//
+// The caller is the claim's, proved one of two ways. An Oh My Pi session's pi-legion holds the
+// registration's secret and names the claim with it, as the ready and the exit do. The Claude
+// bridge holds no secret — its pane's registration is claude-envoy's, inside Claude Code, and the
+// secret never leaves that process — so it presents the launch's own boot token, the 0600 file
+// its pane is told, which the daemon resolves to that launch's claim exactly as a registration's
+// is resolved. A body carrying both, or neither, is refused: each says who is calling, and a
+// caller that cannot say is not answered.
+func (s *server) turnOutcome(w http.ResponseWriter, r *http.Request) {
+	var req claim.TurnOutcomeRequest
+	if !s.readBody(w, r, &req, s.claimSecretCheck) || !requireGeneration(w, req.Generation) {
+		return
+	}
+	if req.Sequence == 0 {
+		// Zero is how a body that named no sequence decodes, and every turn of such a producer
+		// would collide on one key and be counted once, so it is refused rather than recorded.
+		writeJSON(w, http.StatusBadRequest, errorBody("sequence is required, counted from 1 within the generation"))
+		return
+	}
+	if req.Outcome != claim.TurnClean && req.Outcome != claim.TurnRefused {
+		writeJSON(w, http.StatusBadRequest, errorBody(fmt.Sprintf("outcome %q is neither %q nor %q", req.Outcome, claim.TurnClean, claim.TurnRefused)))
+		return
+	}
+	token, m, ok := s.turnOutcomeCaller(w, r, req)
+	if !ok {
+		return
+	}
+	ctx, decided := s.decision(r, token)
+	defer decided()
+	err := m.Handle(ctx, supervise.RequestTurnOutcome{
+		Claim: token, Generation: req.Generation, Sequence: req.Sequence,
+		Refused: req.Outcome == claim.TurnRefused, Message: req.Message,
+	})
+	if err != nil {
+		s.claimFailure(w, "turn outcome", token, err)
+		return
+	}
+	c := m.Claim()
+	run := c.RefusedRun()
+	if c.State == supervise.StateFailed {
+		s.log.Error("api: a claim's provider refused its turns out of their budget", "claim", token,
+			"generation", req.Generation, "sequence", req.Sequence, "refusedRun", run, "failure", c.Failure)
+	}
+	writeJSON(w, http.StatusOK, claim.TurnOutcomeResponse{RefusedRun: run, Failed: c.State == supervise.StateFailed})
+}
+
+// turnOutcomeCaller is the claim a turn outcome is reported for and its machine: the claim the
+// body names, authenticated by the registration's secret, or the claim the launch's boot token
+// resolves to. It writes the refusal itself when the body names neither identity, both, or one
+// the daemon does not recognise.
+func (s *server) turnOutcomeCaller(w http.ResponseWriter, r *http.Request, req claim.TurnOutcomeRequest) (claim.Token, *supervise.Machine, bool) {
+	byClaim := req.ClaimToken != "" || req.Secret != "" || req.SessionID != ""
+	if byClaim == (req.BootToken != "") {
+		writeJSON(w, http.StatusBadRequest, errorBody("a turn outcome names its caller with claimToken, sessionId and secret, or with bootToken; give one"))
+		return "", nil, false
+	}
+	if req.BootToken != "" {
+		launch, known, err := s.bootTokens.Resolve(r.Context(), req.BootToken)
+		if err != nil {
+			s.log.Error("api: resolve a turn outcome's boot token", "error", err)
+			writeJSON(w, http.StatusInternalServerError, errorBody("turn outcome failed: the daemon could not resolve the boot token"))
+			return "", nil, false
+		}
+		m, supervised := s.supervisor.Machine(launch.Claim)
+		if !known || !supervised {
+			writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
+			return "", nil, false
+		}
+		return launch.Claim, m, true
+	}
+	if !requireFields(w,
+		field{"claimToken", string(req.ClaimToken)}, field{"sessionId", req.SessionID}, field{"secret", req.Secret},
+	) {
+		return "", nil, false
+	}
+	m, ok := s.authenticated(req.ClaimToken, req.Secret)
+	if !ok {
+		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
+		return "", nil, false
+	}
+	if s.refuseIfStaleClaim(w, r, m.Claim()) {
+		return "", nil, false
+	}
+	return req.ClaimToken, m, true
+}
+
 // authenticated is the claim's machine when secret is the one its registration was issued. A
 // claim the daemon does not supervise, one no agent has registered on, and a wrong secret all
 // answer the same: nothing about the claim is told to a caller that cannot prove it holds it.

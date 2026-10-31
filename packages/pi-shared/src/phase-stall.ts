@@ -39,8 +39,17 @@ export type PhaseStallInput =
   /** The settling assistant message ran at least one real tool call (`assistantRanTool`). */
   | { readonly kind: "tool-call" }
   | { readonly kind: "settle"; readonly lastAssistantText: string }
+  /** The turn ended because the provider refused it, not because the worker had finished saying
+   * something: `message` is the provider's own words for the refusal (Oh My Pi's `errorMessage`
+   * beside an `error` stop, Claude Code's `StopFailure` error text). The worker never read the
+   * last reminder and would not read the next one either, so this earns none. */
+  | { readonly kind: "refused"; readonly message: string }
   /** The host has just delivered a reminder to the worker. */
   | { readonly kind: "reminded" };
+
+/** How one turn ended, which is the whole of what the host classifies for `PhaseReminder.settle`:
+ * the worker's own settling words, or the provider's refusal of the turn. */
+export type TurnEnd = Extract<PhaseStallInput, { kind: "settle" | "refused" }>;
 
 export interface PhaseStallStep {
   readonly state: PhaseStallState;
@@ -99,6 +108,14 @@ export function stepPhaseStall(state: PhaseStallState, input: PhaseStallInput): 
     case "tool-call":
       // The worker is working, whatever it is working on: nothing is unanswered any more.
       return { state: { state: state.state, count: 0 } };
+    case "refused":
+      // The provider, not the worker, ended this turn: nothing was read and nothing was said, so
+      // the count stands where the last real turn left it and no reminder is earned. Reminding a
+      // session the provider is refusing only buys another refusal, which is what left the
+      // implementer of dispatch://INFRA-264 reminded for ever. The daemon counts these turns
+      // instead (`POST /legion/v1/claims/turn-outcome`) and fails the claim, so the retry starts
+      // a session that can be answered.
+      return { state };
     case "reminded":
       return state.state === "closed"
         ? { state }
@@ -185,6 +202,32 @@ export function assistantRanTool(message: unknown): boolean {
       "type" in block &&
       (block.type === "toolCall" || block.type === "tool_use")
   );
+}
+
+/** The provider's refusal of the turn an assistant message ended, or undefined when that message
+ * is not one: Oh My Pi stops such a reply with `error` and words it in `errorMessage`
+ * (`AssistantMessage` in `src/omp-host.d.ts`; `packages/pi-envoy/extensions/askgate/askgate.ts`
+ * reads the same pair). A refusal the host could not word still has to read as a refusal, so the
+ * stop reason alone stands in for the words. Claude Code never comes here: its own `StopFailure`
+ * hook is what says a turn ended on an API error, and hands the error text with it. */
+export function assistantRefusal(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null) return undefined;
+  if (!("stopReason" in message) || message.stopReason !== "error") return undefined;
+  const worded =
+    "errorMessage" in message && typeof message.errorMessage === "string"
+      ? message.errorMessage
+      : "";
+  return worded === "" ? "error" : worded;
+}
+
+/** How the turn one Oh My Pi settling message ended, as the machine takes it: the provider's
+ * refusal when it refused the turn, and otherwise what the worker said. One classification, so a
+ * refused turn is an input of the machine rather than a check on its answer. */
+export function turnEndOf(message: unknown): TurnEnd {
+  const refusal = assistantRefusal(message);
+  return refusal === undefined
+    ? { kind: "settle", lastAssistantText: assistantText(message) }
+    : { kind: "refused", message: refusal };
 }
 
 /** The state one recorded entry holds, or undefined when it holds none this build understands.

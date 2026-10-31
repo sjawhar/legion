@@ -1,16 +1,19 @@
 package supervise
 
 // A child issue closed as done releases its volume at once (workflow's leave), so its claims are
-// closed rather than suspended: each ends as a tree close ends it, and the session it recorded —
-// which lived on the volume the close releases — goes with it. The workspace is not lost: nothing is
-// recovered, and the issue's next run, re-entered by a person's todo, is a fresh spawn.
+// closed rather than suspended: each ends as a tree close ends it. The session each recorded is
+// kept, because a done issue is reopened — a person moves it back, a production check fails — and
+// its roles are then started again on the same issue; a session dropped here would start each as a
+// fresh agent that has read none of the work it is continuing (dispatch://INFRA-714 R8). The
+// session is a row in the session database rather than a file on the volume the close releases, so
+// it outlives both the pod and the workspace; a resume that cannot find it is the one case that
+// starts fresh, uncharged and reported (machine.go's start).
 
 import "testing"
 
 // The claim is released as a tree close releases it — with its process where one runs, with no
-// locator where none does — and retires with no session, in memory and in the store, so nothing
-// of the issue's sessions is left on it.
-func TestAnIssueCloseRetiresTheClaimAndDropsItsSessionWithoutALostWorkspace(t *testing.T) {
+// locator where none does — and retires with the session it recorded, in memory and in the store.
+func TestAnIssueCloseRetiresTheClaimAndKeepsItsSessionForAReopen(t *testing.T) {
 	for _, state := range []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle, StateSuspended} {
 		t.Run(string(state), func(t *testing.T) {
 			h := newHarness(t)
@@ -32,11 +35,11 @@ func TestAnIssueCloseRetiresTheClaimAndDropsItsSessionWithoutALostWorkspace(t *t
 				t.Errorf("released %+v, want the process %+v", released, before.Locator)
 			}
 			h.wantState(StateRetired)
-			if c := h.claim(); c.Session != "" || c.SessionFile != "" || c.Locator != nil {
-				t.Errorf("claim %+v after the close, want it retired with no session and no locator", c)
+			if c := h.claim(); c.Session != session || c.SessionFile != sessionFile || c.Locator != nil {
+				t.Errorf("claim %+v after the close, want it retired with its session and no locator", c)
 			}
-			if stored := h.store.load(testToken); stored.State != StateRetired || stored.Session != "" || stored.SessionFile != "" {
-				t.Errorf("stored %+v, want the retired claim with its session dropped", stored)
+			if stored := h.store.load(testToken); stored.State != StateRetired || stored.Session != session || stored.SessionFile != sessionFile {
+				t.Errorf("stored %+v, want the retired claim with its session kept", stored)
 			}
 		})
 	}
@@ -60,15 +63,15 @@ func TestAnIssueCloseWhoseReleaseFailsKeepsTheClaimForTheRetry(t *testing.T) {
 	h.rt.FailRelease(nil)
 	h.must(RequestIssueClose{Claim: testToken})
 	h.wantState(StateRetired)
-	if c := h.claim(); c.Session != "" || c.SessionFile != "" {
-		t.Fatalf("claim %+v after the retried close, want its session dropped", c)
+	if c := h.claim(); c.Session != session || c.SessionFile != sessionFile {
+		t.Fatalf("claim %+v after the retried close, want its session kept", c)
 	}
 }
 
-// A claim a tree close already retired keeps its session for a re-admission to resume; the issue's
-// close reaching it drops that session, since its volume goes, and asks nothing of the runtime. One
-// that records no session is left as it is.
-func TestAnIssueCloseOfARetiredClaimDropsTheSessionItKept(t *testing.T) {
+// A claim a tree close already retired keeps its session for a re-admission to resume, and the
+// issue's close reaching it changes nothing at all: it asks the runtime nothing and writes
+// nothing, since the session it would once have dropped is the session a reopen resumes.
+func TestAnIssueCloseOfARetiredClaimKeepsItsSessionAndWritesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateIdle)
 	h.must(RequestTreeClose{Claim: testToken})
@@ -82,29 +85,23 @@ func TestAnIssueCloseOfARetiredClaimDropsTheSessionItKept(t *testing.T) {
 	h.must(RequestIssueClose{Claim: testToken})
 
 	h.wantState(StateRetired)
-	if c := h.claim(); c.Session != "" || c.SessionFile != "" {
-		t.Errorf("claim %+v after the issue close, want its session dropped", c)
+	if c := h.claim(); c.Session != session || c.SessionFile != sessionFile {
+		t.Errorf("claim %+v after the issue close, want its session kept", c)
 	}
-	if stored := h.store.load(testToken); stored.Session != "" || stored.SessionFile != "" {
-		t.Errorf("stored %+v, want the session dropped", stored)
+	if stored := h.store.load(testToken); stored.Session != session || stored.SessionFile != sessionFile {
+		t.Errorf("stored %+v, want the session kept", stored)
 	}
 	if got := h.rt.Calls()[calls:]; len(got) > 0 {
 		t.Errorf("asked the runtime %v, want nothing of a retired claim", got)
 	}
-	if got := len(h.store.history()); got != puts+1 {
-		t.Errorf("wrote the claim %d times, want once for the dropped session", got-puts)
-	}
-
-	h.must(RequestIssueClose{Claim: testToken})
-	if got := len(h.store.history()); got != puts+1 {
-		t.Errorf("a second close of the claim wrote it %d more times, want nothing to write", got-puts-1)
+	if got := len(h.store.history()); got != puts {
+		t.Errorf("wrote the claim %d times, want nothing to write", got-puts)
 	}
 }
 
-// A closed claim relaunched by the workflow — the child set back to todo — is a fresh spawn
-// built for a claim with no session and no lost workspace: it provisions anew, expecting no volume,
-// rather than resuming a session the release deleted or recovering a workspace nothing lost.
-func TestAClaimAnIssueCloseRetiredRelaunchesFresh(t *testing.T) {
+// A closed claim relaunched by the workflow — the child set back to todo — resumes the session it
+// kept, so the worker that continues the reopened issue is the one that worked it.
+func TestAClaimAnIssueCloseRetiredResumesItsSession(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateIdle)
 	h.must(RequestIssueClose{Claim: testToken})
@@ -113,11 +110,10 @@ func TestAClaimAnIssueCloseRetiredRelaunchesFresh(t *testing.T) {
 	h.must(RequestRetry{Claim: testToken})
 
 	h.wantState(StateLaunching)
-	h.wantCalls("Resume", 0)
-	if last := h.rt.Calls()[len(h.rt.Calls())-1]; last.Method != "Spawn" || last.Spec.ResumeSessionFile != "" {
-		t.Errorf("the relaunch was %s %+v, want a fresh spawn", last.Method, last.Spec)
+	if last := h.rt.Calls()[len(h.rt.Calls())-1]; last.Method != "Resume" || last.Spec.ResumeSessionFile != sessionFile {
+		t.Errorf("the relaunch was %s %+v, want a resume of %s", last.Method, last.Spec, sessionFile)
 	}
-	if built := h.specs.last(t); built.Session != "" || built.SessionFile != "" {
-		t.Errorf("the relaunch was built for %+v, want a claim with no session", built)
+	if built := h.specs.last(t); built.Session != session || built.SessionFile != sessionFile {
+		t.Errorf("the relaunch was built for %+v, want the claim's recorded session", built)
 	}
 }

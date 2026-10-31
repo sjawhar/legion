@@ -143,11 +143,19 @@ type rig struct {
 
 func newRig(t *testing.T, args ...string) *rig {
 	t.Helper()
+	return newRigWithEnv(t, nil, args...)
+}
+
+// newRigWithEnv is newRig with more of the pane's environment than a bare bridge needs: the
+// daemon, boot token file and generation a bridge reports its turns with (turnoutcome.go).
+func newRigWithEnv(t *testing.T, extra []string, args ...string) *rig {
+	t.Helper()
 	dir := t.TempDir()
 	record := filepath.Join(dir, "record")
 	argv := append([]string{os.Args[0]}, args...)
 	env := append(os.Environ(), fakeClaudeEnv+"=1", "FAKE_CLAUDE_RECORD="+record,
 		"CLAUDE_CONFIG_DIR="+dir, "LEGION_ROLE=implementer", "LEGION_ISSUE=ACME-7")
+	env = append(env, extra...)
 	cfg, err := Configure(argv, env)
 	if err != nil {
 		t.Fatal(err)

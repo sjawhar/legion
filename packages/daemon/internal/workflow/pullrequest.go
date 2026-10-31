@@ -16,16 +16,11 @@ import (
 )
 
 // pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
-// request: its fix and blocked attempts are what bound the review rounds, so they are carried
-// over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap, and
-// so is the counted attempt the cap holds a red in (classify.FixAttemptCapHolds), and its newest
-// review, which orders every review it will have, and what its base branch requires - its required
-// checks, and its required workflows with their runs at the head they were read at - as last read,
-// so the reopened head's first settlement is judged by all of it (classify.HeadChecks). A reopen at
+// request: it keeps its newest review, which orders every review it will have, and its pushes and
+// head run, which are facts about commits. A reopen at
 // another head than the recorded one - commits pushed while the pull request was closed, which no
 // synchronize reports - is judged as a synchronize to that head would be
-// (classify.AdvancePullRequestHead): onto a red verdict it counts, onto a green one, or onto a
-// settled head whose base branch requires nothing, it leaves the counted attempt. A new generation
+// (classify.AdvancePullRequestHead). A new generation
 // deletes a pull request that is not open, and all of them with it. An issue that waits to close on
 // its recorded merge (awaitsMerge) keeps that merge: GitHub never sends the merge again, so a pull
 // request opened from its branch is not recorded, while an issue set back to todo reruns and its
@@ -35,7 +30,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	pr := record.PullRequest{Issue: issue.Key, Repo: fact.Repo, Number: fact.Number, Branch: fact.Branch, HeadSHA: fact.HeadSHA,
+	pr := record.PullRequest{Issue: issue.Key, Repo: fact.Repo, Number: fact.Number, Branch: fact.Branch, Base: fact.Base, HeadSHA: fact.HeadSHA,
 		HeadUpdatedAt: fact.UpdatedAt, Failing: []string{}, State: record.PullRequestOpen}
 	recorded, err := e.store.PullRequest(ctx, tx, issue.Key)
 	if err != nil {
@@ -69,26 +64,29 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 			(recorded.State == record.PullRequestOpen && !fact.UpdatedAt.After(recorded.HeadUpdatedAt)) {
 			return intake.Result{}, nil
 		}
-		// The reopen keeps the count, the planned mark, the pushes - facts about commits - and the
-		// head run, so a push that arrives after the reopen settles the move the reopen made as it
-		// would have had it arrived first (classify.Reopen); the CI settlement starts afresh.
+		// The reopen keeps the pushes - facts about commits - and the head run, so a push that
+		// arrives after the reopen settles the move the reopen made as it would have had it
+		// arrived first (classify.Reopen); the CI settlement starts afresh.
 		carried := classify.Reopen(*recorded, fact.HeadSHA)
-		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = carried.FixAttempts, carried.BlockedAttempts, recorded.ReviewSeen
-		pr.HeadCounted, pr.PlannedRed, pr.Pushes, pr.Moves, pr.Run = carried.HeadCounted, carried.PlannedRed, carried.Pushes, carried.Moves, carried.Run
-		e.stampRun(&pr)
-		pr.Required, pr.Workflows, pr.WorkflowsHead = carried.Required, carried.Workflows, carried.WorkflowsHead
+		pr.ReviewSeen = recorded.ReviewSeen
+		pr.Pushes, pr.Moves, pr.Run = carried.Pushes, carried.Moves, carried.Run
+		// The reopen keeps the base and the push onto it the next read still owes an answer for: a
+		// pull request reopens onto the base it was opened on, and a fact that names none (a
+		// listener that predates the field) must not forget the recorded one.
+		pr.BaseMoved = recorded.BaseMoved
+		if pr.Base == "" {
+			pr.Base = recorded.Base
+		}
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
 		return intake.Result{}, err
 	}
-	if fact.Reopened {
-		if err := e.headMoved(ctx, tx, *issue, &pr, true); err != nil {
-			return intake.Result{}, err
-		}
-	}
 	if issue.Phase != phase.Implementing {
-		return intake.Result{}, nil
+		// A reopen lands under whatever phase the issue stands in, a reviewing round with an
+		// approval standing among them, and GitHub recomputes the merge state of a pull request
+		// it reopens, so the read is asked for from here too.
+		return intake.Result{}, e.askMergeState(ctx, tx, &pr)
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
 	if err != nil || row.HandoffCommit == "" {
@@ -98,18 +96,9 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 }
 
 // pullRequestSynchronized records the pull request's new head and what the move leaves standing
-// (classify.AdvancePullRequestHead, headMoved), and applies the CI rule to the new head first, in
-// whatever phase the issue is (standingRed). GitHub delivers a push and its synchronize in either
-// order, and either can complete the carry of a code head's red to the handoff head that replaced
-// it (classify.SettlementFor, carriedBack): the push's handler does when the head arrived first
-// (push), and the head's arrival does here when its push was classified handoff-only before the
-// head was known - the record then says the code head, red, and the arrival of the head above it
-// lets the red stand for it. The issue may be in testing, retro or merging by then, as the
-// implementer's completion waits on no webhook, so a red that stands sends the work back from
-// whichever phase, as the settlement would have had it arrived after both, and nothing below runs.
-// The rule is safe in every phase: a phase with no checks_red row - implementing, planning - moves
-// nothing (sendBack), in awaiting_merge the rule does not act (standingRed), and a code push between
-// the two heads carries nothing. In reviewing the head's arrival then re-asks the round
+// (classify.AdvancePullRequestHead). It reads no CI result: a settlement moves nothing,
+// in any phase, and the roles that work the issue were told what it said when it arrived (checks,
+// dispatch://INFRA-714/spec R1). In reviewing the head's arrival re-asks the round
 // (settleRound) once its push is known (classify.HeadPushKnown), since what the approval is judged
 // against is the push's paths: the approved head arriving over a handoff push lets the approval
 // stand, and the new head of a code push that was on its way shows the approval does not cover it
@@ -122,9 +111,9 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 // would have had the head arrived before the approval; otherwise a push lost outright would leave
 // the round stuck at the previous head with an approval of the head it now stands at. Any other
 // push lost outright leaves the round reported as it was, stuck at the previous head, which is told
-// once either way, and the required-checks pass's compare carries the approval when only the
+// once either way, and the per-issue read's compare carries the approval when only the
 // issue's handoffs changed (daemon's readApprovalCarry). A synchronize that moves nothing - a
-// redelivery, or one carrying no head - changes nothing the verdict or the round reads, and applies
+// redelivery, or one carrying no head - changes nothing the round reads, and applies
 // and re-asks nothing. A synchronize of a pull request recorded merged changes nothing either:
 // GitHub synchronizes only an open pull request, so one observed after the merge is older than it,
 // a late redelivery the merge's missing clock cannot fence, as a close or a reopen of a merged pull
@@ -133,10 +122,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 // or because it returned the branch to the recorded head, still names the
 // push its move took, by its sender, while a head run is open (classify.NameMove): an arrival whose
 // synchronize said it moved from a head the record never held waits for it. Late, it records that
-// alone, and moves and sets nothing else; when the replay it starts closes the run or changes the
-// judgement, the checks are decided as the push that did so would decide them (decideChecks): a
-// red held while the arrival waited is judged now, since the required-checks pass re-decides an
-// unchanged read only while a run's hold lapses (HoldLapsed), and the run is closed. In
+// alone, and moves and sets nothing else. In
 // implementing a head that arrives once the implementer has completed is the pull request its
 // completion waited for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
@@ -145,21 +131,25 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 		return intake.Result{}, err
 	}
 	prior := *pr
+	// GitHub names the base on every pull-request event, so a synchronize is also where a base
+	// retargeted on GitHub reaches the record; one that names none (a listener that predates the
+	// field, or the daemon's own read of the head) leaves the recorded base as it is, for the
+	// daemon's next read of the pull request to fill. A late redelivery that writes nothing
+	// records no base either, as it records nothing else.
+	if fact.Base != "" {
+		pr.Base = fact.Base
+	}
 	named := record.Named{Before: fact.Before, SHA: fact.HeadSHA, Sender: fact.Sender, At: fact.UpdatedAt}
 	if classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		if *pr = classify.NameMove(*pr, named); pr.Run == prior.Run {
 			return intake.Result{}, nil
 		}
-		if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
-			return intake.Result{}, err
-		}
-		return intake.Result{}, e.decideReplayed(ctx, tx, prior, pr)
+		return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
 	}
 	arrival := classify.Arrival{Before: fact.Before, Sender: fact.Sender, At: fact.UpdatedAt}
 	moved := classify.MovesBy(*pr, fact.HeadSHA)
 	if moved {
 		*pr = classify.AdvancePullRequestHead(*pr, arrival, fact.HeadSHA)
-		e.stampRun(pr)
 	} else {
 		*pr = classify.NameMove(*pr, named)
 	}
@@ -167,32 +157,26 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
-	if !moved {
-		if err := e.decideReplayed(ctx, tx, prior, pr); err != nil {
-			return intake.Result{}, err
-		}
-	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if err := e.headMoved(ctx, tx, *issue, pr, false); err != nil {
-		return intake.Result{}, err
-	}
-	if moved {
-		if sent, err := e.standingRed(ctx, tx, *issue, pr); err != nil || sent {
-			return intake.Result{}, err
-		}
-	}
 	switch issue.Phase {
 	case phase.Reviewing:
+		// A head that moved under a round whose approval still stands re-asks it; one that did
+		// not, and one whose push is still on its way, leave the round where it is. GitHub
+		// recomputes the merge state of a pull request whose head moved either way, so the read
+		// is asked for on every one of them.
 		if !moved {
-			return intake.Result{}, nil
+			return intake.Result{}, e.askMergeState(ctx, tx, pr)
 		}
 		if !classify.HeadPushKnown(prior, pr.HeadSHA) {
 			reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-			if err != nil || reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head != pr.HeadSHA {
+			if err != nil {
 				return intake.Result{}, err
+			}
+			if reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head != pr.HeadSHA {
+				return intake.Result{}, e.askMergeState(ctx, tx, pr)
 			}
 		}
 		return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
@@ -204,16 +188,6 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 		return intake.Result{}, e.implementationReady(ctx, tx, *issue, row, pr)
 	}
 	return intake.Result{}, nil
-}
-
-// decideReplayed decides the checks (decideChecks) when a fact that moved no head - a push, or a
-// synchronize naming a move late (classify.NameMove) - replayed pr's head run and the replay closed
-// it or changed the judgement prior held, as the settlement it replayed would have decided them.
-func (e *Engine) decideReplayed(ctx context.Context, tx pgx.Tx, prior record.PullRequest, pr *record.PullRequest) error {
-	if !classify.JudgementChanged(prior, *pr) && (prior.Run == nil || pr.Run != nil) {
-		return nil
-	}
-	return e.decideChecks(ctx, tx, pr, false)
 }
 
 func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.Result, error) {
@@ -251,43 +225,24 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 		e.warnOnCommit(ctx, "workflow: a pull request holds the most pushes of the same two heads on their way; the oldest after the first is let go",
 			"issue", pr.Issue, "pullRequest", pr.Number, "before", gone.Before, "after", gone.SHA)
 	}
-	// A push classified after its head arrived can complete the carry of a code head's red to the
-	// handoff head that replaced it (classify.SettlementFor), which sends the work back as the
-	// settlement would have (standingRed), in whatever phase the issue is: GitHub delivers a push
-	// webhook and its synchronize in either order, and the implementer's completion waits on no
-	// webhook, so the head can move and the issue enter testing, retro or merging before the push is
-	// classified. A phase with no checks_red row - implementing, planning - moves nothing (sendBack),
-	// and in awaiting_merge the rule does not act (standingRed). In reviewing the push can otherwise
-	// be what lets an approval of an earlier head stand, or what shows the current head carries code
-	// the approved one does not, so the round is settled again; the round's re-ask is reviewing's
-	// alone. A push for a head that has not arrived yet (its synchronize still on its way) leaves the
-	// record judging the head before it, whose red may be the one the push fixed: it acts only on a
-	// red it made stand, the carry it completed. A push naming the recorded head can change what the
-	// rule decides there and can be the first fact outside implementing to see a red that stood
-	// while implementing, so it applies the rule. A push that closes a head run, or whose replay
-	// changed the pull request's judgement (classify.ApplyPush), decides the checks as the
-	// settlement it replayed would have (decideChecks): a count taken back can lift the fix-attempt
-	// cap off the red that stands, a planned mark or a settlement can change what the red is, a red
-	// held while the run waited is judged now, a red the replay makes stand in awaiting_merge
-	// withdraws the READY, and a count the red stays held at is reported.
+	// A push changes which settlement stands for the head - it can complete the carry of a code
+	// head's settlement to the handoff head that replaced it (classify.SettlementFor) - and that
+	// moves nothing: the roles that work the issue were told what the settlement said when it
+	// arrived (checks, dispatch://INFRA-714/spec R1). In reviewing the push can be what lets an
+	// approval of an earlier head stand, or what shows the current head carries code the approved
+	// one does not, so the round is settled again; the round's re-ask is reviewing's alone.
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if classify.JudgementChanged(prior, *pr) || (prior.Run != nil && pr.Run == nil) {
-		if err := e.decideChecks(ctx, tx, pr, false); err != nil {
-			return intake.Result{}, err
-		}
-		if issue, err = e.store.Issue(ctx, tx, pr.Issue); err != nil || issue == nil {
-			return intake.Result{}, err
-		}
-	} else if fact.After == prior.HeadSHA || !classify.RedSendsBack(prior) {
-		if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
-			return intake.Result{}, err
-		}
-	}
 	if issue.Phase != phase.Reviewing {
 		return intake.Result{}, nil
+	}
+	// The carry is queued before the round is re-asked: a round the push leaves stuck below the
+	// approved head is told so now, and the row's fact ends it once GitHub answers that nothing
+	// outside the issue's handoffs changed.
+	if err := e.carryApproval(ctx, tx, *issue, pr); err != nil {
+		return intake.Result{}, err
 	}
 	return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
 }
@@ -301,14 +256,17 @@ func (e *Engine) reaskRound(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err != nil {
 		return err
 	}
-	_, err = e.settleRound(ctx, tx, issue, reviewer, pr, e.reviewRound(issue, reviewer, &prior), byPush)
-	return err
+	if _, err := e.settleRound(ctx, tx, issue, reviewer, pr, e.reviewRound(issue, reviewer, &prior), byPush); err != nil {
+		return err
+	}
+	return e.askMergeState(ctx, tx, pr)
 }
 
 // merged records the pull request merged, with its merge commit, whatever the issue's phase, and
-// closes an issue that awaited the merge (closeMerged). A merge before awaiting_merge is the
-// architect's to act on, as the shipped daemon routes it: it is told, and the merge closes the
-// issue once it reaches awaiting_merge (transition). A redelivered merge changes nothing.
+// closes an issue that reached merging (closeMerged): the merger merges, and the merge is what
+// ends that phase. A merge before merging is the architect's to act on, as the shipped daemon
+// routes it: it is told, and the merge closes the issue once it reaches merging (transition). A
+// redelivered merge changes nothing.
 func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMerged) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil || pr.State == record.PullRequestMerged {
@@ -322,11 +280,11 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if issue.Phase == phase.AwaitingMerge {
+	if issue.Phase == phase.Merging {
 		return intake.Result{}, e.closeMergedTelling(ctx, tx, *issue, pr)
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
-		Reason: fmt.Sprintf("pull request #%d merged while %s was in %s, not awaiting_merge", pr.Number, issue.Key, issue.Phase)})
+		Reason: fmt.Sprintf("pull request #%d merged while %s was in %s, not merging", pr.Number, issue.Key, issue.Phase)})
 }
 
 // waitingForTree is what a root's architect is told when the merge of its pull request finds the
@@ -338,8 +296,8 @@ func waitingForTree(issue string, number int, waiting []string) string {
 
 // closeMergedTelling closes issue on its merged pull request (closeMerged) and, when the close
 // waited for the rest of the tree instead, tells the root's architect once. It is the two places
-// a wait is newly entered — the merge arriving at an issue in awaiting_merge (merged), and an
-// issue reaching awaiting_merge on a pull request already merged (transition) — and nowhere else:
+// a wait is newly entered — the merge arriving at an issue in merging (merged), and an
+// issue reaching merging on a pull request already merged (transition) — and nowhere else:
 // notices never de-duplicate (notice writes a row per call) and closeMerged is re-entered on every
 // child's departure (closeAwaitingRoot) and on every boot (sweepMerged), so those two tell nobody.
 func (e *Engine) closeMergedTelling(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
@@ -351,7 +309,7 @@ func (e *Engine) closeMergedTelling(ctx context.Context, tx pgx.Tx, issue record
 		Reason: waitingForTree(issue.Key, pr.Number, waiting)})
 }
 
-// closeMerged closes issue, which awaits its merge (or is held from awaiting_merge, a hold the
+// closeMerged closes issue, which awaits its merge in merging (or is held from merging, a hold the
 // upgrade's data move left, which the close clears), on its merged pull request pr, and reports
 // the issues it waited for instead, empty when it closed. In a running tree the close is the
 // table's row to done (transition), which leaves: a child's close retires five of its claims and
@@ -372,10 +330,10 @@ func (e *Engine) closeMergedTelling(ctx context.Context, tx pgx.Tx, issue record
 // tree does not linger: a member of a tree that already lingers must still close at its merge,
 // which suspends nothing further and is the one thing that still moves there.
 func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) ([]string, error) {
-	if issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.AwaitingMerge {
-		issue.Phase, issue.Hold = phase.AwaitingMerge, nil
+	if issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.Merging {
+		issue.Phase, issue.Hold = phase.Merging, nil
 	}
-	if issue.Phase != phase.AwaitingMerge {
+	if issue.Phase != phase.Merging {
 		return nil, nil
 	}
 	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
@@ -401,7 +359,7 @@ func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue,
 	if err := e.status(ctx, tx, issue, row.Status); err != nil {
 		return nil, err
 	}
-	issue.Phase, issue.Hold, issue.ReadyPendingVersion = row.To, nil, nil
+	issue.Phase, issue.Hold = row.To, nil
 	if row.Status != "" {
 		issue.Status = row.Status
 	}
@@ -409,9 +367,6 @@ func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue,
 		return nil, err
 	}
 	e.logOnCommit(ctx, "workflow: a lingering tree's member closed at its merge", "issue", issue.Key, "tree", issue.Tree, "pullRequest", pr.Number, "status", issue.Status)
-	if err := e.disarmOpen(ctx, tx, issue.Key); err != nil {
-		return nil, err
-	}
 	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
 		if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "child-closed", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is done", issue.Key)}); err != nil {
 			return nil, err
@@ -459,7 +414,6 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	repeated := classify.RepeatedClose(*pr, fact.UpdatedAt)
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, classify.Arrival{}, fact.HeadSHA)
-		e.stampRun(pr)
 	}
 	pr.State = record.PullRequestClosed
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
@@ -475,13 +429,13 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 }
 
 // pullRequestMissing tells the architect that the issue's implementer completed and GitHub shows
-// no open pull request on its branch (intake.PullRequestMissing, the required-checks pass's
-// listing): the issue waits in implementing for a pull request record (implementationReady), and
+// no open pull request on its branch (intake.PullRequestMissing, the daemon's per-issue read of
+// GitHub): the issue waits in implementing for a pull request record (implementationReady), and
 // nothing else tells anybody it is missing - the implementer's completion was applied with GitHub
 // unread, or the pull request it read was closed without merging since. The notice names the
 // issue, the repository, the branch and the handoff commit, and says what to do. It tells nothing
 // when the issue has left implementing, its implementer's handoff is another commit, or an open or
-// merged pull request is recorded: the pass listed GitHub before the record changed, or the merge
+// merged pull request is recorded: the read asked GitHub before the record changed, or the merge
 // told the architect (merged) and a completion moves the issue on it.
 func (e *Engine) pullRequestMissing(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMissing) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)

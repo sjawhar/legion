@@ -48,6 +48,8 @@ const implementer: ClaimCapability = {
   issue: "LEGION-208",
   role: "implementer",
   secret: "U2VjcmV0",
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 1,
 }
 
 const grantRequest = {
@@ -70,7 +72,6 @@ test("declares the three phase-worker operations under one op, and names the Env
       issue: { type: "string" },
       summary: { type: "string" },
       verdict: { enum: ["pass", "pending", "fail"] },
-      ready: { type: "boolean" },
       reason: { type: "string" },
     },
     required: ["op"],
@@ -79,7 +80,7 @@ test("declares the three phase-worker operations under one op, and names the Env
     "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. handoff_complete",
   )
   expect(definition.description).toContain(
-    "arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. What a later phase needs",
+    "complete again. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. What a later phase needs",
   )
   expect(definition.description).toContain("with mcp__legion__envoy_publish.")
 })
@@ -110,7 +111,6 @@ test("handoff_complete finds the commit for the issue's phase and the claim's ro
         grantId: "grant-for-one-command",
         summary: "Implemented it.",
         verdict: "pass",
-        ready: false,
         commit: "a".repeat(40),
       },
     },

@@ -100,19 +100,68 @@ func (e *Engine) Ancestry(ctx context.Context, tx pgx.Tx, issue record.Issue, ch
 	return chain, nil
 }
 
+// tellReparented tells a root that ran as a tree of its own, and that a person has since made a
+// child of a live tree, that it stays its own tree: one message on the issue and one notice to
+// that tree's architect. Neither a release of children nor the admission sweep can take such a
+// root in (AdoptionRefusal), so without this the architect releases it, is refused by name once,
+// and the person who moved it is told nothing at all.
+//
+// It is told once per parent value: the parent it was told under is kept on the record
+// (record.Issue.ToldParent), so every later event of the issue under that same parent repeats
+// nothing — an issue's events are many, and a message per rank or title edit would be noise — and
+// a move under another live tree is told anew. Nothing else is told: a root that never ran is
+// adopted rather than refused, a parent inside the root's own tree is no move out of it, and a
+// parent whose tree is not live has no architect to tell.
+func (e *Engine) tellReparented(ctx context.Context, tx pgx.Tx, issue *record.Issue, fact intake.DispatchIssue) error {
+	if fact.Parent == "" || fact.Parent == issue.ToldParent || !claim.IsTreeRoot(issue.Key, issue.Tree) {
+		return nil
+	}
+	ran, err := e.RanAsRoot(ctx, tx, *issue)
+	if err != nil || ran == "" {
+		return err
+	}
+	parent, err := e.store.Issue(ctx, tx, fact.Parent)
+	if err != nil || parent == nil || parent.Tree == issue.Tree {
+		return err
+	}
+	root, err := e.store.Issue(ctx, tx, parent.Tree)
+	if err != nil || root == nil {
+		return err
+	}
+	live, err := record.TreeLive(ctx, e.store, tx, *root)
+	if err != nil || !live {
+		return err
+	}
+	issue.ToldParent = fact.Parent
+	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
+		return err
+	}
+	told := fmt.Sprintf("%s is now a child of %s in Dispatch, and it stays a tree of its own in Legion: %s, so the tree of %s cannot take it in and its architect cannot release it. It runs under its own architect, and its work reaches the tree of %s only through that tree's own issues.",
+		issue.Key, fact.Parent, ran, root.Key, root.Key)
+	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: told}); err != nil {
+		return err
+	}
+	e.logOnCommit(ctx, "workflow: a root that ran was re-parented under a live tree and stays its own tree", "issue", issue.Key,
+		"parent", fact.Parent, "tree", root.Key, "reason", ran)
+	return e.notice(ctx, tx, root.Key, record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: told})
+}
+
 // Adopt moves issue, a recorded root AdoptionRefusal found adoptable into root's live tree, into
-// that tree with every record of its own tree, its parent recorded as parent; each member keeps
-// its own. Each record takes its next generation, the fence every row of the old tree already
+// that tree with every record of its own tree, recorded under the Dispatch parent and held on the
+// blockers child names (intake.AdoptedChild, the release's own read of Dispatch); each member
+// keeps its own. Each record takes its next generation, the fence every row of the old tree already
 // checks (its linger's close, its supervise rows, its issue suspend), with no linger, hold,
 // pending READY or Dispatch chain (record.Issue.Ancestry: a member waits in no line), no
 // hand-over fence and its generation's facts cleared. A todo record enters the tree's run
 // admitted, as an unrecorded todo child does (enterChild), so an open gate starts its planning,
-// unless it waits on an unfinished Dispatch issue: enterChild then holds it at phase.Admitted
-// (blockers.Holds), and StartUnblockedChildren starts it once nothing holds it. Any other status
+// unless it waits on an unfinished Dispatch issue: enterChild then holds it at phase.Admitted, on
+// the union of the mirror's row and the list the release read, and StartUnblockedChildren starts
+// it once nothing holds it. Only the adopted root itself carries that list: a member of its tree
+// was named by no release, and waits on what the mirror says. Any other status
 // keeps it as a parked child at done, which a todo runs again (ReenterChild).
 // The tree's architect is told with a child-status notice. Everything is written in the caller's
 // transaction.
-func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue, parent string) error {
+func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue, child intake.AdoptedChild) error {
 	members, err := e.store.TreeIssues(ctx, tx, issue.Key)
 	if err != nil {
 		return err
@@ -121,8 +170,10 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 		if member.Generation == ^uint64(0) {
 			return fmt.Errorf("adopt %s into %s: generation overflows", member.Key, root.Tree)
 		}
+		fact := RecordedFact(member)
 		if member.Key == issue.Key {
-			member.Parent = record.ParentOf(parent)
+			member.Parent = record.ParentOf(child.Parent)
+			fact.Parent, fact.Blockers = child.Parent, child.BlockedBy
 		}
 		next := member.Generation + 1
 		if err := e.store.DeleteHandover(ctx, tx, member.Key); err != nil {
@@ -132,13 +183,13 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 			return err
 		}
 		if member.Status == "todo" {
-			if err := e.enterChild(ctx, tx, root, RecordedFact(member), next, recordedResolution(member)); err != nil {
+			if err := e.enterChild(ctx, tx, root, fact, next, recordedResolution(member)); err != nil {
 				return err
 			}
 			continue
 		}
 		member.Tree, member.Project, member.Generation, member.Phase = root.Tree, root.Project, next, phase.Done
-		member.LingerUntil, member.Hold, member.ReadyPendingVersion, member.Ancestry = nil, nil, nil, nil
+		member.LingerUntil, member.Hold, member.Ancestry = nil, nil, nil
 		if err := e.store.PutIssue(ctx, tx, member); err != nil {
 			return err
 		}
