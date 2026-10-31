@@ -2,46 +2,46 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T21:56:20Z",
-  "round": "architect send-back (20:38Z): one forward merge of main 6fa26c74 (#2392, per-issue event writes), migrations renumbered 0150-0152 above main's 0149_event_horizon, connections 91 (main's 89 plus this change's two)",
+  "completed": "2026-10-31T02:51:56Z",
+  "round": "review round 4 (changes requested at a3bda21a): two correctness defects with red tests (4f2e3319), the seven no-behaviour changes (88f5b001), and one merge of main 8a72cf79 after GitHub reported a conflict (b9bbf075)",
   "proof": [
     {
       "criterion": "Items 1-6 and D10 across two processes, on the tree merged with main: live edits, cursors and presence, close/reopen, ask authors, agent writes, fresh reads, rebuild/resumption/queue, serving-process header, awareness bounds and the removal clock",
       "surface": "two real envoy-dispatch binaries on one Postgres 17 (pgvector), driven over HTTP and /ws/doc",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 55m ./cmd/dispatch",
-      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1121.697s (multiprocess); docs ok 1544.510s; duty ok 19.339s; store ok 301.844s; processes ok 21.999s; plain cmd/dispatch ok 292.983s; api -run 'Issue|Clos|Ask|Patch|Rebuild|Conditional|Hook|Routes|Comment|Live|Socket|Room|Horizon|Event|Copy' ok 618.157s; infra/gcp TestDispatchConnectionsPerPodIsTheServers ok",
-      "headSha": "bf6318c01ed94bc202d8ad7b84b99c8e60daa521",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1102.940s (multiprocess); docs ok 1642.631s; store ok 300.504s; plain cmd/dispatch ok 310.666s; api -run 'Room|Socket|Live|Hook|Routes|Clos|Ask|Rebuild|Conditional' ok 296.872s; infra/gcp -skip DataDisk ok 86.098s (DataDisk tests need mkfs.ext4, absent in this pod)",
+      "headSha": "b9bbf075daa7181779d8d542ec36b55dae33562e",
       "negativeControl": "At cf17a2e1 TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode fails (alice's removal relayed at clock 0); at the test-support commit aa50b68c the seven two-process tests fail on their bugs"
     },
     {
-      "criterion": "A room fed only by agent writes keeps memory within its bound (main's TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound) after the merge",
+      "criterion": "A read never installs a copy taken before a replica recover, and a removal never drops a client the room holds again (round-4 defects 1 and 2)",
       "surface": "docs package on real Postgres",
-      "command": "cd packages/envoy && go test -count=1 -timeout 55m ./internal/dispatch/docs/",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/docs 1544.510s, TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound included",
-      "headSha": "bf6318c01ed94bc202d8ad7b84b99c8e60daa521",
-      "negativeControl": "At the merge f89b26c5 (no replica fix) it fails 2 of 2: retained=3319888, 386137 more than stored plus 2097152; main e65900f4 passes with GOWORK=off"
+      "command": "cd packages/envoy && go test -count=3 -timeout 20m -run 'TestAReadStartsNoReplicaBehindACommitARecoverTookAway|TestAReaderInTheRoomAgainKeepsItsStateThoughARemovalRacesItsReturn' ./internal/dispatch/docs/",
+      "observed": "ok (both pass 3 of 3 at 4f2e3319 and above); -race Replica/Render/TestStoredHistoryIsNeverTorn ok 1105.670s; whole docs package ok 1642.631s at b9bbf075",
+      "headSha": "b9bbf075daa7181779d8d542ec36b55dae33562e",
+      "negativeControl": "At a3bda21a (before 4f2e3319): replica_read_start_test.go:89 'a read of the room answers ... which does not hold \"A paragraph the read must not lose.\"'; awareness_relay_test.go:344 'task A's relay no longer lists alice among the clients it relays' and :348 bob's reader holds map[]"
     },
     {
       "criterion": "Browser: two people on two processes see each other's typing and cursor within a second on one socket each",
       "surface": "Chromium on main's two-process harness (round-robin proxy, two envoy-dispatch processes, one Postgres)",
       "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra556_e2e?sslmode=disable bun run e2e:multiprocess -- coedit.multiprocess",
-      "observed": "✓ coedit.multiprocess.e2e.ts:143:1 two people on two processes ... (7.3s); 1 passed (9.6s)",
-      "headSha": "bf6318c01ed94bc202d8ad7b84b99c8e60daa521",
+      "observed": "✓ coedit.multiprocess.e2e.ts:143:1 two people on two processes ... (7.1s); 1 passed (9.4s)",
+      "headSha": "b9bbf075daa7181779d8d542ec36b55dae33562e",
       "negativeControl": "Fails without this change (https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs/copied_asks.go, packages/envoy/internal/dispatch/duty/exclusive.go (merge: lock enumeration comments)",
-    "docs/site/src/content/docs/dispatch/running-dispatch.md (connection paragraph, 91)",
-    "packages/envoy/internal/dispatch/store/migrations/0150-0152 (renumbered) and every reference",
-    "packages/envoy/infra/gcp/dispatch.go (dispatchConnectionsPerPod 91)",
-    "packages/envoy/.changes/unreleased/pr2414-Changed-migrations-0150-0152.yaml, pr2414-Changed-connections-per-process.yaml"
+    "packages/envoy/internal/dispatch/docs/tree.go, service.go (startFromRead epoch check, afterReadCopy test seam)",
+    "packages/envoy/internal/dispatch/docs/awareness_relay.go (no removal for a client held again)",
+    "packages/envoy/internal/dispatch/docs/replica_read_start_test.go, awareness_relay_test.go (new red tests)",
+    "packages/envoy/internal/dispatch/docs/livewrite.go -> stored_head.go (950 lines), append_gate.go, keepalive.go, awareness_limit.go, awareness test encoders",
+    "packages/envoy/AGENTS.md, cmd/dispatch/README.md (main's layout; migration notes moved to 0150-0152 .up.sql headers), packages/dispatch/AGENTS.md, one docs/solutions note, pr2414 fragment"
   ],
   "deviations": [
-    "INFRA-562's #2387 is open and also renumbers from this base; whichever lands later renumbers again."
+    "infra/gcp's DataDisk tests (main's) were skipped locally: they need mkfs.ext4, which this pod lacks."
   ],
   "openQuestions": [],
   "trickyParts": [
-    "#2392 removed the events' commit-order advisory lock; no code of this change took it. The close still re-stamps closed_at as its last statement before commit, after the ask withdrawal, so the close margin and the room freeze are unchanged."
+    "Main's #2422 re-laid out AGENTS.md and the README one sentence per line and stopped the README migration log at 0148; the branch's content is in main's layout and its migration notes are in each .up.sql header."
   ]
 }
