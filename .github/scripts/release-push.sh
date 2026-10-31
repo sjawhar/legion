@@ -295,6 +295,17 @@
 #            be folded, so fold-plan fails with one ::error:: that names every
 #            such entry of every spec, sorted, and tells the author to move or
 #            rename a fragment in one commit with `git mv`, and prints no plan.
+#            A file under the .changes/ of a package no <spec> names is refused
+#            the same way, with its own ::error:: naming every such path HEAD's
+#            tree holds, sorted, and the specs it was given: the fold folds the
+#            fragments of the packages it is given and of no others, so the
+#            file would stay on main unfolded. The error says to remove it, or
+#            to give its package a .changie.yaml and a CHANGELOG.md and add it
+#            to CHANGELOG_PACKAGES in .github/workflows/changelog-fold.yaml.
+#            It is the fold-plan command's own check, made after every refusal
+#            above and before the plan is printed; fold-notes and push-fold do
+#            not make it, since changelog-fold.yaml's build job runs fold-plan
+#            first and its publish job needs that job.
 #            With a tag prefix (a package with releases of its own), a
 #            fragment's label is X.Y.Z of the lowest <tag-prefix>X.Y.Z tag
 #            that contains the commit which first added the entry, following
@@ -868,6 +879,26 @@ set_plan() {
   groups=$(printf '%s' "$plan" | cut -f1,2 | uniq)
 }
 
+# refuse_unlisted <spec>...: fail when HEAD's tree holds a file under the
+# .changes/ of a package no <spec> names (the header's fold-plan paragraph).
+# It reads HEAD's tree, as fold_plan does, never the working tree, and the
+# package a path belongs to is read from the path with a bash regex, so the
+# only pathspec is packages/, which holds no magic.
+refuse_unlisted() {
+  local spec path listed=' '
+  local orphans=()
+  for spec in "$@"; do
+    listed+="${spec%%=*} "
+  done
+  while IFS= read -r -d '' path; do
+    [[ $path =~ ^(packages/[^/]+)/\.changes/ ]] || continue
+    [[ $listed == *" ${BASH_REMATCH[1]} "* ]] || orphans+=("$path")
+  done < <(git ls-tree -r -z --name-only HEAD -- packages/)
+  [ ${#orphans[@]} -gt 0 ] || return 0
+  mapfile -d '' -t orphans < <(printf '%s\0' "${orphans[@]}" | LC_ALL=C sort -z)
+  fail_error "$(quote_all "${orphans[@]}") at HEAD: each is under the .changes/ of a package the fold was not given, and the fold folds the fragments of the packages it is given alone, here $(quote_all "$@"), so the file would stay on main unfolded; remove it, or give its package a .changie.yaml and a CHANGELOG.md and add it to CHANGELOG_PACKAGES in .github/workflows/changelog-fold.yaml"
+}
+
 # group_column <dir> <label> <column>: the plan's <column> (3 the date, 4 the
 # path) on each line of that group.
 group_column() {
@@ -1439,6 +1470,7 @@ case "$command" in
   fold-plan)
     shift
     fold_plan "$@"
+    refuse_unlisted "$@"
     printf '%s' "$plan"
     ;;
   fold-notes)

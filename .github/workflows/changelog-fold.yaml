@@ -26,9 +26,10 @@ name: Fold Changelog Fragments
 # holds the credential, the deploy key in the env of the push step alone, and the tripwire last in
 # fold_build. It does not read which commit a job checks out: this workflow keeps both jobs on
 # github.sha, which the event fixes, so fold_build never chooses the commit whose code
-# fold_publish runs. A pull request that changes the fold runs fold_build on its own merge commit,
-# so changie, the plan and the notes run on GitHub before the merge; fold_publish runs on main
-# alone, so nothing lands from a pull request.
+# fold_publish runs. A pull request that changes the fold, or that adds or changes a fragment,
+# runs fold_build on its own merge commit, so the plan refuses a fragment the fold would never
+# fold and changie and the notes run on GitHub before the merge; fold_publish runs on main alone,
+# so nothing lands from a pull request.
 on:
   workflow_run:
     workflows: ["Release Packages", "Release Envoy Listener"]
@@ -37,13 +38,14 @@ on:
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
-  # The fold's own files only: a fragment under .changes/ gets no pull-request check.
+  # The fold's own files, and any fragment: a pull request that adds one is planned too.
   pull_request:
     paths:
       - .github/workflows/changelog-fold.yaml
       - .github/scripts/release-push.sh
       - .github/actions/install-changie/**
       - packages/*/.changie.yaml
+      - packages/*/.changes/**
 
 # Each job declares its own permissions (fold_build, fold_publish below); nothing runs under this
 # workflow-level default.

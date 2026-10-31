@@ -538,6 +538,7 @@ Each item below names a task and where its code is, then notes on it.
   — a change that earns a changelog line adds a fragment to each package it changes that has a `.changie.yaml`:
   the seven packages `.github/workflows/changelog-fold.yaml` lists in `CHANGELOG_PACKAGES` (`pi-legion`, `pi-envoy`, `envoy-plugin`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`).
   A package without one, such as `packages/daemon`, has no fold.
+  The fold's plan, which runs on every pull request that adds or changes a fragment, refuses a file under the `.changes/` of a package `CHANGELOG_PACKAGES` does not list, since the fold would never fold it.
   Write it with `go run github.com/miniscruff/changie@v1.26.0 new --kind <kind> --body '<text>' --custom Issue=pr<number>` from the package directory, `<number>` being this pull request's own number.
   Every `.changie.yaml` sets `fragmentFileFormat: '{{.Custom.Issue}}-{{.Kind}}-{{.Time.Format "20060102-150405"}}'`, so the file lands at `packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`.
   The number exists only once the pull request is open, so open the pull request first and add the fragment in a later commit on the same branch.
