@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-369",
-  "completed": "2026-10-31T03:10:00Z",
-  "round": "the second review round: the reviewer's eleven findings at 158e057e, answered at 1b769383daf41f9cace0e65e1e704a4745745fbc; all 24 review threads answered and resolved",
+  "completed": "2026-10-31T06:05:00Z",
+  "round": "the forward merge of main: GitHub reported the pull request CONFLICTING, so main was merged forward at b290218745ac0425fa4b903250f3bb243e814d89 and nothing else was changed",
   "proof": [
+    {
+      "criterion": "The forward-merge rule: the branch's proofs run again at the merge head, and the merge changed no behaviour.",
+      "surface": "The real Dispatch stack in the issue's pod, rebuilt after the pod was replaced: the Go server on a rootless PostgreSQL 17 with pgvector, the production SPA bundle and a real Chromium.",
+      "command": "bash packages/dispatch/e2e/acceptance/block-graph.sh against the running server; bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/ask-part-references.e2e.ts --project=chromium; and the reply rule driven over HTTP with one b2 naming both a comment's block and the ask's first option.",
+      "observed": "exit=0, PASS=171 FAIL=0 SKIP=0 with the A6 section whole; 2 passed; reply_to + b2 read back comment/<id>#b2 and ask_id + b2 read back ask/<id>#b2.",
+      "headSha": "b290218745ac0425fa4b903250f3bb243e814d89",
+      "negativeControl": "GET /api/v1/references?to=<the ask>%23b-b9 answered 404 naming the part and the ask while a part it holds answered 200; both browser rows pointed at a part id the ask does not hold failed, then passed again at the restored spec."
+    },
     {
       "criterion": "The two blocking typecheck failures CI reported (pi-legion and claude-envoy), and the acceptance lines re-proven after this round's changes.",
       "surface": "The package typecheckers CI runs, and the real Dispatch stack in the issue's pod.",
@@ -55,22 +63,16 @@
     }
   ],
   "filesChanged": [
-    "api/routes_table.go, cmd/dispatch/AGENTS.md, contracts/src/dispatch-api.ts and .changes/unreleased/pr2546-ask-parts.yaml: the four published texts that still gave the old reply_to_block rule.",
-    "refs/ask_blocks.go: askPartLinks, the one fragment closure.go and asksCitingTheDocument share, and AskPartIDs, which owns the matching of parts to options; refs/graph.go and api/ask_rows.go lost their copies.",
-    "refs/item_blocks.go: ItemBlockNode is gone from the package (tests write the shape); ParseItemBlockNode stays.",
-    "packages/pi-legion/scripts/skill-scenarios/seed.ts: the seed's options are Required<Omit<AskOption, \"id\">>[].",
-    "packages/envoy-client/src/dispatch-execute.ts and dispatch-owner.ts: the undefined block key left out, one exported ITEM_KINDS, the pin stripped from the reply_to_ask hint, the refusal's wording.",
-    "Prose: 0150_ask_blocks.up.sql's header and reply sentence, store/graph_edges_test.go, api/ask_parts_test.go, e2e/acceptance/block-graph.sh, packages/envoy/AGENTS.md and cmd/dispatch/README.md."
+    "packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md: the thirteen conflicts of the merge, resolved so main's reflowed text carries this branch's ask-part facts. jj diff -r b290218745ac --stat is those two files and nothing else."
   ],
   "trickyParts": [
-    "Finding 1 is a behaviour correction to a rule this pull request itself introduced, so its prose in packages/envoy/AGENTS.md and cmd/dispatch/README.md moved with it: reply_to_block is the named item's, and POST /api/v1/comments/{id}/reply always names a block of that comment.",
-    "Finding 7 changes an ask's parts hash, so the first reindex of an already-answered ask replaces its answer part. Nothing deployed holds ask parts (migration 0150 is new here), so no live reference moves.",
-    "Finding 2 reaches existing data: once 0151's seed is drained, heldByABlock lists a link written in an ask's question from its question part, so a build without the dashboard fix would relabel existing backlinks. That is why the browser row, not a unit test, is its proof."
+    "Both sides had rewritten the same two documents: main reflowed them to one sentence per line and replaced the README's routes table with a per-route list, while this branch rewrote the same paragraphs for ask parts. The resolution takes main's shape and writes this branch's facts into it, rather than keeping either side whole."
   ],
   "deviations": [
-    "T7 stays with dispatch://INFRA-370 in every case, by the tree's architect's ruling of 2026-10-31, whether or not sjawhar/legion#2394 lands before this pull request merges.",
-    "The migration numbers are 0150 and 0151, read again at this push against main's highest, 0149.",
-    "packages/pi-legion's bun test cannot run in this pod (its skill-scenario rigs need docker and tmux, which the image does not carry); its typecheck, the lane CI reported red, is clean."
+    "The fingerprint changed, db4665d4 to 26141232, so this head takes a full test round rather than the bare gates. The change is confined to the two conflicted documents.",
+    "Two clauses of main's prose were corrected while resolving: refs.CommentBlockAt and refs.RemovedCommentBlockNode, which this branch renamed to refs.ItemBlockAt and refs.RemovedItemBlockNode, and the refusal 'a reply in an ask's thread names no block yet', which api/comment_create.go no longer writes.",
+    "Migrations are unrenumbered: main's highest is 0149, so 0150_ask_blocks and 0151_asks_block_parts_trigger stand. sjawhar/legion#2387 has not merged.",
+    "T7 stays with dispatch://INFRA-370 in every case, by the tree's architect's ruling."
   ],
   "specDepartures": [
     {
@@ -106,9 +108,6 @@
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "A reply's reply_to_block is read against the item the request named, never the thread's head: in an ask's thread one block id can name both a block of the comment and a part of the ask, and the two answer differently.",
-    "The dashboard, the hover card and the CLI each read a block node as its item, so the item kinds live in one exported set per surface (BLOCK_ITEM_KINDS in the web, ITEM_KINDS in the client) and a fourth kind reaches every reader.",
-    "The pull request's contract change census is in the body: four inputs answer differently than on main, with the emitter search and the stored-text statement behind the rollout line.",
-    "A type added to a shared contract reaches packages that only compile it: AskOption.id broke pi-legion's seed and claude-envoy's stricter compile of envoy-client, neither of which this change touches. Both lanes are CI jobs of their own."
+    "A forward merge of a documentation-heavy base changes the branch's own diff even when no code moves, so the fingerprint is the signal that decides the tester's round rather than the merge's own stat."
   ]
 }
