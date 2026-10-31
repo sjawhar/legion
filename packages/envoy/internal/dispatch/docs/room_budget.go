@@ -190,8 +190,9 @@ const bytesOfHeapAStruct = 650
 // charged at the heaviest kind's price its two splits come to 1,300 bytes a copy against the 338.8
 // the insert and its split keep together: the room budget would charge a mebibyte of prose typed
 // with 2,000 keystrokes and ten pastes of 4 KiB a structure part of 8,018,920 bytes, taking its
-// charge to 65,618,920, 1.117 times the 58,734,632 bytes of heap the cross-checked reading of
-// 2026-10-30 finds the room holding, where this price charges 4,400,920 and 1.056 times it
+// charge to 65,618,920, 1.117 times the 58,735,880 bytes of heap the cross-checked reading of
+// 2026-10-31 under sjawhar/ygo v1.54.1-sami.3 finds the room holding, where this price charges
+// 4,400,920 and 1.056 times it
 // (TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor). Under sjawhar/ygo
 // v1.51.3-sami.7 the same two prices charged 1.112 and 1.051 times a reading of 55,591,872 bytes,
 // and the single reading of 2026-10-29, 3.2 MB short before the test cross-checked it against what
@@ -1332,7 +1333,8 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 // beside the other work that sandbox was carrying, the eleven were refused in 23.2 s and the last
 // admitted at 1m27.7s, the decodes of those rooms' loads most of it, which ask for six times the
 // bound's time the counts do. At the price of 500 the budget holds thirty-seven such rooms, and
-// the run of 2026-10-30 refused the thirteen in 10.5 s and admitted the last at 1m20.7s
+// the run of 2026-10-31 under sjawhar/ygo v1.54.1-sami.3 refused the thirteen in 11.2 s and
+// admitted the last at 1m13.5s
 // (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays). The grant is covered inside the
 // transaction the count already holds, so no holder of the bound waits for a pooled connection
 // (copyHeaps).

@@ -354,13 +354,14 @@ func runOfWords(t *testing.T, size int) string {
 // write timeout on sixteen of its twenty sockets - and twenty rooms of a mebibyte each also park
 // the server at its Go memory limit, where the collector takes half of what processors there are.
 //
-// Measured on 2026-10-31 over three runs, of 27 to 32 s: the twenty sockets asked for 1,920 whole
-// states between them and held 1,258,425,600 bytes when the budget closed every one of them,
-// 62,921,280 each - sixty 1,048,688-byte frames, the sixty-first refused - where the frame cap
-// alone would have let them hold 10,738,944,000. A pod's kernel would have charged the server
-// 1,552 to 1,767 MiB of the pod's 4,096 at its peak, and it held 1,570,798,216 to 1,799,998,136
-// bytes of what its 3,865,470,566-byte limit bounds, 1.9 GiB under it at the most, with VmRSS at
-// 1,589 to 1,774 MiB.
+// Measured on 2026-10-31 over four runs, of 25 to 32 s, the last under sjawhar/ygo
+// v1.54.1-sami.3: the twenty sockets asked for 1,920 whole states between them and held
+// 1,258,425,600 bytes when the budget closed every one of them, 62,921,280 each - sixty
+// 1,048,688-byte frames, the sixty-first refused - where the frame cap alone would have let them
+// hold 10,738,944,000. A pod's kernel would have charged the server 1,552 to 2,093 MiB of the
+// pod's 4,096 at its peak, and it held 1,570,798,216 to 2,141,035,272 bytes of what its
+// 3,865,470,566-byte limit bounds, 1.6 GiB under it at the most, with VmRSS at 1,589 to 2,096
+// MiB.
 //
 // Run on 2026-10-31 with the budget at zero, the drive fails on every socket: not one of the
 // twenty was closed by a budget within the two minutes it waits.
@@ -590,8 +591,9 @@ func (s *throttledReader) leave() {
 // tens of bytes of awareness the socket that never reads adds by joining and leaving the room
 // while the slow browser is still draining.
 //
-// Measured on 2026-10-31 over three runs: 200 keystrokes and a handoff of 3,008,463 to 3,008,663
-// bytes took 49.657 to 54.511 s and left the slow browser 3,008,506 to 3,009,102 bytes behind
+// Measured on 2026-10-31 over four runs, the last under sjawhar/ygo v1.54.1-sami.3: 200
+// keystrokes and a handoff of 3,008,463 to 3,008,663 bytes took 49.657 to 55.575 s and left the
+// slow browser 3,008,506 to 3,009,102 bytes behind
 // when the burst ended - nearly all of it the relayed handoff - 4.78 per cent of its
 // 62,914,560-byte budget, and under half the 6,291,456 bytes the budget clears the largest frame
 // a room can send by. It had read 198 to 204 of the 205 frames and 3,018,298 to 3,018,697 of the

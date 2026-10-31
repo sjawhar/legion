@@ -264,7 +264,8 @@ const maxMessageBytes = 54 << 20
 //     whole budget less one frame. Measured on 2026-10-31 over a real socket reading one frame
 //     every 250 ms while another browser typed 200 keystrokes into a mebibyte document and handed
 //     its whole state back at the end, as a reconnecting browser does, the most that reader was
-//     behind by was 3,008,506 to 3,009,102 bytes over three runs
+//     behind by was 3,008,506 to 3,009,102 bytes over four runs, the last under sjawhar/ygo
+//     v1.54.1-sami.3
 //     (TestAThrottledReaderIsNotClosedByTheWriteQueueBudget): the relayed handoff of about
 //     3,008,500 bytes and the keystrokes behind it, 4.78 per cent of the budget and under half of
 //     what it clears the largest frame by.
@@ -282,9 +283,9 @@ const maxMessageBytes = 54 << 20
 //     budget is 3,831,360,759, inside the limit with 34,109,807 bytes left. Measured on 2026-10-31
 //     with twenty such sockets on twenty mebibyte documents
 //     (TestTwentySocketsThatNeverReadStayUnderThePodsMemory), they held 1,258,425,600 bytes
-//     between them over three runs, 62,921,280 each, and the server peaked at 1,552 to 1,767 MiB
-//     of the pod's 4,096 as its kernel would charge it, holding 1,570,798,216 to 1,799,998,136
-//     bytes of what its limit bounds.
+//     between them over four runs, the last under sjawhar/ygo v1.54.1-sami.3, 62,921,280 each,
+//     and the server peaked at 1,552 to 2,093 MiB of the pod's 4,096 as its kernel would charge
+//     it, holding 1,570,798,216 to 2,141,035,272 bytes of what its limit bounds.
 //
 // 64 MiB, which bounded the draft of this against ygo's draft, where a socket held the budget and
 // no more, no longer fits: 20 x 67,108,864 + 425,585,911 + 2,147,483,648 = 3,915,246,839 is

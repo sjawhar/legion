@@ -882,18 +882,19 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // holds adds nothing to its charge (deletedRuns) and each room's second copy was charged before
 // the edit made it.
 //
-// What the fifty wait for is that bound. Measured on 2026-10-30 on this two-processor pod, the
-// server at the pod's Go memory limit and the collector at the runtime's own ratio, the only one
-// Dispatch runs at, with bytesOfHeapAnElement at 500: a mebibyte of prose reserves 57,600,000
-// bytes at both copies and the 2,147,483,648-byte budget holds 37 such rooms. One after another,
-// the first refusal came with 37 rooms held by browsers that stayed, once the five whose browsers
-// went were closed for it, and so did the last; the peak a pod's kernel would charge was 3,661
-// MiB and the runtime held 3,786,700,472 bytes of the 3,865,470,566 its limit bounds, VmRSS 3,697
-// MiB. Fifty at once, 37 handed their state back and edited, the slowest answered after
-// 1m20.717s, 13 were refused at admission, the slowest after 10.506s, and none was answered 503;
-// the burst logged 120 grants of the copy bound, none holding all of it, the longest wait 40.501 s
-// and the longest hold 4.951 s; it charged 3,720 MiB and held 3,845,441,208 bytes, VmRSS 3,783
-// MiB, the whole drive in 336 s.
+// What the fifty wait for is that bound. Measured on 2026-10-31 under sjawhar/ygo
+// v1.54.1-sami.3 on this two-processor pod, the server at the pod's Go memory limit and the
+// collector at the runtime's own ratio, the only one Dispatch runs at, with bytesOfHeapAnElement
+// at 500: a mebibyte of prose reserves 57,600,000 bytes at both copies and the
+// 2,147,483,648-byte budget holds 37 such rooms. One after another, the first refusal came with
+// 37 rooms held by browsers that stayed, once the five whose browsers went were closed for it,
+// and so did the last; the peak a pod's kernel would charge was 3,642 MiB and the runtime held
+// 3,764,102,824 bytes of the 3,865,470,566 its limit bounds, VmRSS 3,644 MiB. Fifty at once, 37
+// handed their state back and edited, the slowest answered after 1m13.548s, 13 were refused at
+// admission, the slowest after 11.185s, and none was answered 503; the burst logged 120 grants
+// of the copy bound, none holding all of it, the longest wait 35.037 s and the longest hold
+// 4.399 s; it charged 3,719 MiB and held 3,844,171,464 bytes, VmRSS 3,722 MiB, the whole drive
+// in 320 s.
 //
 // Measured on 2026-10-29 over four runs on a three-processor sandbox, with the element price at
 // 470, where the same budget held 39 such rooms: 39 admitted and 11 refused every time, the last
@@ -1254,9 +1255,10 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 // What the drive costs in time is what the collector does with the garbage each update leaves -
 // each costs the server a render of the whole document (renderedReplica.observe,
 // internal/dispatch/docs/tree.go:545) - at the runtime's own ratio of garbage to live heap, the
-// only one the server runs at: a pair of rooms takes 1 m 33 s to 1 m 49 s for its 201 updates
-// alone on this sandbox, 0.47 s an update, 1 m 42 s to 2 m 9 s in the run of 2026-10-29 that took
-// 561 s, and 1 m 59 s to 2 m 53 s beside five other containers. A collector held to a tighter
+// only one the server runs at: a pair of rooms takes 1 m 16 s to 1 m 26 s for its 201 updates
+// alone on this sandbox under sjawhar/ygo v1.54.1-sami.3 on 2026-10-31, 0.39 s an update, 1 m 42 s
+// to 2 m 9 s in the run of 2026-10-29 that took 561 s, and 1 m 59 s to 2 m 53 s beside five other
+// containers. A collector held to a tighter
 // ratio costs this drive dearly and buys its eight rooms nothing, since what they charge,
 // 464,320,736 bytes, leaves the Go memory limit room for a whole cycle of the runtime's own:
 // pinned at a seventh of the live heap at boot, the same pair took 4 m 52 s, 1.45 s an update,
@@ -2499,10 +2501,12 @@ const longEditFixturePath = "../../internal/dispatch/docs/testdata/long_edited_d
 // A burst of browsers opening struct-dense documents that render little, all at once, under the
 // Go limit a 4 GiB pod gives the server and at the runtime's own collector ratio, which the
 // server leaves alone, keeps the memory a pod's kernel would charge it under the pod's 4 GiB and
-// what the Go limit bounds within that limit (requireUnderThePod): 3,584 MiB charged on
-// 2026-10-29, of 3,604 MiB of VmRSS, with 3,722,661,352 bytes held of what the 3,865,470,566-byte
-// limit bounds, 136 MiB under it, in a drive of 320 s. A run of the same drive that day charged
-// 3,708 MiB and held 14 MiB under the limit, and one before the held reading was asserted read
+// what the Go limit bounds within that limit (requireUnderThePod): 3,706 MiB charged on
+// 2026-10-31 under sjawhar/ygo v1.54.1-sami.3, of 3,730 MiB of VmRSS, with 3,865,468,440 bytes
+// held of what the 3,865,470,566-byte limit bounds, 2,126 bytes under it, in a drive of 313 s. A
+// run of the same drive on 2026-10-29 charged 3,584 MiB, of 3,604 MiB of VmRSS, with
+// 3,722,661,352 bytes held, 136 MiB under the limit, another that day 3,708 MiB and 14 MiB under
+// it, and one before the held reading was asserted read
 // 1,832,882 bytes past it (podGoMemoryLimitMargin). The 2,660 to 3,727 MiB earlier runs recorded
 // were VmRSS alone, which on this sandbox counts the pages the runtime has released as well
 // (peakResident). The burst is eight copies each
@@ -2643,17 +2647,16 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // the Go memory limit it took from its container (requirePodGoMemoryLimit). At that default the
 // heap goal of a server whose budget is full is the limit itself, so the collector keeps every
 // byte of garbage the limit allows - and the limit bounds exactly what a pod's kernel charges,
-// what the runtime holds less what it has released. Measured on 2026-10-31 over two runs on a
-// two-processor sandbox, the three steps below charged 2,738, 3,626 and 3,712 MiB and 2,697,
-// 3,622 and 3,705 MiB of the pod's 4,096, 384 MiB under it at their worst, in drives of 395 and
-// 408 s, and the keystrokes a person typed through the two heavy steps were answered in 99th
-// percentiles of 53 and 476 ms and of 54 and 381 ms. Of what the Go limit bounds the same steps
-// held 2,825,170,072, 3,750,493,688 and 3,874,238,088 bytes, and 2,791,115,928, 3,746,041,320
-// and 3,910,459,064, the last of each past the limit, which is the step that reads past it: it
-// read 8,767,522 and 44,988,498 bytes over, the allocation of a frame or a copy of tens of MiB
+// what the runtime holds less what it has released. Measured on 2026-10-31 under sjawhar/ygo
+// v1.54.1-sami.3 on a two-processor sandbox, the three steps below charged 2,748, 3,602 and
+// 3,373 MiB of the pod's 4,096, 494 MiB under it at their worst, in a drive of 421 s, and the
+// keystrokes a person typed through the two heavy steps were answered in 99th percentiles of 61
+// and 525 ms. Of what the Go limit bounds the same steps held 2,850,696,344, 3,722,464,744 and
+// 3,872,988,856 bytes, the last past the limit, which is the step that reads past it: it read
+// 7,518,290 bytes over, the allocation of a frame or a copy of tens of MiB
 // mapped before the cycle it triggers can hand anything back (podGoMemoryLimitMargin). VmRSS over
-// those runs read 2,774, 3,632 and 4,405 MiB, and 2,713, 3,623 and 4,512 MiB, the last of each
-// past the pod itself: the difference
+// that run read 2,763, 3,605 and 3,753 MiB, each above what the pod would be
+// charged: the difference
 // is the pages the runtime released and gVisor keeps resident, which no unsandboxed pod is
 // charged (peakResident; the GKE Autopilot deployment names no runtimeClassName or GKE Sandbox
 // node pool, infra/gcp/dispatch_kube.go:492-501). The 4,302 and 4,424 MiB this drive once

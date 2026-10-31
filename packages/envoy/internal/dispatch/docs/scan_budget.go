@@ -50,7 +50,8 @@ const usedUpScanBudget = 64
 // a re-scan of its stored state at the room's load and from what each transaction the room commits
 // scans after it: 1,000,000, the architect's ruling. It is at least twice the re-scan of the
 // heaviest document the server's own writes store, the document an agent rewrote whole until the
-// decode cap refused a write, 475,136 items, twice 950,272
+// decode cap refused a write, 475,136 items under sjawhar/ygo v1.51.3-sami.7, twice 950,272,
+// where under v1.54.1-sami.3 that state re-scans no item at all, measured 2026-10-31
 // (TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed); and at least fifteen times what an
 // honest long session's updates scan, 42,401 items on this pod, fifteen times 636,015
 // (TestTheRoomScanTotalHoldsFifteenHonestLongSessions). A copy of a room at the total costs at most
@@ -91,7 +92,8 @@ func scanCeiling(own uint64) int {
 // server's publish, an injected update, a repair, a local write - and every browser apply the room
 // refused, for what its scans passed before the refusal (settle). A copy of the room re-scans
 // about what the room's own applies scanned - the long session's 42,401 admitted scans re-scan as
-// 42,611 (TestTheRoomScanTotalHoldsFifteenHonestLongSessions) - so the total a reload counts from
+// 42,587, measured 2026-10-31 under sjawhar/ygo v1.54.1-sami.3
+// (TestTheRoomScanTotalHoldsFifteenHonestLongSessions) - so the total a reload counts from
 // the stored state is the total the room had, give or take a few hundred items, and the scans of
 // applies the room refused, which the stored state does not hold. Only a rebuild, which stores a
 // fresh history, starts it again.
