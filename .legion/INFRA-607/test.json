@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-607",
+  "completed": "2026-10-31T10:57:07Z",
+  "testedHead": "b28f3ea7c8f3a7d849b5a45447a92244b6f3b907",
+  "codeHead": "04e390bf6e613f7ec9f07473c3ccc0ec25e588f1",
+  "round": 18,
+  "scope": "Confirmation round (architect, 09:00Z): 04e390bf merges main 1a9095e6 (with #2598) into the READY head 3390b679 with no conflict. round-shape.py v3 (dispatch://INFRA-598/artifact/round-shape-py, version 3): 'old head 0f60ac74929272fea533d81af07a015f5a3c8795 -> new head 04e390bf6e613f7ec9f07473c3ccc0ec25e588f1; files whose own diff differs: 0'; no list of files equal only after normalisation.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "round-shape v3 shows the PR's own diff unchanged. Build step at 04e390bf (export of packages/envoy): go build ./... and go vet ./... clean; infra go vet ./... and go vet -tags natslive ./core/ clean. Migrations 0150-0156 follow main's 0149_event_horizon; dispatchConnectionsPerPod = 90 (infra/gcp/dispatch.go:98)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Confirmation round: the PR's own diff is unchanged by the merge of main, the head builds and vets, migrations 0150-0156 and connections 90 stand",
+      "surface": "round-shape.py v3 over the workspace; an export of packages/envoy at 04e390bf",
+      "command": "python3 round-shape.py 0f60ac74929272fea533d81af07a015f5a3c8795 04e390bf6e613f7ec9f07473c3ccc0ec25e588f1 2391; GOFLAGS=-p=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB go build ./... && go vet ./...; (cd infra && go vet ./... && go vet -tags natslive ./core/)",
+      "observed": "0 files differ. Build and all vets exit 0. Migrations end 0149_event_horizon, 0150_embeddings_notify ... 0156_document_edit_notices_notify. Memory: sampled peak 2.42 GiB of 19 over 79 samples (2 s apart) during build and vet.",
+      "headSha": "04e390bf6e613f7ec9f07473c3ccc0ec25e588f1",
+      "negativeControl": "round-shape.py v3 reported 2 differing files in round 17 (85d493fc -> 0f60ac74), so its 0 here is a real comparison."
+    }
+  ],
+  "ci": "NOT FULLY RUN when I completed, at the architect's direction (10:01Z: complete now, pass, CI named as not run). CI run 41186839706 for 04e390bf was queued from 09:00:04Z to about 10:00Z (50 runs queued repo-wide). At 10:56Z: lint, typecheck, test and pr-title success; dispatch (job 124502788851) and envoy-go (job 124502788892) in_progress; ci-ok not completed. The reviewer reads ci-ok before approving.",
+  "notes": "The memory sampler's '( ... ) & watcher=$!' left $! empty in this harness's shell, so kill \"$watcher\" failed; 'kill %1' stopped it (sample count stopped growing at 91). jobs -l shows it Done; nothing of mine is running."
+}
