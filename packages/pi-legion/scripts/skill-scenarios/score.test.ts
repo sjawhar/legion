@@ -2915,28 +2915,29 @@ test("the tester ran the CLI when the bun stand-in recorded a run of greet.ts, n
 });
 
 // The tester writes its handoff whole with `write`, and its prompt names no time: a body with no
-// `completed` key is what the prompt asks for, so the schema takes it and the run is scored. Before
-// the prompt dropped the time, the schema demanded `completed` and such a body was a rig error.
-const testerHandoff = {
-  schemaVersion: 1,
-  phase: "test",
-  issue: "LWEVAL-1",
-  implementerProof: { verdict: "verified", how: "ran `bun greet.ts Ada` at the head" },
-  proof: [
-    {
-      criterion: "`bun greet.ts <name>` prints the greeting it returns",
-      surface: "the CLI",
-      command: "bun greet.ts Ada",
-      observed: "prints Hello, Ada! and exits 0",
-      headSha: "0f2cc1d4e8b0a1f6c7d2e3b4a5968778695a4b3c",
-      negativeControl: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
-    },
-  ],
-};
-
+// `completed` key is what the prompt asks for, so the schema reads it and the run is scored. Before
+// the prompt dropped the time, the schema demanded `completed`, so such a body failed the run's
+// proof check (`proofProblems`) and scored `pass=false`.
 test("a tester handoff that carries no completed time is read, and one with no issue is not", () => {
-  expect(TestHandoff.safeParse(testerHandoff).success).toBe(true);
-  const { issue: _issue, ...noIssue } = testerHandoff;
+  const handoff = {
+    schemaVersion: 1,
+    phase: "test",
+    issue: "LWEVAL-1",
+    previousHandoff: "",
+    implementerProof: { verdict: "verified", how: "ran `bun greet.ts Ada` at the head" },
+    proof: [
+      {
+        criterion: "`bun greet.ts <name>` prints the greeting it returns",
+        surface: "the CLI",
+        command: "bun greet.ts Ada",
+        observed: "prints Hello, Ada! and exits 0",
+        headSha: "0f2cc1d4e8b0a1f6c7d2e3b4a5968778695a4b3c",
+        negativeControl: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
+      },
+    ],
+  };
+  expect(TestHandoff.safeParse(handoff).success).toBe(true);
+  const { issue: _issue, ...noIssue } = handoff;
   expect(TestHandoff.safeParse(noIssue).success).toBe(false);
 });
 

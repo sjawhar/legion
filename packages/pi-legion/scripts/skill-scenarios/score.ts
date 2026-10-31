@@ -96,13 +96,15 @@ const World = z.object({
 const nonEmpty = z.string().min(1);
 /** The tester's handoff as the tester role's prompt spells it (the `test` shape; nothing in the
  * daemon holds it to one), as far as the score reads it: the stamps the tester writes itself
- * (`schemaVersion` 1, `phase` test, its `issue`), the implementer's proof verdict, the failures,
- * and the tester's own proof, each entry's six fields non-empty.
+ * (`schemaVersion` 1, `phase` test, its `issue`, and `previousHandoff`, the commit carrying its
+ * previous handoff of this phase, empty when there is none), the implementer's proof verdict, the
+ * failures, and the tester's own proof, each entry's six fields non-empty.
  * Nothing stamps a handoff for the tester: it writes the whole file with `write`. */
 export const TestHandoff = z.looseObject({
   schemaVersion: z.literal(1),
   phase: z.literal("test"),
   issue: nonEmpty,
+  previousHandoff: z.string(),
   implementerProof: z.looseObject({ verdict: z.enum(["verified", "rejected"]), how: nonEmpty }),
   failures: z.array(z.looseObject({ criterion: z.string(), evidence: z.string() })).optional(),
   proof: z
