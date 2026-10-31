@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-841",
+  "generation": 2,
+  "completed": "2026-10-31T17:45:00Z",
+  "workspaceNote": "This workspace was recreated before this round. Checked against what I did: every tester round committed and pushed its handoff before completing, so nothing of mine was lost unpushed; generation 1's test.json rounds are absent from the tree only because retro's f11e42a8d4d0 removed .legion/INFRA-841/ before READY, and their evidence is in this pull request's body and history. Generation 2's plan.json and implement.json are on disk and were read before anything else.",
+  "scope": "Generation 2 is the re-run after review 5723093389: two learning pages under docs/solutions/, no code. The plan's acceptance table is the finite list of checks, and every one of them was run here at the head. Generation 1's code is untouched, which the tree comparison below proves, so its verification stands.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Each of the three entries of generation 2's implement.json was re-run at the tree of c08ee3e7ad30131d17f6fcf8afdc1a715e119f45, with its own command: the line-citation pattern over the two pages prints nothing and exits 1; the eleven head citations all resolve; the historical pair holds (present at c10800814dec, absent at the head); the guides test file holds 3 tests and `bun test` gives 3 pass, 0 fail, 7 expect() calls; and the tree comparison against the approved head 7e630849 lists only docs/solutions/ and .legion/INFRA-841/ paths, so the restored bun.lock the implementer describes did stay out of the commit. Its three negative controls at the old head reproduce exactly. Nothing overstated."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Neither of the two named learning pages cites a line number.",
+      "surface": "The two pages as a reader reads them in the tree.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -nE '[A-Za-z0-9_./-]+\\.(ts|go|md|yaml|yml|json|sh):[0-9]+|`:[0-9]+' docs/solutions/testing/the-envoy-guides-layout-checker-runs-only-when-you-run-it-pr2580.md docs/solutions/legion/a-red-check-in-a-package-the-branch-does-not-touch-is-mains-until-mains-own-run-says-otherwise-pr2580.md",
+      "observed": "No output, exit 1. Eight citations went: the three review 5723093389 blocked and five more the acceptance's absolute wording reaches. Reading the two pages whole, every replacement is a symbol, a workflow step's name, a test title or a quoted phrase.",
+      "headSha": "c08ee3e7ad30131d17f6fcf8afdc1a715e119f45",
+      "negativeControl": "The three blocked citations fail their own reading, reproduced here rather than taken from the handoff: at f11e42a8, `scripts/semantic-line-breaks.ts` line 47 is the doc comment `/** --write breaks a line longer than this after …` and not `const MAX_LINE = 160`, which is line 48; lines 771 and 785-786 there are `longLineBreaks`'s `for (let space = 1; …)` loop and the end of `cutLine`'s doc comment, not `wrapLongLine`; and lines 176-190 of the head's `claims_doc_test.go` are the fixed parser, whose comment reads 'a blank line ends it only when the next non-blank line is neither a bullet nor an indented continuation' - the opposite of the sentence that cited them."
+    },
+    {
+      "criterion": "Every citation the two pages now carry resolves in the code at this head, and the one historical citation is historical.",
+      "surface": "The cited files themselves, read with the acceptance table's greps, and the two pages read whole so that no citation is checked only because the table listed it.",
+      "command": "grep -Fqn per citation over scripts/semantic-line-breaks.ts, scripts/semantic-line-breaks.guides.test.ts, .github/workflows/ci.yaml, packages/envoy/AGENTS.md and packages/envoy/internal/broker/oauth/claims_doc_test.go; plus `jj file show -r c10800814dec … | grep -Fq` and the same grep at the head for the historical pair",
+      "observed": "Every one resolves. `const MAX_LINE = 160` and `function wrapLongLine` are in the script; `const GUIDES` is `[\"AGENTS.md\", \"scripts/e2e/README.md\", \"docs/kubernetes.md\"]`; the three test titles the page quotes are the file's three `test(` lines, word for word; `.github/workflows/ci.yaml` carries the step `Test the semantic line-break checker` running `bun test scripts/semantic-line-breaks.test.ts`, and the `test:` filter lists `scripts/semantic-line-breaks.ts` and `scripts/semantic-line-breaks.test.ts` - the guides test appears in that file once, in the comment above that step, and in no filter, which is what the page says; the AGENTS.md clause the page quotes is on a line of 457 characters, so 'about 460' holds, and `MAX_LINE` is read only in `wrapLongLine` (and two doc comments), which returns the line unchanged when it is no longer than that, so 'applied by no check' holds; `claimListNames` and its comment sub-phrase are in claims_doc_test.go; the `#### The Dispatch identity the broker can issue` heading the second page names is docs/kubernetes.md:4481. The historical pair: the old comment is present at c10800814dec (exit 0) and absent at the head (exit 1). The test-count history the page states was read the same way: 1 `test(` at c10800814dec, 3 at 1a9095e6cf22 and 3 at the head.",
+      "headSha": "c08ee3e7ad30131d17f6fcf8afdc1a715e119f45",
+      "negativeControl": "The head-absent half of the historical pair is the control and it exits 1: had the old comment still been at the head, the page would have pinned a commit for text the head carries and the citation would be an ordinary stale one. The pattern in the first proof is the control for the rest - it found eight citations on these pages before the round and finds none now."
+    },
+    {
+      "criterion": "The layout page's two measured claims are true: the guides test file holds three tests and passes, and the repository's own layout checker refuses the tightened claim list, which is why the parser was the only side that could move.",
+      "surface": "The test file and its runner, and the checker run over a deliberately tightened docs/kubernetes.md.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -c '^test(' scripts/semantic-line-breaks.guides.test.ts ; bun install ; bun test scripts/semantic-line-breaks.guides.test.ts ; then, with the blank lines between the four claim bullets of docs/kubernetes.md removed, bun scripts/semantic-line-breaks.ts docs/kubernetes.md",
+      "observed": "3 tests; `3 pass, 0 fail, 7 expect() calls` in 2.13 s. With the list tightened the checker refuses it: `docs/kubernetes.md:4492: R2: - \\`person\\` …`, `:4493: R2: …`, `:4494: R2: …`, exit 1 - so the document could not have been tightened back to suit the old parser, exactly as the second page says a reader should not re-derive. docs/kubernetes.md and bun.lock were both restored with `jj restore --from @-` and `jj status` is clean; `bun install` was needed for the test to run at all, as the implementer recorded, and it rewrites bun.lock.",
+      "headSha": "c08ee3e7ad30131d17f6fcf8afdc1a715e119f45",
+      "negativeControl": "The checker's refusal is itself the negative control for the page's claim, and the untouched file is the positive one: `bun test scripts/semantic-line-breaks.guides.test.ts` passes over docs/kubernetes.md as it ships, and exits 1 naming three lines the moment the list is tightened."
+    },
+    {
+      "criterion": "No file outside docs/solutions/ and .legion/INFRA-841/ differs from the approved head 7e630849, so generation 1's verified code is untouched and its verification stands.",
+      "surface": "The branch's own tree against the approved head.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj diff --from 7e630849 --to c08ee3e7ad30131d17f6fcf8afdc1a715e119f45 --name-only | grep -vE '^(docs/solutions/|\\.legion/INFRA-841/)'",
+      "observed": "No output, exit 1. The whole diff is six paths: the two learning pages and the four .legion/INFRA-841/ handoffs (implement, plan, review, test), the last of which is the generation-1 copy retro deleted and this generation re-creates. A smoke run of the code surface agrees: `go test ./cmd/dispatch/ -run 'TestADispatchStartWaitsOutAReconcileFailureTheBusRetries' -count=1` gives `ok … 1.561s` at this head.",
+      "headSha": "c08ee3e7ad30131d17f6fcf8afdc1a715e119f45",
+      "negativeControl": "The comparison is not one that always prints nothing: run against generation 1's own heads it lists packages/envoy/cmd/dispatch/stream_replicas_test.go, settings.go, settings_test.go, AGENTS.md and the changelog fragment, which is how rounds 1 to 5 knew what they were testing. Here it lists none of them."
+    }
+  ],
+  "ci": {
+    "head": "c08ee3e7ad30131d17f6fcf8afdc1a715e119f45, the pull request's head, which is the implementer's handoff-only push and rightly carries `skip-checks: true`, so GitHub started no run for it. The code head of the round is c23e8401ebdc3f59b0012369a994a0197be6bc80, the docs commit, whose push started CI run 41225141645 and PR Title run 41225142026.",
+    "read": "GitHub, not re-run. At 2026-10-31T17:38Z both runs at c23e8401 are `queued` - read as running, not green - and `gh pr view --json statusCheckRollup` returns no ci-ok and no pr-title at the head, which is what a handoff-only head looks like: the daemon carries the code head's verdict to it.",
+    "note": "The plan's acceptance line 'both SUCCESS at <head>' can only be read at a head that ran CI. That is c23e8401 now and will be retro's push at READY, which carries no trailer; the tester's own handoff push after this is handoff-only and carries the trailer, so it starts no run and cancels none - measured in generation 1's round 5, where the queued run survived the tester's handoff push. CI has been concluding promptly since the backlog cleared: run 41197061043 at f11e42a8 concluded `success`.",
+    "reviewState": "`gh pr view --json reviewDecision,mergeStateStatus` reads CHANGES_REQUESTED and BLOCKED at this head, which is review 5723093389 still standing. That is the review phase's own acceptance line, not the tester's: a reply clears nothing, and this repository's main ruleset does not dismiss a stale review on push."
+  },
+  "notesForTheArchitect": [
+    "Every clause of spec v3's re-run acceptance is met except the two that are not the tester's to meet: the required checks are still queued at the code head, and the fresh approval is the review phase's.",
+    "The implementer's deviation stands up: it removed eight line citations where the review named three, because the acceptance reads 'neither page cites a line number'. The five extra were true at the head; removing them loses nothing a reader can check, since each is now a symbol, a step name, a test title or a quoted phrase, and I verified all eleven resolve.",
+    "The inconsistency the planner reported to you is still there and I make no claim about it: the other two pr2580 learning pages keep their line citations, since the acceptance names two pages."
+  ]
+}
