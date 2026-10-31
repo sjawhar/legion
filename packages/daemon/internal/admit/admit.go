@@ -852,7 +852,6 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	oldTree, oldGeneration := stored.Tree, stored.Generation
 	var gate *record.DesignGate
 	var pr *record.PullRequest
-	var subtree []string
 	var err error
 	if orphan {
 		gate, err = a.store.Gate(ctx, tx, oldTree)
@@ -862,9 +861,6 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 		pr, err = a.store.PullRequest(ctx, tx, stored.Key)
 		if err != nil {
 			return fmt.Errorf("read pull request of re-admitted orphan %s: %w", stored.Key, err)
-		}
-		if subtree, err = a.subtree(ctx, tx, oldTree, stored.Key); err != nil {
-			return fmt.Errorf("read the subtree of re-admitted orphan %s: %w", stored.Key, err)
 		}
 	}
 	stored.Project = a.project
@@ -940,29 +936,6 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 				return fmt.Errorf("carry gate to re-admitted orphan %s: %w", stored.Key, err)
 			}
 		}
-		// A person's decision on this child or on one of its descendants, kept under the old root
-		// while nobody in that tree could hear it (record.RelayParkedDecision), is owed to this
-		// root's architect from here on: the rows move with the child, unclaimed, in this
-		// transaction, so the start this admission queues names them (its ParkedDecisionTask) and
-		// no start or catch-up of the tree it left does. What was decided on the rest of that tree
-		// stays with it.
-		if err := a.store.MoveKeptDecisions(ctx, tx, oldTree, stored.Key, subtree); err != nil {
-			return err
-		}
-		// One of those decisions can already have been forgotten into the task of the old root's
-		// architect: a start named it, the claim took the task, and the task has waited on that
-		// claim, unsent and unconfirmed, while its root was parked, lingering or waiting for its
-		// slot (supervise's Deps.RootHears). Nothing of that task reaches this child, so what it
-		// names of this child's subtree is kept again here, unclaimed under the child's key, for the
-		// start this admission queues. If the old architect is later handed that task after all,
-		// it is told a decision of a tree it no longer holds — the lesser fault of the two.
-		architect, err := a.rootArchitect(oldTree)
-		if err != nil {
-			return err
-		}
-		if err := a.store.ReKeepDeliveredDecisions(ctx, tx, architect, stored.Key, subtree); err != nil {
-			return err
-		}
 		return a.store.PutHandedOverRoot(ctx, tx, record.HandedOverRoot{Issue: stored.Key, Generation: stored.Generation, GateCarried: gate != nil})
 	}
 	// Only the old tree's own root coming back cancels its pending hand-overs; an orphan of that
@@ -978,44 +951,6 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	// A root set back to todo is a new generation of the whole tree, so the old generation's pull
 	// request, gate, handoffs and pending READY go for every issue of it, not only the root's.
 	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
-}
-
-// subtree is key and every issue of tree under it, by key: the work a hand-over of key takes into
-// a tree of its own, read from the parent links the record holds (record.Issue.Parent), which is
-// the only chain a member of a tree has — a Dispatch ancestry is a root's own (record.Issue.
-// Ancestry). An issue of the tree that has already left it is in no tree's reading but its own.
-// The links are walked to a fixed point rather than in one pass: the issues come by key, which is
-// no parent order.
-func (a *Admission) subtree(ctx context.Context, tx pgx.Tx, tree, key string) ([]string, error) {
-	issues, err := a.store.TreeIssues(ctx, tx, tree)
-	if err != nil {
-		return nil, err
-	}
-	under := map[string]bool{key: true}
-	for grew := true; grew; {
-		grew = false
-		for _, issue := range issues {
-			if issue.Parent != nil && under[*issue.Parent] && !under[issue.Key] {
-				under[issue.Key], grew = true, true
-			}
-		}
-	}
-	return slices.Sorted(maps.Keys(under)), nil
-}
-
-// rootArchitect is the claim token of root's architect, keyed as the supervisor and the claims
-// table key it: by the normalized project token (claim.ProjectToken), not the Dispatch project key
-// the issue records carry.
-func (a *Admission) rootArchitect(root string) (claim.Token, error) {
-	project, err := claim.ProjectToken(a.project)
-	if err != nil {
-		return "", fmt.Errorf("the architect of %s: %w", root, err)
-	}
-	token, err := claim.NewToken(project, root, claim.RoleArchitect)
-	if err != nil {
-		return "", fmt.Errorf("the architect of %s: %w", root, err)
-	}
-	return token, nil
 }
 
 // keepStaleApproval keeps, for the architect start of the root key re-admission is clearing, the

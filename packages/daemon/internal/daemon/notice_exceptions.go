@@ -240,7 +240,7 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 		// telling, so the told check supersededKept makes answers no here unless an earlier run of
 		// this row published.
 		if notice.CatchUp.Kept != nil && reported.claims != 0 {
-			if err := r.supersededKept(ctx, issue, reported.claims, key, held.Claim.Generation); err != nil {
+			if err := r.supersededKept(ctx, issue, reported.claims, key); err != nil {
 				return err
 			}
 		}

@@ -256,13 +256,20 @@ func (s *Store) ClaimByBootTokenHash(ctx context.Context, hash []byte) (supervis
 }
 
 // PutDelivery writes the claim's pending delivery, replacing the one it had: a claim has at most
-// one. A token no claim carries is refused.
+// one. A token no claim carries is refused. It is one transaction, because the write carries what
+// the task names of the decisions a person made while nobody in its root's tree could hear them:
+// queued or taken back, the delivery holds those rows; confirmed, it tells them (kept_decisions.go).
 func (s *Store) PutDelivery(ctx context.Context, token claim.Token, d supervise.Delivery) error {
-	return putDelivery(ctx, s.pool, token, d)
+	return s.Tx(ctx, func(tx pgx.Tx) error { return putDelivery(ctx, tx, token, d) })
 }
 
-// putDelivery writes a delivery through whichever executor the caller has: the pool, or the
-// transaction that carries the claim the delivery is confirmed against.
+// putDelivery writes a delivery through whichever executor the caller has: the transaction
+// PutDelivery opens, or the one that carries the claim the delivery is confirmed against. The rows
+// the task names go with it: a delivery still unconfirmed holds them, under this claim and this
+// delivery id, taking each from the start row that claimed it and from whatever id the claim's
+// previous delivery held it under; the write that records the confirmation tells them. Both are in
+// the caller's transaction, so no row is ever held by a delivery the store does not hold, and no
+// confirmation commits without telling what it confirmed.
 func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.Delivery) error {
 	if d.Generation > math.MaxInt64 {
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
@@ -281,13 +288,17 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
 	}
-	return nil
+	if d.ConfirmedAt.IsZero() {
+		return holdKeptDecisions(ctx, db, token, d.ID, keptDecisions(d.Kept))
+	}
+	return tellKeptDecisions(ctx, db, token, d.ID)
 }
 
 // PutClaimAndDelivery writes a claim and its pending delivery in one transaction: a confirmation
 // records both, and a daemon that died between them would leave a claim recorded as working whose
 // delivery nothing retires or re-sends — a task the shim has already answered, so its worker is
-// never prompted again and the phase waits.
+// never prompted again and the phase waits. It is also where a confirmation tells the decisions
+// its delivery holds, in that same transaction and for the same reason.
 func (s *Store) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d supervise.Delivery) error {
 	return s.Tx(ctx, func(tx pgx.Tx) error {
 		if err := putClaim(ctx, tx, c); err != nil {
@@ -301,7 +312,9 @@ func (s *Store) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d su
 // claim does not hold is refused, and the one it does hold stays. The claim it is given is written
 // in the same transaction, because the run a claim serves is set by the retiring of the task that
 // ran: a delete that committed without it would leave a daemon crashed in between with a claim
-// that has forgotten the run its worker is still working.
+// that has forgotten the run its worker is still working. What the delivery held is left KEPT in
+// that same transaction: a retired task tells nothing, so each row waits for the next start or
+// catch-up of its own issue's tree to name it.
 func (s *Store) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryID string) error {
 	return s.Tx(ctx, func(tx pgx.Tx) error {
 		if err := putClaim(ctx, tx, c); err != nil {
@@ -317,7 +330,7 @@ func (s *Store) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryI
 		if tag.RowsAffected() == 0 {
 			return fmt.Errorf("retire delivery %s on %s: the claim holds no such delivery", deliveryID, c.Token)
 		}
-		return nil
+		return releaseKeptDecisions(ctx, tx, c.Token, deliveryID)
 	})
 }
 

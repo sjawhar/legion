@@ -443,6 +443,12 @@ type keptCounts struct {
 	closes              int
 	streamed            int
 	foreign             int
+	// handedInPublish is every hand-over that ran inside a catch-up's held-open publish — the
+	// issue leaving the tree between that catch-up's compose and its publish — and
+	// handedBeforeConfirm every one that ran between a held task's queue and the confirmation
+	// that tells what it holds.
+	handedInPublish     int
+	handedBeforeConfirm int
 	// supersededTimeouts is every catch-up whose receipt timeout drew no copy from the re-hold
 	// because the operation that ran inside its publish superseded it: the branch that leaves what
 	// the row claims to the row's own deletion (notice_exceptions.go's reholdNotice).
@@ -466,6 +472,8 @@ func (c *keptCounts) add(other keptCounts) {
 	c.closes += other.closes
 	c.streamed += other.streamed
 	c.foreign += other.foreign
+	c.handedInPublish += other.handedInPublish
+	c.handedBeforeConfirm += other.handedBeforeConfirm
 	c.supersededTimeouts += other.supersededTimeouts
 	for mode := range c.publishes {
 		c.publishes[mode] += other.publishes[mode]
@@ -477,11 +485,12 @@ func (c keptCounts) String() string {
 		"%d catch-ups finished for an architect that will not hold its role again (%d of them a failed claim); "+
 		"%d publishes held open for an interleaving, %d steps ran rows at once, %d members handed over (%d without their run), "+
 		"%d children orphaned by a person's todo, %d queued roots adopted, %d trees closed, "+
-		"%d restarts met a streaming agent, %d foreign turns, %d receipt timeouts the re-hold found superseded; "+
+		"%d restarts met a streaming agent, %d foreign turns, %d receipt timeouts the re-hold found superseded, "+
+		"%d hand-overs inside a catch-up's publish, %d hand-overs between a held task and its confirmation; "+
 		"catch-up publishes answered: %d delivered, %d no-holder, %d refused, %d receipt-timeout, %d denied, %d delivery-failed",
 		c.refusedLaunches, c.failedClaim, c.retriedFailed, c.endedCatchUps, c.endedByFailure,
 		c.raced, c.together, c.handovers, c.handoversWithoutRun, c.orphans, c.adoptions, c.closes,
-		c.streamed, c.foreign, c.supersededTimeouts,
+		c.streamed, c.foreign, c.supersededTimeouts, c.handedInPublish, c.handedBeforeConfirm,
 		c.publishes[keptDelivers], c.publishes[keptNoHolder], c.publishes[keptRefuses],
 		c.publishes[keptReceiptTimeout], c.publishes[keptDenied], c.publishes[keptDeliveryFailed])
 }
@@ -994,6 +1003,7 @@ func (r *keptRun) enabled() []func() {
 	if len(r.keptCatchUps(due)) > 0 && len(r.raceOps(0)) > 0 {
 		ops = append(ops, r.raceRow)
 	}
+	overs := r.handOvers()
 	for _, tree := range r.roots {
 		if r.readyEnabled(tree) {
 			ops = append(ops, func() { r.ready(tree) })
@@ -1007,6 +1017,9 @@ func (r *keptRun) enabled() []func() {
 		if r.heldTask(tree) {
 			ops = append(ops, func() { r.foreignTurn(tree) }, func() { r.restartStreaming(tree) })
 		}
+	}
+	if len(overs) > 0 && r.awaitingConfirmation(r.root) {
+		ops = append(ops, func() { r.handOverInsideAHeldTask(overs[r.rng.IntN(len(overs))]) })
 	}
 	return ops
 }
@@ -1345,6 +1358,15 @@ func (r *keptRun) handOverGrandchild() { r.handOverMember(r.grandchild, keptChil
 // with the others the run leaves to their own tests (deliverRowsTheRunDoesNotDrive) and the event
 // it would make is applied here, which is the path a person's label takes.
 func (r *keptRun) handOverMember(member *keptTree, parent string, withRun bool) {
+	if err := r.handOverMemberErr(member, parent, withRun); err != nil {
+		r.fatalf("hand %s over: %v", member.key, err)
+	}
+}
+
+// handOverMemberErr is handOverMember without the test's own end: the steps that run a hand-over
+// inside another operation's window run it on a goroutine of their own, or with a confirmation
+// waiting behind it, where a failure is the step's to report (raceRow, handOverInsideAHeldTask).
+func (r *keptRun) handOverMemberErr(member *keptTree, parent string, withRun bool) error {
 	now := time.Now()
 	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 		if err := r.records.PutHandover(r.ctx, tx, record.Handover{Issue: member.key, Tree: r.root.issue.Tree,
@@ -1358,21 +1380,30 @@ func (r *keptRun) handOverMember(member *keptTree, parent string, withRun bool) 
 		}
 		return r.records.Enqueue(r.ctx, tx, row)
 	}); err != nil {
-		r.fatalf("write the hand-over of %s: %v", member.key, err)
+		return fmt.Errorf("write the hand-over of %s: %w", member.key, err)
 	}
-	r.applyHandOverEvent(member, parent)
+	if err := r.applyHandOverEventErr(member, parent); err != nil {
+		return err
+	}
 	r.counts.handovers++
 	if !withRun {
 		r.counts.handoversWithoutRun++
 	}
 	r.tracef("hand-over member=%s with-run=%t tree=%s generation=%d status=%s phase=%s last-row=%d", member.key,
 		withRun, member.issue.Tree, member.issue.Generation, member.issue.Status, member.issue.Phase, r.lastRow())
+	return nil
 }
 
 // applyHandOverEvent applies the labelled todo Dispatch shows for a member the linger handed over,
 // as the daemon's own status write makes it, and records the root of its own it becomes as a tree
 // this run drives.
 func (r *keptRun) applyHandOverEvent(member *keptTree, parent string) {
+	if err := r.applyHandOverEventErr(member, parent); err != nil {
+		r.fatalf("%v", err)
+	}
+}
+
+func (r *keptRun) applyHandOverEventErr(member *keptTree, parent string) error {
 	seq := member.issue.LastDispatchSeq + 1
 	blocked := r.mirroredBlockers(member.key)
 	if _, err := intake.ApplyFact(r.ctx, r.pool, "dispatch", fmt.Sprintf("hand-over:%s:%d", member.key, seq),
@@ -1380,14 +1411,44 @@ func (r *keptRun) applyHandOverEvent(member *keptTree, parent string) {
 			Title: member.issue.Title, Parent: parent, Rank: member.issue.Rank, Blockers: blocked, HandedOver: true,
 			DaemonActor: true},
 		r.engine, r.admission); err != nil {
-		r.fatalf("apply the hand-over of %s: %v", member.key, err)
+		return fmt.Errorf("apply the hand-over of %s: %w", member.key, err)
 	}
 	carried := r.issueRecord(member.key)
 	if carried == nil || carried.Tree != member.key {
-		r.fatalf("the handed-over member %s = %+v, want a tree of its own", member.key, carried)
+		return fmt.Errorf("the handed-over member %s = %+v, want a tree of its own", member.key, carried)
 	}
 	member.issue, member.handed = *carried, true
 	r.roots = append(r.roots, member)
+	return nil
+}
+
+// keptHandOver is one way a tracked issue can leave its tree for one of its own now, named before
+// a step picks among them so that one seed always picks the same one, and runnable where a failure
+// must be reported rather than ended on.
+type keptHandOver struct {
+	what string
+	run  func() error
+}
+
+// handOvers is every hand-over the model state allows now: the child with its run, and the
+// grandchild beside it. They are what the two interleaving steps need — an issue that leaves its
+// tree inside another operation's window — so each is offered as an operation of its own rather
+// than only as a step the generator picks on its own.
+func (r *keptRun) handOvers() []keptHandOver {
+	var ops []keptHandOver
+	if r.handOverEnabled(r.child) {
+		ops = append(ops, keptHandOver{what: fmt.Sprintf("the hand-over of %s with its run", keptChild),
+			run: func() error { return r.handOverMemberErr(r.child, keptRoot, true) }})
+	}
+	if r.handOverEnabled(r.grandchild) {
+		ops = append(ops, keptHandOver{what: fmt.Sprintf("the hand-over of %s beside its parent", keptGrandchild),
+			run: func() error { return r.handOverMemberErr(r.grandchild, keptChild, true) }})
+	}
+	if r.orphanEnabled() {
+		ops = append(ops, keptHandOver{what: fmt.Sprintf("the person's todo that orphans %s", keptChild),
+			run: r.orphanChildErr})
+	}
+	return ops
 }
 
 // orphanEnabled is whether a person can orphan the child now: it still stands in the root's tree
@@ -1403,24 +1464,35 @@ func (r *keptRun) orphanEnabled() bool {
 // (readmit without carry). What a person decided on it while that tree was nobody's to hear is
 // owed to the architect of the root it becomes.
 func (r *keptRun) orphanChild() {
+	if err := r.orphanChildErr(); err != nil {
+		r.fatalf("%v", err)
+	}
+}
+
+// orphanChildErr is orphanChild without the test's own end, for the steps that run it inside
+// another operation's window (raceRow, handOverInsideAHeldTask).
+func (r *keptRun) orphanChildErr() error {
 	r.child.issue.Phase, r.child.issue.Status = phase.Done, "backlog"
-	r.putIssue(r.child.issue)
+	if err := r.putIssueErr(r.child.issue); err != nil {
+		return fmt.Errorf("record the parked child %s: %w", keptChild, err)
+	}
 	seq := r.child.issue.LastDispatchSeq + 1
 	if _, err := intake.ApplyFact(r.ctx, r.pool, "dispatch", fmt.Sprintf("orphan:%s:%d", keptChild, seq),
 		intake.DispatchIssue{Key: keptChild, ResolvedRepo: "acme/widgets", Seq: seq, Type: "issue.updated", Status: "todo",
 			Title: r.child.issue.Title, Parent: keptRoot, Rank: r.child.issue.Rank, HandedOver: true},
 		r.engine, r.admission); err != nil {
-		r.fatalf("apply the person's todo that orphans %s: %v", keptChild, err)
+		return fmt.Errorf("apply the person's todo that orphans %s: %w", keptChild, err)
 	}
 	orphan := r.issueRecord(keptChild)
 	if orphan == nil || orphan.Tree != keptChild {
-		r.fatalf("the orphaned child = %+v, want a tree of its own", orphan)
+		return fmt.Errorf("the orphaned child = %+v, want a tree of its own", orphan)
 	}
 	r.child.issue, r.child.handed = *orphan, true
 	r.roots = append(r.roots, r.child)
 	r.counts.orphans++
 	r.tracef("orphan child=%s tree=%s generation=%d phase=%s last-row=%d", keptChild, orphan.Tree, orphan.Generation,
 		orphan.Phase, r.lastRow())
+	return nil
 }
 
 // adoptionTarget is the live tree a person can make the queued root a child of now, nil for none:
@@ -1708,16 +1780,20 @@ type keptRaceOp struct {
 	row    record.OutboxRow
 	key    string
 	launch uint64
+	over   keptHandOver
 }
 
 // raceOps is every operation that can run inside a catch-up's publish now: the ready fact of a
 // launch whose agent is up and whose ready the daemon has not told the workflow yet, which writes
 // that launch its catch-up; one other due start row of a driven tree — a stale start, whose
 // settlement hands over, or one that finds the architect running and applies the ready fact
-// itself; and the root's re-admission, which is the other thing that supersedes a catch-up
-// (catchUpSuperseded reads the root's generation against the catch-up's). Each of the three drops
-// the root's queued catch-ups or moves the root past the one that is publishing. The row the step
-// is publishing is left out, and so is every row that touches no kept decision.
+// itself; the root's re-admission, which is the other thing that supersedes a catch-up
+// (catchUpSuperseded reads the root's generation against the catch-up's); and the hand-over of a
+// member into a tree of its own, which is the one that moves the debt itself: the catch-up was
+// composed while the issue still stood in this tree and publishes once it no longer does, so its
+// publish must tell the old architect and leave the row for the tree the issue moved to
+// (record.Store.ForgetKeptDecisions). The row the step is publishing is left out, and so is every
+// row that touches no kept decision.
 func (r *keptRun) raceOps(publishing int64) []keptRaceOp {
 	var ops []keptRaceOp
 	for _, tree := range r.roots {
@@ -1745,6 +1821,9 @@ func (r *keptRun) raceOps(publishing int64) []keptRaceOp {
 	if r.parkedOrWaiting() {
 		ops = append(ops, keptRaceOp{kind: "readmit", what: fmt.Sprintf("the re-admission of %s", keptRoot)})
 	}
+	for _, over := range r.handOvers() {
+		ops = append(ops, keptRaceOp{kind: "handover", over: over, what: over.what})
+	}
 	return ops
 }
 
@@ -1760,6 +1839,16 @@ func (r *keptRun) prepareRace(op keptRaceOp) *keptRace {
 				return err
 			}
 			race.outcome = "the ready fact was applied"
+			return nil
+		}
+	case "handover":
+		over := op.over
+		race.run = func() error {
+			if err := over.run(); err != nil {
+				return err
+			}
+			r.counts.handedInPublish++
+			race.outcome = "the issue left the tree the publishing catch-up was composed for"
 			return nil
 		}
 	case "row":
@@ -2076,10 +2165,76 @@ func (r *keptRun) turn(tree *keptTree) {
 	r.tracef("turn tree=%s state=%s pending=%t", tree.key, machine.Claim().State, machine.Claim().Pending != nil)
 }
 
+// awaitingConfirmation is whether the root's architect holds a task that names kept decisions and
+// has not been confirmed — queued and held while the root does not hear, or sent and waiting for
+// its turn. Its delivery holds those rows and its confirmation is what tells them, so this is the
+// window between a held task's queue and its confirmation.
+func (r *keptRun) awaitingConfirmation(tree *keptTree) bool {
+	machine, found := r.sup.Machine(tree.token)
+	if !found {
+		return false
+	}
+	pending := machine.Claim().Pending
+	return pending != nil && pending.Generation != 0 && pending.ConfirmedAt.IsZero()
+}
+
+// namesKeptDecisions is whether the task the tree's architect holds names a decision of its own,
+// which is what makes the window one a decision can be lost in: the counter reports only those.
+func (r *keptRun) namesKeptDecisions(tree *keptTree) bool {
+	machine, found := r.sup.Machine(tree.token)
+	if !found {
+		return false
+	}
+	pending := machine.Claim().Pending
+	return pending != nil && len(pending.Kept) > 0
+}
+
+// handOverInsideAHeldTask is an issue leaving its tree inside that window, and then the whole of
+// what closes it: the hand-over runs, the root is re-admitted when nothing of it runs, so its
+// architect hears again, every start row of the root then due is run — which is where the held
+// task is narrowed of what has left this tree and sent (supervise's Deps.RootTask) — and the turn
+// that confirms it starts at once. The confirmation's own transaction is the first thing to read
+// the record the hand-over left, and what it tells is held to the same rule everything else is: a
+// row whose issue has left the claim's tree is not told but left kept, for the tree it moved into
+// to name (the claim store's tellKeptDecisions). Each piece is an operation the model drives on
+// its own; this step runs them back to back so the window is reached rather than waited for.
+func (r *keptRun) handOverInsideAHeldTask(over keptHandOver) {
+	if err := over.run(); err != nil {
+		r.fatalf("%s, inside the window between the root's held task and its confirmation: %v", over.what, err)
+	}
+	if r.namesKeptDecisions(r.root) {
+		r.counts.handedBeforeConfirm++
+	}
+	r.tracef("hand-over inside a held task: %s; the root runs again and confirms its task now", over.what)
+	if r.parkedOrWaiting() {
+		r.readmit()
+	}
+	for _, row := range r.rows(true) {
+		if row.Issue != keptRoot || row.Kind != record.OutboxKindSupervise {
+			continue
+		}
+		payload, err := record.DecodeOutboxPayload(row)
+		if err != nil {
+			continue
+		}
+		if request, ok := payload.(record.SuperviseRequest); !ok || request.Op != "start" {
+			continue
+		}
+		if runErr := r.runOne(&row, payload); runErr == nil {
+			if err := r.finishRow(row); err != nil {
+				r.fatalf("finish the start row %d that sends the held task: %v", row.ID, err)
+			}
+		}
+	}
+	if r.turnEnabled(r.root) {
+		r.turn(r.root)
+	}
+}
+
 // heldTask is whether the architect's claim holds a task of a run that nobody has sent and nobody
 // has acknowledged: a root architect's start task held back because its root has no architect to
-// hear it (supervise's sendPending, Deps.RootHears). Its decisions were forgotten when the start
-// row gave it to the claim, so this task is the only thing that carries them.
+// hear it (supervise's sendPending, Deps.RootHears). The rows it names are held by its delivery,
+// and its own confirmation is what tells them.
 func (r *keptRun) heldTask(tree *keptTree) bool {
 	machine, found := r.sup.Machine(tree.token)
 	if !found {
@@ -2349,23 +2504,25 @@ func (r *keptRun) held() {
 	}
 }
 
-// keptAnywhere is every decision still kept, under whichever root it stands, with the issue it
-// was decided on and the row that claims it: once the run has quiesced there is no architect left
-// to tell, so a row standing here is a decision nobody will be told.
+// keptAnywhere is every decision still kept, with the issue it was decided on, the tree that issue
+// stands in — the tree that owes it, which the row is read through now that a kept decision is
+// keyed by its issue — and the row that claims it: once the run has quiesced there is no architect
+// left to tell, so a row standing here is a decision nobody will be told.
 func (r *keptRun) keptAnywhere() []string {
-	rows, err := r.pool.Query(r.ctx, "select ref, root, issue, coalesce(claimed_by, 0) from parked_decisions order by ref")
+	rows, err := r.pool.Query(r.ctx, `select kept.ref, coalesce(owner.tree, ''), kept.issue, coalesce(kept.claimed_by, 0)
+		from parked_decisions kept left join issues owner on owner.key = kept.issue order by kept.ref`)
 	if err != nil {
 		r.fatalf("read the decisions still kept: %v", err)
 	}
 	defer rows.Close()
 	var left []string
 	for rows.Next() {
-		var ref, root, issue string
+		var ref, tree, issue string
 		var claimed int64
-		if err := rows.Scan(&ref, &root, &issue, &claimed); err != nil {
+		if err := rows.Scan(&ref, &tree, &issue, &claimed); err != nil {
 			r.fatalf("scan a decision still kept: %v", err)
 		}
-		left = append(left, fmt.Sprintf("%s kept-under=%s issue=%s claimed-by=%d", ref, root, issue, claimed))
+		left = append(left, fmt.Sprintf("%s owed-to=%s issue=%s claimed-by=%d", ref, tree, issue, claimed))
 	}
 	if err := rows.Err(); err != nil {
 		r.fatalf("read the decisions still kept: %v", err)

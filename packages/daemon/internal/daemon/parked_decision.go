@@ -94,15 +94,18 @@ func (r *outbox) parkDecision(ctx context.Context, issue, root string, notice re
 	return nil
 }
 
-// settleKept settles what an architect start row's task named of what its root keeps, once the row
-// has run and whatever its generation or phase made of it. Two things say the task reached the
-// architect: gave, which the run that handed it to the claim knows, and the claim's own record of
+// settleKept settles what an architect start row's task named of what its tree is owed, once the
+// row has run and whatever its generation or phase made of it. Two things say the task reached
+// the claim: gave, which the run that handed it to the claim knows, and the claim's own record of
 // every start row whose task it queued (supervise.Claim.DeliveredRows), which outlives the
-// delivery and answers for a later run of the same row. Either way the row forgets exactly what it
-// named (record.Store.ForgetKeptDecisions). A row neither says reached no architect — an earlier
-// generation, a phase left, a lingering tree, a claim that never took the task — and hands what it
-// claimed over (workflow.HandOverKept), so no release leaves a decision unclaimed while the root
-// has an architect to tell.
+// delivery and answers for a later run of the same row. Either way this row has nothing left to
+// settle: the claim's write of that delivery took the rows the row claimed and holds them, and
+// the write that records the delivery's confirmation tells them — or, if the delivery was retired
+// first, left them KEPT for the next start or catch-up of each one's own tree to name.
+//
+// A row neither says reached no claim — an earlier generation, a phase left, a lingering tree, a
+// claim that never took the task — and hands what it claimed over (workflow.HandOverKept), so no
+// release leaves a decision unclaimed while the tree it is owed to has an architect to tell.
 //
 // Every supervise row is settled after its work (the outbox's execute), and the one step that
 // names decisions inside a start's own run — the ClaimReady a start applies when it finds the root
@@ -121,21 +124,19 @@ func (r *outbox) settleKept(ctx context.Context, row record.OutboxRow, payload r
 	}
 	held := r.supervisedClaim(token).Claim
 	if gave || slices.Contains(held.DeliveredRows, row.ID) {
-		return r.writeSettlement(ctx, root, row.ID, func(ctx context.Context, tx pgx.Tx) error {
-			return r.records.ForgetKeptDecisions(ctx, tx, root, *payload.Kept, row.ID)
-		})
+		return nil
 	}
 	r.log.Info("outbox start finished without giving its claim the task; the decisions it named are handed over", "row", row.ID,
 		"root", root, "generation", payload.Generation, "launch", held.Generation)
-	return r.handOverKept(ctx, root, row.ID, held.Generation)
+	return r.handOverKept(ctx, root, row.ID)
 }
 
-// handOverKept hands the decisions outbox row claims to a fresh catch-up of root's architect, or
-// leaves them unclaimed when the root has no architect to tell (workflow.HandOverKept). launch is
-// the architect claim's current launch, which the catch-up is written for.
-func (r *outbox) handOverKept(ctx context.Context, root string, row int64, launch uint64) error {
+// handOverKept hands the decisions outbox row claims to a fresh catch-up of the architect of each
+// tree they are owed to now, and leaves KEPT what is owed to a tree with no architect to tell
+// (workflow.HandOverKept). root names the row's own tree in the error the settlement reports.
+func (r *outbox) handOverKept(ctx context.Context, root string, row int64) error {
 	return r.writeSettlement(ctx, root, row, func(ctx context.Context, tx pgx.Tx) error {
-		return workflow.HandOverKept(ctx, tx, r.records, r.designGate, root, row, launch, r.now().UTC())
+		return workflow.HandOverKept(ctx, tx, r.records, r.designGate, row, r.now().UTC())
 	})
 }
 
@@ -175,14 +176,16 @@ func (r *outbox) toldKept(ctx context.Context, root, key string) error {
 	return nil
 }
 
-// settleTold forgets what outbox row's catch-up named of what its root keeps, once the row has run
+// settleTold tells what outbox row's catch-up named of what its tree is owed, once the row has run
 // and told it (toldKept), however that run ended: the publish that told it, a newer catch-up that
 // superseded the row since, a holder that refused it, a grant that denied it, an architect that
-// will not hold its role again, or the row's own deletion under its lease. Only a row that told
-// nothing is left to settle another way — the hand-over of a superseded catch-up (supersededKept),
-// and otherwise the architect's next ready, which names every unclaimed decision. A failure
-// returns an error, so the row retries and forgets again; a forget of what is already gone deletes
-// nothing.
+// will not hold its role again, or the row's own deletion under its lease. The telling is held to
+// the one validity rule (record.Store.ForgetKeptDecisions): a row whose issue has left this tree
+// since the catch-up was composed is not deleted but left KEPT, for the tree it stands in now to
+// name. Only a row that told nothing is left to settle another way — the hand-over of a superseded
+// catch-up (supersededKept), and otherwise the architect's next ready, which names every unclaimed
+// decision. A failure returns an error, so the row retries and tells again; a telling of what is
+// already gone deletes nothing.
 func (r *outbox) settleTold(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if payload.CatchUp == nil || payload.CatchUp.Kept == nil {
 		return nil
@@ -197,24 +200,38 @@ func (r *outbox) settleTold(ctx context.Context, row record.OutboxRow, payload r
 		if err != nil || !told {
 			return err
 		}
-		return r.records.ForgetKeptDecisions(ctx, tx, root, *payload.CatchUp.Kept, row.ID)
+		tree, err := r.treeOfIssue(ctx, tx, root)
+		if err != nil {
+			return err
+		}
+		return r.records.ForgetKeptDecisions(ctx, tx, tree, *payload.CatchUp.Kept, row.ID)
 	}); err != nil {
-		return fmt.Errorf("forget the decisions the catch-up of %s told: %w", root, err)
+		return fmt.Errorf("tell the decisions the catch-up of %s named: %w", root, err)
 	}
 	return nil
 }
 
+// treeOfIssue is the tree issue stands in now, which is the tree a row of that issue tells for: a
+// root the record no longer holds, or one that is its own tree, answers itself.
+func (r *outbox) treeOfIssue(ctx context.Context, tx pgx.Tx, issue string) (string, error) {
+	stored, err := r.records.Issue(ctx, tx, issue)
+	if err != nil || stored == nil {
+		return issue, err
+	}
+	return stored.Tree, nil
+}
+
 // supersededKept hands what outbox row's catch-up named over to a fresh catch-up once a newer one
 // has superseded it, so that it will never publish: the newer catch-up was composed from what
-// nobody claimed and left this row's decisions out (workflow.HandOverKept). A row that published
-// before — its forget failed, or the daemon died between the two — told what it named and hands
-// nothing over: settleTold forgets it when the row finishes here.
-func (r *outbox) supersededKept(ctx context.Context, root string, row int64, key string, launch uint64) error {
+// nothing claimed and left this row's decisions out (workflow.HandOverKept). A row that published
+// before — its telling failed, or the daemon died between the two — told what it named and hands
+// nothing over: settleTold tells it when the row finishes here.
+func (r *outbox) supersededKept(ctx context.Context, root string, row int64, key string) error {
 	return r.writeSettlement(ctx, root, row, func(ctx context.Context, tx pgx.Tx) error {
 		told, err := r.records.Processed(ctx, tx, record.KeptToldSource, key)
 		if err != nil || told {
 			return err
 		}
-		return workflow.HandOverKept(ctx, tx, r.records, r.designGate, root, row, launch, r.now().UTC())
+		return workflow.HandOverKept(ctx, tx, r.records, r.designGate, row, r.now().UTC())
 	})
 }

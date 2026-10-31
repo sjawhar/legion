@@ -350,13 +350,21 @@ the root on each of these lines:
 - `outbox parked decision kept for its root's start, which waits for its slot` or `workflow: a
   person's decision on a tree waiting for its slot is kept for its architect's start`: the root was
   set to `todo` already, so no controller is told, and its architect's start names the decision.
-  The daemon keeps the decision until the one start or catch-up that names it reaches the
-  architect; one that reaches none hands it to a fresh catch-up of the root's current architect
-  (`outbox start finished without giving its claim the task; the decisions it named are handed
-  over`), or leaves it for the next start while the tree is parked.
+  The daemon keeps the decision under the issue it was made on, so the architect it is owed to is
+  the one of the tree that issue stands in now: a child handed over into a tree of its own, an
+  orphaned child and a queued root adopted into a live tree each take what was decided on them
+  with them. It is kept until the one start or catch-up that names it has told an architect of
+  that tree — a catch-up at its publish, a start's task at the moment the turn that takes it
+  starts — and one that reaches no architect hands it to a fresh catch-up of that tree's current
+  architect (`outbox start finished without giving its claim the task; the decisions it named are
+  handed over`), or leaves it for the next start while the tree is parked.
 - `supervise: the root of this task's tree has no architect to hear it; the task stays pending`: a
   root architect's start task met a parked, lingering or waiting tree. It is sent when the tree's
   next start runs; nothing to do.
+- `supervise: a decision this held task named is owed to another tree now; the task is sent without
+  it`, or `supervise: everything this held task named is owed to another tree now; it is retired
+  rather than sent`: while the task waited, an issue it named left this tree. What left is owed to
+  the tree it stands in now, whose architect is written a catch-up naming it at once; nothing to do.
 - `workflow: a session's reply on a parked tree is not relayed`, `workflow: a session's answer or
   resolution on a parked tree is not relayed`, or `workflow: a session's decision on a tree waiting
   for its slot is not kept`: an agent wrote it. It stays on the ask for the person who asked.

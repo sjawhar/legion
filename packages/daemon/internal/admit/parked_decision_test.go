@@ -363,7 +363,7 @@ func TestARootReadmittedOnAnOlderApprovalIsToldBothVersions(t *testing.T) {
 					t.Fatalf("put the gate: %v", err)
 				}
 				if tc.decision {
-					if err := records.AddParkedDecision(ctx, tx, record.ParkedDecision{Root: "LEGION-ROOT", Ref: "dispatch://LEGION-ROOT/spec",
+					if err := records.AddParkedDecision(ctx, tx, record.ParkedDecision{Issue: "LEGION-ROOT", Ref: "dispatch://LEGION-ROOT/spec",
 						Decision: record.DecisionDesignApproved, Actor: "user:alice", At: fixedNow}); err != nil {
 						t.Fatalf("keep the relayed decision: %v", err)
 					}

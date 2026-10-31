@@ -170,13 +170,13 @@ func namingRef(naming map[int64]bool) int {
 	return named
 }
 
-// keepDecision keeps one person's decision for root, as the one rule for a decision nobody in its
+// keepDecision keeps one person's decision on issue, as the one rule for a decision nobody in its
 // tree hears keeps it (record.RelayParkedDecision).
-func keepDecision(t *testing.T, pool *pgxpool.Pool, records record.Store, root, ref string, at time.Time) {
+func keepDecision(t *testing.T, pool *pgxpool.Pool, records record.Store, issue, ref string, at time.Time) {
 	t.Helper()
 	ctx := context.Background()
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return records.AddParkedDecision(ctx, tx, record.ParkedDecision{Root: root, Ref: ref,
+		return records.AddParkedDecision(ctx, tx, record.ParkedDecision{Issue: issue, Ref: ref,
 			Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at})
 	}); err != nil {
 		t.Fatalf("keep the decision %s: %v", ref, err)

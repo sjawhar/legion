@@ -30,16 +30,17 @@ const (
 )
 
 // A root architect's start task names the decisions a person made while nobody in the root's tree
-// could hear them, and those rows go the moment the claim takes the task: from then on the task is
-// the only thing that carries them. Such a task waits on the claim, unsent, while its root is
-// parked, lingering or waiting for its slot (supervise's Deps.RootHears), and the root's linger can
-// hand a child of that tree to Legion meanwhile. What the task names of that child's subtree is
-// kept again under the child in the hand-over's own transaction
-// (record.Store.ReKeepDeliveredDecisions), so the child's architect is told it; the old
-// architect's task must stop naming it, or the next run of the tree the child left is told a
-// decision it is owed nothing of. The task is re-read where the machine owns it, as it is about to
-// be sent (supervise's Deps.RootTask, the daemon's rootTask), and what the record still shows in
-// this root's tree is what goes.
+// could hear them, and the claim's write of the delivery that task is queued as takes those rows
+// from the start row and holds them: they stand where they always stood, under the issue each was
+// decided on, and the delivery's confirmation is what tells them. Such a task waits on the claim,
+// unsent, while its root is parked, lingering or waiting for its slot (supervise's
+// Deps.RootHears), and the root's linger can hand a child of that tree to Legion meanwhile. The
+// child is a tree of its own from then on, so a hold of a claim of the tree it left counts for
+// nothing and the child's own architect names what was decided on it; the old architect's task
+// must stop naming it, or the next run of the tree the child left is told a decision it is owed
+// nothing of. The task is re-read where the machine owns it, as it is about to be sent
+// (supervise's Deps.RootTask, the daemon's rootTask), and what the record still shows in this
+// root's tree is what goes.
 func TestAHeldTaskIsSentWithoutTheDecisionsAHandOverGaveToTheChild(t *testing.T) {
 	rig := newHeldTaskRig(t)
 	rig.waitForSlot()
@@ -53,8 +54,15 @@ func TestAHeldTaskIsSentWithoutTheDecisionsAHandOverGaveToTheChild(t *testing.T)
 	if prompts := rig.conn.Prompts(); len(prompts) != 0 {
 		t.Fatalf("the lingering root's architect was prompted %#v, want the task held while nobody hears it", prompts)
 	}
-	if kept := keptDecisions(t, rig.pool, rig.records, heldTaskRoot); len(kept) != 0 {
-		t.Fatalf("%s still keeps %s, want the rows forgotten into the task the claim took", heldTaskRoot, keptRefs(kept))
+	held := keptDecisions(t, rig.pool, rig.records, heldTaskRoot)
+	if len(held) != 2 {
+		t.Fatalf("%s keeps %s, want both decisions standing, held by the task the claim took: a held task's decisions are "+
+			"told at its own confirmation, not when it is queued", heldTaskRoot, keptRefs(held))
+	}
+	for _, kept := range held {
+		if kept.HeldBy.Claim != string(rig.token) || kept.HeldBy.Delivery != pending.ID {
+			t.Fatalf("%s keeps %#v, want it held by the delivery the claim queued the task as", heldTaskRoot, kept)
+		}
 	}
 
 	rig.linger()

@@ -307,22 +307,21 @@ type Deps struct {
 	// not linger and it does not wait in `todo` for an admission slot. A root architect's task of
 	// a run names no phase, so no phase ever drops it, and it waits on the claim until that claim
 	// next runs — which can be after a park, a hand back to `todo` or a linger, generations later.
-	// Such a task carries a person's decisions, which were forgotten when the claim queued it
-	// (daemon's settleKept), so it is held rather than dropped: false keeps it pending, unsent and
-	// uncharged, and the start of the root's next run sends it (queue). It is asked only about a
-	// root architect's task of a run — never a phase worker's, never a task of no run such as an
-	// operator's or a production check's. nil sends every delivery.
+	// Such a task names a person's decisions, which its own confirmation tells (daemon's
+	// settleKept, the claim store's putDelivery), so it is held rather than dropped: false keeps it
+	// pending, unsent and uncharged, and the start of the root's next run sends it (queue). It is
+	// asked only about a root architect's task of a run — never a phase worker's, never a task of
+	// no run such as an operator's or a production check's. nil sends every delivery.
 	RootHears func(ctx context.Context, c Claim, d Delivery) (bool, error)
 	// RootTask is what a root architect's held task of a run says now: its text, and what it names
 	// of the decisions a person made while nobody in the root's tree could hear them
-	// (Delivery.Kept), re-read from the record at the moment the task is about to be sent. The
-	// decisions such a task names were forgotten when the claim queued it, so the task is the only
-	// thing that carries them, and a hand-over of a child into a tree of its own keeps those of
-	// the child's subtree again for the child (record.Store.ReKeepDeliveredDecisions): they are
-	// owed to the child's architect from then on, and this task must stop naming them. An empty
-	// text is a task that names nothing now, which is retired rather than sent. It is asked only
-	// about a root architect's task of a run (asksRoot), once that root has an architect to hear
-	// it, and nil leaves every task as it was queued.
+	// (Delivery.Kept), re-read from the record at the moment the task is about to be sent. An
+	// issue the task names can have left this claim's tree while the task waited, and the tree it
+	// stands in now is the one owed that answer: the answer drops it from the task, releases this
+	// delivery's hold on its row and writes that tree's architect a catch-up naming it, all in one
+	// write of its own. An empty text is a task that names nothing now, which is retired rather
+	// than sent. It is asked only about a root architect's task of a run (asksRoot), once that
+	// root has an architect to hear it, and nil leaves every task as it was queued.
 	RootTask func(ctx context.Context, c Claim, d Delivery) (task string, kept []byte, err error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather

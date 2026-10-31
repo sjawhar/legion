@@ -187,11 +187,12 @@ func TestAParkedDecisionIsPublishedOnTheControllerTopic(t *testing.T) {
 	}
 }
 
-// A decision kept for a root is forgotten when, and only when, the architect start task that named
-// it reaches its claim: a start that finishes without acting (here one of an earlier generation)
-// leaves it for the next start to name, and a decision kept on a named reference since the naming
-// outlives the delivery, since the forget names the row it read, not the reference.
-func TestOnlyADeliveredStartForgetsTheDecisionsItNamed(t *testing.T) {
+// A decision kept for a root is held by the delivery the claim queued the start's task as, and
+// only then: a start that finishes without acting (here one of an earlier generation) leaves it
+// KEPT for the next start to name, and a decision kept on a named reference since the naming is
+// left behind by the hold, which names the row the start read, not the reference. The hold is the
+// claim store's own write, so this runs through the daemon's own claim store.
+func TestOnlyADeliveredStartHoldsTheDecisionsItNamed(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -200,14 +201,15 @@ func TestOnlyADeliveredStartForgetsTheDecisionsItNamed(t *testing.T) {
 	putOutboxIssue(t, pool, records, issue)
 	spec, ask, at := "dispatch://LEGION-1/spec", "dispatch://LEGION-1/ask/ask-1", time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
 	for _, kept := range []record.ParkedDecision{
-		{Root: "LEGION-1", Ref: spec, Decision: record.DecisionDesignApproved, Actor: "user:alice", At: at},
-		{Root: "LEGION-1", Ref: ask, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at},
+		{Issue: "LEGION-1", Ref: spec, Decision: record.DecisionDesignApproved, Actor: "user:alice", At: at},
+		{Issue: "LEGION-1", Ref: ask, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at},
 	} {
 		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return records.AddParkedDecision(ctx, tx, kept) }); err != nil {
 			t.Fatalf("keep the decision: %v", err)
 		}
 	}
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.Store = keptClaimStore{Store: outboxTreeStore(t, pool, issue.Key)}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup,
 		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), now: time.Now,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -227,7 +229,7 @@ func TestOnlyADeliveredStartForgetsTheDecisionsItNamed(t *testing.T) {
 		t.Fatalf("kept after a start that finished without acting = %#v, want both decisions left for the next start", left)
 	}
 	// A person decides again on the reference the start named, before that start is delivered.
-	newer := record.ParkedDecision{Root: "LEGION-1", Ref: spec, Decision: record.DecisionDesignChangesRequested, Actor: "user:bob", At: at.Add(time.Hour)}
+	newer := record.ParkedDecision{Issue: "LEGION-1", Ref: spec, Decision: record.DecisionDesignChangesRequested, Actor: "user:bob", At: at.Add(time.Hour)}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return records.AddParkedDecision(ctx, tx, newer) }); err != nil {
 		t.Fatalf("keep the newer decision: %v", err)
 	}
@@ -245,18 +247,26 @@ func TestOnlyADeliveredStartForgetsTheDecisionsItNamed(t *testing.T) {
 	if pending := machine.Claim().Pending; pending == nil || pending.ID != "outbox:58" {
 		t.Fatalf("the architect's pending task = %#v, want the start's delivery", pending)
 	}
-	// The answer nothing replaced is forgotten with the delivery; the newer decision on the
-	// specification's reference, kept after the start named the older one, survives.
+	// The answer nothing replaced is held by the delivery, to be told at its confirmation; the
+	// newer decision on the specification's reference, kept after the start named the older one,
+	// is left KEPT for the next start or catch-up to name.
 	left := keptDecisions(t, pool, records, "LEGION-1")
-	if len(left) != 1 || left[0].Ref != spec || left[0].Actor != "user:bob" || !left[0].At.Equal(newer.At) {
-		t.Fatalf("kept after the delivered start = %#v, want only the decision kept since it was named", left)
+	if len(left) != 2 {
+		t.Fatalf("kept after the delivered start = %#v, want both rows standing: the delivery holds what it names", left)
+	}
+	if left[0].Ref != spec || left[0].Actor != "user:bob" || !left[0].At.Equal(newer.At) || left[0].HeldBy.Claim != "" {
+		t.Fatalf("the newest row = %#v, want the decision kept since the start named the older one, held by nothing", left[0])
+	}
+	if left[1].Ref != ask || left[1].HeldBy.Claim != string(token) || left[1].HeldBy.Delivery != "outbox:58" {
+		t.Fatalf("the row the start named = %#v, want it held by the delivery the claim took", left[1])
 	}
 }
 
 // A start row still queued keeps the decisions it claimed: a ready of the root's architect before
 // that start is delivered (the start refused while another task is pending, a ready between its
-// delivery and its forget, a crash in that gap) writes a catch-up that names none of them, and the
-// start's delivery then forgets them, so each is told once and nothing is left.
+// delivery and the claim's write, a crash in that gap) writes a catch-up that names none of them,
+// and the start's delivery then holds them, so each is told once, at that delivery's confirmation,
+// and no catch-up names them meanwhile.
 func TestACatchUpLeavesOutWhatAQueuedStartClaims(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
@@ -265,7 +275,7 @@ func TestACatchUpLeavesOutWhatAQueuedStartClaims(t *testing.T) {
 		Tree: "LEGION-1", Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, root)
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
-	answer := record.ParkedDecision{Root: root.Key, Ref: "dispatch://LEGION-1/ask/ask-1", Decision: record.DecisionAskAnswered, Actor: "user:alice",
+	answer := record.ParkedDecision{Issue: root.Key, Ref: "dispatch://LEGION-1/ask/ask-1", Decision: record.DecisionAskAnswered, Actor: "user:alice",
 		At: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if err := records.AddParkedDecision(ctx, tx, answer); err != nil {
@@ -295,6 +305,7 @@ func TestACatchUpLeavesOutWhatAQueuedStartClaims(t *testing.T) {
 		t.Fatalf("read the queued start: %v", err)
 	}
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.Store = keptClaimStore{Store: outboxTreeStore(t, pool, root.Key)}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup,
 		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), now: time.Now,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -304,8 +315,9 @@ func TestACatchUpLeavesOutWhatAQueuedStartClaims(t *testing.T) {
 	if err := runner.execute(ctx, start); err != nil {
 		t.Fatalf("deliver the start: %v", err)
 	}
-	if left := keptDecisions(t, pool, records, root.Key); len(left) != 0 {
-		t.Fatalf("kept after the start's delivery = %#v, want nothing", left)
+	left := keptDecisions(t, pool, records, root.Key)
+	if len(left) != 1 || left[0].HeldBy.Delivery != fmt.Sprintf("%s%d", outboxDeliveryPrefix, start.ID) {
+		t.Fatalf("kept after the start's delivery = %#v, want the one row held by that delivery", left)
 	}
 }
 
@@ -324,7 +336,7 @@ func TestADecisionAStaleStartReleasesReachesTheRunningArchitect(t *testing.T) {
 		Tree: "LEGION-1", Title: "Root", Phase: phase.Admitted, Generation: 2, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, root)
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
-	answer := record.ParkedDecision{Root: root.Key, Ref: "dispatch://LEGION-1/ask/ask-1", Decision: record.DecisionAskAnswered, Actor: "user:alice",
+	answer := record.ParkedDecision{Issue: root.Key, Ref: "dispatch://LEGION-1/ask/ask-1", Decision: record.DecisionAskAnswered, Actor: "user:alice",
 		At: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if err := records.AddParkedDecision(ctx, tx, answer); err != nil {
@@ -389,7 +401,7 @@ func TestARetriedStartDeliversItsTaskOnce(t *testing.T) {
 	putOutboxIssue(t, pool, records, issue)
 	ref, at := "dispatch://LEGION-1/ask/ask-1", time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return records.AddParkedDecision(ctx, tx, record.ParkedDecision{Root: issue.Key, Ref: ref, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at})
+		return records.AddParkedDecision(ctx, tx, record.ParkedDecision{Issue: issue.Key, Ref: ref, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at})
 	}); err != nil {
 		t.Fatalf("keep the decision: %v", err)
 	}
@@ -482,7 +494,7 @@ func TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn(t *testing.T) {
 	putOutboxIssue(t, pool, store, issue)
 	ref, at := "dispatch://LEGION-1/ask/ask-1", time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return store.AddParkedDecision(ctx, tx, record.ParkedDecision{Root: issue.Key, Ref: ref, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at})
+		return store.AddParkedDecision(ctx, tx, record.ParkedDecision{Issue: issue.Key, Ref: ref, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at})
 	}); err != nil {
 		t.Fatalf("keep the decision: %v", err)
 	}
@@ -568,7 +580,7 @@ func TestOnlyADeliveredCatchUpForgetsTheDecisionsItNamed(t *testing.T) {
 			records := record.NewStore()
 			noticeTree(t, pool, records, false)
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				return records.AddParkedDecision(ctx, tx, record.ParkedDecision{Root: "LEGION-1", Ref: spec,
+				return records.AddParkedDecision(ctx, tx, record.ParkedDecision{Issue: "LEGION-1", Ref: spec,
 					Decision: record.DecisionDesignApproved, Actor: "user:alice", At: at})
 			}); err != nil {
 				t.Fatalf("keep the decision: %v", err)
@@ -608,6 +620,9 @@ func TestAStartThatFindsTheRootArchitectRunningNamesEachKeptDecisionOnce(t *test
 		Title: "Workflow", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, root)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	// The hold of what a start's task names is the claim store's own write, so this runs through
+	// the daemon's own claim store: the catch-up the start applies must find those rows held.
+	sup.deps.Store = keptClaimStore{Store: outboxTreeStore(t, pool, root.Key)}
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	runner := &outbox{
@@ -642,7 +657,7 @@ func TestAStartThatFindsTheRootArchitectRunningNamesEachKeptDecisionOnce(t *test
 
 	// A person answered on the parked tree; the re-admission at generation 2 names it in the start's
 	// task, as admission writes it (workflow.Engine.ParkedDecisionTask), while the architect still runs.
-	answer := record.ParkedDecision{Root: root.Key, Ref: "dispatch://LEGION-208/ask/ask-1", Decision: record.DecisionAskAnswered, Actor: "user:alice",
+	answer := record.ParkedDecision{Issue: root.Key, Ref: "dispatch://LEGION-208/ask/ask-1", Decision: record.DecisionAskAnswered, Actor: "user:alice",
 		At: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)}
 	root.Generation = 2
 	putOutboxIssue(t, pool, records, root)
@@ -754,8 +769,8 @@ func TestAClosingTreeNamesEveryDecisionStillOwedToItsArchitect(t *testing.T) {
 	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
 	unclaimed, claimed, held := "dispatch://LEGION-208/ask/ask-1", "dispatch://LEGION-209/ask/ask-2", "dispatch://LEGION-208/ask/ask-3"
 	for _, kept := range []record.ParkedDecision{
-		{Root: root.Key, Ref: unclaimed, Issue: root.Key, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at},
-		{Root: root.Key, Ref: claimed, Issue: child.Key, Decision: record.DecisionAskResolved, Actor: "user:bob", At: at},
+		{Ref: unclaimed, Issue: root.Key, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at},
+		{Ref: claimed, Issue: child.Key, Decision: record.DecisionAskResolved, Actor: "user:bob", At: at},
 	} {
 		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return records.AddParkedDecision(ctx, tx, kept) }); err != nil {
 			t.Fatalf("keep the decision %s: %v", kept.Ref, err)
@@ -795,9 +810,9 @@ func TestAClosingTreeNamesEveryDecisionStillOwedToItsArchitect(t *testing.T) {
 	}
 
 	want := []string{
-		"WARN " + unclaimed + " root=LEGION-208 issue=LEGION-208 where=kept for its root",
-		"WARN " + claimed + " root=LEGION-208 issue=LEGION-209 where=kept for its root",
+		"WARN " + unclaimed + " root=LEGION-208 issue=LEGION-208 where=kept for its issue's tree",
 		"WARN " + held + " root=LEGION-208 issue=LEGION-208 where=held by its architect's unconfirmed task",
+		"WARN " + claimed + " root=LEGION-208 issue=LEGION-209 where=claimed by a start or a catch-up",
 	}
 	if got := owedDecisionsLogged(t, logged.Bytes()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the close logged %q, want one line per decision the tree still owes: %q", got, want)
@@ -813,15 +828,13 @@ func TestAClosingTreeNamesEveryDecisionStillOwedToItsArchitect(t *testing.T) {
 	}
 }
 
-// A tree whose linger expires hands each child it leaves in the workflow to Legion, and that
-// child's re-admission takes what a person decided on it and on everything below it into the tree
-// of its own: the rows the root still keeps move, and what the held, unconfirmed task of the old
-// architect names of that subtree is kept again under the child
-// (record.Store.MoveKeptDecisions, ReKeepDeliveredDecisions). Such a decision is not one the close
-// leaves behind, so the close must not warn that it still owes it: the child's own architect is
-// told it at its start. The close says so in one Info line each, and its Warn lines name only what
-// really stands where it is — what was decided on the root itself, and on a member the close hands
-// to nobody.
+// A tree whose linger expires hands each member it leaves in the workflow to Legion, and that
+// member takes what a person decided on it into the tree of its own with nothing to move: the row
+// stands under its own issue, and a claim or a hold of the tree it left counts for nothing there.
+// Such a decision is not one the close leaves behind, so the close must not warn that it still
+// owes it: the member's own architect is told it at its start. The close says so in one Info line
+// each, and its Warn lines name only what really stands where it is — what was decided on the
+// root itself, and on a member the close hands to nobody, below a handed child or not.
 func TestAClosingTreeDoesNotWarnAboutTheDecisionsItHandsToAChild(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
@@ -832,10 +845,9 @@ func TestAClosingTreeDoesNotWarnAboutTheDecisionsItHandsToAChild(t *testing.T) {
 		Rank: "U", LastDispatchSeq: 5, LingerUntil: &until}
 	rootKey, childKey := root.Key, "LEGION-219"
 	// The child is still working when the linger ends, so the close hands it to Legion with its
-	// run. The grandchild below it has finished, so the close hands it to nobody, but it goes into
-	// the child's new tree all the same: the child's re-admission moves what was decided on its
-	// whole subtree (admit.Admission.subtree, which walks the parent links whatever the status).
-	// The parked member stands under the root and goes nowhere.
+	// run. The grandchild below it has finished, so the close hands it to nobody: it stays a
+	// member of the closing tree, and what was decided on it is that tree's to answer, as is what
+	// was decided on the parked member under the root.
 	child := record.Issue{Key: childKey, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
 		Project: "LEGION", Tree: root.Tree, Parent: &rootKey, Title: "Child", Phase: phase.Planning, Generation: 1,
 		Status: "in_progress", Rank: "B", LastDispatchSeq: 2}
@@ -853,18 +865,18 @@ func TestAClosingTreeDoesNotWarnAboutTheDecisionsItHandsToAChild(t *testing.T) {
 	onTheRoot, onTheChild := "dispatch://LEGION-218/ask/ask-1", "dispatch://LEGION-219/ask/ask-2"
 	onTheGrandchild, onTheParked := "dispatch://LEGION-220/ask/ask-3", "dispatch://LEGION-221/ask/ask-4"
 	for _, kept := range []record.ParkedDecision{
-		{Root: rootKey, Ref: onTheRoot, Issue: rootKey, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at},
-		{Root: rootKey, Ref: onTheChild, Issue: childKey, Decision: record.DecisionAskResolved, Actor: "user:bob", At: at},
-		{Root: rootKey, Ref: onTheGrandchild, Issue: grandchild.Key, Decision: record.DecisionAskAnswered, Actor: "user:bob", At: at},
-		{Root: rootKey, Ref: onTheParked, Issue: parked.Key, Decision: record.DecisionAskResolved, Actor: "user:alice", At: at},
+		{Ref: onTheRoot, Issue: rootKey, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at},
+		{Ref: onTheChild, Issue: childKey, Decision: record.DecisionAskResolved, Actor: "user:bob", At: at},
+		{Ref: onTheGrandchild, Issue: grandchild.Key, Decision: record.DecisionAskAnswered, Actor: "user:bob", At: at},
+		{Ref: onTheParked, Issue: parked.Key, Decision: record.DecisionAskResolved, Actor: "user:alice", At: at},
 	} {
 		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return records.AddParkedDecision(ctx, tx, kept) }); err != nil {
 			t.Fatalf("keep the decision %s: %v", kept.Ref, err)
 		}
 	}
 	// The root architect's claim holds a start task nobody sent and nobody confirmed, naming one
-	// decision of the root and one of the child: the rows went when the claim took the task, so
-	// the task is all that carries them, and the hand-over keeps the child's again for the child.
+	// decision of the root and one of the child: those rows stand held by that delivery, and the
+	// child's goes with the child, whose own tree the hold counts for nothing in.
 	heldOnTheRoot, heldOnTheChild := "dispatch://LEGION-218/ask/ask-5", "dispatch://LEGION-219/ask/ask-6"
 	seedHeldArchitectTask(t, pool, rootKey, record.KeptDecisions{Decisions: []record.DecisionMark{
 		{Ref: heldOnTheRoot, At: at, Issue: rootKey, Decision: record.DecisionAskAnswered, Actor: "user:alice"},
@@ -881,16 +893,16 @@ func TestAClosingTreeDoesNotWarnAboutTheDecisionsItHandsToAChild(t *testing.T) {
 	}
 
 	want := []string{
-		"WARN " + onTheRoot + " root=LEGION-218 issue=LEGION-218 where=kept for its root",
-		"WARN " + onTheParked + " root=LEGION-218 issue=LEGION-221 where=kept for its root",
+		"WARN " + onTheRoot + " root=LEGION-218 issue=LEGION-218 where=kept for its issue's tree",
 		"WARN " + heldOnTheRoot + " root=LEGION-218 issue=LEGION-218 where=held by its architect's unconfirmed task",
+		"WARN " + onTheGrandchild + " root=LEGION-218 issue=LEGION-220 where=kept for its issue's tree",
+		"WARN " + onTheParked + " root=LEGION-218 issue=LEGION-221 where=kept for its issue's tree",
 	}
 	if got := owedDecisionsLogged(t, logged.Bytes()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the close warned about %q, want only what it leaves standing: %q", got, want)
 	}
 	wantHanded := []string{
-		"INFO " + onTheChild + " root=LEGION-218 issue=LEGION-219 where=kept for its root",
-		"INFO " + onTheGrandchild + " root=LEGION-218 issue=LEGION-220 where=kept for its root",
+		"INFO " + onTheChild + " root=LEGION-218 issue=LEGION-219 where=kept for its issue's tree",
 		"INFO " + heldOnTheChild + " root=LEGION-218 issue=LEGION-219 where=held by its architect's unconfirmed task",
 	}
 	if got := handedDecisionsLogged(t, logged.Bytes()); !reflect.DeepEqual(got, wantHanded) {
@@ -958,7 +970,8 @@ func handOverRows(t *testing.T, pool *pgxpool.Pool) []string {
 
 // seedHeldArchitectTask records root's architect ready with a start task it has been given and
 // nobody has sent: unconfirmed, naming kept, as a task held while its root has no architect to
-// hear it stands (supervise's sendPending).
+// hear it stands (supervise's sendPending), with each row it names held by that delivery, as the
+// write that queued it left them (the claim store's putDelivery).
 func seedHeldArchitectTask(t *testing.T, pool *pgxpool.Pool, root string, kept record.KeptDecisions) {
 	t.Helper()
 	ctx := context.Background()
@@ -981,6 +994,13 @@ func seedHeldArchitectTask(t *testing.T, pool *pgxpool.Pool, root string, kept r
 		values ($1, 'outbox:7', 'While nobody in the tree could hear it, a person decided on the tree.', now(), 1, '', $2::jsonb)`,
 		string(token), encoded); err != nil {
 		t.Fatalf("record the architect's held task of %s: %v", root, err)
+	}
+	for _, named := range kept.Decisions {
+		if _, err := pool.Exec(ctx, `insert into parked_decisions (issue, ref, decision, actor, at, held_by_claim, held_by_delivery)
+			values ($1, $2, $3, $4, $5, $6, 'outbox:7')`,
+			named.Issue, named.Ref, string(named.Decision), named.Actor, named.At, string(token)); err != nil {
+			t.Fatalf("hold the decision %s on the architect's task of %s: %v", named.Ref, root, err)
+		}
 	}
 }
 

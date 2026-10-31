@@ -240,9 +240,10 @@ type RequestDeliver struct {
 	// operator's own, the controller's start message). A row the claim already queued a task from
 	// (Claim.DeliveredRows) queues nothing: its task was given once.
 	Row int64
-	// Kept is what the task names of what its root keeps, as the row recorded it
-	// (record.KeptDecisions, encoded JSON), carried onto the delivery and persisted with it
-	// (Delivery.Kept). Empty for a task that names none.
+	// Kept is what the task names of what its tree is owed, as the row recorded it
+	// (record.KeptDecisions, encoded JSON), carried onto the delivery and persisted with it, which
+	// is what holds those rows until the delivery tells them (Delivery.Kept). Empty for a task
+	// that names none.
 	Kept []byte
 }
 
@@ -939,9 +940,9 @@ func agentBusy(reason string) bool {
 // The question a restart left (askFirst) counts as in flight for every delivery but one: a root
 // architect's task of a run (asksRoot) may be a task nobody has ever sent, held on the claim while
 // its root had no architect to hear it, so a turn of the agent's own is not that task's. Confirmed
-// by it, the task would be retired unsent when that turn ended, and the person's decisions it
-// carries — forgotten when the claim queued it — would be lost. Only a send of this machine's own
-// or a prompt it waits for a turn on makes such a turn that task's.
+// by it, the task would tell the person's decisions it names — the confirmation is their telling —
+// to an architect nobody prompted, and be retired unsent when that turn ended. Only a send of this
+// machine's own or a prompt it waits for a turn on makes such a turn that task's.
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking

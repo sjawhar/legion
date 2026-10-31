@@ -358,7 +358,7 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if err := e.warnKeptDecisionsOfAClosedTree(ctx, tx, *issue, members, handed); err != nil {
+	if err := e.warnKeptDecisionsOfAClosedTree(ctx, tx, *issue, handed); err != nil {
 		return intake.Result{}, err
 	}
 	for _, child := range handed {
@@ -370,68 +370,50 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 }
 
 // warnKeptDecisionsOfAClosedTree names every decision a person made while nobody in this tree
-// could hear it that the tree's close leaves behind: one the root still keeps, claimed by a start
-// or a catch-up or not (Store.ParkedDecisions), and one the unconfirmed task held on the root
-// architect's claim is the only carrier of (Store.HeldKeptDecisions, the rows a claim's queueing
-// of the task forgot). The tree closes for good here, so no start task and no catch-up of it names
-// them to an architect again, and each is one Warn line of its own, written once the close has
-// committed (warnOnCommit), so a row run again after a failed commit writes nothing twice. The
-// controller was told each when it was kept — that is what a person's decision on a tree nobody in
-// it hears reaches (record.RelayParkedDecision's notice) — so the line says where the decision
-// stands rather than that it is lost.
+// could hear it that the tree's close leaves behind: every row whose issue stands in this tree
+// now, in whatever state — kept for a start or a catch-up to name, claimed by one, or held by the
+// unconfirmed task queued on an architect's claim (Store.ParkedDecisions, whose reading is by the
+// issue each row was decided on). The tree closes for good here, so no start task and no catch-up
+// of it names them to an architect again, and each is one Warn line of its own, written once the
+// close has committed (warnOnCommit), so a row run again after a failed commit writes nothing
+// twice. The controller was told each when it was kept — that is what a person's decision on a
+// tree nobody in it hears reaches (record.RelayParkedDecision's notice) — so the line says where
+// the decision stands rather than that it is lost.
 //
-// A decision this same close hands to a child is no such decision: a decision made on a child the
-// close hands to Legion (handed), or on an issue of this tree below one, goes with that child into
-// the tree of its own — what the root still keeps of it is moved and what the held task names of it
-// is kept again, both in the re-admission's own transaction (record.Store.MoveKeptDecisions,
-// ReKeepDeliveredDecisions) — and the child's architect is told it at its start. Those are logged
-// as handed over rather than warned about, so the Warn lines name what this close really leaves
-// standing.
-func (e *Engine) warnKeptDecisionsOfAClosedTree(ctx context.Context, tx pgx.Tx, root record.Issue, members, handed []record.Issue) error {
-	goesWithAChild := handedOverSubtrees(members, handed)
+// A decision this same close hands to a child is no such decision: one made on a member the close
+// hands to Legion (handed) goes with that member into the tree of its own, where it stands under
+// its own issue with nothing to move, and that member's architect is told it at its start. Those
+// are logged as handed over rather than warned about, so the Warn lines name what this close
+// really leaves standing. A member the close leaves behind — one already out of the workflow,
+// below a handed child or not — keeps what was decided on it in this closing tree, and that is a
+// Warn line.
+func (e *Engine) warnKeptDecisionsOfAClosedTree(ctx context.Context, tx pgx.Tx, root record.Issue, handed []record.Issue) error {
+	goesWithAChild := make(map[string]bool, len(handed))
+	for _, child := range handed {
+		goesWithAChild[child.Key] = true
+	}
 	kept, err := e.store.ParkedDecisions(ctx, tx, root.Key)
 	if err != nil {
 		return err
 	}
 	for _, decision := range kept {
-		e.keptDecisionOfAClosedTree(ctx, root.Key, decision.Ref, decision.Issue, "kept for its root", goesWithAChild)
-	}
-	project, err := claim.ProjectToken(root.Project)
-	if err != nil {
-		return err
-	}
-	architect, err := claim.NewToken(project, root.Key, claim.RoleArchitect)
-	if err != nil {
-		return err
-	}
-	held, err := e.store.HeldKeptDecisions(ctx, tx, architect)
-	if err != nil {
-		return err
-	}
-	for _, named := range held {
-		e.keptDecisionOfAClosedTree(ctx, root.Key, named.Ref, named.Issue, "held by its architect's unconfirmed task", goesWithAChild)
+		e.keptDecisionOfAClosedTree(ctx, root.Key, decision.Ref, decision.Issue, keptDecisionStands(decision), goesWithAChild)
 	}
 	return nil
 }
 
-// handedOverSubtrees is every issue of the tree that goes with a child the close hands to Legion:
-// each handed child and every member below it, by the parent links the records hold, which is the
-// same subtree the child's re-admission moves the decisions of (admit.Admission.subtree). The
-// links are walked to a fixed point: members come in no parent order.
-func handedOverSubtrees(members, handed []record.Issue) map[string]bool {
-	goes := make(map[string]bool, len(handed))
-	for _, child := range handed {
-		goes[child.Key] = true
+// keptDecisionStands names, for the close's line, where a decision the closing tree still owes
+// stands now: held by the unconfirmed task queued on an architect's claim, claimed by a start or
+// a catch-up that has not settled it, or kept for the next one to name.
+func keptDecisionStands(decision record.ParkedDecision) string {
+	switch {
+	case decision.HeldBy.Claim != "":
+		return "held by its architect's unconfirmed task"
+	case decision.ClaimedBy != 0:
+		return "claimed by a start or a catch-up"
+	default:
+		return "kept for its issue's tree"
 	}
-	for grew := len(goes) > 0; grew; {
-		grew = false
-		for _, member := range members {
-			if member.Parent != nil && goes[*member.Parent] && !goes[member.Key] {
-				goes[member.Key], grew = true, true
-			}
-		}
-	}
-	return goes
 }
 
 // keptDecisionOfAClosedTree writes the one line this decision gets: the Warn for a decision the

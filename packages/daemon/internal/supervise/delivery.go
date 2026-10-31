@@ -70,10 +70,11 @@ type Delivery struct {
 	// Kept is what the task names of the decisions a person made while nobody in the root's tree
 	// could hear them, as the row that queued the task recorded them (record.KeptDecisions, encoded
 	// JSON). It is opaque here — this package knows nothing of the record — and is carried and
-	// persisted with the delivery for one reader: the hand-over of a child into a tree of its own,
-	// which re-keeps for the child what a held, unconfirmed task of the old root's architect names
-	// of its subtree, those rows having been forgotten when the claim queued the task
-	// (record.Store.ReKeepDeliveredDecisions). Empty for a task that names none.
+	// persisted with the delivery because the delivery is what holds those rows: the store's write
+	// of this delivery marks each held by this claim and delivery id, the write that records
+	// ConfirmedAt tells them, and the write that retires it leaves them kept for whichever tree
+	// owes them. It is rewritten, with the task text, by the send-time narrowing of what the task
+	// still names of this claim's tree (Deps.RootTask). Empty for a task that names none.
 	Kept []byte
 }
 
@@ -200,15 +201,15 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	}
 	// A root architect's task of a run (asksRoot) is the one delivery the question a restart left
 	// never answers: such a task may be one nobody has ever sent — it is held on the claim while
-	// its root has no architect to hear it, across restarts — and the decisions it names were
-	// forgotten when the claim queued it, so a turn of the agent's own taken for this task's would
-	// retire it unsent at that turn's end and lose a person's decision. The question is resolved
-	// here rather than asked: while the root does not hear, the task stays pending and unconfirmed
-	// and nothing is sent; once the root hears, it is sent. A send can meet an agent still in a
-	// turn of its own, which answers it busy and leaves the task waiting, charged nothing (refused,
-	// table.go), and the turn's end sends it again: sending again is the lesser fault of the two.
-	// Its phase check always holds — such a task names no phase — so a dropped task is never this
-	// one.
+	// its root has no architect to hear it, across restarts — and the decisions it names are held
+	// by this delivery and told at its confirmation, so a turn of the agent's own taken for this
+	// task's would confirm it unsent and tell a person's decision to nobody. The question is
+	// resolved here rather than asked: while the root does not hear, the task stays pending and
+	// unconfirmed and nothing is sent; once the root hears, it is sent. A send can meet an agent
+	// still in a turn of its own, which answers it busy and leaves the task waiting, charged
+	// nothing (refused, table.go), and the turn's end sends it again: sending again is the lesser
+	// fault of the two. Its phase check always holds — such a task names no phase — so a dropped
+	// task is never this one.
 	if m.asksRoot(*p) {
 		m.askFirst = false
 		hears, err := m.rootHears(ctx, *p)
@@ -269,8 +270,8 @@ func (m *Machine) asksRoot(d Delivery) bool {
 
 // rootHears asks whether the root of this claim's tree has an architect to hear the task now
 // (Deps.RootHears). Only a root architect's task of a run is put to the answer (asksRoot): it names
-// no phase, so the phase check never drops it, and its decisions were forgotten when the claim
-// queued it, so a prompt while the tree is parked, lingering or waiting for its slot would tell
+// no phase, so the phase check never drops it, and the decisions it names are told at its own
+// confirmation, so a prompt while the tree is parked, lingering or waiting for its slot would tell
 // them to an architect no run of the root owns. Every other delivery — a phase worker's, an
 // operator's, a production check's look, the controller's start message — is sent as it always was,
 // and a daemon with no workflow configured supplies no answer, where every delivery is sent.
@@ -286,14 +287,13 @@ func (m *Machine) rootHears(ctx context.Context, d Delivery) (bool, error) {
 }
 
 // currentRootTask writes the held task back to what it says now (Deps.RootTask) and answers
-// whether there is still a task to send. The decisions such a task names were forgotten when the
-// claim queued it, so the task is their only carrier; a hand-over of a child into a tree of its
-// own keeps those of the child's subtree again under the child
-// (record.Store.ReKeepDeliveredDecisions) and they are owed to the child's architect from then on.
-// This is where the task stops naming them, because it is the machine that owns the pending
-// delivery: the hand-over commits in a transaction of the admission's own, with no lock on this
-// claim, and a task rewritten there would be overwritten by the machine's next write of what
-// memory still held.
+// whether there is still a task to send. Such a task names decisions this delivery holds, and an
+// issue one of them was decided on can have left this claim's tree while the task waited: the tree
+// it stands in now owes the person that answer, so the answer drops it from the task, releases
+// this delivery's hold on it and writes that tree's architect a catch-up naming it. This is where
+// the task stops naming it, because it is the machine that owns the pending delivery: the
+// hand-over commits in a transaction of the admission's own, with no lock on this claim, and a
+// task rewritten there would be overwritten by the machine's next write of what memory still held.
 //
 // A task left naming nothing is retired rather than sent: there is nothing to tell this architect,
 // and the start row that queued it is recorded on the claim (Claim.DeliveredRows), so no retry

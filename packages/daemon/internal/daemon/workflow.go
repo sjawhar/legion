@@ -48,7 +48,12 @@ type workflowRuntime struct {
 	admission *admit.Admission
 	handlers  []intake.Handler
 	dispatch  dispatch.Client
-	tokens    appauth.Tokens
+	// designGate is the project's design-gate policy, which the send-time narrowing of a held
+	// architect task reads: a catch-up it writes to another tree's architect is composed under it
+	// (rootTask, workflow.CatchUpTheTreesOwed). The empty policy is the default one
+	// (config.DesignGate.OrDefault).
+	designGate config.DesignGate
+	tokens     appauth.Tokens
 	// forget drops the token source's cached leases for an App and owner, a token GitHub refused
 	// (tokenRefused).
 	forget          appauth.Forgetter
@@ -314,6 +319,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// sequence or status it has already seen (Engine.dispatchIssue), which is exactly the
 	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
 	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
+	w.designGate = cfg.Gates.Design
 	w.pool = st.Pool()
 	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
 		return nil, err
@@ -457,21 +463,30 @@ func (w *workflowRuntime) rootHears(ctx context.Context, c supervise.Claim, _ su
 	return hears, nil
 }
 
-// rootTask answers supervise's Deps.RootTask: what a root architect's held task of a run says now.
-// Such a task names the decisions a person made while nobody in the root's tree could hear them,
-// and those rows went the moment the claim queued it (the outbox's settleKept), so the task is the
-// only thing that carries them. A child handed over into a tree of its own takes what was decided
-// on it and its descendants with it, kept again under the child in the admission's own transaction
-// (record.Store.ReKeepDeliveredDecisions): from then on the child's architect is owed them, and
-// this task must not name them to the architect of the tree the child left. The decisions whose
-// issue the record still shows in this root's tree are kept, in the order the task named them, and
-// the text is written again from them (workflow.KeptDecisionsTask), which is the wording the start
-// that queued the task used. An issue the record does not hold is kept rather than dropped: a
-// person's decision is never lost, and this answer drops one only where the record says another
-// tree is owed it.
+// rootTask answers supervise's Deps.RootTask: what a root architect's held task of a run says now,
+// at the moment it is about to be sent. Such a task names the decisions a person made while nobody
+// in the root's tree could hear them, and holds those rows on its own delivery until the turn that
+// takes it confirms (the claim store's putDelivery, 0065_parked_decisions). An issue it names can
+// have left this tree while the task waited — a child a linger handed to Legion, a parked child a
+// person's todo orphaned, a grandchild handed over beside its parent — and the tree it stands in
+// now is the one that owes the person an answer, not this one.
 //
-// It is read in a short read-only transaction of its own, as rootHears is: the machine asks it
-// holding its own lock, so the answer may take none of the daemon's.
+// So this is where such a decision is dropped from the task, in one write: the rows whose issue
+// has left the claim's tree lose this delivery's hold (record.Store.ReleaseHeldDecisions), which
+// leaves each KEPT for its own tree to name, and the architect of each tree they are now owed to
+// is written a fresh catch-up naming them at once, exactly as a hand-over writes one
+// (workflow.CatchUpTheTreesOwed). The decisions whose issue the record still shows in this tree
+// stay, in the order the task named them, and the text is written again from them
+// (workflow.KeptDecisionsTask), which is the wording the start that queued the task used. An issue
+// the record does not hold is kept rather than dropped: a person's decision is never lost, and
+// this answer drops one only where the record says another tree is owed it. A task left naming
+// nothing is retired rather than sent, and its delivery's write releases whatever it still held.
+//
+// It is the machine that asks, because the machine owns the pending delivery: the hand-over that
+// moved the issue commits in a transaction of its own, with no lock on this claim, and a task
+// rewritten there would be overwritten by the machine's next write of what memory still held. The
+// write here serializes with every fact (intake.SerializeFacts), since it writes the catch-up a
+// ready would write, and takes no lock of the daemon's: the machine asks it holding its own.
 func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d supervise.Delivery) (string, []byte, error) {
 	if len(d.Kept) == 0 {
 		return d.Task, d.Kept, nil
@@ -481,21 +496,48 @@ func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d sup
 		return "", nil, fmt.Errorf("decode what the task held for %s names: %w", c.Token, err)
 	}
 	stays := record.KeptDecisions{Approved: named.Approved, Latest: named.Latest}
-	if err := pgx.BeginTxFunc(ctx, w.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+	var left []record.DecisionMark
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		if err := intake.SerializeFacts(scoped, tx); err != nil {
+			return fmt.Errorf("serialize the narrowing with every fact: %w", err)
+		}
+		holds, err := w.records.HeldKeptRefs(scoped, tx, c.Token, d.ID)
+		if err != nil {
+			return err
+		}
+		stays.Decisions, left = nil, nil
 		for _, mark := range named.Decisions {
-			issue, err := w.records.Issue(ctx, tx, mark.Issue)
+			if !slices.Contains(holds, mark.Ref) {
+				// The row this mark named is not this delivery's any more: told by a catch-up
+				// whose publish reached the architect first, replaced by a newer decision on the
+				// same reference, or released to the tree its issue moved to by an earlier send.
+				// Whatever it was, something else answers the person, and this task names it no
+				// longer: naming it again is the second telling the rule forbids.
+				continue
+			}
+			issue, err := w.records.Issue(scoped, tx, mark.Issue)
 			if err != nil {
 				return err
 			}
 			if issue != nil && issue.Tree != c.Tree {
+				left = append(left, mark)
 				continue
 			}
 			stays.Decisions = append(stays.Decisions, mark)
 		}
-		return nil
+		if len(left) == 0 {
+			return nil
+		}
+		trees, err := w.records.ReleaseHeldDecisions(scoped, tx, c.Token, d.ID, left)
+		if err != nil {
+			return err
+		}
+		return workflow.CatchUpTheTreesOwed(scoped, tx, w.records, w.designGate, trees, time.Now().UTC())
 	}); err != nil {
 		return "", nil, fmt.Errorf("read what the task held for %s still names of %s's tree: %w", c.Token, c.Tree, err)
 	}
+	committed()
 	if len(stays.Decisions) == len(named.Decisions) {
 		return d.Task, d.Kept, nil
 	}

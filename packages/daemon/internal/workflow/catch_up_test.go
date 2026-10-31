@@ -121,7 +121,7 @@ func TestARelaunchedArchitectsCatchUpNamesTheDecisionsKeptForIt(t *testing.T) {
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return record.NewStore().AddParkedDecision(ctx, tx, record.ParkedDecision{Root: "LEGION-1", Ref: "dispatch://LEGION-1/spec",
+		return record.NewStore().AddParkedDecision(ctx, tx, record.ParkedDecision{Issue: "LEGION-1", Ref: "dispatch://LEGION-1/spec",
 			Decision: record.DecisionDesignApproved, Actor: "user:alice", At: at})
 	}); err != nil {
 		t.Fatalf("keep a decision: %v", err)

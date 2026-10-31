@@ -1,11 +1,20 @@
 kind: Added
 body: |-
-    A person's decision on a parked root reaches the root's architect once (INFRA-251). The daemon
-    keeps it until the start or catch-up that names it reaches the architect. A start that reached
-    no architect, or a catch-up a newer one replaced, hands the decision in one transaction to a
-    fresh catch-up of the root's current architect. A claim records each start row whose task it
-    took (migration 0066, `claims.delivered_rows`), so a retried start never tells it twice, and a
-    root architect's start task waits while its tree is parked, lingering or waiting for its slot.
+    A person's decision on a parked tree reaches once the architect of the tree it is owed to
+    (INFRA-251). The daemon keeps it under the issue it was decided on, never under a root
+    (migration 0065), so the tree that owes the person an answer is the tree that issue stands in
+    now: a child a linger hands to Legion, a parked child a person's todo orphans, a grandchild
+    handed over beside its parent and a queued root admission adopts into a live tree each take
+    what was decided on them with them, in any order, with nothing to move. A start or catch-up
+    claims what it names; a start whose task the architect's claim queues leaves it to that
+    delivery, which holds it until the turn that takes the task starts, and that confirmation is
+    what tells it (migration 0066, `claims.delivered_rows` and
+    `pending_task_deliveries.kept_decisions`). A claim or a hold counts only while it stands in the
+    row's own tree, and a telling deletes a row only while its issue still stands in the teller's
+    tree; a start or catch-up that reached no architect, and a held task narrowed of what has left
+    its tree, hand what they release to a fresh catch-up of each tree owed. So a retried start
+    never tells it twice, a root architect's task waits while its tree is parked, lingering or
+    waiting for its slot, and a decision is never lost when its issue changes trees.
 time: 2026-10-30T07:00:00Z
 custom:
     Issue: INFRA-251

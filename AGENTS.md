@@ -397,22 +397,32 @@ suspended or gone. A person's spec decision on it (an approval, a changes reques
 carried to a child's new tree) that the daemon could not deliver to its architect, and a person's
 answer, resolution or reply on an ask of its issues (one that gives the turn to the agent, or one
 under a closed ask), goes to the controller as `parked-decision`, once per decision. The daemon
-keeps the newest decision per Dispatch reference, and the root's next architect start names each
-one: admission's start task, or the catch-up of a later launch (a `legion claims retry` relaunch),
-with both spec versions when the approved one is no longer the current one. Each kept decision is
-claimed by the one start or catch-up that names it, in the transaction that queues it, so no other
-start or catch-up names it; the row that carried it to the architect forgets it (a start once the
-architect's claim has queued its task, which the claim records per start row; a catch-up once it
-is published). A start that reached no claim (its generation is stale, its tree lingers) or a
-catch-up a newer one superseded hands what it claimed, in one transaction with the release, to a
-fresh catch-up of the root's current architect, or leaves it unclaimed for the next start when the
-root has no architect to hear it (parked, lingering, or waiting for its slot); a catch-up its
-architect cannot take (a failed claim, a refusing holder) leaves it for that architect's next
-launch, whose catch-up names it. A root architect's start task waits on its claim while its root
-has no architect to hear it, and is sent once the root runs again. So each is told once and none
-is lost, and a retried start whose task was delivered is not delivered again. A decision on a root
-that was set to `todo` and waits for its slot is kept the same way and goes to no controller,
-whichever path finds it. A
+keeps the newest decision per Dispatch reference, under the issue it was decided on, never under a
+root: the tree that owes the person an answer is the tree that issue stands in now, so a child a
+linger hands to Legion, a parked child a person's todo orphans, a grandchild handed over beside its
+parent and a queued root admission adopts into a live tree each take what was decided on them with
+them, in any order, with nothing to move. That tree's next architect start names each one:
+admission's start task, or the catch-up of a later launch (a `legion claims retry` relaunch), with
+both spec versions when the approved one is no longer the current one. Each kept decision is
+claimed by the one start or catch-up that names it, in the transaction that queues it, and a start
+whose task the architect's claim queues leaves it to that delivery, which holds it until the turn
+that takes the task starts: the write recording that confirmation is what tells it, and a
+published catch-up tells what it named itself. A claim or a hold counts only while it stands in
+the same tree as the row's own issue, and either telling deletes a row only while that issue still
+stands in the teller's tree — otherwise the row waits again for the tree it moved into, and the
+old architect hearing it as well is the lesser fault. A start that reached no claim (its
+generation is stale, its tree lingers) or a catch-up a newer one superseded hands what it claimed,
+in one transaction with the release, to a fresh catch-up of the architect of each tree those rows
+are owed to now, or leaves them waiting when that tree has no architect to hear them (parked,
+lingering, or waiting for its slot); a catch-up its architect cannot take (a failed claim, a
+refusing holder) leaves it for that architect's next launch, whose catch-up names it. A root
+architect's start task waits on its claim while its root has no architect to hear it, and is sent
+once the root runs again — narrowed first to what its delivery still holds of this tree, with
+whatever has left it released to the tree it moved into and that tree's architect written a
+catch-up at once, and retired rather than sent when nothing of it is left. So each is told once
+and none is lost, and a retried start whose task was delivered is not delivered again. A decision
+on a root that was set to `todo` and waits for its slot is kept the same way and goes to no
+controller, whichever path finds it. A
 decision on a lingering root someone moved back to a status of the workflow (`in_progress` and the
 like) is nobody's parked tree: it is neither kept nor relayed. A decision no person made
 (`gates.design: off`) is not relayed. A session's reply on such an ask is not relayed either: the

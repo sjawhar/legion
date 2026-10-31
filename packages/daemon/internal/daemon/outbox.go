@@ -708,7 +708,7 @@ func (r *outbox) deliverNotice(ctx context.Context, row record.OutboxRow, payloa
 			// (settleTold); one that never published hands its decisions to a fresh catch-up, since
 			// the newer catch-up was composed from what nobody claimed and left them out.
 			_, told := payload.Published(row.ID)
-			if err := r.supersededKept(ctx, tree.root.Key, row.ID, told, held.Generation); err != nil {
+			if err := r.supersededKept(ctx, tree.root.Key, row.ID, told); err != nil {
 				return err
 			}
 			r.log.Info("outbox catch-up finished without publishing: a newer catch-up supersedes it", "row", row.ID, "issue", row.Issue,
@@ -1009,11 +1009,11 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			// settle or a ClaimReady below that failed, a crash before the row finished) queues the
 			// task again neither while it is pending nor once the claim has retired it
 			// (supervise.Claim.DeliveredRows), and that same record is what says, when the row
-			// settles what its task named, that the architect has it (settleKept). What the task
-			// names of what its root keeps travels with it as well (supervise.Delivery.Kept): those
-			// rows are forgotten the moment the claim takes the task, so a held task is the only
-			// thing that carries them, and a hand-over of a child reads them there to re-keep what
-			// was decided on the child's subtree (record.Store.ReKeepDeliveredDecisions).
+			// settles what its task named, that the claim has it (settleKept). What the task names
+			// of what its tree is owed travels with it as well (supervise.Delivery.Kept): the
+			// claim's write of the delivery takes those rows from this start row and holds them
+			// under that claim and delivery id, and the write recording the turn's confirmation
+			// tells them (the claim store's putDelivery, 0065_parked_decisions).
 			kept, err := keptJSON(payload.Kept)
 			if err != nil {
 				return err

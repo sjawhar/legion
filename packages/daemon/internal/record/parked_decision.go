@@ -64,14 +64,17 @@ func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue) (bool
 //     moved back into the workflow is nobody's parked tree (RelayNotParked): either keeps nothing.
 //   - Only a person decides (PersonActor): a session's write, the daemon's own included, is no
 //     decision to relay (RelayNoPerson).
-//   - What is kept is kept under root, with issue, the issue it was decided on, so that a child
-//     handed over into a tree of its own takes what was decided on it and its descendants with it
-//     (admit.Admission.readmit). It is kept until the start or catch-up that named it reached an
-//     architect (Store.ForgetKeptDecisions); one that reached none hands it over to a fresh
-//     catch-up (workflow.HandOverKept), so it is never left unclaimed while its root has an
-//     architect to tell. What is relayed is one parked-decision controller notice of
-//     issue, naming root, the decision, where in Dispatch, who made it, and a spec decision's
-//     version and a changes request's reason.
+//   - What is kept is kept under issue, the issue it was decided on, never under a root: the tree
+//     that owes the person an answer is the tree that issue stands in whenever a start or a
+//     catch-up names it, so a child handed over into a tree of its own, a parked child a person
+//     orphans and a queued root adopted into a live tree take what was decided on them with them,
+//     with nothing to move. It is kept until the start or catch-up that named it reached an
+//     architect of that tree (Store.ForgetKeptDecisions, or the confirmation of the delivery
+//     holding it); one that reached none hands it over to a fresh catch-up
+//     (workflow.HandOverKept), so it is never left unclaimed while its tree has an architect to
+//     tell. The root is read for the two answers that are the root's own: whether it waits for its
+//     slot, and the one parked-decision controller notice that names it, the decision, where in
+//     Dispatch, who made it, and a spec decision's version and a changes request's reason.
 //
 // Every write is in the caller's transaction, which the caller keys so that a replay writes none of
 // them again.
@@ -95,7 +98,7 @@ func RelayParkedDecision(ctx context.Context, tx pgx.Tx, store Store, issue stri
 		}
 		return RelayNoPerson, nil
 	}
-	decision.Root, decision.Issue = root.Key, issue
+	decision.Issue = issue
 	if err := store.AddParkedDecision(ctx, tx, decision); err != nil {
 		return RelayNone, err
 	}
@@ -113,15 +116,14 @@ func RelayParkedDecision(ctx context.Context, tx pgx.Tx, store Store, issue stri
 	return RelaySent, nil
 }
 
-// DecisionMark identifies one kept decision an architect's start task or catch-up named, and holds
-// what re-keeping it needs: its Dispatch reference and the time of the decision the root kept then
-// (ParkedDecision.At) identify the row — a newer decision a person made on the same reference since
-// replaces that row with a later time, so the forget leaves it for the next start or catch-up to
-// name — and the issue it was decided on, its kind and its author are the rest of that row, carried
-// so that a task still holding it can be written back as a kept decision of another root: the
-// hand-over of a child re-keeps for the child what a held task of the old root's architect names of
-// its subtree (Store.ReKeepDeliveredDecisions), those rows having been deleted when the claim took
-// the task.
+// DecisionMark identifies one kept decision an architect's start task or catch-up named: the
+// issue it was decided on, its Dispatch reference and the time of the decision the row held then
+// (ParkedDecision.At) are the row's identity — a newer decision a person made on the same
+// reference since replaces that row with a later time, so the telling leaves it for the next
+// start or catch-up to name — and its kind and its author are what the task's text says of it
+// (workflow.KeptDecisionsTask), which is rewritten from these marks whenever a held task is
+// narrowed at send time (supervise's Deps.RootTask). The issue is also what says which tree the
+// decision is owed to now, which is what that narrowing and the telling both read.
 type DecisionMark struct {
 	Ref      string       `json:"ref"`
 	At       time.Time    `json:"at"`
@@ -130,13 +132,15 @@ type DecisionMark struct {
 	Actor    string       `json:"actor,omitempty"`
 }
 
-// KeptDecisions is what one architect start task or catch-up named of what its root keeps
+// KeptDecisions is what one architect start task or catch-up named of what its tree is owed
 // (workflow.Engine.ParkedDecisionTask): each decision, and the pair of approved and latest spec
-// versions when it named one. It travels with the task (SuperviseRequest.Kept, CatchUp.Kept), and
-// the row that carried it to an architect forgets exactly it (Store.ForgetKeptDecisions). A start
-// whose task reached no claim, and a catch-up a newer one supersedes, hand every row over instead
-// (workflow.HandOverKept): a fresh catch-up names them while the root has an architect to tell,
-// and otherwise they wait, unclaimed, for the next start or ready to name them.
+// versions when it named one. It travels with the task (SuperviseRequest.Kept, CatchUp.Kept) and
+// is persisted with the delivery a claim queues it as, which is what says which rows that
+// delivery holds. A published catch-up tells exactly what it named (Store.ForgetKeptDecisions),
+// and a queued start's task tells it at its delivery's confirmation. A start whose task reached
+// no claim, and a catch-up a newer one supersedes, hand every row over instead
+// (workflow.HandOverKept): a fresh catch-up names them while the tree each is owed to has an
+// architect to tell, and otherwise they wait, KEPT, for the next start or ready to name them.
 type KeptDecisions struct {
 	Decisions []DecisionMark `json:"decisions,omitempty"`
 	Approved  int            `json:"approved,omitempty"`
