@@ -12,11 +12,24 @@ import {
 } from "@legion/envoy-client/transport";
 import type { NatsConnection } from "nats";
 import {
-  AbandonedTaskError,
   createRegistrationState,
   type RegistrationInput,
   type RegistrationState,
+  taskWasAbandoned,
 } from "./registration-state";
+
+/** The deadline rejection the queue answers with, which the module names through its predicate:
+ *  the error class itself is private to it. */
+const expectAbandoned = async (running: Promise<unknown>): Promise<void> => {
+  await running.then(
+    () => {
+      throw new Error("the task settled instead of being abandoned at its deadline");
+    },
+    (error: unknown) => {
+      expect(taskWasAbandoned(error)).toBe(true);
+    }
+  );
+};
 
 const ALPHA = `${ROLE_TOPIC_PREFIX}alpha`;
 const BETA = `${ROLE_TOPIC_PREFIX}beta`;
@@ -63,7 +76,10 @@ interface HarnessControl {
   getInterest: (sessionID: string) => Promise<Interest>;
   unsubscribe: (input: UnsubscribeInput) => Promise<void>;
   dial: () => Promise<NatsConnection>;
-  subscribeTopic: (topic: string, dial: () => Promise<NatsConnection>) => Promise<boolean>;
+  /** The session's connection, as the extension's `ensureConnection` answers it: it dials when
+   *  the session has none, and can wait again after the dial. */
+  connect: (dial: () => Promise<NatsConnection>) => Promise<NatsConnection>;
+  subscribeTopic: (topic: string, connect: () => Promise<NatsConnection>) => Promise<boolean>;
 }
 
 interface Harness {
@@ -119,6 +135,9 @@ function createHarness(): Harness {
     getInterest: async (sessionID) => interestFor(sessionID),
     unsubscribe: async () => {},
     dial: async () => fakeConnection("one"),
+    // The extension's own `ensureConnection` keeps one connection per session; a test that cares
+    // about the wait after the dial replaces this.
+    connect: (dial) => dial(),
     subscribeTopic: async () => true,
   };
 
@@ -157,9 +176,10 @@ function createHarness(): Harness {
     log: { warn: (message, context) => warnings.push({ message, context }) },
     appendRoleClaimEntry: (role) => roleEntries.push(role),
     dial: () => control.dial(),
-    subscribeTopic: (topic, dial) => {
+    connect: (dial) => control.connect(dial),
+    subscribeTopic: (topic, connect) => {
       subscribedTopics.push(topic);
-      return control.subscribeTopic(topic, dial);
+      return control.subscribeTopic(topic, connect);
     },
     closeSubject: (subject) => closedSubjects.push(subject),
   });
@@ -256,7 +276,7 @@ describe("the serial queues", () => {
         finished.resolve();
       }
     });
-    await expect(running).rejects.toBeInstanceOf(AbandonedTaskError);
+    await expectAbandoned(running);
     release.resolve();
     await finished.promise;
     expect(stepped).toBe(false);
@@ -308,7 +328,7 @@ describe("the serial queues", () => {
         finished.resolve();
       }
     });
-    await expect(running).rejects.toBeInstanceOf(AbandonedTaskError);
+    await expectAbandoned(running);
     release.resolve();
     await finished.promise;
     expect(stepped).toBe(false);
@@ -340,7 +360,7 @@ describe("the serial queues", () => {
     expect(state.roleSettledSession()).toBe("");
   });
 
-  test("a dial opened by a task whose session moved is closed", async () => {
+  test("a dial a task made for a connection its session outran is closed", async () => {
     const { state, control, closedConnections, fakeConnection } = createHarness();
     control.open = "ses_a";
     const dialling = Promise.withResolvers<void>();
@@ -352,7 +372,7 @@ describe("the serial queues", () => {
     };
     const running = state.passes.run(async (handle) => {
       handle.actFor("ses_a");
-      await handle.dial();
+      await handle.connect();
       return true;
     });
     await dialling.promise;
@@ -362,7 +382,7 @@ describe("the serial queues", () => {
     expect(closedConnections).toEqual(["left-behind"]);
   });
 
-  test("a dial opened by a task past its deadline is closed", async () => {
+  test("a dial a task made for a connection its deadline outran is closed", async () => {
     const { state, control, closedConnections, fakeConnection } = createHarness();
     control.open = "ses_a";
     control.deadlineMs = 0;
@@ -377,14 +397,14 @@ describe("the serial queues", () => {
     const running = state.passes.run(async (handle) => {
       handle.actFor("ses_a");
       try {
-        await handle.dial();
+        await handle.connect();
         return true;
       } finally {
         finished.resolve();
       }
     });
     await dialling.promise;
-    await expect(running).rejects.toBeInstanceOf(AbandonedTaskError);
+    await expectAbandoned(running);
     release.resolve();
     await finished.promise;
     expect(closedConnections).toEqual(["abandoned"]);
@@ -402,9 +422,9 @@ describe("the serial queues", () => {
       return fakeConnection("subscribe-dial");
     };
     // The adapter opens the topic only once it has a connection, as the extension's own
-    // `subscribe` does, and it dials with the dial the handle hands it.
-    control.subscribeTopic = async (topic, dial) => {
-      await dial();
+    // `subscribe` does, and it takes that connection through the step the handle hands it.
+    control.subscribeTopic = async (topic, connect) => {
+      await connect();
       opened.push(topic);
       return true;
     };
@@ -418,6 +438,150 @@ describe("the serial queues", () => {
     expect(await running).toBeUndefined();
     expect(opened).toEqual([]);
     expect(closedConnections).toEqual(["subscribe-dial"]);
+  });
+
+  // The acquisition of the session's connection waits past its own dial: the extension closes a
+  // dial another caller's connection beat and answers with that connection instead. A task
+  // refused during that wait must act on neither.
+  test("a session that moves while the connection is acquired opens no subject", async () => {
+    const { state, control, closedConnections } = createHarness();
+    control.open = "ses_a";
+    const acquiring = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const opened: string[] = [];
+    control.connect = async (dial) => {
+      const dialled = await dial();
+      acquiring.resolve();
+      // The extension's own wait on the connection another caller won the race with.
+      await release.promise;
+      return dialled;
+    };
+    control.subscribeTopic = async (topic, connect) => {
+      await connect();
+      opened.push(topic);
+      return true;
+    };
+    const running = state.passes.run(async (handle) => {
+      handle.actFor("ses_a");
+      return await handle.subscribe("notifications.dispatch.issue.A-1");
+    });
+    await acquiring.promise;
+    control.open = "ses_b";
+    release.resolve();
+    expect(await running).toBeUndefined();
+    expect(opened).toEqual([]);
+    // The connection is the session's, not this task's: a refusal leaves it open.
+    expect(closedConnections).toEqual([]);
+  });
+
+  test("a deadline that fires while the connection is acquired answers the task no connection", async () => {
+    const { state, control } = createHarness();
+    control.open = "ses_a";
+    control.deadlineMs = 0;
+    const acquiring = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const finished = Promise.withResolvers<void>();
+    let watched = false;
+    control.connect = async (dial) => {
+      const dialled = await dial();
+      acquiring.resolve();
+      await release.promise;
+      return dialled;
+    };
+    const running = state.passes.run(async (handle) => {
+      handle.actFor("ses_a");
+      try {
+        await handle.connect();
+        // What the extension does with the connection: replace the agent stream's control
+        // subscription. A task the acquisition outran never reaches it.
+        watched = true;
+        return true;
+      } finally {
+        finished.resolve();
+      }
+    });
+    await acquiring.promise;
+    await expectAbandoned(running);
+    release.resolve();
+    await finished.promise;
+    expect(watched).toBe(false);
+  });
+
+  test("a refusal latches: the session opening again does not revive the task", async () => {
+    const { state, control } = createHarness();
+    control.open = "ses_a";
+    const refused = Promise.withResolvers<void>();
+    const reopened = Promise.withResolvers<void>();
+    let stepped = false;
+    const running = state.passes.run(async (handle) => {
+      handle.actFor("ses_a");
+      await Promise.resolve();
+      // The step the move refuses, caught as `settleRole`'s catch-all catches whatever a step
+      // threw.
+      try {
+        handle.markInboundOpen("ses_a");
+      } catch {
+        refused.resolve();
+      }
+      await reopened.promise;
+      handle.markRoleSettled("ses_a");
+      stepped = true;
+      return true;
+    });
+    control.open = "ses_b";
+    await refused.promise;
+    // The host switches back: the task is still the one the move replaced.
+    control.open = "ses_a";
+    reopened.resolve();
+    expect(await running).toBeUndefined();
+    expect(stepped).toBe(false);
+    expect(state.inboundOpenSession()).toBe("");
+    expect(state.roleSettledSession()).toBe("");
+  });
+
+  test("the recovery's unregister is refused once its task is", async () => {
+    const { state, control, handBacks } = createHarness();
+    control.open = "ses_a";
+    const read = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    control.getInterest = async (sessionID) => {
+      read.resolve();
+      await release.promise;
+      return interestFor(sessionID);
+    };
+    const running = state.passes.run(async (handle) => {
+      handle.actFor("ses_a");
+      await handle.readInterest("ses_a");
+      await handle.unregisterTopics("ses_a", ["notifications.slack.channel.C1"]);
+      return true;
+    });
+    await read.promise;
+    control.open = "ses_b";
+    release.resolve();
+    expect(await running).toBeUndefined();
+    expect(handBacks).toEqual([]);
+  });
+
+  test("the handle unregisters a session's topics, and a failure warns rather than fails the task", async () => {
+    const { state, control, handBacks, warnings } = createHarness();
+    control.open = "ses_a";
+    const unregistered = await state.passes.run(async (handle) => {
+      handle.actFor("ses_a");
+      await handle.unregisterTopics("ses_a", ["notifications.slack.channel.C1"]);
+      control.unsubscribe = async () => {
+        throw apiError(503);
+      };
+      await handle.unregisterTopics("ses_a", ["notifications.slack.channel.C2"]);
+      return true;
+    });
+    expect(unregistered).toBe(true);
+    expect(handBacks).toEqual([
+      "notifications.slack.channel.C1@ses_a",
+      "notifications.slack.channel.C2@ses_a",
+    ]);
+    expect(warnings.map((warning) => warning.message)).toEqual([
+      "envoy: a session's registered topics were not unregistered",
+    ]);
   });
 
   test("the handle's listener reads and subscribes answer a task that still decides", async () => {
@@ -690,7 +854,7 @@ describe("recordClaimAfterDeadline", () => {
       }
     });
     await claiming.promise;
-    await expect(running).rejects.toBeInstanceOf(AbandonedTaskError);
+    await expectAbandoned(running);
     release.resolve();
     await finished.promise;
     expect(state.heldRole()).toBeUndefined();
@@ -740,16 +904,66 @@ describe("adoptClaimAfterSessionMoved", () => {
       await release.promise;
       return { claimed: true, interest: interestFor("ses_a") };
     };
-    const running = state.roleMoves.run(async (handle) => {
-      handle.actFor("ses_a");
-      return handle.claimRole("alpha", { soft: true });
-    });
+    const refusals: boolean[] = [];
+    const running = state.roleMoves.run(
+      async (handle) => {
+        handle.actFor("ses_a");
+        return handle.claimRole("alpha", { soft: true });
+      },
+      (refusal) => refusals.push(refusal.claimAdopted)
+    );
     await claiming.promise;
     control.open = "ses_b";
     release.resolve();
     expect(await running).toBeUndefined();
     expect(state.heldRole()).toBe("alpha");
     expect(state.holdSessionID()).toBe("ses_a");
+    // What the caller tells the model: the claim landed, and the next pass carries it or hands
+    // it back.
+    expect(refusals).toEqual([true]);
+  });
+
+  test("a claim the listener refused while the session moved carries no adoption", async () => {
+    const { state, control } = createHarness();
+    control.open = "ses_a";
+    const claiming = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    control.setRole = async () => {
+      claiming.resolve();
+      await release.promise;
+      return { claimed: false, holder: "ses_newer" };
+    };
+    const refusals: boolean[] = [];
+    const running = state.roleMoves.run(
+      async (handle) => {
+        handle.actFor("ses_a");
+        return handle.claimRole("alpha", { soft: true });
+      },
+      (refusal) => refusals.push(refusal.claimAdopted)
+    );
+    await claiming.promise;
+    control.open = "ses_b";
+    release.resolve();
+    expect(await running).toBeUndefined();
+    expect(state.heldRole()).toBeUndefined();
+    // Nothing was claimed, so that is what the caller says.
+    expect(refusals).toEqual([false]);
+  });
+
+  test("a claim whose session moved before its turn carries no adoption and sends nothing", async () => {
+    const { state, control, claims } = createHarness();
+    control.open = "ses_b";
+    const refusals: boolean[] = [];
+    const running = state.roleMoves.run(
+      async (handle) => {
+        handle.actFor("ses_a");
+        return handle.claimRole("alpha", { soft: true });
+      },
+      (refusal) => refusals.push(refusal.claimAdopted)
+    );
+    expect(await running).toBeUndefined();
+    expect(claims).toEqual([]);
+    expect(refusals).toEqual([false]);
   });
 });
 
@@ -893,7 +1107,7 @@ describe("claimRole", () => {
       }
     });
     await claiming.promise;
-    await expect(running).rejects.toBeInstanceOf(AbandonedTaskError);
+    await expectAbandoned(running);
     release.resolve();
     await finished.promise;
     expect(state.refusalFor("ses_a")).toBeUndefined();
@@ -935,7 +1149,7 @@ describe("claimRole", () => {
       }
     });
     await reading.promise;
-    await expect(running).rejects.toBeInstanceOf(AbandonedTaskError);
+    await expectAbandoned(running);
     release.resolve();
     await finished.promise;
     expect(state.refusalFor("ses_a")).toBeUndefined();

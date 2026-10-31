@@ -961,8 +961,10 @@ export default function envoyExtension(pi: PiApi): void {
     );
   };
 
-  // The session's one NATS connection, dialled if it has none. A queued caller passes its
-  // handle's `dial`, so a dial its task outran is closed there and never reaches this field.
+  // The session's one NATS connection, dialled if it has none. A queued task reaches it through
+  // its handle's `connect`, which hands in the task's own fenced dial and checks the task again
+  // once this whole call has answered: the wait below, after a dial another caller's connection
+  // beat, is inside the step rather than after it.
   const ensureConnection = async (
     dial: () => Promise<NatsConnection> = dialNats
   ): Promise<NatsConnection> => {
@@ -1636,18 +1638,18 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   // Opens every subject of `topic` not already open; answers whether any were new. A queued task
-  // subscribes through its handle, which hands in its own `dial`: a connection its task outran is
-  // closed there and the task ends, so nothing a newer pass has since settled is reopened behind
-  // its back.
+  // subscribes through its handle, which hands in its own `connect`: a connection its task
+  // outran refuses there, before the first subject opens, so nothing a newer pass has since
+  // settled is reopened behind its back.
   const subscribe = async (
     topic: string,
-    dial?: () => Promise<NatsConnection>
+    connect: () => Promise<NatsConnection> = ensureConnection
   ): Promise<boolean> => {
     const subjects = expandSubscriptionTopics([topic]).filter(
       (candidate) => !subscriptions.has(candidate)
     );
     if (subjects.length === 0) return false;
-    const activeConnection = await ensureConnection(dial);
+    const activeConnection = await connect();
     for (const subject of subjects) {
       const subscription = activeConnection.subscribe(subject);
       // A fresh subscription supersedes any earlier deliberate close of this topic.
@@ -1940,7 +1942,7 @@ export default function envoyExtension(pi: PiApi): void {
 
   const watchAgentStream = async (
     session: string,
-    dial?: () => Promise<NatsConnection>
+    connect: () => Promise<NatsConnection> = ensureConnection
   ): Promise<void> => {
     if (agentStreamControlSession === session && agentStreamControl !== undefined) return;
     agentStreamControl?.unsubscribe();
@@ -1953,9 +1955,10 @@ export default function envoyExtension(pi: PiApi): void {
       agentStreamCommandsRefreshedOnWatchAt = -Infinity;
     }
     agentStreamControlSession = session;
-    // A queued task dials through its handle: a connection its task outran is closed there and
-    // the task ends, so a newer pass's control subscription is never overwritten behind its back.
-    const connected = await ensureConnection(dial);
+    // A queued task connects through its handle: an acquisition its task outran refuses there,
+    // and the task ends, so a newer pass's control subscription is never overwritten behind its
+    // back.
+    const connected = await connect();
     const subscription = connected.subscribe(agentStreamControlSubject(session));
     agentStreamControl = subscription;
     void pumpAgentStreamControl(subscription, session);
@@ -2017,20 +2020,30 @@ export default function envoyExtension(pi: PiApi): void {
   // Whether `id` is the session open here, for this instance and the host alike: a role move
   // decided for `id` acts only while it is.
   const sessionOpen = (id: string): boolean => sessionID === id && hostSessionID() === id;
-  // The refusal a role move that decided nothing carries: the session it was decided for stopped
-  // being the open one, so nothing was claimed. Both the plugin bridge's claim and the tool say
-  // the same sentence.
-  const sessionLeftDuringClaim = (from: string, role: string): SessionLeftError =>
+  // What a role move that decided nothing tells the plugin or the model: the session it was
+  // decided for stopped being the open one. A claim the listener granted all the same is held
+  // here under that session, and the next pass carries it or hands it back; one that never
+  // landed claimed nothing. Both the plugin bridge's claim and the tool say the same sentence.
+  const sessionLeftDuringClaim = (
+    from: string,
+    role: string,
+    claimAdopted: boolean
+  ): SessionLeftError =>
     new SessionLeftError(
-      `the session moved from ${from} to ${hostSessionID()} while its claim of role ${role} ran; nothing was claimed`
+      claimAdopted
+        ? `the session moved from ${from} to ${hostSessionID()} while its claim of role ${role} was in flight; the next pass keeps the hold for the session the host is on, or hands it back`
+        : `the session moved from ${from} to ${hostSessionID()} while its claim of role ${role} ran; nothing was claimed`
     );
 
   // The registration and role state the two serial queues write, the queues themselves, each
   // task's deadline and this extension instance's client instance id, all private to
   // `../src/registration-state`. A queued task writes none of it by hand: `run` hands it a handle
-  // whose every step — a state write, a listener request, a NATS dial, a subscribe — refuses once
-  // that task was abandoned at its deadline or the session it acts for stopped being the open
-  // one. Nothing here re-checks a fence, because nothing here can write that state unguarded.
+  // whose every step — a state write, a listener request, a NATS connection, a subscribe —
+  // refuses once that task was abandoned at its deadline or the session it acts for stopped being
+  // the open one, and the first refusal latches. Nothing here re-checks a fence before a step.
+  // `handle.check()` is left at the two places that are not steps: where a catch-all would
+  // otherwise swallow the refusal, and before an action outside the handle (a replay trigger, a
+  // throw this pass reports) that a refused task must not take.
   const registrationState = createRegistrationState({
     client: () => requireEnvoy().client,
     sessionOpen,
@@ -2048,6 +2061,7 @@ export default function envoyExtension(pi: PiApi): void {
       if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
     },
     dial: dialNats,
+    connect: ensureConnection,
     subscribeTopic: subscribe,
     closeSubject: (subject) => {
       closeIntentionally(subject);
@@ -2228,25 +2242,14 @@ export default function envoyExtension(pi: PiApi): void {
     // interests after its grace, and the transcript still says what the session followed. A topic
     // it unfollowed is absent from that state. Agent and role subjects are never among them.
     const registry = await handle.readInterest(sessionID);
-    handle.check();
     const slackRetired = publishedInterface?.roleClaim.slackRoleOwned === true;
     const registered = registry?.topics ?? [];
     const retired = slackRetired
       ? registered.filter((topic) => slackTopicChannel(topic) !== undefined)
       : [];
-    if (retired.length > 0) {
-      const { client } = requireEnvoy();
-      await client.unsubscribe({ sessionID, topics: retired }).catch((error: unknown) => {
-        logger.warn("envoy: could not unregister a resumed controller's retired Slack topics", {
-          sessionID,
-          topics: retired,
-          error: messageFor(error),
-        });
-      });
-    }
-    // Refused during the unsubscribe: a newer pass reads the registry itself, and this one
-    // registers nothing further.
-    handle.check();
+    // A step of this pass, so a pass the host left behind unregisters nothing: the listener keeps
+    // the retired topics until the pass the move queued reads the registry itself.
+    if (retired.length > 0) await handle.unregisterTopics(sessionID, retired);
     // The newest replay state's topics (`rememberedTopics`), but a retired Slack topic.
     const remembered = rememberedSubjects(
       activeSessionContext?.sessionManager.getEntries() ?? []
@@ -2432,11 +2435,11 @@ export default function envoyExtension(pi: PiApi): void {
     if (inbound && registrationState.inboundOpenSession() !== host) {
       try {
         handle.markAgentSessionOpen(host);
-        await ensureConnection(handle.dial);
+        await handle.connect();
         await handle.subscribe(agentSubject(host));
         // A viewer's replay request and its watch pings reach the session here. Opening it costs
         // one core subscription and publishes nothing: a session nobody opens stays silent.
-        await watchAgentStream(host, handle.dial);
+        await watchAgentStream(host, handle.connect);
         if ((context.sessionManager.getBranch?.() ?? []).length > 0) {
           await recoverRegisteredInterests(handle);
         }
@@ -2456,6 +2459,8 @@ export default function envoyExtension(pi: PiApi): void {
       () => undefined,
       (error: unknown) => ({ error })
     );
+    // The catch-all above turned whatever the registration threw into `registration.error`, a
+    // refused step included: this says so rather than report a registration failure.
     handle.check();
     if (registration === undefined) {
       handle.markEstablished(host);
@@ -2500,28 +2505,25 @@ export default function envoyExtension(pi: PiApi): void {
   ): Promise<boolean> => {
     // Every write and listener call below is a step of this move's handle, which refuses it once
     // the move was abandoned at its deadline or the host moved: the move then decides nothing,
-    // and the move the next pass queues converges from the state this one left.
+    // and the move the next pass queues converges from the state this one left. A step is never
+    // preceded by a check here, because it checks itself.
     handle.actFor(host);
-    handle.check();
     const branch = context.sessionManager.getBranch?.() ?? [];
     // The rows are read until a pass has decided for this session, except for a brand-new first
     // session, which has none.
     const settled = registrationState.roleSettledSession();
     const readRows = settled !== host && (branch.length > 0 || settled !== "");
     const desired = await desiredRole(handle, host, branch, readRows);
-    handle.check();
     const unheard = lastHeard !== host;
     const held = registrationState.heldRole();
     if (held !== undefined && held !== desired) {
       // A role end after a move no session event announced is one no plugin heard: the hand-back
       // says so in the pane, and who claims it again.
       await handle.handBackHeldRole(unheard);
-      handle.check();
     }
     if ((await handle.settleEndedHolds(desired)) && unheard && desired !== undefined) {
       handle.noteNoticesClosed(desired);
     }
-    handle.check();
     if (!registered) return false;
     if (desired === undefined) {
       handle.markRoleSettled(host);
@@ -2575,7 +2577,6 @@ export default function envoyExtension(pi: PiApi): void {
     if (supersedes === undefined && lineage.length > 1) {
       const holder = await handle.readRoleHolder(desired);
       if (holder !== undefined && holder !== host && lineage.includes(holder)) supersedes = holder;
-      handle.check();
     }
     try {
       const claimed = await handle.claimRole(desired, {
@@ -2584,8 +2585,9 @@ export default function envoyExtension(pi: PiApi): void {
       });
       if (claimed && unheard) handle.noteNoticesClosed(desired);
     } catch (error) {
-      // A step the handle refused ends this move here: it decided nothing, and the move or pass
-      // that replaced it does. That is not a failure to report.
+      // This catch would otherwise swallow a step the handle refused: the check says so instead.
+      // A move that was refused decided nothing, and the move or pass that replaced it does.
+      // That is not a failure to report.
       handle.check();
       logger.warn("envoy: role reclaim failed", {
         role: desired,
@@ -2593,9 +2595,6 @@ export default function envoyExtension(pi: PiApi): void {
         error: messageFor(error),
       });
     }
-    // The claim, or the hand-back of the role it moved off, can outrun this move's deadline:
-    // a move that no longer decides for `host` records nothing of its pass either.
-    handle.check();
     handle.markRoleSettled(host);
     return true;
   };
@@ -2632,14 +2631,21 @@ export default function envoyExtension(pi: PiApi): void {
     // The listener rejects a claim from a session it does not currently know
     // (its registration may have expired), so register before claiming.
     await registerSession();
-    const claimed = await registrationState.roleMoves.run(async (handle) => {
-      handle.actFor(targetSessionID);
-      await handle.claimRole(role);
-      return true;
-    });
+    let claimAdopted = false;
+    const claimed = await registrationState.roleMoves.run(
+      async (handle) => {
+        handle.actFor(targetSessionID);
+        await handle.claimRole(role);
+        return true;
+      },
+      (refusal) => {
+        claimAdopted = refusal.claimAdopted;
+      }
+    );
     // The move decided nothing, because the session it was decided for stopped being the open
-    // one: the plugin that asked hears that, as it hears a claim that failed.
-    if (claimed === undefined) throw sessionLeftDuringClaim(targetSessionID, role);
+    // one: the plugin that asked hears that, as it hears a claim that failed, and hears whether
+    // the listener granted the claim all the same.
+    if (claimed === undefined) throw sessionLeftDuringClaim(targetSessionID, role, claimAdopted);
   };
 
   const subscribeNotice: LegionNoticeSubscription = async (
@@ -3587,26 +3593,33 @@ export default function envoyExtension(pi: PiApi): void {
           // The session the move is decided for, read when its turn comes and kept for the
           // refusal below, which the session the host is on by then would misname.
           let target = sessionID;
-          const moved = await registrationState.roleMoves.run(async (handle) => {
-            target = sessionID;
-            handle.actFor(target);
-            const held = registrationState.heldRole();
-            const moving = held !== undefined && held !== role;
-            // Moving off a role closes every subscription another plugin opened `whileHolding`
-            // it, so the session would stop taking that role's notices without being told. The
-            // model's tool never does that; the plugin that owns the role moves it by its claim.
-            const bound = registrationState.roleBoundSubjects();
-            if (moving && bound.length > 0) {
-              throw new Error(
-                `This session holds role ${held}, and ${bound.join(", ")} lasts only while it does; envoy_role_set does not move it to ${role}`
-              );
+          let claimAdopted = false;
+          const moved = await registrationState.roleMoves.run(
+            async (handle) => {
+              target = sessionID;
+              handle.actFor(target);
+              const held = registrationState.heldRole();
+              const moving = held !== undefined && held !== role;
+              // Moving off a role closes every subscription another plugin opened `whileHolding`
+              // it, so the session would stop taking that role's notices without being told. The
+              // model's tool never does that; the plugin that owns the role moves it by its claim.
+              const bound = registrationState.roleBoundSubjects();
+              if (moving && bound.length > 0) {
+                throw new Error(
+                  `This session holds role ${held}, and ${bound.join(", ")} lasts only while it does; envoy_role_set does not move it to ${role}`
+                );
+              }
+              await handle.claimRole(role);
+              return { released: moving ? held : undefined };
+            },
+            (refusal) => {
+              claimAdopted = refusal.claimAdopted;
             }
-            await handle.claimRole(role);
-            return { released: moving ? held : undefined };
-          });
+          );
           // The move decided nothing, because the session it was decided for stopped being the
-          // open one: the tool says so rather than report a role it never took.
-          if (moved === undefined) throw sessionLeftDuringClaim(target, role);
+          // open one: the tool says so rather than report a role it never took, and says which
+          // of the two the listener left behind.
+          if (moved === undefined) throw sessionLeftDuringClaim(target, role, claimAdopted);
           const { released } = moved;
           return toolSuccess(
             released === undefined
