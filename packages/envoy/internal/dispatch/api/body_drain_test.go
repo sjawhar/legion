@@ -245,6 +245,41 @@ func (b repeatedByte) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Which 413 a route answers a body past its limit with follows the limit on its own row: every
+// row that takes an upload's body (apiRoute.BodyLimit, upload) answers the upload's CAP_EXCEEDED,
+// and every other row the JSON limit's REQUEST_TOO_LARGE (bodyTooLarge). A new upload row is
+// answered as an upload by being an upload row, with no list of upload patterns to keep in step.
+func TestEveryRoutesOversizedBodyIsAnsweredByItsRowsLimit(t *testing.T) {
+	served := &server{}
+	uploads := 0
+	for _, route := range served.routes() {
+		if route.Method == http.MethodGet {
+			continue
+		}
+		want := "REQUEST_TOO_LARGE"
+		if route.BodyLimit == maxUploadRequestBytes {
+			want, uploads = "CAP_EXCEEDED", uploads+1
+		}
+		t.Run(route.Method+" "+route.Pattern, func(t *testing.T) {
+			// The route's own handler is left out: what answers here is the drain around it,
+			// which needs no caller, no issue and no database to judge a body past the limit.
+			answered := served.drainBeforeAnswer(route, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+			sent := endlessBody(route.bodyLimit() + 1)
+			response := httptest.NewRecorder()
+			answered(response, httptest.NewRequest(route.Method, "/api/v1/oversized-body-test", sent))
+			code, _ := refusalOf(t, response)
+			if response.Code != http.StatusRequestEntityTooLarge || code != want {
+				t.Fatalf("status=%d body=%s, want 413 %s", response.Code, response.Body.String(), want)
+			}
+		})
+	}
+	if uploads == 0 {
+		t.Fatal("no route of the table takes an upload's body, so the upload 413 is never covered here")
+	}
+}
+
 // INFRA-258. An early answer drains at most the route's own limit and one byte
 // more (apiRoute.bodyLimit): a body that runs past it is answered as the limit answers it, 413 with the
 // route's refusal and none of the early answer's headers, and the rest is never read. A body inside

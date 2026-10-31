@@ -7,7 +7,7 @@ GitHub reads go through as the GitHub App.
 ## Startup and persistence
 
 `DATABASE_URL` and `DISPATCH_AGENT_TOKEN` are required. Startup opens the request
-pool at `store.sharedPoolSize` (48) connections — every pool's size is a property
+pool at `store.SharedPoolSize` (48) connections — every pool's size is a property
 of Dispatch, set in `store/pools.go`, rather than of the URL or the task's CPU
 allotment (`packages/envoy/AGENTS.md`, "Every pool's size is set in code"), and
 a `DATABASE_URL` carrying `pool_max_conns` is refused at open rather than

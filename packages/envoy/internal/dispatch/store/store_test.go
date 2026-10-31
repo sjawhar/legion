@@ -125,7 +125,7 @@ func TestOpenRefusesAConnectionStringThatSetsThePoolSize(t *testing.T) {
 			}
 			refused := err != nil &&
 				strings.Contains(err.Error(), poolSizeParam) &&
-				strings.Contains(err.Error(), strconv.Itoa(sharedPoolSize))
+				strings.Contains(err.Error(), strconv.Itoa(SharedPoolSize))
 			if refused != tc.refused {
 				t.Fatalf("refused = %v, want %v; open returned %v", refused, tc.refused, err)
 			}

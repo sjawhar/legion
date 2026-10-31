@@ -15,7 +15,7 @@ import (
 
 // Dispatch's Envoy listener client is a cross-service HTTP call bounded only by its five
 // second timeout (internal/dispatch/envoy/client.go), and production runs one Dispatch task
-// on a pool of store.sharedPoolSize connections. A listener call made while a transaction is
+// on a pool of store.SharedPoolSize connections. A listener call made while a transaction is
 // open therefore holds one of them - and the rows that transaction locked - for as long as
 // the listener takes to answer, so that many concurrent ones empty the pool and stall every
 // unrelated Dispatch request until the listener replies. A listener restart, which happens on

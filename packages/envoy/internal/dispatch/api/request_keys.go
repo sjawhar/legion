@@ -130,20 +130,9 @@ var errRequestKeyTakenOver = errorf(http.StatusConflict, contracts.IdempotencyKe
 // write made as it stands now, with the status the route's write answers - a stale success, in
 // Google AIP-155's words, never a second write. stored is the first answer's body when the key kept
 // one and it was a success, and nil when the first request never answered or answered a refusal.
+// A route that commits a recovery point names its replay on its own row (replays, routes), so the
+// write and the replay of it are one line of the table.
 type keyedReplay func(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, stored []byte)
-
-// keyedReplays is every route whose write commits a recovery point, by method and pattern: the
-// writes that also deliver to sessions, whose deliveries a repeat finishes. Each key names a
-// registered route (TestEveryKeyedRouteTableNamesARoute).
-func (s *server) keyedReplays() map[string]keyedReplay {
-	return map[string]keyedReplay{
-		http.MethodPost + " /api/v1/agents/{session_id}/messages": replayRecovered(s, s.replayAgentMessage),
-		http.MethodPost + " /api/v1/broadcasts":                   replayRecovered(s, s.replayBroadcast),
-		http.MethodPost + " /api/v1/issues/{key}/messages":        replayRecovered(s, s.replayIssueMessage),
-		http.MethodPost + " /api/v1/issues/{key}/comments":        replayRecovered(s, s.replayComment),
-		http.MethodPost + " /api/v1/artifacts/{id}/comments":      replayRecovered(s, s.replayComment),
-	}
-}
 
 // replayKeptMembers are the members of a write's first answer a replay keeps beside the resource
 // as it stands now: what the write's answer carried that a read of the resource does not.
@@ -225,7 +214,8 @@ type resolvedCaller struct {
 // died is taken over, once its lease lapses. A handler cut off with its client would roll its
 // transactions back and leave the next attempt to start again from nothing, so a write that takes
 // the server longer than the client waits could never land.
-func (s *server) keyedWrites(method, pattern string, bodyLimit int64, handler http.HandlerFunc, replay keyedReplay) http.HandlerFunc {
+func (s *server) keyedWrites(route apiRoute, handler http.HandlerFunc) http.HandlerFunc {
+	method, pattern, bodyLimit, replay := route.Method, route.Pattern, route.bodyLimit(), route.Replay
 	wildcards := patternWildcards(pattern)
 	keepsAnswer := !answerHoldsSecret[method+" "+pattern]
 	run := handler
@@ -268,7 +258,7 @@ func (s *server) keyedWrites(method, pattern string, bodyLimit int64, handler ht
 			if s.repeatFoundInFlight != nil {
 				s.repeatFoundInFlight()
 			}
-			s.answerDrainedRepeat(w, r, method, pattern, bodyLimit, wildcards, login, key, replay)
+			s.answerDrainedRepeat(w, r, route, wildcards, login, key, replay)
 			return
 		}
 		digest := sha256.New()
@@ -341,13 +331,6 @@ func (s *server) keyedWrites(method, pattern string, bodyLimit int64, handler ht
 		settled = true
 		answer.deliver()
 	}
-}
-
-// keyedUploads is every keyed route whose body may hold a file (uploadArtifactFor).
-var keyedUploads = map[string]bool{
-	issueUploadRoute: true,
-	http.MethodPost + " /api/v1/projects/{key}/artifacts":      true,
-	http.MethodPost + " /api/v1/agents/{session_id}/artifacts": true,
 }
 
 // keyLease is how long a keyed request holds its key without a renewal before a repeat presumes
@@ -900,15 +883,16 @@ func answerHeldKey(w http.ResponseWriter, r *http.Request, key string, held held
 // that bound for net/http's own reads after the answer; only a body that ended lifts it
 // (movingDeadline.lift).
 func (s *server) answerDrainedRepeat(
-	w http.ResponseWriter, r *http.Request, method, pattern string, limit int64, wildcards []string, login, key string, replay keyedReplay,
+	w http.ResponseWriter, r *http.Request, route apiRoute, wildcards []string, login, key string, replay keyedReplay,
 ) {
+	limit := route.bodyLimit()
 	if expectsContinue(r) {
 		w.Header().Set(contracts.IdempotencyKeyHeader, key)
 		writeKeyInFlight(w, key)
 		return
 	}
 	digest := sha256.New()
-	writeRequestFields(digest, r, method, pattern, wildcards)
+	writeRequestFields(digest, r, route.Method, route.Pattern, wildcards)
 	size, err := digestKeyedBody(r.Body, digest, r.Header.Get("Content-Type"), limit)
 	switch {
 	case err != nil:
@@ -917,7 +901,7 @@ func (s *server) answerDrainedRepeat(
 		writeKeyInFlight(w, key)
 		return
 	case size > limit:
-		tooLarge := bodyTooLarge(method, pattern)
+		tooLarge := bodyTooLarge(route)
 		writeError(w, tooLarge.code, tooLarge.status, tooLarge.message)
 		return
 	}

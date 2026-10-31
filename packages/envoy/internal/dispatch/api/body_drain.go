@@ -133,9 +133,10 @@ var (
 )
 
 // bodyTooLarge is the route's answer to a body past its limit: the one its handler gives on
-// reading past it.
-func bodyTooLarge(method, pattern string) *apiError {
-	if keyedUploads[method+" "+pattern] {
+// reading past it, read from the limit the route's own row carries (apiRoute.BodyLimit, upload),
+// so a route the table makes an upload is answered as an upload without naming it anywhere else.
+func bodyTooLarge(route apiRoute) *apiError {
+	if route.BodyLimit == maxUploadRequestBytes {
 		return errUploadTooLarge
 	}
 	return errJSONTooLarge
@@ -158,8 +159,8 @@ func bodyTooLarge(method, pattern string) *apiError {
 // sending it (Expect: 100-continue) and was never told: it sends nothing, and the first read would
 // tell it to send all of it. A request whose body failed and whose handler answered nothing is
 // answered here (refuseUnreadBody).
-func (s *server) drainBeforeAnswer(method, pattern string, limit int64, handler http.HandlerFunc) http.HandlerFunc {
-	tooLarge := bodyTooLarge(method, pattern)
+func (s *server) drainBeforeAnswer(route apiRoute, handler http.HandlerFunc) http.HandlerFunc {
+	limit, tooLarge := route.bodyLimit(), bodyTooLarge(route)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Body == nil || r.Body == http.NoBody {
 			handler(w, r)

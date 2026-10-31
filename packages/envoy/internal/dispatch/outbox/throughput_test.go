@@ -143,7 +143,7 @@ func (p *latencyProxy) close() {
 }
 
 // busyPoolSize is the shared pool's size in the busy case. A full pool is what the case needs, of
-// any size; filling one of production's store.sharedPoolSize would hold that many server
+// any size; filling one of production's store.SharedPoolSize would hold that many server
 // connections while the other packages' tests share the server, past a default Postgres's
 // hundred.
 const busyPoolSize = 8

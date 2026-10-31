@@ -25,7 +25,7 @@ import (
 // release, and they are waiting for the lock. Two anchored writes and two document
 // settlements on one issue closed that cycle on a four-connection pool, and nothing but
 // pg_terminate_backend recovered it. Rationing connections cannot fix it, and neither can
-// sharedPoolSize's size: the queue behind one writer's issue lock is unbounded - a
+// SharedPoolSize's size: the queue behind one writer's issue lock is unbounded - a
 // settlement per document, every issue-owned event append, the architecture importer - so a
 // bigger pool only moves the number of callers it takes.
 //

@@ -474,8 +474,8 @@ A writer who meant a block learns it is text; a count of zero alone reads as a d
 A document edit reports `decision_blocks_added` instead, on an issue document's advice and as the whole advice of a project document's edit:
 the ask blocks the edited tree holds whose block id no ask block in the tree before the batch carried (`addedAskBlocks`, counted in the transaction that applies the batch), so an inserted or retyped block counts wherever the parser reads one and a moved or reworded block does not.
 Beside it, `decision_block_checks` lists each block the edit added, in document order (`docs.EditOutcome.AddedAskBlocks`), as `{block_id, question, suggestions}`:
-the related-item check run on the block's question once the edit has committed (`decisionBlockChecks`), the first five checked at once under one 5 s allowance and each past them answered, and recorded, as not made; it is omitted when the edit added none.
-An edit releases its document's writer gate at the commit, before those checks run, as every gated write releases its gates before its post-commit work, so they never hold the next writer of the document.
+the related-item check run on the block's question once the edit has committed (`decisionBlockChecks`), the first five checked one after another under one 5 s allowance and each past them answered, and recorded, as not made; it is omitted when the edit added none.
+An edit releases its document's writer gate once its transaction has committed and its events are published, before those checks run, as every gated write releases its gates before its post-commit work, so they never hold the next writer of the document.
 A document write that stored a version replacing the one a person approved reports `superseded_approval` (`{approved_version, version, approved_by}`), on an issue document's advice and in the document report of a project document's:
 a document edit, and an upload that replaced an existing document, each read their transaction's newest review of the document after writing their own version and any approval carry it made (`supersededApprovalAdvice` over `docs.NewestReview`, in `docs.ReviewOrder`, behind a savepoint of its own that is always rolled back), and report only an approval of the version right below the one they stored.
 A document nobody approved, an approval that was already stale, a newer changes request, and a version the carry approved itself each report nothing, so the field names the write that closed a Legion design gate and no other.
@@ -971,7 +971,7 @@ Only the request pool pins, and while the pin holds its connection it is the onl
 one checkout per hot read, the refusals on the pinned connection, a one-connection request pool answering an issue read, and the writer gate admitting a write and refusing a pinned read.
 
 **Every pool's size is set in code.**
-`store.Open` fixes the request pool's `MaxConns` at `store.sharedPoolSize` (48; 16 until 2026-10-27, then 64 until the pools were partitioned), so neither the task's CPU allotment nor the DSN another repository's URL builder writes decides it, and a `DATABASE_URL` that carries `pool_max_conns` is **refused at open** rather than silently overridden
+`store.Open` fixes the request pool's `MaxConns` at `store.SharedPoolSize` (48; 16 until 2026-10-27, then 64 until the pools were partitioned), so neither the task's CPU allotment nor the DSN another repository's URL builder writes decides it, and a `DATABASE_URL` that carries `pool_max_conns` is **refused at open** rather than silently overridden
 — the parameter is read from `pgx.ParseConfig`'s `RuntimeParams`, because `pgxpool.ParseConfig` is the layer that folds it into `MaxConns` and deletes it, so pgxpool's own parse cannot answer the question and a raw-string scan answers a different one.
 The other pool parameters are not refused, because the request pool keeps whatever minimums the connection string sets.
 pgx's default, `max(4, NumCPU)`, is four on production's one Fargate task at `cpu="512"`, and four is a connection per blocked writer:
@@ -979,7 +979,7 @@ with four writers parked on one issue's row lock, a read of an unrelated issue w
 Sixteen ran out too: under heavy agent load the API held all sixteen and every other caller, the events outbox included, waited behind them.
 Sixty-four did not hold either, because the background loops, the live-update readers and the settlements waited for the same connections as the requests, and past capacity each side starved the other.
 
-So a process's connections are one budget, partitioned rather than grown, 89 in all (`store.ConnectionsPerProcess`): the 87 the process opened before the partition, which added none, and the event horizon's 2, the only connections added since (the comment on `store.sharedPoolSize` is its record).
+So a process's connections are one budget, partitioned rather than grown, 89 in all (`store.ConnectionsPerProcess`): the 87 the process opened before the partition, which added none, and the event horizon's 2, the only connections added since (the comment on `store.SharedPoolSize` is its record).
 Each pool below is sized in `store/pools.go`, and every connection carries `dispatch-<pool>` in `application_name`, so `pg_stat_activity` groups a process's connections by pool (`configurePool`; a connection string's own `application_name` is replaced), and the metrics' `pool` label is the part after `dispatch-`.
 
 | Pool | Connections | Acquire bound | What takes them |
@@ -1082,7 +1082,7 @@ A handler that must read outside its transaction commits or rolls back first - `
 
 **No Envoy listener call runs with a transaction or a pooled connection held.**
 One caller, one connection bounds how many of the pool's connections a caller takes; this bounds how long it keeps the one it has.
-The listener is a cross-service HTTP call bounded only by its five-second client timeout (`internal/dispatch/envoy/client.go`), and production runs one Dispatch task on a pool of `store.sharedPoolSize` connections, so a call made inside a transaction holds one of them - and the rows it locked - until the listener answers;
+The listener is a cross-service HTTP call bounded only by its five-second client timeout (`internal/dispatch/envoy/client.go`), and production runs one Dispatch task on a pool of `store.SharedPoolSize` connections, so a call made inside a transaction holds one of them - and the rows it locked - until the listener answers;
 that many concurrent ones empty the pool and stall every unrelated request, which a listener restart alone is enough to cause.
 A read (`Session`, `Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing held;
 the transaction then re-reads under its own lock whatever the resolution depended on and decides with the resolution only while the locked row still agrees, taking it once more when it does not and answering a conflict after that.
@@ -2383,7 +2383,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `internal/dispatch/api/routes_table.go` is the one list of `/api/v1` routes (`routeRow{Method, Pattern, Auth, Description, Handler}`, `Auth` one of `public`, `any`, `human`, `bearer`);
   `Register` mounts that table and public `GET /api/v1` serves it as `{routes: [{method, path, auth, description}], docs: "skills/dispatch/SKILL.md"}` sorted by path then method.
   A new route is a new row (and a bumped pin in `routes_table_test.go`), never a `mux.HandleFunc` line.
-  How `Register` serves a row other than as an ordinary admitted request is written on the row itself: each row is wrapped in the constructor that says how it is served - `served`, `upload` (`apiRoute.BodyLimit`), `download` (`Deadline`) or `concurrentReads` (`Weight`) - so there is no second table to keep in step and a renamed route cannot lose its serving.
+  How `Register` serves a row other than as an ordinary admitted request is written on the row itself: each row is wrapped in the constructor that says how it is served - `served`, `upload` (`apiRoute.BodyLimit`, which also decides whether a body past the limit is answered `413 CAP_EXCEEDED` or `413 REQUEST_TOO_LARGE`), `issueUpload` (that, and the refusal of an upload to a closed issue), `download` (`Deadline`), `concurrentReads` (`Weight`) or `replays` (`Replay`, what answers a repeat of the row's keyed write), so a renamed route cannot lose its serving.
+  One list of routes by `"METHOD pattern"` is left: `answerHoldsSecret` (`api/request_keys.go`), the routes whose answer carries a credential and whose key therefore keeps no answer, today only `POST /api/v1/me/agent-tokens`.
+  `TestEveryKeyedRouteTableNamesARoute` holds every entry of it to a registered `POST` or `PATCH` route, and a route left out of it keeps its answer, which is what every other route does.
   An unknown path under `/api`, `/v1`, `/auth`, `/ws`, or `/healthz` is `404 {"code":"NOT_FOUND","error":"no route for GET /v1/issues","hint":"GET /api/v1 lists every route"}` from `routes/router.go`, decided before any dashboard lookup, so an API caller never receives the SPA shell.
   `GET /api/v1/agents` is readable by any authenticated caller (a session picks a message target by the `capabilities` it advertises);
   the issue-less `POST /api/v1/agents/{session_id}/messages` and `GET /api/v1/agents/{session_id}/messages` stay human-only.
@@ -3412,7 +3414,7 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
   `routes.enforceCookieOrigin`'s `403` for a cross-origin cookie write is answered before the route, outside the drain.
 
 - The layer then reads the body, spooling at most the route's own limit (`apiRoute.bodyLimit`:
-  an upload's file and a megabyte of fields for the three upload routes, `keyedUploads`, 26 MiB;
+  an upload's file and a megabyte of fields for the three upload rows (`upload`, `issueUpload`), 26 MiB;
   `maxJSONRequestBytes`, 1 MiB, for every other); a body past it runs unkeyed and its route refuses it.
   A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`, and a spill Dispatch could not write (`keyedSpillError`:
   a full disk, a temporary directory it cannot write) is a 5xx with the key echoed, Dispatch's own failure, which the client asks again.

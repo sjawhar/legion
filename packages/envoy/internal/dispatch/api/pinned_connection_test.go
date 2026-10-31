@@ -140,7 +140,7 @@ func TestAnIssueReadIsAnsweredByAOneConnectionRequestPool(t *testing.T) {
 func serveTestRoute(t *testing.T, s *server, method string, handler http.HandlerFunc) *httptest.ResponseRecorder {
 	t.Helper()
 	route := apiRoute{routeRow: routeRow{Method: method, Pattern: "/api/v1/pinned-test", Auth: authAny, Handler: handler}}
-	served := s.serveRoute(route, nil, admission.New(admission.DefaultLimits()), 5*time.Second)
+	served := s.serveRoute(route, admission.New(admission.DefaultLimits()), 5*time.Second)
 	response := httptest.NewRecorder()
 	served(response, httptest.NewRequest(method, "/api/v1/pinned-test", nil))
 	return response

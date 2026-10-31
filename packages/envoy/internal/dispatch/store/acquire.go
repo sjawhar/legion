@@ -17,7 +17,7 @@ import (
 // Use is asked about.
 const (
 	// RequestsPool is the shared pool store.Open opens: what every API request reads and writes
-	// through (sharedPoolSize).
+	// through (SharedPoolSize).
 	RequestsPool = "requests"
 	// RoomsPool is where a document load takes its connection (Pool.Rooms).
 	RoomsPool = "rooms"

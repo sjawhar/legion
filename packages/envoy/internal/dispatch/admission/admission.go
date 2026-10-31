@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // Class is the kind of request a Limiter counts separately: reads and writes each have a limit
@@ -69,17 +71,17 @@ func (r *Refusal) Error() string {
 	return fmt.Sprintf("admission refused a %s request: %s", r.Class, r.Reason)
 }
 
-// The limits. The request pool (store.sharedPoolSize) holds 48 connections, and an admitted
+// The limits. The request pool (store.SharedPoolSize) holds 48 connections, and an admitted
 // request holds at most one of them at a time, or Weight of them for a route that reads side by
-// side. 8 of the 48 are left to the pool's users that admission does not count: the websockets'
-// identity checks (whileCallerResolves), the browsers' durable document appends, the /auth routes
-// and the GitHub proxy, and the work a handler leaves running after it has answered. The other 40
-// are all admission may hand out at once, whatever the mix of classes: MaxAdmittedUnits. The
-// number is written here rather than read from the store, whose sharedPoolSize is unexported and
-// whose own comment carries the same partition of the 48, so a change to either belongs in both.
-// Under that combined cap writes, which wait on each other at the commit order, hold at most 24
-// (MaxWriteLimit) and reads at most 28 (MaxReadLimit): the two add to 52, so a class reaches its
-// own cap only while the other is quiet.
+// side. unadmittedConnections of the 48 are left to the pool's users that admission does not
+// count: the websockets' identity checks (whileCallerResolves), the browsers' durable document
+// appends, the /auth routes and the GitHub proxy, and the work a handler leaves running after it
+// has answered. The other 40 are all admission may hand out at once, whatever the mix of classes:
+// MaxAdmittedUnits, the pool's own size less those, so a pool that shrinks takes this cap down
+// with it and every unit admission hands out stays one the pool can serve. Under that combined
+// cap writes, which wait on each other at the commit order, hold at most 24 (MaxWriteLimit) and
+// reads at most 28 (MaxReadLimit): the two add to 52, so a class reaches its own cap only while
+// the other is quiet.
 //
 // Each class's limit follows the CPUs the process may use (runtime.GOMAXPROCS, which follows the
 // container's CPU limit) up to its cap: readsPerCPU reads and writesPerCPU writes per CPU, at least
@@ -139,12 +141,15 @@ func (r *Refusal) Error() string {
 // refused 0, 1 and 3 writes and 0, 0 and 17 reads in three runs (base 1, 0, 1 and 0, 0, 0), the 17
 // in one 1.5-second stall that slowed every issue read at once.
 const (
-	MaxReadLimit      = 28
-	MaxWriteLimit     = 24
-	MaxAdmittedUnits  = 40
-	ReservedReadUnits = 22
-	readsPerCPU       = 14
-	writesPerCPU      = 12
+	MaxReadLimit  = 28
+	MaxWriteLimit = 24
+	// unadmittedConnections is how many of the request pool's connections are left to the users
+	// admission does not count, the ones the comment above lists.
+	unadmittedConnections = 8
+	MaxAdmittedUnits      = store.SharedPoolSize - unadmittedConnections
+	ReservedReadUnits     = 22
+	readsPerCPU           = 14
+	writesPerCPU          = 12
 )
 
 // readLimit and writeLimit are the limits for procs usable CPUs: perCPU each, at least one CPU's

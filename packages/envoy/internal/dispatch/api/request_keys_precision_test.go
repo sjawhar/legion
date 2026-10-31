@@ -226,9 +226,10 @@ func TestARequestKeysRowIsOneOfItsStates(t *testing.T) {
 	}
 }
 
-// Every route the keyed layer's own tables name - those that replay a recovery point, never keep
-// their answer, or take an upload's body - is a POST or PATCH route the server registers: a pattern
-// spelled wrong would silently turn its rule off.
+// Every route the keyed layer's one remaining table names - the answers a key never keeps - is a
+// POST or PATCH route the server registers: a pattern spelled wrong would silently turn its rule
+// off. The layer's other per-route rules are on the route's own row (apiRoute.Replay,
+// apiRoute.BodyLimit), where no pattern is spelled twice.
 func TestEveryKeyedRouteTableNamesARoute(t *testing.T) {
 	registered := map[string]bool{}
 	for _, route := range (&server{}).routes() {
@@ -237,14 +238,8 @@ func TestEveryKeyedRouteTableNamesARoute(t *testing.T) {
 		}
 	}
 	tables := map[string][]string{}
-	for route := range (&server{}).keyedReplays() {
-		tables["keyedReplays"] = append(tables["keyedReplays"], route)
-	}
 	for route := range answerHoldsSecret {
 		tables["answerHoldsSecret"] = append(tables["answerHoldsSecret"], route)
-	}
-	for route := range keyedUploads {
-		tables["keyedUploads"] = append(tables["keyedUploads"], route)
 	}
 	for table, routes := range tables {
 		for _, route := range routes {

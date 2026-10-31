@@ -51,10 +51,17 @@ type apiRoute struct {
 	// most request-pool connections it holds at once. Zero is one.
 	Weight int
 	// BodyLimit is the most bytes the route reads of a request body, which is also how much the
-	// keyed layer spools and how much of an early-answered request's body the server drains before
-	// it answers (bodyLimit, drainBeforeAnswer). Zero is maxJSONRequestBytes, every JSON route's
-	// limit.
+	// keyed layer spools, how much of an early-answered request's body the server drains before
+	// it answers, and which 413 a body past it is answered with (bodyLimit, drainBeforeAnswer,
+	// bodyTooLarge). Zero is maxJSONRequestBytes, every JSON route's limit.
 	BodyLimit int64
+	// Replay answers a repeat of this route's keyed write whose first run committed a recovery
+	// point (keyedReplay, replays): nil for a route that commits none, which is every route but
+	// the writes that also deliver to sessions.
+	Replay keyedReplay
+	// RefusesClosedIssue marks the upload whose issue must still be open (issueUpload,
+	// refuseUploadToAClosedIssue).
+	RefusesClosedIssue bool
 }
 
 // pinsConnection reports whether a request of the route runs every request-pool statement on one
@@ -92,6 +99,20 @@ func served(row routeRow) apiRoute {
 // (uploadArtifactFor), where every other write reads a JSON body.
 func upload(row routeRow) apiRoute {
 	return apiRoute{routeRow: row, BodyLimit: maxUploadRequestBytes}
+}
+
+// issueUpload is the upload to an issue: an upload row whose request is refused when the issue is
+// closed (refuseUploadToAClosedIssue), which the other uploads, holding no issue, are not.
+func issueUpload(row routeRow) apiRoute {
+	return apiRoute{routeRow: row, BodyLimit: maxUploadRequestBytes, RefusesClosedIssue: true}
+}
+
+// replays is route with the keyedReplay that answers a repeat of its write once that write has
+// committed a recovery point (bindRequestKeyRecovery): the writes that also deliver to sessions,
+// whose deliveries a repeat finishes.
+func replays(route apiRoute, replay keyedReplay) apiRoute {
+	route.Replay = replay
+	return route
 }
 
 // download is a file version download, read under downloadDeadline instead of the server's.
@@ -196,8 +217,8 @@ func (s *server) routes() []apiRoute {
 		served(routeRow{http.MethodGet, "/api/v1/issues/{key}/subscribers", authHuman, "Sessions subscribed to an issue's topics.", s.listIssueSubscribers}),
 		served(routeRow{http.MethodDelete, "/api/v1/issues/{key}/subscribers/{session_id}", authHuman, "Unsubscribe a session from an issue.", s.unsubscribeIssueSession}),
 		served(routeRow{http.MethodGet, "/api/v1/issues/{key}/artifacts", authAny, "List an issue's documents and files.", s.listArtifacts}),
-		upload(routeRow{http.MethodPost, "/api/v1/issues/{key}/artifacts", authAny, fmt.Sprintf("Upload an issue document or file (JSON or multipart). A text/markdown upload is a document; any other is an image only when its bytes are a PNG, JPEG, GIF or WebP, stored under the type its bytes are whatever was declared, and otherwise a file under its declared type. A name no artifact has yet is 400 INVALID_ARTIFACT when it, or the reference key <owner>/<slug> it gives the new artifact, is over %d bytes; an upload under an existing artifact's name is never refused for its length.", maxNewArtifactKeyBytes), s.uploadArtifact}),
-		served(routeRow{http.MethodPost, "/api/v1/issues/{key}/messages", authAny, "Post an issue message; target and delivery address a session or role. A reply names the message it answers in in_reply_to, and one block of it in in_reply_to_block.", s.createMessage}),
+		issueUpload(routeRow{http.MethodPost, "/api/v1/issues/{key}/artifacts", authAny, fmt.Sprintf("Upload an issue document or file (JSON or multipart). A text/markdown upload is a document; any other is an image only when its bytes are a PNG, JPEG, GIF or WebP, stored under the type its bytes are whatever was declared, and otherwise a file under its declared type. A name no artifact has yet is 400 INVALID_ARTIFACT when it, or the reference key <owner>/<slug> it gives the new artifact, is over %d bytes; an upload under an existing artifact's name is never refused for its length.", maxNewArtifactKeyBytes), s.uploadArtifact}),
+		replays(served(routeRow{http.MethodPost, "/api/v1/issues/{key}/messages", authAny, "Post an issue message; target and delivery address a session or role. A reply names the message it answers in in_reply_to, and one block of it in in_reply_to_block.", s.createMessage}), replayRecovered(s, s.replayIssueMessage)),
 		served(routeRow{http.MethodGet, "/api/v1/issues/{key}/messages", authAny, "List an issue's message threads: every root message, oldest first, each with its deliveries and its replies.", s.listIssueMessages}),
 		served(routeRow{http.MethodGet, "/api/v1/issues/{key}/messages/{id}", authAny, "Read one message with its deliveries and replies.", s.getMessage}),
 		served(routeRow{http.MethodGet, "/api/v1/messages/{id}", authAny, "Read the conversation a message belongs to by any message id in it, issue-less or not: the thread root with its deliveries and every reply, oldest first. An issue thread follows the issue's rule. On a direct (issue-less) thread a bearer names its session in ?session= and reads only one whose root targets that session or that it replied in (403 THREAD_FORBIDDEN), a guard against reading another session's conversation by mistake, not an authorization boundary. Direct-conversation text also reaches every authenticated caller through that caller's events view on GET /ws/live; nothing in Dispatch restricts it by session.", s.getMessageThread}),
@@ -215,11 +236,11 @@ func (s *server) routes() []apiRoute {
 		served(routeRow{http.MethodGet, "/api/v1/agents", authAny, "Live sessions with roles, capabilities, open asks, and last activity, from Dispatch's copy of the Envoy listener's session list, at most 5 s old.", s.listAgents}),
 		served(routeRow{http.MethodGet, "/api/v1/agents/{session_id}/answers", authAny, "What people wrote that Dispatch delivered to one session, newest first by at, then by id: each ask's current answer (replaced when it changed an earlier answer), each comment at its current body (edited_at when edited; a resolved comment stays) and each message, once however it arrived. It reads the ask.answered, comment.created, message.created and message.answered events a person wrote whose published_destinations hold the session's own topic, the session's sent message deliveries (targeted and broadcast messages) and its sent comment deliveries (mentions); it never lists an agent's or the system's words, an ask's resolution or hand-back, or a delivery to a role: route's topic. Each item names its relation to the session (mentioned_you over replied_on_your_ask over replied_in_a_comment_thread over commented_on_a_document over commented_on_an_issue for a comment; replied_to_your_message over sent_you_a_message for a message; answered_your_ask for an answer), the ask and its whole question on an answer and on a reply in an ask's thread, its owner, dispatch:// ref and href (null owner and ref, and /agents/<session_id>/live, for a direct message). ?since= (RFC3339, default 72 hours ago; older than 7 days or in the future is 400 INVALID_QUERY) starts the window; ?max_chars= (1-100000, else 400 INVALID_QUERY) stops the list after the item whose text takes the running sum of text lengths (UTF-16 units) past it, while total counts every item in the window; {session_id, since, total, items}. A session_id that is not a session id is 400 INVALID_SESSION_ID, as on the agent artifact routes. Not an authorization boundary: direct-message text already reaches every authenticated caller through GET /api/v1/events, and a person may read any session's list.", s.listSessionAnswers}),
 		served(routeRow{http.MethodGet, "/api/v1/agents/{session_id}/messages", authHuman, "A session's targeted messages, newest first.", s.listAgentMessages}),
-		served(routeRow{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session: {body, delivery, in_reply_to?}, answered once its own delivery attempt has settled, on past a client that gives up. Under an Idempotency-Key header (as every POST and PATCH takes one), a repeat with the same request answers 201 with the message the key made and its deliveries as they stand, Idempotency-Replayed: ?1, first sending the one attempt it still owes (none yet, or one stranded past its claim) and nothing else; a listener it cannot reach is recorded on the attempt, so a repeat is answered while the listener is down. An attempt a stopped process left owed is resumed by the server's delivery sweep whether anyone asks again or not.", s.createAgentMessage}),
+		replays(served(routeRow{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session: {body, delivery, in_reply_to?}, answered once its own delivery attempt has settled, on past a client that gives up. Under an Idempotency-Key header (as every POST and PATCH takes one), a repeat with the same request answers 201 with the message the key made and its deliveries as they stand, Idempotency-Replayed: ?1, first sending the one attempt it still owes (none yet, or one stranded past its claim) and nothing else; a listener it cannot reach is recorded on the attempt, so a repeat is answered while the listener is down. An attempt a stopped process left owed is resumed by the server's delivery sweep whether anyone asks again or not.", s.createAgentMessage}), replayRecovered(s, s.replayAgentMessage)),
 		upload(routeRow{http.MethodPost, "/api/v1/agents/{session_id}/artifacts", authAny, "Upload a file or image to an agent's conversation (multipart, as an issue upload, its kind read from its bytes): ref_key agent/<session_id>/<slug>, addressed dispatch://agent/<session_id>/artifact/<slug>. It holds files and images only: a markdown document (JSON content or a text/markdown file) is 400 ARTIFACT_INPUT, since a document belongs to an issue or a project. No event is appended. A session_id that is empty or holds /, ?, #, whitespace, a control character or a character that ends a reference in text (<>\"'`[]|) is 400 INVALID_SESSION_ID on every agent artifact route.", s.uploadAgentArtifact}),
 		served(routeRow{http.MethodGet, "/api/v1/agents/{session_id}/artifacts/{slug}", authAny, "Read an agent's conversation's file or image and its versions by slug.", s.getArtifact}),
 		download(routeRow{http.MethodGet, "/api/v1/agents/{session_id}/artifacts/{slug}/versions/{number}", authAny, "Download one version of an agent's conversation's file or image, as the issue form serves it (Cache-Control: private, max-age=31536000, immutable).", s.getArtifactVersion}),
-		served(routeRow{http.MethodPost, "/api/v1/broadcasts", authHuman, "Send one message to many sessions: {body, delivery, session_ids}, one targeted message per recipient under a shared broadcast, answered once it is committed while each recipient's delivery runs behind the answer. A selected session that is not live or does not advertise the mode is excluded and named in the response, never switched to another mode. Under an Idempotency-Key header (as every POST and PATCH takes one), a repeat with the same request answers 201 at once with the broadcast the key made, every recipient's attempts as they stand and the first answer's exclusions, Idempotency-Replayed: ?1, and puts every recipient it still owes on its way behind the answer. A recipient a stopped process left owed is resumed by the server's delivery sweep whether anyone asks again or not.", s.createBroadcast}),
+		replays(served(routeRow{http.MethodPost, "/api/v1/broadcasts", authHuman, "Send one message to many sessions: {body, delivery, session_ids}, one targeted message per recipient under a shared broadcast, answered once it is committed while each recipient's delivery runs behind the answer. A selected session that is not live or does not advertise the mode is excluded and named in the response, never switched to another mode. Under an Idempotency-Key header (as every POST and PATCH takes one), a repeat with the same request answers 201 at once with the broadcast the key made, every recipient's attempts as they stand and the first answer's exclusions, Idempotency-Replayed: ?1, and puts every recipient it still owes on its way behind the answer. A recipient a stopped process left owed is resumed by the server's delivery sweep whether anyone asks again or not.", s.createBroadcast}), replayRecovered(s, s.replayBroadcast)),
 		served(routeRow{http.MethodGet, "/api/v1/broadcasts", authHuman, "Recent broadcasts, newest first, with their recipient and reply counts.", s.listBroadcasts}),
 		served(routeRow{http.MethodGet, "/api/v1/broadcasts/{id}", authHuman, "One broadcast with every recipient's delivery attempts and replies, recipients in the order the send named them; a broadcast from before that order was stored falls back to created_at, id.", s.getBroadcast}),
 		concurrentReads(routeRow{http.MethodPost, "/api/v1/issues/{key}/asks", authAny, "Open a question ask on an issue (options optional). After the write commits, a related-item check searches the project for the question and waits at most 5 seconds; the response's advice.suggestions says whether it found related items (outcome, with the reason in missing when not made), how it searched, the three items most like it with each ask item's answer state, and any already-answered ask that may settle the same question, with who answered and when.", s.createAsk}),
@@ -233,7 +254,7 @@ func (s *server) routes() []apiRoute {
 		served(routeRow{http.MethodPost, "/api/v1/asks/{id}/answer", authHuman, "Answer an ask with selected options and/or text.", s.answerAsk}),
 		served(routeRow{http.MethodPost, "/api/v1/asks/{id}/resolve", authAny, "Retract or resolve an ask without answering it (kind retracted or resolved; withdrawn is written only by an issue's close, and an ask on a closed issue is 409 ISSUE_CLOSED); a block ask's block records it too.", s.resolveAsk}),
 		served(routeRow{http.MethodGet, "/api/v1/issues/{key}/comments", authAny, "List an issue's comments; ?artifact= scopes to a document.", s.listComments}),
-		served(routeRow{http.MethodPost, "/api/v1/issues/{key}/comments", authAny, "Comment on an issue, a document quote, or an ask. A reply names the comment it answers in reply_to, and one block of it in reply_to_block.", s.createComment}),
+		replays(served(routeRow{http.MethodPost, "/api/v1/issues/{key}/comments", authAny, "Comment on an issue, a document quote, or an ask. A reply names the comment it answers in reply_to, and one block of it in reply_to_block.", s.createComment}), replayRecovered(s, s.replayComment)),
 		served(routeRow{http.MethodPost, "/api/v1/comments/{id}/resolve", authAny, "Resolve a comment thread.", s.resolveComment}),
 		served(routeRow{http.MethodPost, "/api/v1/comments/{id}/reopen", authHuman, "Reopen a resolved comment thread.", s.reopenComment}),
 		served(routeRow{http.MethodGet, "/api/v1/comments/{id}", authAny, "Read one comment with its thread.", s.getComment}),
@@ -246,7 +267,7 @@ func (s *server) routes() []apiRoute {
 		served(routeRow{http.MethodGet, "/api/v1/artifacts/{id}/asks", authAny, "List a document's asks.", s.listArtifactAsks}),
 		concurrentReads(routeRow{http.MethodPost, "/api/v1/artifacts/{id}/asks", authAny, "Open an ask on a document. After the write commits, a related-item check searches the document's project for the question and waits at most 5 seconds; the response's advice.suggestions says whether it found related items (outcome, with the reason in missing when not made), how it searched, the three items most like it with each ask item's answer state, and any already-answered ask that may settle the same question, with who answered and when.", s.createArtifactAsk}),
 		served(routeRow{http.MethodGet, "/api/v1/artifacts/{id}/comments", authAny, "List a document's comments.", s.listArtifactComments}),
-		served(routeRow{http.MethodPost, "/api/v1/artifacts/{id}/comments", authAny, "Comment on a document or one of its quotes.", s.createArtifactComment}),
+		replays(served(routeRow{http.MethodPost, "/api/v1/artifacts/{id}/comments", authAny, "Comment on a document or one of its quotes.", s.createArtifactComment}), replayRecovered(s, s.replayComment)),
 		served(routeRow{http.MethodGet, "/api/v1/artifacts/{id}/events", authAny, "Page a document's event log.", s.listArtifactEvents}),
 		served(routeRow{http.MethodGet, "/api/v1/artifacts/{id}/references", authAny, "Cross-references to and from a document.", s.getArtifactReferences}),
 		served(routeRow{http.MethodGet, "/api/v1/artifacts/{id}/subscribers", authHuman, "Sessions subscribed to a document's topics.", s.listArtifactSubscribers}),

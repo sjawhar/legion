@@ -747,7 +747,7 @@ func TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading(t *testing.T
 		t.Fatal("the test's route is not pinned, so it does not hold a request-pool connection to give back")
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, nil, admission.New(admission.DefaultLimits()), deadline))
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), deadline))
 	httpServer := httptest.NewServer(mux)
 	t.Cleanup(httpServer.Close)
 	awaitQuietRequestPool(t, database.Pool)
@@ -793,7 +793,7 @@ func TestASlowButSteadyReaderOfALargeAnswerIsAnsweredInFull(t *testing.T) {
 		}
 	}}}
 	mux := http.NewServeMux()
-	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, nil, admission.New(admission.DefaultLimits()), deadline))
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, admission.New(admission.DefaultLimits()), deadline))
 	httpServer := httptest.NewServer(mux)
 	t.Cleanup(httpServer.Close)
 

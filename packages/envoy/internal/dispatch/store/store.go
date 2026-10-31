@@ -27,7 +27,7 @@ type Store struct {
 var migrationFiles embed.FS
 
 // poolSizeParam is the connection-string parameter Open refuses. Open fixes MaxConns at
-// sharedPoolSize, so a connection string that asks for a pool size is asking for something
+// SharedPoolSize, so a connection string that asks for a pool size is asking for something
 // that will not happen, and ignoring it silently would leave the operator tuning a number
 // nobody reads.
 //
@@ -37,7 +37,7 @@ var migrationFiles embed.FS
 const poolSizeParam = "pool_max_conns"
 
 // Open connects to databaseURL and verifies the database is reachable. The pool's size is
-// sharedPoolSize: how many connections Dispatch may hold is a property of Dispatch, not of the
+// SharedPoolSize: how many connections Dispatch may hold is a property of Dispatch, not of the
 // string that names its database. It is the request pool (RequestsPool): its connections carry
 // dispatch-requests in application_name, and its acquires are bounded at requestAcquireBound.
 // Every connection it opens scans timestamptz in UTC (scanTimestampsInUTC), as do the pools
@@ -49,14 +49,14 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	}
 	if declared {
 		return nil, fmt.Errorf(
-			"DATABASE_URL sets %s, which Dispatch does not honour: the pool is fixed at %d in code (store.sharedPoolSize). Remove the parameter",
-			poolSizeParam, sharedPoolSize)
+			"DATABASE_URL sets %s, which Dispatch does not honour: the pool is fixed at %d in code (store.SharedPoolSize). Remove the parameter",
+			poolSizeParam, SharedPoolSize)
 	}
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse Postgres URL: %w", err)
 	}
-	config.MaxConns = sharedPoolSize
+	config.MaxConns = SharedPoolSize
 	configurePool(config, RequestsPool, requestAcquireBound)
 	config.AfterConnect = scanTimestampsInUTC
 	pool, err := pgxpool.NewWithConfig(ctx, config)

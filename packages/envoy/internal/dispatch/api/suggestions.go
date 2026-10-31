@@ -470,6 +470,20 @@ func (s *server) runRelatedCheck(
 	meaningAllowance := min(relatedMeaningAllowance, allowance)
 	var meaning chan relatedStage
 	var meaningDone <-chan struct{}
+	var endMeaning context.CancelFunc
+	// Stage 2's goroutine holds a request-pool connection for its query, so the check ends its
+	// context and waits for the stage before it returns, whichever return that is: its allowance
+	// running out, the request going away, stage 1 failing. Left running, it would still hold
+	// that connection while the edit's next decision-block check ran, which is admitted for its
+	// own two connections and not for these as well (decisionBlockChecks). A stage already taken
+	// off the channel leaves nothing to wait for.
+	defer func() {
+		if meaning == nil {
+			return
+		}
+		endMeaning()
+		<-meaning
+	}()
 	reason := ""
 	switch {
 	case input.keywordsOnly:
@@ -478,13 +492,13 @@ func (s *server) runRelatedCheck(
 		reason = relatedReasonNoEmbedder
 	default:
 		meaningCtx, cancelMeaning := context.WithDeadline(bounded, started.Add(meaningAllowance))
-		defer cancelMeaning()
 		meaningRead, err := store.ForConcurrentRead(meaningCtx)
 		if err != nil {
+			cancelMeaning()
 			reason = relatedReasonMeaningFailed
 			break
 		}
-		meaningDone = meaningCtx.Done()
+		meaningDone, endMeaning = meaningCtx.Done(), cancelMeaning
 		meaning = make(chan relatedStage, 1)
 		go func() {
 			stage := s.relatedMeaningStage(meaningRead, project, input.text, pick)
@@ -514,6 +528,7 @@ func (s *server) runRelatedCheck(
 	if meaning != nil {
 		select {
 		case stage := <-meaning:
+			meaning = nil
 			record.meaningMS = milliseconds(stage.took)
 			if stage.reason == "" {
 				answer, answered = stage, true
@@ -610,6 +625,9 @@ func (s *server) relatedMeaningSearch(
 		return model.SearchResponse{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if s.meaningSearchEntered != nil {
+		s.meaningSearchEntered()
+	}
 	if _, err := tx.Exec(ctx, relatedEFSearch); err != nil {
 		return model.SearchResponse{}, err
 	}

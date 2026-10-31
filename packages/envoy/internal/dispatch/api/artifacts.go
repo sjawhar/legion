@@ -108,9 +108,6 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	s.uploadArtifactFor(w, r, artifactTarget{IssueKey: &issueKey})
 }
 
-// issueUploadRoute is the upload to an issue, which refuseUploadToAClosedIssue guards.
-const issueUploadRoute = http.MethodPost + " /api/v1/issues/{key}/artifacts"
-
 // refuseUploadToAClosedIssue answers an upload to an issue that is closed, or missing, with the
 // refusal its handler would make (requireOpenOwnerStatus) before anything spools or parses the
 // upload's body: the keyed layer spools a keyed body whole to disk before its handler runs
@@ -1040,9 +1037,9 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	// Conditional or not, an edit writes the live document, so it queues for the document's
 	// writer gate before its transaction opens: a flood of stale conditional retries, or writers
 	// clustered on one document, wait here holding no connection. release ends that gate once -
-	// right after the commit, which is all a later writer of this document waits on, so the
-	// checks of this edit's new decision blocks never hold it; on every earlier return, by the
-	// defer below.
+	// once the edit has committed and published, which is the gate's own contract (gateDocuments)
+	// and all a later writer of this document waits on, so the checks of this edit's new decision
+	// blocks never hold it; on every earlier return, by the defer below.
 	r, release, err := s.gateDocuments(r, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, r, err)
@@ -1127,7 +1124,6 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, r, err)
 		return
 	}
-	release()
 	var version *model.Version
 	if written != nil {
 		version = &written.Version
@@ -1136,6 +1132,9 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
 	s.publish(published...)
+	// The gate ends here, not at the commit: a writer let in between the two would publish its
+	// own events ahead of this edit's (storeArtifact releases its gates the same way).
+	release()
 	unchanged := edit.Unchanged
 	if unchanged == nil {
 		unchanged = []int{}

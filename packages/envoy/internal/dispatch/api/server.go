@@ -297,6 +297,11 @@ type server struct {
 	// Nil outside tests, and set by a test before the requests it drives, so that a test can hold
 	// a write's post-commit check where production has only a slow one.
 	relatedCheckEntered func()
+	// meaningSearchEntered runs inside the related-item check's meaning stage, with the
+	// request-pool connection that stage's read holds and before its query; nil, which every
+	// server the deployment builds leaves it, calls nothing. Only a test sets it, to hold the
+	// stage where production has only a slow one.
+	meaningSearchEntered func()
 	// broadcastResolveBudget overrides the budget a broadcast's recipient resolution runs under;
 	// zero, which every server the deployment builds leaves it, means broadcastResolveTimeout.
 	// Only a test sets it, so a budget that ends before every selected session is read is the
@@ -541,9 +546,8 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 	if deadline == 0 {
 		deadline = defaultReadDeadline
 	}
-	replays := s.keyedReplays()
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, s.serveRoute(route, replays, limiter, deadline)))
+		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, s.serveRoute(route, limiter, deadline)))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
@@ -583,14 +587,12 @@ const defaultReadDeadline = 20 * time.Second
 // where a write's body gets the bounds it arrives under (drainedBody), and where it parks the
 // units the request was admitted with while its client is still sending, so a body a client
 // trickles holds none of them. A test hook is neither admitted nor bounded: it is a test's own.
-func (s *server) serveRoute(
-	route apiRoute, replays map[string]keyedReplay, limiter *admission.Limiter, deadline time.Duration,
-) http.HandlerFunc {
+func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline time.Duration) http.HandlerFunc {
 	handler := route.Handler
 	if keyedMethod(route.Method) {
-		handler = s.keyedWrites(route.Method, route.Pattern, route.bodyLimit(), handler, replays[route.Method+" "+route.Pattern])
+		handler = s.keyedWrites(route, handler)
 	}
-	if route.Method+" "+route.Pattern == issueUploadRoute {
+	if route.RefusesClosedIssue {
 		handler = s.refuseUploadToAClosedIssue(handler)
 	}
 	if route.Method != http.MethodGet {
@@ -621,7 +623,7 @@ func (s *server) serveRoute(
 		// unread is the drain's guard (drainingWriter.askedContinue) and the keyed layer's
 		// (answerDrainedRepeat), which TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody
 		// pins: without either, the client is told to continue and the answer waits on its body.
-		handler = s.drainBeforeAnswer(route.Method, route.Pattern, route.bodyLimit(), handler)
+		handler = s.drainBeforeAnswer(route, handler)
 	}
 	// The access-log line, which register puts outside this, records what every layer answered -
 	// a keyed replay, a refused login, an early answer the drain held, admission's refusal - and

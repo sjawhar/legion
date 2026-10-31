@@ -65,33 +65,33 @@ func newKeyedRig(t *testing.T, answer func(run int32, w http.ResponseWriter, r *
 	return newKeyedRigAt(t, keyedRigPattern, answer)
 }
 
-// newKeyedRigAt is a keyedRig mounted at pattern, so a route the layer treats as its own - an
-// upload's larger body limit - can be driven too.
+// newKeyedRigAt is a keyedRig mounted at pattern, served as the table's row for it is - an
+// upload's larger body limit and its 413 among them - so a route the layer treats as its own can
+// be driven too.
 func newKeyedRigAt(t *testing.T, pattern string, answer func(run int32, w http.ResponseWriter, r *http.Request)) *keyedRig {
 	t.Helper()
 	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	rig := &keyedRig{database: database, server: served}
 	mux := http.NewServeMux()
 	mux.HandleFunc(http.MethodPost+" "+pattern, trackTransactions(served.keyedWrites(
-		http.MethodPost, pattern, routeBodyLimitOf(t, http.MethodPost, pattern),
+		routeOrJSONBody(t, http.MethodPost, pattern),
 		func(w http.ResponseWriter, r *http.Request) { answer(rig.runs.Add(1), w, r) },
-		nil,
 	)))
 	rig.handler = mux
 	return rig
 }
 
-// routeBodyLimitOf is the body limit register serves a route with (apiRoute.bodyLimit): the
-// table's row for it, or a JSON body's limit for a pattern the table has no row for, as a row
-// that sets none takes.
-func routeBodyLimitOf(t *testing.T, method, pattern string) int64 {
+// routeOrJSONBody is the route register serves pattern as: the table's row for it, or a row with
+// no body limit of its own - a JSON body's, as a row that sets none takes - for a pattern the
+// table has none for.
+func routeOrJSONBody(t *testing.T, method, pattern string) apiRoute {
 	t.Helper()
 	for _, route := range (&server{}).routes() {
 		if route.Method == method && route.Pattern == pattern {
-			return route.bodyLimit()
+			return route
 		}
 	}
-	return maxJSONRequestBytes
+	return apiRoute{routeRow: routeRow{Method: method, Pattern: pattern, Auth: authAny}}
 }
 
 // send posts body to thing's writes as login under key.
@@ -992,7 +992,7 @@ func requestDigestOf(t *testing.T, request *http.Request, pattern string) string
 	t.Helper()
 	digest := sha256.New()
 	writeRequestFields(digest, request, request.Method, pattern, patternWildcards(pattern))
-	body, err := readKeyedBody(request.Body, digest, request.Header.Get("Content-Type"), routeBodyLimitOf(t, request.Method, pattern))
+	body, err := readKeyedBody(request.Body, digest, request.Header.Get("Content-Type"), routeOrJSONBody(t, request.Method, pattern).bodyLimit())
 	defer body.close()
 	if err != nil {
 		t.Fatalf("read the request's body: %v", err)

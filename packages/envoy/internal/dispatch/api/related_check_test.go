@@ -1064,3 +1064,49 @@ func TestCreateExistingExternalIssueAnswersNoCheckWasMade(t *testing.T) {
 		t.Fatalf("already_exists rows for %s = %+v, want one not-made check", key, rows)
 	}
 }
+
+// A check that ends while its meaning stage is still running does not return before that stage
+// has given its request-pool connection back: the stage holds one for its query, and a check
+// that answered holds none, so the next decision-block check of the same edit is admitted for
+// its own two connections and not for these as well (decisionBlockChecks). Here the stage is
+// held inside its read, with that connection taken, until past the check's allowance.
+func TestARelatedCheckWaitsForItsHeldMeaningStagesConnection(t *testing.T) {
+	const allowance = 500 * time.Millisecond
+	embedder := &fakeEmbedder{}
+	handler, database, srv := meaningServer(t, embedder)
+	createSuggestionProject(t, handler, "MHOLD")
+	createSearchIssue(t, handler, "MHOLD", "Nightly backups overrun their window", "")
+	awaitTermStatsRefresh(t, srv, "MHOLD")
+	refreshTermStats(t, database, "MHOLD")
+	awaitQuietRequestPool(t, database.Pool)
+	srv.suggestionTimeout = allowance
+
+	holding, release := make(chan struct{}), make(chan struct{})
+	var held, released sync.Once
+	releaseMeaning := func() { released.Do(func() { close(release) }) }
+	defer releaseMeaning()
+	srv.meaningSearchEntered = func() {
+		held.Do(func() { close(holding) })
+		<-release
+	}
+	answered := make(chan *model.Suggestions, 1)
+	go func() {
+		answered <- srv.relatedCheck(context.Background(), relatedInput{project: "MHOLD", text: "Nightly snapshots finish late"})
+	}()
+	<-holding
+	select {
+	case suggestions := <-answered:
+		t.Fatalf("the check answered %+v while its meaning stage still held a request-pool connection", suggestions)
+	case <-time.After(4 * allowance):
+	}
+
+	releaseMeaning()
+	select {
+	case <-answered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the check did not answer within 10s of its meaning stage being let go")
+	}
+	if held := database.Pool.Stat().AcquiredConns(); held != 0 {
+		t.Fatalf("%d request-pool connections taken once the check answered, want 0", held)
+	}
+}

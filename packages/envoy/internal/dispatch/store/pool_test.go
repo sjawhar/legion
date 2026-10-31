@@ -253,7 +253,7 @@ func TestConcurrentReadsEachHoldOneConnection(t *testing.T) {
 
 // Listener hands out a connection of its own, outside the shared pool: one taken while every shared
 // connection is held is still served, it receives notifications, and once it is closed the next
-// call is served too. The shared pool here holds four connections rather than sharedPoolSize's:
+// call is served too. The shared pool here holds four connections rather than SharedPoolSize's:
 // the property is the same at any size, and holding forty-eight server connections while the
 // other packages' tests share the server would push a default Postgres past its hundred.
 func TestListenerIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
@@ -440,7 +440,7 @@ const testAcquireBound = 300 * time.Millisecond
 const busySlack = 200 * time.Millisecond
 
 // smallRequestPool opens a request pool of size connections on the test database, its acquires
-// bounded at bound. The properties below hold at any size, and holding sharedPoolSize server
+// bounded at bound. The properties below hold at any size, and holding SharedPoolSize server
 // connections while the other packages' tests share the server would push a default Postgres past
 // its hundred.
 func smallRequestPool(t *testing.T, size int32, bound time.Duration) *Pool {

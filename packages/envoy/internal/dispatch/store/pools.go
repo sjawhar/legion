@@ -119,7 +119,7 @@ func (r *RawPool) Ping(ctx context.Context) error {
 	return r.busy(ctx, r.Pool.Ping(ctx))
 }
 
-// sharedPoolSize bounds the shared pool - the request pool - deliberately and in code. pgx's
+// SharedPoolSize bounds the shared pool - the request pool - deliberately and in code. pgx's
 // default, max(4, NumCPU), is four on production's one Fargate task at cpu="512", and a
 // connection per blocked writer is all it takes to starve everything else: with four writers
 // parked on one issue's row lock, a read of an unrelated issue waited the whole seventeen seconds
@@ -139,7 +139,9 @@ func (r *RawPool) Ping(ctx context.Context) error {
 // (PinConnection), so under load the API holds every connection of this pool; the background
 // loops, the live-update readers and the settlements wait on pools of their own, so neither side
 // can starve the other, and an acquire here waits at most requestAcquireBound before it is
-// refused with ErrPoolBusy rather than queueing without end.
+// refused with ErrPoolBusy rather than queueing without end. Admission derives the units it may
+// hand out at once from this number, the connections left to the pool's uncounted users taken off
+// (admission.MaxAdmittedUnits), so a change here moves that cap with it.
 //
 // The database bounds the budget from above. Dispatch's database is the gcp:Dispatch component's
 // Cloud SQL Postgres instance, whose default max_connections follows its tier's memory
@@ -150,7 +152,7 @@ func (r *RawPool) Ping(ctx context.Context) error {
 // or the pod count is checked against it: read SHOW max_connections on the instance before
 // raising either. A new pool, or a new permanent Listener caller, goes into
 // ConnectionsPerProcess with it.
-const sharedPoolSize = 48
+const SharedPoolSize = 48
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
 // finishes, so one is enough for the pool to be deadlock-free; a few let cold rooms load
@@ -301,11 +303,11 @@ const registryPoolSize = 1
 const permanentListeners = 3
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres, the
-// budget of 89 sharedPoolSize describes: every pool's size, the registry's own pool
+// budget of 89 SharedPoolSize describes: every pool's size, the registry's own pool
 // (processes.Register) and the event horizon's (Horizon) among them, and one connection per
 // permanent listener, which the listener pool dials and hands off rather than holds (its one dial
 // in flight is a permanent listener redialling, so it is not counted twice).
-const ConnectionsPerProcess = sharedPoolSize + backgroundPoolSize + livePoolSize + settlementsPoolSize +
+const ConnectionsPerProcess = SharedPoolSize + backgroundPoolSize + livePoolSize + settlementsPoolSize +
 	roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + horizonPoolSize + registryPoolSize +
 	permanentListeners
 
@@ -347,7 +349,7 @@ func (p *Pool) Horizon() (*RawPool, error) {
 // the architecture importer's ticker, the documents' resumption query, task progress,
 // reference-excerpt and block-index reconciliation, the edit-notice sweep, the repair of closed and
 // reopened issues' asks, the server process registry's prune and the fleet build announcer. Six is
-// the background's share of the budget sharedPoolSize describes; nobody waits on these loops, so
+// the background's share of the budget SharedPoolSize describes; nobody waits on these loops, so
 // they wait for each other here (up to backgroundAcquireBound) instead of for the requests'
 // connections.
 const backgroundPoolSize = 6
@@ -360,7 +362,7 @@ func (p *Pool) Background() (*Pool, error) {
 
 // livePoolSize bounds the pool for the live-update readers: the event stream relay and the
 // delivery hub, each reading what a notification announced and handing it to every open stream.
-// Four is their share of the budget sharedPoolSize describes.
+// Four is their share of the budget SharedPoolSize describes.
 const livePoolSize = 4
 
 // Live is the pool for the live-update readers, so an event reaches the open streams while the
@@ -371,7 +373,7 @@ func (p *Pool) Live() (*Pool, error) {
 }
 
 // settlementsPoolSize bounds the pool for document settlements. Four is the settlements' share of
-// the budget sharedPoolSize describes.
+// the budget SharedPoolSize describes.
 const settlementsPoolSize = 4
 
 // Settlements is the pool for document settlements, so a burst of settlements - every room a

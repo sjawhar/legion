@@ -24,7 +24,7 @@ Each item below names a variable, then its purpose.
 
   Postgres connection string.
   Dispatch applies embedded migrations before serving.
-  Every pool's size is fixed in code, at most 89 connections a process in all (`store.ConnectionsPerProcess`) (the request pool's 48 is `store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter.
+  Every pool's size is fixed in code, at most 89 connections a process in all (`store.ConnectionsPerProcess`) (the request pool's 48 is `store.SharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter.
   Each connection names its pool in `application_name`, which replaces the connection string's own:
   `dispatch-requests`, `dispatch-background`, `dispatch-live`, `dispatch-settlements`, `dispatch-rooms`, `dispatch-health`, `dispatch-listen`, `dispatch-leases`, `dispatch-outbox`, `dispatch-horizon` or `dispatch-registry`, so `select application_name, count(*) from pg_stat_activity group by 1` shows what each pool holds.
 
@@ -1371,7 +1371,7 @@ beside 2,000 stored titles at the cap, a check takes 56–95 ms, where parsing e
 
 `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks` run the related-item check once the write has committed, and so does each decision block a document edit (`POST /api/v1/artifacts/{id}/edits`) adds, on the block's question (the check replaced LEGION-550's 300 ms keyword suggestions).
 The check never refuses the write, but the response waits for it, at most 5 s (`relatedCheckAllowance`);
-an edit's blocks are checked together under that one bound, the first five of them, and each block past five is answered as not made.
+an edit's blocks are checked one after another under that one bound, the first five of them, and each block past five is answered as not made.
 It searches the write's own project in two stages started together:
 
 - Stage 1 picks the text's rarest words and runs search's keyword query over them.
