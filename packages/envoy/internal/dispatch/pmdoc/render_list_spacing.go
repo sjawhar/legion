@@ -189,8 +189,9 @@ func spacedAfter(list *Node, quoted bool) *Node {
 }
 
 // blanksEndingQuotedList writes the two blank lines that, at the end of a quote or of a typed block
-// inside one (atFence), spread the list its blocks end in, where nothing else does - three before a
-// typed block's fence where the list's last item ends in a quote, which takes one of them.
+// inside one, spread the list its blocks end in, where nothing else does - three at a typed block's
+// fence (atFence) that stands in a quote, where the list's last item ends in a quote, which takes
+// one of them.
 func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string, atFence bool) {
 	last := blocks[len(blocks)-1]
 	if !isList(last) || r.inFootnote() || r.scope().quotes == 0 {
@@ -203,6 +204,29 @@ func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string, atFence
 		}
 		r.writeSyntax(strings.Repeat("\n"+strings.TrimRight(prefix, " "), blanks))
 	}
+}
+
+// quoteEndsAtFence reports whether the quote whose blocks are being written ends at the fence of
+// the typed block around it: it is that block's last block, or the last block of a quote that is.
+// Nothing of the quote stands between its list and that fence, so the browser editor's parser
+// counts the blank lines before the fence as it counts them at the end of a typed block a list
+// ends (quotedListSpread, blanksEndingQuotedList).
+func (r *renderer) quoteEndsAtFence() bool {
+	child := r.scope().node
+	for index := len(r.scopes) - 2; index >= 0; index-- {
+		container := r.scopes[index].node
+		if container == nil || container.Children[len(container.Children)-1] != child {
+			return false
+		}
+		if _, typed := typedBlock(container.Type); typed {
+			return true
+		}
+		if container.Type != "blockquote" {
+			return false
+		}
+		child = container
+	}
+	return false
 }
 
 // endsInParagraph reports whether list's last item ends in a paragraph holding text, directly or in

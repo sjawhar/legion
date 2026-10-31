@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-722",
+  "completed": "2026-10-31T12:27:53Z",
+  "round": 3,
+  "reviewedHead": "e41313b22f42a46a1347bec109ebbdcc98415215 (code 59873e78a7a1, merge of main 2ab9473a over 19833ea3)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 4,
+  "roundTwoFindings": "All three correctness findings and all four minors fixed at 19833ea3; threads PRRT_kwDORFy7ds6x97Ru, PRRT_kwDORFy7ds6x97SA, PRRT_kwDORFy7ds6yLvOb, PRRT_kwDORFy7ds6yLvOe, PRRT_kwDORFy7ds6yLvOf, PRRT_kwDORFy7ds6yLvOh, PRRT_kwDORFy7ds6yLvOj, PRRT_kwDORFy7ds6yLvOm, PRRT_kwDORFy7ds6yLvOn accepted. The merge kept every PR sentence of packages/envoy/AGENTS.md through main's one-sentence-per-line reflow (deep-review: 54 PR sentences, 186 of main's).",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/pmdoc/list_spacing.go:385", "description": "Architect's request: a blank line anywhere inside a typed block in a list item that the browser reads as spreading the item (after the opening fence, in the middle, unclosed) is stored tight; tester measured 658 of 1,152 misread at base and head, only the item spread differing. One rule folded with typedEndBlankInItem from the same prepareList reading: read as the browser or refused by name. Gate: 0 of the 430 the merged base reads alike newly refused, the 457-member closing-fence family unchanged, a corpus-errors document per refused shape red at the head. The writer itself writes the middle-blank shape for a tight item whose typed block holds two blocks (reviewer probe: engine item(spread=true)), so the census and the read-back decide it, never a refusal of the writer's own rendering."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/pmdoc/source_lines.go:365", "description": "The nextBlock exemption and fenceEnding (direct typed parents only) store documents the browser spreads; the comment (:358-360) and AGENTS.md:1574 say this reader reads them alike. Reviewer probe: `- a\\n  C\\n  para\\n\\n\\nafter\\n` and an item inside an outer callout ending `para\\n\\n:::\\n` stored by ParseForWrite, engine item(spread=true). Deep-review: six documents refused at 51a234b7 are stored misread now; the opposite direction (`> - a\\n>   C\\n>   - x\\n>\\n> - b\\n` Go spread, browser tight) too. All read the same at main 2ab9473a."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/service_test.go:1624", "description": "envoy-go-race-docs red at 59873e78: TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDecision (main's #2525) fails 20+ subtests with 'the text would leave the document's markdown unreadable' on the repair its own refusal names. The job passed at #2525's merge commit 0be366cf8a2d; [INFERENCE] one of this PR's refusals refuses the repaired body. Not a required check, but a broken repair path."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/list_spacing.go:404", "description": "typedBlankUnder duplicates holdsTypedBlockWithBlankLine (:699) body; one walker over typed blocks and footnote definitions. typedEndBlankSpreadsItem vs typedEndBlankSpreadsATightItem differ by one word."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/html_flow.go:104", "description": "Comments narrate review rounds and 'this head' as history main never had (html_flow.go:104-105, AGENTS.md:1478, refusals_test.go:204-207, list_spacing_test.go:150-153, source_lines.go:343, list_spacing.go:377, list_spacing_test.go:301, AGENTS.md:1571)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/source_lines.go:369", "description": "blank/quoteBlankLineAt selection repeats list_spacing.go:227-230; add blankLineAt(depth). AGENTS.md dropped main's pointer to blanksEndingQuotedList."},
+    {"severity": "minor", "file": "(PR body)", "description": "Body says two neighbouring shapes are named in the handoff's deviations; implement.json has deviations []. Not proven / risk rewritten by the reviewer for this head."}
+  ],
+  "ci": "Required set lint, typecheck, test, pr-title. CI head 59873e78 (compare to e41313b2: handoffs only). Run 41190374835 in progress: lint, test, pr-title success, typecheck skipped; envoy-go-race-docs failure (above); envoy-go and dispatch running.",
+  "thermonuclear": "deep-review at 59873e78: CHANGES, one Medium (adopted, reviewer-verified), stale-body Minor adopted. code-quality at 59873e78: three minors adopted.",
+  "proseFixesByReviewer": "None in the tree: each prose finding sits in comments the requested rule rewrites. PR body's Look at first and Not proven / risk rewritten."
+}

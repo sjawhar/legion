@@ -913,6 +913,54 @@ func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
 	}
 }
 
+// A code span's later line is written without its containers' prefix wherever those containers
+// would eat the line's own indentation (takesCodeLineIndent), which keeps the code's text as it
+// is. A line holding one complete HTML tag and nothing else cannot be written so: without the
+// prefix it is a lazy continuation line, and a CommonMark reader opens a block of HTML of kind 7
+// on it, ending the paragraph, the quote, item or definition around it and the code with them.
+// Written behind the prefix the line continues the paragraph, which that kind of block
+// interrupts nowhere, and the containers take the prefix off the code's text again
+// (codeLineOpensHTML).
+func TestRenderPrefixesACodeSpanLineHoldingOneHTMLTag(t *testing.T) {
+	for _, test := range []struct{ name, markdown, want string }{
+		{
+			name:     "a quote",
+			markdown: "> A quote with `code\n> <b>\n> across` lines.\n",
+			want:     "> A quote with `code\n> <b>\nacross` lines.\n",
+		},
+		{
+			name:     "a list item",
+			markdown: "- An item with `code\n  </b>\n  across` lines.\n",
+			want:     "- An item with `code\n  </b>\nacross` lines.\n",
+		},
+		{
+			name:     "text beside the tag needs no prefix",
+			markdown: "> A quote with `code\n> <b> and more\n> across` lines.\n",
+			want:     "> A quote with `code\n<b> and more\nacross` lines.\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", test.markdown, err)
+			}
+			markdown := mustRender(t, doc)
+			if markdown != test.want {
+				t.Fatalf("Render() = %q, want %q", markdown, test.want)
+			}
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				got, _ := back.JSON()
+				want, _ := doc.JSON()
+				t.Fatalf("%q reads back otherwise\n got: %s\nwant: %s", markdown, got, want)
+			}
+		})
+	}
+}
+
 // An email link is one the writer can write as its address (isBareEmailLink) only where the
 // transform's email matcher (findEmails) links its text whole, so the two cannot disagree: an
 // address with no local part (`@b.test`), whose `@` the matcher never starts at, is not one, nor is

@@ -108,7 +108,9 @@ func ParseRendering(markdown string) (*Node, error) {
 // starts (startOf): a paragraph's first line, and every other block's recorded position, so a
 // fenced code block starts at its opening fence. Front matter starts at 0. A child converted from
 // no goldmark block (the empty paragraph of a document with no blocks), or from one that records
-// no position, answers -1.
+// no position, answers -1. Each offset counts markdown's own bytes, the U+0000 the parse reads as
+// U+FFFD included (startsInMarkdown), so a caller cutting markdown at them cuts it where its
+// blocks begin (itemblocks.Split).
 func ParseWithSourceStarts(markdown string) (*Node, []int, error) {
 	var starts []int
 	doc, err := parseMarkdown(markdown, fromStart, true, NewWriteBudget(), &starts)
@@ -237,9 +239,21 @@ func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *Wr
 
 // parseMarkdown is parseUnstamped that, given starts, also sets it to where each of the tree's
 // top-level children starts in markdown (sourceStarts).
+//
+// Every U+0000 in markdown is read as U+FFFD (nulAsReplacement) before any parser sees a byte of
+// it, as CommonMark requires of a reader (§2.3 Insecure characters) and the browser editor's parser
+// does. Goldmark keeps the character as it is, while the rendering writes it as U+FFFD
+// (withNulsWritten), so a write holding one was accepted and left the live tree holding a character
+// the markdown it is stored as does not: the tree a read serves and the bytes a version carries
+// then disagreed. The replacement is three bytes where the character was one, so every offset taken
+// after it is an offset into source and never into markdown: a refusal's line number counts
+// source's line feeds, which the replacement neither adds nor removes, at.server measures a
+// prefix the server itself wrote ahead of the caller's text (parseTableRows), which holds no
+// U+0000 and so keeps its length, and starts are offsets into source until startsInMarkdown maps
+// each of them back to the byte of markdown it stands at.
 func parseMarkdown(markdown string, at origin, readFrontmatter bool, budget *WriteBudget, starts *[]int) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
-	source := []byte(markdown)
+	source := []byte(nulAsReplacement(markdown))
 	var front *Node
 	unclosedFrontmatter := false
 	rest := 0
@@ -275,7 +289,7 @@ func parseMarkdown(markdown string, at origin, readFrontmatter bool, budget *Wri
 		return nil, err
 	}
 	if starts != nil {
-		*starts = sourceStarts(doc, root, front != nil, rest)
+		*starts = startsInMarkdown(sourceStarts(doc, root, front != nil, rest), markdown)
 	}
 	return doc, nil
 }
@@ -300,6 +314,37 @@ func sourceStarts(doc *Node, root ast.Node, front bool, offset int) []int {
 			starts[index] = offset + start
 		}
 		block = block.NextSibling()
+	}
+	return starts
+}
+
+// startsInMarkdown is starts, offsets into the source parsed, as offsets into markdown itself,
+// the bytes the caller wrote: the parse reads every U+0000 as U+FFFD (nulAsReplacement), three
+// bytes where the caller wrote one, so a start past one of them stands two bytes further on in
+// the source than in markdown, two bytes past two, and so on. ParseWithSourceStarts promises the
+// caller's own offsets, and itemblocks.Split cuts the caller's body at them, so a start left
+// unmapped would cut a body holding a U+0000 inside a block instead of between two.
+//
+// Markdown holding no U+0000 is answered as it is, which is every document a route carries today
+// (decodeJSON refuses the character), so the mapping costs nothing there.
+func startsInMarkdown(starts []int, markdown string) []int {
+	if strings.IndexByte(markdown, 0) < 0 {
+		return starts
+	}
+	// Where each replacement stands in the source, which is where the U+0000 before it stood plus
+	// the two bytes each earlier replacement added.
+	var replacements []int
+	for index := range len(markdown) {
+		if markdown[index] == 0 {
+			replacements = append(replacements, index+2*len(replacements))
+		}
+	}
+	for index, start := range starts {
+		if start >= 0 {
+			// The replacements before start, which is where the first one at or past it stands.
+			earlier, _ := slices.BinarySearch(replacements, start)
+			starts[index] = start - 2*earlier
+		}
 	}
 	return starts
 }
@@ -401,17 +446,24 @@ func referencedLabels(nodes []*Node) []string {
 
 // ParseInline converts one textblock's worth of inline markdown into inline nodes, spending
 // budget, its caller write's, on the elements it makes. Markdown that forms more than one
-// paragraph, or holds text after its paragraph's last line, is ErrSchema.
+// paragraph, or holds text after its paragraph's last line, is ErrSchema. Every U+0000 in it is
+// read as U+FFFD, as it is in a document's markdown (readInline, parseUnstamped).
 func ParseInline(markdown string, budget *WriteBudget) (nodes []*Node, err error) {
 	return readInline(markdown, inlineMarkdown.run, parser.NewContext(), budget)
 }
 
 // readInline is ParseInline read with inline, one of an inlineReader's parsers, in context, a new
 // parse context its caller may read after the parse (parseInlineWithDefinitions), counting the
-// elements it makes on budget, a caller write's, or none when budget is nil (a read-back).
+// elements it makes on budget, a caller write's, or none when budget is nil (a read-back). Its
+// source is the caller's markdown with its line endings and its U+0000 characters read as the
+// parser of a document's markdown reads them (LineFeeds, nulAsReplacement, parseUnstamped); a
+// read-back's markdown, which the renderer wrote, holds neither, so both leave it as it is. The
+// lines the parse recorded as opening a block of HTML for the browser editor's parser are dropped
+// before the tree is converted (dropHTMLFlowLines), since this markdown opens no block where it
+// lands.
 func readInline(markdown string, inline parser.Parser, context parser.Context, budget *WriteBudget) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
-	source := []byte(LineFeeds(markdown))
+	source := []byte(nulAsReplacement(LineFeeds(markdown)))
 	var count *parseCount
 	if budget != nil {
 		context.Set(writeBudgetKey, budget)
@@ -421,6 +473,7 @@ func readInline(markdown string, inline parser.Parser, context parser.Context, b
 	if err != nil {
 		return nil, err
 	}
+	dropHTMLFlowLines(root)
 	count.weigh(root, source)
 	if refusal := count.refusal(source, 1); refusal != nil {
 		return nil, refusal

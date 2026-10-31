@@ -59,6 +59,7 @@ import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-b
 import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
 import { libraryRemarkDirectivePlugin } from './lib-remark-directive-plugin';
+import { libraryRemarkHtmlBlockPlugin, libraryRemarkHtmlFlowPlugin } from './html-blocks';
 import { libraryRemarkNestedLinksPlugin } from './nested-links';
 import { liveTypedBlocksRemarkPlugin } from './read-only-directives';
 import { brokenAskInputGuards, keepUnselectedAskBlocks, relaxAskContentCheck } from './ask-content';
@@ -310,6 +311,7 @@ export async function createProofEditor(
     // Frontmatter and typed directives register before their node schemas claim their AST nodes.
     .use(libraryRemarkFrontmatterPlugin)
     .use(libraryRemarkDirectivePlugin)
+    .use(libraryRemarkHtmlFlowPlugin)
     .use(frontmatterSchema)
     // `use` flattens its argument twice, so an array of composed schemas — each of them a pair
     // of plugins — is an argument Milkdown accepts but its own signature cannot express.
@@ -328,6 +330,10 @@ export async function createProofEditor(
     // Register remark plugins for proof marks and dispatchAsk parsing
     .use(remarkProofMarksPlugin)
     .use(remarkDispatchMarksPlugin)
+    // After the mark plugins, whose own block-level span is a pair of HTML blocks until they have
+    // read it: a block of HTML becomes a paragraph holding the same text, which the schema has a
+    // node for. Before the fit check below, which reads that paragraph as the block's content.
+    .use(libraryRemarkHtmlBlockPlugin)
     // Last of the remark plugins that shape inline content, so the links it splits are every link
     // the tree holds: a link inside a link label (an autolink, the only nesting CommonMark allows)
     // is hoisted beside the runs around it (./nested-links.ts). `$remark` puts it in `remarkCtx`,

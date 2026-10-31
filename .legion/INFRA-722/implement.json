@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-722",
+  "completed": "2026-10-31T10:05:00Z",
+  "round": "the third implementing round: review round 2's three correctness findings and four minors",
+  "proof": [
+    {
+      "criterion": "A1/A6: both issue shapes, and every shape this change touches, read in the browser as Go reads them, in a document and in a comment",
+      "surface": "Dispatch's own browser suite in Chromium on the real stack (Go server and production SPA built from the checkout, Playwright Chromium, Postgres 17 + pgvector, all on the issue volume): the spec editor, a past version view and a Conversation comment, plus getIssueArtifactText for the stored markdown and POST /api/v1/issues for the refusal",
+      "command": "cd packages/dispatch && source $TMPDIR/bp-harness/env.sh && bun run e2e -- e2e/document-and-comment-read-alike.e2e.ts --project=chromium",
+      "observed": "8 passed (31.1s) at the forward-merge head, and 8 passed at 19833ea3 before it: the footnote definition over a delimiter-like line draws one h1 in the editor and in a comment; a one-cell header over a two-cell delimiter row draws a paragraph and no table in both; the quoted definition before a lone tag line keeps 'note' in the editor, the past version and the comment; a comment holding '> a' then '<b>' keeps its blockquote and 'a'; a code span's tag line is stored behind '> '; the tab-grammar write is refused 400 INVALID_MARKDOWN naming the line; a NUL draws as U+FFFD; a comment holding '<div>' draws it as a paragraph and the Conversation goes on drawing. bun run e2e rebuilt web/dist from this head first, so the rows ran against main's merged IssueBoard/query-client bundle",
+      "headSha": "59873e78a7a17778215cfd483a2ab83c6723518b",
+      "negativeControl": "the same spec against a build of the fork point f45c6716eacfa82bed5ad29d2371c52aacfadde2: 7 failed, 1 passed, each row drawing what the issue describes (+ [] for the heading, the definition's text and the blockquote; [\"a\",\"\",\"\",\"\"] where the editor drew a table; \"<b>\" stored bare; the refusal absent)"
+    },
+    {
+      "criterion": "A2: the differential against the merged base regresses nothing, and the gate review round 2 set - no document the base read as the browser is refused here - holds over a corpus that includes the quote-wrapped and >-blank forms",
+      "surface": "pmdoc's differential runner, Go against the headless browser engine, over the corpora of every round plus this round's 3,480-member family",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base e65900f4438b987f2dd38b8b51c1ab33ad3fc644 --corpus $TMPDIR/diff722/corpus --out $TMPDIR/diff722/out",
+      "observed": "153,304 documents (the engine cannot read 96). GATE regressions 0, misreads 0, churn 1, engine-tree regressions 0, engine-tree churn 4, head panics 0, lost fixed points 0, newly refused by the writer 0, engine readings Go's schema refuses 0; fixed 18,120, engine-tree fixed 16,102, newly refused 1,345. The two nonzero gate lines are the same two intended documents of every earlier round. Of the 1,345 newly refused, 0 were read as the browser reads them at the base, measured per document from report.jsonl",
+      "headSha": "19833ea3a17d9ab11fed41f22d412fc2838f47b7",
+      "negativeControl": "the same runner over the 320 class documents' base renderings and the code-span matrix reports changes in earlier rounds; in this run 1,345 documents move from stored to refused and 18,120 from misread to alike, so a 0 gate line is a comparison"
+    },
+    {
+      "criterion": "A3: no stored Dispatch version changes its reading, its refusal or its bytes",
+      "surface": "every distinct stored markdown of every version of every document of every project of the live Dispatch, read by the base binary and the head binary",
+      "command": "bun infra-719-crawl.ts versions.jsonl; python3 infra-719-dedupe.py versions.jsonl distinct.jsonl versions-map.tsv; both sides of TestDifferentialDump through a fifo into {id, sha256(tree), parse, write, sha256(render)}; python3 compare.py out versions-map.tsv",
+      "observed": "distinct markdowns read: 37,600; changed: 0. Stored versions: 38,050 (latest 8,024); changed: 0 (latest 0) in 0 documents; stored versions whose markdown was not read: 0, across 8,024 documents in 14 projects. Nothing to rewrite",
+      "headSha": "19833ea3a17d9ab11fed41f22d412fc2838f47b7",
+      "negativeControl": "the same two binaries and the same compare over this branch's 57 testdata/corpus-errors documents: 32 changed, 25 unchanged"
+    },
+    {
+      "criterion": "the 916 fuzzed callout documents of INFRA-581's reviewer read alike or are refused by name, and nothing the fork point read alike is lost",
+      "surface": "the 916 documents' LF text (what parse.go's LineFeeds hands the parser) through the head binary and the headless engine, classed by the planner's classes.jsonl",
+      "command": "bun h/mkcorpus.ts; bun h/run-eng.ts corpus-lf.jsonl head-eng.jsonl; GOWORK=off go test -c; PROBE2_IN=head-eng.jsonl ./go/head2.test -test.run TestZZProbe2; bun h/report.ts (all under $TMPDIR/r916)",
+      "observed": "head 880 alike / 32 refused / 4 otherwise; fork point 596 / 0 / 320; 0 documents the fork read alike that the head does not. The 32 refusals are all class S and all carry one reason, typedDefinitionHoldingBlock. The 4 left are class T tables with a short body row, one tree difference each (table_row(2) [\"x [^g] y\",\"\"] against table_row(1)), pre-existing at the fork and gone under the differential's own padShortRows (884/32/0)",
+      "headSha": "19833ea3a17d9ab11fed41f22d412fc2838f47b7",
+      "negativeControl": "the same harness at the fork point f45c6716 reports 320 misread, exactly the 320 ids of classes.jsonl"
+    },
+    {
+      "criterion": "review round 2's finding 1 and 2: one rule for the blank lines a typed block ends with in a list item, derived from the browser and not from a quote test, with the quoted forms stored and read again",
+      "surface": "a generated family of 3,480 documents - three quote depths x marker or bare item x eighteen block endings x blank-line forms (empty, spaces, a lone >, > and spaces, shorter than the code's indentation, as wide as it, inner-quote markers, mixed runs) x one to three lines x fence-closed or document-end - read by the head binary and by the headless engine",
+      "command": "the family generator and probe under $TMPDIR, the same probe harness the planner's bundle holds",
+      "observed": "members 3,480; the browser spreads 1,560; refused 2,208; read alike 1,272; stored where Go and the browser disagree 0; read as the browser at the merged base and refused here 0. 716 verdicts moved from review round 2's head: 560 misread -> refused, 156 refused -> read alike",
+      "headSha": "19833ea3a17d9ab11fed41f22d412fc2838f47b7",
+      "negativeControl": "the same family at review round 2's head 51a234b7 leaves 156 members refused that the browser reads tight and the base stored - the regression the reviewer found - and 560 stored that the browser spreads"
+    },
+    {
+      "criterion": "the package's own suite and its fast local checks are green at the head that is pushed",
+      "surface": "the Go package under change",
+      "command": "cd packages/envoy && go vet ./internal/dispatch/... && gofmt -l internal/ ; GOWORK=off go test ./internal/dispatch/pmdoc/ -count=1 -timeout 0 -p 1",
+      "observed": "vet and gofmt print nothing; ok github.com/sjawhar/envoy/internal/dispatch/pmdoc 949.168s (exit 0). In the same pod at the same head: bun test over packages/dispatch web/src and e2e/__tests__, packages/dispatch typecheck, packages/proof-editor test and typecheck, and bunx biome check over packages/dispatch, packages/proof-editor and pmdoc/gen all passed",
+      "headSha": "19833ea3a17d9ab11fed41f22d412fc2838f47b7",
+      "negativeControl": "TestParseMatchesMilkdownForFixtures fails on the two new corpus documents at review round 2's head 51a234b7 (quoted-item-typed-blocks-ending-in-blank-lines, quoted-item-typed-block-code-ending-in-a-blank-line), and the new corpus-errors documents are stored rather than refused there"
+    },
+    {
+      "criterion": "the forward merge of main changes no line of the change itself, and the merged head still passes every local check",
+      "surface": "the pull request's own diff, file by file, and the package suites at the merge head",
+      "command": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, per file; then bun test over packages/dispatch web/src and e2e/__tests__, bun run typecheck in packages/dispatch and packages/proof-editor, bun test in packages/proof-editor, bunx biome check over packages/dispatch, packages/proof-editor and pmdoc/gen",
+      "observed": "fingerprint 05ea8adf9052173a1521664c2390959c58b30d777a75221532eb9a1d298a0e8c -> 18dd80ba0440b8534bf160abc6674d80ae9accd3017df1150cdec2a9bb44022c, changed: of the 88 files, packages/envoy/AGENTS.md alone has different diff lines - the conflict main's rewrite of that file made, resolved by taking main's text and re-applying this branch's six edits in its wording. The other 87 are byte-identical, so every measurement of this handoff holds at the merge head. At that head: 2963 pass / 0 fail (packages/dispatch), 271 pass / 0 fail (packages/proof-editor), both typechecks clean, biome checked 770 files with no fix",
+      "headSha": "59873e78a7a17778215cfd483a2ab83c6723518b",
+      "negativeControl": "the same per-file comparison names packages/envoy/AGENTS.md as changed, so a byte-identical file is a measured result and not an empty diff"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/pmdoc/list_spacing.go: one rule and one named reason, typedEndBlankInItem, for the blank lines a typed block ends with in a list item, derived from mdast-util-from-markdown's prepareList; quotedListIn loses its dead parameters and blanksEndingTheList is inlined",
+    "packages/envoy/internal/dispatch/pmdoc/source_lines.go: typedBlankInItem counts the item's blank lines the way the browser's reader does, instead of deriving them from quoteBlankLine",
+    "packages/envoy/internal/dispatch/pmdoc/html_flow.go: kind 7 alone is exempt from the block-HTML refusal, htmlFlowKind returns ast.HTMLBlockType rather than a bare integer, and the reason text of kinds 1-5 says what it measures",
+    "packages/envoy/internal/dispatch/pmdoc/refusals.go, refusals_test.go, list_spacing_test.go, fixtures_test.go, render_written_test.go: the reason, its tests, the nine measured spread rows, the fixture names, and writtenCorpusApart holding out the two documents a concatenated corpus cannot carry",
+    "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/quoted-item-typed-blocks-ending-in-blank-lines.md and quoted-item-typed-block-code-ending-in-a-blank-line.md: the quoted forms this round stores and reads again",
+    "packages/envoy/internal/dispatch/pmdoc/testdata/corpus-errors/: one document per newly refused shape, the kind 7 narrowing's four tab forms included",
+    "packages/envoy/internal/dispatch/pmdoc/testdata/fixtures.json: regenerated with bun run gen after the engine change",
+    "packages/envoy/AGENTS.md and packages/proof-editor/AGENTS.md: the rule and the kind 7 exemption as they now stand",
+    "packages/envoy/.changes/unreleased/pr2507-*.yaml: the changelog fragments"
+  ],
+  "trickyParts": [
+    "The browser's reader counts a blank line toward a list item's spread when no list or quote inside the item is open across it and it is not in the run of line endings the item drops. A directive container is not such a container, so the blank lines that end a typed block are the item's at any depth. Three things keep them from the item: a line the containers around the block do not read as blank; an unclosed fenced code block, which takes them as code; and, in a quote only, a list the block ends with, because resolveContentExits ends that list where the block's content starts on the next line, past the quote's markers. Read off the mdast positions: '- a / C / - x / (blank) / :::' gives list [3:3-3:6], its quoted twin list [3:5-4:2]",
+    "The kind 6 exemption had to go rather than be narrowed: a tag of a block-level name opens kind 6 however unfinished, so the exemption cannot tell '<div x' from a whole tag. Kind 7 alone is exempt, which costs the four '</div\\t>' documents that did read alike; each has a corpus-errors fixture",
+    "The stored-version census outgrew the issue volume: the raw dumps of 37,600 documents filled it and the pod was evicted mid-run twice. The dump now goes through a fifo into one hashed line per document (4.6 MB a side instead of tens of gigabytes), and a checkpoint of both sides is attached to the issue every ten minutes so a replaced pod resumes instead of starting again",
+    "GitHub reported the pull request CONFLICTING in packages/envoy/AGENTS.md alone: main rewrote that file (+4595/-5227 against the fork point) around this branch's +135/-38. The merge takes main's text everywhere and re-applies the six edits in main's wording; nestedQuotedListBlank, quoteTypedAlternations and blanksEndingQuotedList's list-spacing half are gone from it because this change removed them from the code"
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The issue volume dies with its pod, so a measurement longer than a pod's life needs a durable checkpoint. The census checkpoint lives at dispatch://INFRA-722/artifact/infra722-census-checkpoint-tar-gz; its bytes are served by GET /api/v1/artifacts/<id>/versions/<n>, which is also the only way to read an uploaded tar.gz back, since dispatch doc-read refuses a file that is not UTF-8 text"
+  ]
+}
