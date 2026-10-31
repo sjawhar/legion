@@ -2,37 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-625",
-  "completed": "2026-10-31T05:40:00Z",
-  "round": 2,
-  "reviewedCodeHead": "94f1cabac311313126c5c9d93dd44e2dca2fed8e",
+  "completed": "2026-10-31T16:58:00Z",
+  "round": 3,
+  "reviewedCodeHead": "fbf0819bb529cf86b32f6fb02e64a7e4c855762a",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 5,
-  "minor": 7,
-  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head 94f1caba (run 41165498446) at 04:33Z: changes and pr-title success, typecheck/ci-images/broker-multiprocess skipped by filter, every other lane (lint, test, dispatch-memory among them) queued. Compare 94f1caba...17045d2e: handoffsOnly true, 2 files. A request for changes does not wait on CI.",
-  "thermonuclear": "Both run once at 94f1caba: deep-review CHANGES (1 medium, 2 minor), code-quality CHANGES (4 important, 6 minor). No #2403 citation left outside .legion/.",
-  "proseFixedByReviewer": [
-    "packages/envoy/.changes/unreleased/INFRA-625-bodies-parse-in-a-worker.yaml: 4,000 -> 2,000 characters (round 1 asked for it; the rename left it).",
-    "markdown-worker-threshold.ts: '126 ms of room' -> '142 ms', which is what the table's 858 ms leaves.",
-    "docs/reference_excerpts.go: deferBlockIndexBlocks's comment names the block-index reconciliation, not the settlement."
+  "important": 3,
+  "minor": 6,
+  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head fbf0819b (run 41214456937) at 16:56Z: lint, typecheck, pr-title success; test, dispatch-memory in progress; dispatch (the Playwright suite with the write row and Firefox's page-parsed row) still queued. Compare fbf0819b...1612321c: handoffsOnly true, 2 files. A request for changes does not wait on CI; the dispatch lane's write-row ratio and Firefox page-parsed row are read at the next code head.",
+  "thermonuclear": "Both run once at fbf0819b: deep-review CHANGES (1 high, 1 medium, 3 minor), code-quality CHANGES (2 important, 4 minor). Both reproduced the fresh-mount mixed body independently in scratch bun tests.",
+  "roundTwoFindings": "All eight hold except: the mid-paint fix holds only for an element that already shows a paint (fresh mount regressed, H1); the item-cap message format is still written three times. Accepted threads: PRRT_kwDORFy7ds6yA3eI, PRRT_kwDORFy7ds6yOKfB, PRRT_kwDORFy7ds6yOKfD, PRRT_kwDORFy7ds6yOKfF, PRRT_kwDORFy7ds6yOKfG, PRRT_kwDORFy7ds6yOKfK. Standing: PRRT_kwDORFy7ds6yOKe_ (mid-paint, fresh mount), PRRT_kwDORFy7ds6yOKfJ (item cap: message format, load blamed by room name).",
+  "architectChecks": [
+    "The shipped write row warms the 49-marker shape before it times the pair (row carries warm: true; the loop writes it once first), so the tester's unwarmed 3.96x/3.77x pairs were not the shipped setup. The CI ratio is still to be read.",
+    "Firefox's page-parsed row is not yet read in CI: the dispatch lane was queued.",
+    "Not proven / risk now says the mid-paint fix is proven by its unit row alone (written by the reviewer in the PR body), and carries the tester's base/head write numbers in place of the '1 in 5 for base as well as head' claim, and the Firefox margin."
   ],
   "keyFindings": [
-    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx", "description": "Round-1 streaming finding still stands in part: each frame cancels the previous waiter, so an in-flight answer is dropped (worker-queue.ts:250) and, while a parse takes longer than the gap between snapshots (100 ms at the publisher's rate), nothing new paints for the length of the stream, not even as text. And since every changed source is sliced, a frame landing mid-slice leaves a truncated prefix on screen (deep review's repro: 250 of 1,511 paragraphs) until the next answer's whole paint lands."},
-    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx", "description": "The slice driver is still inline in the render callback with effect-scoped sliceTimer/slices/place reset by hand; extract it to a module function that owns the timer and returns the cancel."},
-    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/worker-queue.ts", "description": "Reply is generic, so isReady/answeredId are copied in both policies and each answerOf carries a dead ready guard; type the shared {ready} | {id} reply in the queue."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/reference_excerpts.go", "description": "The log line operators read and block_index_deferral_test.go's name, comments and failure messages still say the settlement indexes deferred blocks; the reconciliation does."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/persistence.go", "description": "088a8516's header-only item-cap check has no test (refuseUpdateItemCap, loadableHistory); a malformed stored history now fails in ygo's loadRoomDoc and skips failRoom; the itemCapError call in the !named branch cannot change anything. Comments it made false: tree.go:310-312, envoy AGENTS.md:578, document_copy_test.go:267, persistence.go:859-860."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/parse.go", "description": "BlockReadError/BlockShapeError are one-line wrappers only tests call; comments still call them the checks."},
-    {"severity": "minor", "file": "packages/proof-editor/src/block-nesting.ts", "description": "parseRecord exports the whole mutable record, including directive-container's private fields, bypassing the line reset."},
-    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx", "description": "inSlices doubled in the paint condition; the comment at 391-396 describes place, not inSlices."},
-    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts", "description": "MermaidJob adds nothing to WorkerJob."},
-    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/INFRA-625-bodies-parse-in-a-worker.yaml", "description": "Said 4,000 characters; fixed by the reviewer."},
-    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/markdown-worker-threshold.ts", "description": "126 ms of room against the table's 858 ms; fixed by the reviewer."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/reference_excerpts.go", "description": "deferBlockIndexBlocks's comment named the settlement; fixed by the reviewer."}
-  ],
-  "verified": [
-    "Round-1 threads: 14 of 16 hold at 94f1caba (threshold 2,000 with measurements; one shared worker queue; per-batch place correction; painted.current and the sliced pending marker; finishBlock; renderSpec with attrs and marks; the list fast path in the patch; the Go helpers; the headline; dispatch AGENTS.md; fragments renamed and the footnote caveat; the directive-container split and one ParseRecord; block_ids comment; DocumentJSON typing). The streaming thread stands; the reference_excerpts thread stands in part.",
-    "Tester's two round-3 failures: the write row 20 of 20 with --retries=0 (test.json); dispatch-memory green at the previous code head 5b4ffd8c with the four-column table at 178 MiB, not yet run at 94f1caba.",
-    "The merge 94f1caba's own resolution touches only bun.lock's patch order and packages/envoy/AGENTS.md, keeping both sides."
+    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx", "description": "H1: painted.current is set only in done(), and a new frame no longer stops a paint, so on a fresh mount a frame that arrives during the first sliced paint writes its raw markdown while the paint keeps attaching batches: raw text followed by 368 of 868 paragraphs, pending until the next answer (both reviewers reproduced; 94f1caba shows text only). The live view opened mid-stream is the trigger."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/worker-queue.ts", "description": "M1: a kept waiter (keepIfPosted) after unmount or after a newer frame painted makes expire() settle with withoutTheWorker = parseOnThePage, a synchronous page-thread parse of a body nobody shows (reproduced with setParseDeadline(50): 1 request, page parse, cached). Settle kept waiters only with a real answer."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/websocket.go", "description": "failUnfinishedLoad finds the failed load by room name after Apply returns; ygo removes the placeholder before waiters wake, so a newer load's record can be failed and deleted by an older waiter, and ErrServerShutdown/ErrUpdateTooLarge also reach it. Fail the load on its own goroutine (onLoadDocument's refusal, CompareAndDelete its own record) or in the ygo fork."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/persistence.go", "description": "The cap message format is written at :887, :907 and websocket_test.go:320."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/MarkdownBody.tsx", "description": "The restore path in paintBlockInSlices (:246-261) has no row: answer frame N+1 during N's paint and assert none-or-all of the previous body."},
+    {"severity": "minor", "file": "packages/dispatch/e2e/heavy-bodies.e2e.ts", "description": "Docblock says 'server otherwise idle' though the reconciliation of the >2,000-block bodies is not drained, and says the body is the first write of its shape, wrong for the warmed 49-marker row; the file grew to 1,058 lines, move the write row out."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/markdown-engine.ts", "description": "keepAPostedParse's doc says a streaming surface asks for it; every useRenderedMarkdown element does. packages/dispatch/AGENTS.md:546 does not describe the kept answer or the pending marker through an older frame's paint."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/stale_room.go", "description": "stale_room.go:167-169 and pending_authors.go:221-222 say a roomLoads entry goes only with its document; failRoomLoad now deletes it."},
+    {"severity": "minor", "file": "(PR body)", "description": "Fixed by the reviewer: Not proven / risk carried a write-row claim the tester's measurement contradicts and did not say the mid-paint fix has only its unit row; Look at first updated."}
   ]
 }
