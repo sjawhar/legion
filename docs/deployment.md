@@ -477,7 +477,12 @@ written by whichever daemon wrote last — so the order matters:
    process, and a host built from the worker image records its own sessions at the paths a pod
    used, so neither tells the two apart. That is what the key buys and what it costs: in this
    window a session of this host's own that has gone missing starts fresh too. Each workspace is
-   provisioned before its first launch.
+   provisioned before its first launch. While the key is set, an issue's close releases nothing in
+   Kubernetes, since this daemon cannot reach a Sandbox: it finishes the close's suspend effect and
+   logs `outbox: an issue close on a runtime that took the project over from Kubernetes released
+   nothing there` with the issue's Sandbox name. A Sandbox step 1 left, or one whose close the
+   Kubernetes daemon queued and never ran, is then named for the operator to delete, with its
+   volume on a release before the pod-owned disk.
 4. Retry what failed to launch meanwhile, once the cause is gone: `legion claims retry --failed`
    (an architect relaunches on its session; a phase worker whose issue is held for its own role
    retries that phase).

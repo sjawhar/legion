@@ -22,7 +22,7 @@ var _ runtime.IssueSuspender = (*Runtime)(nil)
 // next launch, if a person sets it todo again, makes the Sandbox afresh (ensureSandbox). The
 // parent's Sandbox is another issue's and is never touched.
 func (r *Runtime) SuspendIssue(ctx context.Context, issue, tree string, authorize func(context.Context) (bool, error)) error {
-	name, err := issueSandboxName(r.project, issue)
+	name, err := IssueSandboxName(r.project, issue)
 	if err != nil {
 		return fmt.Errorf("suspend issue %s: %w", issue, err)
 	}

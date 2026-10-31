@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
@@ -469,6 +470,7 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		}
 		suspender, ok := r.supervisor.deps.Runtime.(runtime.IssueSuspender)
 		if !ok {
+			r.leftToTheOperator(row, value)
 			return nil
 		}
 		closing := store.IssueClose{Issue: row.Issue, Tree: value.Tree, IssueGeneration: value.Generation,
@@ -495,6 +497,26 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
+}
+
+// leftToTheOperator is an issue close's suspend effect on a runtime that has no issue Sandbox to
+// suspend. The close finishes here either way: there is nothing this runtime can do, and a row held
+// open would hold the issue's later rows behind it. But a runtime that took the project's claims
+// over from a Kubernetes daemon (runtime.TakingOver) cannot reach that daemon's Sandboxes, so an
+// issue whose Sandbox the operator kept, or one whose close that daemon queued and never ran,
+// keeps its Sandbox and, on a release before the pod-owned disk, its volume. Finishing that
+// silently reads as a release that never happened; the warning names the Sandbox to delete.
+func (r *outbox) leftToTheOperator(row record.OutboxRow, value record.IssueSuspend) {
+	taking, ok := r.supervisor.deps.Runtime.(runtime.TakingOver)
+	if !ok || taking.TakesOver() != runtime.RuntimeSandbox {
+		return
+	}
+	name, err := sandbox.IssueSandboxName(r.project, row.Issue)
+	if err != nil {
+		name = fmt.Sprintf("(none: %v)", err)
+	}
+	r.log.Warn("outbox: an issue close on a runtime that took the project over from Kubernetes released nothing there; delete the issue's Sandbox if it still exists, with its volume (docs/deployment.md, \"Moving a project onto tmux\", step 1)",
+		"issue", row.Issue, "tree", value.Tree, "row", row.ID, "sandbox", name)
 }
 
 func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload record.StatusWrite) error {

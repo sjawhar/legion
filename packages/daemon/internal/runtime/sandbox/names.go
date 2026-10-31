@@ -319,11 +319,11 @@ func SandboxName(t claim.Token) string {
 // controller of the project controller's pod. Each has a role Secret of its own in its pod.
 var launcherRoles = append(slices.Clone(claim.Roles), claim.RoleController)
 
-// issueSandboxName is SandboxName of issue's role claims, from the issue key. project need not
+// IssueSandboxName is SandboxName of issue's role claims, from the issue key. project need not
 // already be a claim.ProjectToken (the caller's own Options.Project, the legion.dev/project
 // label's value, may carry characters one drops); it goes through ProjectToken here before
 // naming a claim.
-func issueSandboxName(project, issue string) (string, error) {
+func IssueSandboxName(project, issue string) (string, error) {
 	normalized, err := claim.ProjectToken(project)
 	if err != nil {
 		return "", err

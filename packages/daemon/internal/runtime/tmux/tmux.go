@@ -486,6 +486,15 @@ func (r *Runtime) paneOf(loc runtime.Locator) (string, incarnation, error) {
 // under runtime kubernetes left in the store (`runtime.tmux.take_over: kubernetes`).
 const TakeOverKubernetes = "kubernetes"
 
+var _ runtime.TakingOver = (*Runtime)(nil)
+
+// TakesOver is the runtime whose processes this one takes over: runtime.RuntimeSandbox under
+// `runtime.tmux.take_over: kubernetes`, "" without the key. The outbox reads it to say that an
+// issue close, run here, leaves the issue's Sandbox to the operator.
+func (r *Runtime) TakesOver() string {
+	return r.takeOver
+}
+
 // foreign is whether loc is a valid locator of the runtime this one takes over
 // (runtime.tmux.take_over): a Sandbox role process left in the store by a daemon that ran the
 // project under runtime kubernetes before this one. This runtime cannot see that process, stop it,
