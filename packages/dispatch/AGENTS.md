@@ -1473,38 +1473,47 @@ reaches, `/agents` with both folds, the broadcast page, an issue's Conversation)
 `seedWorkspace()` expects an empty database and returns the ids it made;
 it waits for the spec's decision block to be indexed, so `inboxRows` is exact when it resolves.
 
-`e2e/seed.ts` truncates the test database before each scenario. It first quiesces the server
+`e2e/seed.ts` empties the test database before each scenario. It first quiesces the server
 (`POST /api/v1/artifacts/_test/quiesce`, mounted by `DISPATCH_TEST_HOOKS=1`), which closes every
 live document and waits for the settlements in flight, so the documents the previous scenario had
-open finish writing before the truncate rather than failing against the emptied tables after it.
-`TRUNCATE` locks its tables one at a time, in its own order, so a transaction that reads two of
-them in another order can close a cycle with it, and PostgreSQL aborts one side: a settlement
-(which locks its document's owner row and then reads `artifact_versions`), a request from a page an
-earlier scenario left open, or one of the server's own sweeps. So the reset first takes
-`ACCESS EXCLUSIVE` on every table the truncate empties, and never waits while it holds one (the
-comment above `resetDatabaseOnce` says how), so the truncate cannot deadlock and the reset does
-not retry. A table still held after 5 s fails the reset, naming each holder's query. For a
-deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database and `E2E_AGENT_TOKEN` for
-bearer-seeded API calls. Every SQL statement the harness runs, `seed.ts`'s and
-`failed-room.e2e.ts`'s, goes through `sql()` in `e2e/psql.ts`, which resolves that database
-(`PLAYWRIGHT_DATABASE_URL` for a deployed server, else `DATABASE_URL`, never a default) and runs
-psql without `~/.psqlrc` and without `PGHOSTADDR`: libpq reads it and connects there in place of
-the URL's host, and the server's pgx does not read it, so with it set in a shell psql would
-truncate a database the server's own loopback check never saw. `PGHOST` and `PGSERVICE` stay,
+open finish writing before the delete rather than failing against the emptied tables after it.
+It then empties, in one statement, only the tables that hold rows among the ones it names and
+every table whose foreign keys reach them, and restarts the identity sequences of the tables it
+emptied, which is what `TRUNCATE ... RESTART IDENTITY CASCADE` did for all of them; emptying the
+tables that held nothing was most of the old reset's 441 ms. The delete locks its tables one at a
+time, in its own order, so a transaction that reads two of them in another order can close a cycle
+with it, and PostgreSQL aborts one side: a settlement (which locks its document's owner row and
+then reads `artifact_versions`), a request from a page an earlier scenario left open, or one of
+the server's own sweeps. So the reset first takes `ACCESS EXCLUSIVE` on every table it can empty,
+and never waits while it holds one (the comment above `resetDatabaseOnce` says how), so the delete
+cannot deadlock and the reset does not retry. A table still held after 5 s fails the reset, naming
+each holder's query. For a deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database
+and `E2E_AGENT_TOKEN` for bearer-seeded API calls. Every SQL statement the harness runs,
+`seed.ts`'s and `failed-room.e2e.ts`'s, goes through `sql()` in `e2e/psql.ts`, which resolves that
+database (`PLAYWRIGHT_DATABASE_URL` for a deployed server, else `DATABASE_URL`, never a default)
+and runs psql without `~/.psqlrc` and without `PGHOSTADDR`: libpq reads it and connects there in
+place of the URL's host, and the server's pgx does not read it, so with it set in a shell psql
+would empty a database the server's own loopback check never saw. `PGHOST` and `PGSERVICE` stay,
 since pgx and libpq read both; a service entry's `hostaddr`, the one key they part on, pgx sends
 to Postgres as a setting, which refuses the connection, so the harness server never boots on one.
 `e2e/psql.ts` imports nothing from `e2e/`, so a module can import it statically before the harness
-is up, without evaluating `e2e/api.ts`; its `sqlAt` runs the same psql against a URL it is given,
-and kills it when an `AbortSignal` it is passed fires, which `e2e/local-instance.ts` uses to
-create its database through the server's `postgres` one.
+is up, without evaluating `e2e/api.ts`. `sql()` runs its statements on one psql the process keeps
+open, started at the first call and asked for one statement at a time with a sentinel after each
+(`\echo` on stdout, `\warn` on stderr), since a session cannot use `ON_ERROR_STOP` without psql
+exiting on the first error; a statement psql wrote to stderr for is the call's failure, nothing
+after it runs, and a `ROLLBACK` leaves the session usable for the next caller. A call that arrives
+while another holds that session runs as a psql of its own, so two calls still reach the database
+at once. `sqlAt` runs one psql against a URL it is given, and kills it when an `AbortSignal` it is
+passed fires, which `e2e/local-instance.ts` uses to create its database through the server's
+`postgres` one.
 
 That reset is also the one rig failure that presents as a code failure. A transaction that holds
-one of the truncated tables for 5 s, such as a session left idle in a transaction, a long query, or
+one of the emptied tables for 5 s, such as a session left idle in a transaction, a long query, or
 a Dispatch server from an earlier run still listening on `DISPATCH_E2E_PORT`, makes
 `resetDatabase` throw in `beforeEach`. Because it throws in the hook, **every** spec in the file
-reports failed, each carrying the `psql … DO $$` lock step and the holders it names in its message,
-which reads as a catastrophic regression in the change under test. Recognise that shape as the
-rig: stop whatever holds those tables and run again. A run through `e2e/run.ts` cannot reach
+reports failed, each carrying the `DO $$` lock step's own error and the holders it names in its
+message, which reads as a catastrophic regression in the change under test. Recognise that shape
+as the rig: stop whatever holds those tables and run again. A run through `e2e/run.ts` cannot reach
 that shape through a port at all, since its servers serve on ports the OS chose for it alone, and
 this paragraph is where the harness-port rule lives — `README.md` and the `docs/solutions`
 learnings point here rather than restating it.

@@ -6,8 +6,8 @@ import { measured } from "./measure";
 import { sql } from "./psql";
 
 // The dashboard tables (dashboard_builds, dashboard_assets, dashboard_build_assets, migration 0136)
-// are not on this list, and no foreign key ties them to a table on it, so the CASCADE below never
-// reaches them: every server process publishes its build's assets there once, at boot, and in
+// are not on this list, and no foreign key ties them to a table on it, so the deletes below never
+// reach them: every server process publishes its build's assets there once, at boot, and in
 // two-process mode each answers the other build's chunks from there. A reset between scenarios
 // must not delete what both processes published when they started. The registry of live server
 // processes (server_processes, migration 0135) stays off it too: a process registers once, at
@@ -88,20 +88,21 @@ export async function clearIssueCreator(issueKey: string): Promise<void> {
   await sql(`UPDATE issues SET created_by = 'null'::jsonb WHERE key = ${sqlLiteral(issueKey)}`);
 }
 
-// TRUNCATE locks its tables one at a time, in its own order, waiting for each while it holds the
-// ones before it. A transaction that reads two of those tables in another order can close a cycle
-// with it (the Inbox reads asks before comments, the sidebar issues before user_issue_state), and
-// PostgreSQL breaks the cycle by aborting one side: the reset, or a server request or sweep. Such
-// a transaction can start at any moment: a page an earlier scenario left open refetches whenever
-// the live stream tells it to, and the server runs its own sweeps on timers. So before the
-// TRUNCATE, the reset takes ACCESS EXCLUSIVE on every table the TRUNCATE empties: the tables it
-// names, and every table whose foreign keys reach them, which CASCADE empties too. It never waits
-// while it holds one of those locks. Each try takes them all with NOWAIT; when one is held, the
-// try lets go of every lock it took, and the next try first waits for that one table while it
-// holds none, so the wait cannot close a cycle. Once it holds them all, nothing else touches those
-// tables until COMMIT; the TRUNCATE's other locks are on the tables' own sequences, which only an
-// insert into one of those tables advances. Each wait is capped at the time left of 5 s, so a
-// table still held 5 s after the step began fails the reset then, naming that table's holders.
+// The reset's delete locks its tables one at a time, in its own order, waiting for each while it
+// holds the ones before it. A transaction that reads two of those tables in another order can
+// close a cycle with it (the Inbox reads asks before comments, the sidebar issues before
+// user_issue_state), and PostgreSQL breaks the cycle by aborting one side: the reset, or a server
+// request or sweep. Such a transaction can start at any moment: a page an earlier scenario left
+// open refetches whenever the live stream tells it to, and the server runs its own sweeps on
+// timers. So before the delete, the reset takes ACCESS EXCLUSIVE on every table it can empty: the
+// tables it names, and every table whose foreign keys reach them, which a cascading delete empties
+// too. It never waits while it holds one of those locks. Each try takes them all with NOWAIT; when
+// one is held, the try lets go of every lock it took, and the next try first waits for that one
+// table while it holds none, so the wait cannot close a cycle. Once it holds them all, nothing
+// else touches those tables until COMMIT; the reset's other locks are on the tables' own
+// sequences, which only an insert into one of those tables advances. Each wait is capped at the
+// time left of 5 s, so a table still held 5 s after the step began fails the reset then, naming
+// that table's holders.
 
 async function resetDatabaseOnce(): Promise<void> {
   await sql(
@@ -110,11 +111,19 @@ async function resetDatabaseOnce(): Promise<void> {
       DECLARE
         targets regclass[];
         target regclass;
+        logging regclass[];
+        refilled boolean;
+        emptied regclass[] := '{}';
+        passes int := 0;
+        deletes text[];
+        sequence_name text;
+        holds_rows boolean;
         contended regclass;
         holders text;
         deadline timestamptz := clock_timestamp() + interval '5 seconds';
       BEGIN
-        -- The closure TRUNCATE ... CASCADE empties. packages/envoy/internal/pgmigrate/touched.go
+        -- The closure a TRUNCATE ... CASCADE of these tables would empty, which is the closure
+        -- the deletes below reach. packages/envoy/internal/pgmigrate/touched.go
         -- (reachedByForeignKeys) walks the same closure for a migration's truncate.
         WITH RECURSIVE truncated(rel) AS (
           SELECT unnest(ARRAY[${tables.map(sqlLiteral).join(", ")}]::regclass[])
@@ -156,9 +165,56 @@ async function resetDatabaseOnce(): Promise<void> {
         END LOOP;
         -- The waits above are the only ones lock_timeout bounds.
         PERFORM set_config('lock_timeout', '0', true);
+        -- Unlike TRUNCATE, a DELETE fires the row triggers, and the delivery tables' log their
+        -- own deletions into delivery_changes. So a pass that emptied a table whose deletion
+        -- fires one (pg_trigger's tgtype bit 8) probes again; the log table itself has no such
+        -- trigger, so the second pass ends it. Nothing else in this schema deletes into another
+        -- table, so a reset of rows no delivery spec wrote pays one pass.
+        SELECT coalesce(array_agg(DISTINCT t.tgrelid::regclass), '{}') INTO logging
+          FROM pg_trigger t
+          WHERE t.tgrelid = ANY (targets::oid[]) AND NOT t.tgisinternal AND (t.tgtype & 8) <> 0;
+        LOOP
+          -- Almost every row dirties a handful of the closure's 63 tables, and emptying the ones
+          -- that hold no rows is most of what the old TRUNCATE of all of them cost. Each table is
+          -- probed instead, and only the ones holding rows are emptied.
+          deletes := '{}';
+          refilled := false;
+          FOREACH target IN ARRAY targets LOOP
+            EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', target) INTO holds_rows;
+            IF holds_rows THEN
+              emptied := emptied || target;
+              deletes := deletes || format('d%s AS (DELETE FROM %s)', cardinality(deletes), target);
+              refilled := refilled OR target = ANY (logging);
+            END IF;
+          END LOOP;
+          EXIT WHEN cardinality(deletes) = 0;
+          -- One statement, because this schema's foreign keys that are neither CASCADE nor SET
+          -- NULL are NO ACTION (none is RESTRICT), and a NO ACTION reference is checked at the
+          -- end of the statement: every delete is done by then, so no order among them is needed
+          -- and a referenced row emptied after its referrers is still fine. Every CTE of a
+          -- data-modifying WITH runs, whether the main query reads it or not.
+          EXECUTE 'WITH ' || array_to_string(deletes, ', ') || ' SELECT 1';
+          EXIT WHEN NOT refilled;
+          passes := passes + 1;
+          IF passes > 3 THEN
+            RAISE EXCEPTION 'tables still held rows after % delete passes: %', passes, deletes;
+          END IF;
+        END LOOP;
+        -- What RESTART IDENTITY did, for the tables that were emptied: the sequences their own
+        -- columns own (pg_depend's 'a' for a serial, 'i' for an identity column). A DELETE leaves
+        -- them where they stood, and the next insert would then collide with a row a trigger
+        -- logged under a seq this reset gave back (delivery_changes), so this is not optional.
+        FOR sequence_name IN
+          SELECT DISTINCT s.oid::regclass::text
+            FROM pg_class s
+            JOIN pg_depend d ON d.classid = 'pg_class'::regclass AND d.objid = s.oid
+              AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+            WHERE s.relkind = 'S' AND d.refobjid = ANY (emptied::oid[])
+        LOOP
+          EXECUTE format('ALTER SEQUENCE %s RESTART', sequence_name);
+        END LOOP;
       END
     $$`,
-    `TRUNCATE TABLE ${tables.join(", ")} RESTART IDENTITY CASCADE`,
     // The people the scenarios act as, as if each had signed in: the only assignable names.
     "INSERT INTO people (email) VALUES ('alice'), ('bob')",
     "COMMIT"
@@ -166,18 +222,18 @@ async function resetDatabaseOnce(): Promise<void> {
 }
 
 /**
- * Truncates every table, after the server has closed every live document and finished the
+ * Empties every table, after the server has closed every live document and finished the
  * settlements in flight, so the documents the previous scenario had open finish writing before
- * the truncate rather than failing against the emptied tables after it. The truncate cannot
+ * the delete rather than failing against the emptied tables after it. The delete cannot
  * deadlock with whatever else still reaches the database (the comment above resetDatabaseOnce).
  * It also clears the fake Envoy, whose
- * process-local subscriptions outlive a database truncate and otherwise match recycled issue keys,
+ * process-local subscriptions outlive an emptied database and otherwise match recycled issue keys,
  * the fake broker, whose seeded credential requests would otherwise reach every later row's
  * Inbox, and the fake GitHub, whose installations would otherwise let a later row's reconcile
  * succeed against repositories it never seeded; those resets wait on nothing in the database, so
- * they run beside the quiesce and truncate, which keep their order. All settle before this returns,
+ * they run beside the quiesce and delete, which keep their order. All settle before this returns,
  * a failed one included, so a reset that fails never leaves another running into the next test's.
- * The truncate takes `user_sessions` with it, so a session cookie minted before it is refused
+ * The delete takes `user_sessions` with it, so a session cookie minted before it is refused
  * until its login signs in again: e2e/api.ts forgets its cached ones here, and a browser context
  * signs in after the reset (e2e/users.ts).
  *
