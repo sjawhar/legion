@@ -57,7 +57,7 @@ func TestLastStoredMessageAnswersTheNewestMessageOnTheSubject(t *testing.T) {
 	client := keptClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	subject := contracts.KeptRoleSubject("last-stored-reader")
+	subject := bus.KeptRoleSubject("last-stored-reader")
 
 	if _, err := client.LastStoredMessage(ctx, subject); !errors.Is(err, natsgo.ErrMsgNotFound) {
 		t.Fatalf("read of a subject the stream holds nothing on = %v, want nats.ErrMsgNotFound", err)
@@ -90,22 +90,18 @@ func TestLastStoredMessageAnswersTheNewestMessageOnTheSubject(t *testing.T) {
 // A kept copy is stored on the role's kept subject while the envelope still names the role topic
 // it was published on, so the next holder is handed the message as its sender sent it. Every
 // listener that could not deliver that message writes its copy under one id (KeptMsgID), so the
-// second write is reported a duplicate and the stream still holds one message on the subject.
-func TestPublishStoredOnKeepsTheEnvelopesOwnTopicAndCollapsesRepeats(t *testing.T) {
+// second write is collapsed into the first and the stream still holds one message on the subject.
+func TestPublishStoredAsKeepsTheEnvelopesOwnTopicAndCollapsesRepeats(t *testing.T) {
 	client := keptClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	const role = "kept-writer"
-	subject := contracts.KeptRoleSubject(role)
+	subject := bus.KeptRoleSubject(role)
 	item := keptEnvelope(role, "kept-1")
 	msgID := bus.KeptMsgID(item.DedupeKey, role)
 
-	duplicate, err := client.PublishStoredOn(ctx, subject, item, msgID)
-	if err != nil {
+	if err := client.PublishStoredAs(ctx, subject, item, msgID); err != nil {
 		t.Fatalf("first kept publish: %v", err)
-	}
-	if duplicate {
-		t.Fatal("the first kept publish reported a duplicate; the stream held nothing on the subject")
 	}
 
 	stored, err := client.LastStoredMessage(ctx, subject)
@@ -126,12 +122,8 @@ func TestPublishStoredOnKeepsTheEnvelopesOwnTopicAndCollapsesRepeats(t *testing.
 		t.Fatalf("the kept envelope's event id = %q, want %q", kept.EventID, item.EventID)
 	}
 
-	duplicate, err = client.PublishStoredOn(ctx, subject, item, msgID)
-	if err != nil {
+	if err := client.PublishStoredAs(ctx, subject, item, msgID); err != nil {
 		t.Fatalf("second kept publish: %v", err)
-	}
-	if !duplicate {
-		t.Fatal("a second kept copy under the same id must be reported a duplicate")
 	}
 	if held := storedOn(t, client, subject); held != 1 {
 		t.Fatalf("the stream holds %d messages on %s, want 1", held, subject)
@@ -146,7 +138,7 @@ func TestPublishCursorAtRefusesAWriteWhoseCursorMoved(t *testing.T) {
 	client := keptClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	subject := contracts.KeptRoleCursorSubject("cursor-racer")
+	subject := bus.KeptRoleCursorSubject("cursor-racer")
 
 	first, err := client.PublishCursorAt(ctx, subject, []byte(`{"seq":11}`), 0)
 	if err != nil {

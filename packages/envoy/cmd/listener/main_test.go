@@ -562,7 +562,7 @@ func TestPublishHandler_RoleMessageReachesTheCurrentHolderWithoutTheRoleLane(t *
 	// Set B as the KV value that the route must resolve. This models a
 	// publish that races the handover: the single listener chooses one current
 	// owner, rather than relying on two holders to observe the change first.
-	claimDeps := &listenerDeps{registry: harness.registry, sessions: harness.sessions}
+	claimDeps := &listenerDeps{registry: harness.registry, sessions: harness.sessions, delivery: &harness.config}
 	if err := harness.sessions.Put("ses_role_b", session.SessionEntry{
 		MachineID:      "test-machine",
 		SelfSubscribed: true,
@@ -701,7 +701,7 @@ func TestPublishHandler_RoleFreshDeafHolderAnswersReceiptTimeout(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	role := "fresh-deaf-holder"
 	roleTopic := contracts.RoleTopicPrefix + role
-	claimState := &listenerDeps{registry: harness.registry, sessions: harness.sessions}
+	claimState := &listenerDeps{registry: harness.registry, sessions: harness.sessions, delivery: &harness.config}
 	if err := harness.sessions.Put("ses_deaf", session.SessionEntry{
 		MachineID:      "test-machine",
 		SelfSubscribed: true,
@@ -1133,7 +1133,7 @@ func TestRoleSetHandler_Validation(t *testing.T) {
 
 func TestRoleSetHandler_SetsRole(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	state := &listenerDeps{registry: registry, sessions: sessions}
+	state := withRoleClaimDrain(t, &listenerDeps{client: setupPublishTestClient(t), registry: registry, sessions: sessions})
 	handler := roleSetHandler(state, "test-machine")
 	if err := sessions.Put("ses_role", session.SessionEntry{MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register role session: %v", err)
@@ -2666,7 +2666,7 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrated consumer: %v", err)
 	}
-	if consumerInfo.Config.FilterSubject != "" || !slices.Equal(consumerInfo.Config.FilterSubjects, bus.DurableNotificationSubjects()) {
+	if consumerInfo.Config.FilterSubject != "" || !slices.Equal(consumerInfo.Config.FilterSubjects, bus.StreamSubjects()) {
 		t.Fatalf("migrated consumer filters = %#v", consumerInfo.Config)
 	}
 	if consumerInfo.Config.InactiveThreshold != consumerInactiveThreshold {
@@ -3718,9 +3718,10 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client, transport ht
 		messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
 		deliveryDuration:  met.NewHistogram("test_delivery_duration", "test", metrics.DefaultBuckets),
 		roleKeptExpired:   met.NewCounter("test_role_kept_expired", "test"),
-		// The handler refuses a config without its deferral set, as main.go's always has one;
-		// the harness's two handlers share this one as main.go's do.
+		// The handler refuses a config without its deferral set or its kept-lane drain guards, as
+		// main.go's always has both; the harness's two handlers share these as main.go's do.
 		deferredUnplaceable: newUnplaceableDeferrals(),
+		roleKeepDrains:      newRoleKeepGuards(),
 	}
 	// The durable path's pushes to serving-port sessions run on the workers, and the role lane's
 	// forwards on the role forwarder, as main.go wires them: both are the one path those messages

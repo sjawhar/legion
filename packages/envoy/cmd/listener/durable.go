@@ -123,7 +123,7 @@ func listenerDurable(client *bus.Client, consumer string) (*nats.ConsumerInfo, e
 // The config drift-correction also stamps consumerInactiveThreshold onto
 // consumers created before the threshold existed.
 func startListenerSubscription(client *bus.Client, consumer string, handler nats.MsgHandler) (*nats.Subscription, error) {
-	subjects := bus.DurableNotificationSubjects()
+	subjects := bus.StreamSubjects()
 	info, err := listenerDurable(client, consumer)
 	switch {
 	case err != nil:

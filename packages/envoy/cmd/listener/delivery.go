@@ -89,6 +89,14 @@ type listenerDeliveryHandlerConfig struct {
 	// drawing a private set, since a set per handler is a second budget beside the first on the
 	// very rebind this retry exists for. A test that builds a config sets its own.
 	deferredUnplaceable *unplaceableDeferrals
+	// roleKeepDrains holds one guard per role, so two drains of one role inside this listener do
+	// not walk that role's kept lane together and read the same copy twice (drainKeptRole).
+	// Across listeners the guard is the kept lane's cursor: each drain claims a copy by advancing
+	// the cursor under a compare-and-swap before it forwards it, and the loser of that claim stops
+	// (bus.ErrCursorMoved, claimKeptRoleCopy). It is required, as deferredUnplaceable is: main.go
+	// makes one and sets it once, so every handler and every route built from that config guards
+	// one set of roles. A test that builds a config sets its own.
+	roleKeepDrains *roleKeepGuards
 }
 
 // wireDeliveryWorkers starts the workers every delivery path hands its work to and returns cfg
@@ -260,7 +268,7 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 	}
 	if origin != "" && bus.StreamCaptures(exception.Topic) {
 		// The stream keeps one copy however many listeners raise it, each from its own durable.
-		if err := client.PublishStoredAs(context.Background(), exception, "exception."+reason+"."+origin); err != nil {
+		if err := client.PublishStoredAs(context.Background(), exception.Topic, exception, "exception."+reason+"."+origin); err != nil {
 			return fmt.Errorf("publish delivery exception: %w", err)
 		}
 		return nil
@@ -369,11 +377,15 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 // currently holds the role), a direct agent subject, or the general interest fanout.
 //
 // cfg arrives by value, so every handler built from one config shares the deferral set the
-// unplaceable retry bounds itself with only because the field is a pointer; a config without one
-// is a programming error, refused here at construction rather than at the first deferral.
+// unplaceable retry bounds itself with, and the guards one role's drains take, only because each
+// field is a pointer; a config without either is a programming error, refused here at
+// construction rather than at the first deferral or the first drain.
 func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMessage) {
 	if cfg.deferredUnplaceable == nil {
 		panic("listener delivery handler built without its deferral set (deferredUnplaceable)")
+	}
+	if cfg.roleKeepDrains == nil {
+		panic("listener delivery handler built without its kept-lane drain guards (roleKeepDrains)")
 	}
 	return func(message deliveryMessage) {
 		var item contracts.Envelope

@@ -1,9 +1,9 @@
 // The listener's kept lane for role messages: the copy it stores when a role message has no live
-// holder to take it (contracts.KeptRoleSubject), and the drain that hands those copies to the
-// role's next holder when the role is claimed (contracts.KeptRoleCursorSubject). Both subjects are
-// the listener's own: no session may register a topic under them, and no consumer of the
-// notification stream delivers one (bus.DurableNotificationSubjects), so a kept copy never
-// re-enters the delivery path it was taken out of.
+// holder to take it (bus.KeptRoleSubject), and the drain that hands those copies to the role's
+// next holder when the role is claimed (bus.KeptRoleCursorSubject). Both subjects are the
+// listener's own: no session may register a topic under them, and no consumer of the notification
+// stream delivers one (bus.StreamSubjects carries no kept prefix), so a kept copy never re-enters
+// the delivery path it was taken out of.
 
 package main
 
@@ -81,16 +81,21 @@ type roleKeepCursor struct {
 	Kept uint64 `json:"kept"`
 }
 
-// roleKeepDrains holds one guard per role, so two drains of one role inside this listener do not
-// walk its kept lane together and read the same copy twice. Across listeners the claim each drain
-// makes on a copy before it forwards it is the guard: the cursor's compare-and-swap refuses the
-// loser's claim (bus.ErrCursorMoved, claimKeptRoleCopy) and that drain stops.
-// A role's guard is kept for the process's life, which costs one mutex per role this listener has
-// ever seen claimed.
-var roleKeepDrains sync.Map
+// roleKeepGuards holds one guard per role, so two drains of one role inside this listener do not
+// walk its kept lane together and read the same copy twice. A role's guard is kept for the set's
+// life, which costs one mutex per role the listener it belongs to has seen claimed. One set is
+// built per process (main.go), as listenerDeliveryHandlerConfig.roleKeepDrains.
+type roleKeepGuards struct {
+	guards sync.Map
+}
 
-func roleKeepGuard(role string) *sync.Mutex {
-	guard, _ := roleKeepDrains.LoadOrStore(role, &sync.Mutex{})
+func newRoleKeepGuards() *roleKeepGuards {
+	return &roleKeepGuards{}
+}
+
+// guard is role's own mutex, made on the first drain of that role.
+func (g *roleKeepGuards) guard(role string) *sync.Mutex {
+	guard, _ := g.guards.LoadOrStore(role, &sync.Mutex{})
 	return guard.(*sync.Mutex)
 }
 
@@ -129,7 +134,7 @@ func roleKeepable(result roleHolderResult) bool {
 func keepRoleMessage(client *bus.Client, logger *logging.Logger, role string, item contracts.Envelope) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), roleKeepPublishWindow)
 	defer cancel()
-	if _, err := client.PublishStoredOn(ctx, contracts.KeptRoleSubject(role), item, bus.KeptMsgID(item.DedupeKey, role)); err != nil {
+	if err := client.PublishStoredAs(ctx, bus.KeptRoleSubject(role), item, bus.KeptMsgID(item.DedupeKey, role)); err != nil {
 		logger.Error(roleKeepFailedLine,
 			slog.String("role", role),
 			slog.String("event_id", item.EventID),
@@ -173,12 +178,8 @@ func keepRoleLaneMessage(cfg listenerDeliveryHandlerConfig, role, holder string,
 // startKeptRoleDrain hands role's kept lane to holder, the session that has just claimed it, off
 // the claim's own request: the drain reads the stream and forwards, and the claim's status and
 // body must not wait for either, so it runs in a goroutine under a context of its own bounded by
-// roleKeepDrainWindow. A listener whose delivery configuration is not wired starts nothing: it has
-// no forward to hand a kept copy to.
+// roleKeepDrainWindow.
 func startKeptRoleDrain(cfg *listenerDeliveryHandlerConfig, role, holder string, entry session.SessionEntry) {
-	if cfg == nil {
-		return
-	}
 	config := *cfg
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), roleKeepDrainWindow)
@@ -201,9 +202,6 @@ func startKeptRoleDrain(cfg *listenerDeliveryHandlerConfig, role, holder string,
 // one stream read, and two drains of one role never hand the same copy to two holders
 // (drainKeptRole).
 func drainAfterKeep(cfg *listenerDeliveryHandlerConfig, role string) {
-	if cfg == nil {
-		return
-	}
 	config := *cfg
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), roleKeepDrainWindow)
@@ -263,7 +261,7 @@ func runKeptRoleDrain(ctx context.Context, cfg listenerDeliveryHandlerConfig, ro
 // the lane (bus.ErrCursorMoved) is nothing wrong: that listener owns this role's lane now, and
 // this drain stops.
 func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, holder string, entry session.SessionEntry, now func() time.Time) error {
-	guard := roleKeepGuard(role)
+	guard := cfg.roleKeepDrains.guard(role)
 	guard.Lock()
 	defer guard.Unlock()
 
@@ -271,7 +269,7 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role,
 	// here, on one stream read rather than two: the cursor says nothing a lane with no message
 	// can act on. A lane the cursor has already been advanced past ends on the second read, as
 	// a cursor-first drain would.
-	keptSubject := contracts.KeptRoleSubject(role)
+	keptSubject := bus.KeptRoleSubject(role)
 	last, err := cfg.client.LastStoredMessage(ctx, keptSubject)
 	if errors.Is(err, nats.ErrMsgNotFound) {
 		return nil
@@ -279,7 +277,7 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role,
 	if err != nil {
 		return fmt.Errorf("read role %s's kept lane: %w", role, err)
 	}
-	cursorSubject := contracts.KeptRoleCursorSubject(role)
+	cursorSubject := bus.KeptRoleCursorSubject(role)
 	cursorSeq, from, err := readRoleKeepCursor(ctx, cfg.client, cursorSubject)
 	if err != nil {
 		return fmt.Errorf("read role %s's kept-lane cursor: %w", role, err)

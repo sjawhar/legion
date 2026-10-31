@@ -981,6 +981,11 @@ func main() {
 		// handler it replaces was holding rather than opening a second one beside it
 		// (unplaceableDeferrals, unplaceable_delivery.go).
 		deferredUnplaceable: newUnplaceableDeferrals(),
+		// One guard per role for the life of the process, so two drains of one role inside this
+		// listener - a claim's and the one a keep starts - never walk its kept lane together
+		// (roleKeepGuards, role_keep.go). Every handler and route built from this one value
+		// shares it, as they share the deferral set above.
+		roleKeepDrains: newRoleKeepGuards(),
 	}
 	// The durable path's pushes to serving-port sessions run off its handler, on one worker per
 	// session (servePortWorkers), so a port slow to accept holds up no other session's delivery;

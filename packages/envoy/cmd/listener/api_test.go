@@ -857,7 +857,7 @@ func trailingListeners(t *testing.T) (claimant, observer *listenerDeps) {
 		if err := sessions.WaitForCacheReady(ctx); err != nil {
 			t.Fatalf("warm the %s's session cache: %v", name, err)
 		}
-		return &listenerDeps{client: client, registry: registry, sessions: sessions}
+		return withRoleClaimDrain(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	}
 	claimant, observer = open("claimant"), open("observer")
 	observer.sessions.StopWatch()
@@ -1047,7 +1047,7 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 	})
 	t.Run("role delivery", func(t *testing.T) {
 		harness := newListenerDeliveryHarness(t, nil)
-		claimant := &listenerDeps{client: harness.client, registry: harness.registry}
+		claimant := &listenerDeps{client: harness.client, registry: harness.registry, delivery: &harness.config}
 		var err error
 		if claimant.sessions, err = session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1)); err != nil {
 			t.Fatalf("open the claimant's session registry: %v", err)
@@ -1296,7 +1296,7 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	if err := firstSessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 		t.Fatalf("register role holder: %v", err)
 	}
-	firstState := &listenerDeps{client: client, registry: firstRegistry, sessions: firstSessions}
+	firstState := withRoleClaimDrain(t, &listenerDeps{client: client, registry: firstRegistry, sessions: firstSessions})
 	claim := httptest.NewRecorder()
 	roleSetHandler(firstState, "test-machine").ServeHTTP(
 		claim,
@@ -1378,7 +1378,7 @@ func TestRoleSetHandlerSoftClaim(t *testing.T) {
 			t.Fatalf("register %s: %v", id, err)
 		}
 	}
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := withRoleClaimDrain(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	mux := http.NewServeMux()
 	registerV1Routes(mux, state, "test-machine", logging.New("test"))
 	post := func(body string) *httptest.ResponseRecorder {

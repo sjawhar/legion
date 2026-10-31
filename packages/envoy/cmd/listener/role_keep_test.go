@@ -38,7 +38,7 @@ func readKeptRoleMessage(t *testing.T, client *bus.Client, role string) (contrac
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	stored, err := client.LastStoredMessage(ctx, contracts.KeptRoleSubject(role))
+	stored, err := client.LastStoredMessage(ctx, bus.KeptRoleSubject(role))
 	if errors.Is(err, natsgo.ErrMsgNotFound) {
 		return contracts.Envelope{}, false
 	}
@@ -284,8 +284,8 @@ func TestAKeptRoleMessageOlderThanTheKeepWindowIsDroppedAndTheCursorMovesPastIt(
 
 // Both of the role lane's give-up branches - a role nobody claims and a claim whose holder is
 // gone - keep the message instead of reporting it lost: no delivery exception goes out. The kept
-// copy lies on a subject no consumer filter carries (bus.DurableNotificationSubjects), so the
-// durable never delivers it back and it is never counted received a second time.
+// copy lies on a subject no consumer filter carries (bus.StreamSubjects), so the durable never
+// delivers it back and it is never counted received a second time.
 func TestTheRoleLanesGiveUpBranchesKeepTheMessageWithNoException(t *testing.T) {
 	cases := []struct {
 		name string
@@ -495,7 +495,12 @@ func TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder(t *testing.T) {
 		})
 		return toFirst(subject, item, window)
 	})
+	// The second drain stands in for a second listener: it has guards of its own, where one
+	// listener's guard for the role would hold it until the first drain released it. One guard per
+	// role bounds the drains inside one listener (roleKeepGuards); across listeners the cursor's
+	// compare-and-swap is the guard, which is what this test exercises.
 	second := harness.config
+	second.roleKeepDrains = newRoleKeepGuards()
 	second.forwardRole = inlineForward(hand(holderB))
 
 	entry := session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}
@@ -506,10 +511,6 @@ func TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder(t *testing.T) {
 		done <- drainKeptRole(ctx, first, role, holderA, entry, time.Now)
 	}()
 	<-started
-	// One guard per role bounds the drains inside one listener (roleKeepDrains); two listeners
-	// hold one each, which is what the cursor's compare-and-swap is the guard for. Dropping this
-	// process's guard for the role is how the drain below stands in for that second listener.
-	roleKeepDrains.Delete(role)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := drainKeptRole(ctx, second, role, holderB, entry, time.Now); err != nil {
@@ -764,15 +765,15 @@ func TestTheRoleLaneKeepsNothingForAClaimTheRestartGraceRetained(t *testing.T) {
 func TestAPublishToTheListenersKeptLaneIsRefused(t *testing.T) {
 	d, client := keptRoleDeps(t)
 	const role = "kept-lane-guard"
-	for _, subject := range []string{contracts.KeptRoleSubject(role), contracts.KeptRoleCursorSubject(role)} {
+	for _, subject := range []string{bus.KeptRoleSubject(role), bus.KeptRoleCursorSubject(role)} {
 		t.Run(subject, func(t *testing.T) {
 			recorder, _ := publishThrough(d,
 				`{"topic":"`+subject+`","source":"agent","message":"a copy of my own"}`)
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("publish to %s: status %d, body %s; want 400", subject, recorder.Code, recorder.Body.String())
 			}
-			if body := recorder.Body.String(); !strings.Contains(body, contracts.KeptTopicPrefix) {
-				t.Fatalf("the refusal of %s is %q, want it to name %s", subject, body, contracts.KeptTopicPrefix)
+			if body := recorder.Body.String(); !strings.Contains(body, bus.KeptTopicPrefix) {
+				t.Fatalf("the refusal of %s is %q, want it to name %s", subject, body, bus.KeptTopicPrefix)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

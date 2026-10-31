@@ -1,5 +1,4 @@
 kind: Added
 body: |-
-  `KEPT_TOPIC_PREFIX`, `keptRoleSubject` and `keptRoleCursorSubject`, the subjects Envoy's listener
-  keeps an undeliverable role message and its drain cursor on, and the envelope's optional
-  `kept_at`.
+  The envelope's optional `kept_at`: the time Envoy's listener kept an undeliverable role message,
+  carried on the copy it forwards to the role's next holder.

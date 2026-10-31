@@ -1365,29 +1365,23 @@ func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contr
 	return c.publishJetStream(ctx, item)
 }
 
-// PublishStoredAs publishes item to the notification stream under Nats-Msg-Id msgID instead of the
-// one publishJetStream derives, within ctx's bound as PublishWithin's, for a caller that names the
-// stored message itself: the listener's exception about a stored message, which every listener that
-// raises it from its own durable publishes under one id, so the stream keeps one copy. A duplicate
-// the stream drops counts as published. Its refusals are publishJetStream's (ErrTooLarge,
-// ErrRefused). item.Topic must be one the stream captures.
-func (c *Client) PublishStoredAs(ctx context.Context, item contracts.Envelope, msgID string) error {
-	_, err := c.publishJetStreamOn(ctx, item.Topic, item, msgID)
+// PublishStoredAs publishes item to the notification stream on subject, under Nats-Msg-Id msgID
+// instead of the one publishJetStream derives, within ctx's bound as PublishWithin's, for a caller
+// that names both the subject it is stored on and the stored message itself:
+//   - the listener's exception about a stored message, published on the exception's own topic,
+//     which every listener that raises it from its own durable publishes under one id, so the
+//     stream keeps one copy;
+//   - a role message the listener could not deliver, stored on that role's kept subject
+//     (KeptRoleSubject) while the envelope keeps its own topic field, so the holder that later
+//     takes the role is handed the message as its sender sent it. Every listener that kept the
+//     same message writes it under one id (KeptMsgID).
+//
+// A duplicate the stream drops counts as published, which is the ordinary case for a kept copy
+// rather than a fault. Its refusals are publishJetStream's (ErrTooLarge, ErrRefused); subject must
+// be one the stream captures, or nothing answers the publish.
+func (c *Client) PublishStoredAs(ctx context.Context, subject string, item contracts.Envelope, msgID string) error {
+	_, err := c.publishJetStreamOn(ctx, subject, item, msgID)
 	return err
-}
-
-// PublishStoredOn publishes item to the notification stream on subject, which is not item.Topic,
-// under Nats-Msg-Id msgID, within ctx's bound as PublishStoredAs's, and reports JetStream's
-// duplicate verdict as PublishReportingDuplicate does. The envelope keeps its own topic field: the
-// listener stores a role message it could not deliver on that role's kept subject
-// (contracts.KeptRoleSubject) while the stored envelope still says which role topic it was
-// published on, so the holder that later takes the role is handed the message as its sender sent
-// it. Every listener that kept the same message writes it under one id (KeptMsgID), so the
-// duplicate the stream reports here is the ordinary case rather than a fault. Its refusals are
-// publishJetStream's (ErrTooLarge, ErrRefused); subject must be one the stream captures, or
-// nothing answers the publish.
-func (c *Client) PublishStoredOn(ctx context.Context, subject string, item contracts.Envelope, msgID string) (bool, error) {
-	return c.publishJetStreamOn(ctx, subject, item, msgID)
 }
 
 // publishJetStream publishes item to the notification stream within ctx's bound. The MsgId, where
@@ -1437,7 +1431,7 @@ func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) 
 
 // publishJetStreamOn is publishJetStream to subject under Nats-Msg-Id msgID, none when it is
 // empty. Every publish of the envelope's own topic passes item.Topic; a kept role message passes
-// the subject it is stored on (PublishStoredOn), which leaves item.Topic the role topic it was
+// the subject it is stored on (PublishStoredAs), which leaves item.Topic the role topic it was
 // published on.
 func (c *Client) publishJetStreamOn(ctx context.Context, subject string, item contracts.Envelope, msgID string) (bool, error) {
 	if err := checkSubject(subject); err != nil {
@@ -1614,13 +1608,13 @@ func ForwardMsgID(dedupeKey, subject string) string {
 }
 
 // KeptMsgID is the Nats-Msg-Id of the kept copy of a role message whose dedupe key is dedupeKey:
-// its forward id on that role's kept subject (ForwardMsgID, contracts.KeptRoleSubject). Every
+// its forward id on that role's kept subject (ForwardMsgID, KeptRoleSubject). Every
 // listener of the deployment takes the same raw role publish on its own role-lane subscription,
 // so each of them may find the role undeliverable and write a kept copy of that one message.
 // Under one id the stream's duplicate window collapses those copies into the single stored copy
 // the next holder of the role is handed.
 func KeptMsgID(dedupeKey, role string) string {
-	return ForwardMsgID(dedupeKey, contracts.KeptRoleSubject(role))
+	return ForwardMsgID(dedupeKey, KeptRoleSubject(role))
 }
 
 // ErrForwardNotStored is returned by RequestCoreTo when the holder's empty receipt arrived but the
