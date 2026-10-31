@@ -1,5 +1,27 @@
 # Changelog
 
+## [main@1d3e69553791] - 2026-10-31
+
+### Fixed
+
+- With `DISPATCH_TOKEN_FILE` set and nothing naming the server, `dispatchSettings` and the start notice of `sessionSettings` say `DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for` (`lostDispatchUrlNotice`). They said `no envoy.json at <path>: Dispatch is off` or `<file> names no Dispatch server, …`. Legion sets the variable only beside `DISPATCH_URL`, and a Legion pod has no envoy.json, so an agent whose shell had run `unset DISPATCH_URL` looked for a lost file. When the chosen file is missing, its dangling link and the unread OpenCode-era user file still follow, the old file last. `DISPATCH_TOKEN` alone, a file that turns Dispatch off and a file that cannot be read keep their own notice or error.
+
+## [main@d7e1daaaaf70] - 2026-10-31
+
+### Added
+
+- A `dispatch doc-edit` or `dispatch artifact` whose version superseded a person's approval ends
+  its result with what that write did: the version it stored, the approved version it replaced
+  and who approved it, that the approval is stale until someone approves the new version and no
+  undo restores it, and that a Legion design gate on the document is closed meanwhile, so every
+  READY in its tree is refused. It names both ways on: request approval for the new version, or
+  tell the tree's architect and keep the next correction in a comment or in the plan. A write
+  that superseded no approval prints nothing.
+
+### Changed
+
+- The write advice at six session writes with no human response states the duty at the end it already named: "Stop posting here until a human replies. Their reply ends this: post then what you held back." The old text named the end and no duty there, so a session whose questions were answered acted on the answers and wrote none of it back into the threads.
+
 ## [main@e65900f4438b] - 2026-10-30
 
 ### Added
