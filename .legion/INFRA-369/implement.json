@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-369",
-  "completed": "2026-10-31T00:35:00Z",
-  "round": "the review round: the reviewer's thirteen findings at f11d32e5, answered at dd2f17197c3ffbb053dd11d687ff57f8dde8f118",
+  "completed": "2026-10-31T03:10:00Z",
+  "round": "the second review round: the reviewer's eleven findings at 158e057e, answered at 1b769383daf41f9cace0e65e1e704a4745745fbc; all 24 review threads answered and resolved",
   "proof": [
+    {
+      "criterion": "The two blocking typecheck failures CI reported (pi-legion and claude-envoy), and the acceptance lines re-proven after this round's changes.",
+      "surface": "The package typecheckers CI runs, and the real Dispatch stack in the issue's pod.",
+      "command": "cd packages/pi-legion && bun run typecheck; cd packages/claude-envoy && bun run typecheck; then bash packages/dispatch/e2e/acceptance/block-graph.sh against a running server, and bunx playwright test e2e/ask-part-references.e2e.ts --project=chromium",
+      "observed": "Both typechecks clean (reproduced red first: TS2322 at seed.ts:384 and TS2769 at seed.test.ts:687; TS2375/TS2379 at dispatch-execute.ts:2442-2443). The driver answered exit=0, PASS=171 FAIL=0 SKIP=0, and both browser rows passed.",
+      "headSha": "1b769383daf41f9cace0e65e1e704a4745745fbc",
+      "negativeControl": "GET /api/v1/references?to=<the ask>%23b-b9 answered 404 naming the part and the ask while a part it holds answered 200; both browser rows pointed at a part id the ask does not hold failed, then passed again at the restored spec."
+    },
     {
       "criterion": "Finding 1: a reply names a block of the item the request named, not of its thread's head.",
       "surface": "The real Dispatch server in the issue's pod, over HTTP, on a comment of two blocks under an ask where b2 names both the comment's second block and the ask's Monday option.",
@@ -47,20 +55,12 @@
     }
   ],
   "filesChanged": [
-    "api/comment_create.go, api/comment_delivery.go: namedReplyBlock(kind, itemID) replaces replyBlockInThread; each arm passes the item the request named.",
-    "api/ask_rows.go, api/events.go: part ids matched by (type, identity hash); askEventShell decodes the payload's own options and answer.",
-    "api/reply_blocks.go, refs/item_block_nodes.go, refs/refs.go: refs.ItemBlockNode and refs.ParseItemBlockNode replace three hand-written parsers; blockKindList builds the kind lists from itemKinds.",
-    "refs/graph.go: asksCitingTheDocument on the document's incoming read; atBlock and the read's doc comments.",
-    "refs/ask_blocks.go: the answer part's identity hash carries its answerer.",
-    "refs/reply_blocks.go: one query built from itemTables.",
-    "docs/decided_wording.go: the restore indexes at its own time.",
-    "itemblocks/align.go: Align takes the variadic replaced types; AlignReplaced is gone.",
-    "packages/dispatch/web/src/features/refs/: BLOCK_ITEM_KINDS and isBlockItemKind in block-reference.ts, read by ReferencedBy.tsx, RefPreview.tsx and itemOfBlock.",
-    "packages/envoy-client/src/dispatch-execute.ts: ITEM_KINDS/isItemKind for edgeLine and nodeLine, the advisory ask read for a part's heading, and the prose findings (refGrammarProblem, innerRefProblem, replyBlockProblem and four doc comments).",
-    "packages/dispatch/e2e/ask-part-references.e2e.ts: the backlink-panel row.",
-    "packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md: the eleven passages that named comments and messages only, plus Align's new shape and the corrected reply rule.",
-    "store/migrations/0150_ask_blocks.up.sql: the header no longer claims the parts are split by the document parser.",
-    "Tests: api/ask_parts_test.go, api/reply_blocks_test.go, refs/ask_blocks_test.go, refs/refs_test.go, refs/item_block_nodes_test.go, envoy-client and dispatch web suites."
+    "api/routes_table.go, cmd/dispatch/AGENTS.md, contracts/src/dispatch-api.ts and .changes/unreleased/pr2546-ask-parts.yaml: the four published texts that still gave the old reply_to_block rule.",
+    "refs/ask_blocks.go: askPartLinks, the one fragment closure.go and asksCitingTheDocument share, and AskPartIDs, which owns the matching of parts to options; refs/graph.go and api/ask_rows.go lost their copies.",
+    "refs/item_blocks.go: ItemBlockNode is gone from the package (tests write the shape); ParseItemBlockNode stays.",
+    "packages/pi-legion/scripts/skill-scenarios/seed.ts: the seed's options are Required<Omit<AskOption, \"id\">>[].",
+    "packages/envoy-client/src/dispatch-execute.ts and dispatch-owner.ts: the undefined block key left out, one exported ITEM_KINDS, the pin stripped from the reply_to_ask hint, the refusal's wording.",
+    "Prose: 0150_ask_blocks.up.sql's header and reply sentence, store/graph_edges_test.go, api/ask_parts_test.go, e2e/acceptance/block-graph.sh, packages/envoy/AGENTS.md and cmd/dispatch/README.md."
   ],
   "trickyParts": [
     "Finding 1 is a behaviour correction to a rule this pull request itself introduced, so its prose in packages/envoy/AGENTS.md and cmd/dispatch/README.md moved with it: reply_to_block is the named item's, and POST /api/v1/comments/{id}/reply always names a block of that comment.",
@@ -68,21 +68,47 @@
     "Finding 2 reaches existing data: once 0151's seed is drained, heldByABlock lists a link written in an ask's question from its question part, so a build without the dashboard fix would relabel existing backlinks. That is why the browser row, not a unit test, is its proof."
   ],
   "deviations": [
-    "T7 of the plan (a block[] attribute value naming an ask part is refused) is still not in this pull request: sjawhar/legion#2394 owns that refusal and is open at this completion. The tree's architect ruled it moves to dispatch://INFRA-370 unless #2394 lands first, and told this round that #2394 now lands through the merge lane; if it lands before the merge, T7 returns here.",
-    "The migration numbers are 0150 and 0151, read again at this push against main's highest, 0149. sjawhar/legion#2354 also wants the numbers after the root's, so whichever of the two lands second renumbers.",
-    "Three assertions of main's own ask-edit settlement tests compare the option text a writer sent rather than the whole option, because a read carries the part id and a mutation's answer does not."
+    "T7 stays with dispatch://INFRA-370 in every case, by the tree's architect's ruling of 2026-10-31, whether or not sjawhar/legion#2394 lands before this pull request merges.",
+    "The migration numbers are 0150 and 0151, read again at this push against main's highest, 0149.",
+    "packages/pi-legion's bun test cannot run in this pod (its skill-scenario rigs need docker and tmux, which the image does not carry); its typecheck, the lane CI reported red, is clean."
   ],
   "specDepartures": [
-    { "spec": "The tree's plan for PR6: an ask's parts need no migration as graph nodes and have no graph_edges arm.", "outcome": { "kind": "unchanged" } },
-    { "spec": "The tree's plan's contract item 14: an option's part id is a content hash computed on every read.", "outcome": { "kind": "unchanged" } },
-    { "spec": "The tree's plan's Task 6.2: the storage kind is block with an ask/ prefix.", "outcome": { "kind": "unchanged" } },
-    { "spec": "The tree's plan's writer list for PR6, which names no indexing on the answer path.", "outcome": { "kind": "unchanged" } },
-    { "spec": "The tree's plan's Task 6.1 Step 3: a document page's ?ask= fragment resolves to the part.", "outcome": { "kind": "unchanged" } }
+    {
+      "spec": "The tree's plan for PR6: an ask's parts need no migration as graph nodes and have no graph_edges arm.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The tree's plan's contract item 14: an option's part id is a content hash computed on every read.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The tree's plan's Task 6.2: the storage kind is block with an ask/ prefix.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The tree's plan's writer list for PR6, which names no indexing on the answer path.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The tree's plan's Task 6.1 Step 3: a document page's ?ask= fragment resolves to the part.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "A reply's reply_to_block is read against the item the request named, never the thread's head: in an ask's thread one block id can name both a block of the comment and a part of the ask, and the two answer differently.",
     "The dashboard, the hover card and the CLI each read a block node as its item, so the item kinds live in one exported set per surface (BLOCK_ITEM_KINDS in the web, ITEM_KINDS in the client) and a fourth kind reaches every reader.",
-    "The pull request's contract change census is in the body: four inputs answer differently than on main, with the emitter search and the stored-text statement behind the rollout line."
+    "The pull request's contract change census is in the body: four inputs answer differently than on main, with the emitter search and the stored-text statement behind the rollout line.",
+    "A type added to a shared contract reaches packages that only compile it: AskOption.id broke pi-legion's seed and claude-envoy's stricter compile of envoy-client, neither of which this change touches. Both lanes are CI jobs of their own."
   ]
 }
