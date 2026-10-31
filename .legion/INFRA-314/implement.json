@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-314",
-  "completed": "2026-10-31T15:05:00Z",
+  "completed": "2026-10-31T16:30:00Z",
   "proof": [
     {
       "criterion": "A1, A2, A3, A4, A9, A10, A11: the broker serves its own approval page with a sign-in on its own origin; only the signed-in approver decides, and the decision is bound to what the page showed; nothing Dispatch holds decides; the four sign-in settings are required; a sign-in crosses processes and restarts",
@@ -29,7 +29,7 @@
       "negativeControl": "A page served from another port of the broker's host, with the approver's broker session live, tried a form post, a credentialed fetch and an iframe of the record page: the post got the broker's Refused page, the fetch was blocked by CORS, the frame by frame-ancestors 'none', and the record stayed pending. And A12's red half: inbox.e2e.ts, fake-broker.ts and fake-broker-helpers.ts copied into a throwaway clone of main at 6a4aa61518c1 and run there gave 2 failed, 45 passed, 1 skipped, the first failure `Expected: \"https://secrets.internal.example/approve/record-alice\" Received: \"/credentials/record-alice\"`."
     },
     {
-      "criterion": "A7, A8: machine logins do not change — a listed account still decides one with its typed code, and the machine suites pass with their assertions unchanged",
+      "criterion": "A7, A8: machine logins do not change \u2014 a listed account still decides one with its typed code, and the machine suites pass with their assertions unchanged",
       "surface": "the broker's own packages against a real Postgres, and the binary's service-login suite",
       "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/broker_test?sslmode=disable go test -count=1 ./internal/broker/api/ ./internal/broker/machine/ ./internal/broker/approval/ ./internal/oidc/... ./internal/dispatch/api/ ./cmd/broker/ ./cmd/dev-oidc-issuer/",
       "observed": "ok for every one of those packages. internal/broker/api/oauth_login_test.go, machine_logins_test.go and machine_redecide_test.go and cmd/broker/service_login_test.go pass with their assertions unchanged: a listed account approves and denies a machine login through POST /v1/credential-requests/{record}/approve and /deny with its code, a wrong code is still refused, and a machine login's verification_uri is still BROKER_MACHINE_LOGIN_URL.",
@@ -50,7 +50,7 @@
       "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/broker_test?sslmode=disable go test -count=1 -v -run TestSignInStatusWritesNoDecisionWhenThePostDecidedNothing ./internal/broker/approval/; then go test -count=1 ./internal/broker/approval/ ./internal/broker/api/ ./cmd/broker/; then cd packages/dispatch && bun run e2e -- broker-approval.e2e.ts --project chromium",
       "observed": "The tester's red test, committed unmodified at 51ed20ff124c, passes: a person signs in, approves her record, and the status carries that approval's time; she then resends the very same form, the broker answers 303 as before, the record is still approved with its one grant, and the status's last decision is the first approval's time, unmoved. The three Go packages are ok (approval 17.7 s, api 108.2 s, cmd/broker 256.4 s), so nothing else pinned the old behaviour, and broker-approval.e2e.ts is 5 passed: Approve from the Inbox, the lapsed session's one pass through the sign-in, \"Approve all 3 shown\", the sibling origin, and the account switch all still decide what they decided.",
       "headSha": "58f976e9bfab5daf9000a24f7ff79b4c400ce142",
-      "negativeControl": "The same test's first half is the control: an approval that the broker did apply must still move the time, and it does. The change is in `decide`, which now answers whether this POST decided the record, so \"already decided\", \"expired\", \"no such record\", \"not decided: a machine login\" and \"refused: …\" write nothing, while an approval and a denial - including a denial the broker makes because the requesting enrollment is no longer live - write the time."
+      "negativeControl": "The same test's first half is the control: an approval that the broker did apply must still move the time, and it does. The change is in `decide`, which now answers whether this POST decided the record, so \"already decided\", \"expired\", \"no such record\", \"not decided: a machine login\" and \"refused: \u2026\" write nothing, while an approval and a denial - including a denial the broker makes because the requesting enrollment is no longer live - write the time."
     },
     {
       "criterion": "The review's Critical finding, and the spec's step 1: \"A Dispatch from this step with a broker from before it keeps today's flow\", with A12's \"with a broker that sends no approve_url, the row keeps today's link and agent-secrets prints today's text\"",
@@ -75,6 +75,14 @@
       "observed": "With the path removed the checker names each file and the gate that would skip it, for example `packages/envoy/internal/broker/approval/approval.go::dispatch reads ... which its filter dispatch does not match, so a change to it skips the job: packages/dispatch/e2e/run-broker.sh (started by packages/dispatch/e2e/harness-listeners.ts's realBrokerListeners, which e2e/run.ts starts in ci.yaml dispatch \"Browser-test dispatch dashboard\" for e2e/broker-approval.e2e.ts)`, down to the embedded stylesheet. With the path back it exits 0.",
       "headSha": "6fb80d4ede9e3d21f41f72bb36d1c7357906ddd0",
       "negativeControl": "That removal is itself the control: before this round the same removal was invisible, because ci_job_reads.py modelled run-server.sh's build and not run-broker.sh's, so the checker passed while the browser suite would never have run."
+    },
+    {
+      "criterion": "The tester's failure: the invariant that no line of a session's forms names a host (TestNoSessionLineNamesAHostOrAStoreID) against A12's waiting line, which must name the broker's approve_url",
+      "surface": "the compiled agent-secrets binary driven by its own test harness against a fake broker, every store kind x every form, and the same package set ci.yaml's envoy-go lane runs, here and in a throwaway clone of main",
+      "command": "cd packages/envoy && go test -count=1 -run 'NoSessionLine|PendingRequestWaitsOn|ExecFormPending' ./cmd/agent-secrets/ ; then go test -count=1 -timeout 50m $(go list ./... | grep -Ev '/integration|/internal/dispatch/api$') ; and the same list in a clone of main at f29f58bb9a12",
+      "observed": "The focused run is ok. The invariant now removes the exact approve_url the fake broker answered with, read from the fixtures, before checking its absent list, so the host elsewhere, 127.0.0.1 outside that URL, the account id, the region, the project and 'the broker at' are still refused. A new fixture PENDING_NO_RECORD answers with no record_id and both waiting-line tests drive it under each AGENT_SECRETS_APPROVE_URL value; before the fix that answer dereferenced a nil. The 120-package run leaves six failing here (cmd/agent-secrets's 18, cmd/agent-secrets-helper, cmd/listener, internal/broker/helper, internal/broker/store, internal/dispatch/files); the clone of main fails every one identically, cmd/agent-secrets test for test, so each is the pod and none is this change. internal/dispatch/pmdoc passes under -timeout 50m.",
+      "headSha": "0bcfc8d5c99dc7477eef22cb3939b226517447cd",
+      "negativeControl": "The exception is the control for itself: it removes one exact string, so the same run still fails if any other line names the host, and the eight subtests that were red at 6fb80d4ede9e are the proof the invariant has teeth. The clone of main is the control for the six remaining package failures."
     }
   ],
   "filesChanged": [
