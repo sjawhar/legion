@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-841",
+  "round": 5,
+  "completed": "2026-10-31T09:05:00Z",
+  "workspaceNote": "This workspace was recreated before this round, and retro's 3fe6850f028f had removed .legion/INFRA-841/ before READY, so rounds 1 to 4 of this file are not on disk. They are on this pull request: round 4's evidence is the `E2E (tester)` section of the body, and every round's numbers were posted there as it ran. Nothing of the tester's was lost unpushed: each round's handoff was committed and pushed before its completion.",
+  "forwardMerge": {
+    "oldHead": "b8092134d23beff5feff00fbf556904e1612922f (the head round 4's E2E line names)",
+    "newHead": "fcde46aad09874de3d362c78bbc3cf911dec4ad9 (code head 2599248d44b3438e7b439c2f215ad35123f6f4e1, the merge of c10800814dec with main at 1a9095e6cf22)",
+    "fingerprintBefore": "756fb89b1b0d8f5ba38f18deef45354f689510358b15f9754de4db3ad510fe73",
+    "fingerprintAfter": "756fb89b1b0d8f5ba38f18deef45354f689510358b15f9754de4db3ad510fe73",
+    "verdict": "unchanged, so this round is the bare gates and not a repeat of the real-surface verification",
+    "how": "Computed by the tester at the two heads above with the procedure in skill://legion-worker/references/conflicts-and-rewrites.md, against `main`, after a fetch. The pair matches the implementer's own PR comment. No architect or implementer comment named this a parent's last round, so the equal-fingerprint path applies: CI at the new head, read on GitHub and re-run by nothing, plus the smoke check below. Retro's commits (f6afcc6ddc7e, 3fe6850f028f, c10800814dec) are excluded from the fingerprint by its fileset and are never a reason to re-test."
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round 5's implement.json makes three claims and each was re-run or re-read here at the tree of fcde46aad098. The red that sent the issue back: `go test ./internal/broker/oauth/ -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries -count=1 -v` gives `--- PASS (0.00s)`, `ok … 0.013s` at this head, and the failing job of the red run 41165294249 is `envoy-go` (with `ci-ok`), which is where that test runs - no job of this change's packages failed. The merge: the fingerprint is equal at both heads, as the implementer recorded, and jj reports no conflict in the tree. The acceptance surfaces: the repair test is 3 of 3 PASS at 1.66-1.83 s here and the settings table prints the corrected sentence in both rows with neither superseded wording. Nothing overstated."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Forward-merge re-check: the branch's own lines did not move, so the bare gates stand in for the full round.",
+      "surface": "The branch's diff against its base at the head round 4's E2E line names and at the new head, read with the repository's own fingerprint procedure.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj git fetch && for head in b8092134d23beff5feff00fbf556904e1612922f fcde46aad09874de3d362c78bbc3cf911dec4ad9; do jj diff --from \"fork_point(\\\"main\\\"@origin | $head)\" --to $head --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum; done",
+      "observed": "756fb89b1b0d8f5ba38f18deef45354f689510358b15f9754de4db3ad510fe73 at both heads: unchanged. forward-merge re-check b8092134d23beff5feff00fbf556904e1612922f -> fcde46aad09874de3d362c78bbc3cf911dec4ad9: fingerprint unchanged, bare gates only.",
+      "headSha": "fcde46aad09874de3d362c78bbc3cf911dec4ad9",
+      "negativeControl": "The procedure is not one that always answers 'unchanged': the branch's first forward merge, at f89294cde691, moved it from 1febf71f78ee… to 756fb89b1b0d… because main had reflowed packages/envoy/AGENTS.md under the branch's one changed line, and round 4 therefore ran in full. The same command gives the same two different numbers today."
+    },
+    {
+      "criterion": "The red that sent the issue back to implementing is gone at this head, and it was never this change's.",
+      "surface": "The packages/envoy test binary of internal/broker/oauth, the package whose job CI reported red, run at this branch's tree; and GitHub's own record of which job failed.",
+      "command": "cd packages/envoy && go test ./internal/broker/oauth/ -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries -count=1 -v ; gh api repos/sjawhar/legion/actions/runs/41165294249/jobs --paginate --jq '.jobs[] | select(.conclusion == \"failure\") | .name'",
+      "observed": "`--- PASS: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (0.00s)`, `ok github.com/sjawhar/envoy/internal/broker/oauth 0.013s` at this head, with `-count=1` so no cached result was read. The red run 41165294249's failing jobs are `envoy-go` and the `ci-ok` aggregate alone: no job of cmd/dispatch's or internal/bus's lanes failed, and the pull request touches neither internal/broker/oauth nor docs/kubernetes.md, the two files the failure is about.",
+      "headSha": "fcde46aad09874de3d362c78bbc3cf911dec4ad9",
+      "negativeControl": "The failure is reproducible in the tree that produced it rather than taken on trust: it is CI's own output in run 41165294249's `envoy-go` job, `documented: session` against `issued: person, project, project_scope, session`, from main's tip before sjawhar/legion#2598 - the merge ref's tree, not the branch's. The branch's own tree passed that test before the merge as well, which is why the red was main's and not this change's."
+    },
+    {
+      "criterion": "Smoke check at the new head: the changed surface still behaves, and the published settings rows still read as the change made them.",
+      "surface": "The packages/envoy/cmd/dispatch test binary against a real in-process three-member NATS cluster, and the Dispatch binary's own published settings table.",
+      "command": "cd packages/envoy && go test ./cmd/dispatch/ -run 'TestADispatchStartWaitsOutAReconcileFailureTheBusRetries' -count=3 -v ; go run ./cmd/dispatch settings",
+      "observed": "3 of 3 PASS at 1.66 s, 1.74 s and 1.83 s, in line with every earlier head (1.51-2.06 s across 40 runs over rounds 1 to 4). The settings table prints 'the minute runs from Dispatch's first connection to NATS' twice and neither superseded wording ('reconciles the stream on each connection', 'while the retries stay under a minute') at all.",
+      "headSha": "fcde46aad09874de3d362c78bbc3cf911dec4ad9",
+      "negativeControl": "The standing control for this test, recorded at every head of this pull request and last re-run at the merge head of round 4 (`--- FAIL (0.74s)` with `start Dispatch's stream: reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: no suitable peers for placement, peer offline`): the old rule put back inside awaitReconciled fails this test in under a second. It is not re-run here because the merge changed no line of stream_replicas_test.go - the equal fingerprint above is that evidence - and because an equal fingerprint is the one case the repository's own rule says not to re-verify."
+    }
+  ],
+  "ci": {
+    "head": "fcde46aad09874de3d362c78bbc3cf911dec4ad9, the pull request's head, which is also the push's head: this push is not handoff-only (it carries the merge commit 2599248d44b3), so its head rightly carries no `skip-checks: true` line and GitHub started a run for it.",
+    "read": "GitHub, not re-run. At 2026-10-31T08:56Z: CI run 41186518143 `queued` since 08:54Z with its `changes` job still queued - read as running, not green. PR Title run 41186518146 queued beside it.",
+    "note": "The backlog that hid every earlier round's CI has cleared: run 41165294249 at the previous code head c10800814dec reached a conclusion, `failure`, in `envoy-go` and `ci-ok` - the main-side defect this round's merge fixes. So this run is expected to conclude, and the merge gate's green must be read at this head, not inferred from the local runs above. Do not re-run 41165294249: a re-run reuses its merge ref, which still carries main before sjawhar/legion#2598, so it would fail again; only a new push makes a merge ref over main's new tip, and this push is that."
+  },
+  "notesForTheArchitect": [
+    "This round is the bare gates by the repository's own rule, not a judgement that less testing was warranted: the fingerprint is equal, nothing named this a parent's last round, and retro's commits are never a reason to re-test. The full round at the previous merge head (round 4) is the standing verification, and its evidence is in the pull request body.",
+    "The only thing still open is CI's own verdict at this head. Everything the tester can run locally is green, including the exact test whose red sent the issue back."
+  ]
+}
