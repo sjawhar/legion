@@ -2,96 +2,46 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-264",
-  "completed": "2026-10-31T08:50:00Z",
-  "round": 5,
-  "answers": "The reviewer's round-3 review at f5dd7826 (one important, two minors), and the two forward merges GitHub's CONFLICTING report asked for. The fourteen proofs of round four stand at b5103ea3 and are not repeated here; the entries below are this round's own, every one driven at the head this handoff sits on.",
+  "completed": "2026-10-31T10:05:00Z",
+  "round": 6,
+  "answers": "A conflict return, not a defect: the reviewer approved 683c93b6, then GitHub reported the pull request CONFLICTING (mergeStateStatus DIRTY) against a main ten commits ahead, and runs no CI on a conflicting head. This round is one forward merge of main and nothing else. The proofs of round five stand at 525d94c5; the entries below are this round's.",
   "proof": [
     {
-      "criterion": "A caller presenting a broker-issued token is accepted, and Dispatch reports the session, the person and the project it names (INFRA-264), unchanged by two forward merges of main.",
-      "surface": "A live pair rebuilt in this pod at this head: cmd/broker through packages/envoy/scripts/dev-broker.sh (real dev-oidc-issuer, its own database on the harness Postgres through DEV_BROKER_POSTGRES_URL) and the real Go Dispatch server through packages/dispatch/e2e/run-server.sh with DISPATCH_E2E_AGENT_SECRETS_URL naming that broker, driven by a DPoP/RFC 8693 client written for this round with the Go standard library alone (/legion/scratch/tmp/infra264/dpopdrv).",
-      "command": "dpopdrv exchange --broker http://127.0.0.1:32071 --subject-token-file $DEV_BROKER_DIR/exchange-token --session example-worker-session, then dpopdrv call --url http://127.0.0.1:18779/api/v1/whoami",
-      "observed": "exchange: 200 OK token_type=DPoP expires_in=899; GET /api/v1/whoami -> 200 OK {\"kind\":\"agent\",\"owner\":\"ada@example.com\",\"project\":\"EXAMPLE\",\"service\":null,\"session\":\"example-worker-session\"}.",
-      "headSha": "525d94c5621146dccc07bbaf48c8b64cf6812cd5",
-      "negativeControl": "The same token under Bearer -> 401 UNAUTHORIZED \"invalid bearer token\"; a proof signed by a second ES256 key -> 401 BROKER_TOKEN_KEY_MISMATCH; no DPoP header -> 401 BROKER_TOKEN_PROOF_INVALID; the proof's htu naming http://evil.example/api/v1/whoami -> 401 BROKER_TOKEN_PROOF_INVALID; the proof's ath dropped -> 401 BROKER_TOKEN_PROOF_INVALID."
+      "criterion": "The pull request merges into main again, and its own diff is unchanged but for the one row the conflict touched, so the approved change is the change that merges.",
+      "surface": "GitHub's own mergeability for sjawhar/legion#2541, and the unchanged-diff fingerprint over the pull request's own lines (skill://legion-worker/references/conflicts-and-rewrites.md).",
+      "command": "jj new legion/INFRA-264 main@origin (never a rebase), resolve, push; gh pr view 2541 --json mergeable,mergeStateStatus; and the fingerprint command at each head",
+      "observed": "CONFLICTING/DIRTY at 683c93b6 -> MERGEABLE at c9f4cb6e. Fingerprint b3194dfab6b25bf5359906b1a82e99faba1de700e1a5ec75e823f224f838e71c -> 62d7c68b11fa55f14c48065f9099e53e752b762d9d8c00e8bd514f07908a8e17: changed, by the one conflicted row and nothing else. Posted on the pull request as the forward-merge comment.",
+      "headSha": "c9f4cb6e1f1a503d3ce88d34e34bf4cc7740c0bb",
+      "negativeControl": "The merge is a genuine fast-forward of the branch's own bookmark over main, so `jj git push` took it without --allow-backwards; a push that had rewritten a pushed commit would have been refused."
     },
     {
-      "criterion": "The Dispatch migration this branch adds applies in its new place after main took 0149: a forward merge that leaves two migrations sharing a version would be refused by the runner before it touched the database.",
-      "surface": "The real Dispatch server's own boot against an empty database on the harness Postgres (Postgres 17.11 with pgvector, Debian packages unpacked on the issue volume by /legion/harness/setup.sh), read back with psql.",
-      "command": "bash packages/dispatch/e2e/run-server.sh against a fresh dispatch_impl_e2e, then psql -tAc \"select max(version), count(*) from schema_migrations\" and \\d dpop_proofs",
-      "observed": "The server boots and serves; schema_migrations reports max 150 over 150 rows, 150 being 0150_dpop_proofs and 149 main's 0149_event_horizon; dpop_proofs exists with its (jti, htu) primary key and dpop_proofs_expires_at index. The replay refusal above is that table in use: it held 7 rows after the run.",
-      "headSha": "525d94c5621146dccc07bbaf48c8b64cf6812cd5",
-      "negativeControl": "internal/dispatch/store's TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny is the refusal this renumbering avoids, and `go test ./internal/dispatch/store/` is ok at this head (332 s); with the pre-merge numbering both 0149_dpop_proofs and main's 0149_event_horizon would hit it."
+      "criterion": "The one conflict keeps both sides: this branch's /ws/doc/{room} row takes a person's cookie and no bearer (INFRA-264), and main's #2526 rewrote that row's tail.",
+      "surface": "packages/envoy/cmd/dispatch/AGENTS.md, the route table a reader of cmd/dispatch meets.",
+      "command": "grep -n '`/ws/doc/{room}` | GET' packages/envoy/cmd/dispatch/AGENTS.md",
+      "observed": "One row, `| `/ws/doc/{room}` | GET | user | Join the Hocuspocus document room. The room takes a signed-in person's cookie and no bearer at all (INFRA-264): …` continuing into main's tail, where ygo echoes a read-write peer's awareness renewal to the sender and gives a read-only one a bounded empty response, so the provider stays connected without Dispatch writing a keep-alive frame. No conflict marker is left in the tree.",
+      "headSha": "c9f4cb6e1f1a503d3ce88d34e34bf4cc7740c0bb",
+      "negativeControl": "`grep -c '<<<<<<<'` over the file is 0, and `jj status` shows the merge commit carrying that file alone; a side dropped would have left either `user or bearer` (this branch's change gone) or the old keep-alive sentence (main's gone), and both strings are absent."
     },
     {
-      "criterion": "The broker migration this branch adds applies in its new place after main took 0020 for 0020_vm_enrollment_kind (#2530).",
-      "surface": "cmd/broker's own boot through scripts/dev-broker.sh against its own database on the harness Postgres, read back with psql.",
-      "command": "psql -d dev_broker_wwwosd -tAc \"select max(version), count(*) from broker_schema_migrations\" and \\d oauth_pod_sessions",
-      "observed": "broker_schema_migrations reports max 21 over 21 rows, 21 being 0021_oauth_pod_sessions and 20 main's 0020_vm_enrollment_kind; oauth_pod_sessions exists with its (pod_uid, session) primary key and expiry index, and the broker registered the exchange pod under example-worker-session through it at boot.",
-      "headSha": "525d94c5621146dccc07bbaf48c8b64cf6812cd5",
-      "negativeControl": "`go test ./internal/broker/store/` ok at this head, its own guard test refusing a set that numbers two migrations alike; the exchange above is refused invalid_grant under any session name that table does not carry."
-    },
-    {
-      "criterion": "A credential naming one project writes that project and nothing else, and a credential proving one session writes that session's conversation and no other (INFRA-264), unchanged by the merges.",
-      "surface": "The same live pair, with two projects and two issues seeded through the shared token.",
-      "command": "dpopdrv call --method POST on /api/v1/issues/EXAMPLE-1/comments, /api/v1/issues/OTHER-1/comments and /api/v1/projects, and --method PUT on /api/v1/me/agents/not-my-session/state",
-      "observed": "The caller's own project -> 201 Created, the comment's author {\"kind\":\"session\",\"id\":\"example-worker-session\",\"owner\":\"ada@example.com\",\"project\":\"EXAMPLE\"}, both taken from the token; OTHER-1 -> 403 PROJECT_SCOPE \"this request's credential may write project EXAMPLE; this write belongs to project OTHER\"; POST /api/v1/projects -> 403 PROJECT_SCOPE_DEPLOYMENT naming the route; the other session's state -> 403 SESSION_SCOPE naming both sessions.",
-      "headSha": "525d94c5621146dccc07bbaf48c8b64cf6812cd5",
-      "negativeControl": "The same client, same key and same token is 201 on its own project's issue in the same run, so each 403 is the scope check and not a broken caller."
-    },
-    {
-      "criterion": "Review round 3, important: every ci.yaml filter matches the three packages this change moved or added (internal/brokertoken, internal/ratelimit, internal/broker/oauthwire), so a later change to them starts the jobs that read them.",
-      "surface": "The repository's own gate, the one CI runs as the ci-filters job.",
-      "command": "bash .github/scripts/check-ci-filters.sh",
-      "observed": "exit 0, \"every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)\", with 0 uncovered on each of the 28, envoy-go (2351 files) and ci-filters (2721) among them.",
-      "headSha": "525d94c5621146dccc07bbaf48c8b64cf6812cd5",
-      "negativeControl": "This gate is what reported the finding red at b5103ea3; it is the same script, run unchanged."
-    },
-    {
-      "criterion": "Review round 3, minor: the documentation no longer claims that failing closed closes an existence oracle, and says what project_scope.go says.",
-      "surface": "The files a reader meets: packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, and the code and test they describe.",
-      "command": "grep -rn \"existence oracle\" packages/ --include='*.md' --include='*.go'",
-      "observed": "Four hits, all saying the same thing: project_scope.go:40 \"Failing closed does not close the existence oracle, and does not claim to\", project_scope_test.go:293, README.md:180 and AGENTS.md:2572 \"so failing closed does not close an existence oracle and does not claim to\". Both documents kept that sentence through main's reflow of them (#2474), and `bun scripts/semantic-line-breaks.ts` is clean on both.",
-      "headSha": "525d94c5621146dccc07bbaf48c8b64cf6812cd5",
-      "negativeControl": "The grep is the control: a document still carrying the old claim would show a fifth hit with the opposite wording, which is how the reviewer found it."
-    },
-    {
-      "criterion": "Review round 3, minor: a named project scope with an empty project is refused rather than read as a caller no project check covers.",
-      "surface": "internal/brokertoken's own suite, the reachable surface for it: the broker writes only named-with-a-project and person, so no live token can carry it.",
-      "command": "cd packages/envoy && go test ./internal/brokertoken/ -count=1",
-      "observed": "ok, 15.3 s. brokertoken.live refuses (ProjectScope == named && Project == \"\") in the clause that refuses an unknown scope, so Verify and Live, which share live, both answer BROKER_TOKEN_NOT_A_SESSION.",
-      "headSha": "525d94c5621146dccc07bbaf48c8b64cf6812cd5",
-      "negativeControl": "Both values the broker does write were driven live above: a named scope with EXAMPLE answers whoami with that project, and the same code path refuses the empty one in the suite."
-    },
-    {
-      "criterion": "The claim-list check main's reflow broke (TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries) passes at this head, so the merge carries no red into this branch.",
-      "surface": "The Go suite CI runs as envoy-go, run in this pod.",
-      "command": "cd packages/envoy && go test ./internal/broker/oauth/ -count=1",
-      "observed": "ok, 33.4 s. main broke it in #2474 by laying docs/kubernetes.md's claim list out with a blank line between items, which the parser read as the list's end: run 41164510541's envoy-go job 124441333720 on main reports `documented: session` against `issued: person, project, project_scope, session`. This branch fixed it in ba171533; main then fixed it more thoroughly in #2598, and the merge at 525d94c5 takes main's file whole, so the branch carries no copy of its own.",
-      "headSha": "525d94c5621146dccc07bbaf48c8b64cf6812cd5",
-      "negativeControl": "With the `project` bullet deleted from docs/kubernetes.md the check fails naming exactly that drift (`documented: person, project_scope, session` against `issued: person, project, project_scope, session`), so the parser still reports a document that has fallen behind the code."
+      "criterion": "The merge carries nothing broken into the branch: it builds, vets, and the packages around both sides of the conflict pass at the merge head.",
+      "surface": "The repository's own Go toolchain and suites, run in this pod against the shared Postgres harness (/legion/harness/setup.sh, Postgres 17.11 with pgvector on the issue volume).",
+      "command": "cd packages/envoy && go build ./... && go vet ./internal/dispatch/... ./internal/broker/... ./internal/brokertoken/... && go test ./internal/dispatch/docs/ ./internal/brokertoken/ ./internal/broker/oauth/ -count=1 -timeout 40m",
+      "observed": "Build and vet clean; ok internal/dispatch/docs 1808.6 s (the package main's #2526 changed), ok internal/brokertoken 20.7 s, ok internal/broker/oauth 48.7 s (the claim-list check main's #2598 fixed, which the previous merge took).",
+      "headSha": "c9f4cb6e1f1a503d3ce88d34e34bf4cc7740c0bb",
+      "negativeControl": "The same suites were the ones that caught main's own red before this branch inherited it in round five (envoy-go run 41164510541), so a break arriving with these ten commits would have shown here."
     }
   ],
   "filesChanged": [
-    "packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md: this branch's prose re-applied onto main's semantic-line-break layout (#2474), which also turned three of the README's tables into lists; each file merged three-way with both older sides reflowed by scripts/semantic-line-breaks.ts, five hunks resolved by hand",
-    "packages/envoy/internal/broker/store/migrations/0020_oauth_pod_sessions.up.sql -> 0021_… (main took 0020 for 0020_vm_enrollment_kind, #2530)",
-    "packages/envoy/internal/dispatch/store/migrations/0149_dpop_proofs.{up,census}.sql -> 0150_… (main took 0149 for 0149_event_horizon)",
-    "The references that name them: packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/{AGENTS.md,README.md}, internal/dispatch/store/dpop_proofs.go, and the two migration headers",
-    "packages/envoy/internal/broker/oauth/claims_doc_test.go: fixed in ba171533, then replaced by main's own fix (#2598) in the merge at 525d94c5, so the branch's diff no longer touches it"
+    "packages/envoy/cmd/dispatch/AGENTS.md: the /ws/doc/{room} row, this branch's cookie-only sentence over main's rewritten tail (#2526) — the merge's only resolution and the only file of the pull request's own diff that moved"
   ],
   "trickyParts": [
-    "main reflowed both documents whole, so a textual merge was 14 conflict hunks, some of 800 lines. What made it tractable: reflow the branch's own side and the merge base with the repository's own scripts/semantic-line-breaks.ts (idempotent on main's copies, which is how that was checked), then merge those three with git merge-file. One hunk was left in AGENTS.md and four in the README, each a paragraph this branch had edited that main had also moved into a list; each was resolved by taking main's layout and writing this branch's sentences into it.",
-    "The merge is where a migration number collides, and nothing reports it as a conflict: both files simply exist. The runner refuses a set that numbers two alike (TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny), so the boot would have failed, not the merge.",
-    "The round's one genuine defect came from main, not from this branch: #2474's reflow put a blank line between the claim list's items in docs/kubernetes.md, and claims_doc_test.go read that blank line as the list's end, so main has been red on envoy-go since 03:28Z (run 41164510541). Both halves of the comparison were read before concluding it: main's docs/kubernetes.md is byte-identical to this branch's, and main's exchange writes the same four claims.",
-    "The pod's harness had to be rebuilt from nothing (/legion/harness/setup.sh, an idempotent script the next role can re-run): Postgres 17.11 with pgvector from Debian packages on the issue volume. One addition over the INFRA-42 recipe: initdb trusts every host connection, which makes internal/broker/store's IAM test fail with \"the test proves nothing\", so the script now leaves the superuser trusted and requires a password of every other role."
+    "main took neither 0021 nor 0150, so no migration is renumbered this round: its newest are 0149_event_horizon (Dispatch) and 0020_vm_enrollment_kind (broker), both below this branch's.",
+    "packages/envoy/cmd/dispatch/AGENTS.md carries no semantic-line-break note and is hard-wrapped prose with long table rows; the resolved row keeps that layout, and scripts/semantic-line-breaks.ts does not govern the file (no CI gate reads it: ci.yaml runs the checker's unit tests alone)."
   ],
-  "deviations": [
-    "The architect's task named legion/INFRA-264-rescue-2 (991419ea) as the place to finish the merge from. That commit holds a partial merge of an older main with 9 + 5 conflict hunks still unresolved in the same two files, and neither migration renumbered; a fresh merge against the current main left the same two files conflicting and nothing else, so the merge was made from the branch's own bookmark and that rescue commit was not used. Its content is reachable and nothing of it is lost.",
-    "packages/envoy/cmd/dispatch/README.md's `credential` item said \"For every one but the last that session id is the caller's own text\" while listing broker-token third of four; the enumeration is reordered so that `broker-token:<person>` is last and the sentence is true. One word order, in a file this round already edits."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "notRunHere": [
-    "internal/broker/helper: every test fails PEER_UNIDENTIFIED because gVisor answers SO_PEERPIDFD 'protocol not available'. CI's envoy-go at the head covers it.",
-    "internal/dispatch/api's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves: the harness's only collation is byte order, which the test refuses by its own message. The rest of that package is ok (1688 s).",
-    "The packages that need Docker (internal/dispatch/{delivery,outbox,redeliver,files}) were not run: the image carries no container runtime."
+    "internal/dispatch/api was not re-run this round: no file of it is touched by the merge's resolution, and the pod refuses its rank test for the harness's byte-order collation. CI at the head covers it.",
+    "internal/broker/helper: gVisor answers SO_PEERPIDFD 'protocol not available' in this pod, as in every round."
   ]
 }
