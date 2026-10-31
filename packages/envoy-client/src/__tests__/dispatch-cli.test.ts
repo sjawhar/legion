@@ -331,6 +331,13 @@ const server = Bun.serve({
       });
     }
     if (pathname === "/v1/interests/ses-1") return interests();
+    // A Dispatch build older than the answers route, which it therefore lacks.
+    if (pathname.endsWith("/answers")) {
+      return Response.json(
+        { code: "NOT_FOUND", error: `no route for ${request.method} ${pathname}` },
+        { status: 404 }
+      );
+    }
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
 });
@@ -427,6 +434,15 @@ describe("the dispatch CLI", () => {
     expect(code).toBe(2);
     expect(stdout).toContain("DISPATCH_SESSION_ID");
     expect(requests).toEqual([]);
+  });
+
+  test("answers against a Dispatch without the route says its build is older than the answers route, exit 1", async () => {
+    const { code, stdout } = await run(["answers"], omp);
+    expect(code).toBe(1);
+    expect(stdout).toBe(
+      `This Dispatch (http://127.0.0.1:${server.port}) has no answers route yet: its build is older than the answers route.\n`
+    );
+    expect(requests.map((request) => request.path)).toEqual(["/api/v1/agents/ses-1/answers"]);
   });
 
   test("an unknown flag is refused in command syntax, with an example", async () => {
@@ -1300,6 +1316,29 @@ describe("the dispatch CLI's envoy.json", () => {
       const { code, stdout } = await run(["projects"], { ...fromFile, ENVOY_CONFIG_FILE: file });
       expect(stdout).toBe(
         `dispatch: ${file} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off\n`
+      );
+      expect(code).toBe(2);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  // A Legion pod has no envoy.json: its Dispatch is DISPATCH_URL with DISPATCH_TOKEN_FILE, which
+  // the session's one long-lived shell keeps until a command unsets or empties DISPATCH_URL.
+  test("DISPATCH_TOKEN_FILE with no DISPATCH_URL says the shell lost it, not that envoy.json is missing, and exits 2, sending nothing", async () => {
+    const tokenFile = join(stateDir, "DISPATCH_TOKEN");
+    writeFileSync(tokenFile, "test-token\n");
+    const chosen = join(stateDir, "profile", "envoy.json");
+    for (const variables of [
+      { DISPATCH_TOKEN_FILE: tokenFile },
+      { DISPATCH_TOKEN_FILE: tokenFile, DISPATCH_URL: "" },
+    ]) {
+      const { code, stdout } = await run(["whoami"], {
+        ...fromFile,
+        ENVOY_CONFIG_FILE: chosen,
+        ...variables,
+      });
+      expect(stdout).toBe(
+        "dispatch: DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for\n"
       );
       expect(code).toBe(2);
     }

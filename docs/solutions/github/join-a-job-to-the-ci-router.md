@@ -52,9 +52,11 @@ A Go job also restores its caches the way the section on caches below says.
 ## ci-ok fails a selected job that did not succeed
 
 `ci-ok` runs `.github/scripts/ci-ok.sh`. It passes only when `changes` succeeded, lint
-succeeded, every job `changes` selected succeeded, and every job it did not select succeeded or
-was skipped. A selected job that was skipped, cancelled or is absent from `ci-ok`'s `needs:`
-fails it, and it prints every job's result and whether `changes` selected it.
+succeeded (it runs on every change), every job `changes` selected succeeded, and every job it
+did not select succeeded or was skipped. ci-images is one of the selected jobs: the `ci_images`
+filter selects it, and `SELECTED_BY` maps it. A selected job that was skipped, cancelled or is
+absent from `ci-ok`'s `needs:` fails it, and it prints every job's result and whether `changes`
+selected it.
 
 A skipped job reports success, so accepting any skip is not enough. When `changes` fails, every
 job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `changes` and

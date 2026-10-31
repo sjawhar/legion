@@ -426,7 +426,7 @@ func TestMetricFiltersAreTheFiltersEachComponentRegisters(t *testing.T) {
 			},
 		},
 		{
-			component: "webhook-listener", prefix: "example-hooks", namespace: "example/EnvoyListener", count: 8,
+			component: "webhook-listener", prefix: "example-hooks", namespace: "example/EnvoyListener", count: 9,
 			construct: func(ctx *pulumi.Context, opts pulumi.ResourceOption) error {
 				in := listenerArgs()
 				in.MetricNamespace = "example/EnvoyListener"

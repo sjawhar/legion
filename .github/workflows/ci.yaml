@@ -7,7 +7,7 @@ name: CI
 # failed). The last job, `ci-ok`, condenses every job's result into one check, the one main's
 # ruleset requires beside pr-title: it fails when a job `changes` selected did not succeed. The
 # docs site's build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a
-# workflow of its own whose header says why; its paths are held to the docs filter below.
+# workflow of its own whose header says why. Its paths are held to the docs filter below.
 #
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
@@ -22,11 +22,12 @@ name: CI
 # here (`cache: false` on every step). The jobs that cache Go restore one of five families with
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
-# build the same listener and natsd, and dispatch-browser-multiprocess, which saves none),
-# go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step). Each family keeps one entry,
-# keyed on the Go version its job's setup-go installed, so it is refreshed only when Go is bumped. A
-# go.sum change downloads only the changed modules, and Go's build cache is content-addressed, so a
-# stale entry costs a run only what changed; a key on the go.sum files left a whole entry, up to a
+# build the same listener and natsd, listener-server-change, which builds the listener, and
+# dispatch-browser-multiprocess and envoy-go-race-docs, which save none), go-envoy-infra
+# (envoy-infra-go) and go-notices (lint's notices step). Each family keeps one entry, keyed on the
+# Go version its job's setup-go installed, so it is refreshed only when Go is bumped. A go.sum
+# change downloads only the changed modules, and Go's build cache is content-addressed, so a stale
+# entry costs a run only what changed; a key on the go.sum files left a whole entry, up to a
 # gigabyte, per change for seven days. Only a run off main falls back, when the exact key misses, to
 # the family's newest entry by its prefix; a run on main restores by the exact key only, so the
 # entry it saves after a Go bump holds nothing the older Go built. Each family is saved with
@@ -64,10 +65,20 @@ concurrency:
 
 # Read-only: the token clones, downloads pinned tools, and, in `changes`, reads the pull request's
 # file list, which this public repository serves without `pull-requests: read`. The jobs that need
-# more declare it in blocks of their own: lint (what check-pr-text.sh reads) and worker-image (the
-# image push and its attestation's scopes). docs-pages.yaml publishes the site to GitHub Pages.
+# more declare it in blocks of their own: lint (what check-pr-text.sh reads), ci-images (the
+# ghcr.io push its copy makes) and worker-image (the image push and its attestation's scopes).
+# docs-pages.yaml publishes the site to GitHub Pages.
 permissions:
   contents: read
+
+# A `|` between proxy entries makes a go command fall through to the next source after ANY error,
+# where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+# proxy.golang.org reset a download mid-stream and turned envoy-infra-go red on a module whose
+# hash go.sum already holds (sjawhar/legion#2512); with `|direct` the command fetches the same
+# bytes straight from the source and checks them against go.sum, so this is a second path, not a
+# weaker check.
+env:
+  GOPROXY: https://proxy.golang.org|direct
 
 jobs:
   # Selects the jobs that read what this change touched. Skipped on a draft pull request, so no
@@ -75,6 +86,7 @@ jobs:
   changes:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       typecheck: ${{ steps.filter.outputs.typecheck }}
       test: ${{ steps.filter.outputs.test }}
@@ -94,6 +106,9 @@ jobs:
       envoy_go: ${{ steps.filter.outputs.envoy_go }}
       envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
       envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
+      envoy_go_race_pmdoc: ${{ steps.filter.outputs.envoy_go_race_pmdoc }}
+      envoy_go_race_api: ${{ steps.filter.outputs.envoy_go_race_api }}
+      envoy_go_race_docs: ${{ steps.filter.outputs.envoy_go_race_docs }}
       dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
       dispatch_multiprocess: ${{ steps.filter.outputs.dispatch_multiprocess }}
       listener_server_change: ${{ steps.filter.outputs.listener_server_change }}
@@ -103,6 +118,7 @@ jobs:
       envoy_session_stall: ${{ steps.filter.outputs.envoy_session_stall }}
       go_notices: ${{ steps.filter.outputs.go_notices }}
       ci_filters: ${{ steps.filter.outputs.ci_filters }}
+      ci_images: ${{ steps.filter.outputs.ci_images }}
     steps:
       # On pull_request dorny/paths-filter reads the file list from the API and never reads the
       # tree; push and merge_group diff with git and need the clone (a merge group diffs its
@@ -233,6 +249,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/githubapi/*'
               - 'packages/envoy/internal/dispatch/githubapp/*'
               - 'packages/envoy/internal/dispatch/identity/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/outbox/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
@@ -242,12 +259,14 @@ jobs:
               - 'packages/envoy/internal/dispatch/refs/*'
               - 'packages/envoy/internal/dispatch/retry/*'
               - 'packages/envoy/internal/dispatch/routes/*'
+              - 'packages/envoy/internal/dispatch/sessionanswers/*'
               - 'packages/envoy/internal/dispatch/startup/*'
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
@@ -350,6 +369,7 @@ jobs:
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/logtest/*'
+              - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
@@ -372,8 +392,7 @@ jobs:
             # outside the daemon: contracts' fixtures
             # (internal/api/state_golden_test.go:27, internal/intake/intake_test.go:698), the two
             # Oh My Pi plugins internal/daemon/promptreferences_omp_test.go:132 packs, whose prepack
-            # bundles contracts and envoy-client, stages skills/ and writes their notices,
-            # pi-legion's src/phase-stall.ts internal/claudebridge/bridge_test.go:813-817 runs, the
+            # bundles contracts and envoy-client, stages skills/ and writes their notices, the
             # GitHub App helper internal/api/real_github_test.go:88 sources, and the examples and
             # docs its tests hold to the code (cmd/legion/config_example_test.go:24,
             # internal/config/controller_test.go:179, internal/config/kubernetes_test.go:1322,
@@ -419,6 +438,10 @@ jobs:
               # check-built, and the job puts it in place with release-push.sh extract-built.
               - '.github/scripts/check-private-names.sh'
               - '.github/scripts/release-push.sh'
+              # tests/answers-claude.test.ts runs the Claude Code release .claude-code-pin pins,
+              # which install-claude-code installs.
+              - '.claude-code-pin'
+              - '.github/actions/install-claude-code/**'
               - 'packages/contracts/src/**'
               # tests/daemon-api-version.test.ts:15 and its neighbours.
               - 'packages/contracts/fixtures/daemon-api/**'
@@ -448,7 +471,11 @@ jobs:
               # workflow_paths.py, check-pr-text.sh, release-bump.sh, ci_filter_coverage.py where a
               # checker sources them).
               - '.github/scripts/*'
+              # select-e2e-proofs.test.sh runs the selector over this list and over scripts/e2e/.
+              - '.github/e2e-scripts.json'
               - 'scripts/third-party-notices.test.ts'
+              - 'scripts/semantic-line-breaks.ts'
+              - 'scripts/semantic-line-breaks.test.ts'
               - 'scripts/sessions-import-pods.sh'
               - 'scripts/sessions-import-pods.test.sh'
               # `bun test scripts/e2e/lib` scans scripts/e2e/*.sh (lib/script-functions.test.ts:101-104),
@@ -467,12 +494,15 @@ jobs:
               - 'packages/pi-legion/.changie.yaml'
               - 'packages/pi-legion/CHANGELOG.md'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
-            # generators and its screenshot harness read. docs-pages.yaml builds and publishes main's
-            # site on the pushes this same list selects: its on.push.paths, which check-ci-filters.sh
-            # holds equal to this filter, so it names docs-pages.yaml too.
+            # generators and its screenshot harness read. docs-site.yaml holds those steps, and
+            # both the docs job here and docs-pages.yaml's build job call it. docs-pages.yaml
+            # builds and publishes main's site on the pushes this same list selects: its
+            # on.push.paths, which check-ci-filters.sh holds equal to this filter, so the list
+            # names all three workflow files.
             docs:
               - '.github/workflows/ci.yaml'
               - '.github/workflows/docs-pages.yaml'
+              - '.github/workflows/docs-site.yaml'
               - *bun_install
               - *biome
               - *go_workspace
@@ -566,6 +596,9 @@ jobs:
               # src/__tests__/delivery.test.ts:16-17 and dispatch-config.test.ts:5.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
               - 'packages/contracts/fixtures/dispatch-public-url.json'
+              # The Go copy its test holds the TypeScript to: src/__tests__/askgate-new-asks.test.ts
+              # reads the Dispatch server's decision-block table, which the Go API test reads too.
+              - 'packages/envoy/internal/dispatch/api/testdata/**'
               # src/__tests__/dispatch-advice.test.ts:683-690 holds every skill section a notice
               # cites to a heading of that skill's SKILL.md.
               - 'skills/**'
@@ -665,7 +698,7 @@ jobs:
               - 'packages/contracts/src/**'
               # web/src/features/delivery/lib/applyDelta.test.ts:2-4 and
               # web/src/features/doc/decision-blocks.test.ts:10.
-              - 'packages/contracts/fixtures/delivery-live/**'
+              - 'packages/contracts/fixtures/live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
@@ -675,9 +708,11 @@ jobs:
               - *go_workspace
               - *dispatch_server
               - 'scripts/e2e/lib/held-port.py'
-              # The S3 step reads the file store image from its declaration, and
-              # e2e/__tests__/local-instance-support.test.ts:153-154 holds shellQuote to this table.
+              # The file store image: the pull step names its declaration to the pull-test-images
+              # action, and the S3 step reads the same declaration for its docker run.
               - 'packages/envoy/internal/tests3/seaweedfs.go'
+              - '.github/actions/pull-test-images/**'
+              # e2e/__tests__/local-instance-support.test.ts:153-154 holds shellQuote to this table.
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
@@ -718,13 +753,15 @@ jobs:
               - 'packages/proof-editor/**'
               # Fixtures its Go tests read: cmd/listener/api_test.go:191,
               # internal/contracts/dedupe_test.go:14, golden_test.go:72,
-              # internal/dispatch/api/delivery_live_diff_test.go:965,
-              # internal/dispatch/docs/approval_carry_test.go:26.
+              # internal/dispatch/api/delivery_live_diff_test.go:982,1011,
+              # internal/dispatch/docs/approval_carry_test.go:26,
+              # internal/cistore/settlement_fixture_test.go:56.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
               - 'packages/contracts/fixtures/dedupe-keys.json'
               - 'packages/contracts/fixtures/github-envelopes/**'
-              - 'packages/contracts/fixtures/delivery-live/**'
+              - 'packages/contracts/fixtures/live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
+              - 'packages/contracts/fixtures/checks-settlement/**'
               # The claim list its fence reads: internal/broker/oauth/claims_doc_test.go:161.
               - 'docs/kubernetes.md'
               - '.github/actions/pull-test-images/**'
@@ -749,23 +786,86 @@ jobs:
               # The image pull before its tests, of the consts in testnats/nats.go and
               # testpg/testpg.go.
               - '.github/actions/pull-test-images/**'
+            # The shared race job: the closure of `go test -race` over delivery, the Dispatch
+            # store, the bus, the listener, the registry store, the session cache and kvwatch (`go
+            # list -deps -test -race` in packages/envoy). internal/dispatch/store's
+            # search_text_test.go:102-120 walks every .md file under packages/envoy, so this
+            # filter keeps the wide root rather than the package list that closure would give. No
+            # bun_install anchor: no test of these packages runs bun, so the Bun install sits on
+            # the pmdoc race job with the package that needs it.
             envoy_go_race:
+              - '.github/workflows/ci.yaml'
+              - *go_workspace
+              - 'packages/envoy/**'
+              # The fixture cmd/listener/api_test.go:191,436,480 reads.
+              - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+            # The pmdoc race job: the closure of `go test -race ./internal/dispatch/pmdoc/...`,
+            # and the Bun install its tests need. pmdoc's tests run pmdoc/gen, which imports the
+            # proof editor (internal/dispatch/pmdoc/update_test.go:236-239,
+            # render_readback_test.go:32), so the editor's package is here too.
+            envoy_go_race_pmdoc:
               - '.github/workflows/ci.yaml'
               - *bun_install
               - *go_workspace
-              # Its packages' tests walk every source file under packages/envoy
-              # (internal/dispatch/api/lock_level_test.go:120-133,
-              # internal/dispatch/store/search_text_test.go:102-120).
-              - 'packages/envoy/**'
-              # pmdoc's tests run pmdoc/gen, which imports the editor
-              # (internal/dispatch/pmdoc/update_test.go:236-239, render_readback_test.go:32).
+              - 'packages/envoy/internal/cputest/*'
+              - 'packages/envoy/internal/dispatch/docs/crafted/*'
+              - 'packages/envoy/internal/dispatch/docs/docstest/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/**'
+              - 'packages/envoy/internal/stacktest/*'
               - 'packages/proof-editor/**'
-              # internal/dispatch/api/delivery_live_diff_test.go:965,
-              # internal/dispatch/docs/approval_carry_test.go:26 and cmd/listener/api_test.go:191
-              # (the listener's race step).
-              - 'packages/contracts/fixtures/delivery-live/**'
+            # The API race job. internal/dispatch/api's lock_level_test.go:120-133 walks every
+            # non-test .go file under packages/envoy (event_insert_guard_test.go:32 and
+            # review_write_guard_test.go:44 use the same walk), so this filter keeps the wide root
+            # rather than the package list its closure would give.
+            envoy_go_race_api:
+              - '.github/workflows/ci.yaml'
+              - *go_workspace
+              - 'packages/envoy/**'
+              # internal/dispatch/api/delivery_live_diff_test.go:982,1011.
+              - 'packages/contracts/fixtures/live/**'
+            # The document service's own race job. Not packages/envoy/**, as envoy_go_race has:
+            # a race job of twenty minutes or more must not run on every change under that tree
+            # (INFRA-490). This is the closure of ./internal/dispatch/docs/ (`go list -deps -test
+            # -race`), one pattern per directory, with the testdata of each directory that has
+            # one and what those packages embed.
+            envoy_go_race_docs:
+              - '.github/workflows/ci.yaml'
+              - *go_workspace
+              - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/contracts/testdata/**'
+              - 'packages/envoy/internal/dispatch/accesslog/*'
+              - 'packages/envoy/internal/dispatch/asks/*'
+              - 'packages/envoy/internal/dispatch/auth/*'
+              - 'packages/envoy/internal/dispatch/docs/*'
+              - 'packages/envoy/internal/dispatch/docs/crafted/*'
+              - 'packages/envoy/internal/dispatch/docs/docstest/*'
+              - 'packages/envoy/internal/dispatch/duty/*'
+              - 'packages/envoy/internal/dispatch/events/*'
+              - 'packages/envoy/internal/dispatch/identity/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/*'
+              # internal/dispatch/pmdoc embeds schema/blocks.json; history_fold_test.go:478 reads
+              # pmdoc/testdata/fixtures.json.
+              - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
+              - 'packages/envoy/internal/dispatch/pmdoc/testdata/**'
+              - 'packages/envoy/internal/dispatch/refs/*'
+              - 'packages/envoy/internal/dispatch/store/*'
+              # internal/dispatch/store embeds every migration.
+              - 'packages/envoy/internal/dispatch/store/migrations/**'
+              - 'packages/envoy/internal/dispatch/store/searchtest/*'
+              - 'packages/envoy/internal/dispatch/store/storetest/*'
+              - 'packages/envoy/internal/dispatch/text/*'
+              - 'packages/envoy/internal/dispatch/text/testdata/**'
+              - 'packages/envoy/internal/explaintest/*'
+              - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/logtest/*'
+              - 'packages/envoy/internal/oidc/*'
+              - 'packages/envoy/internal/pglisten/*'
+              - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/stacktest/*'
+              # internal/dispatch/docs/approval_carry_test.go:26.
               - 'packages/contracts/fixtures/decision-blocks/**'
-              - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
             # `go test -tags memory ./cmd/dispatch`. memory_profile_test.go reads four guides only
             # when DISPATCH_EDIT_PROFILE_OUT is set (its line 126), which CI never sets, so they are
             # not here. cmd/dispatch/nats_unreachable_test.go, which carries no tag, starts the
@@ -797,6 +897,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/agentsecrets/*'
               - 'packages/envoy/internal/dispatch/agentstream/*'
               - 'packages/envoy/internal/dispatch/api/*'
+              # internal/dispatch/api/write_advice_test.go:504 reads testdata/decision-block-inserts.json.
+              - 'packages/envoy/internal/dispatch/api/testdata/**'
               - 'packages/envoy/internal/dispatch/architecture/*'
               - 'packages/envoy/internal/dispatch/asks/*'
               - 'packages/envoy/internal/dispatch/auth/*'
@@ -811,12 +913,14 @@ jobs:
               - 'packages/envoy/internal/dispatch/files/*'
               - 'packages/envoy/internal/dispatch/githubapp/*'
               - 'packages/envoy/internal/dispatch/identity/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/processes/*'
               - 'packages/envoy/internal/dispatch/rank/*'
               - 'packages/envoy/internal/dispatch/refs/*'
               - 'packages/envoy/internal/dispatch/retry/*'
+              - 'packages/envoy/internal/dispatch/sessionanswers/*'
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/**'
@@ -878,10 +982,12 @@ jobs:
             envoy_smoke:
               - '.github/workflows/ci.yaml'
               # The image: the Dockerfile, its context's .dockerignore, the web stage's frozen
-              # install (every workspace manifest), the packages it builds the SPA and the Go
-              # binaries from, and the notices scripts.
+              # install (every workspace manifest) and the Bun pin that stage holds its own Bun
+              # to, the packages it builds the SPA and the Go binaries from, and the notices
+              # scripts.
               - 'packages/envoy/docker/Dockerfile'
               - '.dockerignore'
+              - '.bun-version'
               - 'package.json'
               - 'bun.lock'
               - 'patches/**'
@@ -1084,8 +1190,10 @@ jobs:
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
-              # The check holds docs-pages.yaml's on.push.paths equal to the docs filter.
+              # The check holds docs-pages.yaml's on.push.paths equal to the docs filter, and it
+              # reads docs-site.yaml to find the steps the docs gate cites.
               - '.github/workflows/docs-pages.yaml'
+              - '.github/workflows/docs-site.yaml'
               - '**/*.go'
               - '**/go.mod'
               - '**/go.sum'
@@ -1093,12 +1201,25 @@ jobs:
               - '**/go.work.sum'
               - 'packages/daemon/**'
               - 'packages/envoy/**'
+            # ci.yaml's ci-images job: the copy (.github/scripts/mirror-ci-images.sh, through the
+            # crane .github/actions/install-crane installs) and the package mode of
+            # .github/scripts/check-ci-images.sh, which reads ghcr.io. These files are what
+            # decides what those two steps do. The gate's other half reads the whole tree and is
+            # a step of lint, which runs on every change.
+            ci_images:
+              - '.github/ci-images.yaml'
+              - '.github/scripts/mirror-ci-images.sh'
+              - '.github/scripts/check-ci-images.sh'
+              - '.github/scripts/ci_images.py'
+              - '.github/actions/install-crane/**'
+              - '.github/workflows/ci.yaml'
 
   # Reads the whole tree, so it runs on every non-draft run, also when `changes` failed.
   lint:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     # check-pr-text.sh reads a pull request's commits through the compare route (`contents: read`),
     # its reviews and review comments (`pull-requests: read`) and its issue comments
     # (`issues: read`).
@@ -1133,6 +1254,9 @@ jobs:
 
       - name: Check image triggers cover every image input
         run: .github/scripts/check-image-trigger-paths.sh
+
+      - name: Check every image a CI job fetches is a row of .github/ci-images.yaml
+        run: .github/scripts/check-ci-images.sh tree
 
       - name: Check every remote action is pinned to a commit SHA
         run: .github/scripts/check-action-pins.sh
@@ -1265,6 +1389,44 @@ jobs:
             ~/.cache/legion
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
+  # Copies every row .github/ci-images.yaml names into ghcr.io/sjawhar/legion/ci, then reads the
+  # package to check that it holds every row. The order is the point: the read fails a row the
+  # package does not hold, so the copy for this change runs first. The ci_images filter selects
+  # this job, and names the files that decide what its two steps do: the rows, the two scripts,
+  # the module both scripts read a reference with, the crane action and this file. The gate's
+  # other half reads the whole tree, and is a step of lint, which runs on every change: a file
+  # that names a third-party registry again can be any file, and this filter names few of them.
+  # This job is the one copy path: it runs on a pull request, on a merge group and on a push to
+  # main, which is every event that can bring a new row, and a failed copy is re-run with
+  # `gh run rerun`.
+  ci-images:
+    needs: changes
+    if: needs.changes.outputs.ci_images == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # packages: write is the ghcr.io push `crane copy` makes.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/install-crane
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Copy every image the package does not hold
+        run: .github/scripts/mirror-ci-images.sh
+
+      - name: Check the package holds every row of .github/ci-images.yaml
+        run: .github/scripts/check-ci-images.sh package
+
   # lint, typecheck and test keep the names main's ruleset required before ci-ok existed. Each
   # covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when `changes` did not
   # succeed, typecheck and test run rather than skip, since a skipped job reports success and a
@@ -1273,6 +1435,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.typecheck == 'true') }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1314,9 +1477,11 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1376,6 +1541,11 @@ jobs:
       - name: Test third-party notices
         run: bun test scripts/third-party-notices.test.ts
 
+      # The checker's own unit tests only. scripts/semantic-line-breaks.guides.test.ts checks the
+      # guides' layout and runs on demand, deliberately not here: no CI gate over the guides.
+      - name: Test the semantic line-break checker
+        run: bun test scripts/semantic-line-breaks.test.ts
+
       - name: Test the Bun pin check
         run: .github/scripts/check-bun-version.test.sh
 
@@ -1397,6 +1567,12 @@ jobs:
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh
 
+      - name: Test the CI image check
+        run: .github/scripts/check-ci-images.test.sh
+
+      - name: Test the CI image mirror
+        run: .github/scripts/mirror-ci-images.test.sh
+
       - name: Test the action pin check
         run: .github/scripts/check-action-pins.test.sh
 
@@ -1408,6 +1584,11 @@ jobs:
 
       - name: Test the release credential check
         run: .github/scripts/check-release-credentials.test.sh
+
+      # The proof selector e2e.yaml's select job runs, over fixture trees and over this
+      # repository's own .github/e2e-scripts.json and scripts/e2e/.
+      - name: Test the e2e proof selector
+        run: .github/scripts/select-e2e-proofs.test.sh
 
       - name: Test ci-ok's verdict
         run: .github/scripts/ci-ok.test.sh
@@ -1524,108 +1705,24 @@ jobs:
 
   # Builds the documentation site (docs/site) on every pull request and merge group that could
   # change it. A push to main runs no docs job here: docs-pages.yaml builds and publishes main's
-  # site to GitHub Pages (https://sjawhar.github.io/legion/), one push at a time in push order,
-  # with these same steps. The site's reference pages are generated from packages/ and skills/ at
-  # build time, scripts/third-party-notices.ts writes the THIRD_PARTY_NOTICES.txt it publishes,
-  # and the built site is checked with the private-name guard; the docs filter names all of them.
+  # site to GitHub Pages (https://sjawhar.github.io/legion/), one push at a time in push order.
+  # Both callers run the steps of docs-site.yaml, which holds them once. The site's reference
+  # pages are generated from packages/ and skills/ at build time, scripts/third-party-notices.ts
+  # writes the THIRD_PARTY_NOTICES.txt it publishes, and the built site is checked with the
+  # private-name guard; the docs filter names all of them, docs-site.yaml among them.
+  #
+  # No timeout-minutes: GitHub's keywords for a job that calls a reusable workflow leave it out.
+  # docs-site.yaml's own job carries the limit.
   docs:
     needs: changes
     if: needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-24.04
-    # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
-    # truncate.
-    services:
-      postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
-        env:
-          POSTGRES_PASSWORD: ci
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-bun
-      # Astro runs on Node.js (22.12 or newer).
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-      # docs/site/scripts/build-binaries.sh builds the Go binaries the reference generators run, and
-      # the screenshots step builds the Dispatch server; both modules name the same Go.
-      - id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: packages/daemon/go.mod
-          cache: false
-      # go-docs: docs builds the daemon's legion and envoy's dispatch, broker and agent-secrets
-      # commands, which envoy-e2e-local's go-envoy entry (listener and natsd only) does not hold;
-      # sharing one key let whichever job saved first own it. docs-pages.yaml's build job, on
-      # main, saves it; this job, which runs on no push, only restores it.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-docs-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-docs-{0}-', runner.os) || '' }}
-      - run: bun install --frozen-lockfile
-      - name: Lint the docs site
-        run: bun run lint
-        working-directory: docs/site
-      - name: Typecheck the docs site
-        run: bun run typecheck
-        working-directory: docs/site
-      # The pages' screenshots are made, not committed (docs/site/media/README.md): Dispatch on
-      # the e2e harness, seeded with example data, captured in Chromium.
-      - name: Build the Dispatch dashboard the screenshots show
-        run: bun run build:web
-        working-directory: packages/dispatch
-      - name: Install Playwright Chromium
-        # The runner image's chrome-stable apt source intermittently fails `apt-get update`, which
-        # takes `--with-deps` down with it; Chrome itself is preinstalled, so the source goes.
-        run: |
-          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          bunx playwright install --with-deps chromium
-        working-directory: docs/site
-      - name: Take the screenshots
-        run: bun run docs:media
-        # A step of the run that hangs fails it within two minutes (STEP_TIMEOUT_MS in
-        # docs/site/media/harness.ts); this bounds the rest, the build and the boot.
-        timeout-minutes: 15
-        env:
-          DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      # What each failed shot's page showed, and the harness's process logs: a hang leaves the
-      # Dispatch server's goroutines at the end of dispatch.log.
-      - if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: docs-failed-shots-${{ github.run_attempt }}
-          path: |
-            docs/site/media/.work/failed-shots
-            docs/site/media/.work/harness
-          if-no-files-found: ignore
-      # Generates the reference pages, then builds the site; starlight-links-validator fails it on a
-      # broken internal link. The build writes dist/THIRD_PARTY_NOTICES.txt (docs/site/astro.config.mjs),
-      # failing on a package whose license cannot be determined; the listing shows the site ships it.
-      - name: Build the docs site
-        run: |
-          bun run docs:build
-          ls -l docs/site/dist/THIRD_PARTY_NOTICES.txt
-      # The built site, generated reference pages and copied media captions include no private
-      # deployment repository, company, internal host, or Tailscale MagicDNS host; the lint job
-      # checks the sources.
-      - name: Check the built site has no private name, internal host, or tailnet host
-        run: .github/scripts/check-private-names.sh docs/site/dist
+    uses: ./.github/workflows/docs-site.yaml
 
   contracts:
     needs: changes
     if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1649,6 +1746,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_plugin == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1680,6 +1778,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_client == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1696,7 +1795,13 @@ jobs:
         run: bun run typecheck
         working-directory: packages/envoy-client
       - name: Pre-pull the NATS image the credential tests run
-        run: docker pull mirror.gcr.io/library/nats:2.10
+        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml). This job
+        # pulls the image here, and does not call .github/actions/pull-test-images: that action
+        # reads a Go `const` line, and this image is a TypeScript constant
+        # (packages/envoy-client/src/__tests__/nats-server.ts:9-10). The registry is this
+        # repository's own, so a failed pull is a fault of this repository. Show it, do not retry
+        # it.
+        run: docker pull ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
       - name: Test Envoy client
         run: bun run test
         working-directory: packages/envoy-client
@@ -1710,6 +1815,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_shared == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1732,12 +1838,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_envoy == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # The NATS server extensions/card-delivery-omp.test.ts delivers Envoy cards and a person's Send
     # through (LEGION_TEST_NATS_URL on the test step): the 2.10 image the envoy-client job pulls,
     # pinned by digest as this file's other service images are.
     services:
       nats:
-        image: mirror.gcr.io/library/nats:2.10@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1799,11 +1907,13 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_legion == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # The NATS server the Envoy role claim of extensions/controller-start-omp.test.ts's controller
     # needs (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
     services:
       nats:
-        image: mirror.gcr.io/library/nats:2.10@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1818,7 +1928,8 @@ jobs:
       # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       # scripts/skill-scenarios/rig.test.ts runs rig.sh judge-omp's container with the runner's own
-      # Docker, pulling its pinned ubuntu image from mirror.gcr.io.
+      # Docker. Every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci, named by
+      # digest, which ci.yaml's ci-images job publishes from .github/ci-images.yaml.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -1888,9 +1999,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.dispatch == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 155
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1960,19 +2073,22 @@ jobs:
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           bunx playwright install --with-deps chromium webkit firefox
         working-directory: packages/dispatch
+      # The file store the step below starts, pulled first for the reason the action gives. The
+      # image comes from ghcr.io/sjawhar/legion/ci, a registry this repository publishes, so a
+      # failed pull is a fault of this repository. The action must show it, not retry it.
+      - name: Pull the file store image
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: packages/envoy/internal/tests3/seaweedfs.go Image
       - name: Start an S3-compatible server for uploaded files
         # The browser suite runs the server with DISPATCH_FILE_STORE_BUCKET set (e2e/run-server.sh
         # reads DISPATCH_E2E_FILE_STORE_ENDPOINT), so every upload and download the dashboard makes
         # goes through the file store, as production's does. Same image as the Go tests
-        # (internal/tests3), read from its declaration; the bucket is created by an anonymous PUT.
+        # (internal/tests3), read from its declaration again to name it for the docker run below.
+        # An anonymous PUT makes the bucket.
         run: |
           image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' ../envoy/internal/tests3/seaweedfs.go)
           [ -n "$image" ] || { echo "::error::no const Image in packages/envoy/internal/tests3/seaweedfs.go"; exit 1; }
-          for attempt in 1 2 3; do
-            docker pull "$image" && break
-            [ "$attempt" -lt 3 ] || exit 1
-            sleep 10
-          done
           docker run -d --name dispatch-e2e-files -p 127.0.0.1:18333:8333 "$image" server -s3 -dir=/data -ip=0.0.0.0 -s3.port=8333
           for attempt in $(seq 1 60); do
             curl -sf -o /dev/null http://127.0.0.1:18333/ && break
@@ -2012,9 +2128,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.dispatch_browser_multiprocess == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2086,11 +2204,16 @@ jobs:
     needs: changes
     if: needs.changes.outputs.claude_envoy == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
+      # tests/answers-claude.test.ts runs the pinned Claude Code against a stand-in Messages
+      # endpoint and Dispatch, and refuses on GitHub Actions without one. The pin is read from
+      # .claude-code-pin, the repository's one copy of it (.github/actions/install-claude-code).
+      - uses: ./.github/actions/install-claude-code
       - run: bun install --frozen-lockfile
       - name: Lint Claude Envoy plugin
         run: bun run lint
@@ -2122,9 +2245,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_go == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2184,7 +2309,9 @@ jobs:
       # package binaries makes all of their per-test database cleanup queue on the service's one
       # checkpointer, so run it before the rest of the module. Alone it takes close to go test's
       # default ten minutes (523 s on a workstation), and the documents package about nine with the
-      # rest, so every package here gets 20.
+      # rest, so every package here gets 20. The API package's live-feed and delivery-hub tests also
+      # wait for the event log's safe horizon, which any open transaction on this job's Postgres
+      # delays.
       - name: Unit test envoy Go package
         run: |
           go test -timeout 20m ./internal/dispatch/api
@@ -2250,12 +2377,15 @@ jobs:
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too. The unit
   # tests start no container; the natslive files run in a step of their own against real
   # nats-server and Postgres, on testnats.Image, testnats.HubImage and testpg.Image, pulled first
-  # for the reason .github/actions/pull-test-images gives. The per-target compile runs in the lint
-  # job's notices step.
+  # for the reason .github/actions/pull-test-images gives. The gcp natslive tests pull no image:
+  # they install helm, nats-server, the config reloader and the exporter with go install, at the
+  # versions the clustered hub runs, and render the vendored chart in gcp/testdata. The per-target
+  # compile runs in the lint job's notices step.
   envoy-infra-go:
     needs: changes
     if: needs.changes.outputs.envoy_infra_go == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
@@ -2299,7 +2429,9 @@ jobs:
         run: go test ./...
         working-directory: packages/envoy/infra
       - name: Live tests of envoy-infra against nats-server (natslive)
-        run: go test -tags natslive ./core/ ./seed/
+        # gcp's live tests build helm, nats-server, the config reloader and the exporter with go
+        # install first, minutes on a cold cache, so the package gets more than go test's 10 m.
+        run: go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/
         working-directory: packages/envoy/infra
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -2309,34 +2441,60 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
-  # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under
-  # -race and load, not a race in production code, cost three review rounds because nothing ran
-  # this package under -race before a PR claimed it), delivery (its intake handler reads the
-  # routing settings the poll loop publishes, from NATS's delivery goroutine), store (the
-  # pool's one-connection guard, and the hold mark of its own each concurrent read takes), and
-  # the bus (two connects on one SOCKS5 dialer record each dial's error in one record and read it
-  # back, TestConnectsSharingADialerRecordItsLastError), all under the race detector. A read that
-  # walks a live document without its lock races the room's peers, which no ordinary run shows:
-  # envoy-go's unit-test step runs without -race (LEGION-499). Its own job beside envoy-go because
-  # -race runs these packages several times slower, and with its own package deadline, since go
-  # test's ten-minute default is a whole package's. pmdoc's tests shell out to the generated
-  # TypeScript fixtures under internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are
-  # up to date" step), so this job needs Bun installed and its workspace linked the same way, though
-  # not that freshness check itself - a stale fixture is envoy-go's failure to catch, not a race.
-  # delivery's and the bus's NATS runs in the test process (internal/testnats), so the job needs
-  # no container runtime of its own.
+  # The race lane: delivery (its intake handler reads the routing settings the poll loop
+  # publishes, from NATS's delivery goroutine), the Dispatch store (the pool's one-connection
+  # guard, and the hold mark of its own each concurrent read takes), the bus (two connects on one
+  # SOCKS5 dialer record each dial's error in one record and read it back,
+  # TestConnectsSharingADialerRecordItsLastError), the listener, where the role claim watcher, the
+  # session and interest watchers and the request handlers meet, with the role claim view, its
+  # lock and its epoch in the registry store and the watchers' completeness and rescans in kvwatch
+  # (INFRA-141), the session cache, whose reads take its shared lock beside watcher writes and the
+  # expiry timer's callback as kvwatch's resume point is read while a replaced watcher still
+  # applies, pmdoc (LEGION-571: its own flakes under -race and load, not a race in production
+  # code, cost three review rounds because nothing ran this package under -race before a PR
+  # claimed it), the Dispatch API and the document service - all under the race detector. A read
+  # that walks a live document without its lock races the room's peers, which no ordinary run
+  # shows: envoy-go's unit-test step runs without -race (LEGION-499). The lane sits beside
+  # envoy-go because -race runs these packages several times slower, and each job carries a
+  # package deadline of its own, since go test's ten-minute default is a whole package's.
+  #
+  # The lane is four jobs: envoy-go-race (delivery, the Dispatch store, the bus, the listener, the
+  # registry store, the session cache and kvwatch), envoy-go-race-pmdoc, envoy-go-race-api and
+  # envoy-go-race-docs, whose own comment below says why the document service runs alone.
+  #
+  # pmdoc and api sit apart because isolation is what made them fast: sharing a runner, the race
+  # binaries contended for the four vCPUs, and alone pmdoc fell from 1563.552 s to 1023.519 s and
+  # api from 1099.487 s to 746.718 s. The packages left in envoy-go-race are cheap enough to share
+  # one: the two heaviest of those measured there, the bus at 286.931 s and the listener at
+  # 365.787 s (run 40926978371), are a quarter and a third of the lane's bar of 1080 s, which is
+  # 60 % of a 30-minute step's own timeout, so a runner each would buy nothing and cost about
+  # 8,000 replayed runner minutes. Running the heavy packages apart also reads each one's seconds
+  # as its own job's, and leaves the others' numbers standing when one is red.
+  #
+  # Only pmdoc installs Bun: its tests shell out to the generated TypeScript fixtures under
+  # internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to date" step), and
+  # render_readback_test.go refuses to run without bun in CI. Not that freshness check itself - a
+  # stale fixture is envoy-go's failure to catch, not a race. delivery's and the bus's NATS runs in
+  # the test process (internal/testnats), so no job here needs a container runtime of its own.
+  #
+  # Delivery, the Dispatch store, the bus, the listener, the registry store, the session cache and
+  # kvwatch share this runner. The Dispatch store's tests (store_test.go:27, storetest.go:34) and
+  # delivery's (internal/dispatch/delivery/intake_test.go:39-41) read DISPATCH_TEST_DATABASE_URL
+  # and skip without it, and cmd/listener/dispatch_resolution_test.go:158 gets its database
+  # through internal/testpg, so the job carries the lane's Postgres service; the registry store
+  # itself is the NATS KV view and needs none.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy_go_race == 'true'
     runs-on: ubuntu-24.04
-    # Each race step's -timeout 30m must fire before the runner cancels the job, so a hung test
-    # prints the dump that names it. The worst case that still reaches the second step: about 1
-    # minute of setup, the first step up to its own 30 minutes (880 s on main's last green run), up
-    # to 5 minutes to compile the second step's race binaries, then its 30 minutes: 66 minutes.
-    timeout-minutes: 75
+    # The step's -timeout 30m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
+    # binaries, then the step's own 30 minutes, which is 36.
+    timeout-minutes: 45
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2351,21 +2509,137 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      - name: Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch
+        run: go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
+        working-directory: packages/envoy
+
+  # pmdoc under the race detector, on a runner of its own (the lane's comment above says why). The
+  # one race job that installs Bun: its tests run pmdoc/gen's TypeScript through it. No Postgres:
+  # the package talks to no database. Its step is the one in the lane whose deadline is 40 minutes
+  # and not 30: the package measured 1023.519 s isolated, 94.8 % of the lane's bar of 1080 s,
+  # which is 60 % of a 30-minute step's timeout, and 1210 s under contention, so at 30 minutes it
+  # has no headroom at all; at 40 minutes its bar is 1440 s and it uses 71 % of it.
+  envoy-go-race-pmdoc:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_race_pmdoc == 'true'
+    runs-on: ubuntu-24.04
+    # The step's -timeout 40m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
+    # binaries, then the step's own 40 minutes, which is 46.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
-      - name: Race-test the document service, its API, pmdoc, delivery, the store, and the bus
-        run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/
+      - name: Race-test pmdoc
+        run: go test -race -timeout 40m ./internal/dispatch/pmdoc/...
         working-directory: packages/envoy
-      # The listener is where the role claim watcher, the session and interest watchers and the
-      # request handlers meet; the role claim view, its lock and its epoch live in the store, and
-      # the watchers' completeness and rescans in kvwatch (INFRA-141). A step of its own, so its
-      # time and any race it finds are read apart from the packages above.
-      - name: Race-test the listener, the registry store and kvwatch
-        run: go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...
+
+  # The Dispatch API under the race detector, on a runner of its own (the lane's comment above
+  # says why). Its tests drive the store, so the job carries the lane's Postgres service.
+  envoy-go-race-api:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_race_api == 'true'
+    runs-on: ubuntu-24.04
+    # The step's -timeout 30m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
+    # binaries, then the step's own 30 minutes, which is 36.
+    timeout-minutes: 45
+    services:
+      postgres:
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      - name: Race-test the Dispatch API
+        run: go test -race -timeout 30m ./internal/dispatch/api/
+        working-directory: packages/envoy
+
+  # The document service alone, under the race detector, with a deadline of its own. It is by far
+  # the slowest package of the race lane - 1773 s of the 1842 s the first step of envoy-go-race
+  # spent on main at 14d907b6 (job 123461966609) - and sharing a 30-minute step with the other
+  # five groups left it no headroom: that step died on go test's own deadline at job 123503246603.
+  # Its own filter is the closure of this one package, not packages/envoy/**, so a change
+  # elsewhere in the module does not start this job. No Bun: no test file here runs it, and
+  # envoy-go-race's Bun is pmdoc's. It runs under -race because a read that walks a live document
+  # without its lock races the room's peers, which no ordinary run shows
+  # (TestReadsOfALiveDocumentRunBesideItsPeers, internal/dispatch/docs/live_read_race_test.go:39,
+  # LEGION-499).
+  envoy-go-race-docs:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_race_docs == 'true'
+    runs-on: ubuntu-24.04
+    # The step's -timeout 60m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race binary,
+    # then the step's own 60 minutes, which is 66 under this limit of 70.
+    timeout-minutes: 70
+    services:
+      postgres:
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    # Load-bearing, not boilerplate: this package's TestMain is storetest.Main
+    # (internal/dispatch/docs/persistence_test.go:19), and storetest.Open skips every test that
+    # opens the store when DISPATCH_TEST_DATABASE_URL is unset
+    # (internal/dispatch/store/storetest/storetest.go:57-61). A skip is a pass, so without the
+    # service this job would be green having run almost nothing.
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      # go-envoy, restored only: its modules are the envoy module's, but this job builds the
+      # document service's race test binary, not the listener and natsd the family's saving jobs
+      # build, so it saves none.
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      - name: Race-test the document service
+        run: go test -race -timeout 60m ./internal/dispatch/docs/
         working-directory: packages/envoy
 
   # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
@@ -2380,7 +2654,8 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2419,7 +2694,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2511,7 +2787,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2545,6 +2822,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_smoke == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     env:
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image would be one more registry pull a test could fail on.
@@ -2563,9 +2841,10 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       # Every image the build or the test starts (testnats.Image and the smoke image's base
-      # images) is pulled first, for the reason .github/actions/pull-test-images gives. The SPA
-      # stage's base carries an ARG (the Bun pin), so each ARG default is expanded into the FROM
-      # that uses it.
+      # images) is pulled first, for the reason .github/actions/pull-test-images gives. Every
+      # FROM of docker/Dockerfile names a digest and no ARG, so the substitution below expands
+      # nothing today; it stays because a FROM written as an ARG would otherwise be pulled as
+      # the literal `${NAME}`.
       - name: Read the smoke image's base images
         id: base-images
         run: |
@@ -2795,6 +3074,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ci_filters == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2825,16 +3105,18 @@ jobs:
 
   # The one check that condenses every job above into a verdict: .github/scripts/ci-ok.sh, whose
   # header says what it decides and why. It passes only when `changes` succeeded (it selected the
-  # jobs from this head's diff), lint succeeded, every job `changes` selected succeeded, and every
-  # job it did not select succeeded or was skipped. A selected job's skip fails: a skipped job
-  # reports success, and a failed-only re-run of a run whose `changes` failed can make `changes`
-  # succeed and leave the jobs it selects skipped. SELECTED_BY maps every needed job but `changes`
-  # and lint to the output its `if:` tests, and PULL_REQUEST_ONLY lists the jobs whose `if:` also
-  # admits only pull_request; check-ci-filters.sh holds both to those `if:`s.
+  # jobs from this head's diff), lint succeeded (it runs on every change), every job `changes`
+  # selected succeeded, and every job it did not select succeeded or was skipped. A selected
+  # job's skip fails: a skipped job reports success, and a failed-only re-run of a run whose
+  # `changes` failed can make `changes` succeed and leave the jobs it selects skipped.
+  # SELECTED_BY maps every needed job but `changes` and lint to the output its `if:` tests, and
+  # PULL_REQUEST_ONLY lists the jobs whose `if:` also admits only pull_request;
+  # check-ci-filters.sh holds both to those `if:`s.
   ci-ok:
     needs:
       - changes
       - lint
+      - ci-images
       - typecheck
       - test
       - docs
@@ -2850,6 +3132,9 @@ jobs:
       - envoy-go
       - envoy-infra-go
       - envoy-go-race
+      - envoy-go-race-pmdoc
+      - envoy-go-race-api
+      - envoy-go-race-docs
       - dispatch-memory
       - dispatch-multiprocess
       - listener-server-change
@@ -2861,6 +3146,7 @@ jobs:
       - worker-image
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2887,6 +3173,9 @@ jobs:
               "envoy-go": "envoy_go",
               "envoy-infra-go": "envoy_infra_go",
               "envoy-go-race": "envoy_go_race",
+              "envoy-go-race-pmdoc": "envoy_go_race_pmdoc",
+              "envoy-go-race-api": "envoy_go_race_api",
+              "envoy-go-race-docs": "envoy_go_race_docs",
               "dispatch-memory": "dispatch_memory",
               "dispatch-multiprocess": "dispatch_multiprocess",
               "listener-server-change": "listener_server_change",
@@ -2895,6 +3184,7 @@ jobs:
               "envoy-e2e-local": "envoy_e2e_local",
               "envoy-session-stall": "envoy_session_stall",
               "ci-filters": "ci_filters",
+              "ci-images": "ci_images",
               "worker-image": "worker_image"
             }
           PULL_REQUEST_ONLY: '["worker-image"]'

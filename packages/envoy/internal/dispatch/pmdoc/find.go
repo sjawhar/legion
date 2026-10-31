@@ -25,6 +25,63 @@ type Range struct {
 var ErrTargetNotFound = errors.New("target not found")
 var ErrTargetSpansBlocks = errors.New("target spans textblocks")
 
+// ErrMarkNotAllowed is the refusal of a mark on text that stands where the schema allows no mark of
+// its type: an ask's in a code block, or any anchor's in front matter. The refusal is a
+// *MarkNotAllowedError, which is ErrSchema too, so a caller that only knows ErrSchema still sees
+// it, and one that wrote the text itself can tell it apart from a fault of the document or the
+// server.
+var ErrMarkNotAllowed = errors.New("mark not allowed on this text")
+
+// MarkNotAllowedError is MarkRange's refusal of Mark on text in Textblock, the textblock holding the
+// text: "code_block", or "" for text no paragraph, heading or code block holds.
+type MarkNotAllowedError struct {
+	Mark      string
+	Textblock string
+	// At is where the text run holding the refused text begins in the document - its block's whole
+	// text, not where the refused range starts. A code block or the front matter holds its text as
+	// one run, so two refusals with the same Textblock and At are one place, and two with different
+	// At are two places of one kind.
+	At int
+}
+
+func (e *MarkNotAllowedError) Error() string {
+	return fmt.Sprintf("%s: mark %q is not allowed in %s", ErrSchema, e.Mark, e.Place())
+}
+
+// Is reports err as ErrMarkNotAllowed and as ErrSchema.
+func (e *MarkNotAllowedError) Is(target error) bool {
+	return target == ErrMarkNotAllowed || target == ErrSchema
+}
+
+// Place names, for a person, where the refused text stands: "a code block", or "the front matter"
+// for text no textblock holds, since in a document inside the schema only front matter holds text
+// outside a paragraph, heading or code block.
+func (e *MarkNotAllowedError) Place() string {
+	singular, _ := e.place()
+	return singular
+}
+
+// PlacePlural names several places of the kind the refused text stands in, for a count to stand
+// before: "code blocks". It is empty where a document inside the schema holds one place of the
+// kind at most - the front matter - so a caller counting the places a quote landed in names that
+// one as Place names it however often the quote landed there.
+func (e *MarkNotAllowedError) PlacePlural() string {
+	_, plural := e.place()
+	return plural
+}
+
+// place is where the refused text stands, as a person says it of one such place and of several,
+// held as one mapping so the singular and the plural never name different things.
+func (e *MarkNotAllowedError) place() (singular, plural string) {
+	switch e.Textblock {
+	case "":
+		return "the front matter", ""
+	case "code_block":
+		return "a code block", "code blocks"
+	}
+	return e.Textblock, e.Textblock + "s"
+}
+
 // ErrQuoteNotFound reports a quote miss with up to three closest rendered textblocks, in
 // document order among equals, and how many places the quote did match — nonzero only when an
 // occurrence was out of range. It unwraps ErrTargetNotFound so callers can preserve their
@@ -122,48 +179,16 @@ func NewQuoteFinder(doc *Node) *QuoteFinder {
 
 // Find is FindQuote(doc, quote, occurrence, near): the same range or the same error.
 func (f *QuoteFinder) Find(quote string, occurrence, near *int) (Range, error) {
-	return f.find(quote, occurrence, near, true)
-}
-
-// FindDiscardingMiss is Find for a caller that drops a miss: where Find returns an
-// *ErrQuoteNotFound, it returns ErrTargetNotFound itself, without ranking the document's blocks
-// for the nearest ones, which costs another walk of the document a miss. Every other result is
-// Find's.
-func (f *QuoteFinder) FindDiscardingMiss(quote string, occurrence, near *int) (Range, error) {
-	return f.find(quote, occurrence, near, false)
-}
-
-func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss bool) (Range, error) {
-	if f.doc == nil {
-		return Range{}, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
-	}
-	if !f.prepared {
-		f.prepared = true
-		if f.err = f.doc.Validate(); f.err == nil {
-			f.text = buildFlattenedText(f.doc)
-		}
-	}
-	if f.err != nil {
-		return Range{}, f.err
+	matches, err := f.matches(quote)
+	if err != nil {
+		return Range{}, err
 	}
 	doc, text := f.doc, f.text
-	var matches []quoteMatch
-	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
-		matches = headingQuoteMatches(doc, text, quote[len(marker):])
-	} else {
-		matches = quoteMatches(text, quote)
-	}
 	if len(matches) == 0 {
-		if !describeMiss {
-			return Range{}, ErrTargetNotFound
-		}
 		return Range{}, quoteNotFound(doc, quote)
 	}
 	if occurrence != nil {
 		if *occurrence < 0 || *occurrence >= len(matches) {
-			if !describeMiss {
-				return Range{}, ErrTargetNotFound
-			}
 			miss := quoteNotFound(doc, quote)
 			var missing *ErrQuoteNotFound
 			if errors.As(miss, &missing) {
@@ -177,16 +202,9 @@ func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss boo
 		return matches[0].Range, nil
 	}
 	if near != nil {
-		best := matches[0]
-		bestDistance := distance(best.From, *near)
-		for _, match := range matches[1:] {
-			candidateDistance := distance(match.From, *near)
-			if candidateDistance < bestDistance || (candidateDistance == bestDistance && match.From < best.From) {
-				best = match
-				bestDistance = candidateDistance
-			}
-		}
-		return best.Range, nil
+		// MinFunc returns the first least match, which nearerFirst's earlier-of-two-as-near tie
+		// makes the first NearestFirst lists.
+		return slices.MinFunc(matches, nearerFirst(*near)).Range, nil
 	}
 
 	candidates := make([]Candidate, 0, len(matches))
@@ -197,6 +215,61 @@ func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss boo
 		})
 	}
 	return Range{}, &ErrTargetAmbiguous{Target: quote, Candidates: candidates}
+}
+
+// NearestFirst is every range quote matches, as Find matches it, ordered as Find with near chooses
+// among them: the nearest to near first, and of two as near, the earlier. Find with near returns
+// its first. A quote that matches nothing is ErrTargetNotFound itself, without ranking the
+// document's blocks for the nearest ones the way Find's miss does, which costs another walk of the
+// document: a caller that drops the miss pays nothing to describe it. A caller whose first choice
+// cannot carry what it writes there takes the next.
+func (f *QuoteFinder) NearestFirst(quote string, near int) ([]Range, error) {
+	matches, err := f.matches(quote)
+	if err != nil {
+		return nil, err
+	}
+	if len(matches) == 0 {
+		return nil, ErrTargetNotFound
+	}
+	slices.SortFunc(matches, nearerFirst(near))
+	ranges := make([]Range, len(matches))
+	for index, match := range matches {
+		ranges[index] = match.Range
+	}
+	return ranges, nil
+}
+
+// nearerFirst orders two matches of one quote as Find with near chooses between them: the nearer to
+// near first, and of two as near, the earlier. NearestFirst sorts by it and Find takes its least,
+// so the range Find chooses and the first NearestFirst lists are one rule, held in one place.
+func nearerFirst(near int) func(left, right quoteMatch) int {
+	return func(left, right quoteMatch) int {
+		if byDistance := distance(left.From, near) - distance(right.From, near); byDistance != 0 {
+			return byDistance
+		}
+		return left.From - right.From
+	}
+}
+
+// matches is every match of quote in the finder's document, preparing the document at the first
+// call: a heading quote's headings, otherwise the plain matcher cascade's.
+func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
+	if f.doc == nil {
+		return nil, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
+	}
+	if !f.prepared {
+		f.prepared = true
+		if f.err = f.doc.Validate(); f.err == nil {
+			f.text = buildFlattenedText(f.doc)
+		}
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
+		return headingQuoteMatches(f.doc, f.text, quote[len(marker):]), nil
+	}
+	return quoteMatches(f.text, quote), nil
 }
 
 // TargetSpansBlocks reports whether r is not wholly contained by one
@@ -1063,7 +1136,7 @@ func (w *MarkWriter) Mark(txn *crdt.Transaction, r Range, mark Mark) error {
 	last := first
 	for ; last < len(spans) && spans[last].From < r.To; last++ {
 		if !markAllowedInTextblock(mark.Type, spans[last].textblock) {
-			return fmt.Errorf("%w: mark %q is not allowed in %s", ErrSchema, mark.Type, spans[last].textblock)
+			return &MarkNotAllowedError{Mark: mark.Type, Textblock: spans[last].textblock, At: spans[last].From}
 		}
 	}
 	if first == last {

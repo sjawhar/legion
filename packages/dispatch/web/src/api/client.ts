@@ -70,6 +70,7 @@ import type {
   IssueReferenceSummary,
   IssueReferences,
   IssueSummary,
+  ItemBlocks,
   ListUsersResponse,
   MachineLoginsResponse,
   Message,
@@ -83,6 +84,7 @@ import type {
   RepoProject,
   SearchResponse,
   Subscriber,
+  Suggestions,
   UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
@@ -276,6 +278,16 @@ export function isKeyCommitted(error: unknown): error is ApiError {
 // affordance instead of bouncing the user to the sign-in page.
 export function isUnauthorized(error: unknown): boolean {
   return error instanceof ApiError && error.status === 401;
+}
+
+/** Whether `error` is the sign-in check's `503 EVENT_HEAD_UNAVAILABLE`: Dispatch has no event id
+ *  it can vouch for as final yet, which a process just restarted while an event write from before
+ *  it is still open answers until that write ends. The page asks again until it answers
+ *  (`queryRetry`); nothing about the session is wrong. */
+export function isEventHeadUnavailable(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status === 503 && error.code === "EVENT_HEAD_UNAVAILABLE"
+  );
 }
 
 /** Whether `error` is Dispatch's own answer that the caller is signed in to nobody
@@ -919,6 +931,22 @@ export class DispatchApiClient {
     return this.json<SearchResponse>(pathWithQuery("/api/v1/search", { q: query, ...options }));
   }
 
+  /**
+   * `GET /api/v1/projects/{key}/related`: the related-item check over a title, recording nothing.
+   * The create dialog asks while a person types, so a caller passes the `signal` of the check it
+   * is still interested in and a superseded one is aborted rather than raced.
+   */
+  relatedItems(
+    project: string,
+    title: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<Suggestions> {
+    return this.json<Suggestions>(
+      pathWithQuery(`/api/v1/projects/${pathSegment(project)}/related`, { title }),
+      { signal: options.signal }
+    );
+  }
+
   createIssue(input: CreateIssueInput, bounds: WriteBounds): Promise<Issue> {
     return this.post<Issue>("/api/v1/issues", input, bounds);
   }
@@ -1060,6 +1088,12 @@ export class DispatchApiClient {
       { body: input, method: "PATCH", path: `/api/v1/comments/${pathSegment(id)}` },
       bounds
     );
+  }
+
+  /** The comment's current blocks, each with its span in the stored body, and its revision: what
+   *  the editor carries block ids from (`editComment`'s `blocks` and `base_revision`). */
+  commentBlocks(id: string): Promise<ItemBlocks> {
+    return this.json<ItemBlocks>(`/api/v1/comments/${pathSegment(id)}/blocks`);
   }
 
   acceptComment(id: string, bounds: WriteBounds): Promise<Comment> {

@@ -1,6 +1,7 @@
 import { type BearerSource, bearerSource, type FileBearer, fileBearer } from "./bearer";
 import {
   type CheckoutEnvoyConfig,
+  type CommandMode,
   type EnvoyConfig,
   type EnvoyConfigEnvironment,
   httpUrl,
@@ -83,6 +84,30 @@ function writtenToken(
 }
 
 /**
+ * The notice for `DISPATCH_TOKEN_FILE` set while nothing names Dispatch's server, or undefined when
+ * it is not set. Legion sets `DISPATCH_TOKEN_FILE` only beside `DISPATCH_URL`, in a tmux pane and in
+ * a pod alike, and a pod has no envoy.json; its session keeps one shell, where an `unset
+ * DISPATCH_URL` lasts. So this notice names the variable to export again, not the missing file.
+ * `DISPATCH_TOKEN` alone says nothing of the kind: it also goes with a server an envoy.json names.
+ * What may name the server on this machine is still said after it: the missing file's dangling
+ * link, then the unread OpenCode-era user file, last, as `missingConfigNotice` says it
+ * (claude-envoy's session hook prints a notice only when it ends with that file's notice).
+ */
+export function lostDispatchUrlNotice(
+  env: DispatchEnvironment,
+  config: ReadEnvoyConfig
+): string | undefined {
+  if (nonEmpty(env.DISPATCH_TOKEN_FILE) === undefined) return undefined;
+  const link = config.missing?.link ?? null;
+  const old = config.missing?.oldUserFileNotice;
+  return [
+    "DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for",
+    ...(link === null ? [] : [`${config.path} is a link to ${link}, which does not exist`]),
+    ...(old === undefined ? [] : [old]),
+  ].join("; ");
+}
+
+/**
  * Dispatch's URL and bearer token from `config` (`readEnvoyConfig`) and the environment. An empty
  * variable counts as unset.
  *
@@ -111,14 +136,68 @@ function writtenToken(
  * `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`. A checkout's server with its own token points the
  * session at that server as that token's holder, whichever server it is, the user's own included;
  * what a checkout cannot do is take the user's token, or a variable's, anywhere. A checkout's `!`
- * token is refused; the chosen file's runs here, only once Dispatch is about to use it. Dispatch is
- * on only when both URL and bearer token resolve; off, it says why: a `notice` when nothing names
- * it or a file turns it off, an `error` otherwise.
+ * token is refused; the chosen file's runs here, only once Dispatch is about to use it, unless
+ * `options.commands` is `kept`: then only an outcome a run already kept in this process answers,
+ * and with none Dispatch is off with an error saying the command has not run (`fileValue`).
+ * Dispatch is on only when both URL and bearer token resolve; off, it says why: a `notice` when
+ * nothing names it or a file turns it off, an `error` otherwise. Nothing naming it while a token
+ * variable is set is said as the `DISPATCH_URL` the shell lost (`lostDispatchUrlNotice`).
  */
 export function dispatchSettings(
   env: DispatchEnvironment,
-  config: EnvoyConfig
+  config: EnvoyConfig,
+  options: { readonly commands?: CommandMode | undefined } = {}
 ): DispatchConfigResolution {
+  const target = dispatchTarget(env, config);
+  if (!target.enabled) return target;
+  const { url, source } = target;
+  let token: string;
+  try {
+    token =
+      source.kind === "variable"
+        ? source.token
+        : fileBearer(source, url, "DISPATCH", env, options.commands);
+  } catch (error) {
+    return offWithError(messageFor(error));
+  }
+  // An http(s) URL the URL parser takes whose port, when it names one, is from 1 to 65535. The
+  // daemon accepts at load only values taken here, under a narrower rule (its CheckPod and this
+  // read hold to packages/contracts/fixtures/dispatch-public-url.json).
+  const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
+  const publicParsed = publicUrl === undefined ? undefined : httpUrl(publicUrl);
+  if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
+    return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
+  }
+  return {
+    enabled: true,
+    url,
+    token,
+    ...(publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }),
+  };
+}
+
+/**
+ * The URL `dispatchSettings` resolves from `config` and the environment, without reading the token:
+ * no `!` command runs, and no outcome of one is needed. Undefined when Dispatch is off before its
+ * token is read: nothing names it, a file turns it off or cannot be used, `DISPATCH_URL` is no
+ * http(s) URL, or no token source is configured. For a caller on a deadline that holds a list read
+ * from one Dispatch URL and must know whether it is the configured one while the token's command
+ * has not run in its process (`readSessionAnswers`' `dispatchUrl`).
+ */
+export function dispatchUrl(env: DispatchEnvironment, config: EnvoyConfig): string | undefined {
+  const target = dispatchTarget(env, config);
+  return target.enabled ? target.url : undefined;
+}
+
+/** Where Dispatch's token comes from: a variable, or a file with the server written beside it. */
+type TokenSource = Exclude<BearerSource, { readonly kind: "none" }>;
+
+/** Dispatch as `dispatchSettings` resolves it up to its token: its URL and the token's source, or
+ * off saying why. Reads a `DISPATCH_TOKEN_FILE`, never runs a `!` command. */
+function dispatchTarget(
+  env: DispatchEnvironment,
+  config: EnvoyConfig
+): SectionOff | { readonly enabled: true; readonly url: string; readonly source: TokenSource } {
   if (config.kind === "failed") return offWithError(config.error);
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
   const checkoutFile = explicitUrl === undefined ? config.checkout : null;
@@ -141,6 +220,8 @@ export function dispatchSettings(
     own.serverUrl !== undefined ||
     own.enabled === true;
   if (!addressed) {
+    const lost = lostDispatchUrlNotice(env, config);
+    if (lost !== undefined) return offWithNotice(lost);
     return offWithNotice(
       config.missing === null
         ? `${config.path} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`
@@ -151,42 +232,27 @@ export function dispatchSettings(
     return offWithError("DISPATCH_URL must be an http or https URL");
   }
 
+  let source: BearerSource;
   try {
     // A checkout's server goes only with the token written beside it.
-    const source =
+    source =
       checkout !== null && checkoutServer !== undefined
         ? checkoutPair(checkout, checkoutServer)
         : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
-    if (source.kind === "none") {
-      return offWithError(
-        explicitUrl === undefined
-          ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE`
-          : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`
-      );
-    }
-    const url = (
-      explicitUrl ??
-      (source.kind === "file" ? source.server : (own.serverUrl ?? DEFAULT_SERVER_URL))
-    ).replace(/\/+$/, "");
-    const token =
-      source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env);
-    // An http(s) URL the URL parser takes whose port, when it names one, is from 1 to 65535. The
-    // daemon accepts at load only values taken here, under a narrower rule (its CheckPod and this
-    // read hold to packages/contracts/fixtures/dispatch-public-url.json).
-    const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
-    const publicParsed = publicUrl === undefined ? undefined : httpUrl(publicUrl);
-    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
-      return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
-    }
-    return {
-      enabled: true,
-      url,
-      token,
-      ...(publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }),
-    };
   } catch (error) {
     return offWithError(messageFor(error));
   }
+  if (source.kind === "none") {
+    return offWithError(
+      explicitUrl === undefined
+        ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE`
+        : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`
+    );
+  }
+  const url = (
+    explicitUrl ?? (source.kind === "file" ? source.server : (own.serverUrl ?? DEFAULT_SERVER_URL))
+  ).replace(/\/+$/, "");
+  return { enabled: true, url, source };
 }
 
 /**

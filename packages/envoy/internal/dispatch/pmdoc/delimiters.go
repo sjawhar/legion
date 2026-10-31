@@ -197,9 +197,10 @@ type pairingPass struct {
 // those at once, in a pass of their own, before it goes on. The enclosed runs of the pass's own
 // group leave the list as text, as goldmark's ProcessDelimiters drops them; micromark runs its
 // attention again over them and may pair them inside the pair, so in `_**.****.a***_` pmdoc, as
-// main did, reads `**.**` as text where the engine makes `..a` strong. A group's pass starts at
-// its first run left once the groups before it are paired. The passes are a stack rather than
-// calls, so how deeply pairs call for passes is bounded by memory, not by the goroutine's stack.
+// pmdoc did before sjawhar/legion#2360, reads `**.**` as text where the engine makes `..a` strong.
+// A group's pass starts at its first run left once the groups before it are paired. The passes
+// are a stack rather than calls, so how deeply pairs call for passes is bounded by memory, not by
+// the goroutine's stack.
 func (l *delimiterList) pair(bottom int, groups ...runGroup) {
 	var stack []pairingPass
 	for _, group := range groups {

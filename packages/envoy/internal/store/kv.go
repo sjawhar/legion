@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -286,8 +287,15 @@ func (r *Registry) deleteInterest(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	revision = max(revision, read)
+	r.reconcileDeleted(ctx, interests, sessionID, max(revision, read))
+	return nil
+}
 
+// reconcileDeleted brings sessionID's cache entry in line with the bucket after a delete through
+// interests that succeeded past revision: it applies the key's latest history entry, which is the
+// delete marker unless a write has landed since, or, when the history cannot be read within ctx
+// (bus.Bounded), evicts the entry behind a fence just past revision.
+func (r *Registry) reconcileDeleted(ctx context.Context, interests bus.KeyValue, sessionID string, revision uint64) {
 	// A history that does not answer falls back to the fence below: the delete itself answered.
 	entries, _, err := bus.Bounded(ctx, func() ([]nats.KeyValueEntry, error) { return interests.History(sessionID) })
 	if err == nil && len(entries) > 0 {
@@ -296,7 +304,7 @@ func (r *Registry) deleteInterest(ctx context.Context, sessionID string) error {
 			r.mu.Lock()
 			r.evictCachedInterestLocked(sessionID, latest.Revision())
 			r.mu.Unlock()
-			return nil
+			return
 		}
 
 		var item Interest
@@ -309,12 +317,12 @@ func (r *Registry) deleteInterest(ctx context.Context, sessionID string) error {
 				slog.Uint64("revision", latest.Revision()),
 				slog.String("error", err.Error()),
 			)
-			return nil
+			return
 		}
 		r.mu.Lock()
 		r.cacheInterestLocked(sessionID, item, latest.Revision())
 		r.mu.Unlock()
-		return nil
+		return
 	}
 
 	// KeyValue.Delete does not return its revision. A successful delete must
@@ -323,7 +331,6 @@ func (r *Registry) deleteInterest(ctx context.Context, sessionID string) error {
 	r.mu.Lock()
 	r.evictCachedInterestLocked(sessionID, revision+1)
 	r.mu.Unlock()
-	return nil
 }
 
 // Rewatch reopens both buckets on conn and replaces both caches' watchers with ones there
@@ -479,7 +486,8 @@ var ErrRoleViewNotReady = errors.New("the role claim view is not complete")
 // the role's claim names it; its interest record's topics say nothing about that. It answers only
 // while the view is complete (kvwatch.Watcher.Complete): the current watcher's first scan
 // delivered every claim, after any reset, and the watcher still runs. Otherwise it returns
-// ErrRoleViewNotReady, wrapped. A first scan the idle timer ended is scanned again
+// ErrRoleViewNotReady, wrapped, with the reason roleViewGeneration gives, the one test of the
+// view's state, which RoleViewErr makes too. A first scan the idle timer ended is scanned again
 // (newRoleWatcher), so the view becomes complete without a Rewatch.
 //
 // The view is read between two readings of the watcher's generation, and answers only when the
@@ -489,15 +497,9 @@ var ErrRoleViewNotReady = errors.New("the role claim view is not complete")
 // every claim present at a revision no older than the scan's, so the answer is no older than
 // that complete scan.
 func (r *Registry) RolesHeldBy(sessionID string) ([]string, error) {
-	if r.roleWatcher == nil {
-		return nil, fmt.Errorf("%w: no watcher follows the role claims", ErrRoleViewNotReady)
-	}
-	if err := r.roleWatcher.Err(); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrRoleViewNotReady, err)
-	}
-	generation, complete := r.roleWatcher.Complete()
-	if !complete {
-		return nil, fmt.Errorf("%w: its watcher has not delivered every claim", ErrRoleViewNotReady)
+	generation, err := r.roleViewGeneration()
+	if err != nil {
+		return nil, err
 	}
 	roles := []string{}
 	r.holdersMu.RLock()
@@ -514,18 +516,59 @@ func (r *Registry) RolesHeldBy(sessionID string) ([]string, error) {
 	return roles, nil
 }
 
-// WaitForCacheReady blocks until both watchers are ready (kvwatch.Watcher.Ready), each having ended
-// its first scan or failed to start, or until ctx is done. After complete scans, Match sees every
-// existing subscription in the bucket and RolesHeldBy every claim; a role claim scan nats.go's idle
-// timer ended leaves RolesHeldBy refusing (ErrRoleViewNotReady) until its rescan completes. Callers
-// bound ctx: a watcher that fails to start releases it too, and the caller then serves the
-// write-through path while /healthz exposes the unavailable registry. Its error names the cache
-// that was not ready.
+// roleViewGeneration is the one test of whether the role claim view can answer a read: nil and the
+// generation of the watcher the answer would be read under, or the wrapped ErrRoleViewNotReady
+// naming why no read is answered. RolesHeldBy and RoleViewErr both come here, so what a route
+// reads and what /healthz reports of the view are the same state, read the same way, and cannot
+// disagree. It makes no bucket call.
+func (r *Registry) roleViewGeneration() (uint64, error) {
+	if r.roleWatcher == nil {
+		return 0, fmt.Errorf("%w: no watcher follows the role claims", ErrRoleViewNotReady)
+	}
+	if err := r.roleWatcher.Err(); err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrRoleViewNotReady, err)
+	}
+	generation, complete := r.roleWatcher.Complete()
+	if !complete {
+		return 0, fmt.Errorf("%w: its watcher has not delivered every claim", ErrRoleViewNotReady)
+	}
+	return generation, nil
+}
+
+// RoleViewErr is nil while the role claim view would answer a read, and otherwise the wrapped
+// ErrRoleViewNotReady that RolesHeldBy refuses that read with, naming the same reason: both read
+// the view's state through roleViewGeneration, so a report that the view answers and a read it
+// refuses can never disagree. It makes no bucket call, so a caller reports the view without
+// waiting on the bus.
+//
+// /healthz reports it as a degraded dependency, and it is deliberately not part of Ping or
+// WatchErr: those feed the listener's self-health monitor, which restarts the listener over a
+// terminal failure that survives its recovery attempts, and no rebuild completes a scan the
+// bucket keeps timing out on. What does complete it is the role claim watcher's own rescan
+// (newRoleWatcher), which needs nothing from the listener.
+func (r *Registry) RoleViewErr() error {
+	_, err := r.roleViewGeneration()
+	return err
+}
+
+// WaitForCacheReady blocks until both views answer, or until ctx is done. The interest watcher is
+// waited for as ready (kvwatch.Watcher.WaitReady), having ended its first scan or failed to
+// start, and the role claim watcher as complete (kvwatch.Watcher.WaitComplete): the interest view
+// answers from whatever its cache holds, so a partial scan still serves, while the role claim
+// view refuses every read until its scan has delivered every claim (ErrRoleViewNotReady), so
+// readiness alone would let a caller serve a view that answers nothing. After it returns nil,
+// Match sees every existing subscription in the bucket and RolesHeldBy answers. A role claim scan
+// nats.go's idle timer ended releases readiness without completing, and the role claim watcher
+// scans the bucket again after it (newRoleWatcher's kvwatch.WithRescan), so this wait ends on
+// that rescan rather than hanging. Callers bound ctx: a watcher that fails to start releases it
+// too, and so does one that can complete no scan at all, through its terminal error or its stop;
+// the caller then serves the write-through path while /healthz exposes the unavailable registry.
+// Its error names the cache that did not answer.
 func (r *Registry) WaitForCacheReady(ctx context.Context) error {
 	if err := r.watcher.WaitReady(ctx); err != nil {
 		return fmt.Errorf("interest cache: %w", err)
 	}
-	if err := r.roleWatcher.WaitReady(ctx); err != nil {
+	if err := r.roleWatcher.WaitComplete(ctx); err != nil {
 		return fmt.Errorf("role claim cache: %w", err)
 	}
 	return nil
@@ -537,21 +580,49 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 }
 
 // UpsertWithin merges topics into item.SessionID's interest record (mergeForUpsert) and writes it,
-// each bucket call waiting no longer than ctx (bus.Bounded): an HTTP route passes its request's own
-// context. A record this build cannot decode (ErrMalformedInterest) is replaced by item and topics
-// alone, and the registry logs that at WARN naming the session. A write ctx abandoned may still
-// land after this answer. That is safe: it writes the record the caller's retry writes again, it
-// rides the connection ahead of any write this listener sends on it later, so it cannot undo one,
-// and against another listener's write it is last-writer-wins, as every Put already is.
+// stamped with the registry's clock, each bucket call waiting no longer than ctx (bus.Bounded): an
+// HTTP route passes its request's own context. It returns the record as it now stands. A record
+// this build cannot decode (ErrMalformedInterest) is replaced by item and topics alone, and the
+// registry logs that at WARN naming the session. A write ctx abandoned may still land after this
+// answer. That is safe: it writes the record the caller's retry writes again, it rides the
+// connection ahead of any write this listener sends on it later, so it cannot undo one, and
+// against another listener's write it is last-writer-wins, as every Put already is.
+//
+// A heartbeat re-sends the same topics every 90 seconds, so UpsertWithin returns the current row
+// without writing when the encoding of merged equals that of the row it holds, apart from
+// UpdatedAt, and the row is younger than InterestRefreshAge. An unchanged row is thus rewritten
+// once per InterestRefreshAge, its UpdatedAt lags the session's last heartbeat by less than that,
+// and Reap adds InterestRefreshAge to its grace window (InterestReapAllowance), so that lag never
+// shortens a paused session's grace. A changed row is written, and so is a record it cannot
+// decode; any other failed read refuses the write (mergeForUpsert). The session row
+// (session.SessionRegistry.Put) is written on every heartbeat: its bucket's MaxAge is the liveness
+// clock, and NATS connect notices ($SYS) are not available to replace it.
 func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []string) (Interest, error) {
 	cur, getErr := r.Get(ctx, item.SessionID)
-	merged, err := mergeForUpsert(cur, getErr, item, topics, r.now().UnixMilli())
+	now := r.now().UnixMilli()
+	merged, err := mergeForUpsert(cur, getErr, item, topics, now)
 	if err != nil {
 		return Interest{}, err
 	}
 	buf, err := json.Marshal(merged)
 	if err != nil {
 		return Interest{}, err
+	}
+	if getErr == nil && now-cur.UpdatedAt < InterestRefreshAge.Milliseconds() {
+		// What the skip asks is whether this write would store the row it holds, so it compares
+		// the encoding of merged with that of the current row rather than the fields one by one:
+		// a field added to Interest, and the difference between a null and an empty topic list,
+		// are then covered by the encoding itself. The current row is stamped with merged's
+		// UpdatedAt, the one field a write of an unchanged row would move.
+		unchanged := cur
+		unchanged.UpdatedAt = merged.UpdatedAt
+		stored, err := json.Marshal(unchanged)
+		if err != nil {
+			return Interest{}, err
+		}
+		if bytes.Equal(buf, stored) {
+			return cur, nil
+		}
 	}
 	revision, err := r.putInterest(ctx, merged.SessionID, buf)
 	if err != nil {
@@ -1123,6 +1194,21 @@ const (
 	InterestRefreshAge = 5 * time.Minute
 )
 
+// InterestReapAllowance is the age past which Reap deletes a dead session's interest: grace, the
+// window the row's session is given after its last write, plus InterestRefreshAge, the most that
+// write may lag the session's last heartbeat. A row exactly that old is kept. The listener gives
+// the same allowance to the last-seen record its session cache keeps
+// (session.WithLastSeenRetention), so every row the reaper can still hold has one.
+func InterestReapAllowance(grace time.Duration) time.Duration {
+	return grace + InterestRefreshAge
+}
+
+// reapCandidate is one cached interest past the allowance as Reap's snapshot saw it.
+type reapCandidate struct {
+	sessionID string
+	revision  uint64
+}
+
 // Reap cross-references the interest cache with a session liveness check and
 // deletes an interest only when its session is dead AND more than the grace
 // window plus InterestRefreshAge has passed since the row's last write
@@ -1130,26 +1216,42 @@ const (
 // not an interest: it remains available for its holder to re-register after a
 // listener restart, and the role delivery path drops it if that holder never
 // becomes live again.
+//
+// Under the read lock it copies the session id and cache revision of every cached
+// interest past that allowance, and then releases it, so isAlive runs with no interest
+// lock held and a heartbeat's Upsert never waits on a pass. Before it deletes a
+// candidate it reads it again and skips it when its revision changed or it is now
+// within the allowance, and it deletes at exactly the revision it checked, so a write
+// that lands after that check is kept: the delete fails with JetStream's wrong last
+// sequence (10071, nats.ErrKeyExists), and the candidate counts as skipped.
 func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
 	now := r.now().UnixMilli()
-	allowanceMs := graceWindow.Milliseconds() + InterestRefreshAge.Milliseconds()
+	allowanceMs := InterestReapAllowance(graceWindow).Milliseconds()
 
 	r.mu.RLock()
-	var stale []string
+	var candidates []reapCandidate
 	for sid, item := range r.cache {
-		if isAlive(sid) {
-			continue // session still alive
-		}
 		if now-item.UpdatedAt <= allowanceMs {
 			continue // within grace window plus refresh age
 		}
-		stale = append(stale, sid)
+		candidates = append(candidates, reapCandidate{sessionID: sid, revision: r.cacheRevisions[sid]})
 	}
 	r.mu.RUnlock()
 
 	reaped := 0
-	for _, sid := range stale {
-		err := r.deleteInterest(context.Background(), sid)
+	for _, candidate := range candidates {
+		sid := candidate.sessionID
+		if isAlive(sid) {
+			continue // session still alive
+		}
+		r.mu.RLock()
+		item, cached := r.cache[sid]
+		revision := r.cacheRevisions[sid]
+		r.mu.RUnlock()
+		if !cached || revision != candidate.revision || now-item.UpdatedAt <= allowanceMs {
+			continue // written or removed during the pass
+		}
+		deleted, err := r.deleteInterestAt(context.Background(), sid, revision)
 		if errors.Is(err, bus.ErrRefused) {
 			r.logger().Warn("reaper skipped an interest it cannot delete", slog.Int("key_bytes", len(sid)), slog.String("error", err.Error()))
 			continue
@@ -1157,9 +1259,40 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 		if err != nil {
 			return 0, err
 		}
-		reaped++
+		if deleted {
+			reaped++
+		}
 	}
 	return reaped, nil
+}
+
+// deleteInterestAt deletes sessionID's interest only while its latest revision is revision, and
+// reports whether it did, each bucket call waiting no longer than ctx (bus.Bounded). A write since
+// then makes JetStream refuse the delete with wrong last sequence (10071, which nats.go names
+// nats.ErrKeyExists), and the interest is kept: false and no error. Revision 0 names no revision,
+// which a conditional delete cannot express, so that interest is deleted at the revision it reads
+// (deleteInterest). The cache follows the bucket afterwards as it does after deleteInterest. A
+// delete ctx abandoned may still land after this answer, and that is safe: it deletes only the
+// revision it checked.
+func (r *Registry) deleteInterestAt(ctx context.Context, sessionID string, revision uint64) (bool, error) {
+	if revision == 0 {
+		return true, r.deleteInterest(ctx, sessionID)
+	}
+	interests := r.interests()
+	_, answered, err := bus.Bounded(ctx, func() (struct{}, error) {
+		return struct{}{}, interests.Delete(sessionID, nats.LastRevision(revision))
+	})
+	if !answered {
+		return false, fmt.Errorf("delete %s's interest record at revision %d: %w", sessionID, revision, err)
+	}
+	if errors.Is(err, nats.ErrKeyExists) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	r.reconcileDeleted(ctx, interests, sessionID, revision)
+	return true, nil
 }
 
 // ReapRoleClaims removes claims whose holders did not re-register before the
@@ -1213,15 +1346,16 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 // a channel closed once it has returned: a pass in flight when ctx ends finishes first. A pass
 // lists the bucket through watchers whose consumers nats.go creates and deletes, so the listener's
 // shutdown waits for it before it drains NATS (kvwatch.Watcher.End says what a drain does to such
-// a delete).
+// a delete). Each pass logs how many interests it reaped and how long it took (elapsed_ms).
 func (r *Registry) StartReaper(ctx context.Context, isAlive func(string) bool, interval, graceWindow time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
+		started := time.Now()
 		count, err := r.Reap(isAlive, graceWindow)
 		if err != nil {
 			r.logger().Error("reaper cycle failed", slog.String("error", err.Error()))
 			return
 		}
-		r.logger().Info("reaper cycle", slog.Int("reaped", count))
+		r.logger().Info("reaper cycle", slog.Int("reaped", count), slog.Int64("elapsed_ms", time.Since(started).Milliseconds()))
 	})
 }
 
