@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -388,24 +389,21 @@ func requireServiceRestartClose(t *testing.T, connection *gws.Conn, what string)
 	}
 }
 
-// A revoked socket's close frame is a message of its own, so it must never go out inside one of
-// ygo's. gorilla writes a frame larger than its write buffer as a header and the buffer's worth in
-// one write and the rest in another, and the close of a revoked connection - ygo's context
-// watcher, which the revoke wakes, and its ServeHTTP teardown, both of which call Close - can
-// arrive between the two. Here the writer puts the header and the first 4 KB of a 10 KB binary
-// message on the connection, both closers call Close while that message is part way out, and the
-// rest of the message follows: the page reads that message whole and then the close with 1012, and
-// nothing goes on the connection after the frame, the keep-alive's own write included.
-func TestARevokedSocketsCloseFrameWaitsForTheEndOfAMessage(t *testing.T) {
-	type socket struct {
-		admitted  *admittedConn
-		keepAlive *keepAliveWriter
-	}
-	served, done := make(chan socket, 1), make(chan struct{})
+// documentSocket is one document socket served through the wrappers a document socket is served
+// through (Service.ServeHTTP): the keep-alive's writer under the admitted connection, so what
+// ygo's upgrade hijacks is a keepAliveConn held by an admittedConn. page is the other end.
+type documentSocket struct {
+	admitted  *admittedConn
+	keepAlive *keepAliveConn
+	page      *gws.Conn
+}
+
+// serveDocumentSocket serves one document socket through those wrappers and connects a page to
+// it. The server, the socket and the page close when the test ends.
+func serveDocumentSocket(t *testing.T) documentSocket {
+	t.Helper()
+	served, done := make(chan *admittedConn, 1), make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The wrappers are the ones a document socket is served through (Service.ServeHTTP): the
-		// keep-alive's writer under the admitted one, so what ygo's upgrade hijacks is a
-		// keepAliveConn held by an admittedConn.
 		admitted := &admittedConn{}
 		keepAlive := newKeepAliveWriter(w, "room", time.Hour)
 		defer keepAlive.stop()
@@ -414,18 +412,35 @@ func TestARevokedSocketsCloseFrameWaitsForTheEndOfAMessage(t *testing.T) {
 			t.Errorf("upgrade the document socket: %v", err)
 			return
 		}
-		served <- socket{admitted: admitted, keepAlive: keepAlive}
+		served <- admitted
 		<-done
 	}))
-	defer server.Close()
-	defer close(done)
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(done) })
 
 	page, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws/doc/room", nil)
 	if err != nil {
 		t.Fatalf("connect a page: response=%#v err=%v", response, err)
 	}
-	defer page.Close()
-	connection := <-served
+	t.Cleanup(func() { _ = page.Close() })
+	admitted := <-served
+	keepAlive, ok := admitted.Conn.(*keepAliveConn)
+	if !ok {
+		t.Fatalf("ygo's upgrade hijacked a %T, want the keep-alive's connection", admitted.Conn)
+	}
+	return documentSocket{admitted: admitted, keepAlive: keepAlive, page: page}
+}
+
+// A revoked socket's close frame is a message of its own, so it must never go out inside one of
+// ygo's. gorilla writes a frame larger than its write buffer as a header and the buffer's worth in
+// one write and the rest in another, and the close of a revoked connection - ygo's context
+// watcher, which the revoke wakes, and its ServeHTTP teardown, both of which call Close - can
+// arrive between the two. Here the writer puts the header and the first 4 KB of a 10 KB binary
+// message on the connection, both closers call Close while that message is part way out, and the
+// rest of the message follows: the page reads that message whole and then the close with 1012.
+// Nothing follows that frame (TestARevokedSocketTakesNoWriteAfterItsCloseFrame).
+func TestARevokedSocketsCloseFrameWaitsForTheEndOfAMessage(t *testing.T) {
+	connection := serveDocumentSocket(t)
 	connection.admitted.revoke()
 
 	// A binary message past gorilla's 4 KB write buffer, written as gorilla writes one.
@@ -458,23 +473,44 @@ func TestARevokedSocketsCloseFrameWaitsForTheEndOfAMessage(t *testing.T) {
 	<-closed
 	<-closed
 
-	_ = page.SetReadDeadline(time.Now().Add(5 * time.Second))
-	kind, read, err := page.ReadMessage()
+	_ = connection.page.SetReadDeadline(time.Now().Add(5 * time.Second))
+	kind, read, err := connection.page.ReadMessage()
 	if err != nil || kind != gws.BinaryMessage || !bytes.Equal(read, message) {
 		t.Fatalf("the page read a message of type %d and %d bytes (%v), want the %d-byte message whole before the close",
 			kind, len(read), err, len(message))
 	}
-	requireServiceRestartClose(t, page, "the revoked page's socket")
+	requireServiceRestartClose(t, connection.page, "the revoked page's socket")
+}
 
-	if _, err := connection.admitted.Write(frame[:4]); !errors.Is(err, net.ErrClosed) {
+// Nothing goes on a revoked socket's connection after its close frame: keepAliveConn refuses
+// every write once that frame has had its turn, the keep-alive's own among them, so the page
+// reads the close with 1012 and nothing after it. Here the frame goes out as admittedConn.Close
+// writes it (closeBetweenMessages), on a connection nothing has closed yet; a test that closed
+// the connection first would show none of this, since a write on a closed socket fails whatever
+// the connection does.
+func TestARevokedSocketTakesNoWriteAfterItsCloseFrame(t *testing.T) {
+	connection := serveDocumentSocket(t)
+	connection.admitted.revoke()
+	if err := connection.keepAlive.closeBetweenMessages(schemaRevokedCloseFrame, keepAliveWriteWait); err != nil {
+		t.Fatalf("the revoked socket's close frame could not be written: %v", err)
+	}
+	requireServiceRestartClose(t, connection.page, "the revoked page's socket")
+
+	message := append([]byte{finalFrame | gws.BinaryMessage, byte(len("page"))}, "page"...)
+	if _, err := connection.admitted.Write(message); !errors.Is(err, net.ErrClosed) {
 		t.Errorf("a write after the close frame = %v, want %v", err, net.ErrClosed)
 	}
-	watched, ok := connection.admitted.Conn.(*keepAliveConn)
-	if !ok {
-		t.Fatalf("ygo's upgrade hijacked a %T, want the keep-alive's connection", connection.admitted.Conn)
+	if err := connection.keepAlive.writeBetweenMessages(keepAliveFrame("room"), time.Second); err != nil {
+		t.Errorf("the keep-alive's write after the close frame failed with %v, want it refused and nothing written", err)
 	}
-	if err := watched.writeBetweenMessages(keepAliveFrame("room"), time.Second); err != nil {
-		t.Errorf("the keep-alive wrote on the connection after the close frame: %v", err)
+
+	// The page's own connection, not its websocket reader, which goes no further than the close
+	// frame: whatever those writes put on the connection is waiting to be read here.
+	raw := connection.page.UnderlyingConn()
+	_ = raw.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	var after [64]byte
+	if read, err := raw.Read(after[:]); read != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("the page read %d bytes (%v) after the close frame, want nothing until its deadline", read, err)
 	}
 }
 
@@ -508,6 +544,41 @@ func TestARevokedSocketKeepsItsPlaceUntilItsTokenIsAnswered(t *testing.T) {
 	}
 	if !admissions.answer(key) {
 		t.Error("the second token of the key was answered read-only; the socket that is still admitted holds a writable admission")
+	}
+}
+
+// A revoked socket's entry waits behind every socket of its key that is still open. Here the
+// newer page is admitted first and the older one beside it, and the rollback revokes the newer:
+// the token that arrives is the older page's, and its answer must come from its own entry, not
+// from the revoked one ahead of it. A revoked entry that answered in a live socket's place would
+// leave that socket's entry waiting for the life of its socket, and the key would refuse every
+// read-only socket until that page closed - the revoked page's own read-only reconnect among
+// them.
+func TestARevokedSocketsEntryAnswersBehindEverySocketStillOpen(t *testing.T) {
+	var admissions schemaAdmissions
+	key := schemaAdmissionKey{room: "room", token: "2"}
+	newer := &schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 2, valid: true}, writable: true}
+	older := &schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 1, valid: true}, writable: true}
+	for _, admission := range []*schemaAdmission{newer, older} {
+		if !admissions.admit(admission) {
+			t.Fatalf("a page creating up to %d was refused beside the sockets of its key", admission.page.creatable)
+		}
+	}
+
+	revoked := admissions.revokeUnless(schemaFleet{minVersion: 2, maxCreatable: 1})
+	if len(revoked) != 1 || revoked[0] != newer {
+		t.Fatalf("the rollback revoked %d sockets, want the newer page's alone", len(revoked))
+	}
+	if !admissions.answer(key) {
+		t.Fatal("the older page's token was answered read-only, want the writable admission both sockets hold")
+	}
+	if !older.answered {
+		t.Error("the older page's token was answered from the revoked entry, and the older socket's own entry is still waiting for an answer it will never get")
+	}
+	admissions.remove(newer)
+
+	if !admissions.admit(&schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 2, valid: true}}) {
+		t.Error("the revoked page's read-only reconnect was refused once the revoked socket was gone, since the older page's entry is still waiting for its token")
 	}
 }
 
