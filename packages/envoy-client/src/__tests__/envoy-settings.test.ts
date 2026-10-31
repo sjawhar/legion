@@ -333,9 +333,8 @@ describe("envoySettings", () => {
     expect(existsSync(ran)).toBe(false);
   });
 
-  // A caller that opens no NATS connection (the dispatch command, claude-envoy's envoy-send,
-  // pi-legion's extension): a seed it would never send must neither run a command nor turn its
-  // Envoy off.
+  // A caller that opens no NATS connection (`nats: false`; `envoySettings` names which they are):
+  // a seed it would never send must neither run a command nor turn its Envoy off.
   test("nats: false resolves no NATS server and no seed", () => {
     const home = tempDir();
     const ran = path.join(home, "ran");
