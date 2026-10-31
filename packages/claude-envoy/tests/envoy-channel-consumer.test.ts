@@ -3,10 +3,11 @@ import { rm } from "node:fs/promises"
 import { createServer, type Socket } from "node:net"
 import { join } from "node:path"
 import { agentSubject } from "@legion/contracts"
-import type {
-  DeliveryRequest,
-  SubscribeInput,
-  SubscribeResult,
+import {
+  type DeliveryRequest,
+  EnvoyApiError,
+  type SubscribeInput,
+  type SubscribeResult,
 } from "@legion/envoy-client/transport"
 import {
   type ChannelNotification,
@@ -16,7 +17,6 @@ import {
 import { createInboxNotifier, INBOX_CAPABILITIES } from "../src/legion-inbox"
 import { SessionIdentity } from "../src/session-identity"
 import {
-  emptyReplay,
   FakeNats,
   noInterest,
   recordingClient,
@@ -60,21 +60,19 @@ function peerMessage(
   }
 }
 
-/** The listener, as the session's registrations and replay calls reach it. */
+/**
+ * The listener, as the session's registrations reach it: `answer` decides what each one is
+ * answered, or throws the refusal it is refused with.
+ */
 function listener(answer: (input: SubscribeInput) => SubscribeResult) {
   const registrations: SubscribeInput[] = []
-  let replays = 0
   const client = recordingClient([], {
     subscribe: async (input) => {
       registrations.push(input)
       return answer(input)
     },
-    replay: async (input) => {
-      replays += 1
-      return emptyReplay(input)
-    },
   })
-  return { client, registrations, replays: () => replays }
+  return { client, registrations }
 }
 
 /** A notifier whose writes resolve only when the test lets them. */
@@ -265,29 +263,70 @@ test("a frame written before a restart is answered done unshown after it, and th
   }
 })
 
-for (const [why, answer] of [
-  ["a core answer", { ...noInterest(), delivery: { mode: "core", reason: "no_grant" } }],
-  ["an answer without delivery", noInterest()],
+// A refusal is the whole of this session's inbound: nothing else reaches it, so it must say so
+// and keep asking rather than run on quietly deaf. The listener refuses by name, and
+// `parseSubscribeAnswer` refuses an answer naming no consumer the same way, so there is nothing
+// left to fall back to.
+for (const refusal of [
+  { status: 503, reason: "no_grant" },
+  { status: 409, reason: "not_requested" },
 ] as const) {
-  test(`${why} keeps the core path: core frames shown, the replay route asked`, async () => {
+  test(`a registration refused ${refusal.status} ${refusal.reason} leaves the session running with one notice naming it, and the next heartbeat asks again`, async () => {
     const directory = await scratchState()
     const nats = new FakeNats()
     const notifier = heldNotifier()
-    const { client, registrations, replays } = listener(() => answer)
+    let refusing = true
+    const { client, registrations } = listener(() => {
+      if (!refusing) return { ...noInterest(), delivery: CONSUMER }
+      throw new EnvoyApiError({
+        method: "POST",
+        url: "http://127.0.0.1:4000/v1/interests/subscribe",
+        status: refusal.status,
+        responseBody: JSON.stringify({
+          error: "the listener could not give this session a consumer",
+          reason: refusal.reason,
+        }),
+      })
+    })
     const session = await startChannelSession(
       sessionOptions(new SessionIdentity(SESSION, "/tmp"), directory, {
         connection: nats,
         notifier: notifier.notifier,
         client,
+        heartbeatMs: 10,
       }),
     )
+    const notices = () =>
+      notifier.written.filter((written) => written.params.meta["producer"] === "envoy")
     try {
-      expect(delivery(registrations[0])).toMatchObject({ consumer: true })
-      await waitFor(async () => replays() >= 1, "a replay call")
-      const message = peerMessage("core")
-      nats.emit(DIRECT, message.raw)
-      await waitFor(async () => notifier.written.length === 1, "the core frame's write")
-      expect(notifier.written[0]?.params.meta["event_id"]).toBe(message.id)
+      // The session runs on, and its relay subject stays open, so the consumer a later
+      // registration is given has somewhere to land.
+      expect([...nats.subscriptions.keys()]).toEqual([CONSUMER.subject])
+      await waitFor(async () => notices().length === 1, "the notice")
+      expect(notices()[0]?.params.content).toContain(refusal.reason)
+      expect(notices()[0]?.params.content).toContain("Envoy inbound unavailable")
+
+      // Every heartbeat asks again, and the session is told once, not once per tick.
+      const asked = registrations.length
+      await waitFor(async () => registrations.length >= asked + 2, "two more registrations")
+      expect(notices()).toHaveLength(1)
+
+      // Accepted at last: what the stream kept for the session arrives on its relay.
+      refusing = false
+      const accepted = registrations.length
+      await waitFor(async () => registrations.length > accepted, "the accepted registration")
+      const message = peerMessage("after-refusal")
+      nats.emitRelay(SESSION, {
+        subject: DIRECT,
+        seq: 12,
+        raw: message.raw,
+        reply: "_INBOX.after-refusal",
+      })
+      // Every write is let through as it comes: the notice, then the frame behind it.
+      await waitFor(async () => {
+        for (const write of notifier.pending) write.resolve()
+        return notifier.written.some((written) => written.params.meta["event_id"] === message.id)
+      }, "the frame after the refusal")
     } finally {
       for (const write of notifier.pending) write.resolve()
       await session.shutdown()
@@ -364,14 +403,16 @@ test("a late BTW is passed over and answered done, and the frame after it is sho
   }
 })
 
-test("consumer mode asks no replay and shows no core frame of a relayed subject, answering nothing", async () => {
+// The acceptance line of dispatch://INFRA-771: no Envoy session receives from a plain NATS
+// subscription. The whole subscription set is asserted, never the presence of the relay subject,
+// so a core subscription added back on any followed subject fails here. Oh My Pi's plugin holds
+// one more, its agent-stream control subject; this server has no agent stream, so the relay
+// subject is the whole set.
+test("holds exactly its relay subject after registration, and no other subscription", async () => {
   const directory = await scratchState()
   const nats = new FakeNats()
   const notifier = heldNotifier()
-  const { client, registrations, replays } = listener(() => ({
-    ...noInterest(),
-    delivery: CONSUMER,
-  }))
+  const { client, registrations } = listener(() => ({ ...noInterest(), delivery: CONSUMER }))
   const session = await startChannelSession(
     sessionOptions(new SessionIdentity(SESSION, "/tmp"), directory, {
       connection: nats,
@@ -381,25 +422,20 @@ test("consumer mode asks no replay and shows no core frame of a relayed subject,
     }),
   )
   try {
-    await session.follow(["notifications.team.deploy"])
-    // A role lane's forward onto the agent subject, and a frame on a followed topic the stream
-    // stores: the relay shows the stream's copy of each, so both core copies are dropped. Nothing
-    // is answered on the bus either - a role forward counts as delivered once the stream stored
-    // it, and no other frame on these subjects expects an answer.
-    const forward = peerMessage("forward", "notifications.role.reviewer")
-    nats.emit(DIRECT, forward.raw)
-    const team = peerMessage("team", "notifications.team.deploy")
-    nats.emit("notifications.team.deploy", team.raw)
-    await settled()
-    expect(nats.published).toEqual([])
-    expect(notifier.written).toEqual([])
-
-    // Heartbeats ran meanwhile, each sweeping after it registered, and none of them asked the
-    // listener's replay route.
+    await session.follow(["notifications.team.deploy", "notifications.dispatch.issue.DSP-7.>"])
+    // Heartbeats ran meanwhile, each registering what the session follows.
     const ticks = registrations.length
-    await waitFor(async () => registrations.length >= ticks + 3, "three more heartbeats")
+    await waitFor(async () => registrations.length >= ticks + 2, "two more heartbeats")
     await settled()
-    expect(replays()).toBe(0)
+
+    expect(registrations.at(-1)?.topics).toEqual(
+      expect.arrayContaining(["notifications.team.deploy", "notifications.dispatch.issue.DSP-7.>"]),
+    )
+    expect([...nats.subscriptions.keys()]).toEqual([CONSUMER.subject])
+    expect(nats.unsubscribed).toEqual([])
+    // Nothing was published either: a session answers no receipt, and the only bodies on the bus
+    // are a relay frame's own replies, of which there have been none.
+    expect(nats.published).toEqual([])
     expect(notifier.written).toEqual([])
   } finally {
     for (const write of notifier.pending) write.resolve()

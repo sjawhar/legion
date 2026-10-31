@@ -4,9 +4,9 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import type { Interest, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
+  ChannelBrokerMessage,
   ChannelConnectionStatus,
   ChannelForwarderConnection,
-  ChannelInboundMessage,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
 import {
@@ -16,13 +16,13 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { roleStateFile, SessionIdentity } from "../src/session-identity"
-import { emptyReplay, type FakeClient } from "./channel-session-harness"
+import type { FakeClient } from "./channel-session-harness"
 
 class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
     return {
       unsubscribe: () => undefined,
-      async *[Symbol.asyncIterator](): AsyncGenerator<ChannelInboundMessage> {},
+      async *[Symbol.asyncIterator](): AsyncGenerator<ChannelBrokerMessage> {},
     }
   }
 
@@ -62,9 +62,17 @@ function interest(): Interest {
   }
 }
 
-/** The listener's answer to a registration: the interest, and the core delivery mode. */
+/** The listener's answer to a registration: the interest, and this session's own consumer. */
 function registered(): SubscribeResult {
-  return { ...interest(), delivery: { mode: "core", reason: "not_answered" } }
+  return {
+    ...interest(),
+    delivery: {
+      mode: "consumer",
+      subject: "notifications.envoy.deliver.ses_current",
+      stream_id: "stream-1",
+      gap: false,
+    },
+  }
 }
 
 test("reasserts a restored role after a successful registration heartbeat loses it", async () => {
@@ -85,7 +93,6 @@ test("reasserts a restored role after a successful registration heartbeat loses 
       return { claimed: true, interest: interest() }
     },
     getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1 }),
-    replay: emptyReplay,
   }
   const session = await startChannelSession({
     identity: new SessionIdentity("ses_current", "/tmp"),
@@ -131,7 +138,6 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
       if (holder === "ses_current" && regains.length === 0) holder = "ses_lost"
       return answer
     },
-    replay: emptyReplay,
   }
   const session = await startChannelSession({
     identity: new SessionIdentity("ses_current", "/tmp"),

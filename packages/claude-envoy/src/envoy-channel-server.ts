@@ -22,12 +22,6 @@ import {
   type RenderInboundResult,
   renderInbound,
 } from "@legion/envoy-client/delivery"
-import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
-import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
-import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
-import { messageFor } from "@legion/envoy-client/errors"
-import { machineID } from "@legion/envoy-client/machine"
-import { natsConnectionOptions } from "@legion/envoy-client/nats-connection"
 import {
   closeReplayedRemoval,
   createDeliveryLedger,
@@ -38,6 +32,11 @@ import {
   rememberedTopics,
   replayFollowedSubjects,
 } from "@legion/envoy-client/delivery-ledger"
+import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
+import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
+import { messageFor } from "@legion/envoy-client/errors"
+import { machineID } from "@legion/envoy-client/machine"
+import { natsConnectionOptions } from "@legion/envoy-client/nats-connection"
 import {
   type SessionConfigFile,
   sessionConfigFile,
@@ -75,7 +74,6 @@ import { name as packageName, version as packageVersion } from "../package.json"
 import {
   type ChannelForwarder,
   type ChannelForwarderConnection,
-  type ChannelInboundMessage,
   type ChannelTopicSubscription,
   createChannelForwarder,
   deliveryIdentity,
@@ -614,6 +612,23 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   let relay: Relay | undefined
 
   /**
+   * A `subscription.removed` the relay delivered: the topics it names leave this session, the
+   * way `envoy_unsubscribe` leaves it, and the listener's registry too, but only those the
+   * session followed before the stream stored the frame (`closeReplayedRemoval`), so a removal
+   * the stream kept while the session was away never closes a topic followed again since.
+   */
+  const closeRemovedSubscriptions = async (frame: ConsumerFrame): Promise<void> => {
+    const open = relay?.sessionID === identity.id ? relay : undefined
+    await closeReplayedRemoval(frame, {
+      sessionID: identity.id,
+      followedBefore: (topic) => open?.delivery.followedBefore(topic, frame.storedAtMs) !== false,
+      close: (topic) => userTopics.delete(topic),
+      unregister: unfollowRemovedTopics,
+      followedChanged: () => ledger.followedChanged(),
+    })
+  }
+
+  /**
    * Hands one relay frame to the channel's write queue, and answers it once Claude Code has it:
    * `done` once the notifier resolved the write (`createChannelDelivery`) and the ledger recorded
    * the frame, at once for a frame skipped, suppressed (a late BTW), rejected (once the reply is
@@ -629,7 +644,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       frame.nak()
       return
     }
-    takeRemovals(frame.data)
+    await closeRemovedSubscriptions(frame)
     const identityOf = deliveryIdentity(frame.data)
     const claim = dedupe.claim(identityOf)
     // A copy of a frame shown or being shown (another subject, a core frame of an unstored topic).
@@ -651,8 +666,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       frame.done()
       return
     }
-    // Recorded before the claim settles and before `done`, as the core path records it.
-    if (identityOf !== undefined) await replay.recordDelivered(identityOf)
+    // Recorded before the claim settles and before `done`, so no redelivery shows it again.
+    if (identityOf !== undefined) await ledger.recordDelivered(identityOf)
     claim.settle()
     frame.done()
     owner.delivery.persist()
@@ -673,10 +688,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     closeRelay()
     const consumer: ConsumerDelivery = createConsumerDelivery({
       sessionID,
-      ledger: replay,
+      ledger,
       host: {
         deliver: (frame) => deliverRelayed(owner, frame),
-        gap: tellNotice,
+        gap: tellGapNotice,
         log: (message, error) => {
           process.stderr.write(
             `envoy-channel: ${message}${error === undefined ? "" : ` — ${messageFor(error)}`}\n`,
@@ -749,68 +764,34 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   }
 
   /**
-   * What a registration's answer says of consumer delivery, for the id it registered with the
-   * topics it carried, and the relay it asked for. One that asked nothing (no relay open) is
-   * answered `core` by the listener, and nothing is relayed: the core path is on already, since
-   * `closeRelay` is the one place a relay is dropped and `delivery.close()` left consumer mode
-   * there. An answer for an id this process has left, or for a relay since closed, changes
-   * nothing.
+   * What a registration's answer says of consumer delivery, for the id it registered and the
+   * relay it asked for. An answer for an id this process has left, or for a relay since closed,
+   * changes nothing.
    */
   const takeDeliveryAnswer = (
     sessionID: string,
-    topics: readonly string[],
     asked: Relay | undefined,
     result: SubscribeResult,
   ): void => {
-    if (sessionID !== identity.id || relay !== asked) return
-    asked?.delivery.answered(result.delivery, topics)
+    if (sessionID !== identity.id || asked === undefined || relay !== asked) return
+    asked.delivery.answered(result.delivery)
   }
 
-  const forwarder: ChannelForwarder = createChannelForwarder(options.connection, {
-    dedupe,
-    ledger: replay,
-    relayed: relaysCoreTopic,
-    failed: (message, topic, error, receivedAt) => {
-      // A frame no sweep will show again gets its notice at once: a role forward, which the
-      // listener delivers from the stream itself, one on a subscription the replay does not read
-      // (refused, not started, or the listener's replay failing), or one received before its
-      // subject's cursor started. The stream's copy of any other waits for a sweep.
-      const envelope = renderInbound(message.raw, identity.id, message.subject).envelope
-      if (envelope !== undefined) void replay.liveFailed(topic, envelope, error, receivedAt)
-    },
-    deliver: async (message) => {
-      takeRemovals(message.raw)
-      return enqueueChannelMessage(delivery, message)
-    },
-  })
+  // Nothing is subscribed per topic: the forwarder holds the followed set a registration
+  // carries, and the one NATS subscription this process makes is the relay's (`openRelay`).
+  const forwarder: ChannelForwarder = createChannelForwarder(options.connection)
 
   /**
-   * A human Dispatch subscription removal, best-effort: drops the topics, which the caller has
-   * taken out of `userTopics`, and resolves once the replay state no longer follows them.
-   */
-  function dropRemovedTopics(topics: readonly string[]): Promise<void> {
-    unfollowRemovedTopics(topics)
-    return replay.followedChanged()
-  }
-
-  /**
-   * Starts dropping removed topics from the forwarder and the registry entry, each failure
-   * reported here: the drop half of `dropRemovedTopics`, and what a replayed removal takes out of
-   * the registry (`closeReplayedRemoval`).
+   * Drops removed topics from the followed set and the registry entry, its failure reported
+   * here: what a removal frame takes out of the registry (`closeReplayedRemoval`).
    */
   function unfollowRemovedTopics(topics: readonly string[]): void {
-    const { dropping, unsubscribing } = dropFromForwarderAndRegistry(topics)
-    dropping.catch((error: unknown) => {
-      process.stderr.write(
-        `envoy-channel: could not drop a removed subscription — ${messageFor(error)}\n`,
-      )
-    })
     // Dispatch has already removed them from the entry, but a registration in
     // flight at that moment adds them back; removing them again behind it undoes
     // that. A failure here is not retried by name: the heartbeat's own interest
     // reconciliation (below) brings the entry back in line with what this session
     // actually follows, whatever caused the drift.
-    unsubscribing.catch((error: unknown) => {
+    dropFromForwarderAndRegistry(topics).catch((error: unknown) => {
       process.stderr.write(
         `envoy-channel: could not drop a removed subscription from the registry — ${messageFor(error)}; the next heartbeat reconciles it\n`,
       )
@@ -818,28 +799,18 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   }
 
   /**
-   * Drops `topics` from the forwarder's subscriptions and the registry entry — the two
-   * steps every removal here takes once a caller has already taken them out of
-   * `userTopics`. `forwarder.unfollow` runs first and removes from `following`
-   * before its first await, so no registration queued behind either promise
-   * advertises a dropped topic again, and the relay stops taking them at once. Both
-   * callers here — `dropRemovedTopics`, a removal's best-effort drop, and the public
-   * `unfollow` below — take these same two steps in this order; only whether they
-   * wait for them differs.
+   * Drops `topics` from the followed set and the registry entry — the two steps every removal
+   * here takes once a caller has already taken them out of `userTopics`. The followed set is cut
+   * first, synchronously, so no registration queued behind the registry write advertises a
+   * dropped topic again, and the relay stops taking them at once. Both callers here —
+   * `unfollowRemovedTopics`, a removal's best-effort drop, and the public `unfollow` below —
+   * take these same two steps in this order; only whether they wait for them differs.
    */
-  function dropFromForwarderAndRegistry(topics: readonly string[]): {
-    readonly dropping: Promise<void>
-    readonly unsubscribing: Promise<void>
-  } {
-    const dropping = forwarder.unfollow(topics)
+  function dropFromForwarderAndRegistry(topics: readonly string[]): Promise<void> {
+    forwarder.unfollow(topics)
     // The relay takes the topics the session follows now, before a registration carries them.
     if (relay?.sessionID === identity.id) relay.delivery.setFollowed(registeredTopics())
-    return {
-      dropping,
-      unsubscribing: serialized(() =>
-        options.client.unsubscribe({ sessionID: identity.id, topics }),
-      ),
-    }
+    return serialized(() => options.client.unsubscribe({ sessionID: identity.id, topics }))
   }
 
   /**
@@ -851,6 +822,36 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     return forwarder.topics().filter((topic) => !reachesPrivateStreamSubject(directSubject, topic))
   }
 
+  /**
+   * Said once per outage: the listener refused this session's registration, so it has no consumer
+   * and receives nothing. The session still runs, and the heartbeat registers again every tick
+   * until one is accepted; the reason is the listener's own (`consumer_error`, `no_grant`,
+   * `not_requested`, `invalid_session_id`), which the error carries in its message.
+   */
+  let inboundUnavailableTold = false
+  const tellInboundUnavailable = (error: unknown): void => {
+    if (inboundUnavailableTold) return
+    inboundUnavailableTold = true
+    const why = messageFor(error)
+    process.stderr.write(
+      `envoy-channel: this session receives nothing (${why}); registering again every heartbeat\n`,
+    )
+    delivery
+      .notice(
+        envoyNoticeText({
+          notice: "Envoy inbound unavailable",
+          error: why,
+          detail:
+            "The listener gave this session no durable consumer, which is the only path an Envoy message reaches it by, so it receives none. Everything else works, and the session registers again at every heartbeat; what the stream stored meanwhile arrives once a registration is accepted.",
+        }),
+      )
+      .catch((noticeError: unknown) => {
+        process.stderr.write(
+          `envoy-channel: the session could not be told that it receives nothing — ${messageFor(noticeError)}\n`,
+        )
+      })
+  }
+
   /** The title last stamped, so a heartbeat stamps nothing new. */
   let stampedTitle: { readonly sessionID: string; readonly title: string } | undefined
   /** Whether a failure to stamp the title has been reported since the last success. */
@@ -858,10 +859,12 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   /**
    * Advertise the current id and topics; runs only inside `serialized`. The title is also stamped
-   * for the `dispatch` command (`options.stampTitle`) whenever it or the id changes. With the id's
-   * relay open, the registration asks for consumer delivery (`delivery`: the relay's epoch and
-   * resume point), the relay taking the topics it carries as followed first; its answer says
-   * whether the listener relays them (`takeDeliveryAnswer`).
+   * for the `dispatch` command (`options.stampTitle`) whenever it or the id changes. Every
+   * registration asks for consumer delivery (`delivery`: the relay's epoch and resume point),
+   * the relay taking the topics it carries as followed first: a session receives only what its
+   * own consumer holds, so a registration carrying no relay would be refused `409 not_requested`
+   * and leave nothing registered. With no relay open the registration fails here instead, and
+   * the next heartbeat tries again; the answer's consumer is taken by `takeDeliveryAnswer`.
    */
   const register = async (): Promise<void> => {
     const title = options.title?.(identity.id) ?? ""
@@ -886,21 +889,38 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     }
     const sessionID = identity.id
     const topics = registeredTopics()
-    const asking = relay?.sessionID === identity.id ? relay : undefined
-    asking?.delivery.setFollowed(topics)
-    const result = await options.client.subscribe({
-      sessionID,
-      directory: identity.directory,
-      topics,
-      port: 0,
-      title,
-      capabilities: options.capabilities,
-      driving: false,
-      selfSubscribed: true,
-      plugin: { name: packageName, version: options.pluginVersion },
-      ...(asking === undefined ? {} : { delivery: asking.delivery.registration() }),
-    })
-    takeDeliveryAnswer(sessionID, topics, asking, result)
+    const asking = relay?.sessionID === sessionID ? relay : undefined
+    if (asking === undefined) {
+      const refused = new Error(
+        "this session holds no relay subject, so the listener can give it no consumer and it can receive nothing",
+      )
+      tellInboundUnavailable(refused)
+      throw refused
+    }
+    asking.delivery.setFollowed(topics)
+    let result: SubscribeResult
+    try {
+      result = await options.client.subscribe({
+        sessionID,
+        directory: identity.directory,
+        topics,
+        port: 0,
+        title,
+        capabilities: options.capabilities,
+        driving: false,
+        selfSubscribed: true,
+        plugin: { name: packageName, version: options.pluginVersion },
+        delivery: asking.delivery.registration(),
+      })
+    } catch (error) {
+      // A registration the listener refused (`503 consumer_error|no_grant`, `409
+      // not_requested|invalid_session_id`) leaves the session with no consumer at all, as every
+      // other failed registration does: the session is told once and the heartbeat asks again.
+      tellInboundUnavailable(error)
+      throw error
+    }
+    inboundUnavailableTold = false
+    takeDeliveryAnswer(sessionID, asking, result)
   }
 
   /**
@@ -1070,11 +1090,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     // handoff does not wait for it: a stuck notification would otherwise hold
     // every registry write queued behind this one. The drain never rejects.
     void forwarder.unfollow([previousSubject])
-    // The new id's replay state: none after a `/clear`, which starts afresh as a new session
-    // does, so nothing published before it existed comes back. Until it is loaded, replay does
-    // nothing, and the old id's sweep in flight writes nothing more. Loading it closes the old
-    // id's relay (its unanswered frames `nak`) and subscribes the new id's relay subject.
-    await restoreReplay()
+    // The new id's delivery state: none after a `/clear`, which starts afresh as a new session
+    // does, so nothing published before it existed comes back. Until it is loaded, the ledger
+    // records nothing. Loading it closes the old id's relay (its unanswered frames `nak`) and
+    // subscribes the new id's relay subject.
+    await restoreDelivery()
     roleTransferFrom ??= previous
     // The new relay subject reaches the server before the registration that asks for it. Not
     // fatal: a relayed frame nobody answers pauses the relay, which sends again after its backoff
@@ -1208,9 +1228,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       requestHeartbeat()
     } finally {
       heartbeatInFlight = false
-      // Every tick also sweeps the stream, so a missed trigger is caught up, and a listener that
-      // does not replay yet keeps being asked.
-      triggerReplay()
       if (heartbeatRequested) {
         heartbeatRequested = false
         void heartbeat()
@@ -1222,11 +1239,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     else void heartbeat()
   }
 
-  // The session's replay state comes first, so a live repeat of a frame it was shown before is
+  // The session's delivery record comes first, so a redelivery of a frame it was shown before is
   // dropped against it. The topics it followed come back with it: a session the listener reaped
-  // (ten minutes after it stopped) still follows them, and its sweep still reads them. Its relay
-  // comes with it too, restored and subscribed before the first registration asks for it.
-  const remembered = await restoreReplay()
+  // (ten minutes after it stopped) still follows them, and its consumer still holds them. Its
+  // relay comes with it too, restored and subscribed before the first registration asks for it.
+  const remembered = await restoreDelivery()
   // The NATS subscription precedes registration so the listener never routes
   // a direct delivery to an advertised but deaf channel process.
   forwarder.follow(directSubject)
@@ -1244,7 +1261,17 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   })
   await options.connection.flush()
   await serialized(async () => {
-    await register()
+    // Best-effort, as the interests read above is: a listener that refuses this registration
+    // because it can give the session no consumer (`tellInboundUnavailable` tells the session
+    // once, naming the listener's reason), or one that is down, must not take the whole channel
+    // with it — the tools, the role and the `dispatch` command work without it. Every heartbeat
+    // asks again, and `registrationFailed` makes the first accepted one a regain of the role.
+    await register().catch((error: unknown) => {
+      registrationFailed = true
+      process.stderr.write(
+        `envoy-channel: the first registration failed (${messageFor(error)}); the next heartbeat retries\n`,
+      )
+    })
     // Best-effort, as the interests read above is, and for a sharper reason: registration has
     // already happened, so a throw here takes down a channel the registry is advertising and
     // leaves the Agents page a row that never beats again.
@@ -1271,9 +1298,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       )
     })
   })
-  // The first sweep, once the listener knows what the session follows: what was stored while it
-  // was away (a resume included), or, for a new session, its cursors' start at the stream's end.
-  triggerReplay()
   // Housekeeping of the plugin's own state directories, each best-effort for the reason the
   // interests read above is: the heartbeat timer below is not armed yet, so a sweep that threw
   // here would take the session's whole channel down over a dead pid's handoff, a cosmetic title
@@ -1313,14 +1337,13 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     requestHeartbeat()
   }
   // nats.js resubscribes by itself after a reconnect; what was published while it was away is in
-  // the stream: the relay restarts at its ack floor on a new epoch's registration, and the core
-  // path's sweep reads it. The status events end when the connection closes.
+  // the stream, and the relay restarts at its ack floor on the new epoch's registration. The
+  // status events end when the connection closes.
   void (async () => {
     try {
       for await (const status of options.connection.status()) {
         if (status.type !== "reconnect") continue
         renewRelayEpoch()
-        triggerReplay()
       }
     } catch (error) {
       process.stderr.write(
@@ -1344,9 +1367,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       await options.connection.flush()
       await serialized(register)
       if (fresh.length > 0) {
-        // A new follow's cursor starts where the stream ends at the next sweep: no history.
-        await replay.followedChanged()
-        triggerReplay()
+        // Recorded at once, so a restart follows the topic again; the relay takes frames stored
+        // from this follow on, never the stream's older ones (`setFollowed`).
+        await ledger.followedChanged()
       }
       return fresh
     },
@@ -1354,11 +1377,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       const requested = topics.length === 0 ? [...userTopics] : expandSubscriptionTopics(topics)
       const removed = requested.filter((topic) => userTopics.delete(topic))
       if (removed.length === 0) return []
-      const { dropping, unsubscribing } = dropFromForwarderAndRegistry(removed)
-      // Recorded at once, so a restart does not follow the topics again from the replay state.
-      await replay.followedChanged()
+      const unsubscribing = dropFromForwarderAndRegistry(removed)
+      // Recorded at once, so a restart does not follow the topics again from the delivery state.
+      await ledger.followedChanged()
       await unsubscribing
-      await dropping
       return removed
     },
     onRoleRegained(hook) {
