@@ -94,6 +94,6 @@ func TestStoredOrderFormattedWritesReplayToEveryVersion(t *testing.T) {
 	}
 	report := assertStoredOrder(t, service, artifactID)
 	if report.UpdatesChecked == 0 || report.VersionsChecked < versions {
-		t.Fatalf("report = %+v, want every update and the %d named versions checked", report, versions)
+		t.Fatalf("report = %+v, want updates checked and at least the %d named versions checked", report, versions)
 	}
 }
