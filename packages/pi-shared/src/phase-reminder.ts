@@ -97,22 +97,23 @@ export interface PhaseReminder {
 export const RECORD_READ_BOUND_MS = 5_000;
 
 /**
- * The listener's "nothing was kept for that role": a 404 whose body names `unclaimed` or
- * `holder_lapsed` (`packages/envoy/cmd/listener/api.go`).
+ * The listener's "no live session holds that role": a 404 whose body names `unclaimed` or
+ * `holder_lapsed` (`packages/envoy/cmd/listener/api.go`). Nobody was told, so `reported` stays
+ * false and the next delivered reminder publishes the same notice again, under the same
+ * idempotency key, until a session holding the role takes it.
  *
- * It no longer means the architect is simply away. This notice is published with `keep` unset,
- * which the listener reads as true, so a role no session holds is answered 202: the listener
- * keeps the notice and hands it to the session that claims the architect role next, and the
- * publish resolves, which marks the notice reported. A 404 now reaches here only when the keep
- * itself failed, or when the listener is of a release before the kept lane (INFRA-839) and still
- * refuses an unheld role.
+ * It is the only answer an unheld or lapsed architect role gets here, because this notice is
+ * published with `keep: false` (INFRA-839). That is what the kept lane reserves the flag for: a
+ * sender that holds a retry of its own, as the daemon's notice publisher does
+ * (`packages/daemon/internal/notify/notify.go`). This sender's retry is the reminding itself —
+ * reminders never stop while the phase is open, so every one after this one tries the notice
+ * again — while a kept copy waits out the listener's window and is then dropped with nothing
+ * left to send it again.
  *
- * Both cases are answered the same way, and the same way as before: the architect was not told,
- * so `reported` stays false and the next delivered reminder publishes the same notice again,
- * under the same idempotency key. It stays a debug line rather than a warning because neither
- * case is this worker's doing, and the retry is already in hand.
+ * It stays a debug line rather than a warning because an architect that is away is not this
+ * worker's doing, and the retry is already in hand.
  */
-function keptNothing(error: unknown): boolean {
+function roleUnheld(error: unknown): boolean {
   if (!(error instanceof EnvoyApiError) || error.details.status !== 404) return false;
   let body: unknown;
   try {
@@ -269,7 +270,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       const topic =
         ROLE_TOPIC_PREFIX +
         roleToken(deps.project ?? "", live ? claim.issue : claim.tree, "architect");
-      await publish({
+      const answer = await publish({
         topic,
         message:
           `The ${claim.role} of ${claim.issue} has let ${reminders} phase reminders go unanswered: ` +
@@ -286,22 +287,40 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
         }),
         idempotencyKey: key,
         sourceSessionID: claim.sessionID,
+        // This sender keeps its own retry, so the listener is to keep nothing: an unheld or
+        // lapsed role is answered 404 (`roleUnheld`) and the next reminder tries again, rather
+        // than a kept copy that is dropped when its window passes and that this run would read
+        // as the architect having been told.
+        keep: false,
       });
       // The publish has no deadline of its own, so the worker's own turn may have reset the count
       // while it was in flight, and a later run may have begun. That run has a key of its own, or
       // none yet: this acceptance is not its notice.
       if (reportKey !== key) return;
+      // A listener that kept the notice all the same (202, `PublishResult.kept`) has told no
+      // architect, and its copy is dropped once the kept window passes. It is read as the 404 is:
+      // nobody was told, so the run's next reminder publishes the same notice again under the
+      // same key.
+      if (
+        typeof answer === "object" &&
+        answer !== null &&
+        "kept" in answer &&
+        answer.kept === true
+      ) {
+        deps.log.debug("legion: the listener kept the architect notice; telling it again later", {
+          issue: claim.issue,
+          reminders,
+        });
+        return;
+      }
       reported = true;
       writeEntry();
     } catch (error) {
-      if (keptNothing(error)) {
-        deps.log.debug(
-          "legion: the listener kept nothing for the architect role; telling it again later",
-          {
-            issue: claim.issue,
-            reminders,
-          }
-        );
+      if (roleUnheld(error)) {
+        deps.log.debug("legion: no session holds the architect role; telling it again later", {
+          issue: claim.issue,
+          reminders,
+        });
         return;
       }
       // Any other failure — a 5xx, a 400 or 403, a timeout — leaves `reported` false too, and the

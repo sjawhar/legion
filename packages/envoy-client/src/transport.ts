@@ -349,8 +349,9 @@ export type PublishResult = {
    * a success answer, not a refusal. Absent unless the listener answered it.
    */
   readonly kept?: boolean;
-  /** Why the message was kept: the role was unclaimed, or its holder's claim had lapsed. */
-  readonly keptReason?: "unclaimed" | "holder_lapsed";
+  /** Why the message was kept: the role was unclaimed, or its holder's claim had lapsed. Read
+   * from the answer's own schema, so a reason a later listener adds is added in one place. */
+  readonly keptReason?: z.infer<typeof PublishResponseSchema>["kept_reason"];
 };
 
 /** One followed subject of a replay request, read from after `after`, or, without one, started. */

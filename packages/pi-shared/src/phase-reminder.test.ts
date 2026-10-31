@@ -190,10 +190,12 @@ test("a notice the listener failed is published again by the run's next reminder
   expect(published).toHaveLength(2);
 });
 
-// Nobody holds the architect role, so the listener keeps the notice and hands it to the session
-// that claims the role next (INFRA-839). The publish is answered 202, which is a success: the
-// architect is told, once, and no later reminder of the run publishes again.
-test("a notice kept for an architect role no session holds is told once, not published again", async () => {
+// The notice asks the listener to keep nothing, because this sender keeps its own retry: the
+// reminding never stops while the phase is open. A listener that keeps it all the same answers
+// 202 with a kept body, and that is not the architect being told — the kept copy is dropped once
+// its window passes, and nothing would publish the notice again. So the run's next delivered
+// reminder publishes it again, under the same key.
+test("a kept answer is not the architect being told, so the run's next reminder publishes again", async () => {
   const requests: unknown[] = [];
   const client = createEnvoyClient({
     baseUrl: "http://listener.test",
@@ -227,22 +229,26 @@ test("a notice kept for an architect role no session holds is told once, not pub
   await fireLast(timers);
 
   expect(published).toHaveLength(1);
+  // The notice asks for `keep: false`, and the flag reaches the listener.
+  expect(published[0]?.keep).toBe(false);
+  expect(requests[0]).toMatchObject({ keep: false });
+  // Nobody was told, and that is not this worker's doing: no warning, and the notice stands.
   expect(warned).toEqual([]);
-  expect(entries.at(-1)).toMatchObject({ count: 2, reported: true });
-  // The notice asks for no `keep: false`, so the listener keeps it for the role's next holder.
-  expect(requests[0]).not.toHaveProperty("keep");
+  const kept = entries.at(-1);
+  expect(kept).toMatchObject({ count: 2, reported: false });
 
-  // Told once is told once: the run's later reminders add no second notice.
   expect(await reminder.settle("Still here.")).toBeUndefined();
   await fireLast(timers);
-  expect(published).toHaveLength(1);
+  expect(published).toHaveLength(2);
+  expect(published[1]?.idempotencyKey).toBe(kept?.reportKey);
+  expect(entries.at(-1)).toMatchObject({ count: 3, reported: false });
 });
 
-// A 404 no longer says the architect is away: with `keep` unset the listener keeps an unheld
-// role's message, so this is a keep that failed, or a listener from before the kept lane. Either
-// way nobody was told, so the next delivered reminder publishes again under the same key, and
-// the worker's transcript gets no warning for something that is not its doing.
-test("a notice the listener kept nothing for is published again by the run's next reminder, under the same key", async () => {
+// With `keep: false` the listener keeps nothing for a role no live session holds: it answers the
+// 404 it always did, and that is the answer this sender's retry exists for. Nobody was told, so
+// the next delivered reminder publishes again under the same key, and the worker's transcript
+// gets no warning for something that is not its doing.
+test("a notice no session held the architect role for is published again by the run's next reminder, under the same key", async () => {
   let attempt = 0;
   const { reminder, timers, entries, published, warned } = rig({
     publish: async () => {
@@ -264,6 +270,7 @@ test("a notice the listener kept nothing for is published again by the run's nex
   expect(await reminder.settle("Still here.")).toBeUndefined();
   await fireLast(timers);
   expect(published).toHaveLength(1);
+  expect(published[0]?.keep).toBe(false);
   expect(warned).toEqual([]);
   const refused = entries.at(-1);
   expect(refused).toMatchObject({ count: 2, reported: false });
