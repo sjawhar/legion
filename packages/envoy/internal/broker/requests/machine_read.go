@@ -88,7 +88,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	// mints for the github-owners the grant was just checked against, never a later read's.
 	set := m.Policy.Get()
 	if policyVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount, m.VMServicesByAccount)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -578,7 +578,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 		return Request{}, false, err
 	}
 	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount, m.VMServicesByAccount)
 		if err != nil {
 			return Request{}, false, err
 		}

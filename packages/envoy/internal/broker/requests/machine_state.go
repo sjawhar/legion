@@ -170,6 +170,10 @@ type Machine struct {
 	// the service a pod whose projected token proved it runs as that account proves, when its
 	// launcher's service is that one (requester).
 	ServicesByAccount map[string]string
+	// VMServicesByAccount are the VM services' accounts (BROKER_VM_SERVICES): for each Google
+	// service-account email, the service a VM whose identity token proved it runs as that account
+	// proves, when its launcher's service is that one (requester).
+	VMServicesByAccount map[string]string
 	// Minters maps each policy kind (policy.Kinds) to its Minter. A release never returns the
 	// stored value of a kind secret.
 	Minters map[string]Minter
@@ -206,14 +210,15 @@ type enrollmentRow struct {
 }
 
 // requester is the enrollment as the policy sees it, read through q: the person it acts for (none
-// for a pod), its service, and the names that person withheld from it (RevokeByApprover's
-// withhold). Its service is its launcher credential's only when it is a pod and services maps the
-// pod's verified service account to that same service: a machine login's service name is the
-// machine's own claim, which anyone signed in to Dispatch may approve, so the account is what
-// proves the service. Any other session has none. A caller that decides for the
+// for a pod or a VM), its service, and the names that person withheld from it (RevokeByApprover's
+// withhold). Its service is its launcher credential's only when it is a pod and pods maps the pod's
+// verified service account to that same service, or a VM and vms maps the VM's verified
+// service-account email to it: a machine login's service name is the machine's own claim, which
+// anyone signed in to Dispatch may approve, so the account is what proves the service. Any other
+// session has none. A caller that decides for the
 // session reads it after locking the session's row, which RevokeByApprover holds while it
 // withholds, so a withhold either committed before the read or waits for the caller.
-func (e enrollmentRow) requester(ctx context.Context, q querier, services map[string]string) (policy.Requester, error) {
+func (e enrollmentRow) requester(ctx context.Context, q querier, pods, vms map[string]string) (policy.Requester, error) {
 	rows, err := q.Query(ctx, `select name from withheld_secrets where enrollment_id=$1`, e.ID)
 	if err != nil {
 		return policy.Requester{}, err
@@ -222,9 +227,18 @@ func (e enrollmentRow) requester(ctx context.Context, q querier, services map[st
 	if err != nil {
 		return policy.Requester{}, err
 	}
+	var accounts map[string]string
+	switch e.Kind {
+	case "pod":
+		accounts = pods
+	case "vm":
+		accounts = vms
+	}
 	var service string
-	if e.Kind == "pod" && e.Subject != nil && e.Service != nil && services[*e.Subject] == *e.Service {
-		service = *e.Service
+	if e.Subject != nil && e.Service != nil {
+		if bound, ok := accounts[*e.Subject]; ok && bound == *e.Service {
+			service = *e.Service
+		}
 	}
 	return policy.Requester{Operator: deref(e.Operator), Service: service, Withheld: withheld}, nil
 }
@@ -304,7 +318,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err := lockLiveEnrollment(ctx, tx, enrollmentID); err != nil {
 		return Request{}, err
 	}
-	requester, err := enr.requester(ctx, tx, m.ServicesByAccount)
+	requester, err := enr.requester(ctx, tx, m.ServicesByAccount, m.VMServicesByAccount)
 	if err != nil {
 		return Request{}, err
 	}
@@ -639,7 +653,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, err
 	}
 	if approve {
-		requester, err := enr.requester(ctx, tx, m.ServicesByAccount)
+		requester, err := enr.requester(ctx, tx, m.ServicesByAccount, m.VMServicesByAccount)
 		if err != nil {
 			return Decision{}, err
 		}

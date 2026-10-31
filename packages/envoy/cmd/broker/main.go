@@ -20,6 +20,7 @@ import (
 	"os/signal"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -220,17 +221,11 @@ func main() {
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
-	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Compact(slices.Sorted(maps.Values(cfg.ServicesByAccount)))}
-	var pod enroll.PodVerifier
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: serviceNames(cfg)}
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
-	verifier, err := oidc.Discover(ctx, cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, oidc.DiscoveryTimeout)
+	pod, vm, err := discoverVerifiers(ctx, cfg, oidc.Discover)
 	fatal(err)
-	if verifier != nil {
-		// One verifier for both: a pod's enrollment token and a service's login token are the same
-		// cluster's projected tokens, for the same audience.
-		pod = enroll.K8sPodVerifier{Verifier: verifier}
-	}
 
 	// The context the work that has to outlive the drain runs on: the five-minute policy reload
 	// below and the reread listener under it. ctx is signal.NotifyContext's, which the first
@@ -401,7 +396,10 @@ func main() {
 	slog.Info("broker listening", "addr", listener.Addr().String())
 
 	lease, sweep := time.Duration(cfg.LeaseSeconds)*time.Second, time.Duration(cfg.SweepSeconds)*time.Second
-	enr := &enroll.Service{Store: st, Lease: lease, Pod: pod, ServiceLogins: cfg.ServiceLogins}
+	enr := &enroll.Service{
+		Store: st, Lease: lease, Pod: pod, ServiceLogins: cfg.ServiceLogins,
+		VM: vm, VMServicesByAccount: cfg.VMServicesByAccount, VMProjects: cfg.VMProjects, VMInstancePatterns: cfg.VMInstancePatterns,
+	}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
 	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
@@ -689,17 +687,59 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from
 // its configuration: the audience and skew every request object is checked against, and, for each
-// service account, the registered service a pod running as it proves. A grant lasts the lifetime
-// its request signed, or until its session ends.
+// service account, the registered service a pod running as it proves, and for each VM service
+// account, the service a VM running as it proves. A grant lasts the lifetime its request signed, or
+// until its session ends.
 func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
 	m := &requests.Machine{
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
-		ServicesByAccount: cfg.ServicesByAccount,
-		Minters:           kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
+		ServicesByAccount:   cfg.ServicesByAccount,
+		VMServicesByAccount: cfg.VMServicesByAccount,
+		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
+}
+
+// serviceNames is every registered service, sorted and each once: BROKER_SERVICES' and
+// BROKER_VM_SERVICES'. The policy loader serves a secret whose owner tag names one of them as that
+// service's, and refuses any other owner that is not a person.
+func serviceNames(cfg config.Config) []string {
+	names := slices.AppendSeq(slices.Collect(maps.Values(cfg.ServicesByAccount)), maps.Values(cfg.VMServicesByAccount))
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+// discoverFunc is oidc.Discover's shape, a seam for a test that must not reach a real issuer.
+type discoverFunc func(ctx context.Context, issuer, audience string, timeout time.Duration) (*oidc.Verifier, error)
+
+// discoverVerifiers discovers the token issuers the broker trusts, each under
+// oidc.DiscoveryTimeout: the cluster's (BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE), one
+// verifier for both a pod's enrollment token and a service's login token, which are the same
+// cluster's projected tokens for the same audience; and Google's (config.GoogleOIDCIssuer), for a
+// VM's identity token, only when BROKER_GOOGLE_OIDC_AUDIENCE is set, logging one line that names
+// the issuer, the audience and the VM services. With no Google audience it reads and logs nothing
+// about Google, and answers a nil VM verifier, so the broker enrolls no VM and serves no VM login.
+func discoverVerifiers(ctx context.Context, cfg config.Config, discover discoverFunc) (enroll.PodVerifier, enroll.VMVerifier, error) {
+	var pod enroll.PodVerifier
+	cluster, err := discover(ctx, cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, oidc.DiscoveryTimeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	if cluster != nil {
+		pod = enroll.K8sPodVerifier{Verifier: cluster}
+	}
+	if cfg.GoogleOIDCAudience == "" {
+		return pod, nil, nil
+	}
+	google, err := discover(ctx, config.GoogleOIDCIssuer, cfg.GoogleOIDCAudience, oidc.DiscoveryTimeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	services := slices.Sorted(maps.Values(cfg.VMServicesByAccount))
+	slog.Info("google vm identity", "issuer", config.GoogleOIDCIssuer, "audience", cfg.GoogleOIDCAudience, "services", strings.Join(slices.Compact(services), ","))
+	return pod, enroll.GoogleVMVerifier{Verifier: google}, nil
 }
 
 // exchangeKeys reads issuer's published signing keys, the source the RFC 8693 exchange resolves a

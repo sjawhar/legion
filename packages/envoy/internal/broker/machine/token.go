@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
@@ -24,7 +26,8 @@ var ErrServiceLogsInWithToken = errors.New("a service logs in with its own Kuber
 
 var (
 	// ErrTokenLoginsOff is VerifyServiceToken's refusal on a broker that trusts no Kubernetes token
-	// issuer (BROKER_K8S_OIDC_ISSUER unset).
+	// issuer (BROKER_K8S_OIDC_ISSUER unset) and no Google VM audience (BROKER_GOOGLE_OIDC_AUDIENCE
+	// unset).
 	ErrTokenLoginsOff = errors.New("this broker trusts no Kubernetes token issuer, so no service logs in with a token")
 	// ErrTokenExpired is VerifyServiceToken's refusal of a token past its expiry: the caller logs in
 	// again with its current token.
@@ -41,11 +44,14 @@ var (
 	ErrAccountNotListed = errors.New("this ServiceAccount does not log in as this service")
 )
 
-// ServiceAccount is a verified ServiceAccount token whose account BROKER_SERVICE_LOGINS names:
-// the token's claims and the service the account logs in as.
+// ServiceAccount is a verified token whose identity is listed to log in as a service: the token's
+// claims (a VM's subject is its runtime id, enroll.VMClaims.RuntimeID), the service it logs in as,
+// and the host its credential names.
 type ServiceAccount struct {
 	enroll.AccountClaims
 	Service string
+	// Host is a Kubernetes account's <namespace>/<name>, or a VM's <project>/<zone>/<instance name>.
+	Host string
 }
 
 // TokenCredential is what a token login issued: the launcher credential's id and its expiry.
@@ -54,34 +60,98 @@ type TokenCredential struct {
 	ExpiresAt time.Time
 }
 
-// VerifyServiceToken verifies a service's projected ServiceAccount token against the broker's
-// Kubernetes issuer and audience (s.Enroll.Pod, the verifier pod enrollment uses), holds it to
-// MaxTokenLoginLifetime from its issue, and maps its subject through BROKER_SERVICE_LOGINS
-// (s.Enroll.ServiceLogins), which AuthenticateLauncher reads too. Refusals: ErrTokenLoginsOff,
-// ErrTokenExpired, ErrTokenInvalid, ErrTokenTooLongLived and ErrAccountNotListed; none repeats
-// the token.
+// VerifyServiceToken verifies a service's token and maps it to the service it logs in as. The
+// token is tried against the broker's Kubernetes issuer and audience first (s.Enroll.Pod, the
+// verifier pod enrollment uses), whose subject BROKER_SERVICE_LOGINS (s.Enroll.ServiceLogins) must
+// name; then, when that issuer is not configured or the token is not its issuer's, against Google's
+// (s.Enroll.VM, a Compute Engine VM's identity token), whose account BROKER_VM_SERVICES must bind,
+// from the project BROKER_VM_PROJECTS names and an instance whose name BROKER_VM_INSTANCES' glob
+// matches (verifyVM). Each is tried only when its verifier is configured, and a token neither
+// issuer issued is refused with the Kubernetes verifier's error, as before there was a second.
+// Either token is held to MaxTokenLoginLifetime from its issue. AuthenticateLauncher reads the same
+// settings for every credential a login issues. Refusals: ErrTokenLoginsOff, ErrTokenExpired,
+// ErrTokenInvalid, ErrTokenTooLongLived and ErrAccountNotListed; none repeats the token.
 func (s *Service) VerifyServiceToken(ctx context.Context, token string) (ServiceAccount, error) {
-	if s.Enroll.Pod == nil {
+	if s.Enroll.Pod == nil && s.Enroll.VM == nil {
 		return ServiceAccount{}, ErrTokenLoginsOff
 	}
-	claims, err := s.Enroll.Pod.VerifyAccount(ctx, token)
-	switch {
-	case errors.Is(err, oidc.ErrExpired):
-		return ServiceAccount{}, fmt.Errorf("%w (%v)", ErrTokenExpired, err)
-	case err != nil:
-		return ServiceAccount{}, fmt.Errorf("%w (%v)", ErrTokenInvalid, err)
+	var kubernetes error
+	if s.Enroll.Pod != nil {
+		claims, err := s.Enroll.Pod.VerifyAccount(ctx, token)
+		if err == nil {
+			return s.verifyKubernetes(claims)
+		}
+		if s.Enroll.VM == nil || !errors.Is(err, oidc.ErrIssuer) {
+			return ServiceAccount{}, tokenRefusal(err)
+		}
+		kubernetes = err
 	}
+	claims, err := s.Enroll.VM.VerifyVM(ctx, token)
+	if kubernetes != nil && errors.Is(err, oidc.ErrIssuer) {
+		return ServiceAccount{}, tokenRefusal(kubernetes)
+	}
+	if err != nil {
+		return ServiceAccount{}, tokenRefusal(err)
+	}
+	return s.verifyVM(claims)
+}
+
+// tokenRefusal is a token that did not verify: ErrTokenExpired for one past its expiry, else
+// ErrTokenInvalid, each naming why.
+func tokenRefusal(err error) error {
+	if errors.Is(err, oidc.ErrExpired) {
+		return fmt.Errorf("%w (%v)", ErrTokenExpired, err)
+	}
+	return fmt.Errorf("%w (%v)", ErrTokenInvalid, err)
+}
+
+// checkLifetime refuses a verified token that names no issue time, or lives longer than
+// MaxTokenLoginLifetime from it.
+func (s *Service) checkLifetime(claims enroll.AccountClaims) error {
 	if claims.IssuedAt.IsZero() {
-		return ServiceAccount{}, fmt.Errorf("%w: it names no issue time (iat)", ErrTokenTooLongLived)
+		return fmt.Errorf("%w: it names no issue time (iat)", ErrTokenTooLongLived)
 	}
 	if lives := claims.Expiry.Sub(claims.IssuedAt); lives > MaxTokenLoginLifetime+s.Skew {
-		return ServiceAccount{}, fmt.Errorf("%w: it lives %s", ErrTokenTooLongLived, lives)
+		return fmt.Errorf("%w: it lives %s", ErrTokenTooLongLived, lives)
+	}
+	return nil
+}
+
+// verifyKubernetes maps a verified ServiceAccount token through BROKER_SERVICE_LOGINS.
+func (s *Service) verifyKubernetes(claims enroll.AccountClaims) (ServiceAccount, error) {
+	if err := s.checkLifetime(claims); err != nil {
+		return ServiceAccount{}, err
 	}
 	service, listed := s.Enroll.ServiceLogins[claims.Subject]
 	if !listed {
 		return ServiceAccount{}, fmt.Errorf("%w: %s is not in BROKER_SERVICE_LOGINS", ErrAccountNotListed, claims.Subject)
 	}
-	return ServiceAccount{AccountClaims: claims, Service: service}, nil
+	namespace, name, _ := strings.Cut(strings.TrimPrefix(claims.Subject, "system:serviceaccount:"), ":")
+	return ServiceAccount{AccountClaims: claims, Service: service, Host: namespace + "/" + name}, nil
+}
+
+// verifyVM maps a verified VM identity token through BROKER_VM_SERVICES, and refuses a VM of the
+// bound account in another project than BROKER_VM_PROJECTS names, or whose instance name
+// BROKER_VM_INSTANCES' glob does not match: the account alone does not name the fleet, since
+// anyone who can run a VM as it in any project could otherwise log in as its service. The login's
+// subject is the VM's runtime id, so each VM of the fleet holds a credential of its own.
+func (s *Service) verifyVM(vm enroll.VMClaims) (ServiceAccount, error) {
+	claims := enroll.AccountClaims{Subject: vm.RuntimeID(), Expiry: vm.Expiry, IssuedAt: vm.IssuedAt}
+	if err := s.checkLifetime(claims); err != nil {
+		return ServiceAccount{}, err
+	}
+	service, listed := s.Enroll.VMServicesByAccount[vm.Account]
+	if !listed {
+		return ServiceAccount{}, fmt.Errorf("%w: %s is not in BROKER_VM_SERVICES", ErrAccountNotListed, vm.Account)
+	}
+	if project := s.Enroll.VMProjects[vm.Account]; vm.Project != project {
+		return ServiceAccount{}, fmt.Errorf("%w: %s logs in from project %s only (BROKER_VM_PROJECTS), and this VM is in project %s", ErrAccountNotListed, vm.Account, project, vm.Project)
+	}
+	pattern := s.Enroll.VMInstancePatterns[vm.Account]
+	if matched, err := path.Match(pattern, vm.Instance); err != nil || !matched {
+		return ServiceAccount{}, fmt.Errorf("%w: instance %s does not match %s's instance names %q (BROKER_VM_INSTANCES)", ErrAccountNotListed, vm.Instance, vm.Account, pattern)
+	}
+	return ServiceAccount{AccountClaims: claims, Service: service, Host: vm.Project + "/" + vm.Zone + "/" + vm.Instance}, nil
 }
 
 // TokenLogin logs account (VerifyServiceToken's answer) in, and no person approves it.
@@ -114,7 +184,7 @@ func (s *Service) TokenLogin(ctx context.Context, account ServiceAccount, compac
 	}
 	expires = expires.UTC().Truncate(time.Microsecond)
 	id, err := s.Enroll.IssueTokenLogin(ctx, enroll.TokenLogin{
-		Subject: account.Subject, Service: account.Service, PodUID: account.PodUID, TokenExpires: account.Expiry,
+		Subject: account.Subject, Service: account.Service, Host: account.Host, PodUID: account.PodUID, TokenExpires: account.Expiry,
 		Thumbprint: obj.Thumbprint, JWK: jwk, Expires: expires,
 	})
 	if store.IsUniqueViolation(err) {

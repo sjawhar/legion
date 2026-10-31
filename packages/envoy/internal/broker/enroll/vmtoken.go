@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -29,6 +30,26 @@ type VMClaims struct {
 	InstanceID string
 	Expiry     time.Time
 	IssuedAt   time.Time
+}
+
+// RuntimeID names one VM as the broker keys it: <account>@<project>/<zone>/<instance id>, the
+// service-account email with the instance's project, zone and id. An instance id is unique only
+// within a project and a zone, so the id alone does not name one VM. A VM's token login holds its
+// launcher credential under this subject, and its vm enrollment carries it as its runtime id, so
+// each VM of a fleet that shares one account has a credential and an enrollment of its own.
+func (c VMClaims) RuntimeID() string {
+	return c.Account + "@" + c.Project + "/" + c.Zone + "/" + c.InstanceID
+}
+
+// vmRuntimeAccount reads the account and project back out of a VMClaims.RuntimeID; ok is false
+// for any other subject, a Kubernetes ServiceAccount's among them, which holds no "@".
+func vmRuntimeAccount(id string) (account, project string, ok bool) {
+	at := strings.LastIndex(id, "@")
+	if at <= 0 {
+		return "", "", false
+	}
+	project, _, ok = strings.Cut(id[at+1:], "/")
+	return id[:at], project, ok
 }
 
 // VMVerifier verifies a VM identity token and returns its verified identity fields.
