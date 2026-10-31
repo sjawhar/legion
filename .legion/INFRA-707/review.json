@@ -2,29 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-707",
-  "completed": "2026-10-30T21:34:00Z",
-  "round": 1,
-  "reviewedCodeHead": "eb0fe0be3cdfe265e0313569afb04ba405cb1b35",
+  "completed": "2026-10-31T00:38:00Z",
+  "round": 2,
+  "reviewedCodeHead": "f33d68d2ab3e52e2973b230926e64c7fd8001d70",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 6,
+  "important": 1,
   "minor": 3,
-  "ci": "Required checks (rulesets: lint, typecheck, test, pr-title; branch protection: none) at CI head eb0fe0be: lint success, typecheck skipped, test success, pr-title success. Compare eb0fe0be...c02a5f14 changes only .legion/INFRA-707/ (2 files). envoy-go-race (not required): attempt 2 of run 40966135659 in progress at 21:30Z.",
-  "proofLines": "E2E (implementer) and E2E (tester) both present in the PR body; each names surface, command, observation, head eb0fe0be and a negative control.",
-  "contractCensus": "Not required: the new stored-order subcommand and loadtest/browsertype are new surfaces; VersionedStore and the docs package are internal to packages/envoy; no existing process or package boundary changes shape.",
+  "ci": "CI head f33d68d2 (the tester's two test commits sit on the implementer's 00441179). At 00:37Z run 41150116149 (CI) was pending, with only `changes` queued, and pr-title was queued; no required check had a result. The request for changes does not wait on CI; the next round reads it at the new code head.",
+  "round1Threads": "All nine round-1 findings fixed in 00441179 (AppendRoomFlush; RoomFlush.appended and advanceRoomCursorThrough; backfill through storeRepair/commitSettlement with closureChangedMarkdown deleted; roomcursor.go, pending_authors.go 725 lines; flushRead/storeRead/ran deleted; errForkReleased wraps ErrServiceUnavailable, 503 tested in 4d40f2b2; README vacuum note; AGENTS.md and retrySettleSoon comments). Each thread was resolved by the implementer; I replied on each with its fixing commit.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at eb0fe0be; Minor: errForkReleased unmapped (500) on a path no production caller reaches; stored-order holds one repeatable-read snapshot per document.",
-    "codeQuality": "Verdict: CHANGES at eb0fe0be; findings 1, 2, 3, 5, 6, 7, 8 accepted; finding 4 (shadow re-implements the measure) judged not blocking: the shared part is renderDocumentForUpdate, already one function, and the comparison is one line."
+    "deepReview": "Verdict: APPROVE at f33d68d2; Minor: the backfill's unlocked queue read allows a latent double store; appendingCursor comment wrong.",
+    "codeQuality": "Verdict: CHANGES at f33d68d2; High (latent): the same double store; Minor: backfill reuses `settling` against Ledger's doc; takeRoomCursors decides the write/flush pairing twice."
   },
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/persistence.go", "description": "AppendUpdateWithCredit becomes a different operation (a whole flush, ignoring its update and contentChanged arguments) when the context carries withWorkerFlush; flushGateContextKey is a second context key for the same *roomFlush that only appendingCursor reads. Give the worker flush a named VersionedStore method and drop flushGateContextKey."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/ledger.go", "description": "The merge of a transaction's appended versions for one room instance is written four times (roomFlush.appended, liveWrite.withOwnAppends, takeRoomCursors' taken type and sort, commitSettlement/appendFlushing advance loops). One fold helper and one advance helper."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/service.go", "description": "backfillBlockIDs is the one durable writer still on the old path (closureChangedMarkdown, bare AppendUpdateTx, manual advanceRoomCursor) with no flush; route it through storeRepair/commitSettlement and delete closureChangedMarkdown, or state the exception where the stamp is appended."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/pending_authors.go", "description": "991 -> 1030 lines, past 1000; the room instance/cursor/gate code (roomInstance through appendingCursor) is not pending-authors code; move it to its own file."},
-    {"severity": "important", "file": "packages/envoy/AGENTS.md", "description": "Cutover left false statements: recordUpdateClass, finishDurableAppend, holdLive for a version's capture, closureChangedMarkdown for settlement's closure, and the lock-order paragraph saying only observe blocks on the replica lock (readPoint and drainedSeq now do too). Also service.go SettleNow's and cmd/dispatch/multiprocess_test.go's mentions of the deleted retrySettleSoon."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/flush.go", "description": "flushRead and storeRead are pass-through layers over Ledger.flushThrough; put the nil-cursor return in Ledger.flushThrough and call it directly."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/flush.go", "description": "roomFlush.ran is redundant: commit positions start at 1 (tree.go r.seq++ before use), so class.seq <= flush.through is false while through is 0."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/livewrite.go", "description": "errForkReleased maps to no HTTP status (500) where the pre-change code rebuilt the fork; wrap it as ErrServiceUnavailable or document that the retry needs a transaction with no earlier append to the document."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md", "description": "stored-order holds one repeatable-read snapshot per document while it renders every update; say to pass --since (or read a replica) against production."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/service.go", "description": "backfillBlockIDs reads the room's queue in flushThrough before it holds the document's advisory lock. A worker flush that has committed class A but not yet marked it stored passes the gate, so the backfill stores A a second time. The only guard is the assumption that the backfill's service serves no browser, and the PR's own TestStoredOrderBackfillStampOverAnUnstoredEdit breaks that assumption. Fix: lockDocumentRoom right after Begin; move the stale-room test's window to a hook before Begin; delete the exception text in service.go and flush.go."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/ledger.go", "description": "The backfill builds a Ledger with settling: true, but ledger.go:25-34 says settlement's and the joined ledger are the only two. Update the doc, or rename the field to what it means (a transaction of its own)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/ledger.go", "description": "takeRoomCursors decides twice, with opposite tests, whether a write and a flush share an instance (:240 and :248). Decide it once."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/roomcursor.go", "description": "appendingCursor's comment says a joined transaction's flush is read by the room-cursor branch; flushThrough passes flush to every flush append, so the flush branch decides those, and the ledger lookup serves only the repairs storeRepair appends."}
   ]
 }
