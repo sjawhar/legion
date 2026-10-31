@@ -289,3 +289,39 @@ func TestADocumentSocketWhoseMessageNeverNamesItselfEnds(t *testing.T) {
 		t.Fatal("a message naming no document or type was read through, want the connection to end")
 	}
 }
+
+// The header the filter builds for ygo is the one a browser's own frames carry, in each of the
+// three length forms RFC 6455 section 5.2 gives a payload - 7-bit, 16-bit and 64-bit - and the
+// length the filter reads back from such a header is the length it names. The messages the tests
+// above send reach the first two forms; this pins all three, and the guard readFrame reads a
+// length past an int64 by.
+func TestAFrameHeaderIsBuiltAndReadBackInEveryLengthForm(t *testing.T) {
+	key := []byte{0x11, 0x22, 0x33, 0x44}
+	for _, length := range []int{0, 5, 125, 126, 0xffff, 0x10000, 70_000} {
+		masked := frameHeader(gws.BinaryMessage, true, int64(length), key)
+		want := clientFrame(gws.BinaryMessage, true, make([]byte, length))[:len(masked)]
+		if !bytes.Equal(masked, want) {
+			t.Errorf("the header of a masked %d-byte frame is % x, want % x", length, masked, want)
+		}
+		if read := frameHeaderLength(masked[:2]); read != len(masked) {
+			t.Errorf("the header of a masked %d-byte frame reads as %d bytes, want its own %d", length, read, len(masked))
+		}
+		if read := framePayloadLength(masked); read != int64(length) {
+			t.Errorf("the header of a masked %d-byte frame names %d payload bytes", length, read)
+		}
+		unmasked := frameHeader(continuationFrame, false, int64(length), nil)
+		if len(unmasked) != len(masked)-len(key) || unmasked[0] != continuationFrame || unmasked[1]&maskedFrame != 0 {
+			t.Errorf("the unmasked header of a %d-byte continuation is % x, want %d bytes with neither the FIN nor the MASK bit", length, unmasked, len(masked)-len(key))
+		}
+		if read := framePayloadLength(unmasked); read != int64(length) {
+			t.Errorf("the unmasked header of a %d-byte frame names %d payload bytes", length, read)
+		}
+	}
+	if read := frameHeaderLength(nil); read != 2 {
+		t.Errorf("a header read so far as nothing is %d bytes long, want the two it takes to tell", read)
+	}
+	past := binary.BigEndian.AppendUint64([]byte{finalFrame | gws.BinaryMessage, maskedFrame | 127}, 1<<63)
+	if read := framePayloadLength(past); read != -1 {
+		t.Errorf("a header naming 2^63 payload bytes reads as %d, want -1: no int64 holds it", read)
+	}
+}

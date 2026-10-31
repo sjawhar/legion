@@ -3,6 +3,7 @@ package docs
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,11 +20,11 @@ import (
 // whatever made that change (:2595-2601). A tab applies the awareness the server sends it for
 // the room's other readers (:2265), and that apply fires the same change (:1582-1586), so every
 // tab sends the other readers' client ids back on its own socket. Nothing in the protocol bounds
-// what a socket names. ygo applies a peer's awareness frame whole and broadcasts it to the room's
-// other peers whatever it names (provider/websocket/peer.go:96-117), and the room's relay then
-// sends it to every other process (awareness_relay.go), so one tab's frame naming thousands of
-// invented client ids used to cost every reader of every process an entry each, and the room it
-// filled had nothing left for the reader who joined next.
+// what a socket names. ygo applies a peer's awareness frame whole and broadcasts it to every peer
+// of the room, its sender included (provider/websocket/peer.go:110-131, 785-793), and the room's
+// relay then sends it to every other process (awareness_relay.go), so one tab's frame naming
+// thousands of invented client ids used to cost every reader of every process an entry each, and
+// the room it filled had nothing left for the reader who joined next.
 //
 // So the bound is the socket's: a document socket may hold maxAwarenessClientsPerSocket awareness
 // clients at once, and the entries of the clients past that are taken out of its frame before ygo
@@ -32,10 +33,11 @@ import (
 // (awarenessLimitWriter, awarenessLimitConn), where the process header's wrapper sits
 // (websocket.go). Filtering there, before ygo reads the frame, is what makes the room's own
 // readers and the readers on the other processes see the same clients: ygo broadcasts and the
-// relay sends the frame the filter wrote, not the one the socket sent.
+// relay sends the frame the filter wrote, not the one the socket sent, and the echo ygo returns
+// to the sender carries that frame too.
 //
 // A socket's clients go with it: ygo tracks the client ids a peer announced and removes them as
-// the peer disconnects (provider/websocket/peer.go:438-465, 467-653), which the relay carries to
+// the peer disconnects (provider/websocket/peer.go:474-501, 503-689), which the relay carries to
 // the other processes like any other removal, and the filter frees a client's place as the socket
 // takes that client away. So a room's awareness holds its sockets' clients at most, and the
 // sockets of a process are themselves bounded (Service.canAddConnection).
@@ -58,7 +60,7 @@ const (
 	// maxAwarenessBytesPerRoom, so nothing a reader sends comes near it; a larger one reaches ygo
 	// as an awareness message naming no client, which applies and broadcasts as no change. It
 	// bounds what the filter buffers for a socket, well under the 64 MiB message ygo's own reader
-	// buffers (provider/websocket/server.go:103, 1998).
+	// buffers (provider/websocket/server.go:148, 2049).
 	maxAwarenessMessageBytes = 256 << 10
 	// maxDocumentMessageHeader is how many bytes of a message the filter reads to learn what the
 	// message is: Hocuspocus frames each one with the document's name and the message's type
@@ -70,7 +72,20 @@ const (
 	// continuationFrame is the opcode of a websocket frame continuing the message before it
 	// (RFC 6455 section 5.4); gorilla names every other opcode this package uses.
 	continuationFrame = 0x0
+	// finalFrame is the FIN bit of a websocket frame's first byte: the frame ends its message.
+	finalFrame = 0x80
+	// maskedFrame is the MASK bit of a frame's second byte: a masking key follows the length.
+	maskedFrame = 0x80
+	// maxFrameHeader is the longest frame header: two bytes, an eight-byte length, a masking key.
+	maxFrameHeader = 14
+	// hocuspocusAwareness is the Hocuspocus message type of an awareness update.
+	hocuspocusAwareness = 1
 )
+
+// noAwarenessChange is an awareness update naming no client - y-protocols' encoding of an update
+// over no clients, a count of zero - which ygo applies and broadcasts as no change, and which a
+// browser's provider reads as no change too, emitting nothing and answering nothing.
+var noAwarenessChange = []byte{0}
 
 // awarenessLimitMode is what the message a socket is part way through sending is to the filter.
 type awarenessLimitMode int
@@ -373,8 +388,8 @@ func (c *awarenessLimitConn) allowed(message []byte) []byte {
 }
 
 // writeAwareness puts the awareness message carrying update - the socket's, with the clients it
-// may not hold taken out - on the stream ygo reads. A nil update names no client, which ygo
-// applies and broadcasts as no change, as the keep-alive's does (keepalive.go).
+// may not hold taken out - on the stream ygo reads. A nil update names no client
+// (noAwarenessChange), which ygo applies and broadcasts as no change.
 func (c *awarenessLimitConn) writeAwareness(update []byte) {
 	if update == nil {
 		update = noAwarenessChange
@@ -409,4 +424,68 @@ func documentMessageKind(message []byte) (name string, kind uint64, read int, na
 		return "", 0, 0, false
 	}
 	return name, kind, len(message) - decoder.Remaining(), true
+}
+
+// frameHeaderLength is the length of the frame header that begins with header, at least two bytes.
+func frameHeaderLength(header []byte) int {
+	if len(header) < 2 {
+		return 2
+	}
+	length := 2
+	switch header[1] &^ maskedFrame {
+	case 126:
+		length += 2
+	case 127:
+		length += 8
+	}
+	if header[1]&maskedFrame != 0 {
+		length += 4
+	}
+	return length
+}
+
+// framePayloadLength is the payload length the frame header names, or -1 when it names one past
+// what an int64 holds (RFC 6455 keeps the top bit of a 64-bit length clear). It is the one place
+// a frame's length is decoded: the awareness filter's read of what a socket sends
+// (awarenessLimitConn.readFrame) takes it from here.
+func framePayloadLength(header []byte) int64 {
+	switch length := int64(header[1] &^ maskedFrame); length {
+	case 126:
+		return int64(binary.BigEndian.Uint16(header[2:4]))
+	case 127:
+		if named := binary.BigEndian.Uint64(header[2:10]); named <= uint64(1<<63-1) {
+			return int64(named)
+		}
+		return -1
+	default:
+		return length
+	}
+}
+
+// frameHeader is the header of a websocket frame of opcode carrying length payload bytes: the
+// opcode byte, with the FIN bit set when final, then the payload's length in the 7-, 16- or
+// 64-bit form RFC 6455 section 5.2 gives it, then key, the masking key. A frame a client sends
+// gives its four-byte key, which sets the MASK bit on the length's first byte; a frame a server
+// sends gives none (nil), and its MASK bit stays clear. It is the one place a frame's header is
+// encoded: the awareness filter's frames to ygo - awarenessLimitConn.writeFrame, and the
+// continuation header awarenessLimitConn.pass writes - are built here, each with the key of the
+// frame it stands for. The caller appends the payload, masked under key when it gives one.
+func frameHeader(opcode byte, final bool, length int64, key []byte) []byte {
+	header := append(make([]byte, 0, maxFrameHeader), opcode)
+	if final {
+		header[0] |= finalFrame
+	}
+	var mask byte
+	if key != nil {
+		mask = maskedFrame
+	}
+	switch {
+	case length < 126:
+		header = append(header, mask|byte(length))
+	case length <= 0xffff:
+		header = binary.BigEndian.AppendUint16(append(header, mask|126), uint16(length))
+	default:
+		header = binary.BigEndian.AppendUint64(append(header, mask|127), uint64(length))
+	}
+	return append(header, key...)
 }

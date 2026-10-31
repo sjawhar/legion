@@ -65,7 +65,7 @@ func TestADocumentSocketWhoseFirstMessageNamesNoDocumentIsClosedThroughARealUpgr
 			for {
 				_, _, err := socket.ReadMessage()
 				if err == nil {
-					continue // the document the room sends every socket, or a keep-alive
+					continue // the document the room sends every socket, or its awareness
 				}
 				if errors.Is(err, os.ErrDeadlineExceeded) {
 					t.Fatalf("the socket is still open %v after a %d-byte first message that names neither a document nor a type: want it closed",

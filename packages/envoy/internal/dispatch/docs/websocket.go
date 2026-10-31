@@ -337,12 +337,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	connection := &connectionState{}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
-	// The socket's peer hears from it at least every s.keepAlive (documentKeepAlive), however idle
-	// the room (keepalive.go), so its provider never takes the socket for dead; the awareness
-	// clients the peer may announce are bounded before ygo reads its frames (awareness_limit.go).
-	keepAlive := newKeepAliveWriter(w, room, s.keepAlive)
-	s.srv.ServeHTTP(&awarenessLimitWriter{ResponseWriter: keepAlive, room: room}, r.WithContext(ctx))
-	keepAlive.stop()
+	// The awareness clients the socket's peer may announce are bounded before ygo reads its
+	// frames (awareness_limit.go).
+	s.srv.ServeHTTP(&awarenessLimitWriter{ResponseWriter: w, room: room}, r.WithContext(ctx))
 	if connection.added {
 		s.removeConnection(connection.room, connection.id)
 	}
