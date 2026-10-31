@@ -116,6 +116,6 @@ jobs:
           if jq -r '.pull_request.title' "$PAYLOAD" | grep -qE '^[a-z]+(\([^)]+\))?!?: .+'; then
             echo "PR title is conventional"
           else
-            echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — a non-conventional title makes the release pipelines rely on the squash body alone."
+            echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — a merge the Legion daemon submits writes an empty squash body, so on it the title is the only text they read."
             exit 1
           fi
