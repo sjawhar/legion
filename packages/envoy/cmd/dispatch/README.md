@@ -2441,16 +2441,24 @@ once admitted, runs to completion. Every wait for a database connection is bound
 seconds for a request's. The document and delivery websockets are neither admitted nor bounded.
 
 A slow client is bounded as well, so that it holds neither the admission units it was admitted
-with nor the database connection its read pinned for as long as it cares to. A request's whole
-body has 60 seconds to arrive, counted from the first read of it: enough to carry a 26 MiB upload
-over a link of 450 KB/s and a 1 MiB JSON body over one of 17 KB/s. Past it the read of the body
-fails, and the request is answered `400 REQUEST_BODY_UNREADABLE` - or with whatever its layer had
-already answered, such as a refused upload's `409 ISSUE_CLOSED` - with the connection closed after
-it. A read's answer is written under the read's own deadline too (20 seconds, 5 minutes for a file
-version download), counted from its first byte, so a client that stops reading a large answer has
-the connection closed under it there. Each route also bounds its body in bytes: 1 MiB for a JSON
-route (`413 REQUEST_TOO_LARGE`) and 26 MiB for an upload (`413 CAP_EXCEEDED`). Neither bound
-touches the websockets, which are mounted outside the routes.
+with nor the database connection its read pinned for as long as it cares to, while a client that
+is merely slow is served in full. A request's body, and a read's answer, are bounded on the
+silence between their bytes and on the rate those bytes keep, never on how long the whole
+transfer takes: 20 seconds without a byte ends it, and so does an average below 32 KB/s once the
+transfer has had a minute's grace. So an upload over a slow uplink is taken however long it needs
+- a 26 MiB file at 1 Mbit/s takes about three and a half minutes - and a large answer read over a
+slow downlink is written in full, where both were once cut off at a fixed 60 and 20 seconds. Past
+either bound the read of the body fails, and the request is answered `400 REQUEST_BODY_UNREADABLE`
+- or with whatever its layer had already answered, such as a refused upload's `409 ISSUE_CLOSED` -
+with the connection closed after it; a client that went away instead is answered nothing and
+recorded as `status=499`. A client that stops reading an answer has the connection closed under it
+within the same 20 seconds. While a body is still arriving its request holds none of the
+admission units it was admitted with: they go back for as long as the body takes and are taken
+again once it has arrived, so clients trickling bodies cannot hold the server's room for writes,
+and a body that arrives to find no room left is answered `429 OVERLOADED` with its body already
+read. Each route also bounds its body in bytes: 1 MiB for a JSON route (`413 REQUEST_TOO_LARGE`)
+and 26 MiB for an upload (`413 CAP_EXCEEDED`). Neither bound touches the websockets, which are
+mounted outside the routes.
 
 Each answer below carries `Retry-After` in seconds, and all but `EDIT_QUEUE_FULL` carry
 `Cache-Control: no-store`; none is logged above DEBUG, and a request whose client went away is
@@ -2463,11 +2471,11 @@ have done.
 
 | Status / code | Meaning |
 | --- | --- |
-| `429 OVERLOADED` | The server had no room for another read or write: its queue was full, or 1 second passed with no room. Nothing ran, so any method may be sent again after `Retry-After: 1`. A refused request's body is read and discarded first, up to the route's body limit and within the 60 seconds the body has to arrive, so a browser reads the 429 rather than a reset connection. A write that waited for a document's writer gate and then found no room is refused this way too. `dispatch_http_refused_total` counts them. |
+| `429 OVERLOADED` | The server had no room for another read or write: its queue was full, or 1 second passed with no room. Nothing ran, so any method may be sent again after `Retry-After: 1`. A refused request's body is read and discarded first, up to the route's body limit and within the bounds that body arrives under, so a browser reads the 429 rather than a reset connection. A write whose body arrived to find no room left, and one that waited for a document's writer gate and then found none, are refused this way too. `dispatch_http_refused_total` counts them. |
 | `429 EDIT_QUEUE_FULL` | 32 writes were already waiting for a document this write changes. Every write to a live document waits for that document's writer gate, one write at a time, before its transaction opens: an edit, an upload, a rebuild, an anchored comment or ask, a reply that writes into its document, a comment edited, resolved, reopened, accepted or rejected, an ask answered, resolved or edited. Nothing ran; send it again after `Retry-After: 1`. |
 | `503 DATABASE_BUSY` | No database connection came free within its pool's bound (`store.ErrPoolBusy`). A read may be sent again after `Retry-After: 1`; a write may have committed part of its work before the wait that failed it, so read what it wrote before sending it again. `dispatch_db_pool_acquire_timeouts_total` counts the waits. |
 | `503 REQUEST_TIMEOUT` | A read ran past its deadline: 20 seconds, 5 minutes for a file version download. Send it again after `Retry-After: 1`. |
-| `500 COMMIT_OUTCOME_UNKNOWN` | The database did not answer this write's commit within the commit's bound (10 seconds). The outcome is unknown: the transaction may have committed, and the server cannot tell. Read what the write would have written before sending it again, or send it again under the same `Idempotency-Key`, which answers a replay rather than writing twice. It carries no `Retry-After`, and the server logs it at ERROR. |
+| `500 COMMIT_OUTCOME_UNKNOWN` | The database did not answer this write's commit within the commit's bound (10 seconds). The outcome is unknown: the transaction may have committed, and the server cannot tell. Read what the write would have written before sending it again, or send it again under the same `Idempotency-Key`, which answers a replay rather than writing twice. It carries no `Retry-After`, and the server logs it at ERROR, whether or not the client is still there to read the 500: a client that left while the commit ran is answered nothing and recorded as `status=499`, and the ERROR line still names the unknown outcome. |
 
 ## Input errors
 
@@ -2501,7 +2509,8 @@ Each item below names a status and code, then its meaning.
 
 - `400 REQUEST_BODY_UNREADABLE`
 
-  The request's body did not arrive within the 60 seconds a body has, counted from the first read of it, or its connection broke while it was being read; nothing ran, and the connection closes after the answer.
+  The request's body stopped arriving: 20 seconds passed without a byte of it, or it fell below 32 KB/s after its first minute; nothing ran, and the connection closes after the answer.
+  A client that went away mid-body is answered nothing instead, and recorded as `status=499`.
   A keyed request answers it too, with its key unclaimed, so the same key may be sent again.
 
 ## Document errors

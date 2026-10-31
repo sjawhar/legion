@@ -30,10 +30,14 @@ body: |-
   seconds is `500 COMMIT_OUTCOME_UNKNOWN` with an ERROR line naming the unknown outcome, where it
   was `503 DATABASE_BUSY` at DEBUG telling the client nothing had run: the transaction may have
   committed, so the write is not to be sent again until what it wrote has been read, or sent again
-  under its `Idempotency-Key`. Both 503s carry `Retry-After: 1` and `Cache-Control: no-store`. A
-  request whose client went away is answered nothing and logged at DEBUG, where it was a `500` and
-  an ERROR line, and its access-log line now records `status=499`, nginx's client-closed code,
-  where a write that rolled back because its client left read as a `200`; none of these answers is
+  under its `Idempotency-Key`. The ERROR line is written whether or not the client is still there
+  to read the 500, since the unknown outcome is the operator's to see; a client that left while
+  the commit ran is answered nothing and recorded as `status=499`. Both 503s carry `Retry-After:
+  1` and `Cache-Control: no-store`. A request whose client went away is answered nothing and
+  logged at DEBUG, where it was a `500` and an ERROR line, and its access-log line now records
+  `status=499`, nginx's client-closed code, where a write that rolled back because its client left
+  read as a `200`: a client that left while its request was queued for room, while its body was
+  arriving, or while its handler ran is recorded that way. None of these answers is
   logged above DEBUG (`cmd/dispatch/README.md`, "Load errors"). An
   admitted read of weight one runs on one connection for its whole length, where an issue read
   took twelve one after another (INFRA-592).

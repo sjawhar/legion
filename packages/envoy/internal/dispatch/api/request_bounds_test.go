@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -492,17 +493,17 @@ func TestTheDeliveryTimelineHoldsAtMostTwoConnections(t *testing.T) {
 	}
 }
 
-// A client that sends its headers and then its body a byte at a time does not hold its write unit
-// for as long as it cares to: the body arrives under a bound of its own (defaultBodyReadLimit,
-// here the test's), and once it passes, the read fails, the handler answers and the unit goes
-// back. With both write units held by such tricklers, an ordinary write is admitted inside its
-// queue wait instead of being refused 429 OVERLOADED, which is what twelve of them did to every
-// other write on the process.
+// A client that sends its headers and then trickles its body holds no write unit while that
+// body arrives: the reads of it park the ticket the request was admitted with and take it back
+// only once the body has ended (drainedBody.park), so a write beside two such clients is
+// admitted at once rather than waiting for them, and each trickler is cut within the idle bound
+// its body arrives under. Twelve of them once held every write unit of a process for as long as
+// they cared to, and every other write on it was refused 429 OVERLOADED.
 func TestATricklingBodyDoesNotHoldItsWriteUnitWithoutEnd(t *testing.T) {
-	const bodyRead, queueWait = 200 * time.Millisecond, 2 * time.Second
+	const idle, queueWait = 2 * time.Second, 3 * time.Second
 	limiter := admission.New(admission.Limits{Read: 4, Write: 2, Wait: queueWait})
 	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{admission: limiter})
-	served.bodyReadLimit = bodyRead
+	served.transfer = transferBounds{idle: idle}
 	issue := createInteractionIssue(t, handler, "TEST", "Trickled writes", "A spec")
 	httpServer := httptest.NewServer(handler)
 	t.Cleanup(httpServer.Close)
@@ -510,28 +511,194 @@ func TestATricklingBodyDoesNotHoldItsWriteUnitWithoutEnd(t *testing.T) {
 	header := http.Header{}
 	header.Set("Content-Type", "application/json")
 	header.Set("X-Dispatch-User", "alice")
+	// net/http tells a client that asked to continue to do so at the first read of its body, so
+	// the 100 Continue each trickler reads says its request is in that read with its ticket
+	// parked, with no byte of its body sent.
+	header.Set("Expect", "100-continue")
 	tricklers := make([]*heldBackBody, 0, 2)
 	for range cap(tricklers) {
 		tricklers = append(tricklers, sendPartOfBody(t, httpServer.Listener.Addr().String(),
-			"/api/v1/issues/"+issue.Key+"/comments", header, int(maxJSONRequestBytes), []byte(`{"body":"a`)))
+			"/api/v1/issues/"+issue.Key+"/comments", header, int(maxJSONRequestBytes), nil))
 	}
-	waitForWritesInFlight(t, limiter, cap(tricklers))
+	for _, trickler := range tricklers {
+		if response, answer := trickler.answer(); response.StatusCode != http.StatusContinue {
+			t.Fatalf("a trickler was answered %d %s before it sent a byte, want the 100 Continue of a body being read",
+				response.StatusCode, answer)
+		}
+	}
+	reading := time.Now()
+	if held := limiter.Stats()[admission.Write].InFlight; held != 0 {
+		t.Fatalf("the tricklers hold %d write units while their bodies arrive, want none", held)
+	}
 
 	started := time.Now()
 	admitted := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Renamed"}, "alice")
 	waited := time.Since(started)
 	if admitted.Code != http.StatusOK {
-		t.Fatalf("the write beside the tricklers: status=%d body=%s after %v, want 200 once their units went back at the body read bound",
+		t.Fatalf("the write beside the tricklers: status=%d body=%s after %v, want 200 on the units they park",
 			admitted.Code, admitted.Body.String(), waited)
 	}
-	if waited >= queueWait {
-		t.Fatalf("the write beside the tricklers waited %v, want it admitted inside its %v queue wait", waited, queueWait)
+	if waited >= idle {
+		t.Fatalf("the write beside the tricklers waited %v, want it admitted at once rather than once their %v idle bound cut them",
+			waited, idle)
 	}
 	for _, trickler := range tricklers {
 		response, answer := trickler.answer()
-		if response.StatusCode < http.StatusBadRequest {
-			t.Fatalf("a trickled write was answered %d %s, want the refusal of a body that did not arrive", response.StatusCode, answer)
+		if response.StatusCode != http.StatusBadRequest || refusalCode(answer) != "REQUEST_BODY_UNREADABLE" {
+			t.Fatalf("a trickled write was answered %d %s, want 400 REQUEST_BODY_UNREADABLE once the idle bound cut its body",
+				response.StatusCode, answer)
 		}
+	}
+	if cut := time.Since(reading); cut < idle-100*time.Millisecond {
+		t.Fatalf("the tricklers were cut %v after their first read, want them to have their %v idle bound", cut, idle)
+	}
+}
+
+// A body that keeps arriving is taken however long it takes: the bound on it is on the silence
+// between its bytes and on the rate they keep, not on the transfer's length, so an honest upload
+// over a slow uplink - a 25 MiB file at 1 Mbit/s takes about three and a half minutes - is
+// written rather than refused. Here the body is sent steadily for three times the grace its rate
+// is judged after, which the total bound this replaced would have cut.
+func TestABodyThatKeepsArrivingIsTakenHoweverLongItTakes(t *testing.T) {
+	const grace, sending = time.Second, 3 * time.Second
+	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: time.Second, grace: grace, floor: 1 << 10}
+	issue := createInteractionIssue(t, handler, "TEST", "Slow uploads", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	header := http.Header{}
+	header.Set("Content-Type", "application/json")
+	header.Set("X-Dispatch-User", "alice")
+	body := []byte(`{"body":"` + strings.Repeat("a", 30_000) + `"}`)
+	sent := sendPartOfBody(t, httpServer.Listener.Addr().String(),
+		"/api/v1/issues/"+issue.Key+"/comments", header, len(body), body[:10])
+	started := time.Now()
+	response, answer := sent.sendSteadily(body[10:], 12, sending/12)
+	elapsed := time.Since(started)
+
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		t.Fatalf("the steadily sent body was answered %d %s after %v, want it taken", response.StatusCode, answer, elapsed)
+	}
+	if elapsed < grace {
+		t.Fatalf("the body arrived in %v, want it sent for longer than the %v its rate is judged after", elapsed, grace)
+	}
+}
+
+// A client that goes away while its request waits for room is recorded as the 499 it is, not as
+// the 200 of a handler that wrote nothing: under load a client that gives up while queued is the
+// most frequent way a request ends with nothing written.
+func TestARequestWhoseClientLeavesWhileItIsQueuedIsLoggedClientGone(t *testing.T) {
+	limiter := admission.New(admission.Limits{Read: 4, Write: 1, Wait: 10 * time.Second})
+	handler, database, _ := newTestServer(t, testServerOptions{admission: limiter})
+	issue := createInteractionIssue(t, handler, "TEST", "Queued writes", "A spec")
+	release := holdIssueRow(t, database, issue.Key)
+	defer release()
+	held := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		held <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Renamed"}, "alice")
+	}()
+	waitForWritesInFlight(t, limiter, 1)
+	logged := captureLog(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	queued := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+			strings.NewReader(`{"body":"queued"}`)).WithContext(ctx)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Dispatch-User", "alice")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		queued <- response
+	}()
+	waitForQueuedWrites(t, limiter, 1)
+	cancel()
+
+	if response := awaitResponse(t, queued); response.Body.Len() != 0 {
+		t.Fatalf("the request whose client left while it was queued was answered %d %s, want nothing written",
+			response.Code, response.Body.String())
+	}
+	line := accessLineOfRoute(t, logged, "/api/v1/issues/{key}/comments")
+	if !strings.Contains(line, "status=499") {
+		t.Fatalf("the request whose client left while it was queued logged:\n%s\nwant status=499", line)
+	}
+	release()
+	if response := awaitResponse(t, held); response.Code != http.StatusOK {
+		t.Fatalf("the held write: status=%d body=%s, want 200", response.Code, response.Body.String())
+	}
+}
+
+// waitForQueuedWrites returns once limiter holds writes of them in its queue.
+func waitForQueuedWrites(t *testing.T, limiter *admission.Limiter, writes int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for limiter.Stats()[admission.Write].Queued != writes {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d writes were queued, want %d", limiter.Stats()[admission.Write].Queued, writes)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// accessLineOfRoute is the one access-log line logged holds for route.
+func accessLineOfRoute(t *testing.T, logged *logBuffer, route string) string {
+	t.Helper()
+	var found []string
+	for _, line := range accessLines(t, logged) {
+		if strings.Contains(line, " route="+route+" ") {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%d access-log lines name route %s:\n%s", len(found), route, strings.Join(found, "\n"))
+	}
+	return found[0]
+}
+
+// A commit the database does not answer within its bound is reported whether or not the client
+// is still there to be told: the outcome is unknown, which is a fault an operator must see, so
+// the ERROR line names it either way. Only a client still there is written the 500
+// COMMIT_OUTCOME_UNKNOWN; one that went away is answered nothing and logged 499, as every gone
+// client is. The commit waits on the test's lock and its bound is the test's
+// (store.WithCommitBoundForTest), as TestAWriteWhoseCommitRunsOutItsBoundIsNotAnsweredDatabaseBusy
+// holds the answer a client still there reads.
+func TestACommitPastItsBoundIsLoggedWhenItsClientHasGone(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	issue := createInteractionIssue(t, handler, "TEST", "Commit past its bound", "Before.")
+	release := holdCommits(t, database)
+	defer release()
+	logged := captureLog(t)
+
+	data, err := json.Marshal(map[string]any{"ops": []map[string]string{
+		{"op": "insert", "markdown": "Written while the commit is held.", "after": "end"},
+	}})
+	if err != nil {
+		t.Fatalf("encode the edit: %v", err)
+	}
+	ctx, cancel := context.WithCancel(store.WithCommitBoundForTest(context.Background(), 300*time.Millisecond))
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", bytes.NewReader(data)).WithContext(ctx)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Dispatch-User", "alice")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		answered <- response
+	}()
+	waitForHeldCommit(t, database)
+	cancel()
+
+	if response := awaitResponse(t, answered); response.Body.Len() != 0 {
+		t.Fatalf("the write whose client left mid-commit was answered %d %s, want nothing written",
+			response.Code, response.Body.String())
+	}
+	if !strings.Contains(logged.String(), "level=ERROR") || !strings.Contains(logged.String(), "its outcome is unknown") {
+		t.Fatalf("the commit that ran out its bound under a client that had gone logged:\n%s\nwant an ERROR line naming the unknown outcome",
+			logged.String())
+	}
+	if line := accessLineOfRoute(t, logged, "/api/v1/artifacts/{id}/edits"); !strings.Contains(line, "status=499") {
+		t.Fatalf("the write whose client left mid-commit logged:\n%s\nwant status=499", line)
 	}
 }
 
@@ -549,14 +716,16 @@ func awaitRequestPoolIdle(t *testing.T, pool *store.Pool, wait time.Duration) ti
 	return time.Since(started)
 }
 
-// A pinned read whose client stops reading its answer gives its request-pool connection back at
-// the read's deadline: the answer is larger than the sockets between the two buffer, so the
-// handler blocks in Write, and the bound its answer is written under (boundedAnswer) is what ends
-// that wait. Without it the read held its pinned connection, and the admission unit around it,
-// for as long as the client cared to leave the answer unread.
+// A pinned read whose client stops reading its answer gives its request-pool connection back
+// within the idle bound that answer is written under: the answer is larger than the sockets
+// between the two buffer, so the handler blocks in Write, and the bound (boundedAnswer) is what
+// ends that wait. The read's own deadline is far past it here, so only the idle bound can.
+// Without it the read held its pinned connection, and the admission unit around it, for as long
+// as the client cared to leave the answer unread.
 func TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading(t *testing.T) {
-	const deadline = 500 * time.Millisecond
+	const idle, deadline = 500 * time.Millisecond, 30 * time.Second
 	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: idle}
 	const pattern = "/api/v1/stalled-reader-test"
 	pinned := make(chan struct{})
 	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
@@ -592,8 +761,72 @@ func TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading(t *testing.T
 		t.Fatalf("send the read: %v", err)
 	}
 	<-pinned
-	// The client reads nothing of the answer; only the read's deadline can end the handler's write.
-	if held := awaitRequestPoolIdle(t, database.Pool, 10*time.Second); held < deadline {
-		t.Fatalf("the pinned connection went back after %v, want it held until the read's %v deadline", held, deadline)
+	// The client reads nothing of the answer; only its idle bound can end the handler's write.
+	if held := awaitRequestPoolIdle(t, database.Pool, 10*time.Second); held < idle {
+		t.Fatalf("the pinned connection went back after %v, want it held until the answer's %v idle bound", held, idle)
+	}
+}
+
+// A client that reads a large answer slowly but steadily is answered all of it: the bound on an
+// answer is on the silence of each write, not on the answer's length, so a page or a download on
+// a slow downlink is served however long it takes, while one that stops reading is cut within the
+// idle bound (TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading). Here the client
+// takes several times that bound to read the answer, which the total bound this replaced cut off
+// at it. It reads far faster than the bound asks, because what one write of the handler's waits
+// for is not one read of the client's: the kernel takes the answer into its send buffer and wakes
+// the blocked write only once a good part of that buffer has drained.
+func TestASlowButSteadyReaderOfALargeAnswerIsAnsweredInFull(t *testing.T) {
+	const idle, deadline, answer, chunk = time.Second, 30 * time.Second, 32 << 20, 256 << 10
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: idle}
+	const pattern = "/api/v1/steady-reader-test"
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
+		block := make([]byte, chunk)
+		began := time.Now()
+		for written := 0; written < answer; written += len(block) {
+			wrote := time.Now()
+			if _, err := w.Write(block); err != nil {
+				t.Errorf("write the answer at %d bytes, %v into the answer and %v into this write: %v",
+					written, time.Since(began), time.Since(wrote), err)
+				return
+			}
+		}
+	}}}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, nil, admission.New(admission.DefaultLimits()), deadline))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+	if err := connection.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatalf("read the answer's head: %v", err)
+	}
+	defer response.Body.Close()
+
+	started := time.Now()
+	block := make([]byte, chunk)
+	for read := 0; read < answer; {
+		// A chunk every 20 ms: the whole answer takes about two and a half seconds, several
+		// times the idle bound, and every write of the handler's wakes well inside it.
+		time.Sleep(20 * time.Millisecond)
+		n, err := io.ReadFull(response.Body, block)
+		read += n
+		if err != nil {
+			t.Fatalf("the answer stopped %v in, after %d of %d bytes: %v", time.Since(started), read, answer, err)
+		}
+	}
+	if elapsed := time.Since(started); elapsed < idle {
+		t.Fatalf("the answer was read in %v, want a reader slower than its %v idle bound", elapsed, idle)
 	}
 }

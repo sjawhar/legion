@@ -893,12 +893,12 @@ func answerHeldKey(w http.ResponseWriter, r *http.Request, key string, held held
 // answered 409 KEY_IN_FLIGHT at once, with nothing read: it has sent nothing, so the answer is as
 // fresh as the key, and a read would ask it for its whole body only to judge it.
 //
-// The body is read under the bound it arrives under, whatever is left of it (drainedBody.arm):
+// The body is read under the bounds it arrives under, whatever is left of it (movingDeadline.arm):
 // one that stops arriving is answered 409 KEY_IN_FLIGHT, which is what the key said, and the
 // connection closes after it. A body past the route's limit is answered as its route answers one
 // (bodyTooLarge), unkeyed, as a request whose body is past the limit runs unkeyed. Either keeps
-// that bound for net/http's own reads after the answer; only a body read to its end lifts it
-// (drainedBody.lift).
+// that bound for net/http's own reads after the answer; only a body that ended lifts it
+// (movingDeadline.lift).
 func (s *server) answerDrainedRepeat(
 	w http.ResponseWriter, r *http.Request, method, pattern string, limit int64, wildcards []string, login, key string, replay keyedReplay,
 ) {

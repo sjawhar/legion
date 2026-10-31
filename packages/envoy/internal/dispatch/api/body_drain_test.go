@@ -77,6 +77,20 @@ func (b *heldBackBody) finish(rest []byte) (*http.Response, []byte) {
 	return b.answer()
 }
 
+// sendSteadily sends rest in chunks of its length over chunks sends, one every pause, as a
+// client on a slow uplink sends a body, and reads the answer once the last of it is out.
+func (b *heldBackBody) sendSteadily(rest []byte, chunks int, pause time.Duration) (*http.Response, []byte) {
+	b.t.Helper()
+	size := (len(rest) + chunks - 1) / chunks
+	for start := 0; start < len(rest); start += size {
+		time.Sleep(pause)
+		if _, err := b.connection.Write(rest[start:min(start+size, len(rest))]); err != nil {
+			b.t.Fatalf("send bytes %d on of the body: %v", start, err)
+		}
+	}
+	return b.answer()
+}
+
 // answer reads the first answer the server writes, an interim 1xx included.
 func (b *heldBackBody) answer() (*http.Response, []byte) {
 	b.t.Helper()
@@ -512,7 +526,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 }
 
 // INFRA-258. A drain is bounded in time as well as in bytes: a body that stops arriving is waited
-// for within the bound the request's body arrives under (defaultBodyReadLimit), and then the
+// for within the idle bound it arrives under (transferBounds), and then the
 // answer goes out as it stood, with the connection closed after it, rather than the request held
 // open for as long as its client cares to. Both drains: the one every early answer waits behind
 // (drainBeforeAnswer), here an upload to a closed issue and a message pressed by another login,
@@ -529,7 +543,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 func TestADrainStopsWaitingForABodyThatStalls(t *testing.T) {
 	const drainLimit = time.Second
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{files: filestest.NewMemory()})
-	served.bodyReadLimit = drainLimit
+	served.transfer = transferBounds{idle: drainLimit}
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	open := createArtifactIssue(t, handler)
