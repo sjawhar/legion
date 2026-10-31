@@ -8,13 +8,21 @@ import (
 )
 
 var (
-	ordersRows       = regexp.MustCompile(`\border by\b`)
-	readsReviewTable = regexp.MustCompile(`\bfrom\s+` + reviewTable)
+	ordersRows = regexp.MustCompile(`\border by\b`)
+	// readsReviewTable matches the table after a from or a join, since a statement reaches it
+	// either way and a join's newest-row pick is as ordinary a shape as a plain read's.
+	readsReviewTable = regexp.MustCompile(`\b(?:from|join)\s+` + reviewTable)
 	// reviewOrderText is the leading term of docs.ReviewOrder, the one a statement written with
 	// another order cannot carry: the two after it, created_at and id, are what the wrong order
 	// is made of.
 	reviewOrderText = "event_seq desc nulls last"
 )
+
+// The guard reads an order by clause and nothing else, so one edge is outside it: a newest-row
+// pick written with no order by at all, such as
+// `where created_at = (select max(created_at) from artifact_reviews where artifact_id = $1)`,
+// reads the table without ordering its rows and is not refused. Reading that shape needs a
+// predicate of another kind, a larger change than this guard; a reviewer catches it.
 
 // TestEveryReviewReadOrdersByReviewOrder enforces, over the whole module, what
 // docs/review_order_plan_test.go enforces over the three reads it explains: a statement that
@@ -81,6 +89,17 @@ func TestTheReviewOrderGuardReadsBothOrders(t *testing.T) {
 		{name: "the order 0120 replaced", statement: wrong, refused: true},
 		{name: "a read that orders nothing", statement: "select 1 from artifact_reviews where artifact_id = $1"},
 		{name: "another table's order", statement: "select id from artifact_versions order by created_at desc"},
+		{
+			name: "the order 0120 replaced, reached through a join",
+			statement: "select r.id from asks a join artifact_reviews r on r.artifact_id = a.artifact_id " +
+				"order by r.created_at desc, r.id desc limit 1",
+			refused: true,
+		},
+		{
+			name: "a join that picks no newest row",
+			statement: "select count(*) from asks a join artifact_reviews r on r.artifact_id = a.artifact_id " +
+				"where a.id = $1",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			refused := readsReviewTable.MatchString(test.statement) &&
