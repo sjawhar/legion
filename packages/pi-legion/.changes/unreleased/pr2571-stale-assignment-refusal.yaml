@@ -9,4 +9,4 @@ body: |-
     reporting the refused commit again.
 time: 2026-10-30T15:10:00Z
 custom:
-    Issue: INFRA-338
+    Issue: pr2571

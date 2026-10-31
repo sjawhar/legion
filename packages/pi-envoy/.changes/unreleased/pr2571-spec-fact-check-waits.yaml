@@ -5,4 +5,4 @@ body: |-
     Pi's own defaults, so its findings arrive from the `wait` rather than from the dispatch.
 time: 2026-10-30T18:00:00Z
 custom:
-    Issue: INFRA-338
+    Issue: pr2571

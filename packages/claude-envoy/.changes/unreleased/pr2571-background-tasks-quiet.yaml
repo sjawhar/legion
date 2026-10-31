@@ -7,4 +7,4 @@ body: |-
     which is the behaviour before this field existed.
 time: 2026-10-30T19:40:00Z
 custom:
-    Issue: INFRA-338
+    Issue: pr2571

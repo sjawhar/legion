@@ -7,4 +7,4 @@ body: |-
     every agent file to declaring no `blocking` field, true or false.
 time: 2026-10-30T09:00:00Z
 custom:
-    Issue: INFRA-338
+    Issue: pr2571

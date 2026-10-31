@@ -6,4 +6,4 @@ body: |-
     is what holds the pin to that.
 time: 2026-10-30T19:40:00Z
 custom:
-    Issue: INFRA-338
+    Issue: pr2571

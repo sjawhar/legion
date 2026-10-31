@@ -7,4 +7,4 @@ body: |-
     `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_DISABLE_CRON=1` stay.
 time: 2026-10-30T09:45:00Z
 custom:
-    Issue: INFRA-338
+    Issue: pr2571
