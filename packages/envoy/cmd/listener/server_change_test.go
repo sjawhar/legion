@@ -5,10 +5,13 @@
 // of the hub change under the recipient. It runs the real envoy-listener binary twice, the holder's
 // listener and the sender's, over a three-server cluster in this process (testnats.StartCluster),
 // and a session stand-in that holds its own NATS connection, as an Oh My Pi or Claude Code session
-// does, through gates (testnats.StartGate) the test can close. While three senders publish a role
-// message, an ad-hoc topic message and a captured topic message every 250 ms for at least a minute,
-// it moves the stand-in to another server by a lame-duck shutdown or a forced kill of the server it
-// is on, holding it off the hub for the window a plugin's reconnect wait leaves.
+// does, through gates (testnats.StartGate) the test can close. The stand-in takes every message
+// from the relay of its own session consumer (bus.DeliverSubject), as a session in consumer
+// delivery does, and answers each frame received and done; it holds no subscription of its own on
+// any topic. While three senders publish a role message, a team topic message and a GitHub topic
+// message every 250 ms for at least a minute, it moves the stand-in to another server by a
+// lame-duck shutdown or a forced kill of the server it is on, holding it off the hub for the
+// window a plugin's reconnect wait leaves.
 //
 // Its own build tag, and its own CI job (listener-server-change), because one run sends for a
 // minute and then waits out each server's restart and the JetStream catch-up after it, past what
@@ -42,7 +45,7 @@ import (
 const (
 	serverChangeSession  = "ses_server_change_standin"
 	serverChangeRole     = "server-change-holder"
-	serverChangeAdHoc    = "notifications.team.server-change"
+	serverChangeTeam     = "notifications.team.server-change"
 	serverChangeCaptured = "notifications.github.legion-test.server_change.pr.1"
 	serverChangeReplicas = 3
 
@@ -61,8 +64,7 @@ const (
 	// serverChangeQuiet is the sending after each recovery, and before the first disruption, in which
 	// every message must be answered 200 and received (assertion 4).
 	serverChangeQuiet = 3 * time.Second
-	// serverChangeTail is how long the run waits, once every call has finished, for late frames and
-	// the replay of the last reconnect.
+	// serverChangeTail is how long the run waits, once every call has finished, for late frames.
 	serverChangeTail = 5 * time.Second
 	// serverChangeHeartbeat is how often the stand-in registers again, as a plugin heartbeats.
 	serverChangeHeartbeat = 30 * time.Second
@@ -72,31 +74,30 @@ const (
 	// packages/envoy-client/src/transport.ts).
 	serverChangeAttemptTimeout = 5 * time.Second
 	serverChangeRetryDelay     = 250 * time.Millisecond
-	// serverChangeReplayTimeout is envoy-client's replay call timeout (REPLAY_TIMEOUT_MS).
-	serverChangeReplayTimeout = 10 * time.Second
-	// serverChangeReplayMaxMessages is the most messages the stand-in asks one replay call for, the
-	// listener's own cap (replayMaxMessages).
-	serverChangeReplayMaxMessages = 500
 
 	// serverChangeRecovery bounds each wait of the run for the cluster, the stand-in or a listener:
-	// a member restarting and catching up its streams, a reconnect, a sweep.
+	// a member restarting and catching up its streams, a reconnect, a relay sending again after a
+	// pause.
 	serverChangeRecovery = time.Minute
 )
 
 // The three kinds of message a run sends, one sender each, indexing serverChangeKinds.
 const (
 	kindRole = iota
-	kindAdHoc
+	kindTeam
 	kindCaptured
 	kindCount
 )
 
-// serverChangeKinds names each kind and the topic its sender publishes to: a role topic the stand-in
-// holds, an ad-hoc topic no stream subject captures (bus.UsesCoreTransport), and a captured topic
-// the stream stores and POST /v1/replay serves to a session that registered it.
+// serverChangeKinds names each kind and the topic its sender publishes to: a role topic the
+// stand-in holds, whose lane takes core NATS and whose forward the listener stores on the
+// holder's agent subject (startRoleForward); a team topic, the one namespace an agent names
+// itself; and a GitHub topic. The stream stores the last two under the topic itself, and the
+// stand-in's consumer filters on both, so every kind reaches it through the relay of that
+// consumer and none through a subscription of its own.
 var serverChangeKinds = [kindCount]struct{ name, topic string }{
 	{"role", contracts.RoleTopicPrefix + serverChangeRole},
-	{"ad-hoc", serverChangeAdHoc},
+	{"team", serverChangeTeam},
 	{"captured", serverChangeCaptured},
 }
 
@@ -112,14 +113,12 @@ type soakMessage struct {
 	failure string
 }
 
-// soakFrame is one copy of a message the stand-in received, live on a subscription or from a
-// replay.
+// soakFrame is one copy of a message the stand-in received, as a frame on its relay subject.
 type soakFrame struct {
 	kind, number int
 	envelope     contracts.Envelope
 	subject      string
 	at           time.Time
-	replay       bool
 }
 
 // soakOutage is one time the stand-in's connection was down: from its drop to its reconnect, and
@@ -157,24 +156,17 @@ type serverChangeSoak struct {
 	// them; each holds one, and a disruption empties both before it starts.
 	dropped     chan time.Time
 	reconnected chan string
-	// sweepDue wakes the sweeper after a reconnect. cursors is the sweeper's alone once it starts.
-	sweepDue chan struct{}
-	cursors  map[string]uint64
-	calls    sync.WaitGroup
+	calls       sync.WaitGroup
 
-	mu                 sync.Mutex
-	messages           []*soakMessage
-	frames             []soakFrame
-	strays             []string
-	outages            []soakOutage
-	disruptions        []soakDisruption
-	quiet              [][2]time.Time
-	droppedRoleReplays int
-	sweeps             int
-	sweepQueued        bool
-	sweepRunning       bool
-	sweepFailures      []string
-	heartbeatFailures  []string
+	mu                sync.Mutex
+	messages          []*soakMessage
+	frames            []soakFrame
+	strays            []string
+	outages           []soakOutage
+	disruptions       []soakDisruption
+	quiet             [][2]time.Time
+	heartbeatFailures []string
+	replyFailures     []string
 }
 
 // serverChangeRun is one way TestServerChange runs: what both listeners start with beyond the
@@ -249,8 +241,6 @@ func runServerChange(t *testing.T, run serverChangeRun) {
 		stopped:     make(chan struct{}),
 		dropped:     make(chan time.Time, 1),
 		reconnected: make(chan string, 1),
-		sweepDue:    make(chan struct{}, 1),
-		cursors:     map[string]uint64{},
 	}
 	stop := sync.OnceFunc(func() { close(s.stopped) })
 	t.Cleanup(stop)
@@ -261,8 +251,13 @@ func runServerChange(t *testing.T, run serverChangeRun) {
 		}
 	})
 	s.awaitReplicated(t)
-	if bus.UsesCoreTransport(serverChangeCaptured) || !bus.UsesCoreTransport(serverChangeAdHoc) {
-		t.Fatalf("the captured topic %s must be stored by the stream and the ad-hoc topic %s must not", serverChangeCaptured, serverChangeAdHoc)
+	if bus.UsesCoreTransport(serverChangeCaptured) || bus.UsesCoreTransport(serverChangeTeam) {
+		t.Fatalf("the stream must store the team topic %s and the captured topic %s: a session reads only what its own consumer holds",
+			serverChangeTeam, serverChangeCaptured)
+	}
+	if !bus.UsesCoreTransport(serverChangeKinds[kindRole].topic) {
+		t.Fatalf("the role lane %s must take core NATS, so its sender's message reaches the stand-in only as the listener's stored forward",
+			serverChangeKinds[kindRole].topic)
 	}
 
 	s.startStandIn(t)
@@ -296,19 +291,20 @@ func runServerChange(t *testing.T, run serverChangeRun) {
 	case <-time.After(2*serverChangeAttemptTimeout + serverChangeRetryDelay + 5*time.Second):
 		t.Fatalf("publish calls were still running past envoy-client's two attempts after the last send")
 	}
-	// The plan names this wait: late frames and the replay of the last reconnect land in it.
+	// The plan names this wait: late frames land in it.
 	time.Sleep(serverChangeTail)
-	s.awaitSweepIdle(t)
+	s.awaitConsumerDrained(t)
 	stop()
 
 	t.Logf("sent for %s with %d disruptions", sending.Round(time.Millisecond), len(s.disruptions))
 	s.assert(t)
 }
 
-// startStandIn connects the session stand-in through one gate per member, subscribes it to its
-// agent subject and both topics as the plugins do, registers it through H with the topics,
-// claims the role there, starts its cursors at the stream's end, and starts its heartbeat and its
-// replay sweeper.
+// startStandIn connects the session stand-in through one gate per member, subscribes it to the
+// relay subject of its own session consumer and to nothing else, registers it through H in
+// consumer delivery with the topics it follows, claims the role there, and starts its heartbeat.
+// Its consumer is created by that registration, and H's relay of it is the only way a message
+// reaches it.
 func (s *serverChangeSoak) startStandIn(t *testing.T) {
 	t.Helper()
 	gateURLs := make([]string, len(s.cluster.Servers))
@@ -331,19 +327,17 @@ func (s *serverChangeSoak) startStandIn(t *testing.T) {
 	t.Cleanup(conn.Close)
 	s.standIn = conn
 	agentSubject := contracts.AgentSubject(serverChangeSession)
-	for _, subject := range []string{agentSubject, serverChangeAdHoc, serverChangeCaptured} {
-		if _, err := conn.Subscribe(subject, s.receive); err != nil {
-			t.Fatalf("the stand-in subscribe %s: %v", subject, err)
-		}
+	if _, err := conn.Subscribe(bus.DeliverSubject(serverChangeSession), s.receive); err != nil {
+		t.Fatalf("the stand-in subscribe its relay subject: %v", err)
 	}
 	if err := conn.Flush(); err != nil {
-		t.Fatalf("flush the stand-in's subscriptions: %v", err)
+		t.Fatalf("flush the stand-in's subscription: %v", err)
 	}
 
 	registration, err := json.Marshal(subscribeBody{
 		SessionID:      serverChangeSession,
 		Dir:            "/server-change",
-		Topics:         []string{agentSubject, serverChangeAdHoc, serverChangeCaptured},
+		Topics:         []string{agentSubject, serverChangeTeam, serverChangeCaptured},
 		Title:          "server-change stand-in",
 		SelfSubscribed: true,
 		Delivery:       &subscribeDelivery{Consumer: true, Epoch: "epoch-1"},
@@ -354,27 +348,6 @@ func (s *serverChangeSoak) startStandIn(t *testing.T) {
 	postListener(t, s.holder.port, "/v1/interests/subscribe", string(registration))
 	postListener(t, s.holder.port, "/v1/roles/set", `{"session_id":"`+serverChangeSession+`","role":"`+serverChangeRole+`"}`)
 	go s.heartbeat(registration)
-
-	// A replay without a cursor answers the stream's end, where the plugins start one. The answer
-	// also shows #2228's replay serves both subjects to this session, the captured topic included.
-	var answer replayResponse
-	status, body, err := s.call(s.holder.port, http.MethodPost, "/v1/replay", replayRequest{
-		SessionID: serverChangeSession,
-		Subjects:  []replaySubjectRequest{{Subject: serverChangeCaptured}, {Subject: agentSubject}},
-	}, serverChangeReplayTimeout)
-	if err != nil || status != http.StatusOK || json.Unmarshal(body, &answer) != nil {
-		t.Fatalf("start the stand-in's replay cursors: status %d, %s, %v", status, body, err)
-	}
-	for _, subject := range answer.Subjects {
-		if subject.Refused != "" {
-			t.Fatalf("POST /v1/replay refused %s for the stand-in: %s", subject.Subject, subject.Refused)
-		}
-		s.cursors[subject.Subject] = subject.NextAfter
-	}
-	if len(s.cursors) != 2 {
-		t.Fatalf("POST /v1/replay answered %d subjects, want the two asked for: %s", len(answer.Subjects), body)
-	}
-	go s.sweeper()
 }
 
 // awaitStandInSeenBySenders waits until the listener the senders call (via) lists the stand-in
@@ -390,7 +363,7 @@ func (s *serverChangeSoak) awaitStandInSeenBySenders(t *testing.T) {
 		}
 		listed := slices.ContainsFunc(sessions, func(info sessionInfo) bool {
 			return info.SessionID == serverChangeSession &&
-				slices.Contains(info.Topics, serverChangeAdHoc) && slices.Contains(info.Topics, serverChangeCaptured)
+				slices.Contains(info.Topics, serverChangeTeam) && slices.Contains(info.Topics, serverChangeCaptured)
 		})
 		if !listed {
 			return false
@@ -403,23 +376,36 @@ func (s *serverChangeSoak) awaitStandInSeenBySenders(t *testing.T) {
 	})
 }
 
-// receive is the stand-in's handler on every subscription: it records the frame as a live copy
-// and answers nothing, as a session answers no frame of its own.
+// receive is the stand-in's handler on its relay subject: it answers the frame received and then
+// done, as a session that wrote the message does, and records the copy. The answer goes out from
+// the handler itself, so a stand-in whose connection is up never keeps the relay waiting
+// relayReceiptWait for a receipt.
 func (s *serverChangeSoak) receive(msg *natsgo.Msg) {
 	at := time.Now()
+	subject := msg.Header.Get(relayHeaderSubject)
 	var envelope contracts.Envelope
 	if err := json.Unmarshal(msg.Data, &envelope); err != nil {
 		s.mu.Lock()
-		s.strays = append(s.strays, fmt.Sprintf("live frame on %s is no envelope: %v", msg.Subject, err))
+		s.strays = append(s.strays, fmt.Sprintf("the relay frame of %s is no envelope: %v", subject, err))
 		s.mu.Unlock()
 		return
 	}
-	s.record(envelope, msg.Subject, at, false)
+	for _, reply := range []string{relayReplyReceived, relayReplyDone} {
+		// An answer that does not go out leaves the message unacknowledged, and the relay's next
+		// restart at the ack floor sends it again; it is counted, not a failure of its own.
+		if err := msg.Respond([]byte(reply)); err != nil {
+			s.mu.Lock()
+			s.replyFailures = append(s.replyFailures, fmt.Sprintf("%s to %s on %s: %v", reply, envelope.EventID, subject, err))
+			s.mu.Unlock()
+			break
+		}
+	}
+	s.record(envelope, subject, at)
 }
 
 // record files one received copy under its kind, read from its topic, and its number, read from
 // its message text; a frame that names neither is a stray, which the run reports.
-func (s *serverChangeSoak) record(envelope contracts.Envelope, subject string, at time.Time, replay bool) {
+func (s *serverChangeSoak) record(envelope contracts.Envelope, subject string, at time.Time) {
 	kind := slices.IndexFunc(serverChangeKinds[:], func(k struct{ name, topic string }) bool { return k.topic == envelope.Topic })
 	fields := strings.Fields(envelope.PayloadSummary)
 	number := -1
@@ -431,10 +417,10 @@ func (s *serverChangeSoak) record(envelope contracts.Envelope, subject string, a
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if number < 0 {
-		s.strays = append(s.strays, fmt.Sprintf("frame on %s (replay %t) with topic %q and text %q", subject, replay, envelope.Topic, envelope.PayloadSummary))
+		s.strays = append(s.strays, fmt.Sprintf("frame of %s with topic %q and text %q", subject, envelope.Topic, envelope.PayloadSummary))
 		return
 	}
-	s.frames = append(s.frames, soakFrame{kind: kind, number: number, envelope: envelope, subject: subject, at: at, replay: replay})
+	s.frames = append(s.frames, soakFrame{kind: kind, number: number, envelope: envelope, subject: subject, at: at})
 }
 
 // onDrop records the stand-in's connection going down and tells a waiting disruption.
@@ -448,134 +434,51 @@ func (s *serverChangeSoak) onDrop(at time.Time) {
 	}
 }
 
-// onReconnect records where the stand-in's connection came back, tells a waiting disruption, and
-// wakes the sweeper, as a plugin sweeps the stream after each reconnect.
+// onReconnect records where the stand-in's connection came back and tells a waiting disruption.
+// It asks the listener for nothing: the relay of the stand-in's consumer restarts at its ack
+// floor on its own and sends every message the stand-in has not answered.
 func (s *serverChangeSoak) onReconnect(at time.Time, server string) {
 	s.mu.Lock()
 	if n := len(s.outages); n > 0 && s.outages[n-1].reconnected.IsZero() {
 		s.outages[n-1].reconnected = at
 		s.outages[n-1].server = server
 	}
-	queue := !s.sweepQueued
-	s.sweepQueued = true
 	s.mu.Unlock()
 	select {
 	case s.reconnected <- server:
 	default:
 	}
-	if queue {
-		s.sweepDue <- struct{}{}
-	}
 }
 
-// sweeper runs one sweep for each reconnect, one at a time; a reconnect during a sweep queues
-// another after it.
-func (s *serverChangeSoak) sweeper() {
+// awaitConsumerDrained waits until the stand-in's session consumer holds nothing: every message
+// the stream stored for it was relayed and acknowledged, so the assertions read every copy the
+// relay had to send. It waits serverChangeRecovery and not the tail, because a relay the last
+// outage paused sends again only after its backoff (relayPauseFirst, doubling to relayPauseMax).
+// A consumer that does not drain is logged, not fatal: the assertions then name the messages that
+// are actually missing.
+func (s *serverChangeSoak) awaitConsumerDrained(t *testing.T) {
+	t.Helper()
+	consumer, ok := bus.SessionConsumerName(serverChangeSession)
+	if !ok {
+		t.Fatalf("no session consumer name for %s", serverChangeSession)
+	}
+	deadline := time.Now().Add(serverChangeRecovery)
 	for {
+		info, err := s.js.ConsumerInfo(bus.Stream, consumer)
+		switch {
+		case err == nil && info.NumPending == 0 && info.NumAckPending == 0:
+			return
+		case time.Now().After(deadline):
+			t.Logf("the stand-in's consumer still held messages %s after the last send: %+v, %v",
+				serverChangeRecovery, info, err)
+			return
+		}
 		select {
 		case <-s.stopped:
 			return
-		case <-s.sweepDue:
-		}
-		s.mu.Lock()
-		s.sweepQueued = false
-		s.sweepRunning = true
-		s.mu.Unlock()
-		err := s.sweep()
-		s.mu.Lock()
-		s.sweepRunning = false
-		s.sweeps++
-		if err != nil {
-			s.sweepFailures = append(s.sweepFailures, err.Error())
-		}
-		s.mu.Unlock()
-	}
-}
-
-// sweep reads, through H's POST /v1/replay, what the stream stored for the captured topic and the
-// stand-in's agent subject after its cursors, page by page until no subject has more, and retries a
-// call that failed (H's own NATS connection may be moving too) until serverChangeRecovery passes.
-func (s *serverChangeSoak) sweep() error {
-	deadline := time.Now().Add(serverChangeRecovery)
-	for {
-		more, err := s.replayPage()
-		switch {
-		case err == nil && !more:
-			return nil
-		case err == nil:
-			continue
-		case time.Now().After(deadline):
-			return fmt.Errorf("replay sweep did not finish within %s: %w", serverChangeRecovery, err)
-		}
-		select {
-		case <-s.stopped:
-			return err
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-}
-
-// replayPage makes one replay call from the cursors, records what it returned and moves the
-// cursors, and reports whether a subject has more.
-func (s *serverChangeSoak) replayPage() (bool, error) {
-	maxMessages := serverChangeReplayMaxMessages
-	request := replayRequest{SessionID: serverChangeSession, MaxMessages: &maxMessages}
-	for _, subject := range []string{serverChangeCaptured, contracts.AgentSubject(serverChangeSession)} {
-		after := s.cursors[subject]
-		request.Subjects = append(request.Subjects, replaySubjectRequest{Subject: subject, After: &after})
-	}
-	status, body, err := s.call(s.holder.port, http.MethodPost, "/v1/replay", request, serverChangeReplayTimeout)
-	if err != nil {
-		return false, err
-	}
-	var answer replayResponse
-	if status != http.StatusOK || json.Unmarshal(body, &answer) != nil {
-		return false, fmt.Errorf("POST /v1/replay: status %d: %s", status, body)
-	}
-	at := time.Now()
-	more := false
-	for _, subject := range answer.Subjects {
-		if subject.Refused != "" {
-			return false, fmt.Errorf("POST /v1/replay refused %s: %s", subject.Subject, subject.Refused)
-		}
-		for _, stored := range subject.Messages {
-			s.replayed(stored, at)
-		}
-		s.cursors[subject.Subject] = subject.NextAfter
-		more = more || subject.More
-	}
-	return more, nil
-}
-
-// replayed records one stored message a sweep returned, but drops a role forward as the plugins'
-// isRoleForward does (packages/envoy-client/src/replay.ts): role messages stay live only, so a role
-// message counts as received only when it arrived live.
-func (s *serverChangeSoak) replayed(stored replayMessage, at time.Time) {
-	var envelope contracts.Envelope
-	if err := json.Unmarshal([]byte(stored.Data), &envelope); err != nil {
-		s.mu.Lock()
-		s.strays = append(s.strays, fmt.Sprintf("replayed message %d on %s is no envelope: %v", stored.Seq, stored.Subject, err))
-		s.mu.Unlock()
-		return
-	}
-	if strings.HasPrefix(envelope.DedupeKey, roleForwardDedupePrefix) || strings.HasPrefix(envelope.Topic, contracts.RoleTopicPrefix) {
-		s.mu.Lock()
-		s.droppedRoleReplays++
-		s.mu.Unlock()
-		return
-	}
-	s.record(envelope, stored.Subject, at, true)
-}
-
-// awaitSweepIdle waits until no sweep is queued or running, so the assertions read every copy the
-// last reconnect's sweep found.
-func (s *serverChangeSoak) awaitSweepIdle(t *testing.T) {
-	t.Helper()
-	waitFor(t, serverChangeRecovery, "the stand-in's last replay sweep to finish", func() bool {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return !s.sweepQueued && !s.sweepRunning
-	})
 }
 
 // heartbeat registers the stand-in again through H every serverChangeHeartbeat, as a plugin keeps
@@ -836,11 +739,8 @@ func (s *serverChangeSoak) assert(t *testing.T) {
 	disruptions := slices.Clone(s.disruptions)
 	outages := slices.Clone(s.outages)
 	quiet := slices.Clone(s.quiet)
-	t.Logf("replay sweeps %d, role forwards a sweep dropped %d, heartbeats H refused %d %v",
-		s.sweeps, s.droppedRoleReplays, len(s.heartbeatFailures), s.heartbeatFailures)
-	for _, failure := range s.sweepFailures {
-		t.Errorf("a replay sweep failed: %s", failure)
-	}
+	t.Logf("heartbeats H refused %d %v, frame answers that did not go out %d %v",
+		len(s.heartbeatFailures), s.heartbeatFailures, len(s.replyFailures), s.replyFailures)
 	s.mu.Unlock()
 	for _, stray := range strays {
 		t.Errorf("the stand-in received a frame of no message the senders sent: %s", stray)
@@ -855,18 +755,16 @@ func (s *serverChangeSoak) assert(t *testing.T) {
 	for id := range copies {
 		slices.SortStableFunc(copies[id], func(a, b soakFrame) int { return a.at.Compare(b.at) })
 	}
-	// received is the receipt assertion 1 and 4 count: a live copy, or for the captured kind a copy
-	// from a replay too. An ad-hoc copy a sweep found on the agent subject is that session's own
-	// stored forward, but the plan counts only the captured kind's replay.
+	// received is the receipt assertions 1 and 4 count: one copy of the message on the stand-in's
+	// relay subject, whatever its kind. Every kind reaches the stand-in that way now, so no kind
+	// is counted differently.
 	received := func(message *soakMessage) bool {
-		return slices.ContainsFunc(copies[messageID{message.kind, message.number}], func(frame soakFrame) bool {
-			return !frame.replay || message.kind == kindCaptured
-		})
+		return len(copies[messageID{message.kind, message.number}]) > 0
 	}
 
 	for kind := range kindCount {
 		name := serverChangeKinds[kind].name
-		var sent, live, replay, onlyReplay, errored, repeats int
+		var sent, receivedCount, errored, repeats int
 		var longest time.Duration
 		var missing, badRepeats []string
 		for _, message := range messages {
@@ -879,17 +777,7 @@ func (s *serverChangeSoak) assert(t *testing.T) {
 			}
 			got := copies[messageID{kind, message.number}]
 			if len(got) > 0 {
-				liveCopy := slices.ContainsFunc(got, func(frame soakFrame) bool { return !frame.replay })
-				replayCopy := slices.ContainsFunc(got, func(frame soakFrame) bool { return frame.replay })
-				if liveCopy {
-					live++
-				}
-				if replayCopy {
-					replay++
-				}
-				if !liveCopy {
-					onlyReplay++
-				}
+				receivedCount++
 				repeats += len(got) - 1
 				longest = max(longest, got[0].at.Sub(message.sentAt))
 			}
@@ -907,12 +795,12 @@ func (s *serverChangeSoak) assert(t *testing.T) {
 					(repeat.envelope.DedupeKey == first.DedupeKey && contracts.DedupeKeyNamesTheUpstreamEvent(repeat.envelope)) {
 					continue
 				}
-				badRepeats = append(badRepeats, fmt.Sprintf("%d (first %s %s, repeat %s %s on %s, replay %t)",
-					message.number, first.EventID, first.DedupeKey, repeat.envelope.EventID, repeat.envelope.DedupeKey, repeat.subject, repeat.replay))
+				badRepeats = append(badRepeats, fmt.Sprintf("%d (first %s %s, repeat %s %s on %s)",
+					message.number, first.EventID, first.DedupeKey, repeat.envelope.EventID, repeat.envelope.DedupeKey, repeat.subject))
 			}
 		}
-		t.Logf("%s: sent %d, received live %d, received by replay %d (only by replay %d), errored %d, repeats %d, longest delay send to first receipt %s",
-			name, sent, live, replay, onlyReplay, errored, repeats, longest.Round(time.Millisecond))
+		t.Logf("%s: sent %d, received %d, errored %d, repeats %d, longest delay send to first receipt %s",
+			name, sent, receivedCount, errored, repeats, longest.Round(time.Millisecond))
 		if len(missing) > 0 {
 			t.Errorf("assertion 1 (no message missing silently): %s messages %s were answered 200 and never received", name, strings.Join(missing, ", "))
 		}

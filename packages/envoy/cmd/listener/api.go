@@ -1392,13 +1392,14 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// A topic reaching a private stream subject (another session's inbox, a failed-delivery
 		// lane, the Legion controller lane; bus.ReachesPrivateStreamSubject) is left out and named in
 		// a warning, the rest of the registration stored: the topics stored here drive the
-		// listener's fan-out to serve-port sessions (`store.Registry.Match`), and such a topic would
-		// hand this session messages meant for another session or for the controller's role holder;
-		// /v1/replay refuses such a subject on its own (`bus.SharedStreamTopic`). A registration
-		// naming one is not refused whole, since a released pi-envoy registers every subject it has
-		// open, a fork parent's agent subject and any topic its envoy_subscribe took included. The
-		// registry drops such a topic from the stored row too (`store.Registry.Upsert`), so a row an
-		// earlier build stored with one is cleaned by this registration.
+		// listener's fan-out to serve-port sessions (`store.Registry.Match`) and the filters of
+		// the session's own consumer (`sessionConsumerFilter`), and such a topic would hand this
+		// session messages meant for another session or for the controller's role holder. A
+		// registration naming one is not refused whole, since a released pi-envoy registers every
+		// subject it has open, a fork parent's agent subject and any topic its envoy_subscribe took
+		// included. The registry drops such a topic from the stored row too
+		// (`store.Registry.Upsert`), so a row an earlier build stored with one is cleaned by this
+		// registration.
 		warnings := make([]string, 0)
 		topics := make([]string, 0, len(body.Topics)+1)
 		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
@@ -1562,7 +1563,6 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(d, logger))
-	v1.HandleFunc("/v1/replay", replayHandler(d))
 	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})
