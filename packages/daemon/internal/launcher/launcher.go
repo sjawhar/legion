@@ -112,9 +112,11 @@ func Run(ctx context.Context, cfg Config) error {
 		return managers[0].serveUntil(ctx, address)
 	}
 	// The pod's own test database, before any role starts: a role that starts at once finds the
-	// server listening (serveTestPG).
+	// server serving its DSN (serveTestPG). Its ticker is waited on with the roles below, so Run
+	// returns with nothing of the launcher's still running.
+	var testPG <-chan struct{}
 	if cfg.TestPostgres {
-		serveTestPG(ctx, cfg, managers[0].log, guard)
+		testPG = serveTestPG(ctx, cfg, managers[0].log, guard)
 	}
 	var running sync.WaitGroup
 	for _, m := range managers {
@@ -125,6 +127,9 @@ func Run(ctx context.Context, cfg Config) error {
 		}()
 	}
 	running.Wait()
+	if testPG != nil {
+		<-testPG
+	}
 	return ctx.Err()
 }
 

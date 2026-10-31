@@ -36,8 +36,9 @@ const (
 )
 
 // testPGInterval is how often the launcher asks the script again. `ensure` returns after one
-// `pg_isready` while the server answers, so the poll costs milliseconds, and a postmaster that
-// died — killed by the node under memory pressure, or crashed — is replaced within it. The
+// connection through the DSN while the server serves it, so the poll costs milliseconds, and a
+// postmaster that died — killed by the node under memory pressure, or crashed — is replaced
+// within it, as is a start that left the server up and its role or database unmade. The
 // launcher polls rather than waiting on a child because `pg_ctl` daemonises the postmaster: it is
 // reparented to this process, and PID 1's reaper collects it. A test shortens it.
 var testPGInterval = 15 * time.Second
@@ -45,21 +46,29 @@ var testPGInterval = 15 * time.Second
 // testPGDir is where the server's data and admin socket live for this launcher's roles directory.
 func testPGDir(rolesDir string) string { return filepath.Join(rolesDir, TestPGDirName) }
 
-// serveTestPG starts the pod's test database and keeps it running until ctx ends. The first
-// attempt is this call's, before the launcher serves any role, so a role that starts at once finds
-// the server listening; afterwards each tick asks again, which starts a postmaster that has died.
+// serveTestPG starts the pod's test database and keeps it running until ctx ends, and answers a
+// channel closed once its ticker goroutine has returned, so a caller that ends ctx can wait for
+// it rather than leave it running. The first attempt is this call's, before the launcher serves
+// any role, so a role that starts at once finds the server serving its DSN; afterwards each tick
+// asks again, which starts a postmaster that has died and finishes a start that left one up.
 // A failure is logged and never thrown: a pod whose test database cannot start still runs its
 // roles, whose agents then read the refusal in the container's log, where a launcher that failed
 // its container would instead cost the issue every role it was serving.
-func serveTestPG(ctx context.Context, cfg Config, log *roleLog, guard *pidGuard) {
+func serveTestPG(ctx context.Context, cfg Config, log *roleLog, guard *pidGuard) <-chan struct{} {
+	// The interval is read here, in the caller's own goroutine, and not inside the one below: it
+	// is a package variable a test shortens, and a goroutine still reading it after the test
+	// restored it is a data race the race detector fails the test for.
+	interval := testPGInterval
 	ensure := func() {
 		if err := runTestPG(ctx, cfg, log, guard, "ensure"); err != nil {
 			log.linef("launcher: test database: %v", err)
 		}
 	}
 	ensure()
+	done := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(testPGInterval)
+		defer close(done)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -70,6 +79,7 @@ func serveTestPG(ctx context.Context, cfg Config, log *roleLog, guard *pidGuard)
 			}
 		}
 	}()
+	return done
 }
 
 // testPGBound is how long one run of the script may take. The first `ensure` runs before the

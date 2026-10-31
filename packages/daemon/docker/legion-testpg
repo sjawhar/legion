@@ -213,8 +213,11 @@ start() {
 		# fixtures. huge_pages and dynamic_shared_memory_type are the pod's: gVisor serves no
 		# huge pages, and each role mounts its own 64 MiB /dev/shm, too small for the posix
 		# segments the default picks. jit off keeps LLVM out of a test's plan times. The WAL
-		# settings bound the cluster's share of the pod's 10Gi ephemeral-storage limit, which
-		# the kubelet evicts all six roles over, and each is below its default: wal_level=minimal
+		# settings bound the cluster's share of whatever ephemeral-storage limit the pod runs
+		# under, which the kubelet evicts every role of the pod over: the daemon's own default
+		# is 80Gi on a 6Gi request (`defaultResources`), and a deployment that sets
+		# `runtime.kubernetes.resources.issue` names its own — one Autopilot deployment gives
+		# its issue pods 10Gi. Each setting is below its default: wal_level=minimal
 		# writes no WAL at all for a table built, copied into or rewritten in the transaction
 		# that made it, which is most of what a suite's fixture does (and it needs
 		# max_wal_senders=0, since no walsender can serve that level, and no replication slot
@@ -272,6 +275,12 @@ ensure() {
 		[ "$s" -ne 75 ] || die "waited 180 s for $dir/.lock"
 		exit "$s"
 	}
+	# The start reported success, so the DSN must answer now. A start that cannot be repaired by
+	# starting again — a role the cluster holds as NOLOGIN, a password set on it, an hba file an
+	# earlier version wrote — would otherwise be reported as served on every tick for the pod's
+	# life, and nothing in the log would say the DSN does not work.
+	serving ||
+		die "started the server but $LEGION_TEST_PG_DSN still does not answer; $log holds the server's output"
 	echo "$name: serving $LEGION_TEST_PG_DSN from $data"
 }
 

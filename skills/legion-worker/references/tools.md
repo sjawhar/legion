@@ -27,12 +27,12 @@ cites is in sjawhar/legion.
   your change.
 - `LEGION_TEST_PG_DSN` unset: your deployment has not turned the pod's server on, so no launcher
   is starting one and nothing will appear while you wait. With `legion-testpg` on `PATH`, start
-  one yourself and keep it: `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable`
-  then `legion-testpg ensure`, which makes the cluster, the role and `vector` in `template1`.
-  With no `legion-testpg` either, stand up a Postgres of your own on the issue's volume with the
-  harness below (**The worked case** under "What the withheld capability is, and what it is not" —
-  the same extracted Postgres serves any test, not only the Dispatch stack), and set
-  `LEGION_TEST_PG_DSN` to it yourself so everything that reads the variable finds it.
+  one yourself on the issue's volume: the directory it defaults to is a 1 MiB filesystem your
+  role's own mounts cover, so `export LEGION_TESTPG_DIR=$XDG_DATA_HOME/testpg` first, then
+  `export LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable`
+  and `legion-testpg ensure`, which makes the cluster, the role and `vector` in `template1`. That
+  server dies when your generation ends; the next one's `ensure` finds the same cluster. With no
+  `legion-testpg` either, stand up one with the harness below (**The worked case**) and set the DSN.
 
 ## The five clients the image already carries
 

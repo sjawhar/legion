@@ -40,8 +40,10 @@ func TestTheLauncherServesTheTestDatabaseBeforeAnyRoleAndKeepsAsking(t *testing.
 	rolesDir := t.TempDir()
 	var log bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	serveTestPG(ctx, Config{RolesDir: rolesDir, TestPostgres: true}, &roleLog{stdout: &log, stderr: &log}, &pidGuard{})
+	// The ticker goroutine is waited for before the cleanup above restores the interval, so no
+	// read of it outlives this test.
+	done := serveTestPG(ctx, Config{RolesDir: rolesDir, TestPostgres: true}, &roleLog{stdout: &log, stderr: &log}, &pidGuard{})
+	t.Cleanup(func() { cancel(); <-done })
 	first, err := os.ReadFile(calls)
 	if err != nil {
 		t.Fatalf("serveTestPG returned before its first ensure ran: %v", err)
@@ -78,8 +80,8 @@ func TestATestDatabaseThatCannotStartOnlyLogs(t *testing.T) {
 	t.Cleanup(func() { testPGInterval = 15 * time.Second })
 	var log bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	serveTestPG(ctx, Config{RolesDir: t.TempDir(), TestPostgres: true}, &roleLog{stdout: &log, stderr: &log}, &pidGuard{})
+	done := serveTestPG(ctx, Config{RolesDir: t.TempDir(), TestPostgres: true}, &roleLog{stdout: &log, stderr: &log}, &pidGuard{})
+	t.Cleanup(func() { cancel(); <-done })
 	if !strings.Contains(log.String(), "launcher: test database:") {
 		t.Errorf("the container log holds %q, want the refusal named", log.String())
 	}
