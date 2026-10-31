@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-588",
+  "completed": "2026-10-31T20:31:01Z",
+  "round": 10,
+  "decision": "approved",
+  "codeHead": "d910aa0c290899e350686886399c893340fd05e2 (CI head adfca5059f26)",
+  "scope": "Since the round-9 approval at d88178f72c6d: retro's docs/solutions learnings (5966a3e8) and its removal of .legion/ (475a0929), and the architect-scoped post-READY fix d910aa0c: the daemon's three timestamped-migration tests migrate the numbered series alone (closing number read from the new migrationid.ClosedAt) so a real timestamped migration does not break them; Check is refactored over ClosedAt with unchanged behaviour.",
+  "checks": "Every migrationid caller still compiles and passes (go test ./migrationid/, daemon ./internal/store/migrations/); Check keeps refusing no-closing-file and two-closing-file sets (TestCheckFindsTheSeriesByItsClosingFile unchanged, new TestClosedAtIsTheClosingNumberOfTheSeriesTheSetHolds). Tester proof: with a real timestamped probe migration added, the three tests fail at 475a0929 and pass at d910aa0c.",
+  "ci": "Required ci-ok and pr-title (rulesets). At adfca5059f26 (code d910aa0c plus the implement handoff): ci-ok success (20:30Z), pr-title success; nothing else red. compare adfca505...8025b19c: only .legion/INFRA-588/test.json.",
+  "thermonuclear": "Not run: the round is a test-only change plus a behaviour-preserving extraction of ClosedAt from Check, checked directly; the pair reviewed migrationid in rounds 7 and 9.",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": []
+}
