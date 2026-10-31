@@ -35,8 +35,8 @@ import (
 const (
 	liveMachineID = "example-host-a"
 	liveSession   = "s1"
-	// liveServingSession is a session the listener reaches on its serving port, as a session that
-	// serves an HTTP port is reached, rather than over NATS.
+	// liveServingSession is a session the listener reaches by POSTing to its serving port rather
+	// than over NATS.
 	liveServingSession = "s-serving"
 	liveRole           = "example-role"
 	// liveHealthWindow is how long the listener has to answer "healthy" (its durable bound under

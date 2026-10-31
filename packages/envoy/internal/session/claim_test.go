@@ -8,9 +8,9 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 )
 
-// Session routes are keyed by session ID, but agent session state lives on
-// shared disk, so several live processes can hold the same session at once: the
-// process explicitly driving it, plus any process that merely has it loaded.
+// Session routes are keyed by session ID, but a harness can keep session state
+// on shared disk, so several live processes can hold the same session at once:
+// the process explicitly driving it, plus any process that merely has it loaded.
 // Every such process heartbeats a claim. Blind last-writer-wins therefore
 // routes deliveries to an arbitrary holder, and a holder that is not driving
 // the session starts its own model loop on delivery — two loops interleaving
