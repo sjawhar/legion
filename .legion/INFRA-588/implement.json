@@ -2,74 +2,59 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-31T04:20:01Z",
-  "round": "final integration round: main forward-merged after INFRA-629/630/631/632; INFRA-633 acceptance checks run from main",
+  "completed": "2026-10-31T05:16:00Z",
+  "round": "test round 11 failed: daemon fragments removed, fold-plan refuses unlisted fragments, conflicts README laid out",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
-  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6538908248",
-  "reviewAnswered": "Architect: final integration round (one forward merge, fragment not CHANGELOG edit, layout checker exit 0, closings raised to main last numbers, INFRA-633 checks 1-5)",
+  "head": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
+  "proofComment": "posted after the push",
+  "reviewAnswered": "Tester round 11 failure (daemon fragment never folds) and architect Envoy 86d49bda: (1) delete the PR daemon fragment, (2) delete main three orphan daemon fragments, (3) gate in the existing fragment check with a test, (4) lay out scripts/conflicts/README.md with the note",
   "proof": [
     {
-      "criterion": "INFRA-633 #1 changelog fragments",
-      "surface": "git merge-tree on commits built off main d7e1daaaaf70; changelog-fold.yaml run on main",
-      "command": "bash $TMPDIR/i588/acc12.sh d7e1daaaaf70 (dispatch://INFRA-588/artifact/integration-merge-checks-txt); git diff e65900f4438b cc825086d07c",
-      "observed": "two fragments in packages/envoy, and envoy+daemon fragments: exit 0 both ways; fold run 41098469188 pushed e65900f44..cc825086d: 54 fragments deleted, 7 CHANGELOG.md files gained lines, 0 removed",
-      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
-      "negativeControl": "the before window: 89 of 253 conflicting merges were changelog-only when entries were edited into CHANGELOG.md"
+      "criterion": "fold-plan refuses a fragment of a package CHANGELOG_PACKAGES does not list, naming it and the list",
+      "surface": "release-push.sh fold-plan over changelog-fold.yaml CHANGELOG_PACKAGES, in throwaway git worktrees of the head",
+      "command": "bash $TMPDIR/i588/gate-proof.sh <head>",
+      "observed": "as it stands: exit 0, 23 plan lines; a committed packages/daemon/.changes/unreleased/pr-1-proof.yaml: exit 1, no plan, one ::error:: naming the file and the seven specs; a committed packages/envoy fragment: exit 0, 23 plan lines",
+      "headSha": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
+      "negativeControl": "main 3f7b3e753f85 with main own release-push.sh: the daemon fragment gives exit 0 (no refusal); main tree with this head script: exit 1 naming main three daemon orphans"
     },
     {
-      "criterion": "INFRA-633 #2 built claude-envoy files",
-      "surface": "git merge-tree from main; bun run check-dist; claude-envoy-rebuild.yaml on main",
-      "command": "bash acc12.sh d7e1daaaaf70; (cd packages/claude-envoy && bun run check-dist); gh run list --workflow claude-envoy-rebuild.yaml --branch main",
-      "observed": "two skills, and contracts+envoy-client: exit 0 both ways, 0 built files in each branch; check-dist: dist/ and legion/ match a fresh build; run 41164510507 at d7e1daaaaf70 success",
-      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
-      "negativeControl": "before the fix packages/claude-envoy/legion/** conflicted in 25 merges (by-glob table)"
+      "criterion": "the gate is tested",
+      "surface": "release-push.test.sh and changelog-fold.test.sh (CI test job steps Test release scripts, Test the changelog fold with changie)",
+      "command": "bash .github/scripts/release-push.test.sh; bash .github/scripts/changelog-fold.test.sh (changie v1.26.0)",
+      "observed": "628 passed 0 failed, including fold-orphan cases: daemon fragment refused by name with the specs, passes once removed, working-tree-only file not refused, .changes/header.tpl.md refused; fold test 12 passed",
+      "headSha": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
+      "negativeControl": "the daemon-fragment case fails against main release-push.sh, which plans and exits 0"
     },
     {
-      "criterion": "INFRA-633 #3 restructured guides",
-      "surface": "git merge-tree on commits off main d7e1daaaaf70 and off c892b97d",
-      "command": "bash $TMPDIR/i588/guides/merge-check.sh",
-      "observed": "5 guides x {sentence pair, list pair}: exit 0 both ways on main",
-      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
-      "negativeControl": "the same 10 pairs on each file at c892b97d: exit 1 both ways, conflict naming the file"
+      "criterion": "no daemon fragment remains; README and AGENTS.md layout",
+      "surface": "the head tree; scripts/semantic-line-breaks.ts",
+      "command": "git ls-tree HEAD packages/daemon/.changes; bun scripts/semantic-line-breaks.ts AGENTS.md scripts/conflicts/README.md; bun test scripts/semantic-line-breaks.guides.test.ts",
+      "observed": "no packages/daemon/.changes at HEAD; both exit 0; guides test 3 pass; README word sequence equals the old one plus the note, minus the table header",
+      "headSha": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
+      "negativeControl": "scripts/conflicts/README.md at 710f02a2: semantic-line-breaks exit 1 (R1 at lines 4, 15, 19, ...)"
     },
     {
-      "criterion": "INFRA-633 #4 guidance",
-      "surface": "git grep on main",
-      "command": "git grep on origin/main for changelog-fragment, semantic-line-break and built-file guidance",
-      "observed": "AGENTS.md fragment convention, layout rule AGENTS.md:6-9,574-578 and packages/envoy/AGENTS.md:5-8, claude-envoy AGENTS.md:82,99,249 and README.md:298 say a PR never commits dist/ or legion/; no guide tells a PR to commit them",
-      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
-      "negativeControl": "grep for commit-the-built-files wording returns only README.md:174 naming main committed bundle"
-    },
-    {
-      "criterion": "INFRA-633 #5 measurement",
-      "surface": "scripts/conflicts/measure.ts against sjawhar/legion GitHub history",
-      "command": "bun scripts/conflicts/measure.ts --since 2026-10-28T09:12:59Z --until 2026-10-31T04:00:00Z --branch-prefix legion/ --compare-with before.json --fixed (8 globs, the four sibling merges)",
-      "observed": "exit 0, 291 s, 864M workdir; 130 PRs read, 403 conflicting merges; 0 merges in the after state for every fixed glob; changelog-only 89/253 (35.2%) -> 14/403 (3.5%); output dispatch://INFRA-588/artifact/conflict-integration-2026-10-28-to-31-txt",
-      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
-      "negativeControl": "every fixed-file conflict in the window is before (branch cut before the fix) or transition, none after"
-    },
-    {
-      "criterion": "forward merge keeps approved migration code",
-      "surface": "Go suites on PostgreSQL 18.6 + pgvector at the merge",
-      "command": "go test ./internal/store/... ./internal/api/ (daemon); ./migrationid/ ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/ ./cmd/dispatch -run Healthz|Census|Migrat (envoy); autodeploy_test.sh; loadtest/common.test.sh",
-      "observed": "all ok; red tests unchanged; diff from fe1d38fe8378 in identifier files is the two closings and main horizon pool only",
-      "headSha": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
-      "negativeControl": "without raising the closings, main 0062-0064/0142-0149 would fail migrationid.Check (numbers above the closing file)"
+      "criterion": "nothing else regressed",
+      "surface": "repository checks",
+      "command": "check-ci-filters.sh; check-release-credentials.sh; shellcheck release-push.sh release-push.test.sh against the previous files; check-private-names.sh; biome scripts/conflicts",
+      "observed": "all pass; shellcheck findings identical before and after (3 pre-existing)",
+      "headSha": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
+      "negativeControl": "none needed: unchanged-result checks"
     }
   ],
   "filesChanged": [
-    "merge of main d7e1daaaaf70: conflicts resolved in docs/kubernetes.md, packages/envoy/cmd/dispatch/README.md, packages/envoy/loadtest/{README.md,common.sh,stack.sh} onto main layout and code",
-    "packages/envoy/migrationid/migrationid.go (closings 0064 daemon, 0149 Dispatch)",
-    "packages/daemon/internal/store/migrations/embed.go (comment names 0064)",
-    "packages/daemon/.changes/unreleased/pr-2411-migration-timestamps.yaml (new fragment)",
-    "packages/envoy/internal/dispatch/store/README.md (one sentence per line)"
+    "packages/daemon/.changes/unreleased/{pr-2411-migration-timestamps,fix-open-roles-live,pr-2542-daemon-silent-cut,squash-commit-message}.yaml deleted",
+    "scripts/conflicts/README.md: one sentence per line, file-head note, flags table as a list, no word changed",
+    "release-push.sh: refuse_unlisted, called by the fold-plan command after fold_plan; header paragraph",
+    "release-push.test.sh: template nolog fragment dropped, order and empty cases pass every fragment-holding spec, new fold-orphan repository with 5 assertions",
+    "changelog-fold.yaml: pull_request.paths gains packages/*/.changes/**; two comments",
+    "AGENTS.md: one sentence after the packages/daemon has-no-fold sentence"
   ],
   "trickyParts": [
-    "loadtest seed check: main changed how the built Dispatch is recorded (bin/envoy-dispatch.json); the merged check compares the set of versions when both records hold one, and the highest only when an older record holds none"
+    "refuse_unlisted runs only in the fold-plan command, after fold_plan, so every existing fold_plan refusal fires first; fold-notes and push-fold do not repeat it because the Plan step runs first in fold_build and fold_publish needs fold_build"
   ],
   "deviations": [
-    "The merge commit also carries the daemon changelog fragment and the store README relayout (written before the merge was described), not separate commits."
+    "changelog-fold.yaml pull_request.paths gains packages/*/.changes/** (no new step or job): without it no pull-request check runs fold-plan on a fragment, so the gate would act only on main after the merge. fold_build is not a required check (main requires ci-ok and pr-title), so a red fold_build shows on the pull request but does not block its merge by itself."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
