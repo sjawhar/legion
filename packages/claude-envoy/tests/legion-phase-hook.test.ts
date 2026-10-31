@@ -230,9 +230,14 @@ test("a settle that says what it waits on buys the quiet wait, and is reminded o
 
 // `StopFailure` runs instead of `Stop` when the turn ended on an API error, and its
 // `${last_assistant_message}` is the error text rather than anything the worker said ("Hooks
-// reference", code.claude.com/docs/en/hooks). That is the provider refusing the turn: reminding
-// the session would only buy another refusal, as it did for dispatch://INFRA-264's implementer.
-test("a turn that ended on an API error is answered {} and earns no reminder at all", async () => {
+// reference", code.claude.com/docs/en/hooks). That is the provider refusing the turn, so the
+// answer carries no continuation: the host would turn one into another turn at once and the
+// provider would refuse that one the same way, as it did for dispatch://INFRA-264's implementer.
+// One timer is armed all the same, because the task that refused turn carried ended with it and
+// nothing else would wake this worker: a single transient refusal would otherwise leave the issue
+// idle. What stops the reminding of a session the provider refuses for ever is the daemon failing
+// the claim at `launch_failure_limit`, which the test below this one holds.
+test("a turn that ended on an API error carries no continuation, and is woken once by its timer", async () => {
   const { endpoint, record, inbox, close } = await harness({
     record: recorded("open", 0, { lastMessage: "I pushed the branch." }),
     claim: implementer,
@@ -244,14 +249,29 @@ test("a turn that ended on an API error is answered {} and earns no reminder at 
         lastAssistantMessage: "API Error: Rate limit reached",
       }),
     ).toEqual({})
-    // Nothing moved, the words the worker last said included: the error text is not one of them.
-    const unmoved = { state: "open", count: 0, reported: false, lastMessage: "I pushed the branch." }
-    expect(await record()).toEqual(unmoved)
-    // A case asserting that nothing happens has no condition to wait for, so this is one of the
-    // file's fixed waits, three times the reminder interval above.
-    await Bun.sleep(60)
+    // The words the worker last said stand: the provider's error text is not one of them, and a
+    // turn the worker never read moves nothing.
+    expect(await record()).toEqual({
+      state: "open",
+      count: 0,
+      reported: false,
+      lastMessage: "I pushed the branch.",
+    })
+    // Nothing is sent as the turn ends; the reminder comes from the timer instead.
     expect(inbox).toEqual([])
-    expect(await record()).toEqual(unmoved)
+    await waitFor(async () => inbox.length > 0, "the reminder the refused turn's timer carries")
+    expect(inbox).toEqual([REMINDER])
+    // One wake, not a run of them: the next refusal arms the next one. An assertion that nothing
+    // more arrives has no signal to await, so this is one of the file's fixed waits, three times
+    // the reminder interval the harness sets above.
+    await Bun.sleep(60)
+    expect(inbox).toEqual([REMINDER])
+    expect(await record()).toEqual({
+      state: "open",
+      count: 1,
+      reported: false,
+      lastMessage: "I pushed the branch.",
+    })
   } finally {
     await close()
   }
@@ -267,9 +287,9 @@ test("no reminder is sent once the daemon has failed this role's claim", async (
     claimState: "failed",
   })
   try {
-    expect(
-      await endpoint.handle({ event: "Stop", lastAssistantMessage: "Still here." }),
-    ).toEqual({})
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Still here." })).toEqual(
+      {},
+    )
     // A case asserting that nothing happens has no condition to wait for, so this is one of the
     // file's fixed waits (its header says why a fake clock settles nothing here), three times
     // the reminder interval above.
@@ -281,9 +301,7 @@ test("no reminder is sent once the daemon has failed this role's claim", async (
       reported: false,
       lastMessage: "Still here.",
     })
-    expect(
-      lines.some((line) => line.includes("the daemon has failed this claim")),
-    ).toBe(true)
+    expect(lines.some((line) => line.includes("the daemon has failed this claim"))).toBe(true)
   } finally {
     await close()
   }
