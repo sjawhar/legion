@@ -487,6 +487,8 @@ jobs:
               # select-e2e-proofs.test.sh runs the selector over this list and over scripts/e2e/.
               - '.github/e2e-scripts.json'
               - 'scripts/third-party-notices.test.ts'
+              - 'scripts/semantic-line-breaks.ts'
+              - 'scripts/semantic-line-breaks.test.ts'
               - 'scripts/sessions-import-pods.sh'
               - 'scripts/sessions-import-pods.test.sh'
               # `bun test scripts/e2e/lib` scans scripts/e2e/*.sh (lib/script-functions.test.ts:101-104),
@@ -1551,6 +1553,11 @@ jobs:
 
       - name: Test third-party notices
         run: bun test scripts/third-party-notices.test.ts
+
+      # The checker's own unit tests only. scripts/semantic-line-breaks.guides.test.ts checks the
+      # guides' layout and runs on demand, deliberately not here: no CI gate over the guides.
+      - name: Test the semantic line-break checker
+        run: bun test scripts/semantic-line-breaks.test.ts
 
       - name: Test the Bun pin check
         run: .github/scripts/check-bun-version.test.sh
