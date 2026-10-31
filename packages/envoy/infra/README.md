@@ -1435,10 +1435,12 @@ component, so one tailnet Service would have two owners. Make the move in this o
 in one apply:
 
 1. On the old pin, set `retainOnDelete: true` on the consumer's own `tailscale.Service` and
-   apply. If that resource is protected, unprotect it in the same step
-   (`pulumi state unprotect '<its URN>'`): a protected resource is not deleted even with the
-   retain, so the apply that removes it would be refused. Nothing changes in the tailnet here;
-   the stack still owns the Service, and now its delete would drop the state entry alone.
+   apply. If that resource is protected, set `protect: false` on it in the same program change
+   (`false`, not just no `protect`, when it inherits protection from a protected parent): a
+   protected resource is not deleted even with the retain, so the apply that removes it would be
+   refused, and a `pulumi state unprotect` run before this apply does not last, since every
+   apply writes the program's `protect` back to state. Nothing changes in the tailnet here; the
+   stack still owns the Service, and now its delete would drop the state entry alone.
 2. In the next apply, remove that resource and the `tailnetService` argument from the program and
    pass the component a `tailscale` provider. The component registers the Service without the
    consumer's dependency, its create is an upsert, so it adopts the live `svc:<hostname>` and

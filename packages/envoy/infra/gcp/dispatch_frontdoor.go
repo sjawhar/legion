@@ -482,8 +482,8 @@ gate() {
 //
 // Its Protect follows deletionProtection, the input that already guards the cluster and the
 // database, rather than being hard-coded: a child's own Protect overrides the one it would
-// inherit from the component (the SDK takes the parent's only when the child names none,
-// pulumi/sdk/v3 v3.268.0's go/pulumi/context.go:1450-1453), so a hard-coded one could be
+// inherit from the component (registerResource takes the parent's only when the child names
+// none, pulumi/sdk/v3 v3.268.0's go/pulumi/context.go:1832-1835), so a hard-coded one could be
 // changed only by a resource transform on the component or by a state edit
 // (`pulumi state unprotect <urn>`), and deleting a Dispatch would need one of the two.
 //
