@@ -353,6 +353,7 @@ test("reloading mid-edit reopens the same content", async ({ browser }) => {
 
   try {
     const alicePage = await alice.newPage();
+    const aliceSockets = countDocumentSockets(alicePage);
     const bobPage = await bob.newPage();
     await Promise.all([
       alicePage.goto(`/issues/${issue.key}/spec`),
@@ -365,6 +366,11 @@ test("reloading mid-edit reopens the same content", async ({ browser }) => {
     await typeAtEnd(alicePage, "before reload");
     await expect(bobEditor).toContainText("before reload");
     await alicePage.reload();
+    // The twin of documentCollaborationLive's gate (document.e2e.ts): the editor's textbox role
+    // is written at the end of the reload's admission chain, so wait for the reload's own socket
+    // and for the editor that sync builds before reading the text back.
+    await expect.poll(aliceSockets).toBe(2);
+    await expect(documentEditor(alicePage)).toBeAttached();
     await expect(documentEditor(alicePage)).toContainText("Use SQLite");
     await expect(documentEditor(alicePage)).toContainText("before reload");
     await expect(alicePage.getByRole("combobox", { name: "Version" })).toContainText("Version 1");

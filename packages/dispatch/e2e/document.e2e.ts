@@ -10,6 +10,7 @@ import {
 import {
   barAction,
   connectedDot,
+  countDocumentSockets,
   documentEditor,
   markSpan,
   selectEditorText,
@@ -46,6 +47,7 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
 
   try {
     const alicePage = await alice.newPage();
+    const aliceSockets = countDocumentSockets(alicePage);
     await alicePage.goto("/projects/CORE/documents");
     await alicePage.getByRole("button", { name: "New document" }).click();
     await alicePage.getByRole("textbox", { name: "Title" }).fill("Design notes");
@@ -63,14 +65,30 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
     await typeAtEnd(alicePage, "Alice wrote this.");
     await expect(documentEditor(bobPage)).toContainText("Alice wrote this.");
     await alicePage.reload();
+    // The editor's textbox role is written at the very end of the reload's admission chain - the
+    // `/text` read, the transport chunk, the document socket, that socket's first sync, then the
+    // editor chunk (web ProofDocument's `admit` and its `onSynced`). One assertion on the
+    // editor's text spends a single expect budget on all of it and reports "element(s) not
+    // found" when any step of it is slow, so wait for the reload's own socket and for the editor
+    // that sync builds, each on its own budget.
+    await expect.poll(aliceSockets).toBe(2);
+    await expect(documentEditor(alicePage)).toBeAttached();
     await expect(documentEditor(alicePage)).toContainText("Alice wrote this.");
+    // The picker lists every settled version and the live document. A settlement landing between
+    // a read of the versions and a read of the options moves both, so one poll reads the pair and
+    // compares them against each other rather than against a count read before it.
     await expect
-      .poll(() => getArtifact(artifact.id).then((current) => current.versions.length))
-      .toBeGreaterThan(1);
-    const versionCount = await getArtifact(artifact.id).then((current) => current.versions.length);
-    await expect(
-      alicePage.getByRole("combobox", { name: "Version" }).locator("option")
-    ).toHaveCount(versionCount + 1);
+      .poll(async () => {
+        const [current, options] = await Promise.all([
+          getArtifact(artifact.id),
+          alicePage.getByRole("combobox", { name: "Version" }).locator("option").count(),
+        ]);
+        const versions = current.versions.length;
+        return versions > 1 && options === versions + 1
+          ? "one option per settled version, and one for the live document"
+          : `${options} options for ${versions} settled versions`;
+      })
+      .toBe("one option per settled version, and one for the live document");
     await alicePage.screenshot({
       path: testInfo.outputPath("project-document-live.png"),
       fullPage: true,

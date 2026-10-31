@@ -350,6 +350,14 @@ for (const { kind, noun } of overlapKinds) {
           const composer = page.getByRole("form", { name: "Comment composer" });
           await composer.getByLabel(recordField[kind]).fill(`On ${quote}`);
           await composer.locator('button[type="submit"]').click();
+          // The margin refuses a selection-bar action made while the open composer's send is
+          // still out: it takes back the mark that action wrote and brings the sending composer
+          // back instead of opening a new one (web/src/features/margin/margin-context.tsx
+          // `composeForMark`), so the next quote's Question or Comment field never appears. The
+          // server holds the record before the browser's send lands, so the next turn waits on
+          // the composer the held send keeps on the page (useMarginSheet's `heldCompose`) going,
+          // not on the record alone.
+          await expect(composer).toHaveCount(0);
           await expect.poll(async () => (await anchored()).length).toBe(index + 1);
         }
         const records = await anchored();
