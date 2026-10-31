@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-562",
+  "completed": "2026-10-31T07:22:34Z",
+  "round": 14,
+  "scope": "Narrowed by the INFRA-63 architect: the #2422 merge (README relayout and migration header comments, no code change), f9f6188d being test-only and equal to #2594's file, migration versions against main, and ci-ok plus pr-title green at the code head.",
+  "reviewedHead": "f8c2e841d1ea78211f964be0b49afd4b989295c9",
+  "codeHead": "f9f6188deeda57599ea877f5ab3484d6899b6e16",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "scopeResults": {
+    "merge2422": "a8c1b638 read with git show --remerge-diff: the resolution touches only packages/envoy/AGENTS.md, cmd/dispatch/README.md and the headers of this PR's four .up.sql files. No .go or .ts file. In the migrations every changed line is a -- comment; 0 SQL statement lines changed. Main's #2422 retired the README migration log, and each migration's description now lives in its own header, with the roll and census facts (e.g. 0151_route_roster's header gains 'The census answers 0, and rolling back past it is an image rollback alone').",
+    "f9f6188d": "Test-only: it changes packages/envoy/internal/dispatch/api/delivery_live_hub_test.go alone, and that file's blob at f9f6188d is f5d97ae2, byte for byte #2594's head 4b7746eb. envoy-go-race-api passed at f9f6188d.",
+    "migrations": "At main@origin ab7c2339 (06:19Z), main's highest is 0149_event_horizon; this PR's 0150-0153 share no version with it."
+  },
+  "ci": "Required set on main (rulesets): ci-ok and pr-title only. CI run 41170368978 at f9f6188d: pr-title, typecheck, test and envoy-go-race-api success. lint failed on the runner ('No space left on device' in the runner's diagnostics; no lint step failed). envoy-go failed in internal/broker/oauth TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries, which main fails identically (envoy-go job 124441333720 at d7e1daaa) since #2474 relaid docs/kubernetes.md. This PR touches neither docs/kubernetes.md nor internal/broker. ci-ok cannot go green until that test is fixed in the branch's tree.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/broker/oauth/claims_doc_test.go",
+      "description": "ci-ok, a required check on main, is red because envoy-go fails main's broken TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries. Take sjawhar/legion#2598's test-only fix (head 930cad24) byte for byte, as f9f6188d took #2594's file, and push once without skip-checks so CI runs at the new head. The next round checks only that the file equals #2598's and that ci-ok and pr-title are green, naming the run."
+    }
+  ]
+}
