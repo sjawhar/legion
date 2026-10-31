@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The broker's sign-in status is one row (0021's signin_status), the facts GET /signin/status
+// The broker's sign-in status is one row (0022's signin_status), the facts GET /signin/status
 // answers. It is in Postgres rather than in each process so that every replica and every restart
 // answers the same thing, and it is one row because none of these facts belongs to a pod: the
 // client check any replica took is the check they all report.

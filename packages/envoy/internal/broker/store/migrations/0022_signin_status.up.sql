@@ -1,4 +1,4 @@
--- packages/envoy/internal/broker/store/migrations/0021_signin_status.up.sql
+-- packages/envoy/internal/broker/store/migrations/0022_signin_status.up.sql
 -- What GET /signin/status answers: whether the sign-in provider accepted the broker's client at
 -- the last check and when that check was taken, when a sign-in last succeeded, when one last
 -- failed and why, and when a decision was last made on the approval page. It is kept here, and

@@ -11,7 +11,7 @@ import (
 )
 
 // signInStatusReasons are the eleven coded reasons a failed sign-in may be written with, as
-// 0021's check constraint lists them. The approval page's own constants are the other copy;
+// 0022's check constraint lists them. The approval page's own constants are the other copy;
 // what holds the two together is this test, which writes each one through the store.
 var signInStatusReasons = []string{
 	"invalid_client", "unauthorized_client", "redirect_uri_mismatch", "invalid_grant",

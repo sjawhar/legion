@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// A browser session is a person signed in to the broker's approval page (0020's browser_sessions).
+// A browser session is a person signed in to the broker's approval page (0021's browser_sessions).
 // Each function takes the SHA-256 of the session's cookie secret, never the secret itself, and
 // the caller's now: a session is live while its expires_at is after now, so the lookup and the
 // sweep draw the same line, as the sweeper's other expiries do on the time it passes them.

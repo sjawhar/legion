@@ -1,4 +1,4 @@
--- packages/envoy/internal/broker/store/migrations/0020_browser_sessions.up.sql
+-- packages/envoy/internal/broker/store/migrations/0021_browser_sessions.up.sql
 -- A person's session on the broker's own approval page, made when they sign in to the broker.
 -- Their browser holds a random secret in a cookie; the row keeps only that secret's SHA-256, so a
 -- read of this table hands no one a cookie that signs in. A session lasts until expires_at, an
