@@ -472,7 +472,8 @@ func (o *Outbox) scan(ctx context.Context, hold fence) scanEnd {
 				// A batch read past the owners the others held, and they have given those lanes
 				// back since: read once more rather than wait for a wake that may already have
 				// been spent on that batch. The read that follows leaves no owner out, since
-				// none is in flight, so it sets no missed read of its own and the scan ends.
+				// none is in flight, so it sets no missed read of its own; only a batch a wake
+				// starts beside it can.
 				missed, due = false, true
 				continue
 			}

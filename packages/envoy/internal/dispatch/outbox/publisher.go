@@ -655,11 +655,11 @@ func deferPastWindow(events []*batchEvent) []outcome {
 // same statement, so a process that lost the hold mid-batch schedules nothing beside the holder
 // that took it. Each row is guarded on published_at is null.
 //
-// A write that fails leaves the whole batch as it was read, which is what a process that dies
-// between NATS's acknowledgements and this write leaves too: the batch is sent again by the next
-// scan or the next holder. JetStream drops each repeat inside its duplicate window by its MsgId,
-// a role forward's included (roleForward.send), and a role's holder drops a repeat forward by its
-// dedupe key (internal/contracts/dedupe.go).
+// A write that fails leaves the events it covered (one owner's, or the batch end's remainder) as
+// they were read, which is what a process that dies between NATS's acknowledgements and this write
+// leaves too: they are sent again by the next scan or the next holder. JetStream drops each repeat
+// inside its duplicate window by its MsgId, a role forward's included (roleForward.send), and a
+// role's holder drops a repeat forward by its dedupe key (internal/contracts/dedupe.go).
 func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid.UUID) (bool, error) {
 	if len(outcomes) == 0 {
 		return true, nil
