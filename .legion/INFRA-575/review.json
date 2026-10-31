@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-575",
+  "completed": "2026-10-31T00:59:00Z",
+  "round": 1,
+  "reviewedHead": "1ba0d155c9d616e8d830b6e98d5080853314e17d",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 13,
+  "minor": 6,
+  "ci": "Required set (ruleset): lint, typecheck, test, pr-title. CI head 15c9cc9a987d (run 41150250825) still pending with `changes` queued at 00:47Z; compare 15c9cc9a...1ba0d155 is handoffs-only (1 file). Not waited on: a REQUEST_CHANGES stands whatever CI says.",
+  "thermonuclear": "Both run once at 1ba0d155: thermonuclear-deep-review CHANGES (4 medium correctness, 1 medium performance, 3 minor), thermonuclear-code-quality CHANGES (8 important, 4 minor). Findings 1-4 below re-read by the reviewer in the code at the head.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/dispatch/web/src/features/inbox/Inbox.tsx", "description": "With the pane on, Enter's `when` (767-771) never checks where the focus is, so Enter on any list control (a row's owner link, Later (n), the bulk bar, filter controls) is preventDefault'ed and focus jumps into the pane's answer box. Regression from the old `inFocusedRow` guard; probe: `ENTER default prevented: true focus now: TEXTAREA`."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/inbox/Inbox.tsx", "description": "In a document with several open decision blocks, `hand()` is the whole pane, so 1-9 (780) and Enter (756-759) act on the FIRST block's AskCard in DOM order, not the selected ask's: ProofDocument hosts an answerable AskBlockCard with `hotkey` options for every open block (ProofDocument.tsx:934-946, AskCard.tsx:670). A reader can tick an option of the wrong decision."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/inbox/useAskAnswerForm.ts", "description": "startChanging writes the recorded answer's text into the new shared draft store (304) and cancelChanging (308-312) never clears it, so after Change answer -> Cancel, `unsentAnswer` (418) is the reader's own recorded answer and the card shows 'This question closed before you sent your answer' on every surface for that ask; the leftover draft also holds the question in the pane."},
+    {"severity": "important", "file": "packages/proof-editor/src/editor-change-decorations.ts", "description": "textRuns (70-82) counts only text nodes, while change-marks.ts reads offsets from `block.textContent`, which counts a hard break's leafText '\\n'; every mark after a hard break is shifted one character per break (probe: `canary` drawn over 'anary ')."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/doc/change-set.ts", "description": "diffWordsWithSpace (81) runs unbounded on every changed pair, and lists, tables and fenced code blocks are now one block each; two unrelated 3000-word blocks take ~8 s on the main thread (benchmark), where VersionDiff's diffLines cost ~one token per line. Bound it (maxEditLength/timeout) and fall back to whole-block removed/added."},
+    {"severity": "important", "file": "packages/dispatch/.changes/unreleased/INFRA-575-reading-pane.yaml", "description": "packages/dispatch has no .changie.yaml, so nothing folds this fragment, and the root AGENTS.md forbids a Dispatch issue key in a fragment's file name and Issue field. Delete it."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/doc/ChangeView.tsx", "description": "`fold?: boolean` and its branch have no production caller (only ChangeView.test.tsx passes fold={false}); change-set.ts:7 and AGENTS.md:558 claim both surfaces 'mark the same words' though ChangeView pairs markdown source and change-marks pairs rendered textContent; AGENTS.md:558 says 'the one view ... the only one' beside the second mechanism; AGENTS.md:560 says 'three classes' and lists four."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/inbox/answer-drafts.ts", "description": "Copies reply-drafts.ts line for line (store map, listeners, setter, useSyncExternalStore hook, reset). One keyed draft store for both."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/inbox/Inbox.tsx", "description": "NOTE_DISCLOSURE_SELECTOR (91) finds the note disclosure by an aria-controls id suffix; use a data-ask-note-disclosure attribute as data-ask-answer/data-ask-option do."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/inbox/Inbox.tsx", "description": "Inbox.tsx grows 878 -> 1208 lines with the selection (selectedNow, shownItem, paneSubject, paneAsk, nextAfterSelected, the ?item= and scroll effects) written inline and `paneShown ?` ternaries in most bindings; move the selection into a usePaneSelection hook and choose move/noun once."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/inbox/Inbox.tsx", "description": "InboxItem (119-284) uses `onSelect !== undefined` as a mode switch between two unrelated layouts; split into a short row and a card row sharing the <li> wrapper."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/inbox/ReadingPane.tsx", "description": "Two flows in one component chosen by subject.kind about ten times (queries, effects, VersionView vs ProofDocument); split into ApprovalBody and DecisionBody under the shared ReadingPaneHead."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/doc/ProofDocument.tsx", "description": "The pane surface is spelled three ways (inPane, surfaceRef.current === 'pane', local pane) across ~17 sites; surfaceRef exists only to keep a never-changing prop out of effect deps. One `page` const in the deps."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/artifacts/ArtifactDocument.tsx", "description": "New props onAskAnswered and surface are passed by no caller (DocumentPage.tsx:147, IssuePage.tsx:397, :455); ReadingPane mounts ProofDocument directly. Delete them."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/inbox/ReadingPane.tsx", "description": "The ['artifact', id, 'text'] query (190-197) is written by hand beside ProofDocument's liveTextQueryOptions; reuse it."},
+    {"severity": "minor", "file": "packages/proof-editor/src/lib.ts", "description": "Two setters (setTextDecorations, setBlockWidgets) each rebuilding the whole set, always called together from one ChangeMarks; one setChangeDecorations({text, widgets}); TextDecoration's optional from/to pair as one optional range."},
+    {"severity": "minor", "file": "bun.lock", "description": "Workspace version churn of envoy-plugin, pi-envoy and pi-legion, packages this change does not touch, already stale against main's package.json; revert."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/inbox/Inbox.tsx", "description": "selectStep from a question held past its row (draft or outstanding answer) jumps to the first row rather than the next (at === -1 branch, 679)."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/inbox/ReadingPane.tsx", "description": "'Next change' is offered when the baseline loaded but the markdown engine did not warm: changeMarksAgainst returns no marks and the button does nothing (387-389)."}
+  ],
+  "notes": [
+    "The approval column draws the rendered document with editor decorations, contrary to plan.json's specDeparture (markdown source). The spec asked for the rendered document and the architect accepted the widget decoration on dispatch://INFRA-575/comment/78d233a3, so the code is reviewed against the spec there; the plan's departure record is stale, not a defect of the change.",
+    "PR body: the tester's section still carries rounds 2 and 3's 'Verdict: fail' paragraphs under the round-4 pass; the next tester round rewrites its own section."
+  ]
+}
