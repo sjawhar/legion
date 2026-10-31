@@ -51,9 +51,9 @@ session's token, or a process whose standard input is a terminal. The daemon mus
 path — the first would make an agent session the grantee — so:
 
 - Start the daemon in a terminal pane the operator opens by hand (a tmux window or pane in the
-  operator's own session), in which no OMP or OpenCode agent session has run since secretsd last
-  started. secretsd remembers a terminal an agent session has used and refuses tokenless requests
-  from it with `a tokenless request came from a known agent terminal`.
+  operator's own session), in which no agent session has run since secretsd last started.
+  secretsd remembers a terminal an agent session has used and refuses tokenless requests from it
+  with `a tokenless request came from a known agent terminal`.
 - The daemon and its supervisor loop (for example `while :; do legion start <team> --config
   legion.yaml; sleep 5; done`) run inside that pane's process tree with **stdin left on the pane's
   terminal**: no `< /dev/null`, no `nohup`, no `setsid` with stdin redirected. secretsd identifies

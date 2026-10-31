@@ -367,8 +367,8 @@ gated write only when it consumes one, so a write sent any other way is refused 
   it when the ledger cannot take that line, and then posts it with a `dispatch: warning:` line.
   Either way pi-envoy records an `advisor-gate` entry with outcome `unmarked`. A record that cannot
   be read, or that names a store that is gone, is a refusal. A session no live record names needs
-  no marker: a terminal, CI, Claude Code, OpenCode, a pod without pi-envoy, a session with no
-  Dispatch and one with `askgate.enabled: false`.
+  no marker: a terminal, CI, Claude Code, a pod without pi-envoy, a session with no Dispatch and
+  one with `askgate.enabled: false`.
 - **The cause note.** When a `bash` call outside the literal form holds a `dispatch` word and a
   gated subcommand, and its result holds the CLI's refusal (or warn-mode warning) of a write with
   no marker, the gate appends an `AskGate note:` to that result. It names the first cause it found

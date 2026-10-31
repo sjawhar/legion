@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-429",
+  "completed": "2026-10-31T15:01:32Z",
+  "round": 4,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round 4 is a forward merge after the approval, and the architect's direction for it was to verify the implementer's claim about the merge rather than to re-run the product: diff the branch diff at the approved head against the one at the merge head, and run the bare gates alone if the only difference is the three version lines it names and no file enters or leaves. I did exactly that and the claim holds. Branch diff = jj diff --from fork_point(\"main\"@origin | <head>) --to <head> --git --context 0 '~(.legion | docs/solutions)', with the @@ and index lines dropped, computed at four heads. c08d06bc (approved) against cd1d5c63 (merge): three changed lines and nothing else — bun.lock's \"13.10.1\"→\"13.10.2\" and \"15.5.1\"→\"15.6.1\", and the deleted packages/envoy-plugin/package.json's \"12.5.1\"→\"12.6.1\" — with an identical file set (diff of the 'diff --git' lines is empty). So the merge brought in no product change, and the implementer's comment 6545034083 is accurate line for line."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The architect's test for this round: the forward merge cd1d5c63 against main dbdf9318 changes nothing of the product, so the bare gates settle it.",
+      "surface": "The pull request's own diff against its base, computed at each head and compared line by line; then the frozen install and the script whose text moved.",
+      "command": "bd() { jj -R \"$LEGION_WORKSPACE\" diff --from \"fork_point(\\\"main\\\"@origin | $1)\" --to \"$1\" --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d'; }; then diff bd(c08d06bc) bd(cd1d5c63), diff of their 'diff --git' lines, and the same pair for my own round-3 head 7ed391a8 against 43111efd; then bun install --frozen-lockfile and .github/scripts/check-zod-version.sh.",
+      "observed": "The architect's pair differs by exactly three lines, all version numbers main moved while the branch waited, and by no file: '+      \"version\": \"13.10.1\",' → '13.10.2' and '+      \"version\": \"15.5.1\",' → '15.6.1' in the bun.lock lines this change rewrites anyway, and '-  \"version\": \"12.5.1\",' → '12.6.1' in the packages/envoy-plugin/package.json this change deletes. My own pair, from the head I judged in round 3, differs by those same three lines plus one more hunk: the reviewer's second correction of check-zod-version.sh's header comment, which now reads that the packages outside the workspace set that declare zod, @assistant-ui/react and astro among them, nest their own. bun install --frozen-lockfile: 'Checked 939 installs across 1120 packages (no changes)', exit 0. check-zod-version.sh: 'every zod declaration names 4.3.6 (7 across 11 manifests)'.",
+      "headSha": "43111efd4e2bcae5f680bd15d4b8024ab5219582",
+      "negativeControl": "The comparison can distinguish, and did: the same method over my round-3 pair finds a fourth hunk the architect's pair does not have, the reviewer's comment, so the diff is not being reported unchanged by construction. I then measured that comment's own claim rather than taking it: node_modules shows @assistant-ui/react declaring zod ^4.6.5 and astro declaring ^4.5.4, both outside the workspace set, with four zod copies in the store (4.6.5, 4.3.6, 4.1.8, 3.25.76), so 'more than one package' is true and the sentence it replaced, which said one, was not."
+    },
+    {
+      "criterion": "A1 (R1), smoke at the merge head: the shipped dispatch command still refuses DISPATCH_HOST=opencode and the tree still carries no OpenCode support outside the keep categories.",
+      "surface": "The bytes a session's dispatch command runs, built from this head and driven under env -i, and the repository tree read with the criterion's own grep, diffed against the table in the pull request body.",
+      "command": "cd packages/claude-envoy && bun scripts/build.ts --out \"$TMPDIR/ce-t6\"; then env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=<scratch> DISPATCH_HOST=<host> \"$TMPDIR/ce-t6/bin/dispatch\" projects; and the A1 grep.",
+      "observed": "The build carries var HOSTS = [\"omp\", \"claude\"] (1) and 'not omp or claude' (1), no OPENCODE_CONFIG_DIR. DISPATCH_HOST=opencode → 'dispatch: DISPATCH_HOST is \"opencode\", not omp or claude.'; omp passes the host gate. packages/envoy-plugin is gone. The A1 grep lists 38 files, one fewer than round 3's 39: .legion/INFRA-429/review.json left the list when the reviewer rewrote its handoff, and nothing joined. The body's table carries 36 rows, 35 files and one .legion/INFRA-429/ row standing for plan.json, implement.json and test.json, so it diffs against the grep with no row missing and no row spare.",
+      "headSha": "43111efd4e2bcae5f680bd15d4b8024ab5219582",
+      "negativeControl": "The same grep at 2f6c8a50, the commit before the change, lists 83 files, among them all of packages/envoy-plugin/**; and round 2's mutation still stands for the refusal itself — HOSTS regaining opencode turns the lock red with 'Expected: 2, Received: 0'."
+    }
+  ],
+  "forwardMerge": {
+    "heads": "c08d06bcdd617ca9a186b630d7efbb89d49c6330 (approved) → 43111efd4e2bcae5f680bd15d4b8024ab5219582, code head cd1d5c63b2b554aa847f32a177d78390165604a1, merged against main dbdf9318c059eb3c83e8f9c64eb1a7ebdb18d7c1.",
+    "fingerprint": "Changed by the mechanical rule — 4737f9c6… → d844b733… at the architect's pair, 4c64597b… → d844b733… at mine — and the architect directed that the line-by-line comparison, not the hash, decide the round. It did: three version lines and no file, so bare gates only, and no full round.",
+    "pushShape": "Correct, and checked because a wrong trailer stalls an issue rather than failing it: cd1d5c63 is the code push and carries no skip-checks line, 43111efd touches only .legion/INFRA-429/implement.json and ends with skip-checks: true after two empty lines. That is why gh pr checks reports no check on the head: CI runs at the code head and the daemon carries its verdict up."
+  },
+  "ciAtTheHead": "Read on GitHub and not re-run. At the code head cd1d5c63, runs 41212274231 (CI), 41212274216 (Fold Changelog Fragments) and 41212274235 (PR Title) were queued at 15:01Z. Read as running. The head 43111efd itself reports no check, correctly, being the trailered handoff commit above it. At the approved head c08d06bc, PR Title 41197489798 and Fold Changelog Fragments 41197489815 are both success. No settled CI result exists for this head yet, so A1's 'CI and the two image builds pass' is the reviewer's read of the lanes, not mine.",
+  "observations": [
+    "Still open for the architect, unchanged by this round and measured in round 3: the title 'feat!: …' makes release-bump.sh:76 a major bump, scoped per package to release.yaml's *_VERSION_ARGS paths. pi-envoy (16 files) and pi-legion (13) bump through packages/envoy-client/, whose shipped dispatch CLI really does lose a host; the Go legion binary bumps on one file, packages/daemon/docker/worker.Dockerfile, a deleted COPY of a package that no longer exists, so legion-v17.x would become v18.0.0 with nothing in the binary changed. Not a defect, and majors look routine here.",
+    "Rounds 1 to 3 left nothing open: the fabricated head SHA, the short A1 table, the missing refusal lock and the non-conventional title are all closed, and the lock was proven by mutation."
+  ]
+}
