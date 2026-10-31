@@ -141,11 +141,11 @@ type liveAheadDocuments map[string]owedDocument
 // document id; empty is the start), one batch of the items owed an index with the block grammar,
 // oldest first (refs.ReindexOwedItem), and one batch of the comments and messages owed a block
 // index of their own blocks, oldest owed_at first (refs.IndexOwedItemBlocks), each in its own
-// transaction: a grammar index takes the item row then its state row, an index of an item's own
-// blocks the item's owner lock then its state row, so it waits for an edit of that item rather
-// than writing over the one that edit planned. The item blocks run last, so an item the grammar
-// batch indexed, blocks included, is no longer owed. The documents are listed by keyset, so a
-// document it skips never holds back the ones past it: the tick's Cursor moves past every
+// transaction and each under the item's owner lock, taken before it reads the item, so it waits
+// for an edit of that item rather than writing over the one that edit planned. The item blocks
+// run last, so an item the grammar batch indexed, blocks included, is no longer owed. A direct
+// message has no owner and needs none. The documents are listed by keyset, so a document it skips
+// never holds back the ones past it: the tick's Cursor moves past every
 // document its batch lists, indexed or not, and goes back to the start once a batch lists fewer
 // than a full one. A document or item it cannot index for a reason of its own is logged and left
 // owed, so one never holds back the rest of its batch. liveAhead is the documents the calling

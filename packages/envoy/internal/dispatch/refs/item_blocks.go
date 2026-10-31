@@ -699,7 +699,7 @@ func OwedItemBlocks(ctx context.Context, q Queryer, limit int) ([]OwedItemBlock,
 }
 
 // IndexOwedItemBlocks indexes one owed comment or message in a transaction of its own and reports
-// whether it indexed it. It takes the item's owner lock (itemOwner), the lock every writer of the
+// whether it indexed it. It takes the item's owner lock (sourceOwner), the lock every writer of the
 // item takes, and reads the item in the statement after it, so a write committed while it waited
 // is seen; a direct message, whose conversation is no owner, has no such lock and needs none,
 // since nothing ever rewrites a message's body. It takes no item row: a row lock would assign the
@@ -720,7 +720,7 @@ func IndexOwedItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, ser
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	owner, found, err := itemOwner(ctx, tx, item.Kind, item.ID)
+	owner, found, err := sourceOwner(ctx, tx, string(item.Kind), item.ID)
 	if err != nil || !found {
 		return false, err
 	}
@@ -745,37 +745,4 @@ func IndexOwedItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, ser
 		return false, err
 	}
 	return indexed, tx.Commit(ctx)
-}
-
-// itemOwner is the owner whose lock every writer of comment or message itemID takes: a comment's
-// issue, or the artifact of a comment on a document no issue owns (api.ownerOf, the owner
-// api.lockedComment locks), and an issue message's issue (api.createStoredMessage). A direct
-// message has none: its conversation is no owner, and no site rewrites a message. The read takes
-// no lock, since neither column ever changes. found is false when the item is gone.
-func itemOwner(ctx context.Context, q Queryer, kind ItemKind, itemID string) (*store.Owner, bool, error) {
-	var query string
-	switch kind {
-	case ItemComment:
-		query = `select issue_key, artifact_id::text from comments where id = $1::uuid`
-	case ItemMessage:
-		query = `select issue_key, null::text from messages where id = $1::uuid`
-	default:
-		return nil, false, fmt.Errorf("read the owner of %s %s: not an item kind", kind, itemID)
-	}
-	var issueKey, artifactID *string
-	switch err := q.QueryRow(ctx, query, itemID).Scan(&issueKey, &artifactID); {
-	case errors.Is(err, pgx.ErrNoRows):
-		return nil, false, nil
-	case err != nil:
-		return nil, false, fmt.Errorf("read the owner of %s %s: %w", kind, itemID, err)
-	}
-	switch {
-	case issueKey != nil:
-		owner := store.IssueOwner(*issueKey)
-		return &owner, true, nil
-	case artifactID != nil:
-		owner := store.ArtifactOwner(*artifactID)
-		return &owner, true, nil
-	}
-	return nil, true, nil
 }
