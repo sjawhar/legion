@@ -17,6 +17,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -65,6 +66,29 @@ func TestSessionRegistry_PutAndGet(t *testing.T) {
 	}
 	if got.MachineID != "test-machine" {
 		t.Fatalf("expected machine_id test-machine, got %s", got.MachineID)
+	}
+}
+
+// The stored entry keeps the plugin a session registered through and that plugin's build, so the
+// session list read back from the bucket names them.
+func TestSessionRegistry_PutAndGetKeepsThePluginAndItsVersion(t *testing.T) {
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+
+	entry := SessionEntry{MachineID: "test-machine", Plugin: "@sjawhar/claude-envoy", PluginVersion: "afe10b2f3e1b"}
+	if err := reg.Put("ses_plugin", entry); err != nil {
+		t.Fatalf("put failed: %v", err)
+	}
+
+	got, err := reg.Get("ses_plugin")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	if got.Plugin != "@sjawhar/claude-envoy" || got.PluginVersion != "afe10b2f3e1b" {
+		t.Fatalf("got %+v, want plugin @sjawhar/claude-envoy at afe10b2f3e1b", got)
 	}
 }
 
@@ -141,7 +165,7 @@ func TestSessionRegistry_Delete(t *testing.T) {
 	entry := SessionEntry{Port: 13381, MachineID: "test-machine", Dir: "/test"}
 	reg.Put("ses_del", entry)
 
-	if err := reg.Delete("ses_del"); err != nil {
+	if err := reg.Delete(context.Background(), "ses_del"); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
 
@@ -338,7 +362,7 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 		KeyValue: reg.watcher.KV(),
 		err:      errors.New("injected history failure"),
 	})
-	if err := reg.Delete(sessionID); err != nil {
+	if err := reg.Delete(context.Background(), sessionID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
@@ -419,9 +443,7 @@ func waitForSessionEviction(t *testing.T, reg *SessionRegistry, sessionID string
 func captureSessionRegistryLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
 	var logs lockedBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 	return &logs
 }
 

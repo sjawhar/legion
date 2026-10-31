@@ -79,6 +79,9 @@ const boardCollisionDetection: CollisionDetection = (args) => {
 };
 
 const CARD_SELECTOR = "[data-board-card]";
+/** A card's title link, which the open keys follow: the card holds other links (a claim's
+ *  agent), so "the first link" is not the issue's. */
+const ISSUE_LINK = "[data-issue-link]";
 const COLUMN_SELECTOR = "[data-board-column]";
 
 /** The focus ring every board focus target draws: cards, columns and rails alike. */
@@ -145,6 +148,7 @@ function IssueCard({ issue, unread }: { issue: IssueSummary; unread: boolean }):
           styles.css), so the key and title are stacked and start-aligned explicitly. */}
       <Link
         className={`flex flex-col text-sm ${linkText} ${linkHoverText}`}
+        data-issue-link
         to={buildIssuePath({ key: issue.key, kind: "issue" })}
         {...referenceTriggerProps({ key: issue.key, kind: "issue" })}
       >
@@ -339,33 +343,56 @@ export function IssueBoard({
   const [dragging, setDragging] = useState(false);
   // The click that trails a drop (mouseup or touchend on the card) is stopped by dnd-kit before
   // React sees it, which is enough for buttons but not for the title link: the browser's own
-  // navigation still runs and reloads the app on the issue page. Cancel that default for the
-  // instant after a card lands, on the board only - a link elsewhere on the page must keep
-  // working meanwhile.
+  // navigation still runs and reloads the app on the issue page. The drop itself marks that
+  // click as the drag's, rather than a window of milliseconds after it: the browser fires the
+  // click in the gesture that was dropped, however long a busy main thread takes to deliver it,
+  // and a window that has lapsed by then lets the drop navigate away from the board. The mark is
+  // spent by the first click after the drop, and the press that begins the next gesture - of a
+  // pointer or of a key, since `o` and Enter open the focused card by clicking its link - drops
+  // it, so a drop that draws no click of its own (a touch drag, a drag the browser cancels)
+  // never swallows a later one. Only the board's own clicks are cancelled - a link elsewhere on
+  // the page must keep working meanwhile.
   const boardRef = useRef<HTMLElement>(null);
-  const dragEndedAt = useRef(Number.NEGATIVE_INFINITY);
+  const clickBelongsToDrop = useRef(false);
   useEffect(() => {
+    // `capture: true` on `window` is load-bearing, not decoration: the keymap listens for keys on
+    // window's bubble phase (`shell/KeymapProvider.tsx`), and `o` and Enter open the focused card
+    // by clicking its link, so this has to have dropped the mark before that key is acted on. In
+    // the bubble phase it would run after the click it is meant to let through.
+    const forgetDrop = () => {
+      clickBelongsToDrop.current = false;
+    };
     const cancelTrailingClick = (event: MouseEvent) => {
-      if (
-        performance.now() - dragEndedAt.current < 150 &&
-        event.target instanceof Node &&
-        boardRef.current?.contains(event.target)
-      ) {
+      if (!clickBelongsToDrop.current) {
+        return;
+      }
+      clickBelongsToDrop.current = false;
+      if (event.target instanceof Node && boardRef.current?.contains(event.target)) {
         event.preventDefault();
       }
     };
+    window.addEventListener("keydown", forgetDrop, { capture: true });
+    window.addEventListener("pointerdown", forgetDrop, { capture: true });
     window.addEventListener("click", cancelTrailingClick, { capture: true });
-    return () => window.removeEventListener("click", cancelTrailingClick, { capture: true });
+    return () => {
+      window.removeEventListener("keydown", forgetDrop, { capture: true });
+      window.removeEventListener("pointerdown", forgetDrop, { capture: true });
+      window.removeEventListener("click", cancelTrailingClick, { capture: true });
+    };
   }, []);
   // The title link is both the hover-card trigger and part of the whole-card drag activator, and
   // the click that would dismiss an open card after the drop is the one swallowed above - so a
-  // lift closes the card (open or still pending) itself.
+  // lift closes the card (open or still pending) itself. The lift marks the gesture's click as
+  // well as the drop does: dnd-kit builds its drop event from a lift React has committed, so a
+  // flick fast enough to release before that commit - which a stalled main thread makes of any
+  // flick - ends with no drop event at all, and the mark has to be there already.
   const liftCard = () => {
+    clickBelongsToDrop.current = true;
     closeRefPreview();
     setDragging(true);
   };
   const landCard = () => {
-    dragEndedAt.current = performance.now();
+    clickBelongsToDrop.current = true;
     setDragging(false);
   };
   const columns = useMemo(
@@ -586,7 +613,8 @@ export function IssueBoard({
       id: "open",
       keys: "o",
       label: "Open issue",
-      run: () => cardAround(document.activeElement)?.querySelector("a")?.click(),
+      run: () =>
+        cardAround(document.activeElement)?.querySelector<HTMLElement>(ISSUE_LINK)?.click(),
       when: focusedCard,
     },
     {
@@ -596,7 +624,8 @@ export function IssueBoard({
       keys: "Enter",
       label: "Open the focused card's issue",
       palette: false,
-      run: () => cardAround(document.activeElement)?.querySelector("a")?.click(),
+      run: () =>
+        cardAround(document.activeElement)?.querySelector<HTMLElement>(ISSUE_LINK)?.click(),
       when: () => document.activeElement?.matches(CARD_SELECTOR) === true,
     },
     {

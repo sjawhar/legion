@@ -7,9 +7,6 @@ set -euo pipefail
 readonly envoy_url="${ENVOY_URL:-http://127.0.0.1:9020}"
 readonly nats_url="${ENVOY_NATS_URL:?set ENVOY_NATS_URL to the live Envoy NATS listener}"
 readonly claude_bin="${CLAUDE_BIN:-claude}"
-plugin_dir="${CLAUDE_PLUGIN_DIR:-$(dirname "${BASH_SOURCE[0]}")/..}"
-plugin_dir="$(cd "$plugin_dir" && pwd)"
-readonly plugin_dir
 readonly heartbeat_ms="${ENVOY_HEARTBEAT_MS:-5000}"
 readonly startup_timeout=60
 readonly registration_timeout=45
@@ -62,6 +59,18 @@ cleanup() {
   rm -rf "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${workdir//[^A-Za-z0-9]/-}" "$workdir"
 }
 trap cleanup EXIT INT TERM
+
+# The plugin under test: CLAUDE_PLUGIN_DIR when set, else a copy built from this tree into the
+# scratch directory (`scripts/build.ts --out`), since a pull request's tree carries no fresh
+# `dist/` or `legion/`.
+if [[ -n "${CLAUDE_PLUGIN_DIR:-}" ]]; then
+  plugin_dir="$(cd "$CLAUDE_PLUGIN_DIR" && pwd)"
+else
+  plugin_dir="${workdir}/claude-envoy"
+  bun "$(dirname "${BASH_SOURCE[0]}")/build.ts" --out "$plugin_dir" >/dev/null ||
+    fail "the plugin did not build into ${plugin_dir}"
+fi
+readonly plugin_dir
 
 # The registry rows this Claude session owns: it registers with its project directory.
 entries() {

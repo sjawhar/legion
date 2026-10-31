@@ -1,12 +1,13 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -95,13 +96,19 @@ type outbox struct {
 	now       func() time.Time
 	clock     supervise.Clock
 	provision func(context.Context, workspace.Request) (workspace.Workspace, error)
-	remove    func(context.Context, workspace.Workspace) error
-	// provisionMu runs the workspace provisions and removals one at a time: every issue's
-	// workspace is a jj workspace of its repository's shared clone, and the clone's `jj git
-	// fetch` and `workspace add` corrupt it when two run at once. Lanes run issues side by side,
-	// so without it two issues' starts could both be provisioning. One lock serves every
-	// repository's clone.
-	provisionMu sync.Mutex
+	// remove removes a workspace from the daemon's host, handed its repository's store lock, which
+	// it holds for every step on the shared clone and lets go before it deletes the workspace's
+	// files (workspace.Remove).
+	remove func(context.Context, workspace.Workspace, sync.Locker) error
+	// checkedOut is whether a workspace on the daemon's host finished its checkout
+	// (workspace.CheckedOut): a launch provisions one that did not (ensureWorkspace).
+	checkedOut func(context.Context, workspace.Workspace) (bool, error)
+	// provisions orders the workspace provisions and removals (provisionLocks): up to
+	// provisionConcurrency checkouts at once, one at a time per issue, and one command at a time
+	// on each repository's shared clone but for the checkouts — the clone's `jj git fetch`, its
+	// git configuration and its bookmarks corrupt or refuse when two write at once. Lanes and
+	// launches run issues side by side, so several issues' provisions are in flight together.
+	provisions provisionLocks
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
@@ -149,8 +156,11 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 			workspace.WarmCodegraphIndexInBackground(provisioned.Dir)
 			return provisioned, nil
 		},
-		remove: func(ctx context.Context, working workspace.Workspace) error {
-			return workspace.Remove(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), working)
+		remove: func(ctx context.Context, working workspace.Workspace, store sync.Locker) error {
+			return workspace.Remove(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), working, store)
+		},
+		checkedOut: func(ctx context.Context, working workspace.Workspace) (bool, error) {
+			return workspace.CheckedOut(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), working)
 		},
 	}
 }
@@ -462,8 +472,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 			return nil
 		}
 		closing := store.IssueClose{Issue: row.Issue, Tree: value.Tree, IssueGeneration: value.Generation,
-			TreeGeneration: value.TreeGeneration, Row: row.ID, Release: value.Release}
-		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, value.Release, func(ctx context.Context) (bool, error) {
+			TreeGeneration: value.TreeGeneration, Row: row.ID}
+		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, func(ctx context.Context) (bool, error) {
 			return r.trees.IssueSuspension(ctx, r.project, closing, record.OutOfWorkflow)
 		})
 	case record.WorkspaceRemove:
@@ -527,7 +537,7 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 			return err
 		}
 	}
-	if err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
+	if _, err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
 		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
 	}
 	return nil
@@ -620,15 +630,26 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
 // notice either, and, before any publish, a row whose architect stopped with its finished tree
-// (stoppedWithTree). A publish the listener accepts but then cannot forward, to a session that is
-// registered but no longer running, comes back as a role-lane exception and is queued again
-// (rehold, notice_exceptions.go) unless its architect stopped with its finished tree. The runner
-// executes a row it leased from memory, so a row deleted under its lease since (a catch-up a newer
-// ready dropped) is found gone in the tree's snapshot and finishes without a publish, and so does a
-// catch-up a newer one superseded (catchUpSuperseded, read against the snapshot's root and the
-// claim as it runs now): the re-hold reads the claim from memory and writes its copy outside
-// ApplyFact's lock, so it can lose the race to a ready and commit an older copy after the fresh
-// catch-up.
+// (stoppedWithTree). A listener that confirms a role message before it answers says when the
+// architect's session did not take the notice (notify.ErrNotDelivered): when the last forward
+// reached the NATS server and drew no receipt (`receipt_timeout`) — a session that is registered
+// but no longer running, or one whose connection is moving to another server — the notice is
+// queued again from the answer by the re-hold policy (reholdNotice, notice_exceptions.go) and the
+// row finishes; when the listener could not forward it at all (`delivery_failed`), as when the hub
+// is down, the row retries on its backoff as any failed publish does, so an outage drops nothing.
+// A holder that does not advertise the notice's delivery mode (notify.ErrRefusedByHolder) refuses
+// every attempt until another session holds the role, and a forward the listener's own NATS grant
+// denies (notify.ErrPublishDenied) is denied on every attempt until an operator changes the grant,
+// so either row finishes undelivered with one log line naming the reason rather than hold every
+// later notice to the architect behind the fence. A listener of an earlier release answers 200 and
+// reports a forward that then fails as a role-lane exception, which is queued again by the same
+// policy (rehold). Neither re-hold queues a copy when its architect stopped with its finished
+// tree. The runner executes a row it leased from memory, so a row deleted under its lease since (a
+// catch-up a newer ready dropped) is found gone in the tree's snapshot and finishes without a
+// publish, and so does a catch-up a newer one superseded (catchUpSuperseded, read against the
+// snapshot's root and the claim as it runs now): the re-hold reads the claim from memory and
+// writes its copy outside ApplyFact's lock, so it can lose the race to a ready and commit an older
+// copy after the fresh catch-up.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -673,8 +694,27 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	notice, key := payload.Published(row.ID)
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
+	var notDelivered notify.ErrNotDelivered
+	var refused notify.ErrRefusedByHolder
+	var denied notify.ErrPublishDenied
 	switch {
 	case published == nil:
+		return nil
+	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
+		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
+		source := cmp.Or(payload.ResendOf, row.ID)
+		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect}
+		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder); err != nil {
+			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
+		}
+		return nil
+	case errors.As(published, &refused):
+		r.log.Warn("outbox notice finished undelivered: its architect's session does not advertise the delivery mode",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "holder", refused.Holder, "error", published)
+		return nil
+	case errors.As(published, &denied):
+		r.log.Warn("outbox notice finished undelivered: the listener's NATS grant denied the forward to its architect",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "reason", denied.Message)
 		return nil
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
@@ -689,10 +729,16 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 
 // mergeQueue publishes the merger's READY packet, or the daemon's withdrawal of it, to the
 // project's merge queue role, keyed by the row so a retried row is one delivery. A role with no
-// live holder refuses every attempt until someone claims it, so waiting would retry forever; the
+// live holder refuses every attempt until someone claims it, so does a holder that does not
+// advertise the packet's delivery mode (notify.ErrRefusedByHolder) until another session holds the
+// role, and so does the listener's own NATS grant when it denies the forward
+// (notify.ErrPublishDenied) until an operator changes it, so waiting would retry forever; the
 // Dispatch message the same READY posted already carries the packet, and the issue's status shows
-// a withdrawal, so the issue is told the role had no holder, as the merger's prompt says the
-// daemon does (internal/prompts/go/merger.md), and the row is done.
+// a withdrawal, so the issue is told the role had no holder (as the merger's prompt,
+// internal/prompts/go/merger.md, says the daemon does), that its holder refused the packet, or that
+// the listener was denied the forward, and the row is done. A holder that did not confirm the packet
+// in time (notify.ErrNotDelivered) is retried on the row's backoff as any failed publish is: the
+// holder, or the session that next claims the role, can take it.
 func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
@@ -700,6 +746,16 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	err := r.notices.Publish(ctx, notify.RoleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
 	if errors.Is(err, notify.ErrNoHolder) {
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
+	}
+	var refused notify.ErrRefusedByHolder
+	if errors.As(err, &refused) {
+		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s refused the packet: its holder %s does not advertise the delivery mode, at %s",
+			payload.Role, refused.Holder, r.now().UTC().Format(time.RFC3339))})
+	}
+	var denied notify.ErrPublishDenied
+	if errors.As(err, &denied) {
+		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s: the listener's NATS grant denied the forward (%s), at %s",
+			payload.Role, denied.Message, r.now().UTC().Format(time.RFC3339))})
 	}
 	if err != nil {
 		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)
@@ -942,10 +998,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		return nil
 	case "issue_close":
 		// A child's close as done: the claim is closed as a tree close closes it, its session dropped
-		// with it, since the issue's volume the session lived on goes with the close's release
-		// (record.IssueSuspend's Release, which waits for every claim of the issue to retire). It is
-		// fenced as a suspend is, not as a tree close: no linger is involved, and a newer start
-		// means a person set the child todo again, whose run the close must not end.
+		// with it, since the issue is finished and its next run, should a person set it todo again,
+		// starts fresh on a pod and a disk of its own. It is fenced as a suspend is, not as a tree
+		// close: no linger is involved, and a newer start means a person set the child todo again,
+		// whose run the close must not end.
 		if !found {
 			return r.stopWithoutMachine(ctx, row, token)
 		}
@@ -1143,28 +1199,98 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if r.podsProvision() {
 		return nil
 	}
-	if r.tokens == nil {
-		return errors.New("supervise executor has no GitHub App token manager")
-	}
 	repo, err := issue.Repository()
 	if err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
-	if err != nil {
-		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), issue.Key, err)
+	return r.provisionIn(ctx, issue.Key, repo, issue.DefaultBranch, false)
+}
+
+// ensureWorkspace provisions key's workspace when a launch finds it missing or not checked out on
+// the daemon's host (the launch's spec, specs.ensureWorkspace): a claim resumed, relaunched or
+// recovered rather than created, whose workspace this host never had — its issue ran in another
+// runtime's pods before — or no longer has, or whose checkout failed or was cut short (a provision
+// registers a workspace with no files and checks it out after, workspace.Provision), where the pane
+// would start in an empty working copy. A whole workspace is left as it is. Provisioning checks out
+// the issue's branch legion/<KEY> when GitHub has it, and starts at defaultBranch otherwise; on a
+// workspace already there it finishes the checkout (workspace.Provision). The workspace is read
+// under the issue's turn (provisionIn), so a launch never reads one the issue's provision is still
+// making.
+func (r *outbox) ensureWorkspace(ctx context.Context, key string, repo ghrepo.Repository, defaultBranch string) error {
+	if r.podsProvision() {
+		return nil
 	}
-	// One provision at a time (provisionMu): the issue's workspace is added to its repository's
-	// shared clone, which every issue on that repository shares, and a second issue's lane
-	// provisioning beside this one would have the clone fetching and adding under both.
-	r.provisionMu.Lock()
-	defer r.provisionMu.Unlock()
+	return r.provisionIn(ctx, key, repo, defaultBranch, true)
+}
+
+// unprovisioned is why key's workspace, working, needs a provision before a launch works in it, or
+// "" when it is whole: its directory is absent from the daemon's host ("missing"), or its checkout
+// never finished ("not checked out", checkedOut).
+func (r *outbox) unprovisioned(ctx context.Context, key string, working workspace.Workspace) (string, error) {
+	if _, err := os.Stat(working.Dir); errors.Is(err, os.ErrNotExist) {
+		return "missing", nil
+	} else if err != nil {
+		return "", fmt.Errorf("read the workspace of %s: %w", key, err)
+	}
+	whole, err := r.checkedOut(ctx, working)
+	if err != nil {
+		return "", fmt.Errorf("read whether the workspace of %s finished its checkout: %w", key, err)
+	}
+	if whole {
+		return "", nil
+	}
+	return "not checked out", nil
+}
+
+// provisionIn provisions key's workspace in repo, at defaultBranch for an issue with no branch, as
+// the implement App for repo's owner; with onlyMissing, only when the workspace is still missing or
+// not checked out once this provision's turn comes (unprovisioned), so two launches that both need
+// it provision it once. Provisions of one issue take turns; once it has its turn, a provision runs
+// beside other issues' provisions, handed its repository's store lock (provisionLocks.stores) and
+// the wait for one of the provisionConcurrency checkout places (provisionLocks.slot), which
+// workspace.Provision takes for the checkout alone, once it has let the store lock go. The order is
+// issue turn, store lock, checkout place, and nothing that holds a place waits on a store lock, so
+// the three never wait in a cycle, and a provision waiting on its repository's store lock holds no
+// place another repository's checkout needs.
+func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Repository, defaultBranch string, onlyMissing bool) error {
+	located, err := workspace.Location(r.stateDir, repo, key)
+	if err != nil {
+		return fmt.Errorf("provision workspace for %s: %w", key, err)
+	}
+	issue, releaseIssue := r.provisions.issues.take(located.Dir)
+	defer releaseIssue()
+	issue.Lock()
+	defer issue.Unlock()
+	if onlyMissing {
+		found, err := r.unprovisioned(ctx, key, located)
+		if err != nil || found == "" {
+			return err
+		}
+		r.log.Warn("provisioning the workspace a claim's launch found missing or not checked out", "issue", key, "repository", repo.String(), "found", found)
+	}
+	if r.tokens == nil {
+		return errors.New("supervise executor has no GitHub App token manager")
+	}
+	// The token is minted when the provision opens GitHub, under the repository's store lock
+	// (workspace.FromGitHub), never here: a provision may wait on that lock behind its
+	// repository's whole queue, longer than a cached token has left to live.
+	mint := func() (string, error) {
+		lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+		if err != nil {
+			return "", fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), key, err)
+		}
+		return lease.Token, nil
+	}
+	store, releaseStore := r.provisions.stores.take(located.Clone)
+	defer releaseStore()
 	if _, err := r.provision(ctx, workspace.Request{
-		StateDir: r.stateDir, Repo: repo, Issue: issue.Key, DefaultBranch: issue.DefaultBranch, CredentialHelper: workspace.GitHubCredentialHelper,
-		Source: workspace.FromGitHub(lease.Token, r.stateDir),
-		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
+		StateDir: r.stateDir, Repo: repo, Issue: key, DefaultBranch: defaultBranch, CredentialHelper: workspace.GitHubCredentialHelper,
+		Source:       workspace.FromGitHub(mint, r.stateDir),
+		Log:          func(line string) { r.log.Warn("provisioning: "+line, "issue", key) },
+		StoreLock:    store,
+		CheckoutSlot: r.provisions.slot,
 	}); err != nil {
-		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
+		return fmt.Errorf("provision workspace for %s: %w", key, err)
 	}
 	return nil
 }
@@ -1178,15 +1304,45 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 		return fmt.Errorf("read Dispatch approval %s: %w", payload.ArtifactID, err)
 	}
 	// The version Dispatch holds is the current one, even one the architect did not see: approved
-	// there, the gate opens at it; otherwise a later version still moves the gate to it, closed.
-	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}
+	// there, the gate opens at it; changes requested on it, the gate closes with the reason, which
+	// tells the architect unless the gate already records that review as told; otherwise a later
+	// version still moves the gate to it, closed. A review carries its place in the issue's Dispatch
+	// event log (Seq, At), which identifies it in the told record, places it against a root's wait,
+	// and names it in the fact's id, so a second registration of one version in one generation,
+	// whose seed reads a newer review, is not dropped as the first seed's. A version carries no
+	// place; it says instead whether the read showed the approval request waiting on the agent
+	// (RequestWaitsOnAgent), as a newer version leaves it, which is what lets it answer a root
+	// waiting on its gate. A document Dispatch shows below the version the seed was queued at has a
+	// gate above any version Dispatch wrote (a daemon that registered the caller's version unchecked
+	// could record one), so the seed resets the gate to Dispatch's version with what it read there
+	// (intake.GateAboveDispatch).
+	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion,
+		RequestWaitsOnAgent: approval.AskID != "" && approval.WaitingOn == "agent"}
+	review := record.EventMark{Seq: approval.Seq, At: approval.At}
+	changes, reason := approval.ChangesRequestedLatest()
 	switch {
-	case approval.State == "approved" && approval.Version != nil && *approval.Version == approval.LatestVersion:
-		fact.Kind = intake.DispatchArtifactApproved
-	case approval.LatestVersion <= payload.Version:
+	case approval.ApprovedLatest() != 0:
+		fact.Kind, fact.Mark = intake.DispatchArtifactApproved, review
+	case changes != 0:
+		fact.Kind, fact.Reason, fact.Mark = intake.DispatchArtifactChangesRequested, reason, review
+	case approval.LatestVersion == payload.Version:
 		return nil
 	}
-	_, err = intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("gate-seed:%s:%d:%s:%s:%d", row.Issue, payload.Generation, payload.ArtifactID, fact.Kind, fact.Version), fact, r.handlers...)
+	if approval.LatestVersion < payload.Version {
+		id := fmt.Sprintf("gate-above:%s:%d:%s:%d:%s:%d:%d", row.Issue, payload.Generation, payload.ArtifactID, payload.Version, fact.Kind, fact.Version, fact.Mark.ID())
+		if _, err := intake.ApplyFact(ctx, r.pool, "outbox", id, intake.GateAboveDispatch{Generation: payload.Generation, Above: payload.Version, Read: fact}, r.handlers...); err != nil {
+			return fmt.Errorf("reset the gate of %s to the version Dispatch holds: %w", row.Issue, err)
+		}
+		return nil
+	}
+	id := fmt.Sprintf("gate-seed:%s:%d:%s:%s:%d:%d", row.Issue, payload.Generation, payload.ArtifactID, fact.Kind, fact.Version, fact.Mark.ID())
+	// A version fact carries no mark, so its id also says whether the read showed the request with
+	// the agent: a later seed of the same version that finds it moved there is another fact, not a
+	// duplicate of one that answered nothing.
+	if fact.Kind == intake.DispatchArtifactVersion && fact.RequestWaitsOnAgent {
+		id += ":with-agent"
+	}
+	_, err = intake.ApplyFact(ctx, r.pool, "outbox", id, fact, r.handlers...)
 	if err != nil {
 		return fmt.Errorf("apply approved gate seed for %s: %w", row.Issue, err)
 	}
@@ -1301,11 +1457,12 @@ func (r *outbox) checkBound(ctx context.Context, row record.OutboxRow) error {
 // (record.CheckCompare), read from GitHub as the implement App, the App that merged the check's
 // pull request. A check closed since, or whose last look has started, is compared with nothing,
 // and so is one a later merge replaced since the row was queued (NamedBy). A row carrying a deploy
-// run is checkDeployRun's from there. For a build — the commit a daemon boot or a Dispatch start
-// reported itself built from — the question is whether it contains the check's merge commit. A
-// check that recorded no merge commit (an upgrade-opened one, record.ProductionCheck.MergeSHA) has
-// it read from its pull request first and recorded (recordMergeCommit), so this compare and every
-// later one has it. GitHub's compare of the merge with the build answering `identical` or `ahead`
+// run is checkDeployRun's from there. For a build — the commit a daemon boot reported itself built
+// from, or Dispatch announced every server process serves (server.started) — the question is
+// whether it contains the check's merge commit. A check that recorded no merge commit (an
+// upgrade-opened one, record.ProductionCheck.MergeSHA) has it read from its pull request first and
+// recorded (recordMergeCommit), so this compare and every later one has it. GitHub's compare of
+// the merge with the build answering `identical` or `ahead`
 // says the merge is an ancestor of the build, so the build carries it: intake.CheckWake wakes the
 // look the row was queued for, once per check (record.ProductionCheck.ID), build and cause.
 // `behind` or `diverged` is a build without the merge, and a commit GitHub does not know (404) is
@@ -1354,13 +1511,10 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 			return err
 		}
 	}
-	var compare struct {
-		Status string `json:"status"`
-	}
 	// Both commits are SHAs by the time they reach here (the merge from GitHub's own answer, the
-	// build held to workflow's buildShape before its row was queued); the escape is defence in depth,
+	// build held to workflow's buildShape before its row was queued); Compare escapes them anyway,
 	// so a value that is not keeps to its path segment rather than ending the request at a `#` or `?`.
-	err = github.Get(ctx, "/compare/"+url.PathEscape(check.MergeSHA)+"..."+url.PathEscape(payload.Build)+"?per_page=1", &compare)
+	compare, err := github.Compare(ctx, check.MergeSHA, payload.Build)
 	var answer *githubrest.Answer
 	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
 		r.log.Info("outbox check compare finished without acting: GitHub does not know the merge or the build", "row", row.ID,
@@ -1663,6 +1817,12 @@ func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 	return ghbranch.Create(ctx, github, repo, workspace.Bookmark(issue.Key), issue.DefaultBranch)
 }
 
+// removeWorkspace removes the workspace of the row's issue once its tree's linger expired. The
+// removal belongs to the tree whose linger queued it and to that linger's root generation: an issue
+// adopted into another tree since (workflow.Engine.Adopt) works in its new tree, and a tree
+// re-admitted since runs in the workspace again, so either row finishes without acting. A row
+// queued by an earlier release names no tree and is fenced by its linger alone, against the
+// issue's current tree.
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {
 	if r.supervisor == nil {
 		return errors.New("workspace removal has no claim supervisor")
@@ -1674,9 +1834,15 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if err != nil {
 		return err
 	}
+	if payload.Tree != "" && payload.Tree != issue.Tree {
+		r.log.Info("outbox workspace removal of a tree the issue left; finished without acting", "row", row.ID, "issue", issue.Key,
+			"tree", payload.Tree, "current", issue.Tree, "linger", payload.Linger)
+		return nil
+	}
 	// The removal belongs to the linger it expired, the root generation it names. Once
 	// re-admission ends that linger, the tree's new run may already work in the workspace again,
 	// even in a later linger of the tree, so a removal still backing off finishes without acting.
+	// Past the fence above, the tree the row names is the issue's own.
 	root, err := r.root(ctx, issue)
 	if err != nil {
 		return err
@@ -1706,11 +1872,18 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if err != nil {
 		return fmt.Errorf("locate workspace for %s: %w", row.Issue, err)
 	}
-	// The removal forgets the workspace in the same shared clone a provision adds to, so it takes
-	// the provision's turn (provisionMu) rather than running under another issue's provision.
-	r.provisionMu.Lock()
-	defer r.provisionMu.Unlock()
-	if err := r.remove(ctx, working); err != nil {
+	// The removal forgets the workspace in the same shared clone a provision adds to: it takes its
+	// issue's turn, so it never runs under that issue's provision, then hands workspace.Remove the
+	// clone's store lock, the order a provision takes them in. Remove holds the lock for every step
+	// on the clone and the rename aside, and lets it go before it deletes the workspace's files, so
+	// nothing of another issue's provision waits for that delete.
+	issueTurn, releaseIssue := r.provisions.issues.take(working.Dir)
+	defer releaseIssue()
+	issueTurn.Lock()
+	defer issueTurn.Unlock()
+	store, releaseStore := r.provisions.stores.take(working.Clone)
+	defer releaseStore()
+	if err := r.remove(ctx, working, store); err != nil {
 		return fmt.Errorf("remove workspace for %s: %w", row.Issue, err)
 	}
 	return nil

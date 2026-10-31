@@ -73,14 +73,16 @@ func TestAChildsMergeClosesItAndHandsItsImplementerTheFirstLook(t *testing.T) {
 		t.Fatalf("the check task opens %q, want the line a resumed session tells the check by", lead)
 	}
 	for _, want := range []string{"sjawhar/legion", "#43", "merge-43", "Look 1, woken by the merge.", "handoff_complete", "pass", "pending", "fail", "the daemon wakes the check",
-		// A defect is a finding ask on the report issue, whose reference the implementer publishes
-		// to the controller, which follows it and files only on a person's answer.
-		"dispatch ask", "skill://legion-worker/references/findings.md", "report issue", "controller topic"} {
+		// A defect with a clear fix goes to the controller topic, which hands it to the tree that
+		// owns the code and files it for Legion only when none does; one that needs a decision is a
+		// finding ask on the report issue, whose reference the implementer publishes to the
+		// controller, which files only on a person's answer.
+		"a defect with a clear fix goes to the controller topic", "dispatch ask", "skill://legion-worker/references/findings.md", "report issue", "controller topic"} {
 		if !strings.Contains(start.Task, want) {
 			t.Fatalf("the check task lacks %q:\n%s", want, start.Task)
 		}
 	}
-	// A defect the check finds is an ask a person answers, never an issue the implementer files.
+	// The implementer never files an issue for a defect the check finds: the controller does.
 	for _, never := range []string{"dispatch issue", "issue of its own"} {
 		if strings.Contains(start.Task, never) {
 			t.Fatalf("the check task still says %q:\n%s", never, start.Task)
@@ -155,8 +157,8 @@ func TestARootsCloseLingersItsTreeAndOpensItsCheckBehindTheLingersRows(t *testin
 			t.Fatalf("supervise row %d of the root is newer than the check's start row %d: %s", row.id, start.id, row.payload)
 		}
 	}
-	if got := issueSuspensions(t, pool, "LEGION-208"); len(got) != 1 || got[0].Release {
-		t.Fatalf("the root's issue suspensions = %+v, want the linger's one keeping row", got)
+	if got := issueSuspensions(t, pool, "LEGION-208"); len(got) != 1 {
+		t.Fatalf("the root's issue suspensions = %+v, want the linger's one row", got)
 	}
 	if check := productionCheck(t, pool, "LEGION-208"); check == nil || !check.Open() || check.Looks != 1 || !check.LookOpen || check.MergeSHA != "merge" {
 		t.Fatalf("the root's production check = %+v, want it open at look 1 on merge", check)
@@ -211,8 +213,8 @@ func TestALingeringMembersMergeClosesItAndWakesItsCheck(t *testing.T) {
 }
 
 // A child closed as done with no pull request — a human's done on an issue short of its merge —
-// has nothing to check in production: today's close, every claim closed and the Sandbox released
-// with its volume, and no check, no look and no bound.
+// has nothing to check in production: today's close, every claim closed and the Sandbox deleted
+// with the pod and the disk that pod owns, and no check, no look and no bound.
 func TestAChildClosedAsDoneWithNoPullRequestOpensNoCheck(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
@@ -229,8 +231,8 @@ func TestAChildClosedAsDoneWithNoPullRequestOpensNoCheck(t *testing.T) {
 			t.Fatalf("issue_close rows = %v, want one for every role", closed)
 		}
 	}
-	if got := issueSuspensions(t, pool, "LEGION-209"); len(got) != 1 || !got[0].Release {
-		t.Fatalf("issue suspensions = %+v, want one releasing row", got)
+	if got := issueSuspensions(t, pool, "LEGION-209"); len(got) != 1 {
+		t.Fatalf("issue suspensions = %+v, want one row", got)
 	}
 	if check := productionCheck(t, pool, "LEGION-209"); check != nil {
 		t.Fatalf("production check = %+v, want none for a child with no pull request", check)
@@ -439,7 +441,8 @@ func TestARootWithNoOpenTreeClosesAtItsMerge(t *testing.T) {
 
 // A merged root stands in awaiting_merge for as long as its tree runs, so the two facts that would
 // take an awaiting pull request back to implementing can land on a merge GitHub already made. A
-// push past the head READY named takes neither move (withdrawMovedReady), and a red required check
+// synchronize past the head READY named is older than the merge, since GitHub synchronizes only an
+// open pull request, and changes nothing (pullRequestSynchronized), and a red required check
 // withdraws nothing there, as it never has (classify.RedWithdrawsReady): there is nothing left to
 // merge or to re-implement.
 func TestNothingWithdrawsTheREADYOfAWaitingMergedRoot(t *testing.T) {

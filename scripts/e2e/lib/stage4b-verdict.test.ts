@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scriptFunctions } from "./script-functions";
+import { expectNoMissingHelpers, nameMissingHelpers, scriptFunctions } from "./script-functions";
 
 // Stage 4b's own blocked, fail, pass, until_reached, cleanup, audit_verdict and audit_failure,
 // taken from the script by name and run after the controller checkpoint ends (blocked, failed, or
@@ -11,8 +11,10 @@ import { scriptFunctions } from "./script-functions";
 // Dispatch read replaced by its result: a write outside LEGSMOKE, or none. A timed-out wait runs
 // the script's own capacity hook and limit_pending against a kubectl that answers pods (filtered by
 // the -l selector, as the API server does) and FailedScheduling events from the test's fixture.
-const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
+const script = join(import.meta.dir, "..", "stage4b-sandbox-tree.sh");
+const fn = scriptFunctions(script);
 const rigFn = scriptFunctions(join(import.meta.dir, "rig.sh"));
+const helperGuard = nameMissingHelpers(script, join(import.meta.dir, "rig.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage4b-verdict-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "bin");
@@ -185,7 +187,9 @@ root=${JSON.stringify(join(import.meta.dir, "..", "..", ".."))}
 work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 check=controller check_started=2026-09-30T12:00:00Z daemon_log=${JSON.stringify(join(evidence, "daemon.log"))}
 ok= was_blocked= until=controller locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
-tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none project=LEGSMOKE run_label=x smoke_main_cleaning=
+tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none session_db_container=none project=LEGSMOKE run_label=x smoke_main_cleaning=
+run_container_label=legion.dev/e2e-run run_container_id=verdict-run signalled=
+session_db_ready=1 daemon_started=1
 negative_config_pod= negative_config_workspace= block_tree=
 operator=production namespace=legion capacity_subject=
 mkdir -p "$work" "$evidence/model-gateway"
@@ -193,9 +197,10 @@ mkdir -p "$work" "$evidence/model-gateway"
 # would list it, and a failed checkpoint's do.
 printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:05Z 4242 /x controller timeout no-key >"$evidence/model-gateway/hawk-token.calls"
 exec 7>&1
+${helperGuard}
 stop_tree() { :; }; stop_pid() { :; }; collect_transcripts() { :; }; record_pair() { :; }; op() { :; }
 teardown() { :; }; namespace_clean() { :; }; delete_consumers() { :; }; remove_run_branches() { :; }
-run_processes() { :; }; note() { echo "   $*"; }
+run_processes() { :; }; note() { echo "   $*"; }; interests_sample() { :; }
 production_audit() {
   audited=1
   printf '%s\\n' "$OUTSIDE" >"$evidence/production-issues-touched-outside.json"
@@ -214,6 +219,8 @@ ${fn("on_subject")}
 ${fn("on_tree")}
 ${fn("limit_pending_blocked")}
 ${rigFn("until_true")}
+${fn("remove_negative_config")}
+${fn("remove_run_container")}
 ${fn("cleanup")}
 trap cleanup EXIT
 ${tail}
@@ -230,7 +237,9 @@ ${tail}
   );
   const stdout = result.stdout.toString();
   // cleanup's ERR trap reports every teardown command that fails, a helper this harness neither
-  // takes nor stubs included (exit 127).
+  // takes nor stubs included (exit 127); the guard above names that helper, on whichever stream
+  // the shell was writing to when it was called.
+  expectNoMissingHelpers(stdout, result.stderr.toString());
   expect(stdout).not.toContain("cleanup warning:");
   return { code: result.exitCode, stdout };
 }
@@ -241,6 +250,50 @@ describe("stage 4b's verdict line", () => {
     expect(clean.code).toBe(1);
     expect(clean.stdout).toContain("stage 4b e2e: BLOCKED (check controller)");
     expect(clean.stdout).not.toContain("model-gateway-unserved:");
+  });
+
+  // signalRun ends the controller checkpoint the way an operator's Ctrl-C or a `kill` does: the
+  // signal arrives while the checkpoint waits, and the script's own traps, taken from it, record
+  // the signal and exit with its status. The checkpoint itself neither failed nor blocked.
+  const signalTraps = readFileSync(script, "utf8")
+    .split("\n")
+    .filter((line) => line.startsWith("trap 'signalled="));
+  function signalRun(signal: "INT" | "TERM", outside = "[]") {
+    expect(signalTraps.length).toBe(3);
+    return verdictRun(outside, `${signalTraps.join("\n")}\nkill -${signal} $$\nsleep 5`);
+  }
+
+  test("says above the verdict that a signal stopped the run, and keeps the signal's status", () => {
+    const stopped = signalRun("TERM");
+    expect(stopped.code).toBe(143);
+    expect(stopped.stdout).toContain(
+      "stage 4b e2e: SIGTERM stopped the run (exit 143) while check controller was running: the checkpoint it cut neither failed nor passed, so the run is no verdict on the change, and the checkpoints before it stand\nstage 4b e2e: FAIL (check controller)\n"
+    );
+    expect(stopped.stdout).not.toContain("model-gateway-unserved:");
+  });
+
+  test("names an interrupt by its own name and status", () => {
+    const stopped = signalRun("INT");
+    expect(stopped.code).toBe(130);
+    expect(stopped.stdout).toContain("stage 4b e2e: SIGINT stopped the run (exit 130)");
+  });
+
+  test("names the signal with the exit status the run really takes when a teardown check failed", () => {
+    const stopped = signalRun("TERM", outsideWrite);
+    expect(stopped.code).toBe(1);
+    expect(stopped.stdout).toContain("stage 4b e2e: SIGTERM stopped the run (exit 1)");
+    // A failed teardown check still outranks every reason the run stopped.
+    expect(stopped.stdout).toContain(
+      "stage 4b e2e: FAIL (check production-audit, in the teardown after check controller)"
+    );
+  });
+
+  // A command of the run that exits with a signal's status was no signal to the driver.
+  test("calls an exit 143 of the run's own a failure, as before", () => {
+    const failed = verdictRun("[]", "sh -c 'exit 143'");
+    expect(failed.code).toBe(143);
+    expect(failed.stdout).toContain("stage 4b e2e: FAIL (check controller)");
+    expect(failed.stdout).not.toContain("stopped the run");
   });
 
   test("never says BLOCKED once the teardown's production audit finds a write outside LEGSMOKE", () => {

@@ -55,9 +55,13 @@ const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 
 const ASK_QUESTION_CONTRACT =
-  "The question carries the problem the reader recognises and why it matters now, what constrains " +
-  "the answer, and the recommendation with its reason. It asks how to solve the problem or which " +
-  "outcome is wanted; never enumerate choices in the question.";
+  "The question names the concrete case first: which machines, files, sessions or people, and the " +
+  "numbers. It asks the choice in those terms, saying what happens to whom under each option " +
+  '("Ship Friday and risk signing out 1,240 users, or hold to Monday?"), never "How should we ' +
+  'proceed?" or "Which option?", because a reader cannot work back from a general question to ' +
+  "the case. It carries every fact the reader needs to decide and nothing " +
+  "that does not change the decision. Generalize only after the specifics, if at all. Then give " +
+  "your recommendation and its reason.";
 
 const ASK_OPTIONS_CONTRACT =
   "Options carry the genuinely different approaches. Each option has a label, and its description " +
@@ -243,8 +247,7 @@ function componentsArgument<E extends SchemaNode<E>>(z: SchemaApi<E>): E {
     );
 }
 
-const SPEC_WRITING_POINTER =
-  'Write a spec as the "Writing a spec" section of skill://dispatch says.';
+const SPEC_WRITING_POINTER = "Write a spec as skill://dispatch-writing-specs says.";
 
 /**
  * The `images` argument of the three tools that write text a person reads: local picture files,
@@ -264,8 +267,13 @@ function imagesArgument<E extends SchemaNode<E>>(z: SchemaApi<E>, owner: string,
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 
-/** Longest ask question the Dispatch server accepts, in characters. */
-export const ASK_QUESTION_MAX = 800;
+/**
+ * Longest ask question the Dispatch server accepts, in UTF-16 code units. Generated into Go as
+ * `contracts.AskQuestionMax`, which the server enforces on an ask's question and from which it
+ * derives the room an approval request's summary has. A question names its concrete case, and
+ * 800 was too short for that: capped asks crowded the limit while uncapped ask blocks ran past it.
+ */
+export const ASK_QUESTION_MAX = 2000;
 
 /**
  * Longest comment, comment edit, message and broadcast body the Dispatch server accepts, in
@@ -308,6 +316,12 @@ export const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 export const PROJECT_KEY_RULE =
   "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE";
 
+/** A GitHub repository as `owner/name`, as `dispatch architecture-sync --repo` sends it in the
+ *  path of `/api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync`. A name of `.` or
+ *  `..` would resolve away as a path segment, so it is refused here rather than sent; the server
+ *  holds the rest of GitHub's rule (`parseSourceRepo`). */
+const ARCHITECTURE_SOURCE_REPO_PATTERN = /^[A-Za-z0-9-]+\/(?!\.\.?$)[A-Za-z0-9._-]+$/;
+
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
   "triage",
@@ -340,6 +354,13 @@ export const DOC_EDIT_OPS = [
   "delete_column",
 ] as const;
 
+/** What dispatch_issue and dispatch_ask print about the related-item check their write ran. */
+const RELATED_CHECK_RESULT =
+  "Dispatch then runs the related-item check (waiting at most five seconds; dispatch related runs " +
+  "it without writing), and the result says, right after the line naming what was created, " +
+  "which items it found and how it searched, that it searched and found nothing, or that no " +
+  "check was made, why, and the dispatch search to run instead.";
+
 export const dispatchToolSpecs = [
   {
     name: "dispatch_issue",
@@ -348,6 +369,8 @@ export const dispatchToolSpecs = [
       "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " +
       "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " +
       "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
+      "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " +
+      `${RELATED_CHECK_RESULT} With --force, the result also names each issue whose title you forced past. ` +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
@@ -383,7 +406,7 @@ export const dispatchToolSpecs = [
       assignee: z
         .string()
         .describe(
-          "Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else the project's default assignee when it still names a person who has signed in, else unassigned."
+          "Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else the project's default assignee when it still names a person who has signed in, else unassigned. Set it only when a person said who owns the issue."
         )
         .optional(),
       components: componentsArgument(z).optional(),
@@ -415,7 +438,9 @@ export const dispatchToolSpecs = [
       "replaces the issue's own attachment. Closing an issue " +
       "(status done) requires reason, the note that says why: it is posted on the issue as a " +
       "message, then the issue closes, because a closed issue refuses messages, comments, and " +
-      "artifacts; reason goes only with status done. A closed issue takes only a board move " +
+      "artifacts; reason goes only with status done. Closing an issue withdraws every open ask " +
+      "it holds (resolution kind withdrawn, naming the closer), and reopening it brings exactly " +
+      "those asks back. A closed issue takes only a board move " +
       "(before, after), components, " +
       "a reopening status (any status but done), and an external_links write that adds no new " +
       "link (so a link can move to the issue that replaced it); everything else, priority " +
@@ -423,7 +448,8 @@ export const dispatchToolSpecs = [
       "priority is yours to set and a human overrides it. before and after move the issue on " +
       "its project's board: before puts it above that issue, after below, and both together " +
       "land it between them. A project's board order is one agent's to keep; in a Legion " +
-      "deployment that is the controller. At least one " +
+      "deployment that is the controller. Never reassign an issue a person holds to get a " +
+      "faster answer: who holds it is their call. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
@@ -507,7 +533,15 @@ export const dispatchToolSpecs = [
       "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " +
       "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " +
       "Your claim records your own session and shows on every read of the issue: the dashboard header, the " +
-      "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " +
+      "issue list and board, dispatch read, and dispatch issues. While you hold it, a person's answers, " +
+      "comments and messages on the issue reach your session directly (a new comment that mentions you " +
+      "arrives once, as the mention, when the mention reached you; when the mention's send fails, the " +
+      "comment still reaches you directly; a mention whose receipt timed out can arrive twice, and the " +
+      "second copy is the same comment); an agent's events and every other change on the issue still " +
+      "need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, " +
+      "resolution or edit of it (other than a quiet edit), and every reply there (new, edited, resolved " +
+      "or reopened), reach you " +
+      "as its follower. Claiming is refused with 409 ISSUE_CLAIMED " +
       "when another session holds the issue and is still running; the refusal names that session, so talk to " +
       "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " +
       "person, not a session: there is nothing running to message, so ask them on the issue rather than " +
@@ -534,16 +568,19 @@ export const dispatchToolSpecs = [
     example: {
       issue: "DSP-1",
       question:
-        "The release cannot pass its review gate because the revised plan is unreviewed. " +
-        "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+        "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " +
+        "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " +
+        "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " +
+        "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " +
+        "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate.",
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed.",
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate.",
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users.",
         },
       ],
     },
@@ -554,17 +591,22 @@ export const dispatchToolSpecs = [
       "end of the section it concerns), at every phase, approved spec or not; the block reaches " +
       "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " +
       "document is approved through dispatch request-approval. Do not use this tool for a status " +
-      "update or discussion; use dispatch message instead. " +
+      "update or discussion; use dispatch message instead. Never create an issue to park a " +
+      "question: the question is an ask on the issue it concerns. " +
       ASK_QUESTION_CONTRACT +
       " " +
       ASK_OPTIONS_CONTRACT +
       " For an action only a human can perform, state what it changes and risks as constraints. " +
       "Anything that requires a human to do, including a credential or grant renewal, is an ask, " +
-      "never a message. " +
+      "never a message. Measure what you can first, and put the measurement and the size of the " +
+      "population it covers in the question; drop an option that cannot fix most of that " +
+      "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " +
+      "when your work halts on the answer, and keep working on everything else. " +
       "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". ` +
       `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` +
-      `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
+      `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` +
+      `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -572,7 +614,7 @@ export const dispatchToolSpecs = [
       ref: z
         .string()
         .describe(
-          "Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link."
+          "Optional dispatch:// reference (issue, document, block, message, or ask); appended to the question and rendered as a link."
         )
         .optional(),
       question: z
@@ -614,16 +656,19 @@ export const dispatchToolSpecs = [
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
       question:
-        "The release cannot pass its review gate because the revised plan is unreviewed. " +
-        "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+        "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " +
+        "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " +
+        "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " +
+        "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " +
+        "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate.",
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed.",
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate.",
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users.",
         },
       ],
     },
@@ -696,7 +741,11 @@ export const dispatchToolSpecs = [
       "Retract an open question that is moot or resolve one after finding the answer. This closes " +
       "the question without answering it. An ask that lives as an `ask` block in a document is " +
       'closed in the document too. A reason beginning "removed from the document in version" is ' +
-      "refused: that marks a retraction the document's own settlement wrote.",
+      "refused: that marks a retraction the document's own settlement wrote. Use retracted for an ask " +
+      "a newer one replaces or the design made moot, resolved for one whose answer you found; an " +
+      "answered ask cannot be resolved, and resolving records no decision by a person. An issue's " +
+      "close withdrew its open asks (kind withdrawn, which only Dispatch writes, never this tool); " +
+      "an ask on a closed issue is refused (409 ISSUE_CLOSED): reopen the issue first.",
     arguments: (z) => ({
       ask: z
         .string()
@@ -753,7 +802,7 @@ export const dispatchToolSpecs = [
     description:
       "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " +
       "Do not use it for an exact replacement; use " +
-      `dispatch suggest instead. A quote anchor is pinned to its block. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
+      `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -774,7 +823,9 @@ export const dispatchToolSpecs = [
         .string()
         .describe(
           "A comment id (uuid); replying to any comment in a thread continues that thread (an " +
-            "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " +
+            "ask's clarification thread included). A block reference to one block of the comment " +
+            "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " +
+            "passage the reply answers. To reply to an ask, use reply_to_ask with the " +
             "ask id instead."
         )
         .optional(),
@@ -849,7 +900,10 @@ export const dispatchToolSpecs = [
       "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " +
       "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " +
       "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " +
-      "that conversation back. Every other message names its issue. " +
+      "that conversation back. " +
+      "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " +
+      "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " +
+      "arrives as a user message: answer in the conversation, with no dispatch message. " +
       `Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z
@@ -866,6 +920,8 @@ export const dispatchToolSpecs = [
         .describe(
           "Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " +
             "this message under it so the reply stays with the original in the Conversation. " +
+            "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " +
+            "replies to that message and names the passage the reply answers. " +
             "A bare id with no issue answers a human's direct message to this session; a " +
             "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " +
             "reply on that issue."
@@ -891,14 +947,17 @@ export const dispatchToolSpecs = [
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
       "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " +
       "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
-      "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " +
+      "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block\'s id, type, opening words and token, and each table\'s rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ' +
       "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
       "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
-      `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+      "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " +
+      "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " +
+      "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " +
+      `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -1014,6 +1073,7 @@ export const dispatchToolSpecs = [
       "Do not use it for issue status, asks, or events; " +
       "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
       "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
+      "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
       "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,
@@ -1046,7 +1106,7 @@ export const dispatchToolSpecs = [
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
     description:
-      "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. Opens an approval ask (Approve / " +
+      "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect runs `plan-gap-analyst` and `plan-reviewer`. Opens an approval ask (Approve / " +
       "Request changes) in the human's Inbox whose question names the document and version, " +
       "followed by the summary; the answer pins a review to that version and arrives as " +
       "artifact.approved or artifact.changes_requested. An open request follows the document: a " +
@@ -1085,7 +1145,7 @@ export const dispatchToolSpecs = [
       summary: z
         .string({ min: 1 })
         .describe(
-          `What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`
+          `What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. A Legion architect adds one last sentence with its two spec reviews' results. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`
         ),
     }),
     validation: documentOwnerValidation(true),
@@ -1095,8 +1155,9 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      "dispatch doc-edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
+      "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
       "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " +
+      "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
       `${OWNER_REFERENCE}`,
     arguments: (z) => ({
@@ -1149,6 +1210,9 @@ export const dispatchToolSpecs = [
       "--events N lists the last N, and --all-events every one. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
+      "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " +
+      "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " +
+      "reads `No block <id> in <document>.` " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +
       "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " +
       "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " +
@@ -1163,7 +1227,18 @@ export const dispatchToolSpecs = [
           "Document artifact id, slug, or filename: one of the issue's, or a project document."
         )
         .optional(),
-      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
+      ref: z
+        .string()
+        .describe(
+          "Optional dispatch:// reference: dispatch://KEY, dispatch://KEY/spec, " +
+            "dispatch://KEY/artifact/<slug>[@vN], dispatch://KEY/ask/<id>, dispatch://KEY/comment/<id>, " +
+            "dispatch://KEY/message/<id>, dispatch://PROJECT/artifact/<slug>[@vN], and its " +
+            "/ask/<id> and /comment/<id>; or the dashboard URL of one. A block: " +
+            "dispatch://KEY/spec#b-<block id>[@vN], dispatch://KEY/artifact/<slug>#b-<block id>[@vN] or " +
+            "dispatch://PROJECT/artifact/<slug>#b-<block id>[@vN], the id percent-encoded except ASCII " +
+            "letters, digits and -."
+        )
+        .optional(),
       message: z
         .string()
         .describe(
@@ -1195,6 +1270,9 @@ export const dispatchToolSpecs = [
       'Websearch syntax: "quoted phrase", -excluded, OR. ' +
       "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " +
       "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " +
+      "An ask hit says whether it is answered: an answered one shows the latest answer, who gave it, " +
+      "when, the options chosen and its text; a closed one says it was closed with no answer, or " +
+      "shows the last answer it had. " +
       `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` +
       "so narrow the query or name a project to reach the rest. Paging is exact only while the " +
       "corpus holds still: content added, changed, or removed between two offsets can shift rows " +
@@ -1227,6 +1305,47 @@ export const dispatchToolSpecs = [
     },
   },
   {
+    name: "dispatch_related",
+    example: { project: "CORE", title: "Retry failed webhook deliveries" },
+    description:
+      "Run the related-item check that dispatch issue, dispatch ask and a new decision block in " +
+      "dispatch doc-edit run on their own write, and write nothing: it lists the three items of " +
+      "one project most like a title and a text (at most one per issue or document, open ones " +
+      "first), each ask with whether it is answered, and a past decision that already answers " +
+      "the same question. Use it to check a draft before filing it. It searches by meaning and by " +
+      "the text's rarest words, and says how it searched; when meaning search cannot run it " +
+      "searches by keywords only and says why. When it could not search at all it says why and " +
+      "names the dispatch search to run instead. exclude_issue leaves that issue's own items out, " +
+      "as a check on that issue's own write does; keywords_only skips meaning search.",
+    arguments: (z) => ({
+      project: z.string().describe("Project key to search within, such as CORE."),
+      title: z
+        .string({ max: ISSUE_TITLE_MAX })
+        .describe("Optional title to check, as an issue title; at most 1,000 characters.")
+        .optional(),
+      text: z
+        .string()
+        .describe("Optional text to check, such as a draft spec or a question.")
+        .optional(),
+      exclude_issue: z
+        .string()
+        .describe("Optional issue key in the project whose own items are left out.")
+        .optional(),
+      keywords_only: z
+        .boolean()
+        .describe("Search by keywords only, skipping meaning search.")
+        .optional(),
+    }),
+    // The key rides in the request path; a missing project is the schema's own refusal.
+    validation: {
+      check: (value) => {
+        const { project } = value as { readonly project?: unknown };
+        return typeof project !== "string" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: `project is not a project key: ${PROJECT_KEY_RULE}`,
+    },
+  },
+  {
     name: "dispatch_issues",
     example: { project: "PROJ", limit: 250, offset: 250 },
     description:
@@ -1238,7 +1357,8 @@ export const dispatchToolSpecs = [
       "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " +
       "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " +
       'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' +
-      "session that is not running at the moment of the read, whatever its priority. A restarting " +
+      "session that is not running, as of the server's copy of the listener's session list, at " +
+      "most 5 s old, whatever its priority. A restarting " +
       "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " +
       "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " +
       "Dispatch pages the list: limit sets the page size (default " +
@@ -1246,7 +1366,10 @@ export const dispatchToolSpecs = [
       "(default 0), and the answer names how many issues match, so repeat with the next offset to " +
       "walk every matching issue. A walk is exact only while the list does not change: an issue " +
       "that enters or leaves what the filters match, or whose status or rank changes, between two " +
-      "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
+      "pages shifts rows across a page boundary, so one issue can come back twice and another never. " +
+      "all takes the whole filtered list in one read instead, for a caller that must not miss or " +
+      "repeat a row while other writers change the list, and especially for one whose own writes " +
+      "move issues out of what it filtered on.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -1278,6 +1401,13 @@ export const dispatchToolSpecs = [
       offset: z
         .number({ int: true, min: 0 })
         .describe("Rows to skip before the page; nonnegative integer; default 0.")
+        .optional(),
+      all: z
+        .boolean()
+        .describe(
+          "Take every matching issue in one unpaged read, so no row is missed or repeated while " +
+            "the list changes. Refused with limit or offset."
+        )
         .optional(),
     }),
   },
@@ -1314,15 +1444,36 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_architecture_sync",
-    example: { project: "CORE" },
+    example: { project: "CORE", repo: "acme/infra" },
     description:
-      "Import a project's architecture model from its configured source repository now, instead of " +
-      "waiting for the server's five-minute schedule. Returns the imported commit and component " +
-      "count, or the recorded error when the model was rejected (the previous model stays up). " +
-      "The source itself is configured by a human in Settings; 404 SOURCE_NOT_FOUND without one.",
+      "Import a project's architecture model from its source repositories now, instead of waiting " +
+      "for the server's five-minute schedule. A project may have several sources, one per " +
+      "repository, and its model is every source's components together. Without repo every " +
+      "source imports and each answers on its own line; with repo only that source does. Each " +
+      "line names the imported commit, or the recorded error when that source's model was " +
+      "rejected (its previous components stay up, and every other source is untouched). A failed " +
+      "line also says what of that source still shows (its commit, its component count when it " +
+      "was saved again on another branch and has not imported from it yet, or that it never " +
+      "imported), and a credential or branch problem is that source's failed line, or with repo " +
+      "the error 409 SOURCE_ACCESS. Sources " +
+      "are saved in Settings or with PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}; " +
+      "404 SOURCE_NOT_FOUND when the project has none, or none for that repository.",
     arguments: (z) => ({
-      project: z.string().describe("Project key whose architecture source to sync, such as CORE."),
+      project: z.string().describe("Project key whose architecture sources to sync, such as CORE."),
+      repo: z
+        .string()
+        .describe(
+          "One source repository of the project to sync alone, owner/name; omit it to sync every source."
+        )
+        .optional(),
     }),
+    validation: {
+      check: (value) => {
+        const { repo } = value as { readonly repo?: unknown };
+        return typeof repo !== "string" || ARCHITECTURE_SOURCE_REPO_PATTERN.test(repo);
+      },
+      message: "repo is not a repository: give it as owner/name, such as acme/infra.",
+    },
     strict: true,
   },
   {
@@ -1341,6 +1492,19 @@ export const dispatchToolSpecs = [
         )
         .optional(),
     }),
+    strict: true,
+  },
+  {
+    name: "dispatch_answers",
+    example: {},
+    description:
+      "List every answer and comment a person wrote to this session in the last 72 hours, newest first, each in full: " +
+      "answers to its asks, replies on its asks and in its comment threads, comments on its documents and on issues routed to it, " +
+      "mentions of it, messages to it and replies to its messages. Each item names its time, its writer, what it is, its " +
+      "dispatch:// reference and its issue or document, an answer's question and choices, and the words, never cut. " +
+      "Run it when the list of people's answers on a model request says it left older items out. " +
+      "It reads this session's id from CLAUDE_CODE_SESSION_ID under Claude Code and DISPATCH_SESSION_ID elsewhere, so a subagent reads its parent's.",
+    arguments: () => ({}),
     strict: true,
   },
   {

@@ -162,12 +162,15 @@ While a dialog is open, only its own keys work.
 
 ## Writing
 
-These keys belong to the message boxes rather than to a page, so `?` does not list them.
+These keys belong to the message boxes rather than to a page, so `?` does not list them. The live
+view's message box is the exception to the `Enter` row only: there `Enter` sends, as at the agent's
+terminal, `Shift+Enter` starts a new line, and `Ctrl+Enter` sends as everywhere.
 
 | Keys | Action |
 | --- | --- |
 | `Ctrl+Enter` | Send |
 | `Enter` | New line |
-
+| `Enter` in the live view's message box | Send |
+| `Shift+Enter` in the live view's message box | New line |
 | After `/` in the live view's Send or Aside box | Arrow keys choose a command; `Tab` or `Enter` picks it; `Escape` closes the list |
 | `Ctrl+K` | In a new comment on an issue, open the reference picker to insert a `dispatch://` link |

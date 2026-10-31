@@ -83,10 +83,11 @@ func ChangeAt(ctx context.Context, q Querier, seq int64) (*time.Time, error) {
 	return &at, nil
 }
 
-// PruneChanges deletes every change recorded more than ChangeRetention before now, and answers how
-// many it deleted.
-func PruneChanges(ctx context.Context, pool *store.Pool, now time.Time) (int64, error) {
-	tag, err := pool.Exec(ctx, `delete from delivery_changes where at < $1`, now.Add(-ChangeRetention))
+// PruneChanges deletes every change recorded more than ChangeRetention before the database's now(),
+// and answers how many it deleted. Each row's at is the database's clock too, so the cutoff and the
+// rows it compares share one clock whichever process prunes.
+func PruneChanges(ctx context.Context, pool *store.Pool) (int64, error) {
+	tag, err := pool.Exec(ctx, `delete from delivery_changes where at < now() - $1::interval`, ChangeRetention)
 	if err != nil {
 		return 0, err
 	}

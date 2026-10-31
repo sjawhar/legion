@@ -797,3 +797,39 @@ for (const [row, clipboard, header, body] of [
     });
   }
 }
+
+// A `|` after an even run of backslashes ends a table cell, and one after an odd run is the cell's
+// text, to Go as to the browser editor: `| a \\| b |` is the cells `a \` and `b`, and `| a \| b |`
+// the one cell `a | b`, which Go pads to the header's width with an empty cell, as the editor
+// shows it. Go stores a document written through the API as it reads it, so a Go that read the
+// even run as the cell's text would store, and the editor show, the one cell `a \| b` in its place.
+test("a pipe after two backslashes ends a table cell in Go as in the editor", async ({
+  browser,
+}) => {
+  const written = "| one | two |\n| --- | --- |\n| a \\\\| b |\n| a \\| b |\n";
+  const cells = [
+    ["one", "two"],
+    ["a \\", "b"],
+    ["a | b", ""],
+  ];
+  const { alice, issue, page } = await openIssue(browser, "Escaped table pipes", written);
+  try {
+    expect(engineTables(written)).toEqual([[...cells.slice(0, 2), ["a | b"]]]);
+    await expect
+      .poll(() =>
+        documentEditor(page)
+          .locator("tr")
+          .evaluateAll((rows) =>
+            rows.map((row) =>
+              Array.from(row.querySelectorAll("th, td"), (cell) => cell.textContent)
+            )
+          )
+      )
+      .toEqual(cells);
+    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
+    expect(engineTables(stored)).toEqual([cells]);
+    expect(engineTables(await goReadBack(stored))).toEqual([cells]);
+  } finally {
+    await alice.close();
+  }
+});

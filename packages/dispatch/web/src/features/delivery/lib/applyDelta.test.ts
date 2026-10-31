@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import after from "../../../../../../contracts/fixtures/delivery-live/after.json";
-import delta from "../../../../../../contracts/fixtures/delivery-live/delta.json";
-import snapshot from "../../../../../../contracts/fixtures/delivery-live/snapshot.json";
+import after from "../../../../../../contracts/fixtures/live/after.json";
+import delta from "../../../../../../contracts/fixtures/live/delta.json";
+import snapshot from "../../../../../../contracts/fixtures/live/snapshot.json";
 import type {
   DeliveryLiveDelta,
   DeliveryLiveRevs,
@@ -234,9 +234,9 @@ test("revision changes apply section by section; null deletes the key", () => {
 });
 
 test("the server's delta applied to its snapshot is the snapshot a page subscribing afterwards gets", () => {
-  // The frames Dispatch's own diff writes (packages/contracts/fixtures/delivery-live): a deploy, a
-  // merge and two pull requests leaving the window. A delta never carries freshness, which has its
-  // own frame, so it is the one field the two bodies may differ in.
+  // The frames Dispatch's own diff writes (packages/contracts/fixtures/live): a deploy, a merge
+  // and two pull requests leaving the window. A delta never carries freshness, which has its own
+  // frame, so it is the one field the two bodies may differ in.
   const held = snapshot as unknown as DeliveryLiveSnapshot;
   const next = after as unknown as DeliveryLiveSnapshot;
   const change = delta as unknown as DeliveryLiveDelta;

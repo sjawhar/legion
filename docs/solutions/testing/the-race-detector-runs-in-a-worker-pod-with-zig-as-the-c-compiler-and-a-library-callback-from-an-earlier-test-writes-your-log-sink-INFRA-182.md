@@ -10,7 +10,7 @@ tags:
   - bytes-buffer
   - nats
 date: 2026-10-25
-status: active
+status: superseded in part by INFRA-257 — the worker image now carries gcc and libc6-dev with cgo off by default, so a role runs `CGO_ENABLED=1 go test -race …` with no `CC`, zig or `-linkmode=external`, and the zig recipe applies only to an older pinned image digest without gcc; the canary, the reproducer and the stray-writer advice stand
 module: packages/envoy
 related_issues:
   - "INFRA-182"
@@ -39,6 +39,8 @@ that a pod has no C compiler. A pod can fetch one.
   `relocation target __popcountdi2 not defined`, and zig's linker supplies that symbol. Before you
   trust a clean run, first prove the detector reports a race: run a two-goroutine program that
   writes one variable and check that it prints `WARNING: DATA RACE`.
+  On an image with `gcc` (INFRA-257 onward), drop zig, `CC`, `CXX` and `-ldflags=-linkmode=external`:
+  `CGO_ENABLED=1 go test -race ./internal/<pkg>/ -run '<tests>'`. The canary still comes first.
 - **Prove a race fix with a throwaway reproducer that fails on the old code.** A clean `-race` run
   of the real tests proves little, because the race needs a writer at the moment of the read. Write
   a throwaway test where a goroutine logs through `slog.Default()` while the test reads the capture

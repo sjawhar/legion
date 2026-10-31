@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -63,13 +66,16 @@ type roomState struct {
 	settle         *time.Timer
 	unrecorded     map[pmdoc.MarkRef]time.Time
 	durableAppends atomic.Int64
-	// roomGeneration counts this room's own in-process invalidations (a reload, a failure, a
-	// settlement's own commit): a settlement compares the value it started at against the room's
-	// current one to tell a read still good from one a change since has invalidated.
+	// roomGeneration moves at each of this room's own in-process invalidations (a reload, a
+	// failure, a settlement's own commit): a settlement compares the value it started at against
+	// the room's current one to tell a read still good from one a change since has invalidated.
+	// Every value is drawn from the service's one counter (nextRoomGeneration), so it also tells
+	// this state from any state that replaced it.
 	roomGeneration uint64
 	// liveWriter is the open transaction writing this document (see liveWrite), or nil. While
-	// it is set no settlement is armed; settleDeferred records one that was stopped or asked for
-	// meanwhile, which finishing the write arms.
+	// it is set no settlement is armed; settleDeferred records one that opening the write took
+	// over (armed, fired or running) or that was asked for meanwhile, which finishing the write
+	// arms.
 	liveWriter     *liveWrite
 	settleDeferred bool
 	// settleWarming is set while a settlement loads the room it is about to settle, so that load
@@ -82,6 +88,14 @@ type roomState struct {
 	closed     bool
 	failed     error
 	failedDone chan struct{}
+	// reloading marks a state whose room a close is about to retire because the room stands behind
+	// the durable head (reserveRoomCloseLocked): no transaction takes its writer slot from then on
+	// (openLiveWrite), until the close has returned, whether or not it closed the room it checked
+	// (closeReservedRoom). reservedFor is the instance that close checked: a reservation outlasts
+	// that instance when it is retired and a load replaces it on this state before the close
+	// returns, and the replacement is not the reserving close's to answer for (closeRoomBehindHead).
+	reloading   bool
+	reservedFor *crdt.Doc
 	// released marks a state the service has forgotten (forgetLocked), so a lookup that found it
 	// before it went takes the document's current state instead.
 	released bool
@@ -110,6 +124,18 @@ func (s *Service) lockExistingState(room string) *roomState {
 	return s.lookUpState(room, false)
 }
 
+// newRoomState is a document's record with nothing of a room on it yet.
+func newRoomState() *roomState {
+	return &roomState{
+		connected:         make(map[uint64]model.Actor),
+		inflight:          make(map[uint64]*inflightCredit),
+		askBlocks:         make(map[string]struct{}),
+		askAuthors:        make(map[string]model.Actor),
+		pendingAskAuthors: make(map[string]model.Actor),
+		unrecorded:        make(map[pmdoc.MarkRef]time.Time),
+	}
+}
+
 // lookUpState is lockState and lockExistingState. A state released after the map handed it out
 // and before its lock was taken is skipped for the document's current one.
 func (s *Service) lookUpState(room string, create bool) *roomState {
@@ -119,15 +145,7 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 			if !create {
 				return nil
 			}
-			fresh := &roomState{
-				connected:         make(map[uint64]model.Actor),
-				inflight:          make(map[uint64]*inflightCredit),
-				askBlocks:         make(map[string]struct{}),
-				askAuthors:        make(map[string]model.Actor),
-				pendingAskAuthors: make(map[string]model.Actor),
-				unrecorded:        make(map[pmdoc.MarkRef]time.Time),
-			}
-			value, _ = s.rooms.LoadOrStore(room, fresh)
+			value, _ = s.rooms.LoadOrStore(room, newRoomState())
 		}
 		state := value.(*roomState)
 		if s.afterStateLookup != nil {
@@ -176,12 +194,58 @@ func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
 }
 
 // forgetLocked takes state, room's, out of the service: a lookup that already found it skips it
-// (lookUpState). An in-flight credit the state still holds is reached through its update's
-// UpdateCredit, which holds the state, so a forced eviction (evictRoom) that forgets the state
-// before that update's append lands loses nothing the append writes. Its caller holds state.mu.
+// (lookUpState). Its one caller, releaseIfUnusedLocked, forgets only a state nothing holds
+// (unusedLocked), so no in-flight credit is on it. Its caller holds state.mu.
 func (s *Service) forgetLocked(room string, state *roomState) {
 	state.released = true
 	s.rooms.CompareAndDelete(room, state)
+}
+
+// handOverFailedRoomLocked takes state, room's, out of the service once the eviction of the room
+// it failed has closed that room, and hands the browsers that joined it meanwhile to the record
+// registered in its place. The record has to go: it carries the failure, which every holder of it
+// still reads (failure) and no later access may (roomFailure, which refuses a load and a connect).
+//
+// ygo takes the closed room out of its map before CloseRoom returns (sjawhar/ygo v1.51.3-sami.1,
+// provider/websocket/inject.go), and a browser registers as it is authorized, before its room is
+// loaded or joined (authorize), so a browser that opened the document while the eviction ran is on
+// this record. Dropping it outright loses that browser, and with it the credit for the person's
+// next keystroke. A load refuses a failed room, so no room of its own attached to this record,
+// and what the failed room left is the failed room's, except the
+// updates its persistence has not taken yet. Those are carried, with the counts that hold the
+// record for them: a failed room's update is dropped while the room is failed
+// (StoreUpdateContext), but ygo's stranded persistence can hand one on after the eviction has
+// cleared that failure, and a class the successor does not hold is an append stored with no
+// credit at all - the author of that keystroke is then on no version and in no pending row. An
+// in-flight credit the record still holds is reached through its update's UpdateCredit, which
+// holds the record, so an append that lands after the record went loses nothing it writes. A
+// browser the close disconnects is forgotten by its own removeConnection, which finds it under
+// the connection id the service gave it. Its caller holds state.mu.
+func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
+	state.released = true
+	if len(state.connected) == 0 && len(state.updateClasses) == 0 {
+		s.rooms.CompareAndDelete(room, state)
+		return
+	}
+	successor := newRoomState()
+	maps.Copy(successor.connected, state.connected)
+	// Only the updates still waiting for the room's persistence move, with the appends they
+	// count. An append already in flight finishes on the record that counted it
+	// (finishDurableAppend takes the record consumeUpdateClass answered), so its count stays
+	// where it is.
+	carried := int64(0)
+	for _, class := range state.updateClasses {
+		if class.durable {
+			carried++
+		}
+	}
+	successor.updateClasses = state.updateClasses
+	successor.pendingUpdates = state.pendingUpdates
+	successor.durableAppends.Store(carried)
+	state.updateClasses = nil
+	state.pendingUpdates = 0
+	state.durableAppends.Add(-carried)
+	s.rooms.CompareAndSwap(room, state, successor)
 }
 
 // unusedLocked is whether state holds nothing that outlasts its room. These are every holder: an
@@ -211,13 +275,14 @@ func (s *Service) recordUpdateClass(room string, update []byte, class documentUp
 }
 
 // consumeUpdateClass takes the class the room's update observer recorded for update, wherever it
-// stands among the room's recorded updates. ygo fires a transaction's observers after the
-// transaction has released the document's lock, so two peers' updates reach persistence in the
-// order their read loops hand them on, which need not be the order the room recorded them in.
-func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdateClass, bool) {
+// stands among the room's recorded updates, and the record it took it from. ygo fires a
+// transaction's observers after the transaction has released the document's lock, so two peers'
+// updates reach persistence in the order their read loops hand them on, which need not be the
+// order the room recorded them in.
+func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdateClass, *roomState, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {
-		return documentUpdateClass{contentChanged: true}, false
+		return documentUpdateClass{contentChanged: true}, nil, false
 	}
 	defer s.unlockState(room, state)
 	for index, class := range state.updateClasses {
@@ -228,9 +293,9 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdate
 		if class.durable {
 			state.pendingUpdates--
 		}
-		return class, true
+		return class, state, true
 	}
-	return documentUpdateClass{contentChanged: true}, false
+	return documentUpdateClass{contentChanged: true}, nil, false
 }
 
 func (s *Service) hasPendingUpdates(room string) bool {
@@ -242,13 +307,14 @@ func (s *Service) hasPendingUpdates(room string) bool {
 	return state.pendingUpdates > 0
 }
 
-// finishDurableAppend ends a durable append recordUpdateClass counted. The state that counted it
-// holds it until then (unusedLocked), so it is the state found here.
-func (s *Service) finishDurableAppend(room string) {
-	if state := s.lockExistingState(room); state != nil {
-		state.durableAppends.Add(-1)
-		s.unlockState(room, state)
-	}
+// finishDurableAppend ends a durable append recordUpdateClass counted on state, the record that
+// counted it (consumeUpdateClass answers it). A failed room's eviction registers a new record in
+// place of the one that counted the append (handOverFailedRoomLocked), so a late append of the
+// failed room's never takes that new record's count below zero.
+func (s *Service) finishDurableAppend(room string, state *roomState) {
+	state.mu.Lock()
+	state.durableAppends.Add(-1)
+	s.unlockState(room, state)
 }
 
 func (s *Service) hasDurableAppend(room string) bool {
@@ -260,20 +326,77 @@ func (s *Service) hasDurableAppend(room string) bool {
 	return state.durableAppends.Load() > 0
 }
 
-// hasWriteInFlight is whether this process has durable work of room's document under way that is
-// about to advance the room instance's cursor: an open live-write transaction (liveWrite, whose
-// publish takes its versions in), a browser append the room's persistence has not landed
-// (durableAppends), or a settlement running on the room (settleRoomWithin, which takes in the
-// version its repair is stored at). The stale-room evictor asks it before it closes a room
-// another process's write left behind: closing one of these rooms would take the room out from
-// under the writer that is mid-write on it.
-func (s *Service) hasWriteInFlight(room string) bool {
+// hasOpenLiveWrite is whether an open live-write transaction of this process is writing room's
+// document (liveWrite). The stale-room evictor asks it before it closes a room another process's
+// write left behind, because that writer alone is out of reach of the confirmation the evictor
+// makes under the document's advisory lock (roomBehindDurableHead): an open write holds no lock
+// between its operations, and between its commit and its publish it has moved the cursor of the
+// room it forked past what that room holds (Ledger.takeRoomCursors, publish), so the room it
+// publishes into is the room the evictor would close.
+//
+// The other writers of this process take the document's lock and are ordered by that
+// confirmation instead, so they are not asked about here. A browser's append (appendUpdate,
+// under withRoomLock) and a settlement (settleRoomWithin, under lockSettlementCursor) each either
+// advance the instance's cursor before they drop the lock or are refused by the gate on a room
+// behind the head (ErrRoomBehindHead), and a cursor moves only by the version after the one it
+// stands at (advanceRoomCursor), so a room the confirmation finds behind is one none of them can
+// bring back to the head.
+func (s *Service) hasOpenLiveWrite(room string) bool {
 	state := s.lockExistingState(room)
 	if state == nil {
 		return false
 	}
 	defer s.unlockState(room, state)
-	return state.liveWriter != nil || state.durableAppends.Load() > 0 || state.settling > 0
+	return state.openLiveWriteLocked()
+}
+
+// openLiveWriteLocked is hasOpenLiveWrite for a state its caller holds state.mu on: the close of
+// a room behind the durable head reads it again under the hold that reserves the close, so no
+// write is admitted between the evictor's own unlocked read and the reservation.
+func (state *roomState) openLiveWriteLocked() bool {
+	return state.liveWriter != nil
+}
+
+// editSourceMark is where room's record stood, as to its latest edit source, when a room's load
+// was about to read the document's pending-settlement row: the record then registered, nil for
+// none; how many edit sources it had recorded (creditSeq, which every recorder of one moves:
+// creditContentChange, Ledger.creditRooms, a seed); and whether it held a browser edit whose
+// append has yet to write that row (quiet when it held none).
+type editSourceMark struct {
+	state *roomState
+	seq   uint64
+	quiet bool
+}
+
+// markEditSource marks where room's record stands before its load reads the pending-settlement
+// row (onLoadDocument).
+func (s *Service) markEditSource(room string) editSourceMark {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return editSourceMark{quiet: true}
+	}
+	defer s.unlockState(room, state)
+	quiet := len(state.inflight) == 0 && state.pendingUpdates == 0 && state.durableAppends.Load() == 0
+	return editSourceMark{state: state, seq: state.creditSeq.Load(), quiet: quiet}
+}
+
+// rowIsCurrent is whether the pending-settlement row a load read after mark is at least as new as
+// the latest edit source state holds, so the load may take the row's in its place. A committed
+// write writes the row in its transaction and records the source once it commits
+// (Ledger.creditRooms), so a source it recorded by the mark is in the row the load read, and one
+// it recorded after moved creditSeq. A browser edit records its source first (creditContentChange)
+// and writes it to the row when its append lands, so the row is not current while the record held
+// such an edit at the mark: its credit, its update or its append. Two appends write no source:
+// one whose credit a version written without a live write already consumed, and one made with no
+// browser connected. Each keeps the row's earlier source, which the load then takes, as a record
+// made fresh from the row always did. A settlement records no source, so neither a running one
+// nor an open write keeps the record's: the settlement whose warm-up runs this very load reads the
+// row's. A record registered after the mark counts from none. Its caller holds state.mu.
+func (mark editSourceMark) rowIsCurrent(state *roomState) bool {
+	if mark.state != state {
+		mark = editSourceMark{quiet: true}
+	}
+	return mark.quiet && state.creditSeq.Load() == mark.seq
 }
 
 func (s *Service) roomFailure(room string) error {

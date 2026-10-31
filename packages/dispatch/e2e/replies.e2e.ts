@@ -15,8 +15,9 @@ import {
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// A row names its replier the way every surface does (`actorLabel`): by the title the session
-// stamped on its write.
+// A row names its replier through `AgentName`, by the rule every surface uses: the registry's
+// title while Envoy lists the session, else the title it stamped on its write. This session is
+// never listed, so the row shows the stamped title.
 const session = {
   actor: {
     id: "e2e-replies-agent",
@@ -87,7 +88,7 @@ async function expectRepliesCount(page: Page, isPhone: boolean, count: number): 
 }
 
 for (const [kind, seed] of Object.entries(threadKinds)) {
-  test(`replies: ${kind} a session replied in is listed, clears once read, and returns on the next reply`, async ({
+  test(`replies: ${kind} a session replied in is listed, clears once read, and returns on the next reply @phone`, async ({
     browser,
   }, testInfo) => {
     const isPhone = testInfo.project.name === "iphone";
@@ -148,7 +149,7 @@ const planner: FakeSession = {
 // A phone's compact header carries the title, every count that is up and Menu on one bar. With
 // all three counts up (an open ask, an agent's reply, a thread's reply), the title stays whole,
 // every badge reads on one line, Menu stays on screen, and the page never scrolls sideways.
-test("replies: the phone header keeps the title and every count whole when all three are up", async ({
+test("replies: the phone header keeps the title and every count whole when all three are up @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the compact header renders below 1280 px");

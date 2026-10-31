@@ -97,6 +97,31 @@ describe("sessionSettings", () => {
     expect(settings.notice).toBe(`no envoy.json at ${file}: Dispatch is off`);
   });
 
+  // A process started from a shell that lost DISPATCH_URL says so at its start, as `dispatch` does,
+  // rather than naming the missing file for Dispatch; Envoy's part still names the file.
+  test("DISPATCH_TOKEN_FILE with no DISPATCH_URL: the start notice names the lost DISPATCH_URL", () => {
+    const lost =
+      "DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for";
+    const tokenFile = writeFile(path.join(tempDir(), "DISPATCH_TOKEN"), "pointer-token\n");
+    const missing = path.join(tempDir(), "envoy.json");
+    const settings = sessionSettings(
+      { path: missing, error: null },
+      { HOME: tempDir(), DISPATCH_TOKEN_FILE: tokenFile },
+      { cwd: tempDir() }
+    );
+    expect(settings.dispatch).toEqual({ enabled: false, notice: lost, error: null });
+    expect(settings.notice).toBe(`${lost}; no envoy.json at ${missing}: Envoy is off`);
+    // With Envoy on, the notice is Dispatch's alone; a file that names no server says it too.
+    const envoyFile = writeFile(path.join(tempDir(), "envoy.json"), { envoy: envoyOn });
+    expect(
+      sessionSettings(
+        { path: envoyFile, error: null },
+        { HOME: tempDir(), DISPATCH_TOKEN_FILE: tokenFile },
+        { cwd: tempDir(), nats: false }
+      ).notice
+    ).toBe(lost);
+  });
+
   test("a section's error is the notice, beside a section that is on", () => {
     const file = path.join(tempDir(), "envoy.json");
     const settings = sessionSettings(
@@ -142,6 +167,17 @@ describe("sessionSettings", () => {
     expect(settings.notice).toBe(
       `${checkout}: envoy is not read from a checkout's envoy.json; put it in ${file}`
     );
+  });
+
+  test("a checkout's askgate section is said", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), { dispatch: dispatchOn });
+    const cwd = tempDir();
+    const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), {
+      askgate: { enabled: false },
+    });
+    const settings = sessionSettings({ path: file, error: null }, {}, { cwd });
+    expect(settings.dispatch.enabled).toBe(true);
+    expect(settings.notice).toContain(`askgate in ${checkout} is not read; set it in ${file}`);
   });
 
   test("a checkout's file that cannot be used is Dispatch's error, or said as not read while DISPATCH_URL replaces it", () => {
@@ -330,6 +366,30 @@ describe("sessionDispatchSettings", () => {
       warnings: [],
       missing: { link: null },
     });
+  });
+
+  test("commands: kept never runs a token command, and takes the value a run kept", () => {
+    const home = tempDir();
+    const runs = path.join(home, "runs");
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; echo kept-token` },
+    });
+    const chosen = { path: file, error: null } as const;
+    const env = { HOME: home, PATH: process.env.PATH };
+    expect(
+      sessionDispatchSettings(chosen, env, { cwd: tempDir(), commands: "kept" }).dispatch
+    ).toEqual({
+      enabled: false,
+      notice: null,
+      error: `${file}: dispatch.token's command has not run in this process yet, and this read does not run it`,
+    });
+    expect(existsSync(runs)).toBe(false);
+    expect(sessionDispatchSettings(chosen, env, { cwd: tempDir() }).dispatch).toMatchObject({
+      token: "kept-token",
+    });
+    expect(
+      sessionDispatchSettings(chosen, env, { cwd: tempDir(), commands: "kept" }).dispatch
+    ).toMatchObject({ enabled: true, token: "kept-token" });
   });
 });
 

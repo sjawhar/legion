@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -23,14 +24,18 @@ import (
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
 // runs — a fetch, a jj operation, or a git configuration edit — each bounded independently. The
 // exceptions are the fetch's transfers and the checks of what the repository cache streamed, under
-// FetchTimeout, and the shared clone's own clone, under CloneTimeout (both below).
+// FetchTimeout (the repository cache's own first clone under CacheFetchTimeout instead), the
+// shared clone's own clone, under CloneTimeout (both below), and the cache's repack
+// (repocache.repackTimeout, through FeedGitWithin).
 const CommandTimeout = 5 * time.Minute
 
-// FetchTimeout is the one bound for everything whose duration follows the repository's size and
-// the network's speed in a fetch, once it may start: every attempt of a transfer from GitHub, and,
-// for a feed filled from the repository cache, the cache's stream and its verification too, all
-// together (Fetch). It is long enough for a large repository's slow but steadily progressing
-// transfer to finish.
+// FetchTimeout is the bound of each stage of a fetch whose duration follows the repository's size
+// and the network's speed, once it may start (Fetch): a feed filled from the repository cache gets
+// one for the cache's stream and its verification together and another for the delta from GitHub,
+// every attempt of it included; a clone or a fetch from GitHub alone gets one. It is long enough
+// for a large repository's slow but steadily progressing transfer to finish. A request may set its
+// own (FetchRequest.Bound), which the repository cache does for its first clone alone
+// (CacheFetchTimeout).
 const FetchTimeout = 30 * time.Minute
 
 // CloneTimeout is the one bound ensureRepoClone gives its size-following steps, together, as the
@@ -44,7 +49,8 @@ const CloneTimeout = 30 * time.Minute
 
 // Command is one process the provisioner runs, each bounded independently of every other: most
 // hold the runner's own slow-command budget (RunChecked), each of the fetch's transfers and checks
-// holds what remains of FetchTimeout instead (Fetch), and each size-following step of the shared
+// holds what remains of its request's bound instead (Fetch, FetchRequest.Bound), a command run with
+// FeedGitWithin holds the timeout it is given, and each size-following step of the shared
 // clone's clone holds what remains of CloneTimeout (ensureRepoClone) — never a budget shared
 // across the whole provisioning sequence.
 type Command struct {
@@ -92,6 +98,53 @@ type Request struct {
 	// Log takes the one line provisioning logs: the commits it set aside when it started a merged
 	// issue's workspace at the default branch (createWorkspace).
 	Log func(line string)
+	// StoreLock, when set, is held around every command provisioning runs on the repository's
+	// shared clone — its clone, fetch, bookmark reads and writes, the workspace's registration,
+	// git worktree bookkeeping and configuration — and let go before the checkout writes the
+	// issue's own working copy (`jj sparse reset` in the workspace the registration made with no
+	// files), the one step whose time follows the repository's size and which writes nothing of
+	// the clone's. A daemon that provisions several issues of one repository at once hands each the
+	// clone's one lock, so their checkouts run side by side and nothing else of the clone ever does.
+	// Nil holds nothing: a pod provisions its one issue alone.
+	StoreLock sync.Locker
+	// CheckoutSlot, when set, waits for one of the places a daemon bounds its checkouts by and
+	// returns the release of the place it took, or ctx's error once ctx ends first. Provision waits
+	// for a place only after it has let StoreLock go, and holds it around the checkout alone, the
+	// step the bound exists for: a provision waiting on its repository's store lock holds no place,
+	// so no other repository's checkout waits behind it. The order is StoreLock, let go, then a
+	// place, and nothing that holds a place waits on a store lock. Nil bounds nothing: a pod checks
+	// out its one issue alone.
+	CheckoutSlot func(ctx context.Context) (release func(), err error)
+}
+
+// checkoutPlace waits for one of request's checkout places (CheckoutSlot) and returns its release;
+// a request with no CheckoutSlot takes none.
+func (r Request) checkoutPlace(ctx context.Context) (func(), error) {
+	if r.CheckoutSlot == nil {
+		return func() {}, nil
+	}
+	return r.CheckoutSlot(ctx)
+}
+
+// storeLock is a Request's StoreLock, or nothing when it names none, and whether this provision
+// holds it.
+type storeLock struct {
+	locker sync.Locker
+	held   bool
+}
+
+func (l *storeLock) lock() {
+	if l.locker != nil && !l.held {
+		l.locker.Lock()
+		l.held = true
+	}
+}
+
+func (l *storeLock) unlock() {
+	if l.locker != nil && l.held {
+		l.locker.Unlock()
+		l.held = false
+	}
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape
@@ -491,8 +544,10 @@ func runCommand(ctx context.Context, run Runner, argv []string, env []string, di
 }
 
 // runCommandTimeout is runCommand, but for timeout instead of the runner's own slow-command
-// budget: runCommand itself calls it with run.Timeout(); Fetch calls it with what remains of
-// FetchTimeout for each attempt of its clone, and ensureRepoClone with CloneTimeout.
+// budget: runCommand itself calls it with run.Timeout(); Fetch calls it with what remains of its
+// request's bound (FetchRequest.Bound, FetchTimeout by default) for each of its transfers and
+// checks; FeedGitWithin with the timeout its caller gives it (the repository cache's repack); and
+// ensureRepoClone with CloneTimeout.
 func runCommandTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
@@ -587,9 +642,10 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	}
 	// The fetch takes no snapshot of the clone's working copy: a snapshot runs the working-copy
 	// filter, fsmonitor, and signing programs jj's configuration names, which a tree agent can set,
-	// and on the tmux runtime this fetch holds the one-shot credential. A failed fetch is diagnosed
-	// against the old alternate-clone failure before its own error is returned; a successful fetch
-	// pays no connectivity scan.
+	// and on the tmux runtime this fetch holds the one-shot credential. A failed fetch returns its
+	// own error: no clone this code makes borrows objects from the feed (clone.go makes a plain
+	// local clone), so the connectivity scan that once diagnosed a clone whose borrowed history had
+	// gone had no case left and was deleted with the disk that carried such a clone (INFRA-80).
 	fetch := []string{"git", "fetch"}
 	for _, branch := range source.branches {
 		fetch = append(fetch, "--branch", exactName(branch))
@@ -599,17 +655,8 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 		return err
 	}
 	result, runErr := runCommand(ctx, run, argv, source.env, "")
-	_, fetchErr := checkedResult(argv, result, runErr)
-	if fetchErr == nil {
-		return nil
-	}
-	if err := ensureCloneConnectivity(ctx, run, cloneDir); err != nil {
-		return err
-	}
-	if err := ensureJujutsuConnectivity(ctx, run, cloneDir); err != nil {
-		return err
-	}
-	return fetchErr
+	_, err = checkedResult(argv, result, runErr)
+	return err
 }
 
 // GitHubCredentialHelper is the `credential.helper` every shared clone gets: `legion

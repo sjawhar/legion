@@ -13,36 +13,51 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/api"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
+	"github.com/sjawhar/envoy/internal/dispatch/routes"
+	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -55,10 +70,9 @@ func multiprocessNATS(t *testing.T) string {
 	return url
 }
 
-// multiprocessSigningKey is the one DISPATCH_SIGNING_KEY every process of a pair carries: the
-// deployment rule INFRA-66 wrote down, since a session cookie minted by one process is presented
-// to the other on the next request and nothing can tell a key the other process does not hold
-// from a session that has ended.
+// multiprocessSigningKey is the one DISPATCH_SIGNING_KEY every process of a pair carries: a
+// session cookie minted by one process is presented to the other on the next request, and a
+// process whose key set a live peer does not share refuses to start (processes.Register).
 const multiprocessSigningKey = "multiprocess-signing-key"
 
 // dispatchPair is two envoy-dispatch processes on one database and one NATS server.
@@ -77,10 +91,11 @@ func newPair(t *testing.T) *dispatchPair {
 	return &dispatchPair{database: storetest.Open(t), nats: multiprocessNATS(t)}
 }
 
-// start starts both processes on the pair's database and NATS, each on a free port and in a home
-// of its own, both carrying multiprocessSigningKey, and returns once each answers /healthz. The
-// two are started together rather than one after the other: several rows are about what the two
-// do when their loops fire at the same moment, which a staggered start would hide.
+// start starts both processes on the pair's database and NATS, each on a port held for it from the
+// moment the kernel chose it (startDispatchProcessWith) and in a home of its own, both carrying
+// multiprocessSigningKey, and returns once each answers /healthz. The two are started together
+// rather than one after the other: several rows are about what the two do when their loops fire at
+// the same moment, which a staggered start would hide.
 func (p *dispatchPair) start(t *testing.T, env map[string]string) {
 	t.Helper()
 	options := dispatchOptions{NATSURL: p.nats, SigningKey: multiprocessSigningKey, Env: env}
@@ -130,106 +145,46 @@ func (p *dispatchPair) name(one *dispatchProcess) string {
 	return "B"
 }
 
-// ───── the processes' own logs ──────────────────────────────────────────────
+// ───── the live socket's event feed ─────────────────────────────────────────
 
-// logLines is every line of the process's output that holds all of parts, which is how a slog
-// text line is matched: the message and the attribute that narrows it.
-func (p *dispatchProcess) logLines(parts ...string) []string {
-	var matched []string
-	for line := range strings.Lines(p.Output.String()) {
-		if holdsAll(line, parts...) {
-			matched = append(matched, strings.TrimRight(line, "\n"))
-		}
-	}
-	return matched
+// feedEvent is one event the event feed sent: its type and the event's JSON.
+type feedEvent struct {
+	eventType string
+	data      string
 }
 
-func holdsAll(line string, parts ...string) bool {
-	for _, part := range parts {
-		if !strings.Contains(line, part) {
-			return false
-		}
-	}
-	return true
-}
-
-// logged reports whether the process has written a line holding all of parts.
-func (p *dispatchProcess) logged(parts ...string) bool {
-	return len(p.logLines(parts...)) > 0
-}
-
-// waitForLog waits up to within for a line holding all of parts, polling rather than sleeping a
-// fixed time, and fails the test with the process's whole output when none arrives, at once when
-// the process exits without it: a process that has exited writes no more lines.
-func (p *dispatchProcess) waitForLog(t *testing.T, within time.Duration, parts ...string) {
+// openEventFeed holds GET /ws/live open as a dashboard tab does, subscribed to the event feed, and
+// reports every event it is sent on the returned channel, until the test ends or the socket does.
+// One subscription, read to the end: a row about the live feed carrying the other process's event
+// has to show that event arriving on the subscription the page already had, never on a
+// resubscribe's catch-up.
+func (p *dispatchProcess) openEventFeed(t *testing.T) <-chan feedEvent {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for !p.logged(parts...) {
-		select {
-		case <-p.Exited:
-			// Exited closes only once the output is whole, so this read is final.
-			if p.logged(parts...) {
-				return
-			}
-			t.Fatalf("the process exited without a line holding %v:\n%s", parts, p.Output.String())
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no line holding %v within %v:\n%s", parts, within, p.Output.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// ───── server-sent events ───────────────────────────────────────────────────
-
-// sseFrame is one server-sent event the stream handler wrote: its type and its data line. Its
-// `id:` line names the event, which the data carries too, so nothing here keeps it.
-type sseFrame struct {
-	event string
-	data  string
-}
-
-// openEventStream holds GET /api/v1/events open as a dashboard tab does and reports every frame
-// it reads on the returned channel, until the test ends or the connection does. One request, read
-// to the end: a row about a live stream carrying the other process's event has to show that event
-// arriving on the connection the reader already had, never on a reconnect's catch-up.
-func (p *dispatchProcess) openEventStream(t *testing.T) <-chan sseFrame {
-	t.Helper()
-	response, err := p.send(http.MethodGet, "/api/v1/events", "")
-	if err != nil {
-		t.Fatalf("open the event stream: %v", err)
-	}
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		t.Fatalf("open the event stream: status %d: %s", response.StatusCode, body)
-	}
-	t.Cleanup(func() { _ = response.Body.Close() })
-	frames := make(chan sseFrame, 256)
+	conn := p.openLiveEvents(t)
+	events := make(chan feedEvent, 256)
 	go func() {
-		defer close(frames)
-		reader := bufio.NewReader(response.Body)
-		var frame sseFrame
+		defer close(events)
 		for {
-			line, err := reader.ReadString('\n')
-			switch trimmed := strings.TrimRight(line, "\r\n"); {
-			case trimmed == "":
-				if frame.data != "" {
-					frames <- frame
-				}
-				frame = sseFrame{}
-			case strings.HasPrefix(trimmed, "event: "):
-				frame.event = strings.TrimPrefix(trimmed, "event: ")
-			case strings.HasPrefix(trimmed, "data: "):
-				frame.data = strings.TrimPrefix(trimmed, "data: ")
+			var frame struct {
+				Type  string          `json:"type"`
+				Event json.RawMessage `json:"event"`
 			}
-			if err != nil {
+			if err := conn.ReadJSON(&frame); err != nil {
 				return
 			}
+			if frame.Type != "event" {
+				continue
+			}
+			var event struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(frame.Event, &event); err != nil {
+				return
+			}
+			events <- feedEvent{eventType: event.Type, data: string(frame.Event)}
 		}
 	}()
-	return frames
+	return events
 }
 
 // ───── the API a row drives ─────────────────────────────────────────────────
@@ -291,11 +246,11 @@ func (p *dispatchProcess) documentText(t *testing.T, artifactID string) string {
 	return document.Markdown
 }
 
-// ───── a live stream carries the other process's events ─────────────────────
+// ───── the live feed carries the other process's events ─────────────────────
 
 // A dashboard tab is open on one process and the work happens on the other: the event of an issue
-// created through B's API has to reach the stream A is holding, on the connection it already has.
-// The live source of an open stream is no longer this process's in-memory broker, which hears
+// created through B's API has to reach the event feed A's socket holds, on the subscription it
+// already has. The live source of an open feed is not this process's in-memory broker, which hears
 // only its own writes, but a relay over `listen dispatch_events`, so what either process commits
 // every process publishes.
 func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
@@ -303,21 +258,21 @@ func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
 	project := uniqueProjectKey(t, "XPR")
 	pair.a.createProject(t, project, "Cross process")
 
-	frames := pair.a.openEventStream(t)
+	events := pair.a.openEventFeed(t)
 	key, _ := pair.b.createIssueIn(t, project, "Created on the other process", "spec")
 
 	deadline := time.After(30 * time.Second)
 	for {
 		select {
-		case frame, open := <-frames:
+		case event, open := <-events:
 			if !open {
-				t.Fatalf("the stream A held closed before B's event arrived:\n%s", pair.a.Output.String())
+				t.Fatalf("the feed A held closed before B's event arrived:\n%s", pair.a.Output.String())
 			}
-			if frame.event == "issue.created" && strings.Contains(frame.data, `"`+key+`"`) {
+			if event.eventType == "issue.created" && strings.Contains(event.data, `"`+key+`"`) {
 				return
 			}
 		case <-deadline:
-			t.Fatalf("the stream A held never carried the issue B created (%s):\nA:\n%s\nB:\n%s",
+			t.Fatalf("the feed A held never carried the issue B created (%s):\nA:\n%s\nB:\n%s",
 				key, pair.a.Output.String(), pair.b.Output.String())
 		}
 	}
@@ -449,33 +404,6 @@ func streamHead(t *testing.T, js natsgo.JetStreamContext) uint64 {
 	return info.State.LastSeq
 }
 
-// readStreamFrom is every envelope the stream retains past head, read by sequence rather than
-// through a consumer so the read creates nothing on the server and cannot miss a message a
-// consumer's filter would skip. A sequence the stream no longer holds is passed over.
-func readStreamFrom(t *testing.T, js natsgo.JetStreamContext, head uint64) []contracts.Envelope {
-	t.Helper()
-	info, err := js.StreamInfo(bus.Stream)
-	if err != nil {
-		t.Fatalf("read the notification stream: %v", err)
-	}
-	var items []contracts.Envelope
-	for seq := head + 1; seq <= info.State.LastSeq; seq++ {
-		msg, err := js.GetMsg(bus.Stream, seq)
-		if err != nil {
-			if errors.Is(err, natsgo.ErrMsgNotFound) {
-				continue
-			}
-			t.Fatalf("read message %d of the notification stream: %v", seq, err)
-		}
-		var item contracts.Envelope
-		if err := json.Unmarshal(msg.Data, &item); err != nil {
-			t.Fatalf("decode message %d of the notification stream: %v", seq, err)
-		}
-		items = append(items, item)
-	}
-	return items
-}
-
 // drainEnvelopes reads what a subscription has collected and keeps reading until quiet is up with
 // nothing more arriving.
 func drainEnvelopes(t *testing.T, from <-chan contracts.Envelope, quiet time.Duration) []contracts.Envelope {
@@ -492,46 +420,6 @@ func drainEnvelopes(t *testing.T, from <-chan contracts.Envelope, quiet time.Dur
 }
 
 // ───── the delivery durables ────────────────────────────────────────────────
-
-// deliveryDurables are the two push durables the delivery intakes bind, one subscriber each.
-var deliveryDurables = []string{"delivery-events", "delivery-jobs"}
-
-// seedDeliverySettings writes the one delivery_settings row, the same write
-// PUT /api/v1/settings/delivery makes (delivery.PutSettings). The intakes read it on their first
-// poll and bind nothing until it is there, so a row about the durables seeds it before the
-// processes start rather than driving the route, which would first have the GitHub App prove it
-// can read the repository.
-func seedDeliverySettings(t *testing.T, database *store.Store) {
-	t.Helper()
-	if _, err := delivery.PutSettings(context.Background(), database.Pool, delivery.DeliverySettings{
-		DeployRepo:           "acme/deploy",
-		DeployWorkflowPath:   ".github/workflows/deploy.yaml",
-		PRChecksWorkflowPath: ".github/workflows/pr.yaml",
-		ProductionJobNames:   []string{"production"},
-	}, model.Actor{Kind: "user", ID: dispatchTestLogin}); err != nil {
-		t.Fatalf("seed the delivery settings: %v", err)
-	}
-}
-
-// githubAppEnv is a GitHub App a Dispatch process boots with: a throwaway RSA key generated for
-// this test, and apiBase as the only origin its App JWT is ever sent to. Without an App the
-// delivery intakes never connect and the webhook redelivery sweep never runs, so a row about
-// either needs these rows.
-func githubAppEnv(t *testing.T, apiBase string) map[string]string {
-	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate the test App key: %v", err)
-	}
-	encoded := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	return map[string]string{
-		"DISPATCH_APP_CLIENT_ID":   "Iv1.multiprocess",
-		"DISPATCH_APP_ID":          "4242",
-		"DISPATCH_APP_SLUG":        "multiprocess",
-		"DISPATCH_APP_PEM_B64":     base64.StdEncoding.EncodeToString(encoded),
-		"DISPATCH_GITHUB_API_BASE": apiBase,
-	}
-}
 
 // githubFake is the loopback GitHub the test's processes send their App calls to, so no call
 // leaves the machine. It answers an empty list to everything, and holds the first webhook
@@ -695,7 +583,7 @@ func TestADocumentWriteOnOneProcessClosesTheStaleRoomOnTheOther(t *testing.T) {
 	pair.a.createProject(t, project, "Documents")
 	_, artifactID := pair.a.createIssueIn(t, project, "Open here, written there", "before")
 
-	editor := pair.a.openEditor(t, artifactID, "before\n")
+	editor := openSyncedEditor(t, pair, artifactID, "before\n")
 	wrote := time.Now()
 	pair.b.call(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits",
 		`{"ops":[{"op":"replace","find":"before","with":"after"}]}`, http.StatusOK)
@@ -735,10 +623,68 @@ func settlementOwedFor(t *testing.T, pair *dispatchPair, artifactID string) bool
 	return owed
 }
 
+// storedHead is the version of the document's latest durable update, which is the version a room
+// of it must stand at to append anything (ErrRoomBehindHead).
+func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
+	t.Helper()
+	var head int64
+	if err := pair.database.Pool.QueryRow(context.Background(),
+		`select coalesce(max(version), 0) from doc_updates where artifact_id = $1`, artifactID).Scan(&head); err != nil {
+		t.Fatalf("read the stored head of %s: %v", artifactID, err)
+	}
+	return head
+}
+
+// openSyncedEditor opens a spec tab on A, as openEditor does, and returns once the update the tab
+// sends as it syncs is stored, so that whatever B writes next is the only thing that can leave A's
+// room behind the durable head.
+//
+// A browser's provider answers the room's sync step 1 with its own state (docstest.Peer.read, as
+// y-websocket does), and the room appends that update even when it changes nothing, since ygo runs
+// the room's update observer for every transaction it commits. An append from a room standing
+// behind the head is refused by the durable gate, and the refusal fails the room
+// (ErrRoomBehindHead; docs/stale_room.go names this path): the room closes and the browser
+// reconnects. That is correct for a browser, but a row timing which path closes A's room reads it
+// as some other path. So a tab whose update is still on its way when B's write lands closes its
+// own socket within milliseconds of that write, which is how the refused-notification row failed
+// 2 of 20 runs on a development machine (dispatch://INFRA-396).
+//
+// The head is read before the dial, and nothing else writes the document while the tab connects:
+// B writes only after this returns, and a settlement is at least the settle delay away (2 s by
+// default). So the head moves by exactly one, the tab's own update, and anything more fails the
+// row rather than letting it run on with that update still on its way. The wait is openEditor's
+// own ten seconds: on a loaded development machine 52 such updates were stored 16-294 ms after
+// the dial, and one was not stored within a second. A tab whose update is not stored in ten fails
+// the row: either the room stopped storing an update for a sync that changes nothing, and this
+// wait has outlived its reason, or the machine is too slow for the row. How much of the eviction
+// window a reconnect spent is the gap burstLeavingTheRoomBehind asserts.
+func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string) *docstest.Peer {
+	t.Helper()
+	const within = 10 * time.Second
+	before := storedHead(t, pair, artifactID)
+	dialled := time.Now()
+	editor := pair.a.openEditor(t, artifactID, want)
+	for {
+		head := storedHead(t, pair, artifactID)
+		switch {
+		case head == before+1:
+			t.Logf("the tab's own sync update was stored %v after it dialled the room", time.Since(dialled))
+			return editor
+		case head > before+1:
+			t.Fatalf("the document moved from update %d to %d while a tab connected, and only the tab's own sync update was to be stored: something else wrote it, and the tab's update may still be on its way",
+				before, head)
+		case time.Since(dialled) >= within:
+			t.Fatalf("the tab's own sync update was not stored within %v of its dial: the document still stands at update %d. Either the room no longer stores an update for a sync that changes nothing, which makes this wait unnecessary, or the machine is too slow for this row.",
+				within, before)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // writeThroughRetrying503s makes one edit through the process's own API, repeating a 503 as a
 // client is told to. A write whose own room is failed or reloading is answered
 // 503 DOC_SERVICE_UNAVAILABLE, and the contract is that the caller repeats the same call
-// (skills/dispatch/references/documents.md, and the pull request's contract census). A rig that
+// (`dispatch doc-edit --help`, and the skills/dispatch/SKILL.md opening list). A rig that
 // read that 503 as a failure would report a correct contract as a defect, which one run of this
 // row's first draft did.
 func writeThroughRetrying503s(t *testing.T, p *dispatchProcess, artifactID, find, with string) int {
@@ -782,18 +728,19 @@ const staleRoomEvictInterval = 2 * time.Second
 // whose sum passed it would be evicted on the spot by a notification the interval allowed, which
 // is a different scenario wearing this one's name. This row's first construction went wrong that
 // way once.
-func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID string, beforeReload func()) (*docstest.Peer, time.Time) {
+func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID string) (*docstest.Peer, time.Time) {
 	t.Helper()
-	editor := pair.a.openEditor(t, artifactID, "before\n")
+	editor := openSyncedEditor(t, pair, artifactID, "before\n")
 	writeThroughRetrying503s(t, pair.b, artifactID, "before", "middle")
 	var evicted time.Time
 	select {
 	case <-editor.Ended:
-		// Where the interval's window starts, as closely as this side can see it: Evict closes
-		// the room - which is what ends this socket - and the stamp the interval reads is taken
-		// as that call returns (recordEviction, docs/stale_room.go). This stamp is on the test's
-		// side of that close, so it is the later of the two, and the gap measured at the end of
-		// this helper reads shorter than the window the write really spent, by the close's trip
+		// Where the interval's window starts, as closely as this side can see it: the evictor's
+		// close (closeRoomBehindHead) closes the room - which is what ends this socket - and the
+		// stamp the interval reads is taken as that call returns (recordEviction,
+		// docs/stale_room.go). This stamp is on the test's side of that close, so it is the
+		// later of the two, and the gap measured at the end of this helper reads shorter than
+		// the window the write really spent, by the close's trip
 		// out to this process. The error runs towards under-reading, which makes the assertion
 		// below permissive rather than conservative: a write that landed a hair past the
 		// interval could still read under it. That is acceptable for what this guard is for -
@@ -806,6 +753,20 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	case <-time.After(30 * time.Second):
 		t.Fatalf("the room A held never closed after B's first write:\n%s", pair.a.Output.String())
 	}
+	// The tab reconnects the moment its socket closes, as the dashboard's document provider does
+	// (@hocuspocus/provider's initialDelay is 0, features/doc/connection.ts), so the reloaded room's
+	// load - which arms the settlement the document owes, the settle delay out - lands with the
+	// eviction that starts the window. A reconnect that waited for the eviction's log line first
+	// put up to that poll's 50 ms between the two, so the evictor's re-examination at the window's
+	// end and that settlement met less often than they do for a browser (dispatch://INFRA-396). Its
+	// own sync update is stored before the trailing write (openSyncedEditor), so that write alone
+	// leaves the room behind the head.
+	//
+	// Dialling this early can land in ygo's own window between a close's peer hang-up and its
+	// removal of the room, where the dial is refused: a real browser's reconnect has the same
+	// window, and the row then fails at its open, naming the refusal, rather than passing on
+	// something it did not measure.
+	reconnected := openSyncedEditor(t, pair, artifactID, "middle\n")
 	// The eviction's own line is written after the room has closed, so it is waited for rather
 	// than read the moment the socket went.
 	pair.a.waitForLog(t, 10*time.Second,
@@ -813,10 +774,6 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	if evictions := evictionsOf(pair.a, artifactID); evictions != 1 {
 		t.Fatalf("want one eviction after the first write, got %d", evictions)
 	}
-	if beforeReload != nil {
-		beforeReload()
-	}
-	reconnected := pair.a.openEditor(t, artifactID, "middle\n")
 	wrote := time.Now()
 	writeThroughRetrying503s(t, pair.b, artifactID, "middle", "after")
 	// Measured to the write's own answer, not to the moment it was begun: the notification is
@@ -855,13 +812,14 @@ func requireTheRoomClosed(t *testing.T, p *dispatchProcess, editor *docstest.Pee
 }
 
 // requireTheSecondEviction is what credits the close above to the window: editor.Ended says the
-// socket went, not who ended it, and both rows below have another path that ends it - the
-// settlement rescue's failRoomLocked for the room that owes one, an unload for either - so the
-// close is the window's only if the evictor closed that room a second time. The first eviction
-// is asserted in burstLeavingTheRoomBehind, so the count here is two. The line is written after
-// the room has closed, so it is waited for rather than counted the moment the socket went; ten
-// seconds is the budget the eviction's other waits in this file use, and it is spent only by a
-// row that is already failing.
+// socket went, not who ended it, and both rows below have other paths that end it - a browser
+// append the durable gate refused (ErrRoomBehindHead), which fails the room, that settlement's
+// own close of a room the durable gate finds behind the head (reloadRoomBehindHead,
+// docs/service.go), an unload for either - so the close is the window's only if the evictor
+// closed that room a second time. The first eviction is asserted in burstLeavingTheRoomBehind,
+// so the count here is two. The line is written after the room has closed, so it is waited for
+// rather than counted the moment the socket went; ten seconds is the budget the eviction's other
+// waits in this file use, and it is spent only by a row that is already failing.
 func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what string) {
 	t.Helper()
 	const budget = 10 * time.Second
@@ -875,7 +833,7 @@ func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what
 			t.Fatalf("%s: the evictor closed this room %d times, and the burst leaves it exactly two - the first write's and the refused notification's window - so something else wrote this document:\n%v",
 				what, evictions, p.logLines("closed a document room another process's write left behind", "room="+artifactID))
 		case time.Now().After(deadline):
-			t.Fatalf("%s: the room closed but the evictor has closed it %d time(s) in %v, not the two this burst leaves, so what closed it is some other path - the settlement rescue's failRoomLocked, or an unload - and not the window of the notification the interval refused.\nThis room's evictions, then the closes and the head reads that failed:\n%v\n%v\n%v\nThe process's output:\n%s",
+			t.Fatalf("%s: the room closed but the evictor has closed it %d time(s) in %v, not the two this burst leaves, so what closed it is some other path - a browser append the durable gate refused, the owed settlement's close of a room behind the head, or an unload - and not the window of the notification the interval refused.\nThis room's evictions, then the closes and the head reads that failed:\n%v\n%v\n%v\nThe process's output:\n%s",
 				what, evictions, budget,
 				p.logLines("closed a document room another process's write left behind", "room="+artifactID),
 				p.logLines("close a document room another process's write left behind", "room="+artifactID),
@@ -886,12 +844,24 @@ func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what
 	}
 }
 
+// owedSettlementDelay is process A's settle delay in the row below, which holds its owed
+// settlement past the window. That settlement is armed when A's reconnecting browser loads the
+// room, because the document owes one (onLoadDocument), and it is the other path that closes this
+// room: the durable gate refuses it from a room behind the head, and the refusal closes the room
+// (reloadRoomBehindHead, INFRA-218). At the default two seconds it fired 10-50 ms after the
+// window's own close, close enough on a loaded runner to come first, and its close is not the
+// evictor's, so the row failed on requireTheSecondEviction. Ten seconds keeps the settlement clear
+// of the window and of refusedWindowClosesWithin below, so the window is what closes the room
+// whenever the window works, and the settlement is what closes it only when it does not.
+const owedSettlementDelay = 10 * time.Second
+
 // refusedWindowClosesWithin bounds the row below between the two paths that could close its
 // room, since a bound above both would be green on either. The window's own re-examination
 // closes it a little under two seconds after the trailing write - what the write left of the
 // interval, plus the close - which was 1.9486 s in this row's green run here and 1.88 s when it
-// was built. The settlement rescue - three refusals two seconds apart, maxSettleFailures of
-// them, ending in failRoomLocked - took 6.018 s in the control run with the wake unwired.
+// was built. The owed settlement closes it no sooner than owedSettlementDelay after A's reconnect
+// (every later arm restarts its timer), which is before the trailing write, so about ten seconds
+// or more from that write.
 //
 // Both of those figures are taken from the trailing write; this budget is not counted from
 // there. It is spent by requireTheRoomClosed's own time.After, which starts when that helper is
@@ -900,25 +870,34 @@ func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what
 // only labels its log line. That origin is later than wrote by the trailing write's own
 // duration plus that one query, which is inside the 91-164 ms the helper logs for the whole
 // stretch from the first eviction, the write included. So in the terms the two figures above
-// use, the deadline falls at about 4.1 s: some 2.2 s past the window's close and some 1.9 s
-// short of the rescue. This row still goes red when the wake is gone instead of green on the
-// rescue's clock.
+// use, the deadline falls at about 4.1 s: some 2.2 s past the window's close and some 5.9 s
+// short of the settlement's. This row still goes red when the wake is gone instead of green on
+// the settlement's clock.
 const refusedWindowClosesWithin = 4 * time.Second
 
 // The deferred re-examination, in the branch where something else could also have rescued the
 // room. A notification the eviction interval refuses is remembered and re-examined when that
-// room's window ends; here the room also owes a settlement, so the durable gate would fail it in
-// about six seconds anyway - three refusals two seconds apart, maxSettleFailures of them, ending
-// in failRoomLocked. The window is the shorter of the two and is what closes it, which is why
-// this row is bounded below the rescue's own time (refusedWindowClosesWithin) and why the close
-// must be the evictor's second eviction of this room rather than any close at all.
+// room's window ends; here the room also owes a settlement, which the durable gate refuses from
+// a room behind the head, and that refusal closes the room too (reloadRoomBehindHead). A's settle
+// delay (owedSettlementDelay) puts that settlement well after the window, so the window is what
+// closes the room, which is why this row is bounded below the settlement's own time
+// (refusedWindowClosesWithin) and why the close must be the evictor's second eviction of this
+// room rather than any close at all.
 func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
-	pair := startPair(t, nil)
+	pair := newPair(t)
+	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey, SettleDelay: owedSettlementDelay,
+	})
+	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey,
+	})
+	pair.a.waitHealthy(t)
+	pair.b.waitHealthy(t)
 	project := uniqueProjectKey(t, "OWD")
 	pair.a.createProject(t, project, "Owes a settlement")
 	_, artifactID := pair.a.createIssueIn(t, project, "Written in a burst elsewhere", "before")
 
-	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID, nil)
+	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID)
 	if !settlementOwedFor(t, pair, artifactID) {
 		t.Fatalf("this document owes no settlement, so this row is not the branch it is named for")
 	}
@@ -926,12 +905,13 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 }
 
 // The branch the deferred re-examination was built for, and the one nothing else covers: a room
-// no settlement of this process's will ever fail. A settlement is what rescued the room in the
-// row above - refused by the durable gate three times two seconds apart until failRoomLocked -
-// and a reader with the tab open who has typed nothing has no such rescuer, so the window's
-// re-examination is the only path that closes its room, and without it that reader holds text
-// the store replaced for as long as the tab stays open (roomIdleTimeout is how long a room stays
-// resident *after its last peer leaves*, which a room with a browser in it never reaches).
+// no settlement of this process's will ever close. A settlement is what could rescue the room in
+// the row above - refused by the durable gate from a room behind the head, it closes that room
+// (reloadRoomBehindHead) - and a reader with the tab open who has typed nothing has no such
+// rescuer, so the window's re-examination is the only path that closes its room, and without it
+// that reader holds text the store replaced for as long as the tab stays open (roomIdleTimeout is
+// how long a room stays resident *after its last peer leaves*, which a room with a browser in it
+// never reaches).
 //
 // How that room is made, and what the construction is and is not. The document is created and
 // written on B, and A only ever reads it, which removes the rescuer rather than the condition -
@@ -942,9 +922,15 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 // timer-armed path (scheduleSettleLocked), while settleLastPeer - wired as OnLastPeer - settles
 // at once when the last browser leaves whatever timer is armed, retrySettleSoon re-arms at a
 // fixed 10 ms, and a mark's expiry arms its own. What makes the delay enough here is that the
-// close this row measures is Evict, which stops the room's armed settle timer before it closes
-// the room, and that the row asserts afterwards that A wrote no "dispatch: settle document" line
-// for this document - a settlement that fired on any of those paths would be in A's output.
+// close this row measures, the evictor's (closeRoomBehindHead), stops the room's armed settle
+// timer as it reserves the room and arms it again at A's own thirty-minute delay, and that the
+// row then excludes the settlements that could themselves have closed the room: a settlement the
+// durable gate refused from this room behind the head logs a line naming "its settlement found
+// behind the durable head" for every outcome that can close it - only a service stopping, a
+// shutdown's skip and a room already closed or failed log otherwise or not at all, and none of
+// those closes a room - and a failed one logs "dispatch: settle document". A settlement that
+// committed logs neither, and it closes no room either, so the evictor's second close
+// (requireTheSecondEviction) is still what credits the close to the window.
 //
 // The condition itself was tried first and did not hold: B was given a settle delay short enough
 // to clear the pending row before A's reconnect loaded the room, and the row asserted that row
@@ -952,13 +938,13 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 // peer appends as it syncs and arms a settlement of its own. With the wake wired that assertion
 // passed only because the window (1.88 s) beat the settle delay (2 s), which is a vacuous pass;
 // the control with the wake unwired is what exposed it. Hence this shape, and hence the
-// assertion below that no settlement of A's ran, which under a 30-minute delay is a real
-// condition rather than a race the window happens to win.
+// assertion below that A logged no settlement that could have closed this room, which under a
+// 30-minute delay is a real condition rather than a race the window happens to win.
 //
 // Its budget stays at thirty seconds, which already discriminates: with the wake unwired nothing
 // closes this room at all, so no bound is needed to tell the window from a rescuer it has none
 // of.
-func TestTheRefusedNotificationClosesARoomNoSettlementWillFail(t *testing.T) {
+func TestTheRefusedNotificationClosesARoomNoSettlementWillClose(t *testing.T) {
 	pair := newPair(t)
 	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
 		NATSURL: pair.nats, SigningKey: multiprocessSigningKey, SettleDelay: 30 * time.Minute,
@@ -970,14 +956,151 @@ func TestTheRefusedNotificationClosesARoomNoSettlementWillFail(t *testing.T) {
 	pair.b.waitHealthy(t)
 
 	project := uniqueProjectKey(t, "OWN")
-	pair.b.createProject(t, project, "No settlement will fail it")
+	pair.b.createProject(t, project, "No settlement will close it")
 	_, artifactID := pair.b.createIssueIn(t, project, "Open here, typed into never", "before")
 
-	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID, nil)
-	requireTheRoomClosed(t, pair.a, reconnected, artifactID, wrote, 30*time.Second, "no settlement will fail it")
-	if settled := pair.a.logLines("dispatch: settle document", artifactID); len(settled) > 0 {
-		t.Errorf("A settled this room after all, so something other than the window could have closed it:\n%v", settled)
+	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID)
+	requireTheRoomClosed(t, pair.a, reconnected, artifactID, wrote, 30*time.Second, "no settlement will close it")
+	settled := pair.a.logLines("dispatch: settle document", artifactID)
+	settled = append(settled, pair.a.logLines("its settlement found behind the durable head", artifactID)...)
+	if len(settled) > 0 {
+		t.Errorf("A ran a settlement of this room that could have closed it, so something other than the window could have:\n%v", settled)
 	}
+}
+
+// ───── the asks of a closed issue ──────────────────────────────────────────
+
+// A browser connected to B's room writes a decision block into a document of an issue A has just
+// closed. A's close, and the sweep it runs once its rooms are closed, reach only A's rooms
+// (SetIssueClosed), so B's room still takes the write: the block is stored, and the document owes a
+// settlement no process runs while the issue is closed, so the block would read open, with no ask,
+// for as long as the issue stays closed. One repair pass, run as the interval runs it - from
+// another process on the same database, bounded to the documents marked owing a settlement since a
+// moment before the close - gives the issue the close's final sweep: the block reads resolved in
+// the durable document, and in B's room once B has reloaded it.
+func TestTheRepairSweepResolvesADecisionBlockWrittenOnTheOtherProcessAfterTheClose(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "SWP")
+	pair.a.createProject(t, project, "Swept after the close")
+	issueKey, artifactID := pair.a.createIssueIn(t, project, "Closed on A, written on B", "Context")
+
+	editor := pair.b.openEditor(t, artifactID, "Context\n")
+	// The tab's sync and the issue's creation each leave a settlement owed, which B and A settle
+	// within their settle delay; the close is to find the document settled.
+	waitForSettlementOwed(t, pair.database, artifactID, false)
+	var markedSince time.Time
+	if err := pair.database.Pool.QueryRow(context.Background(), `select statement_timestamp()`).Scan(&markedSince); err != nil {
+		t.Fatalf("read the database's clock: %v", err)
+	}
+	pair.a.call(t, http.MethodPatch, "/api/v1/issues/"+issueKey, `{"status":"done"}`, http.StatusOK)
+	if settlementOwed(t, pair.database, artifactID) {
+		t.Fatal("A's close left the document owing a settlement, so this row could not tell B's write from it")
+	}
+
+	const block = ":::ask{#written-on-b urgency=\"low\" multiple=\"false\"}\nWritten on B after the close?\n:::\n"
+	head := storedHead(t, pair, artifactID)
+	appendBlock(t, editor, block)
+	// B stores the tab's update, which marks the document owing a settlement again.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if storedHead(t, pair, artifactID) > head && settlementOwed(t, pair.database, artifactID) &&
+			settlementMarkedAt(t, pair.database, artifactID).After(markedSince) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B never stored its tab's block: stored head %d (was %d), settlement owed %v\nB:\n%s",
+				storedHead(t, pair, artifactID), head, settlementOwed(t, pair.database, artifactID), pair.b.Output.String())
+		}
+	}
+	const written = `:::ask{#written-on-b urgency="low" multiple="false" state="open"}`
+	if text := pair.b.documentText(t, artifactID); !strings.Contains(text, written) {
+		t.Fatalf("B's room does not hold the block its tab wrote:\n%s", text)
+	}
+	if text := durableText(t, pair, artifactID); !strings.Contains(text, written) {
+		t.Fatalf("the durable document does not hold the block B's tab wrote:\n%s", text)
+	}
+
+	logs := captureDefaultLog(t)
+	broker := events.NewBroker()
+	documents := docs.New(docs.Deps{Store: pair.database, Events: broker})
+	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+	repair, err := api.RepairIssueAsks(store.WithTransactionTracking(context.Background()),
+		api.Deps{Store: pair.database, Docs: documents, Events: broker}, &markedSince)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if repair.Swept != 1 || repair.Withdrawn != 0 || repair.Restored != 0 {
+		t.Fatalf("repair = %+v, want the one block B's tab wrote swept", repair)
+	}
+	logged := logs.String()
+	if !slices.ContainsFunc(strings.Split(logged, "\n"), func(line string) bool {
+		return holdsAll(line, `msg="dispatch: repaired the asks of an issue"`, "issue="+issueKey, "swept=1")
+	}) {
+		t.Fatalf("the repair logged no line sweeping one block of %s:\n%s", issueKey, logged)
+	}
+	const resolved = `:::ask{#written-on-b urgency="low" multiple="false" state="resolved"}`
+	if text := durableText(t, pair, artifactID); !strings.Contains(text, resolved) {
+		t.Fatalf("the durable document after the repair:\n%s\nwant it to hold %s", text, resolved)
+	}
+	// The repair's write leaves B's room behind the durable head, which B closes; a reader then
+	// reads the document B loads again.
+	select {
+	case <-editor.Ended:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("B's room never closed behind the repair's write:\nB:\n%s", pair.b.Output.String())
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		text := pair.b.documentText(t, artifactID)
+		if strings.Contains(text, resolved) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B serves the document without the swept block after reloading it:\n%s", text)
+		}
+	}
+}
+
+// appendBlock appends markdown's blocks to the end of the editor's document in one keystroke's
+// transaction, and sends the room the update it made.
+func appendBlock(t *testing.T, editor *docstest.Peer, markdown string) {
+	t.Helper()
+	typed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse %q: %v", markdown, err)
+	}
+	fragment := editor.Doc.GetXmlFragment("prosemirror")
+	var changeErr error
+	if _, err := editor.Send(func(txn *crdt.Transaction) {
+		tree, err := pmdoc.ReadInTransaction(txn, fragment)
+		if err != nil {
+			changeErr = err
+			return
+		}
+		tree.Children = append(tree.Children, typed.Children...)
+		changeErr = pmdoc.Update(txn, fragment, tree)
+	}); err != nil || changeErr != nil {
+		t.Fatalf("the editor's edit: %v %v", err, changeErr)
+	}
+}
+
+// durableText is the document as its stored updates hold it: read by a document service of this
+// test's own, which holds no room of it until this read loads one from the store.
+func durableText(t *testing.T, pair *dispatchPair, artifactID string) string {
+	t.Helper()
+	reader := docs.New(docs.Deps{Store: pair.database})
+	defer func() { _ = reader.Shutdown(context.Background()) }()
+	text, err := reader.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read the durable document %s: %v", artifactID, err)
+	}
+	return text
+}
+
+// captureDefaultLog records what the default logger writes until the test ends.
+func captureDefaultLog(t *testing.T) *storetest.LockedLog {
+	t.Helper()
+	logs := &storetest.LockedLog{}
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
+	return logs
 }
 
 // ───── the leased maintenance loops ────────────────────────────────────────
@@ -1026,11 +1149,12 @@ func requireLeasedOnce(t *testing.T, pair *dispatchPair, lease string) {
 	}
 }
 
-// lockTables holds every table named in exclusive mode in a transaction of the test's own, as a
-// writer that is taking its time would, and rolls it back when the test ends if the test has not.
-// A maintenance pass whose first statement writes one of them waits there, inside its lease, which
-// is the moment the lease is about: both processes' loops firing while one is still in its pass.
-func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
+// lockTables holds every table named in mode (`exclusive`, or `access exclusive`) in a transaction
+// of the test's own, as a writer that is taking its time would, and rolls it back when the test
+// ends if the test has not. A maintenance pass whose first statement writes one of them - or, in
+// access exclusive mode, reads one - waits there, inside its lease, which is the moment the lease
+// is about: both processes' loops firing while one is still in its pass.
+func lockTables(t *testing.T, database *store.Store, mode string, tables ...string) pgx.Tx {
 	t.Helper()
 	ctx := context.Background()
 	gate, err := database.Pool.Begin(ctx)
@@ -1039,7 +1163,7 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 	}
 	t.Cleanup(func() { _ = gate.Rollback(context.Background()) })
 	for _, table := range tables {
-		if _, err := gate.Exec(ctx, "lock table "+table+" in exclusive mode"); err != nil {
+		if _, err := gate.Exec(ctx, "lock table "+table+" in "+mode+" mode"); err != nil {
 			t.Fatalf("hold %s: %v", table, err)
 		}
 	}
@@ -1053,19 +1177,38 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Three of the six leases are observable inside a window a test can wait out:
-// reference-excerpts and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other three
-// are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
-// architecture-import's and delivery-reconcile's first pass is jittered uniformly over
-// SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
-// ever overlap is a coin toss no test should turn into a flake.
+// Five of the eleven leases are observable inside a window a test can wait out:
+// reference-excerpts, block-index, search-term-stats and webhook-redelivery, whose first pass is
+// immediate, and suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in.
+// The other six are not, and this row says so rather than pretending: document-compaction's
+// interval is 24 h; issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in,
+// the boot's repair taking no lease; architecture-import's and delivery-reconcile's first pass is
+// jittered uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own,
+// so whether their passes ever overlap is a coin toss no test should turn into a flake;
+// edit-notices' period is five seconds, so this window holds many of its periods, each served once
+// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for); and
+// server-processes' prune is one delete on server_processes, the table every process's heartbeat
+// writes every five seconds, so a lock that held the prune would hold the registry itself.
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
+	// The term-statistics refresh writes nothing for a database with no project, so one exists
+	// before either process starts.
+	if _, err := pair.database.Pool.Exec(context.Background(), `insert into projects (key, name) values ('LEASE', 'Lease')`); err != nil {
+		t.Fatalf("create the project the term-statistics refresh rebuilds: %v", err)
+	}
 	// refs is where the reference-excerpt reconciliation's first statement writes
-	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
-	gate := lockTables(t, pair.database, "refs", "write_suggestions")
+	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does, and
+	// search_term_totals where the term-statistics refresh's first write for a project goes (its
+	// first statement only reads projects, which an exclusive lock does not hold).
+	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions", "search_term_totals")
+	// The block-index reconciliation's first statements read document_block_versions and
+	// block_grammar_owed, which only access exclusive mode holds back. They are held in a gate of
+	// their own, released as soon as the other process has found the lease held: that pass's
+	// interval is 30 s, so released with the gate above - a minute in, when the suggestion sweep's
+	// first tick lands - the other process's own next tick could land beside the release and make
+	// the next period's pass before this row counts the first.
+	blockGate := lockTables(t, pair.database, "access exclusive", "document_block_versions", "block_grammar_owed")
 	pair.start(t, githubAppEnv(t, fake.URL()))
 
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 60*time.Second); waiting < 1 {
@@ -1076,6 +1219,24 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	if ran := countLease(pair.a, leaseRan, "reference-excerpts") + countLease(pair.b, leaseRan, "reference-excerpts"); ran != 0 {
 		t.Errorf("a reference-excerpt pass reported running %d times while the one holding the lease is still inside the refs lock", ran)
 	}
+	waitForLease(t, pair, leaseSkipped, "search-term-stats", 60*time.Second)
+	if ran := countLease(pair.a, leaseRan, "search-term-stats") + countLease(pair.b, leaseRan, "search-term-stats"); ran != 0 {
+		t.Errorf("a term-statistics pass reported running %d times while the one holding the lease is still inside the search_term_totals lock", ran)
+	}
+
+	if waiting := storetest.WaitForLockWaiters(t, blockGate, 1, 60*time.Second); waiting < 1 {
+		t.Fatalf("no block-index pass reached the document_block_versions lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
+			pair.a.Output.String(), pair.b.Output.String())
+	}
+	waitForLease(t, pair, leaseSkipped, "block-index", 60*time.Second)
+	if ran := countLease(pair.a, leaseRan, "block-index") + countLease(pair.b, leaseRan, "block-index"); ran != 0 {
+		t.Errorf("a block-index pass reported running %d times while the one holding the lease is still inside the document_block_versions lock", ran)
+	}
+	if err := blockGate.Rollback(context.Background()); err != nil {
+		t.Fatalf("release the tables the block-index pass is waiting on: %v", err)
+	}
+	waitForLease(t, pair, leaseRan, "block-index", 60*time.Second)
+	requireLeasedOnce(t, pair, "block-index")
 
 	// The webhook redelivery sweep's first pass is held in its first GitHub call instead: it
 	// lists the App webhook's failed deliveries before it writes anything.
@@ -1092,12 +1253,16 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	}
 	waitForLease(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
 	waitForLease(t, pair, leaseRan, "suggestion-outcomes", 60*time.Second)
+	waitForLease(t, pair, leaseRan, "search-term-stats", 60*time.Second)
 	requireLeasedOnce(t, pair, "reference-excerpts")
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
+	requireLeasedOnce(t, pair, "search-term-stats")
 	for _, unobserved := range []struct{ lease, why string }{
-		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
+		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
+		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
+		{"edit-notices", "its period is 5 s, so the window holds many periods, each served once"},
 	} {
 		if ran := countLease(pair.a, leaseRan, unobserved.lease) + countLease(pair.b, leaseRan, unobserved.lease); ran > 0 {
 			t.Logf("%s ran %d times in the window, which this row does not hold to a count: %s",
@@ -1109,7 +1274,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 }
 
 // A rolling update starts the second process minutes after the first, and at a steady two
-// replicas each process keeps a ticker of its own: two ticks of one leased loop almost never
+// replicas each process keeps a timer of its own: two ticks of one leased loop almost never
 // overlap, because a pass is seconds and its interval is minutes. This row is that shape - the
 // second process is started only after the first has finished a pass and given the lease back -
 // and it is where "runs once overall" has to hold, not only while a pass is in flight.
@@ -1120,14 +1285,14 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 // list calls for one result", redeliver/sweep.go). So the GitHub fake's count of those listings
 // is what one sweep window cost the installation's rate limit, whichever process paid it.
 //
-// A period is a bucket of the database's clock (duty.Exclusive, migration 0115), so both
+// A period is a bucket of the tick's due time (duty.Exclusive, migration 0115), so both
 // processes are started inside one bucket on purpose: a second process whose first tick lands
 // past a bucket boundary is entitled to sweep, and this row is about the one that lands inside
 // the bucket its peer has already served. waitOutABucketBoundary is what keeps which of the two
 // this run gets from being luck.
 func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 	pair := newPair(t)
-	waitOutABucketBoundary(t, pair, redeliver.Interval)
+	waitOutABucketBoundary(t, redeliver.Interval)
 	fake := startGitHubFake(t)
 	// Nothing is held here: this row is about two passes that never meet, so the first one must
 	// finish and give the lease back before the second process exists.
@@ -1166,20 +1331,16 @@ func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 }
 
 // waitOutABucketBoundary returns with enough of period's current bucket left for a row to start
-// both processes and read their first ticks inside it. A period is floor(epoch / period) on the
-// database's clock, so a row that straddles a boundary watches a second process legitimately
-// sweep rather than skip; this waits the boundary out instead, on the same clock the gate reads,
-// and waits at most the margin it needs.
-func waitOutABucketBoundary(t *testing.T, pair *dispatchPair, period time.Duration) {
+// both processes and read their first ticks inside it. A period is floor(epoch / period) of a
+// tick's due time, on the clock of the process that ticks, so a row that straddles a boundary
+// watches a second process legitimately sweep rather than skip; this waits the boundary out
+// instead, on the clock both processes share with this test (one host), and waits at most the
+// margin it needs.
+func waitOutABucketBoundary(t *testing.T, period time.Duration) {
 	t.Helper()
 	// What one run of the row needs inside the bucket: two process starts and their first ticks.
 	const margin = 45 * time.Second
-	var left time.Duration
-	if err := pair.database.Pool.QueryRow(context.Background(),
-		`select make_interval(secs => $1 - mod(extract(epoch from now()), $1))`, period.Seconds(),
-	).Scan(&left); err != nil {
-		t.Fatalf("read how much of the period's bucket is left: %v", err)
-	}
+	left := period - time.Duration(time.Now().UnixNano()%period.Nanoseconds())
 	if left >= margin {
 		return
 	}
@@ -1187,25 +1348,12 @@ func waitOutABucketBoundary(t *testing.T, pair *dispatchPair, period time.Durati
 	time.Sleep(left + time.Second)
 }
 
-// ───── one signing key across the processes ────────────────────────────────
+// ───── a sign-in across the processes ───────────────────────────────────────
 
-// The sign-in client the fake issuer serves, and the group it admits.
-const (
-	cookieClientID     = "dispatch-multiprocess-client"
-	cookieClientSecret = "dispatch-multiprocess-secret"
-	cookieGroup        = "dispatch-members"
-	cookiePerson       = "alice@example.test"
-)
-
-// A person signs in on one process and their next request lands on the other, which is what a
-// load balancer in front of two tasks does on every page load. The session itself is in Postgres,
-// which both read; what each process needs of its own is DISPATCH_SIGNING_KEY, and nothing in
-// Dispatch can tell a cookie signed with another key from a session that has ended - the third
-// process here, carrying a key of its own, answers the same 401 either way.
-func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *testing.T) {
-	issuer := oidctest.New(t)
-	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
-	signIn := map[string]string{
+// cookieSignIn is the environment that has a process sign people in through issuer's code flow
+// under the group rule, on a plain-HTTP cookie, as the multiprocess sign-in rows run it.
+func cookieSignIn(issuer *oidctest.Issuer) map[string]string {
+	return map[string]string{
 		"DISPATCH_IDENTITY":             "cookie",
 		"DISPATCH_SIGNIN_ISSUER":        issuer.URL(),
 		"DISPATCH_SIGNIN_CLIENT_ID":     cookieClientID,
@@ -1213,14 +1361,96 @@ func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *
 		"DISPATCH_SIGNIN_GROUP":         cookieGroup,
 		"DISPATCH_INSECURE_COOKIE":      "1",
 	}
-	pair := newPair(t)
-	pair.start(t, signIn)
-	// The negative control: a third process on the same database and the same sign-in issuer,
-	// whose signing key is its own, as a deployment that rolled one task with a new secret has.
-	odd := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
-		NATSURL: pair.nats, SigningKey: "a-key-of-its-own", Env: signIn,
+}
+
+// multiprocessServerURL is the one public origin a pair behind a load balancer is reached at,
+// DISPATCH_SERVER_URL on both: each process builds the sign-in's redirect_uri from it, so the
+// process that exchanges the code names the redirect_uri the process that started the sign-in
+// sent the issuer, which the issuer requires. Without it each process would build its own from
+// the request's Host, and the issuer would refuse the exchange on the other process. Nothing here
+// resolves the name: the test carries every redirect itself.
+const multiprocessServerURL = "http://dispatch.multiprocess.test"
+
+// A person starts signing in on A and the issuer's redirect back lands on B, which is what a load
+// balancer does when it sends the browser's two requests to different tasks. The sign-in in
+// flight rides the browser's state cookie, signed under the pair's key, so B completes it: the
+// callback answers 302 to the page the sign-in started from, with a session cookie, and both
+// processes name the person on that cookie. Before INFRA-555 the state was held by the process
+// that started the sign-in, and B answered 400 "invalid or expired state".
+func TestASignInStartedOnOneProcessCompletesOnTheOther(t *testing.T) {
+	issuer := oidctest.New(t)
+	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
+	env := cookieSignIn(issuer)
+	env["DISPATCH_SERVER_URL"] = multiprocessServerURL
+	pair := startPair(t, env)
+	issuer.SignInAs(map[string]any{
+		"sub":              "alice-subject",
+		"cognito:username": "ExampleIdP_" + cookiePerson,
+		"cognito:groups":   []string{cookieGroup},
+		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
 	})
-	odd.waitHealthy(t)
+
+	const next = "/issues/XPS-1?tab=spec"
+	started := browserGet(t, pair.a.url("/auth/start?next="+url.QueryEscape(next)), nil)
+	_ = started.Body.Close()
+	if started.StatusCode != http.StatusFound {
+		t.Fatalf("/auth/start on A answered %d, want a redirect to the issuer:\n%s", started.StatusCode, pair.a.Output.String())
+	}
+	var state *http.Cookie
+	for _, cookie := range started.Cookies() {
+		if cookie.Name == "dispatch_oauth_state" && cookie.Value != "" {
+			state = cookie
+		}
+	}
+	if state == nil {
+		t.Fatalf("/auth/start on A set no sign-in state cookie: %v", started.Cookies())
+	}
+	authorize, err := url.Parse(started.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse the authorization URL A answered: %v", err)
+	}
+	if got, want := authorize.Query().Get("redirect_uri"), multiprocessServerURL+"/auth/callback"; got != want {
+		t.Fatalf("A sent the issuer redirect_uri %q, want %q, the pair's public origin", got, want)
+	}
+	code, returned := issuer.Authorize(t, authorize.String())
+
+	callback := browserGet(t, pair.b.url("/auth/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(returned)), state)
+	body, _ := io.ReadAll(callback.Body)
+	_ = callback.Body.Close()
+	if callback.StatusCode != http.StatusFound {
+		t.Fatalf("/auth/callback on B answered %d, want 302: %s\nB:\n%s", callback.StatusCode, body, pair.b.Output.String())
+	}
+	if location := callback.Header.Get("Location"); location != next {
+		t.Errorf("/auth/callback on B redirected to %q, want the page the sign-in started from, %q", location, next)
+	}
+	var session *http.Cookie
+	for _, cookie := range callback.Cookies() {
+		if cookie.Name == "dsession" && cookie.Value != "" {
+			session = cookie
+		}
+	}
+	if session == nil {
+		t.Fatalf("/auth/callback on B set no session cookie: %v", callback.Cookies())
+	}
+	for _, process := range []*dispatchProcess{pair.a, pair.b} {
+		if answer, status := whoami(t, process, session); status != http.StatusOK || !strings.Contains(answer, cookiePerson) {
+			t.Errorf("%s answered whoami %d %s, want 200 naming %s", pair.name(process), status, answer, cookiePerson)
+		}
+	}
+}
+
+// ───── one signing key across the processes ────────────────────────────────
+
+// A person signs in on one process and their next request lands on the other, which is what a
+// load balancer in front of two tasks does on every page load. The session itself is in Postgres,
+// which both read; what each process needs of its own is DISPATCH_SIGNING_KEY. A process carrying
+// a key no live peer shares refuses to start (TestAProcessWhoseKeySetALivePeerDoesNotShareRefusesToStart),
+// so no third process with a key of its own serves beside these two.
+func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *testing.T) {
+	issuer := oidctest.New(t)
+	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
+	pair := newPair(t)
+	pair.start(t, cookieSignIn(issuer))
 
 	session := signInThrough(t, pair.a, issuer)
 	for _, target := range []struct {
@@ -1230,7 +1460,6 @@ func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *
 	}{
 		{"the process it was minted on", pair.a, http.StatusOK},
 		{"the other process of the pair", pair.b, http.StatusOK},
-		{"a process carrying a key of its own", odd, http.StatusUnauthorized},
 	} {
 		answer, status := whoami(t, target.process, session)
 		if status != target.status {
@@ -1243,68 +1472,602 @@ func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *
 	}
 }
 
-// signInThrough signs cookiePerson in on the process, the whole code flow a browser walks:
-// /auth/start for the issuer's authorization URL and the state cookie, the issuer's own sign-in,
-// then /auth/callback, which answers the session cookie. It returns that cookie.
-func signInThrough(t *testing.T, p *dispatchProcess, issuer *oidctest.Issuer) *http.Cookie {
-	t.Helper()
-	issuer.SignInAs(map[string]any{
-		"sub":              "alice-subject",
-		"cognito:username": "ExampleIdP_" + cookiePerson,
-		"cognito:groups":   []string{cookieGroup},
-		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
+// The registry of live server processes refuses a process whose signing key set a live peer does
+// not share both ways (processes.Register): with a pair live under one key, a process carrying a
+// key of its own - a task rolled with a changed secret - and one with no DISPATCH_SIGNING_KEY,
+// which signs with a key it minted in its own data dir, each exit 1 with the refusal and never
+// answer /healthz, since each would sign people out of the pair or be signed out by it. Each
+// exits once it has waited a live window and a heartbeat for the pair to stop heartbeating, which
+// the pair never does. A process given the pair's key first and another second, the first step of
+// a rotation, starts beside them.
+func TestAProcessWhoseKeySetALivePeerDoesNotShareRefusesToStart(t *testing.T) {
+	pair := startPair(t, nil)
+	for _, refused := range []struct{ name, key string }{
+		{"a process carrying a key of its own", "a-key-of-its-own"},
+		{"a process with no key, which minted one in its data dir", ""},
+	} {
+		process := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: refused.key})
+		requireRefusedToStart(t, process, refused.name)
+	}
+
+	rotating := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey + " a-key-of-its-own",
 	})
-	started := browserGet(t, p.url("/auth/start"), nil)
-	defer started.Body.Close()
-	if started.StatusCode != http.StatusFound {
-		t.Fatalf("/auth/start answered %d, want a redirect to the issuer", started.StatusCode)
+	rotating.waitHealthy(t)
+	var registered int
+	if err := pair.database.Pool.QueryRow(context.Background(), `select count(*) from server_processes`).Scan(&registered); err != nil {
+		t.Fatalf("count the registered server processes: %v", err)
 	}
-	var state *http.Cookie
-	for _, cookie := range started.Cookies() {
-		if cookie.Name == "dispatch_oauth_state" {
-			state = cookie
+	if registered != 3 {
+		t.Errorf("%d server processes registered, want the pair and the process given the pair's key first", registered)
+	}
+}
+
+// A process whose heartbeat stops for longer than the registry's live window drops out of Live
+// while it still runs: a pod frozen by its node, or one cut from the database for that long. A
+// process started meanwhile with a key set the first does not share is not refused, since no live
+// row disagrees with it. Once the first process resumes, the two must not both serve: each refuses
+// the cookies the other mints, which signs people out of whichever one their next request reaches,
+// the very thing the boot refusal is there to prevent. Whichever of the two stops - exits, or stops
+// answering /healthz 200 so the Service takes it out - the pair must not stay serving side by side.
+func TestAProcessThatResumesBesideAPeerWhoseKeySetItDoesNotShareDoesNotServeBesideIt(t *testing.T) {
+	pair := newPair(t)
+	frozen := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey, OwnProcessGroup: true})
+	frozen.waitHealthy(t)
+	if err := frozen.Cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatalf("freeze the first process: %v", err)
+	}
+	resumed := false
+	t.Cleanup(func() {
+		if !resumed {
+			_ = frozen.Cmd.Process.Signal(syscall.SIGCONT)
+		}
+	})
+	time.Sleep(processes.LiveWindow + 2*time.Second)
+
+	other := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: "a-key-of-its-own"})
+	other.waitHealthy(t)
+	if err := frozen.Cmd.Process.Signal(syscall.SIGCONT); err != nil {
+		t.Fatalf("resume the first process: %v", err)
+	}
+	resumed = true
+
+	serving := func(p *dispatchProcess) bool {
+		select {
+		case <-p.Exited:
+			return false
+		default:
+		}
+		response, err := (&http.Client{Timeout: time.Second}).Get(p.url("/healthz"))
+		if err != nil {
+			return false
+		}
+		_ = response.Body.Close()
+		return response.StatusCode == http.StatusOK
+	}
+	deadline := time.Now().Add(3*processes.HeartbeatInterval + 5*time.Second)
+	for time.Now().Before(deadline) {
+		if !serving(frozen) || !serving(other) {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("a process that resumed beside a live peer whose key set it does not share still serves beside it %s after it resumed, and so does the peer: each refuses the other's cookies\nresumed process:\n%s\npeer:\n%s",
+		3*processes.HeartbeatInterval+5*time.Second, frozen.Output.String(), other.Output.String())
+}
+
+// requireRefusedToStart waits up to a minute for the process to exit, asking its /healthz all the
+// while, and requires that it exited 1 with the registry's refusal, never having answered /healthz
+// nor logged that it serves. A refused process waits processes.LiveWindow and one
+// processes.HeartbeatInterval (20 s) for its refusers to lapse before it exits, well inside the
+// minute.
+func requireRefusedToStart(t *testing.T, p *dispatchProcess, name string) {
+	t.Helper()
+	client := &http.Client{Timeout: time.Second}
+	deadline := time.Now().Add(time.Minute)
+	answered := 0
+	for exited := false; !exited; {
+		select {
+		case <-p.Exited:
+			exited = true
+			continue
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was still running a minute after it started:\n%s", name, p.Output.String())
+		}
+		if response, err := client.Get(p.url("/healthz")); err == nil {
+			_ = response.Body.Close()
+			answered++
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	output := p.Output.String()
+	if code := p.Cmd.ProcessState.ExitCode(); code != 1 {
+		t.Errorf("%s exited %d, want 1:\n%s", name, code, output)
+	}
+	if answered > 0 {
+		t.Errorf("%s answered /healthz %d times before it exited", name, answered)
+	}
+	if !p.logged(`msg="dispatch: register this server process"`, "signing key set does not match a live server process", "DISPATCH_SIGNING_KEY") {
+		t.Errorf("%s did not log the registry's refusal:\n%s", name, output)
+	}
+	if p.logged(`msg="dispatch: listening"`) {
+		t.Errorf("%s logged that it serves:\n%s", name, output)
+	}
+}
+
+// The two keys TestAKeyRotationKeepsPeopleSignedInAcrossTwoProcesses rotates between: K0, the key
+// the pair ran under, and K1, the key it moves to.
+const (
+	rotationK0 = "multiprocess-rotation-k0"
+	rotationK1 = "multiprocess-rotation-k1"
+)
+
+// A rotation halfway rolled: A carries the new key first ("K1 K0") while B still signs with the
+// old one ("K0 K1"), each holding both, which the registry admits. Nobody is signed out on either
+// process. A person signed in on B holds a cookie signed and a refresh token sealed under K0, and
+// A answers that cookie. Once the confirmation lapses, A's request refreshes it, opening the K0
+// seal and sealing the token again under K1; once it lapses again, B's request refreshes it,
+// which opens that K1 seal. A cookie minted on A, under K1, is answered on B. Before INFRA-555 a
+// DISPATCH_SIGNING_KEY of two keys was one key, so each process refused the other's cookie.
+func TestAKeyRotationKeepsPeopleSignedInAcrossTwoProcesses(t *testing.T) {
+	issuer := oidctest.New(t)
+	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
+	pair := newPair(t)
+	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: rotationK1 + " " + rotationK0, Env: cookieSignIn(issuer),
+	})
+	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: rotationK0 + " " + rotationK1, Env: cookieSignIn(issuer),
+	})
+	pair.a.waitHealthy(t)
+	pair.b.waitHealthy(t)
+
+	signedInOnB := signInThrough(t, pair.b, issuer)
+	requireWhoami(t, pair, pair.a, signedInOnB, "the cookie B minted under K0")
+	requireSealedUnder(t, pair.database, rotationK0, "the refresh token B's sign-in stored")
+
+	lapseConfirmation(t, pair.database)
+	refreshes := issuer.Refreshes()
+	requireWhoami(t, pair, pair.a, signedInOnB, "the cookie B minted, once the confirmation lapsed")
+	if got := issuer.Refreshes(); got != refreshes+1 {
+		t.Fatalf("A answered a lapsed confirmation with %d refreshes at the issuer, want 1", got-refreshes)
+	}
+	requireSealedUnder(t, pair.database, rotationK1, "the refresh token after A's refresh")
+
+	lapseConfirmation(t, pair.database)
+	refreshes = issuer.Refreshes()
+	requireWhoami(t, pair, pair.b, signedInOnB, "its own cookie, once the confirmation A renewed lapsed")
+	if got := issuer.Refreshes(); got != refreshes+1 {
+		t.Fatalf("B answered a lapsed confirmation with %d refreshes at the issuer, want 1: it did not refresh with the token A sealed", got-refreshes)
+	}
+	requireSealedUnder(t, pair.database, rotationK0, "the refresh token after B's refresh")
+
+	signedInOnA := signInThrough(t, pair.a, issuer)
+	requireWhoami(t, pair, pair.b, signedInOnA, "the cookie A minted under K1")
+}
+
+// requireWhoami requires that p answers /auth/whoami 200 naming cookiePerson on session.
+func requireWhoami(t *testing.T, pair *dispatchPair, p *dispatchProcess, session *http.Cookie, what string) {
+	t.Helper()
+	if answer, status := whoami(t, p, session); status != http.StatusOK || !strings.Contains(answer, cookiePerson) {
+		t.Fatalf("%s answered whoami on %s with %d %s, want 200 naming %s:\n%s",
+			pair.name(p), what, status, answer, cookiePerson, p.Output.String())
+	}
+}
+
+// lapseConfirmation dates cookiePerson's last confirmation two hours back, past the hour a
+// confirmation stands, so the next request either process answers for them refreshes it.
+func lapseConfirmation(t *testing.T, database *store.Store) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(),
+		`update people set confirmed_at = now() - interval '2 hours' where email = $1`, cookiePerson); err != nil {
+		t.Fatalf("date the confirmation two hours back: %v", err)
+	}
+}
+
+// requireSealedUnder requires that the refresh token people holds for cookiePerson opens under
+// signingKey alone. It opens the value as the v1 seal format is pinned to stay (an AES-256-GCM key
+// derived from the signing key with HKDF-SHA256, a random nonce leading the ciphertext, the email
+// as additional data), so it tells which key of the two sealed it, which a process holding both
+// cannot show.
+func requireSealedUnder(t *testing.T, database *store.Store, signingKey, what string) {
+	t.Helper()
+	var sealed string
+	if err := database.Pool.QueryRow(context.Background(),
+		`select refresh_token from people where email = $1`, cookiePerson).Scan(&sealed); err != nil {
+		t.Fatalf("read %s: %v", what, err)
+	}
+	encoded, ok := strings.CutPrefix(sealed, "v1:")
+	if !ok {
+		t.Fatalf("%s is not in the v1 sealed format", what)
+	}
+	ciphertext, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("%s does not decode: %v", what, err)
+	}
+	key, err := hkdf.Key(sha256.New, []byte(signingKey), nil, "dispatch people.refresh_token v1", 32)
+	if err != nil {
+		t.Fatalf("derive the refresh-token key: %v", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("refresh-token cipher: %v", err)
+	}
+	aead, err := cipher.NewGCMWithRandomNonce(block)
+	if err != nil {
+		t.Fatalf("refresh-token AEAD: %v", err)
+	}
+	if _, err := aead.Open(nil, nil, ciphertext, []byte(cookiePerson)); err != nil {
+		t.Fatalf("%s does not open under %s alone", what, signingKey)
+	}
+}
+
+// ───── the fleet's build ────────────────────────────────────────────────────
+
+// The two builds TestTwoProcessesAnnounceTheirBuildOnce rolls between, stamped into its binaries
+// as the image build stamps a commit.
+const (
+	fleetBuildC1 = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+	fleetBuildC2 = "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+)
+
+// fleetQuiet is how long a step that must announce nothing is watched: two passes of the
+// announcer (startup.Interval, five seconds) and a second more, so every live process has passed
+// at least once since the step and a pass that would announce has had its chance to.
+const fleetQuiet = 2*5*time.Second + time.Second
+
+// server.started goes out once each time every live process comes to serve one build, never per
+// process start: two processes stamped C1 put one envelope on the stream; B restarted on C1 puts
+// none; B replaced by a C2 binary while A still runs C1 is a roll halfway through and puts none;
+// A replaced by C2 completes it and puts one for C2. Each process's /healthz fleet_commit follows
+// the announcements, whichever build that process itself runs.
+func TestTwoProcessesAnnounceTheirBuildOnce(t *testing.T) {
+	pair := newPair(t)
+	c1 := cmdtest.BuildStamped(t, "envoy-dispatch-c1", fleetBuildC1)
+	c2 := cmdtest.BuildStamped(t, "envoy-dispatch-c2", fleetBuildC2)
+	start := func(binary string) *dispatchProcess {
+		t.Helper()
+		process := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+			NATSURL: pair.nats, SigningKey: multiprocessSigningKey, Binary: binary,
+		})
+		process.waitHealthy(t)
+		return process
+	}
+	replace := func(process *dispatchProcess, name, binary string) *dispatchProcess {
+		t.Helper()
+		process.Terminate(t)
+		process.WaitExit(t, "SIGTERM to "+name)
+		return start(binary)
+	}
+	conn := testnats.Connect(t, pair.nats)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	head := streamHead(t, js)
+	announced := func() []contracts.Envelope {
+		var starts []contracts.Envelope
+		for _, item := range readStreamFrom(t, js, head) {
+			if item.Topic == startup.Subject {
+				starts = append(starts, item)
+			}
+		}
+		return starts
+	}
+
+	a, b := start(c1), start(c1)
+	waitForAnnouncements(t, announced, fleetBuildC1)
+	waitForFleetCommit(t, fleetBuildC1, a, b)
+
+	b = replace(b, "B", c1)
+	time.Sleep(fleetQuiet)
+	requireAnnouncements(t, announced(), fleetBuildC1)
+
+	b = replace(b, "B", c2)
+	time.Sleep(fleetQuiet)
+	requireAnnouncements(t, announced(), fleetBuildC1)
+	waitForFleetCommit(t, fleetBuildC1, a, b)
+
+	a = replace(a, "A", c2)
+	waitForAnnouncements(t, announced, fleetBuildC1, fleetBuildC2)
+	waitForFleetCommit(t, fleetBuildC2, a, b)
+	time.Sleep(fleetQuiet)
+	requireAnnouncements(t, announced(), fleetBuildC1, fleetBuildC2)
+}
+
+// waitForAnnouncements waits up to thirty seconds for the stream to hold as many server.started
+// envelopes as commits names, then requires them to be those (requireAnnouncements).
+func waitForAnnouncements(t *testing.T, announced func() []contracts.Envelope, commits ...string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for len(announced()) < len(commits) && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
+	requireAnnouncements(t, announced(), commits...)
+}
+
+// requireAnnouncements requires got to be one server.started envelope per commit of commits, in
+// that order, each from Dispatch, naming its commit in its payload and in its event id.
+func requireAnnouncements(t *testing.T, got []contracts.Envelope, commits ...string) {
+	t.Helper()
+	if len(got) != len(commits) {
+		t.Fatalf("the stream holds %d server.started envelopes, want %d naming %v: %+v", len(got), len(commits), commits, got)
+	}
+	for i, item := range got {
+		var payload startup.Payload
+		if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
+			t.Fatalf("decode server.started payload %q: %v", item.Payload, err)
+		}
+		if item.Source != startup.Source || payload.Commit != commits[i] ||
+			!strings.HasPrefix(item.EventID, "dispatch-server-started-"+commits[i]+"-") {
+			t.Fatalf("server.started envelope %d = %+v, want one from dispatch announcing %s", i, item, commits[i])
 		}
 	}
-	if state == nil {
-		t.Fatalf("/auth/start set no sign-in state cookie: %v", started.Cookies())
-	}
-	code, returned := issuer.Authorize(t, started.Header.Get("Location"))
-	callback := browserGet(t, p.url("/auth/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(returned)), state)
-	defer callback.Body.Close()
-	for _, cookie := range callback.Cookies() {
-		if cookie.Name == "dsession" && cookie.Value != "" {
-			return cookie
+}
+
+// waitForFleetCommit waits up to fleetQuiet for every one of processes to report want as its
+// /healthz fleet_commit: each refreshes it on its announcer's pass.
+func waitForFleetCommit(t *testing.T, want string, processes ...*dispatchProcess) {
+	t.Helper()
+	deadline := time.Now().Add(fleetQuiet)
+	for _, process := range processes {
+		for {
+			response, err := http.Get(process.url("/healthz"))
+			if err != nil {
+				t.Fatalf("GET /healthz: %v", err)
+			}
+			var health struct {
+				FleetCommit *string `json:"fleet_commit"`
+			}
+			err = json.NewDecoder(response.Body).Decode(&health)
+			_ = response.Body.Close()
+			if err != nil {
+				t.Fatalf("decode /healthz: %v", err)
+			}
+			if health.FleetCommit != nil && *health.FleetCommit == want {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("/healthz fleet_commit = %v, want %s", health.FleetCommit, want)
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
 	}
-	body, _ := io.ReadAll(callback.Body)
-	t.Fatalf("/auth/callback answered %d and set no session cookie: %s", callback.StatusCode, body)
+}
+
+// ───── two dashboard builds ─────────────────────────────────────────────────
+
+// dashboardBuild is a web dist a test wrote: its directory and every file below its assets
+// directory, by URL path.
+type dashboardBuild struct {
+	dir    string
+	assets map[string][]byte
+}
+
+// writeDashboardBuild writes a dist as Vite does, for build name: an index.html naming its own
+// entry chunk, the entry, chunks of the sizes the dashboard's own run to (its largest is 1,747,955
+// bytes) whose names and bytes are this build's alone, and a chunk of the same name and bytes in
+// every build, as yjs and the stylesheet are across two builds of one source.
+func writeDashboardBuild(t *testing.T, name string) dashboardBuild {
+	t.Helper()
+	build := dashboardBuild{dir: t.TempDir(), assets: map[string][]byte{}}
+	entry := "/assets/index-" + name + ".js"
+	build.assets[entry] = []byte("import './chunk-" + name + "-0.js'; console.log('" + name + "')")
+	for i, size := range []int{1_747_955, 420_000, 96_000, 12_000, 2_000, 300, 1} {
+		build.assets[fmt.Sprintf("/assets/chunk-%s-%d.js", name, i)] = bytes.Repeat([]byte(name), size)
+	}
+	build.assets["/assets/fonts/inter-"+name+".woff2"] = []byte{0x77, 0x4f, 0x46, 0x32, 0x00, byte(len(name))}
+	build.assets["/assets/yjs-shared.js"] = []byte("export const yjs = 'the same in every build'")
+	files := map[string][]byte{"index.html": []byte(`<!doctype html><html><head><script type="module" crossorigin src="` + entry + `"></script></head><body><div id="root"></div></body></html>`)}
+	for path, content := range build.assets {
+		files[strings.TrimPrefix(path, "/")] = content
+	}
+	for name, content := range files {
+		file := filepath.Join(build.dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return build
+}
+
+// startOnBuild starts a Dispatch process serving build on database, with no NATS: the dashboard's
+// assets need none. It carries multiprocessSigningKey, as every process beside a live peer must.
+func startOnBuild(t *testing.T, database string, build dashboardBuild) *dispatchProcess {
+	t.Helper()
+	process := startDispatchProcessWith(t, database, dispatchOptions{SigningKey: multiprocessSigningKey, Env: map[string]string{"DISPATCH_WEB_DIST": build.dir}})
+	process.waitHealthy(t)
+	return process
+}
+
+// getAsset fetches path from the process and says what is wrong with the answer, or nothing.
+func getAsset(client *http.Client, p *dispatchProcess, path string, want []byte) error {
+	response, err := client.Get(p.url(path))
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return fmt.Errorf("GET %s: read: %w", path, err)
+	}
+	if response.StatusCode != http.StatusOK || !bytes.Equal(body, want) {
+		return fmt.Errorf("GET %s: status %d with %d bytes, want 200 with the %d bytes on disk", path, response.StatusCode, len(body), len(want))
+	}
+	if got := response.Header.Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		return fmt.Errorf("GET %s: Cache-Control %q, want the immutable year", path, got)
+	}
 	return nil
 }
 
-// browserGet is one GET a browser makes during a sign-in: it sends cookie when there is one and
-// never follows the redirect, since the redirect's own response is where the cookie is set.
-func browserGet(t *testing.T, target string, cookie *http.Cookie) *http.Response {
-	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, target, nil)
-	if err != nil {
-		t.Fatalf("build %s: %v", target, err)
+// A rolling update runs two builds on one database, each process holding its own build's files
+// alone: a page one process served asks the other for its chunks. Every file of either build
+// answers 200 with its bytes from both processes.
+func TestDashboardServesEveryFileOfEitherBuildFromBothProcesses(t *testing.T) {
+	database := (&dispatchPair{database: storetest.Open(t)}).databaseURL(t)
+	builds := []dashboardBuild{writeDashboardBuild(t, "a"), writeDashboardBuild(t, "b")}
+	processes := []*dispatchProcess{startOnBuild(t, database, builds[0]), startOnBuild(t, database, builds[1])}
+
+	for i, process := range processes {
+		for j, build := range builds {
+			for path, content := range build.assets {
+				if err := getAsset(http.DefaultClient, process, path, content); err != nil {
+					t.Errorf("process %s, build %s's file: %v", "AB"[i:i+1], "ab"[j:j+1], err)
+				}
+			}
+		}
 	}
-	if cookie != nil {
-		request.AddCookie(cookie)
-	}
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(request)
-	if err != nil {
-		t.Fatalf("GET %s: %v", target, err)
-	}
-	return response
 }
 
-// whoami asks the process who the session cookie names, and answers its body and status.
-func whoami(t *testing.T, p *dispatchProcess, session *http.Cookie) (string, int) {
+// Every chunk a stale tab's route imports is asked for at once, by every such tab: a burst of 200
+// concurrent requests for build A's files, every one but the shared chunk missing from B's disk, is
+// answered 200 with each file's bytes by B.
+func TestDashboardServesABurstOfTheOtherBuildsFiles(t *testing.T) {
+	database := (&dispatchPair{database: storetest.Open(t)}).databaseURL(t)
+	a := writeDashboardBuild(t, "a")
+	startOnBuild(t, database, a)
+	b := startOnBuild(t, database, writeDashboardBuild(t, "b"))
+	paths := slices.Sorted(maps.Keys(a.assets))
+
+	const burst = 200
+	client := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: burst}}
+	failures := make([]error, burst)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range burst {
+		wg.Go(func() {
+			<-start
+			path := paths[i%len(paths)]
+			failures[i] = getAsset(client, b, path, a.assets[path])
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	failed := 0
+	for _, err := range failures {
+		if err != nil {
+			failed++
+			t.Error(err)
+		}
+	}
+	if failed > 0 {
+		t.Fatalf("%d of %d concurrent requests for A's files to B failed:\n%s", failed, burst, b.Output.String())
+	}
+}
+
+// A pod restarted on the build it ran writes no asset: the restart's publish writes no file's
+// bytes and leaves every stored asset row as it was, renewing only the build's last start, and the
+// restarted process still serves every file.
+func TestDashboardRestartOnTheSameBuildWritesNoAssetBytes(t *testing.T) {
+	ctx := context.Background()
+	pair := &dispatchPair{database: storetest.Open(t)}
+	database := pair.databaseURL(t)
+	build := writeDashboardBuild(t, "a")
+	first := startOnBuild(t, database, build)
+	if !first.logged("dispatch: published dashboard assets", fmt.Sprintf("assets=%d written=%d", len(build.assets), len(build.assets))) {
+		t.Fatalf("the first boot did not write every one of the build's %d files:\n%s", len(build.assets), first.Output.String())
+	}
+	assetRows := func() string {
+		var rows string
+		if err := pair.database.Pool.QueryRow(ctx, `select string_agg(path || ':' || xmin::text || ':' || created_at::text, ',' order by path) from dashboard_assets`).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	lastStarted := func() time.Time {
+		var at time.Time
+		if err := pair.database.Pool.QueryRow(ctx, `select last_started_at from dashboard_builds`).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	rowsBefore, startedBefore := assetRows(), lastStarted()
+	first.Terminate(t)
+	first.WaitExit(t, "SIGTERM")
+
+	restarted := startOnBuild(t, database, build)
+
+	if !restarted.logged("dispatch: published dashboard assets", fmt.Sprintf("assets=%d written=0", len(build.assets))) {
+		t.Errorf("the restart wrote asset bytes, want none:\n%s", restarted.Output.String())
+	}
+	if rowsAfter := assetRows(); rowsAfter != rowsBefore {
+		t.Errorf("the restart changed asset rows: before %s, after %s", rowsBefore, rowsAfter)
+	}
+	if startedAfter := lastStarted(); !startedAfter.After(startedBefore) {
+		t.Errorf("the build's last start is %s after the restart, want later than %s", startedAfter, startedBefore)
+	}
+	for path, content := range build.assets {
+		if err := getAsset(http.DefaultClient, restarted, path, content); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// dashboardBuildsOf is GET /api/v1/dashboard/builds from the process, as the test's person.
+func dashboardBuildsOf(t *testing.T, p *dispatchProcess) (serving string, live []string) {
 	t.Helper()
-	response := browserGet(t, p.url("/auth/whoami"), session)
-	defer response.Body.Close()
-	body, _ := io.ReadAll(response.Body)
-	return strings.TrimSpace(string(body)), response.StatusCode
+	var answer struct {
+		Serving string   `json:"serving"`
+		Live    []string `json:"live"`
+	}
+	if err := json.Unmarshal(p.call(t, http.MethodGet, "/api/v1/dashboard/builds", "", http.StatusOK), &answer); err != nil {
+		t.Fatal(err)
+	}
+	return answer.Serving, answer.Live
+}
+
+// A tab offers "A new version is available" only when one build is live and it is not the tab's,
+// so the builds route is what a rolling update shows it. While A and B run both builds are live,
+// whichever process answers; once B shuts down gracefully it has deregistered and only A's build
+// is; and a process that stopped beating without deregistering drops out once its heartbeat is
+// older than the live window, aged here in the database rather than waited for.
+func TestDashboardBuildsAnswersTheBuildsTheLiveProcessesServe(t *testing.T) {
+	ctx := context.Background()
+	pair := &dispatchPair{database: storetest.Open(t)}
+	database := pair.databaseURL(t)
+	const entryA, entryB = "/assets/index-a.js", "/assets/index-b.js"
+	buildB := writeDashboardBuild(t, "b")
+	a := startOnBuild(t, database, writeDashboardBuild(t, "a"))
+	b := startOnBuild(t, database, buildB)
+
+	for _, process := range []struct {
+		name    string
+		p       *dispatchProcess
+		serving string
+	}{{"A", a, entryA}, {"B", b, entryB}} {
+		if serving, live := dashboardBuildsOf(t, process.p); serving != process.serving || !slices.Equal(live, []string{entryA, entryB}) {
+			t.Errorf("process %s with both live: serving %q, live %q; want %q and both builds", process.name, serving, live, process.serving)
+		}
+	}
+
+	b.Terminate(t)
+	b.WaitExit(t, "SIGTERM")
+	if serving, live := dashboardBuildsOf(t, a); serving != entryA || !slices.Equal(live, []string{entryA}) {
+		t.Fatalf("after B shut down: serving %q, live %q; want %q alone", serving, live, entryA)
+	}
+
+	// A process on B's build that is beating, and then one whose last heartbeat left the window.
+	var instance string
+	if err := pair.database.Pool.QueryRow(ctx, `
+		insert into server_processes (instance, dashboard_build, signing_keys) values (gen_random_uuid(), $1, '{fingerprint}')
+		returning instance::text`, routes.DashboardBuild(buildB.dir)).Scan(&instance); err != nil {
+		t.Fatal(err)
+	}
+	if _, live := dashboardBuildsOf(t, a); !slices.Equal(live, []string{entryA, entryB}) {
+		t.Fatalf("with a beating process on B's build: live %q, want both builds", live)
+	}
+	if _, err := pair.database.Pool.Exec(ctx, `
+		update server_processes set heartbeat_at = now() - make_interval(secs => $2) where instance = $1::uuid`,
+		instance, processes.LiveWindow.Seconds()+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, live := dashboardBuildsOf(t, a); !slices.Equal(live, []string{entryA}) {
+		t.Fatalf("after its heartbeat aged past the live window: live %q, want %q alone", live, entryA)
+	}
 }

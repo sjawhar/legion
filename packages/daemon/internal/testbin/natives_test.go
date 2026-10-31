@@ -86,42 +86,86 @@ func TestTheNativesCacheRunsOmpOnceAndEveryHomeLinksTheOneCopy(t *testing.T) {
 	}
 }
 
-// A fill whose extraction lacks a file the binary embeds is refused and caches nothing, as when a
-// full disk fails omp's second write and omp still exits 0; the next fill, whose extraction holds
-// both files, is cached. The stand-in embeds two files, writes one on its first run and both after.
-func TestANativesFillMissingAnEmbeddedFileCachesNothing(t *testing.T) {
+// A fill holding a file that is not what the binary embeds at its embedded size is refused and
+// caches nothing; the next whole fill is cached. A binary that writes only one of the variants it
+// embeds, which the pin does, is a whole fill. The stand-in writes its native short on the first
+// run and whole after.
+func TestANativesFillShortOfAnEmbeddedSizeCachesNothing(t *testing.T) {
 	dir := t.TempDir()
 	runs := filepath.Join(dir, "runs")
 	omp := standIn(t, dir, []string{
 		`{ variant: "modern", filename: "pi_natives.test-modern.node", size: 6 },`,
 		`{ variant: "baseline", filename: "pi_natives.test-baseline.node", size: 8 },`,
-	}, "natives=\"$HOME/.omp/natives/9.9.9\"\nmkdir -p \"$natives\"\nprintf modern >\"$natives/pi_natives.test-modern.node\"\n"+
-		"[ -e "+runs+" ] && printf baseline >\"$natives/pi_natives.test-baseline.node\"\necho run >>"+runs+"\n")
+	}, "natives=\"$HOME/.omp/natives/9.9.9\"\nmkdir -p \"$natives\"\n"+
+		"if [ -e "+runs+" ]; then printf modern >\"$natives/pi_natives.test-modern.node\"; "+
+		"else printf mod >\"$natives/pi_natives.test-modern.node\"; fi\necho run >>"+runs+"\n")
 	root := filepath.Join(dir, "cache")
 	digest, _, err := readBinary(omp)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := fillNativesCache(root, omp); err == nil || !strings.Contains(err.Error(), "embeds pi_natives.test-baseline.node, but its extraction") {
-		t.Fatalf("the fill whose extraction lacks the baseline file = %v, want it refused naming that file", err)
+	if _, err := fillNativesCache(root, omp); err == nil || !strings.Contains(err.Error(), "embeds pi_natives.test-modern.node at 6 bytes, but extracted it at 3") {
+		t.Fatalf("the fill whose extraction is short of the modern file's size = %v, want it refused naming that file and both sizes", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, digest)); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("after the refused fill the cache stats %v, want no cache", err)
 	}
 	cache, err := fillNativesCache(root, omp)
 	if err != nil {
-		t.Fatalf("the fill whose extraction holds both files = %v, want it cached", err)
+		t.Fatalf("the fill whose extraction holds the modern file whole = %v, want it cached", err)
 	}
-	for _, name := range []string{"pi_natives.test-modern.node", "pi_natives.test-baseline.node"} {
-		if _, err := os.Stat(filepath.Join(cache, "9.9.9", name)); err != nil {
-			t.Errorf("the cache lacks %s: %v", name, err)
-		}
+	if _, err := os.Stat(filepath.Join(cache, "9.9.9", "pi_natives.test-modern.node")); err != nil {
+		t.Errorf("the cache lacks the variant the binary extracted: %v", err)
+	}
+}
+
+// A file under natives that is not a native the binary embeds is refused by its name. omp writes
+// each native to a `.tmp.<pid>.<ms>` file and renames it once it is whole, so a write that failed
+// and whose cleanup failed too leaves that file in place of its native.
+func TestANativesFillHoldingALeftoverTemporaryFileCachesNothing(t *testing.T) {
+	dir := t.TempDir()
+	omp := standIn(t, dir, []string{
+		`{ variant: "default", filename: "pi_natives.test.node", size: 6 },`,
+	}, "natives=\"$HOME/.omp/natives/9.9.9\"\nmkdir -p \"$natives\"\n"+
+		"printf nat >\"$natives/pi_natives.test.node.tmp.1.2\"\n")
+	root := filepath.Join(dir, "cache")
+	digest, _, err := readBinary(omp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fillNativesCache(root, omp); err == nil || !strings.Contains(err.Error(), "extracted pi_natives.test.node.tmp.1.2 under") {
+		t.Fatalf("the fill holding a leftover temporary file = %v, want it refused naming that file", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, digest)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("after the refused fill the cache stats %v, want no cache", err)
+	}
+}
+
+// A fill that writes no native at all, as a failed write and its cleanup leave it.
+func TestANativesFillThatExtractsNothingCachesNothing(t *testing.T) {
+	dir := t.TempDir()
+	omp := standIn(t, dir, []string{
+		`{ variant: "default", filename: "pi_natives.test.node", size: 6 },`,
+	}, "mkdir -p \"$HOME/.omp/natives/9.9.9\"\n")
+	root := filepath.Join(dir, "cache")
+	digest, _, err := readBinary(omp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fillNativesCache(root, omp); err == nil || !strings.Contains(err.Error(), "extracted no native under") {
+		t.Fatalf("the fill whose extraction wrote nothing = %v, want it refused", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, digest)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("after the refused fill the cache stats %v, want no cache", err)
 	}
 }
 
 // A binary that lists no embedded natives is refused before it runs: with nothing to check an
-// extraction against, a partial one would be cached.
+// extraction against, every file it wrote would be refused by name anyway, so refusing first fails
+// with a precise message and never runs omp to extract a native of about 111 MiB.
 func TestANativesFillRefusesABinaryThatListsNoEmbeddedNatives(t *testing.T) {
 	dir := t.TempDir()
 	runs := filepath.Join(dir, "runs")

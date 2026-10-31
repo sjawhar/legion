@@ -10,9 +10,9 @@ import { defaults, type Reservation } from "./stage4b-reservations";
 // reservation rule (shape_problems, with record_stream and lib/stage4b-pods.jq), and the
 // address-moved checkpoints' readers (claims_on_handed_addresses and the helpers restart-mid-tree's
 // negative control and the two moves use), taken from the script by name (script-functions.ts) and
-// run on the runtime's golden root issue pod, whose six role launchers dial tcp://192.0.2.250:13371
-// and whose every container carries the daemon's default reservation
-// (packages/daemon/internal/runtime/sandbox/testdata/golden).
+// run on the runtime's golden root issue pod, whose one container, `roles`, runs the launcher of
+// every role, dialing tcp://192.0.2.250:13371, and whose every container carries the daemon's
+// default issue-pod reservation (packages/daemon/internal/runtime/sandbox/testdata/golden).
 const root = join(import.meta.dir, "..", "..", "..");
 const lib = join(root, "scripts", "e2e", "lib");
 const fn = scriptFunctions(join(root, "scripts", "e2e", "stage4b-sandbox-tree.sh"));
@@ -36,7 +36,7 @@ const golden = JSON.parse(
     "utf8"
   )
 );
-// The issue pod's role containers, in the order the runtime builds them (claim.Roles).
+// The issue pod's workflow roles, in the order the runtime names them (claim.Roles).
 const roles = ["architect", "planner", "implementer", "tester", "reviewer", "merger"];
 const goldenStream = "tcp://192.0.2.250:13371";
 // A moved stream: a restart on the run's other port, so the worker stream takes the API's.
@@ -53,19 +53,15 @@ interface Container {
   command?: string[];
   resources?: Resources;
 }
-// withConnect is an argv edit that points a role launcher's --connect at STREAM.
+// withConnect is an argv edit that points the launcher's --connect at STREAM.
 const withConnect = (stream: string) => (command: string[]) =>
   command.map((word, i) => (command[i - 1] === "--connect" ? stream : word));
-// pod is the golden root issue pod created at AT, Guaranteed as the API server classes it, the
-// command of each role container ONLY names (every role's by default) edited by argv.
-function pod(
-  argv: (command: string[]) => string[] = (command) => command,
-  at = created,
-  only: string[] = roles
-) {
+// pod is the golden root issue pod created at AT, Guaranteed as the API server classes it, its
+// `roles` container's command edited by ARGV.
+function pod(argv: (command: string[]) => string[] = (command) => command, at = created) {
   const spec = structuredClone(golden.spec.podTemplate.spec);
   spec.containers = spec.containers.map((container: Container) =>
-    only.includes(container.name)
+    container.name === "roles"
       ? { ...container, command: argv(container.command ?? []) }
       : container
   );
@@ -75,8 +71,15 @@ function pod(
     status: { qosClass: "Guaranteed" },
   };
 }
-// reserving is a pod() whose container NAME (a role's or an init container's) carries RESOURCES
-// in place of its own.
+// renamed is a pod() whose one container is named NAME rather than `roles`, as a pod of the layout
+// before one container named each launcher's container for its role.
+function renamed(name: string) {
+  const object = pod();
+  object.spec.containers[0].name = name;
+  return object;
+}
+// reserving is a pod() whose container NAME (`roles` or an init container) carries RESOURCES in
+// place of its own.
 function reserving(name: string, resources: Resources) {
   const object = pod();
   for (const list of [object.spec.containers, object.spec.initContainers]) {
@@ -87,19 +90,17 @@ function reserving(name: string, resources: Resources) {
   return object;
 }
 // reservation is a container's RESOURCES with cpu and memory as both request and limit, and
-// ephemeral-storage as STORAGE_REQUEST under the limit STORAGE (the implementer's and tester's
-// defaults when omitted).
+// ephemeral-storage as STORAGE_REQUEST under the limit STORAGE (the issue pod's defaults when
+// omitted).
 const reservation = (
   cpu: string,
   memory: string,
-  storage = "20Gi",
-  storageRequest = "1Gi"
+  storage = "80Gi",
+  storageRequest = "6Gi"
 ): Resources => ({
   requests: { cpu, memory, "ephemeral-storage": storageRequest },
   limits: { cpu, memory, "ephemeral-storage": storage },
 });
-// eachLauncher is the line shape_problems prints for every role launcher, in container order.
-const eachLauncher = (line: (role: string) => string) => roles.map(line);
 
 interface Stream {
   since: string;
@@ -114,8 +115,12 @@ interface Run {
   // streams is what record_stream wrote as each daemon started; by default one daemon serving
   // advertise_host at the port since before the pod was created.
   streams?: Stream[];
-  // resources is run_resources, each role's expected reservation; the defaults by default.
+  // resources is run_resources, each pod's expected reservation; the defaults by default.
   resources?: Record<string, Reservation>;
+  // route and audience are the run's route ConfigMap and gateway audience. The defaults are names
+  // the plain goldens carry no route or audience of, so each rule's tests keep only their own lines.
+  route?: string;
+  audience?: string;
 }
 // shapeProblemLines runs shape_problems on the pod under RUN's worker streams and returns every
 // line it prints. The golden pod departs from the run's route and audience rules (its route
@@ -137,7 +142,7 @@ function shapeProblemLines(object: object, run: Run = {}): string[] {
       "bash",
       "-c",
       `set -Eeuo pipefail
-root=${JSON.stringify(root)} evidence=${JSON.stringify(evidence)} route_configmap=route gateway_audience=audience host=${host} port_worker_stream=${port}
+root=${JSON.stringify(root)} evidence=${JSON.stringify(evidence)} route_configmap=${run.route ?? "route"} gateway_audience=${run.audience ?? "audience"} host=${host} port_worker_stream=${port}
 run_resources=${JSON.stringify(JSON.stringify(run.resources ?? defaults))}
 ${shapeProblems}
 shape_problems`,
@@ -150,9 +155,7 @@ shape_problems`,
 }
 // connectProblems is shape_problems' --connect lines alone.
 function connectProblems(object: object, run: Run = {}): string[] {
-  return shapeProblemLines(object, run).filter(
-    (line) => line.includes("launcher dials") || line.includes("launchers dial")
-  );
+  return shapeProblemLines(object, run).filter((line) => line.includes("launcher dials"));
 }
 // reservationProblems is shape_problems' reservation lines alone: a container's reservation or
 // disk bound, the pod's QoS class, or an affinity.
@@ -166,50 +169,77 @@ function reservationProblems(object: object, run: Run = {}): string[] {
   );
 }
 
+// The root issue pod the runtime builds under the operator route a live run carries
+// (deploy/kubernetes/operator-route/pod.yml, its token audience filled in with operator-audience,
+// TestOperatorRouteGolden), with the ConfigMap the fixture names: the pod a Stage 4b run's daemon
+// builds. Its whole verdict is pinned, so a mount the renderer moves fails here.
+const operatorRoute = JSON.parse(
+  readFileSync(
+    join(
+      root,
+      "packages",
+      "daemon",
+      "internal",
+      "runtime",
+      "sandbox",
+      "testdata",
+      "golden",
+      "root-operator-route.json"
+    ),
+    "utf8"
+  )
+);
+const operatorRun: Run = { route: "legion-operator-route", audience: "operator-audience" };
+function operatorPod() {
+  return {
+    metadata: { name: "pod", uid: "uid", creationTimestamp: created },
+    spec: structuredClone(operatorRoute.spec.podTemplate.spec),
+    status: { qosClass: "Guaranteed" },
+  };
+}
+
+describe("the pod shape, whole, on the pod the runtime builds under the operator route", () => {
+  test("departs from no rule", () => {
+    expect(shapeProblemLines(operatorPod(), operatorRun).filter((line) => line !== "")).toEqual([]);
+  });
+
+  test("a models.yml at the image home in the roles container, as before the move, departs", () => {
+    const object = operatorPod();
+    for (const mount of object.spec.containers[0].volumeMounts) {
+      if (mount.mountPath === "/var/run/legion/home/.omp/profiles/legion/agent/models.yml") {
+        mount.mountPath = "/home/legion/.omp/profiles/legion/agent/models.yml";
+      }
+    }
+    expect(shapeProblemLines(object, operatorRun).filter((line) => line !== "")).toEqual([
+      "the roles container does not mount models.yml of legion-operator-route where every role profile reads it",
+    ]);
+  });
+});
+
 describe("the pod shape's --connect rule", () => {
-  test("a pod whose role launchers dial advertise_host at the worker stream port passes it", () => {
+  test("a pod whose launcher dials advertise_host at the worker stream port passes it", () => {
     expect(connectProblems(pod())).toEqual([]);
   });
 
-  test("a pod told the address the daemon binds departs, naming each launcher and that address", () => {
-    const wildcard = pod(withConnect("tcp://0.0.0.0:13371"));
-    expect(connectProblems(wildcard)).toEqual(
-      eachLauncher(
-        (role) =>
-          `the ${role} launcher dials tcp://0.0.0.0:13371, not advertise_host at ${goldenStream}`
-      )
-    );
-  });
-
-  test("one launcher told another address departs alone, naming its role", () => {
-    const stray = pod(withConnect("tcp://192.0.2.9:13371"), created, ["reviewer"]);
-    expect(connectProblems(stray)).toEqual([
-      `the reviewer launcher dials tcp://192.0.2.9:13371, not advertise_host at ${goldenStream}`,
+  test("a pod told the address the daemon binds departs, naming that address", () => {
+    expect(connectProblems(pod(withConnect("tcp://0.0.0.0:13371")))).toEqual([
+      `the launcher dials tcp://0.0.0.0:13371, not advertise_host at ${goldenStream}`,
     ]);
-    expect(
-      runJq(["-r", "-L", lib, 'include "stage4b-pods"; launcher_connect'], JSON.stringify(stray))
-    ).toBe("null\n");
   });
 
   test("a pod told another advertise_host departs", () => {
-    expect(connectProblems(pod(), { host: "192.0.2.9" })).toEqual(
-      eachLauncher(
-        (role) =>
-          `the ${role} launcher dials ${goldenStream}, not advertise_host at tcp://192.0.2.9:13371`
-      )
-    );
+    expect(connectProblems(pod(), { host: "192.0.2.9" })).toEqual([
+      `the launcher dials ${goldenStream}, not advertise_host at tcp://192.0.2.9:13371`,
+    ]);
   });
 
-  test("a pod whose launchers have no --connect departs", () => {
+  test("a pod whose launcher has no --connect departs", () => {
     const unconnected = pod((command) =>
       command.filter((word, i) => word !== "--connect" && command[i - 1] !== "--connect")
     );
-    expect(connectProblems(unconnected)).toEqual(
-      eachLauncher(
-        (role) =>
-          `the ${role} launcher dials nothing (no --connect), not advertise_host at ${goldenStream}`
-      )
-    );
+    expect(connectProblems(unconnected)).toEqual([
+      `the launcher dials nothing (no --connect), not advertise_host at ${goldenStream}`,
+    ]);
     expect(
       runJq(
         ["-r", "-L", lib, 'include "stage4b-pods"; launcher_connect'],
@@ -218,15 +248,27 @@ describe("the pod shape's --connect rule", () => {
     ).toBe("null\n");
   });
 
-  test("launcher_connect is the one address every role launcher dials", () => {
+  test("launcher_connect is the address the roles container's launcher dials, and none in a pod without one", () => {
     expect(
       runJq(["-r", "-L", lib, 'include "stage4b-pods"; launcher_connect'], JSON.stringify(pod()))
     ).toBe(`${goldenStream}\n`);
+    expect(
+      runJq(
+        ["-r", "-L", lib, 'include "stage4b-pods"; launcher_connect'],
+        JSON.stringify(renamed("architect"))
+      )
+    ).toBe("null\n");
+  });
+
+  test("a pod of the layout before one container departs, naming its containers", () => {
+    expect(shapeProblemLines(renamed("architect"))).toContain(
+      'pod containers ["architect"], want only ["roles"]'
+    );
   });
 });
 
 // ghProblems is shape_problems' gh credential lines alone (LEGION-631): each role's gh-<role>
-// volume, mount and the clone's helper.
+// volume, its mount and the clone's helper.
 function ghProblems(object: object): string[] {
   return shapeProblemLines(object).filter((line) =>
     /gh-|credential-helper|shareProcessNamespace/.test(line)
@@ -234,22 +276,37 @@ function ghProblems(object: object): string[] {
 }
 
 describe("the pod shape's gh credential rule", () => {
-  test("the golden issue pod projects each role's gh files into its own container alone", () => {
+  test("the golden issue pod mounts each role's gh files under its own role directory alone", () => {
     expect(ghProblems(pod())).toEqual([]);
   });
 
-  test("a container mounting another role's gh volume departs, naming both", () => {
+  test("a role's gh volume mounted at another role's directory, or twice, departs", () => {
     const crossed = pod();
-    const implementer = crossed.spec.containers.find((c: Container) => c.name === "implementer");
-    implementer.volumeMounts.push({
+    const mounts = crossed.spec.containers[0].volumeMounts;
+    mounts.find((m: { name: string }) => m.name === "gh-implementer").mountPath =
+      "/var/run/legion/roles/reviewer/gh";
+    expect(ghProblems(crossed)).toHaveLength(1);
+    expect(ghProblems(crossed)[0]).toContain(
+      "gh-implementer at /var/run/legion/roles/reviewer/gh read-only"
+    );
+    expect(ghProblems(crossed)[0]).toEndWith(
+      "want each gh-<role> alone, read-only at /var/run/legion/roles/<role>/gh"
+    );
+    const twice = pod();
+    twice.spec.containers[0].volumeMounts.push({
       name: "gh-reviewer",
-      mountPath: "/var/run/legion/gh-reviewer",
+      mountPath: "/var/run/legion/gh",
       readOnly: true,
     });
-    expect(ghProblems(crossed)).toEqual([
-      "container implementer mounts gh volumes gh-implementer at /var/run/legion/gh read-only, gh-reviewer at /var/run/legion/gh-reviewer read-only, want gh-implementer alone, read-only at /var/run/legion/gh",
-      "container implementer mounts gh-reviewer under /var/run/legion/gh",
-    ]);
+    expect(ghProblems(twice)).toHaveLength(1);
+  });
+
+  test("an init container mounting a gh volume departs, naming both", () => {
+    const leaked = pod();
+    leaked.spec.initContainers
+      .find((c: Container) => c.name === "workspace-init")
+      .volumeMounts.push({ name: "gh-merger", mountPath: "/var/run/legion/gh", readOnly: true });
+    expect(ghProblems(leaked)).toEqual(["init container workspace-init mounts gh-merger"]);
   });
 
   test("a gh volume of another Secret, a missing file, a shared pid namespace and the old helper each depart", () => {
@@ -293,66 +350,59 @@ describe("the pod shape across a move of the worker stream", () => {
   });
 
   test("a pod created after the move but told the old stream departs, naming the new one", () => {
-    expect(connectProblems(pod(undefined, later), { port: 13371, streams })).toEqual(
-      eachLauncher(
-        (role) => `the ${role} launcher dials ${goldenStream}, not advertise_host at ${movedStream}`
-      )
-    );
+    expect(connectProblems(pod(undefined, later), { port: 13371, streams })).toEqual([
+      `the launcher dials ${goldenStream}, not advertise_host at ${movedStream}`,
+    ]);
   });
 
   test("a pod created before the move but told the new stream departs, naming the old one", () => {
-    expect(connectProblems(pod(withConnect(movedStream)), { port: 13370, streams })).toEqual(
-      eachLauncher(
-        (role) => `the ${role} launcher dials ${movedStream}, not advertise_host at ${goldenStream}`
-      )
-    );
+    expect(connectProblems(pod(withConnect(movedStream)), { port: 13370, streams })).toEqual([
+      `the launcher dials ${movedStream}, not advertise_host at ${goldenStream}`,
+    ]);
   });
 
   test("a pod created before any daemon served a stream departs, naming when it was created", () => {
     expect(connectProblems(pod(undefined, "2026-10-06T10:59:59Z"), { streams })).toEqual([
-      `the role launchers dial ${goldenStream}, but no worker stream was served when the pod was created (2026-10-06T10:59:59Z)`,
+      `the launcher dials ${goldenStream}, but no worker stream was served when the pod was created (2026-10-06T10:59:59Z)`,
     ]);
   });
 });
 
 describe("the pod shape's reservation rule", () => {
-  test("a pod whose every container carries its role's reservation, Guaranteed and with no affinity, passes it", () => {
+  test("a pod whose every container carries the issue pod's reservation, Guaranteed and with no affinity, passes it", () => {
     expect(reservationProblems(pod())).toEqual([]);
   });
 
-  test("the run's overrides are what a role container is held to, each field on its own", () => {
-    // The run overrides the tester's cpu, memory and ephemeral-storage limit and the merger's cpu
-    // alone; the golden pod carries the defaults, so those two containers depart and the others
-    // pass.
-    const overrides = {
-      ...defaults,
-      tester: { ...defaults.tester, cpu: "1", memory: "5Gi", ephemeral_storage: "30Gi" },
-      merger: { ...defaults.merger, cpu: "200m" },
-    };
-    expect(reservationProblems(pod(), { resources: overrides })).toEqual([
-      "the tester container reserves cpu 750m, memory 6Gi, ephemeral-storage 1Gi of 20Gi, not the run's cpu 1, memory 5Gi, ephemeral-storage 1Gi of 30Gi for its role",
-      "the merger container reserves cpu 250m, memory 1Gi, ephemeral-storage 1Gi of 10Gi, not the run's cpu 200m, memory 1Gi, ephemeral-storage 1Gi of 10Gi for its role",
-    ]);
-    const overridden = reserving("tester", reservation("1000m", "5120Mi", "30720Mi", "1024Mi"));
-    overridden.spec.containers = overridden.spec.containers.map((container: Container) =>
-      container.name === "merger"
-        ? { ...container, resources: reservation("200m", "1Gi", "10Gi") }
-        : container
+  test("the run's override is what every container is held to, each field on its own", () => {
+    // The run overrides the issue pod's cpu and memory alone; the golden pod carries the defaults,
+    // so every container departs, its disk bound the default's.
+    const overrides = { ...defaults, issue: { ...defaults.issue, cpu: "2950m", memory: "16Gi" } };
+    const departs = (name: string) =>
+      `container ${name} reserves cpu 3, memory 19Gi, ephemeral-storage 6Gi of 80Gi, not the run's cpu 2950m, memory 16Gi, ephemeral-storage 6Gi of 80Gi for the issue pod`;
+    expect(reservationProblems(pod(), { resources: overrides })).toEqual(
+      ["workspace-fetch", "workspace-init", "roles"].map(departs)
     );
-    // Quantities compare as amounts: 1000m is 1, 5120Mi is 5Gi, 30720Mi is 30Gi and 1024Mi is 1Gi.
+    const overridden = pod();
+    for (const container of [
+      ...overridden.spec.initContainers,
+      ...overridden.spec.containers,
+    ] as Container[]) {
+      container.resources = reservation("2.95", "16384Mi", "81920Mi", "6144Mi");
+    }
+    // Quantities compare as amounts: 2.95 is 2950m, 16384Mi is 16Gi, 81920Mi 80Gi, 6144Mi 6Gi.
     expect(reservationProblems(overridden, { resources: overrides })).toEqual([]);
   });
 
   test("a container whose request is not its limit departs, naming both", () => {
     expect(
       reservationProblems(
-        reserving("tester", {
-          requests: { cpu: "750m", memory: "3Gi", "ephemeral-storage": "1Gi" },
-          limits: { cpu: "1", memory: "3Gi", "ephemeral-storage": "20Gi" },
+        reserving("roles", {
+          requests: { cpu: "3", memory: "8Gi", "ephemeral-storage": "6Gi" },
+          limits: { cpu: "3", memory: "19Gi", "ephemeral-storage": "80Gi" },
         })
       )
     ).toEqual([
-      'container tester requests {"cpu":"750m","memory":"3Gi","ephemeral-storage":"1Gi"} but is limited to {"cpu":"1","memory":"3Gi","ephemeral-storage":"20Gi"}; this run configures request = limit',
+      'container roles requests {"cpu":"3","memory":"8Gi","ephemeral-storage":"6Gi"} but is limited to {"cpu":"3","memory":"19Gi","ephemeral-storage":"80Gi"}; this run configures request = limit',
     ]);
   });
 
@@ -360,58 +410,45 @@ describe("the pod shape's reservation rule", () => {
     // The disk bound is a request under a limit, not one value as both: a request past the limit
     // is what the API server refuses, and a request below it at the run's values passes.
     expect(
-      reservationProblems(reserving("implementer", reservation("750m", "6Gi", "20Gi", "21Gi")))
+      reservationProblems(reserving("roles", reservation("3", "19Gi", "80Gi", "81Gi")))
     ).toEqual([
-      "container implementer requests ephemeral-storage 21Gi past its limit 20Gi; the request may not exceed the limit",
+      "container roles requests ephemeral-storage 81Gi past its limit 80Gi; the request may not exceed the limit",
     ]);
-    expect(
-      reservationProblems(reserving("implementer", reservation("750m", "6Gi", "20Gi", "1Gi")))
-    ).toEqual([]);
+    expect(reservationProblems(reserving("roles", reservation("3", "19Gi")))).toEqual([]);
     // A request under the limit at other than the run's values is held to the run's.
     expect(
-      reservationProblems(reserving("implementer", reservation("750m", "6Gi", "20Gi", "2Gi")))
+      reservationProblems(reserving("roles", reservation("3", "19Gi", "80Gi", "7Gi")))
     ).toEqual([
-      "the implementer container reserves cpu 750m, memory 6Gi, ephemeral-storage 2Gi of 20Gi, not the run's cpu 750m, memory 6Gi, ephemeral-storage 1Gi of 20Gi for its role",
+      "container roles reserves cpu 3, memory 19Gi, ephemeral-storage 7Gi of 80Gi, not the run's cpu 3, memory 19Gi, ephemeral-storage 6Gi of 80Gi for the issue pod",
     ]);
   });
 
   test("a container reserving no cpu, memory or ephemeral-storage departs", () => {
     expect(
       reservationProblems(
-        reserving("merger", { limits: { cpu: "250m", memory: "1Gi", "ephemeral-storage": "10Gi" } })
+        reserving("roles", { limits: { cpu: "3", memory: "19Gi", "ephemeral-storage": "80Gi" } })
       )
     ).toEqual([
-      'container merger reserves {"limits":{"cpu":"250m","memory":"1Gi","ephemeral-storage":"10Gi"}}, want cpu and memory as both request and limit and ephemeral-storage as request and limit',
+      'container roles reserves {"limits":{"cpu":"3","memory":"19Gi","ephemeral-storage":"80Gi"}}, want cpu and memory as both request and limit and ephemeral-storage as request and limit',
     ]);
     expect(
       reservationProblems(
-        reserving("merger", {
-          requests: { cpu: "250m", memory: "1Gi" },
-          limits: { cpu: "250m", memory: "1Gi" },
+        reserving("roles", {
+          requests: { cpu: "3", memory: "19Gi" },
+          limits: { cpu: "3", memory: "19Gi" },
         })
       )
     ).toEqual([
-      'container merger reserves {"requests":{"cpu":"250m","memory":"1Gi"},"limits":{"cpu":"250m","memory":"1Gi"}}, want cpu and memory as both request and limit and ephemeral-storage as request and limit',
+      'container roles reserves {"requests":{"cpu":"3","memory":"19Gi"},"limits":{"cpu":"3","memory":"19Gi"}}, want cpu and memory as both request and limit and ephemeral-storage as request and limit',
     ]);
     expect(reservationProblems(reserving("workspace-init", {}))).toEqual([
       "container workspace-init reserves {}, want cpu and memory as both request and limit and ephemeral-storage as request and limit",
     ]);
   });
 
-  test("an init container carries the reservation of a role of the pod, whichever launch created it", () => {
-    // The golden pod's init containers carry the architect's, the launching role's; a child's pod,
-    // created by its planner's launch, carries the planner's, and one created by a relaunch of the
-    // tester the tester's. A reservation no role of the pod has departs, the disk bound included.
-    expect(reservationProblems(reserving("workspace-fetch", reservation("750m", "6Gi")))).toEqual(
-      []
-    );
+  test("an init container carries the issue pod's one reservation, whichever launch created the pod", () => {
     expect(reservationProblems(reserving("workspace-fetch", reservation("2", "1Gi")))).toEqual([
-      "init container workspace-fetch reserves cpu 2, memory 1Gi, ephemeral-storage 1Gi of 20Gi, the reservation of no role of the pod",
-    ]);
-    expect(
-      reservationProblems(reserving("workspace-fetch", reservation("750m", "6Gi", "30Gi")))
-    ).toEqual([
-      "init container workspace-fetch reserves cpu 750m, memory 6Gi, ephemeral-storage 1Gi of 30Gi, the reservation of no role of the pod",
+      "container workspace-fetch reserves cpu 2, memory 1Gi, ephemeral-storage 6Gi of 80Gi, not the run's cpu 3, memory 19Gi, ephemeral-storage 6Gi of 80Gi for the issue pod",
     ]);
   });
 
@@ -543,19 +580,20 @@ claims_on_handed_addresses`);
   ];
   const handed = { "pod-a/architect": handedEnv(), "pod-a/tester": handedEnv() };
 
-  test("pod_connect is one line, printing the one address every role launcher dials", () => {
+  test("pod_connect is one line, printing the address the pod's launcher dials", () => {
     expect(fn("pod_connect").split("\n")).toHaveLength(1);
     const pods = {
       connected: pod(),
-      stray: pod(withConnect("tcp://192.0.2.9:13371"), created, ["reviewer"]),
+      stray: pod(withConnect("tcp://192.0.2.9:13371")),
+      earlier: renamed("architect"),
     };
     const { exitCode, out } = runScript(`root=${JSON.stringify(root)}
 op() { jq -e --arg p "$3" '.[$p]' <<<${JSON.stringify(JSON.stringify(pods))}; }
 ${fn("pod_connect")}
-printf '%s|%s\\n' "$(pod_connect connected)" "$(pod_connect stray)"
+printf '%s|%s|%s\\n' "$(pod_connect connected)" "$(pod_connect stray)" "$(pod_connect earlier)"
 if absent=$(pod_connect absent); then echo "absent read: $absent"; fi`);
     expect(exitCode).toBe(0);
-    expect(out).toBe(`${goldenStream}|\n`);
+    expect(out).toBe(`${goldenStream}|tcp://192.0.2.9:13371|\n`);
   });
 
   test("every claim on the handed addresses passes, judged from one read of legion claims", () => {
@@ -563,27 +601,30 @@ if absent=$(pod_connect absent); then echo "absent read: $absent"; fi`);
     expect(exitCode).toBe(0);
     expect(reads).toBe(1);
     expect(out).toContain(
-      `claim-b: pod pod-a's launchers dial ${movedStream}; its tester is told LEGION_DAEMON_URL ${movedDaemonURL} and the run's services`
+      `claim-b: pod pod-a's launcher dials ${movedStream}; its tester is told LEGION_DAEMON_URL ${movedDaemonURL} and the run's services`
     );
     expect(out).toContain(
       "all 2 claims that run a process are on the addresses the daemon hands now"
     );
   });
 
-  test("a pod whose launchers keep the old --connect fails, naming the claim, role and pod", () => {
+  test("a pod whose launcher keeps the old --connect fails, naming the claim, role and pod", () => {
     const { exitCode, out } = judge({ pods: { "pod-a": pod() }, envs: handed, claims });
     expect(exitCode).toBe(1);
     expect(out).toEndWith(
-      `FAIL: claim-a's architect in pod pod-a's role launchers dial ${goldenStream}, not ${movedStream}\n`
+      `FAIL: claim-a's architect in pod pod-a's launcher dials ${goldenStream}, not ${movedStream}\n`
     );
   });
 
-  test("a pod one of whose launchers dials elsewhere fails, naming no one address", () => {
-    const split = pod(withConnect(movedStream), created, roles.slice(1));
-    const { exitCode, out } = judge({ pods: { "pod-a": split }, envs: handed, claims });
+  test("a pod with no roles container fails, naming no address", () => {
+    const { exitCode, out } = judge({
+      pods: { "pod-a": renamed("architect") },
+      envs: handed,
+      claims,
+    });
     expect(exitCode).toBe(1);
     expect(out).toEndWith(
-      `FAIL: claim-a's architect in pod pod-a's role launchers dial no one address, not ${movedStream}\n`
+      `FAIL: claim-a's architect in pod pod-a's launcher dials nothing, not ${movedStream}\n`
     );
   });
 
@@ -635,7 +676,7 @@ if absent=$(pod_connect absent); then echo "absent read: $absent"; fi`);
     expect(out).toEndWith("FAIL: the operator could not read pod pod-c\n");
   });
 
-  test("a role with no readable Oh My Pi fails, naming its container", () => {
+  test("a role with no readable Oh My Pi fails, naming its role's namespaces", () => {
     const { exitCode, out } = judge({
       pods: { "pod-a": movedPod() },
       envs: { "pod-a/architect": handedEnv() },
@@ -643,7 +684,7 @@ if absent=$(pod_connect absent); then echo "absent read: $absent"; fi`);
     });
     expect(exitCode).toBe(1);
     expect(out).toContain(
-      "FAIL: claim-b's tester in pod pod-a has no readable Oh My Pi environment in its tester container"
+      "FAIL: claim-b's tester in pod pod-a has no readable Oh My Pi environment in its tester namespaces"
     );
   });
 
@@ -735,27 +776,28 @@ printf '%s|%s\\n' "$(pod_resume pod tester)" "$(pod_resume pod planner)"`);
 });
 
 describe("stage4b-pods.jq's ready_pods", () => {
-  // event is one pod watch line: a pod with these labels whose role launchers are ready, all but
-  // the one NOT_READY names.
-  function event(name: string, labels: object, notReady?: string) {
+  // event is one pod watch line: a pod with these labels whose containers CONTAINERS are ready,
+  // every one but the one NOT_READY names.
+  function event(name: string, labels: object, containers = ["roles"], notReady?: string) {
     return JSON.stringify({
       kind: "Pod",
       object: {
         kind: "Pod",
         metadata: { name, labels },
         status: {
-          containerStatuses: roles.map((role) => ({ name: role, ready: role !== notReady })),
+          containerStatuses: containers.map((c) => ({ name: c, ready: c !== notReady })),
         },
       },
     });
   }
 
-  test("keeps a ready issue pod and leaves out the probe, a control, and a pod with a role unready", () => {
+  test("keeps an issue pod whose roles container is ready, and leaves out the probe, a control, an unready pod and one of the earlier layout", () => {
     const watch = [
       event("kept", {}),
       event("probe", { "legion.dev/probe": "x" }),
       event("control", { "legion.dev/e2e-control": "x" }),
-      event("unready", {}, "merger"),
+      event("unready", {}, ["roles"], "roles"),
+      event("earlier", {}, roles),
     ].join("\n");
     expect(
       runJq(["-r", "-L", lib, 'include "stage4b-pods"; ready_pods | .metadata.name'], watch)
@@ -769,14 +811,14 @@ describe("stage4b-pods.jq's ready_pods", () => {
 // then names the pod's runtime class; a bare pod object is dropped unread and the verdict stays as
 // the real record left it.
 describe("the pod-shape checkpoint's wrong-runtime control", () => {
-  // watchEvent is one pod watch line for the golden root issue pod, uid UID, its six role launchers
+  // watchEvent is one pod watch line for the golden root issue pod, uid UID, its roles container
   // ready, as `kubectl get pods --watch -o json --output-watch-events` writes it.
   function watchEvent(uid: string) {
     const object = {
       kind: "Pod",
       metadata: { name: `pod-${uid}`, uid, creationTimestamp: created, labels: {} },
       spec: pod().spec,
-      status: { containerStatuses: roles.map((role) => ({ name: role, ready: true })) },
+      status: { containerStatuses: [{ name: "roles", ready: true }] },
     };
     return JSON.stringify({ type: "MODIFIED", object });
   }
@@ -839,7 +881,7 @@ pod_shape_verdict "$work/pod-watch-wrong-shape.json" | sed 's/^/control /'`);
 // The pod-watch-verdict checkpoint's matching (pod_watch_verdict, never_scheduled_deaths): the
 // daemon names a dead process by its claim, whose last word is its role, and its incarnation,
 // `<pod uid>/<generation>`; the driver records an action by pod uid, with the role for a kill
-// (driver_action). A `kill-container` accounts for a death of the role it killed, any generation, in
+// (driver_action). A `kill-role` accounts for a death of the role it killed, any generation, in
 // its pod and no other role's; a `delete-pod` or `close` for a death of any role in its pod. Neither
 // accounts for another pod, a pod whose uid it is a prefix of included; a death whose pod the
 // scheduler never placed is accounted for by that pod's own conditions; and a record line in any
@@ -900,8 +942,7 @@ describe("the pod-watch-verdict checkpoint's matching", () => {
         })
         .join("")
     );
-    const out =
-      runScript(`root=${JSON.stringify(root)} work=${JSON.stringify(evidence)} lost_detail="the issue's volume was lost: "
+    const out = runScript(`root=${JSON.stringify(root)} work=${JSON.stringify(evidence)}
 ${fn("never_scheduled_deaths")}
 ${fn("pod_watch_verdict")}
 pod_watch_verdict "$work/pod-watch.json" "$work/driver-actions.txt" "$work/daemon.log" >/dev/null || true
@@ -919,7 +960,7 @@ sed -n 's/^incarnation \\([^ ]*\\) of .* died with no driver action.*/\\1/p; /^d
           ["uid-a2/1", "implementer"],
           ["uid-b/1", "implementer"],
         ],
-        ["kill-container uid-a implementer"]
+        ["kill-role uid-a implementer"]
       )
     ).toEqual(["uid-a2/1", "uid-b/1"]);
   });
@@ -931,7 +972,7 @@ sed -n 's/^incarnation \\([^ ]*\\) of .* died with no driver action.*/\\1/p; /^d
           ["uid-a/1", "implementer"],
           ["uid-a/1", "tester"],
         ],
-        ["kill-container uid-a implementer"]
+        ["kill-role uid-a implementer"]
       )
     ).toEqual(["uid-a/1"]);
   });
@@ -962,22 +1003,24 @@ sed -n 's/^incarnation \\([^ ]*\\) of .* died with no driver action.*/\\1/p; /^d
   });
 
   test("a record line in another form is named, a kill without its role included", () => {
-    expect(verdict([], ["kill-container uid-a"])).toEqual([
-      "driver action kill-container uid-a 2026-10-08T14:00:00.000Z is not kill-container UID TIME ROLE, delete-pod UID TIME or close UID TIME",
+    expect(verdict([], ["kill-role uid-a"])).toEqual([
+      "driver action kill-role uid-a 2026-10-08T14:00:00.000Z is not kill-role UID TIME ROLE, delete-pod UID TIME or close UID TIME",
     ]);
   });
 
   // An unreadable line accounts for nothing: a death in its pod is named beside the line, whatever
-  // the line's kind (an old kind, a deletion with a field too many, a kill with one too many).
+  // the line's kind (an old kind — a bare kill, or the one-container-per-role layout's kill of a role
+  // container — a deletion with a field too many, a kill with one too many).
   test("an unreadable line accounts for no death in its pod, and the verdict names both", () => {
     for (const line of [
       "kill uid-a",
+      "kill-container uid-a tester",
       "delete-pod uid-a extra",
-      "kill-container uid-a tester extra",
+      "kill-role uid-a tester extra",
     ]) {
       const [kind, uid, ...rest] = line.split(" ");
       expect(verdict([["uid-a/1", "tester"]], [line])).toEqual([
-        `driver action ${[kind, uid, "2026-10-08T14:00:00.000Z", ...rest].join(" ")} is not kill-container UID TIME ROLE, delete-pod UID TIME or close UID TIME`,
+        `driver action ${[kind, uid, "2026-10-08T14:00:00.000Z", ...rest].join(" ")} is not kill-role UID TIME ROLE, delete-pod UID TIME or close UID TIME`,
         "uid-a/1",
       ]);
     }
@@ -992,9 +1035,9 @@ sed -n 's/^incarnation \\([^ ]*\\) of .* died with no driver action.*/\\1/p; /^d
     writeFileSync(
       join(evidence, "driver-actions.txt"),
       [
-        "kill-container uid-a 2026-10-08T14:00:00.000Z planner",
-        "kill-container uid-b 2026-10-08T14:01:00.000Z architect",
-        "kill-container uid-c 2026-10-08T14:02:00.000Z merger",
+        "kill-role uid-a 2026-10-08T14:00:00.000Z planner",
+        "kill-role uid-b 2026-10-08T14:01:00.000Z architect",
+        "kill-role uid-c 2026-10-08T14:02:00.000Z merger",
         "delete-pod uid-c 2026-10-08T14:03:00.000Z",
       ]
         .map((line) => `${line}\n`)

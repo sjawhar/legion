@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // A room that only ever receives valid writes is never refused and never loses one while readers,
@@ -90,6 +91,9 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 		err    error
 	}
 	written := make(chan writerResult, 1)
+	// writes counts the writer's rounds as they land, so the readers run until there are enough of
+	// them to judge, not for a fixed time.
+	var writes atomic.Int64
 	go func() {
 		var result writerResult
 		for round := 0; ; round++ {
@@ -106,6 +110,7 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 				return
 			}
 			result.writes++
+			writes.Add(1)
 			result.last = canonical
 		}
 	}()
@@ -130,12 +135,13 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 		defer refusalsMu.Unlock()
 		refusals = append(refusals, fmt.Sprintf(format, args...))
 	}
-	// Three seconds and forty rounds, whichever comes later, within thirty seconds: a loaded machine
-	// takes longer over each round.
+	// Three seconds, forty rounds and twenty writes, whichever comes later, within thirty seconds: a
+	// loaded machine takes longer over each round and each write, and a fixed window gave a pod as
+	// few as twelve writes.
 	start := time.Now()
 	running := func() bool {
 		elapsed := time.Since(start)
-		return elapsed < 30*time.Second && (elapsed < 3*time.Second || rounds.Load() < 40)
+		return elapsed < 30*time.Second && (elapsed < 3*time.Second || rounds.Load() < 40 || writes.Load() < 20)
 	}
 	var readers sync.WaitGroup
 	for range 4 {
@@ -422,9 +428,7 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	var trees []*pmdoc.Node
 	for _, body := range []string{
@@ -575,7 +579,7 @@ func listedReplica(t *testing.T, service *Service, artifactID string) (weak.Poin
 		t.Fatal("the written room's replica went while the room is resident")
 	}
 	waitFor(t, 10*time.Second, "the written room's replica to hold a copy", func() bool {
-		if resident.hold(artifactID, live) == nil {
+		if resident.hold() == nil {
 			return false
 		}
 		resident.mu.Unlock()

@@ -1,9 +1,405 @@
 # Changelog
 
-## [Unreleased]
+## [13.10.1] - 2026-10-31
+
+### Fixed
+
+- The `dispatch` command (`dist/dispatch.js`) and the session's start notice name the lost `DISPATCH_URL` when `DISPATCH_TOKEN_FILE` is set and nothing names the server: `DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for`. In a Legion pod, which has no envoy.json and whose session keeps one shell, a command that ran `unset DISPATCH_URL` made every later `dispatch` say `no envoy.json at <path>: Dispatch is off`.
+
+## [13.10.0] - 2026-10-31
 
 ### Added
 
+- Two skills every session with Dispatch now loads: `outside-message`, which holds when the
+  operator approves text that reaches a person outside the company, the two exclusions, the four
+  steps before the ask and what the ask carries; and `plain-words`, which holds the empty verb
+  phrases to delete from any text a person reads. Neither counts toward the 2,000-word budget of
+  the three Dispatch skills.
+
+### Changed
+
+- The `dispatch` skill tells a session to write each ask or comment id whole in a reference,
+  taking it from `dispatch read`'s `Ask id:` or from the page URL, because the command accepts
+  a prefix while a person's link does not. It said an ask or comment id could be an 8-hex
+  prefix, and a reference built from one opens nothing for the person who clicks it.
+  `dispatch-writing-specs` carries the same rule where a citation is written. Three pieces of
+  text that the same skills state elsewhere pay for it: the 8-hex licence, `Decisions are
+  asks.` in the `dispatch` skill's "Structure over stream", and that skill's
+  `DOC_SERVICE_UNAVAILABLE` line. The three Dispatch skills hold 1,995 words, under the
+  2,000-word guard.
+
+## [13.8.0] - 2026-10-30
+
+### Added
+
+- AskGate's rules check: a second model call judges only the new asks a Dispatch write opens
+  against two rules. A new ask is a `dispatch ask`, an ask block that a `doc-edit` inserts or a
+  block that it retypes into an ask, and an ask block in an issue spec or in a markdown upload. One
+  rule refuses an ask whose own recommendation is to change nothing. The other refuses an ask for a
+  step the person must do with their own hands when the agent did not try its own access first. A
+  match refuses the call in `warn` mode as well as in `block` mode, and mints no marker for it. The
+  check runs only on a call AskGate reads, which is one literal `dispatch` command: a call in any
+  other form reaches no gate at all, so the `dispatch` CLI refuses it for want of a marker in
+  `block` mode and posts it with a warning in `warn` mode, and the check never sees it.
+  `--advisor-rebuttal '<line>'` on a command, `"advisor_rebuttal": "<line>"` in a device's JSON,
+  or the third attempt at the same thing on the same target sends the call anyway. Each such flag
+  is kept as a shell comment where the command's line ends, after everything that runs, so
+  dispatch never sees it and the agent's record of its call still shows it, and the acknowledgement
+  quotes every override as the agent sent it and records every line: told only that the flag was
+  removed, agents read their own call back without it and reported a rebuttal they never wrote.
+  Every word of that comment is quoted, and the comment stands at the end of the command's line
+  because that is the one place bash reads it as a comment at all: written anywhere else, inside a
+  single-quoted value that is still open, the quotes would pair around the agent's own line and
+  leave it outside them. AskGate reads the commented command back as the same call before it hands
+  it over: an override no word of the form it reads can carry is removed instead, and the
+  acknowledgement says so. That command sent again is
+  read as the same rebuttal and comes back unchanged, any other comment leaves the command outside
+  the form AskGate reads, and the run-end self-check counts it as the one `dispatch` command it is,
+  so it owes no check. A device's field is removed before the call runs, and both refusals say
+  which happens. The breaker counts only the calls the gate refused, so a charter revise in `warn`
+  mode, which sends the call, never moves it. It counts each thing apart: each new ask a call
+  opens, or the call as a whole when it opens none, so its free pass covers only the thing that was
+  refused twice, and an ask refused once on a target whose other ask was refused twice is still
+  reviewed. An upload's ask block is new only while the version it replaces does not already hold
+  it, and when that version cannot be read the blocks carrying an `#id` are left out of the check
+  (`ruleAsksPartial`), so a re-upload of an unchanged document is never refused for an ask block
+  it already held. When every block of such an upload carries an `#id`, the rules check asks no
+  model and refuses nothing, but it is not silent: `ruleOutcome` reads `unjudged`, with
+  `ruleAsksPartial`, and the decision record and the report count it. The `advisor-gate` entry
+  gains `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleModel`, `ruleLatencyMs`,
+  `ruleTextMissing`, `ruleError`, `ruleAsksCut`, `ruleAsksPartial` and `target`, and
+  `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors and the
+  refusals the agent overrode; it reads its command line with `node:util`'s `parseArgs` and refuses
+  a flag given twice by name, rather than reading only its last value. Three rules calls in a row
+  with no verdict raise one warning saying those calls' new asks went unchecked and that the check
+  still runs.
+- AskGate publishes each rule decision, each refused call the agent sent again with a rebuttal or
+  the breaker (recorded with `ruleOutcome: null` and the refusal's own target), and each write that
+  reached the `dispatch` CLI outside the form the gate reads while carrying an ask for a person
+  (`outcome: "unmarked"`, with `asksCarried` above zero), to a Dispatch project document of the
+  session's own, `askgate-decisions-<session id>.md`, so a session holding a Dispatch token and
+  nothing else can count the refusals, the overrides, the unreviewed writes that carried an ask and
+  the rules-call errors a fortnight of sessions made. The record carries the time, the session,
+  an `id` of its own (the gated call's tool call id, and for an unmarked write the CLI ledger
+  line's place in its tool call), `source` (`pod` or `machine`), the project, the call's tool and
+  target, the rule fields, the decision, the mode, `asksCarried` and the two latencies, and **no
+  ask text and no quote**. The
+  CLI counts an unmarked write's asks from the write's own text, so a re-upload of ask blocks the
+  stored version already holds counts them as carried. `OMP_ASKGATE_RECORD_PROJECT` names the
+  project, else `LEGION_PROJECT` does, and with neither set nothing is written. The record runs
+  once the gate has answered the call, never inside its `tool_call` handler, and never changes
+  the decision; an unmarked write's runs behind that write's own entry, and the tool result waits
+  on none of it. Its write runs until Dispatch has answered it or the session's shutdown cuts it,
+  under the `Idempotency-Key` the write carries, so a Dispatch slow under load is
+  waited out rather than given up. A record that fails or that the session's shutdown cuts writes
+  one line to the host's log and appends one
+  `advisor-gate-record` entry carrying `toolCallId`, `tool`, `recordError` and, for an unmarked
+  write, the record's own `recordId`, which is what ties it to that write's entry alone; the
+  call's own `advisor-gate` entry stands as written, and `--sessions` counts each follow-up as one
+  decision record the session could not confirm.
+  At shutdown the one `session_shutdown` handler the gate binds gives the records 1.25 s from
+  that moment and then cuts them, whether or not the gate loaded, and the gate waits for what is
+  still pending, so a record still lands, and the entry of one that could not, before the session
+  is sealed; a record cut there says the shutdown cut it. The document is created once and
+  appended to ever after: the create carries a header paragraph and no record, and every record,
+  the session's first included, is appended through `docEdit`, since an upload of a name Dispatch
+  already holds stores a new version of that document and the reader reads that in place of
+  everything the versions before it held. A process holding no id for the session reads the
+  document by name — one request of a few bytes, rather than every document of the project — and
+  creates one only where that read answers 404. The create carries an `Idempotency-Key` of the
+  document's own (`askgate-doc.` and the sha256 of the project and the name) and a body fixed for
+  the session, the header alone, so every attempt of it, in this process or another, is one
+  intent Dispatch runs once: a key that finished is replayed, `409 KEY_COMMITTED` and
+  `422 KEY_REUSED` send the recorder to the read and then the append, and no create of a session's
+  document given up here can replace the records written since by committing late. Each append
+  carries a key of its own, the sha256 of the session and the record's id, so an append Dispatch
+  ran late is replayed rather than written twice, and the same record sent again with another time
+  in its body gets `422 KEY_REUSED` and is not written. Keys belong to the login that sent them — every
+  Legion pod writes under the shared agent token, which is one login — and Dispatch keeps one
+  24 h, well past the 10 minutes a create's run can hold it.
+  The records of one session are written one at a time, each carrying the time the gate made it,
+  which is what the reader counts and sorts by.
+  `scripts/askgate-report.ts
+  --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those documents back and counts
+  them, split by `source`, with the unmarked writes on a line of their own, by mode and with the
+  asks they carried, counted as neither a rules call nor an override; one `(session, id)` is one
+  decision, and a second copy of it — a write given up here that Dispatch ran all the same — is
+  counted as a duplicate and in nothing else.
+  Because no call waits for the record, the review's deadline keeps its 5,000 ms margin under
+  `extensionHandlers.toolCallTimeoutMs` — the room the handler needs for the aborted call's usage
+  report and the entry — so Oh My Pi's 30 s default still gives a 25,000 ms deadline, and the key
+  must be at least 15,000 ms: set below that, the gate does not load, and so refuses every
+  Dispatch write it would have reviewed.
+- The `advisor-gate` entry gains `charterLatencyMs`, the charter call's own time on the clock
+  `ruleLatencyMs` uses: the two calls run side by side, and the entry's `latencyMs` alone never
+  said which of them the gate waited on. It also gains `mintSkipped: "call-ended"`, on a call whose
+  decision let the write out but whose own tool ended while the gate still held it: no marker is
+  minted there, since no command of that call can run, and `scripts/askgate-report.ts` prints the
+  count of those entries.
+
+### Fixed
+
+- A model request against a Dispatch build older than the answers route, which answers its own
+  `404 NOT_FOUND` "no route for …", carries no line about people's answers when no list read
+  before from that Dispatch has an item to show. Before, every request carried a line saying the
+  answers could not be read and telling the agent to run `dispatch answers`, a command that fails
+  against that same Dispatch. A list read before from that Dispatch is still carried, its
+  left-out line naming no command. The extension logs once per session and Dispatch URL, with
+  `logger.warn`, that the Dispatch has no answers route, and again only after a read of it
+  answered with a list. A proxy's 404 page, a 200 that is no answers list, a 503 and every other
+  failed read still carry the line naming why.
+
+## [13.6.0] - 2026-10-30
+
+### Added
+
+- Every model request of a session's conversation with Dispatch — a top-level session, a Legion
+  pane or a `task` subagent — carries, as its last message, what people wrote to the session in
+  the last 72 hours that Dispatch delivered to it, newest first and word for word: answers to its
+  asks, replies on them and in its comment threads, comments on its documents and routed issues,
+  mentions and messages. A subagent carries its parent's list. The message
+  stays under 8,000 characters (at most 7,999), leaving the oldest items out with a line that
+  counts them and names `dispatch answers`. Each request waits at most 800 ms for Dispatch,
+  then carries the last list read from that Dispatch, with its read time and why this read
+  failed, or, when that list shows nothing, a line saying the list could not be read and why;
+  a Dispatch older than this release, which answers its own 404 "no route for …", adds no such
+  line, is logged once per session, and is not asked again for 5 minutes, and no `!` token
+  command runs for the read. The list is a separate user message after the
+  conversation, so a change in it leaves the cached conversation byte for byte and Oh My Pi puts
+  no cache anchor on it; the `dispatch-first` skill stays at the head as before. Requests Oh My
+  Pi builds from the conversation that are not its turns carry no list and wait on no read: a
+  side turn (a Dispatch BTW, the stop-time self-check, `/btw`) and the handoff keep their own
+  prompt last, and a remote compaction's request ends at its cut. Two copies of the extension
+  make one read per request, a list or none.
+
+### Fixed
+
+- A session following `notifications.dispatch.issue.<KEY>.>` is now shown the comments,
+  documents and asks the agents on that issue write, live and on replay, and records each in
+  its ledger so no sweep shows it twice. Before, the renderer skipped every Dispatch frame
+  marked `notify: false` on an owner topic, which is every event an agent wrote, and a skipped
+  frame is not recorded while its cursor still moves past it: a subscribed session saw a
+  person's activity and none of its peers'.
+
+## [13.5.1] - 2026-10-30
+
+### Changed
+
+- `dispatch-first` says that a result a person asked for is like a blocker: a document or artifact notifies nobody, so the document that holds the result ends with an ask block asking their next step, else a `dispatch ask`. Its rule that each ask and message stands alone is gone, since `dispatch-writing-specs` carries it where an ask is written; the three Dispatch skills stay under their 2,000-word budget.
+
+## [13.5.0] - 2026-10-30
+
+### Added
+
+- The Dispatch tools take a block reference in `reply_to` and `in_reply_to` to answer one block of a comment or message, and read a block of a comment or message by its reference.
+
+## [13.3.0] - 2026-10-29
+
+### Changed
+
+- `dispatch read` asks for each referenced document's latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.
+
+## [13.2.0] - 2026-10-29
+
+### Changed
+
+- The shipped `envoy` skill and the bundled `envoy_publish` description say when a publish errs,
+  now that the listener confirms a role or ad-hoc topic message with its recipients before it
+  answers: a role message errs when its holder did not confirm it within about 4 seconds (seen
+  after about 8, since the client tries once more), and a team or other ad-hoc topic errs naming
+  each session registered on it, the sender excepted, that did not confirm; a session named with
+  `receipt_timeout` gets the message back from its inbox through the replay once its connection
+  returns. The README, `AGENTS.md` and the delivery comment say the listener's publish route
+  waits for the receipt the session sends for a forwarded frame.
+
+## [12.0.0] - 2026-10-29
+
+### Added
+
+- Every Dispatch write a session makes carries one `Idempotency-Key` and is asked again under it after a transport failure, a 5xx, a 408, a 429, a `409 KEY_IN_FLIGHT` or an attempt that hears nothing for 20 s (INFRA-258, through `@sjawhar/envoy-client`'s `DispatchClient`). The accept behind a person's direct Send or Aside (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`) retries inside its own 10 s bound, at 0, 1, 3 and 7 s, so an accept whose `200` was lost becomes the person's turn on the replay where it used to leave the message as a card; every refusal, error and the timeout still keep the card.
+
+## [11.9.0] - 2026-10-29
+
+### Fixed
+
+- A person's Send from Dispatch's live view no longer waits behind Envoy notifications, and an
+  interrupt no longer drops the notifications queued when it lands. Every card (an Envoy
+  notification, an issue message, a comment mention, a Dispatch Steer that was not accepted as the
+  person's own turn) went into the host's steering queue, which the host drains one message per
+  step, so a session that received many cards took a person's Send minutes later, and an Esc
+  emptied that queue. While a turn runs a card now goes as an aside, which the host folds in at the
+  next step, after the Send, without ending the running tool batch; a card still queued at an
+  interrupt is folded into the context with no run and read at the next turn. On an idle session a
+  card is still a steer with `triggerTurn`, so it starts a turn as before; a targeted Aside stays
+  an aside, and a host context without `ctx.isIdle()` keeps every other card a steer. A card the
+  host folds into the context with no turn, as it does for an aside that lands as a run ends in a
+  session interrupted earlier, or in plan mode, now gets one hidden wake that starts a turn to read
+  it, unless an interrupt is still in effect or the card was a targeted Aside; a card sent while
+  the session sets up a prompt is left to that prompt's run, so an interrupt there starts no turn
+  either. The limits are in the package's `AGENTS.md`.
+- The Legion controller's start message is its session's first turn, ahead of any Envoy card that
+  arrived while the session started. A card that reached the operator's controller in a terminal
+  before `/legion-controller-start` ran started its own turn ahead of the start message, and in RPC
+  mode a startup card's wake could fire once the host was idle after its startup, before the
+  daemon's start prompt arrived. While the plugin interface's `startupTurn` names the session (the
+  start sent under 30 s ago, or due and not sent yet for under 30 s), a card that finds it idle goes
+  as a follow-up that starts no turn, in any mode, and the startup wake waits for the start turn:
+  once that turn ends, one wake starts a turn for every card that arrived meanwhile, counted even
+  though the start turn's reply follows them, unless a later reply read them. A start that never
+  comes holds the cards back for 30 s, and a start claim refused before the send releases them
+  within a second. A mark naming another session, or one whose start was sent 30 s ago or more,
+  changes nothing. Plugin interface version 5, which pi-envoy reads; install it with the
+  `@sjawhar/pi-legion` released beside it.
+- A card that reaches an RPC session while Oh My Pi starts no longer holds back every RPC command
+  until the turn it started ends. Oh My Pi settles every extension send of its startup before RPC
+  mode reads its input, and an idle card's send lasted its whole turn, so a Legion worker's
+  `get_state` and task waited for it (once 72 minutes). Such a card now goes into the context with
+  no turn, and the wake starts its turn once the host is idle after its startup. Print, json and
+  terminal sessions keep the idle steer.
+
+## [11.8.0] - 2026-10-28
+
+### Added
+
+- Every registration names the plugin: `plugin` `@sjawhar/pi-envoy` and `plugin_version` this
+  package's version, which the listener's `GET /v1/sessions` and `GET /v1/registry/<id>`, and
+  `envoy_sessions`, show.
+
+### Fixed
+
+- A session whose NATS path freezes (packets stop, neither side closes) reconnects within 30 s,
+  52 s when its first redial also hangs, instead of after up to 6 minutes: it dials with
+  `@legion/envoy-client/nats-connection`'s options, a ping every 10 s and the connection dropped
+  after two unanswered pings, in place of nats.js's default 120 s ping. The reconnect runs the
+  catch-up, so the session shows the messages sent meanwhile once.
+- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) is closed once
+  nats.js gives up on it at its 20 s dial timeout, instead of keeping its socket open for the
+  process's life: the bundle carries `patches/nats@2.29.3.patch`, which makes nats.js destroy the
+  socket of a transport that never finished connecting. The patch also makes nats.js close a stale
+  connection without flushing it first, so a session that published agent-stream frames after its
+  path froze still reconnects: the flush never completed behind data the dead path never
+  acknowledged, and the session never redialed.
+
+## [11.7.0] - 2026-10-28
+
+### Changed
+
+- The `dispatch` skill this plugin ships says what a claim delivers, where it said a claim delivers
+  no comments: a person's answers, comments and messages on the claimed issue reach the session,
+  and a new comment that mentions it arrives as the mention alone once that mention was delivered,
+  or twice when the mention's receipt timed out. A `session:` route to the session brings a
+  person's answers, comments and messages as a claim does; a subscription to the issue brings
+  other agents' activity, beyond a reply in an ask the session follows.
+- `dispatch issue-update --help` says closing an issue withdraws its open asks (record kind
+  `withdrawn`, naming the closer, written only by Dispatch) and a reopen brings back exactly those,
+  and `dispatch resolve-ask --help` says an ask on a closed issue is refused (`409 ISSUE_CLOSED`)
+  until the issue reopens.
+- Plugin interface version 4: the interface carries `startupTurn`, the session whose
+  first turn a start that runs after Oh My Pi's startup owns and when that start was sent, which
+  `@sjawhar/pi-legion` sets for its controller's start message and clears at that session's first
+  run or shutdown. Install it with the `@sjawhar/pi-legion` released beside it.
+
+## Before changelog fragments
+
+### Added
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  Its description says an ask hit says whether it is answered (INFRA-569).
+
+- AskGate's marker checks at the `dispatch` CLI (no matching marker, a file changed after the
+  review, a file missing when the gate ran) warn by default: the write posts with its warning and
+  an entry the report counts. They refuse only when the session chose block (`OMP_ASKGATE=block`,
+  or its `experiments` entry's `askgate_block` arm on). A model's revise verdict still blocks by
+  default, and no model role or a gate that did not load still refuses in both modes.
+- A session shows once each Envoy message it missed while its NATS connection or a subscription
+  was down, NATS was restarting or the session was not running. It asks its listener's new
+  `POST /v1/replay` for what the notification stream (72 hours) stored on its own agent subject
+  and on every topic it follows after where it last read, when a pass opens its agent subject (a
+  start, a switch, a resume), after a subscription is reopened, on each NATS reconnect, on every
+  heartbeat and after `envoy_subscribe`, and shows each message neither the live path nor an
+  earlier sweep showed as a card saying it was published while the connection was down. A
+  replayed BTW, Aside, Steer or person's Send is that card only: it runs no side turn, takes no
+  user turn and posts no Dispatch reply. Role messages and team or other ad-hoc topics stay live
+  only, and nothing from before the session followed a topic, or older than 72 hours, comes back.
+  A message counts as shown once Oh My Pi wrote its card, or the person's turn it became, to the
+  session file (the message's `message_end`): a card or turn handed over while a turn streams,
+  which Oh My Pi holds in memory until the turn takes it, is recorded only then, so a process that
+  ends first (a SIGKILL, a pod stopped mid-turn) shows it after the restart instead of losing it.
+  A card Oh My Pi drops unwritten while the process lives on is shown again: one an interrupt
+  (Escape, RPC `abort_and_restore_queue`) withdrew is handed again at the next heartbeat, once
+  the host is idle and holds no message (`ctx.isIdle()`, `ctx.hasPendingMessages()`), and one a
+  switch away dropped is released, so that session's sweep shows it once the host is back on it
+  or resumes it, never recorded before its card is written. A person's Send run as typed input
+  that an interrupt withdrew unwritten (Oh My Pi hands it back to whoever interrupted) is
+  released at that heartbeat, so the next sweep shows it as a card that runs nothing. A BTW is
+  recorded by its event id the moment it arrives, before its side turn and before any reply is
+  posted, in the session's file even while it shuts down, so no sweep shows it as a card again,
+  whether its answer or refusal fails, is still in flight, or the process ends mid-turn or
+  mid-reply and the session is resumed; a Retry of it still runs. Whatever the record, a BTW that
+  reaches replay is shown as one notice that starts no turn, saying it runs nothing, and so is a
+  failure notice naming a BTW: it is handed only once the host is idle with nothing queued, since a
+  streaming turn would run another model turn for it, and waits for the first such heartbeat while
+  a turn runs. The replay's one-time notices (the stream was recreated, older messages may be
+  missing) wait for an idle host the same way. A held notice is recorded in the session file
+  and shown after a restart, or a switch away and back, that cut the hold short. A replayed
+  subscription removal takes the topic out of the listener's registry too, so a later restart
+  does not follow it again.
+  The session file keeps what the session was shown (`envoy-replay-delivered`, and the written
+  cards themselves, read back by the event they name) and where it read to
+  (`envoy-replay-state`), so a restart shows nothing again (up to 20,000 frames in 72 hours) — a
+  live repeat of a frame shown before the restart is dropped too — and a session stopped past the
+  listener's grace follows its topics again; a person's turn written just before the process
+  ended, its record not, can come back once as a card, never lost. A frame that fails to show is
+  retried, and its third failure, or a live failure no sweep will retry (a frame received before
+  its subject's cursor started included, stamped when it arrived even behind a slow delivery),
+  shows one card naming it and how to read it, where a
+  failed injection was only logged before. A recreated stream (its `stream.id` changed, or, from a
+  listener that answers no id, its creation time; a restore moves the creation time under the same
+  id, as can a leader election after a clustered restore, and that is no recreation) or a cursor
+  older than the stream's
+  oldest message is said once as a card, also after a restart that came before it was said; a
+  listener without the route (404) or unable to read the
+  stream (503 `REPLAY_UNAVAILABLE`, 401, 403) is said once as a warning, and live delivery goes
+  on as before. The session registers and replays no followed topic reaching a private stream
+  subject, by the listener's own rule: another session's agent subject (a fork parent's until a
+  pass closes it), a failed-delivery lane, a `notifications.legion.` controller lane, or a
+  wildcard reaching one such as `notifications.agent.*`, which the listener refuses to store; it
+  still follows it live.
+  `scripts/smoke-replay.sh` proves it against a real session, listener and JetStream (INFRA-439).
+
+- A person's browser edit of a spec a session wrote reaches that session as one Envoy card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block. An idle session starts a turn on it.
+- The `dispatch` command this plugin ships reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it. `dispatch read --help` lists the block forms
+  and the id's percent-encoding, `dispatch ask --help` takes a block reference, and
+  `dispatch doc-edit --help` says a block id past 256 bytes is stored but its block is no graph
+  node.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line.
+- The `dispatch` skill never claims an issue with the `legion` label unless the session is a
+  Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
+  root's architect while the root waits on a person, and taking that claim takes the tree out of
+  the workflow.
+- `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
+- The agent stream reports the model and thinking level the session runs now, so Dispatch's live
+  view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
+  every model the session lists as available, the configured thinking level `/effort` reports
+  (`null` for the model's default) and the levels `/effort` offers (`thinking: null` for a model
+  with no adjustable thinking), read from the live `AgentSession`'s own getters. Ids are never
+  truncated and the list is never cut. A host that cannot be read (no `AgentRegistry` export, no
+  live session under this id, or a missing getter) sends `reported: false`. The session re-reads
+  the getters on every replay and watch, on `turn_start` and `retry_fallback_applied`, and after a
+  person's typed input runs, before its reply is posted, and publishes the frame only when it
+  changed and a viewer is attached; a getter that throws is logged and never blocks the replay
+  answer. A replay ends with the history, the settings, then the commands; the settings frame is
+  paid for first and whole, and the commands keep the prefix that fits what is left (INFRA-195).
 - The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
   `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
   `--after <OTHER>`, which puts it below, or both together, which land it between them, where the
@@ -12,9 +408,142 @@
   `notifications.role.legion-<project>-controller` — in place of the retired `backlog-order`
   address, and says to raise a wrong order on the issue itself where no Legion controller runs
   (INFRA-188).
+- The `dispatch` command's `architecture-sync` imports every architecture source of the project,
+  one per repository, and prints a line for each, or with `--repo <owner/name>` that one source
+  alone (INFRA-391). Against a Dispatch older than this release,
+  `dispatch architecture-sync --project <KEY>` falls back to that server's single-source sync and
+  prints its one line, and `--repo` needs a Dispatch of this release. The `dispatch` skill this
+  plugin ships says an issue's component ids may come from any of its project's source
+  repositories, and its issues reference gives the per-source output and `--repo`.
+
+- AskGate reviews each Dispatch write of a session's main agent before the write posts, and sends
+  back a write that breaks its rules with the reason and the fix. It runs in each session unless
+  `{"askgate":{"enabled":false}}` in the session's own envoy.json turns it off. A checkout cannot
+  turn it off. `OMP_ASKGATE=warn|block` sets the mode, and else the session's `experiments` entry
+  does (`block` when there is none). The gate asks the `askgate` model role, else the `default`
+  role, and refuses the write when neither is set. A switch that does not parse, and a gate that
+  does not load, are said at session start. A gate that does not load (a host module, an
+  `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler time limit too short for a
+  verdict) refuses each write it would review, in both modes, naming the error and the switch.
+- AskGate reviews an upload of a markdown document (`dispatch artifact` with inline text, a
+  `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that ends in `.md`) against
+  its rule on the person's words alone. A name or path read from a file (`--name-file`) is decided
+  from the dry run, and one that holds an expansion is outside the form the gate reads. Each posted
+  file is read in place and reviewed, and the call runs as written; the marker binds each file's
+  sha256, and the CLI refuses a file that changed after the review. A file missing when the gate
+  runs (one a call earlier in the same message writes) is refused in block mode with the advice to
+  send the call again in a later message, and runs unreviewed with that note in warn mode. A
+  missing or non-regular file is refused before AskGate reads it,
+  and the refusal names `--content-file -` for an upload's text from standard input.
+  The gate cuts all arguments at 64 KiB as one JSON block, so it reviews only part of a long
+  document. Its rules now also send back a fact the reader does not need and text longer than its
+  decision needs, and a claim about what the person said is sourced only by a link to where they
+  wrote it.
+- AskGate reads one form of a Dispatch write: `[cd <literal path> && ] dispatch <subcommand>
+  <literal words…> [2>&1] [<<'DELIM' … DELIM] [| head|tail [-n N]]`, with every word literal and
+  nothing else in the call; a quoted word may run over several lines (double quotes with no `$`,
+  backtick or backslash), a backslash-newline continues the command, and the one trailing `head`
+  or `tail` stage is left out of the dry run. `bun <path>/dispatch.js` and any path ending in
+  `dispatch` or `dispatch.js` are the CLI.
+  It refuses no call by reading any other form and reads no eval cell: the `dispatch` CLI enforces
+  the review. While the gate is bound, pi-envoy keeps one owner-only record file for its process
+  in the `askgate/` directory of the CLI state directory of each session id it binds, and the
+  gate mints one single-use marker for each literal call it lets run, bound to the CLI's argv and,
+  behind a review, to the dry run's arguments and each named file's sha256. Under a live record
+  the CLI posts a gated write only when it consumes a matching marker; block mode refuses one with
+  none, warn mode posts it with a warning, and either is recorded as an `unmarked` entry. A pipe
+  other than one trailing `head` or `tail`, `xargs`, a script, an alias, `python3 -c`, `node -e`
+  or an eval cell's process is therefore refused by the CLI in block mode, and text that only
+  names a write (a commit message, a search pattern) runs. A task subagent's literal write gets an
+  argv-only marker. A gate that did not load mints nothing, and a session with no model role still
+  refuses in both modes.
+- When the CLI refuses (or in warn mode warns about) a write with no marker from a `bash` call
+  outside the literal form, AskGate appends a note to the call's result that names the first cause
+  it found (an expansion, a program that runs the write, a pipe, a second command, an assignment,
+  a redirect) with the call's own text, and the literal form to send.
+- pi-envoy sets `DISPATCH_STATE_DIR` in the session's environment when it is unset, so a command
+  that changes `HOME` or `XDG_STATE_HOME` still finds the session's ledger and AskGate record. A
+  record AskGate cannot write after a session switch is a notice at once, not only a log line.
+- An upload whose `--name` ends in `.md` after trimming is judged with the CLI's own markdown
+  predicate, so the gate reviews every upload the CLI asks a marker for.
+- AskGate says it when a write posts unreviewed. A timeout, a model error, an answer with no
+  verdict, a handler exception, a dry run that failed, the pause after three failures, a session
+  on another provider, a rebuttal and a breaker trip each record their outcome and tell the agent
+  that the write went out unreviewed and why, in a headless session too. A failed review hands
+  back the agent's own command, so a gate that fails breaks no valid write.
+- AskGate refuses a posted path that reaches a file descriptor of whichever process opens it, by
+  its own spelling (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`, `/proc/thread-self/fd/N`,
+  `/proc/<n>/task/<m>/fd/N`) or through a symbolic link to one: AskGate would open it in Oh My
+  Pi's process and the command in its own shell. It walks each operand one component at a time,
+  follows every link itself, refuses a component that reaches `/proc` or `/dev`, and opens with
+  `O_NOFOLLOW`. A `--path-file` is refused for the same reason. A `--<field>-file` operand goes
+  to the kernel as written, so a `..` after a symbolic link names the file the CLI opens. An
+  `--image` file is not reviewed: the model reads its path, and the CLI names the upload after the
+  file it opens when it sends.
+- AskGate refuses in both modes when no model role resolves, on every path: a rebuttal, a halt, a
+  breaker trip, a shutdown and a dry run that failed each allowed the write before this.
+- Every note AskGate hands back rides on the call's own result as well as the loop's context, so
+  a write made from an eval cell, which has no loop context, tells the agent what happened.
+- A write that no review stands behind is refused in both modes when AskGate cannot record it:
+  the record is the whole account of what posted unreviewed. A write the model allowed still
+  posts.
+- AskGate keeps a marker until the call it was minted for ends. A call the host backgrounds
+  (`async: true`, or `bash.autoBackground`) reports its start before the shell runs, so its
+  marker stays until the session shuts down; a session switch or branch keeps it.
+- AskGate binds only in a session that has Dispatch, read from the session's own envoy.json and
+  the variables over it; a checkout's file can turn it on and never off. A session or a pod with
+  no Dispatch has no write to review, gets no gate and no record. The test runs at load: a session
+  that turns Dispatch on afterwards has no gate until it starts again.
+- `scripts/askgate-report.ts` prints a count for each outcome and names every session that had a
+  write the gate did not review, with its counts. It counts as sent back every entry whose
+  decision is `revise` — a revise verdict, `no-model-role`, and in block mode `abandoned`,
+  `shutdown` and `unmarked` — and every `unreadable`, `unmarked` or `load-failed` entry; as a
+  refusal a write that did not post; and as unreviewed every `allow` whose outcome is no verdict,
+  warn mode's `abandoned` and `shutdown` among them. Its printed header says the same.
+- AskGate needs `extensionHandlers.toolCallTimeoutMs` at 120000 or more in the session's settings.
+  At the 30 s default its deadline is 25 s, a review of a long session often times out, and the
+  write posts unreviewed. A deadline under 30 s is one warning at start that names the key.
+- AskGate reviews the writes of a cooperating agent and is no sandbox: a process of the same user
+  can turn the gate off in its own envoy.json, or point the session at another envoy.json through
+  the launching shell. The CLI's
+  check does not cover a direct HTTP request to Dispatch, an older or a different CLI, or a
+  same-user process that removes the record or a marker, acts as another session id or state
+  directory, or otherwise goes around the CLI. claude-envoy has no Dispatch write tool over MCP;
+  Claude Code writes through the CLI under host `claude`, where no record exists. The README and
+  AGENTS.md say so.
+- An upload's absolute `--path` resolves as the CLI resolves it, which removes a `..` before the
+  kernel follows a link, so the gate reviews and posts the file the CLI opens.
+- In warn mode a write whose review the gate gave up (`abandoned`, `shutdown`) carries the same
+  note as every other unreviewed outcome.
+- The core's header says that `O_NOFOLLOW` guards the last path component only.
+- A leading `cd` is resolved as Oh My Pi resolves it: the dry run and its directory probe run
+  with no `CDPATH`, and a leading `cd /` in a call that names no directory runs in the session's
+  own directory.
 
 ### Fixed
 
+- AskGate's rules no longer push a reviewer to shorten an ask below what its concrete case needs.
+  They say a rewritten `dispatch ask` or `dispatch edit-ask` question is at most 2,000 characters
+  (`ASK_QUESTION_MAX`), cut to fit and never below it to save room. Content failure 12 exempts the
+  concrete case, what each option does and to whom, and the recommendation, and content failure
+  13 now names padding (a preamble, a restatement, a process account, a closing offer), never
+  length alone. A question about a credential, grant or permission only the person can give is a
+  question for them, and a claim about what the person said may be restated as the agent's own
+  dated reading of a named source when no link reaches their words. A full-length rewrite now
+  reaches the agent whole: the revise reason handed to it is capped at 8 KiB, from 2 KiB, which
+  clipped the end of a rewrite (its options and recommendation), and the review's output budget is
+  4,096 tokens, from 1,200, which a rewrite of a 1,450-character question already used 1,106 of,
+  thinking included; an answer cut off there holds no verdict and the write posts unreviewed.
+- A live view held open while its session is relaunched with `--resume` now shows the resumed
+  process's model, thinking level and command changes. Two things stopped it. Every process
+  numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only
+  when its `seq` beats the one it already applied, so it ignored everything the resumed process sent
+  below the earlier process's count: the publisher now seeds `seq` from its clock (milliseconds ×
+  1,000) and never moves it back on a reset, so a later process of the session numbers above every
+  frame an earlier one sent. And the page's relay asks the new process for no replay, only re-arms
+  it with bare watches, so the settings and commands the process read before the first watch never
+  reached the page: a control message that arms a publisher nobody was watching now also sends the
+  settings and commands as they stand (INFRA-195).
 - A pass or a role move that never settles no longer stops the registration heartbeat. Both serial
   queues (`passes`, `roleMoves`) give each task a deadline, never shorter than the heartbeat
   interval: past it the caller's call rejects, the queue starts the next task, and the abandoned
@@ -105,6 +634,96 @@
 
 ### Changed
 
+- `dispatch-writing-specs`, "Old specs": text kept in a rewrite follows the text rules, and each
+  retelling, quotation or unlinked attribution in the old spec is restated as design or cut; a
+  requirement's linked `From:` source stays. Rewrites kept passages such as "You asked if …" word
+  for word, because the agent carried them over rather than wrote them. To stay under the
+  2,000-word guard, lines another loaded text already says are cut or merged: "Write about the
+  design, never the person" joins "State the current design, never how people reached it" as
+  "Write about the current design, never the person or how people reached it"; the list of
+  reference forms after "Link each source where the person wrote it" (`dispatch`, "References",
+  lists them); "A person's decision is their answered ask block" (`dispatch`: "Decisions are
+  asks"); and "approved spec's" in "The plan" (`dispatch-first`'s table says when to plan).
+
+- `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
+  a line number, since a line number is stale at the next edit. A sentence that cites a gate
+  passing (a test, review, check or proof) also says, in that sentence, what the pass does not
+  show, so a reader does not take it as evidence of more. To stay under the 2,000-word guard, lines
+  another loaded text already says are cut: the Legion reviewer names in "Each version" and the
+  design-gate pointer in "Approval" (`skill://legion-architect` holds both), the description's
+  pointer to `skill://legion-architect` (`dispatch-first`'s table names it), the approval Dispatch
+  carries (the version it carries to is approved, so "Approval" already asks for none), "The spec
+  is the issue's primary document" and "Name an issue by its `dispatch://` link" (`dispatch` says
+  both), "resolve the ask it answers" (`dispatch`, "Close what you opened"), "Write what is true
+  now", and "Length scales with the change".
+
+- `dispatch-writing-specs`, `dispatch` and `dispatch-first` tell a session to name the concrete
+  case in an ask first (which machines, files, sessions or people, and the numbers) and to ask the
+  choice in those terms, never "Which option?". The ask block template shows that shape. To stay
+  under the 2,000-word guard, lines another of the three skills already says are cut.
+
+- `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
+  own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code
+  the session's own tree touches is fixed in that tree's pull request, any other goes to the
+  Legion controller, and a finding that needs a decision is an ask.
+
+- `dispatch request-approval --help` names both reviewers a Legion architect runs before an
+  approval request, `plan-gap-analyst` and `plan-reviewer`. `--summary` says that a Legion
+  architect ends it with one sentence giving the two reviews' results.
+
+- Three Dispatch skills ship, under 2,000 words together, from four skills and the
+  dispatch skill's eight references of 10,908 words. `dispatch-writing-specs` replaces
+  `dispatch-brainstorming`, and `skill://dispatch-brainstorming` no longer resolves. It sets a
+  spec's seven parts (Summary, Problem, Goals and non-goals, Requirements, Design, Decisions,
+  Acceptance), the rules for text a person reads, which questions go to a person, the check before
+  each version, where the agent records its own decisions, and the plan as the issue's `plan.md`
+  written with superpowers' `writing-plans`. `dispatch-first` says which of the three to read
+  before which step, and that a person sees an agent's need only through an ask or an approval
+  request. `dispatch` keeps only what `dispatch <command> --help` does not say: its `references/`
+  directory goes, and the rules about one command moved into that command's help. These rules
+  are gone: keep a person's words in the spec, write a decision quoted and dated, a first version
+  holds only what the person settled, ask in stages, "density is the problem, not length", and
+  "sections follow the topic". `src/skills-guard.test.ts` fails the build when the three skills
+  reach 2,000 words.
+- `dispatch-writing-specs` after a fresh-agent dry run on a real issue's messages: the
+  Design gives a value for each limit, size and time; a choice the person's messages favour is
+  settled; each design choice no source states is a decision entry; the fresh reader gets the whole
+  spec pasted before every spec write; an ask block names a requirement by what it is; unbuilt
+  acceptance checks never delay approval; and text is about the design, never the person.
+- `dispatch-writing-specs`, "The outline": a small change gets a few sentences per part, no matrix,
+  and the Summary names the change in the reader's own terms, never in a category the writer
+  coined.
+- `dispatch-first`, which every session holds, says: the moment a person blocks your work, open a
+  `dispatch ask` for it, and run `dispatch open-asks` before you say you wait on a person; and record
+  every request you accept in Dispatch before you start it, read that record before a turn ends, and
+  drop no item. `src/skills-guard.test.ts` holds both rules to the context a session receives.
+- `dispatch-writing-specs`: say in a clause what each issue you name does for the reader; and when a
+  person's answer, comment or edit changes a text, never narrate the edit or what used to be there,
+  since versions and comments hold the history. In `dispatch`, three lines that repeat what the
+  command prints are gone: the meaning of `You've sent N messages`, "never progress or status"
+  (`dispatch message --help`) and the read-back after an inserted block (`dispatch doc-edit
+  --help`).
+- `dispatch-writing-specs`, "Approval": after a person approves a spec, an agent makes a new version
+  only for a change to scope, acceptance, cost, risk or a decision the person made, and puts all
+  such changes into one version. Any other fix goes in the plan or a comment, so the person is not
+  asked to approve the spec again for a small change.
+- The `dispatch` command's notice after a primary spec with no ask block says that a person does
+  not watch the session's chat and sees its need only through an open ask or a spec that waits for
+  approval. The notice for a typed-block opening stored as text cites
+  `dispatch-writing-specs`, "Questions". `dispatch issue --spec` and `dispatch doc-edit` point at
+  `skill://dispatch-writing-specs`.
+- The `envoy` skill this plugin ships and the `envoy_publish` description say a team topic, any
+  `notifications.` topic the stream does not store, reaches a session on a serve port through its
+  machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
+  the shared hub's listener does not), where they said such a session received none. A session of
+  this plugin holds its own NATS connection and receives such a topic as before (INFRA-122).
+
+- The `envoy` skill is rewritten to the minimum text that carries its instructions (INFRA-353),
+  from 21,146 bytes to about 7,500, with the delivery fields, role-claim lifetime, Legion lanes,
+  Slack, Ghost Wispr and WhatsApp topics and the check-settlement contract moved whole to
+  `references/`. Its topic table now names the Dispatch and `agent.<id>` topics, the two that
+  sessions subscribe to most after GitHub's.
+
 - The `dispatch`, `dispatch-first` and `dispatch-brainstorming` skills are rewritten shorter
   (the dispatch skill and its references from about 20,300 words to 9,400), with detail moved to
   references and `dispatch <command> --help`; a blind comparison of old and new text on each
@@ -172,6 +791,10 @@
 
 ### Added
 
+- The plugin ships a fifth skill, `asd-ste100`: the ASD-STE100 rules (Simplified Technical
+  English) for text a reader must not misread, which a session reads before it writes text a
+  person reads. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69,
+  with its licence and without its linter.
 - `dispatch_read` takes `events` (the issue's last N events) and `all_events` (every one) for an
   issue read and its `dispatch://KEY/log`, which list the last 10 without either; the `dispatch`
   command spells them `--events N` and `--all-events`. Both together, or either beside a read

@@ -37,16 +37,17 @@ controller, installs both the same way.
 
 Released installs come from npm as `@sjawhar/pi-legion`. The tarball ships `dist/legion.js`, which
 bundles every dependency except the Oh My Pi host packages (`@legion/pi-shared`, `@legion/contracts`
-and `@legion/envoy-client` are inlined), `dist/THIRD_PARTY_NOTICES`, the eight Legion skills staged at
+and `@legion/envoy-client` are inlined), `dist/THIRD_PARTY_NOTICES`, the nine Legion skills staged at
 `dist/skills` (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
-`legion-worker`, `ce-simplify-code`, `thermonuclear-code-quality`, `thermonuclear-deep-review`;
+`legion-worker`, `leading-a-work-stream`, `ce-simplify-code`, `thermonuclear-code-quality`, `thermonuclear-deep-review`;
 the manifest's `omp.skills: ["dist/skills"]` is what lets Oh My Pi discover them), and `agents/`,
 the task agents Legion's prompts dispatch (`oracle`; the reviewer's pair
 `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`; the planner's
-`plan-gap-analyst`, which also reads a spec before a human does, and `plan-reviewer`), each
+`plan-gap-analyst` and `plan-reviewer`, which also review a root spec before every approval
+request, `plan-reviewer` checking each of its factual claims), each
 declaring its model as a role the operator maps (`docs/kubernetes.md`, "Model roles"). The Dispatch
-and Envoy skills (`dispatch`, `dispatch-first`,
-`dispatch-brainstorming`, `envoy`) ship in `@sjawhar/pi-envoy`; a link from a Legion skill into one
+and Envoy skills (`asd-ste100`, `dispatch`, `dispatch-first`,
+`dispatch-writing-specs`, `envoy`) ship in `@sjawhar/pi-envoy`; a link from a Legion skill into one
 of them is written `skill://dispatch/...`, which resolves by name once both are installed.
 
 `scripts/pi-plugin-prepack.sh` at the repository root is both plugins' `prepack`: it builds the one
@@ -54,7 +55,7 @@ entry, writes the notices and stages this package's partition of `skills/`. It r
 the committed manifest, whose `omp.extensions` names `extensions/legion.ts`; the release workflow's
 `pi_legion_build` job (`.github/workflows/release.yaml`), the worker image and the e2e pack step
 rewrite it to `["dist/legion.js"]` before `bun pm pack`. Only the e2e pack step restores it
-afterwards: the build job's tree is discarded, and `pi_legion_publish` commits the version bump to
+afterwards: the build job's tree is discarded, and the `publish` job commits the version bump to
 the committed manifest, touching `.version` alone. The manifest's `legion` key carries the daemon
 API contract the plugin was built against; `src/daemon-api-version.test.ts` pins it to the daemon's
 golden fixture.

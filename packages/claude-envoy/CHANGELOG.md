@@ -1,25 +1,435 @@
 # Changelog
 
-## [Unreleased]
+## [main@1d3e69553791] - 2026-10-31
+
+### Fixed
+
+- The `dispatch` command (`dist/dispatch.js`), the MCP server's start notice and its Dispatch reply name the lost `DISPATCH_URL` when `DISPATCH_TOKEN_FILE` is set and nothing names the server: `DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for`, where they named a missing envoy.json. When the chosen file is missing, its dangling link and the unread OpenCode-era user file follow, the old file last, so the session hook still prints the old file's advice.
+
+## [main@d7e1daaaaf70] - 2026-10-31
 
 ### Added
 
+- The plugin ships `claude-envoy:outside-message` and `claude-envoy:plain-words`, so a standalone
+  Claude Code session and a Legion phase worker on the Claude Code backend read the same rules for
+  text that reaches a person outside the company as an Oh My Pi session does.
+
+### Changed
+
+- The `dispatch` and `dispatch-writing-specs` skills this plugin links tell a session to write
+  each ask or comment id whole in a reference, taking it from `dispatch read`'s `Ask id:` or
+  from the page URL, because the command accepts a prefix while a person's link does not. The
+  `dispatch` skill said an ask or comment id could be an 8-hex prefix, and a reference built
+  from one opens nothing for the person who clicks it.
+
+## [main@e65900f4438b] - 2026-10-30
+
+### Added
+
+- The `dispatch` command (`dist/dispatch.js`) takes `dispatch answers`, which prints every item of
+  that list in full.
+- `tests/answers-claude.test.ts` runs the real Claude Code, the release the new repository-root
+  `.claude-code-pin` pins (2.1.311), against a stand-in model and Dispatch, and shows the list on
+  the Messages request after startup, `--resume`, `/compact` and a subagent's start. CI's
+  claude-envoy job installs that release (`.github/actions/install-claude-code`), and the test
+  refuses to skip there.
+- A third session hook, `dist/session-hook.js answers`, on every `SessionStart` (startup, resume,
+  clear, compact, fork) and every `SubagentStart`, puts what people wrote to the session in the
+  last 72 hours into the model's context: answers to its asks, replies to
+  its comments, comments on documents it wrote and messages to it, read from Dispatch's
+  `GET /api/v1/agents/{session_id}/answers` for the hook input's `session_id`, which at
+  `SubagentStart` is the parent's. It is the list every Oh My Pi model request carries, under
+  8,000 characters, newest first, with a line naming `dispatch answers` when older items are left
+  out. The hook prints within 800 ms of its start, or 150 ms after its code begins when Bun's
+  start-up alone took longer, so a slow start-up never costs a list Dispatch answers at once; it
+  exits 50 ms after that, always with status 0: when Dispatch has not answered it carries the last
+  list read, kept in `answers.json` in the session's Dispatch state directory, with when it was
+  read and why this read failed, or, when no list read before has an item to show, one line saying
+  the list could not be read and why. A `!` command in envoy.json runs in a process the hook starts
+  detached, one per session at a time, and waits on until that same deadline; a slower command
+  still runs to its end or its 10 s timeout in that process, which removes its output file and
+  reads the list with its token for the next hook. While it runs, only a list read from the
+  Dispatch URL envoy.json names now stands in, never one another Dispatch answered. Against a
+  Dispatch older than this release, which answers its own 404 "no route for …", the hook adds
+  nothing to the context and writes one line naming that Dispatch to stderr.
+
+### Changed
+
+- Daemon API contract 43: the `legion` MCP tool reads the state's new `consumers` and
+  `repositories.withoutWebhookApp` strictly, and its `handoff_complete` description names the
+  implementer's new refusal `HANDOFF_NO_PULL_REQUEST`. A daemon of contract 42 and this plugin
+  refuse each other.
+- `dispatch-first`, which every Claude Code session loads at its start, says that a result a person asked for is like a blocker: a document or artifact notifies nobody, so the document that holds the result ends with an ask block asking their next step, else a `dispatch ask`. Its rule that each ask and message stands alone is gone, since `dispatch-writing-specs` carries it where an ask is written.
+
+### Fixed
+
+- The `answers` hook adds nothing to the context when Dispatch answers its own `404 NOT_FOUND`
+  "no route for …", as a build older than the answers route does, and no list read before from
+  that Dispatch has an item to show. Before, it added a line saying the answers could not be read
+  and telling the agent to run `dispatch answers`, a command that fails against that same
+  Dispatch. A list read before from that Dispatch is still carried, its left-out line naming no
+  command. The hook writes one line to stderr naming that Dispatch and that it has no answers
+  route, also when the refresher that ran a `!` token command made the read
+  (`answers-refresh.json` carries the `notice`). A proxy's 404 page, a 200 that is no answers
+  list and every other failed read still add the line naming why.
+
+## [main@49e23926228d] - 2026-10-30
+
+### Added
+
+- The Dispatch tools take a block reference in `reply_to` and `in_reply_to` to answer one block of a comment or message, and read a block of a comment or message by its reference.
+
+### Changed
+
+- The bundled `envoy_publish` description says a role message errs when its
+  holder did not confirm it within the listener's window, and a team or other ad-hoc topic errs
+  naming each session holding its own NATS connection that registered the topic and did not
+  confirm it; a session that stopped without unregistering stays registered for up to 5 minutes
+  and is named in that time, and a named session is not a failed delivery to the others.
+- `dispatch read` asks for each referenced document's latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.
+
+### Fixed
+
+- Main's rebuild of `dist/` and `legion/` lands even when main moved while its push job waited
+  for a runner: it commits the build onto main's tip whenever it is newer than the build main
+  holds, and starts one fresh run when a build input changed in between, so main's built plugin is
+  at most one run behind its inputs and never moves backward (#2493).
+  `scripts/build-inputs.txt` lists every path that can change the build; `tests/build-inputs.test.ts`
+  runs the build and fails when the bundles or the Legion plugin read a file the list does not
+  match (the files the build's scripts read by path are listed by hand).
+- A message the listener forwards to the session's agent subject is shown with the topic it was
+  published to: the channel notification's `topic` meta is the envelope's `topic`, falling back to
+  the NATS subject only when the envelope names none, where it was always the subject. A role
+  message's forward was shown under the session's own `notifications.agent.<id>`, and so was an
+  ad-hoc topic's copy the listener now confirms with the session, which can arrive before the copy
+  on the topic itself.
+
+## [main@1f5b08286a6d] - 2026-10-29
+
+### Added
+
+- The `dispatch` command (`dist/dispatch.js`) prints the related-item check an issue, an ask or a
+  new decision block got right under the line naming the write, as what it found and how it
+  searched, that it found nothing, or that no check was made, why, and the `dispatch search` to
+  run instead, and `dispatch related --project <KEY> --title … --text …` runs that check on a
+  draft and writes nothing.
+
+## [main@d157fc86811c] - 2026-10-29
+
+### Added
+
+- The worker image carries no Claude Code, only its pin: `packages/daemon/docker/claude-code`'s
+  `package.json` and `package-lock.json` at `/opt/legion/claude-code`. Claude Code's licence grants
+  no redistribution and the image is public, so a pod whose role runs on Claude Code installs the
+  pinned release at every launch, into its generation's own directory on the pod's own disk, with
+  `npm ci --ignore-scripts --omit=dev` (the lockfile's `sha512` integrity is the checksum), holds
+  the installed binary's `--version` to the pin, and fails the launch with a
+  `legion claude-code: …` line when the fetch fails or does not verify. The image probe
+  (`legion probe-image`, at the publish and at every boot) now proves what the image carries
+  instead of running `claude --version`: this package's root, its two loaded files and its
+  declared contract, and a pin that names one exact version and locks it and its `linux-x64`
+  package with their integrity; it fetches nothing. The `claude-code` capability row says and
+  measures the same, with the `npm` and `node` the install and its check run, in place of `claude`
+  on `PATH`. `scripts/e2e/claude-backend-sandbox.sh` now holds the worker to the binary its
+  generation's install left.
+- The Legion worker image carries a build of this package from the image's own commit at
+  `/opt/legion/claude-envoy`, so a phase worker a deployment puts on Claude Code now runs under
+  `runtime: kubernetes` as well as tmux: in its issue pod's one `roles` container, in the role's
+  own namespaces, its command is
+  `legion claude-bridge -- claude -p …`, its one MCP server is that root's
+  `dist/envoy-channel.js` and its plugins are that root and its generated `legion/`. The copy is
+  root's and writable by no one else, as the image's two Oh My Pi plugins are, since every role of
+  the pod loads it from the one container's filesystem. No workflow releases this package, so the
+  image is a Kubernetes deployment's only source of it, and a plugin-contract change for such a role
+  is answered by a new image rather than by an install (`docs/kubernetes.md`).
+- In a Kubernetes pod a Claude Code phase worker's session survives the pod: the pod's
+  disk dies with it, so the role's launcher keeps the transcript and the phase reminder's record as
+  rows of Oh My Pi's session table while the generation runs, and restores both at the next pod's
+  resume. The claim boot registers a transcript only once that table holds it: when
+  `LEGION_CLAUDE_SESSION_ID` is set, which the Kubernetes runtime sets for every Claude launch, it
+  waits for the launcher's `<transcript>.legion-saved` marker as well as the transcript. Under tmux
+  the variable is unset and the boot is as before.
+- The Legion phase reminder runs on Claude Code. A phase worker in a Legion pane whose
+  turn ends with its phase still open — no successful `handoff_complete` since its assignment — is
+  reminded at the end of every turn, for as long as that phase stays open, as an Oh My Pi worker
+  is. The machine is `@legion/pi-shared`'s, one copy for both harnesses; this plugin is its Claude
+  Code host (`src/legion-phase-hook.ts`), driven by Claude Code's own hooks: five `mcp_tool`
+  entries generated into the Legion plugin's `legion/hooks/hooks.json` (`Stop`, `StopFailure`,
+  `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`) call the new `legion_phase_hook` tool on
+  the pane's `legion` MCP server. The first reminder of a run comes back as the `Stop` hook's
+  `{"decision":"block","reason":…}`, which Claude Code turns into one more turn of the same
+  session; every later one is written into the session over the bridge's inbox from a timer, so the
+  turn boundary the daemon reads stays intact. A WAITING reply buys a quiet wait, the count of
+  unanswered reminders resets on any tool call or inbound turn, and a run of them tells the issue's
+  architect over this server's own Envoy client. The record — the phase, the count, the architect
+  notice's key and the head of what the worker last said, which that notice quotes even after a
+  relaunch — is `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json`, written
+  before each hook answers and read again when Claude Code restarts the server inside the same
+  `claude` process; a file the Go bridge wrote reads as an open phase with no reminder yet. The
+  four `LEGION_STALL_*` numbers come from the worker's environment. The hook entries are the Legion
+  plugin's alone: a plain `@sjawhar/claude-envoy` install registers no `legion` server, so
+  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 42.
+- A Claude Code phase worker whose launcher recreated its workspace is told so, once per launch,
+  over the same inbox the reminders use, as an Oh My Pi worker is
+  (`LEGION_WORKSPACE_RECREATED`): it reconciles against its committed handoff before new work
+  rather than finding the workspace quietly empty. Whether the notice has been sent rides in the
+  same state file, so a server Claude Code restarts inside one `claude` process does not repeat
+  it, and a launch that recreated nothing clears it, so a later recreation is told again.
+
+### Fixed
+
+- The channel server's one tmux call as it starts, which names the session's title after its pane,
+  is held to its 1 s bound by a timer that kills tmux with SIGKILL and stops reading its output,
+  not by the synchronous spawn's `timeout`: Bun 1.3.14's `execFileSync` let a hung or slow `tmux`
+  (measured: a `sleep 5` in its place, about half the runs) run to its end, holding the server's
+  start that long. `dist/` was rebuilt.
+
+## [main@c4cea404651d] - 2026-10-29
+
+### Added
+
+- Every Dispatch write the bundled `dispatch` command and the channel server make carries one `Idempotency-Key` and is asked again under it after a transport failure, a 5xx, a 408, a 429, a `409 KEY_IN_FLIGHT` or an attempt that hears nothing for 20 s (INFRA-258, through `@sjawhar/envoy-client`'s `DispatchClient`), so a write whose answer was lost is made once. A session's reply to a delivery attempt goes through that client too, keyed and bounded by its deadline. The hooks read Dispatch and write nothing, so they carry no key. `dist/dispatch.js`, `dist/envoy-channel.js` and `dist/session-hook.js` are rebuilt.
+
+## [main@a09a2f257406] - 2026-10-29
+
+### Added
+
+- Every registration names the plugin: `plugin` `@sjawhar/claude-envoy` and `plugin_version` the
+  version directory Claude Code's plugin cache installed it under (the marketplace commit's first
+  12 characters), or `source` for a bundle outside the plugin cache, which the listener's
+  `GET /v1/sessions` and `GET /v1/registry/<id>`, and `envoy_sessions`, show. `dist/` was rebuilt.
+
+### Changed
+
+- Pull requests no longer commit `dist/` and `legion/`: main's Rebuild Claude Envoy plugin
+  workflow commits them after each merge, so main's built files lag its sources by one run of
+  that workflow, runner queues included, while the merge's hand-written files (`hooks/hooks.json`,
+  `.mcp.json`, `bin/`) are live at once beside the previous build.
+  `scripts/build.ts` takes `--check` or `--out <dir>` (a runnable copy of the plugin in a new or
+  empty directory outside the repository), refuses a run that names no mode, and never writes the
+  package's own `dist/` or `legion/`.
+- The `dispatch` skill this plugin ships (its `skills/dispatch` link to the repository's skill)
+  and the bundled `dispatch_claim` description, since `dist/` was regenerated, say what a claim
+  delivers, where the skill said a claim delivers no comments: while a session holds an issue's
+  claim, a person's answers, comments and messages on that issue reach it directly, and a new
+  comment that mentions it arrives once, as the mention, when the mention reached it, and still
+  reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
+  twice: the second copy is the same comment). A `session:` route to the session brings a person's
+  answers, comments and messages as a claim does; a subscription to the issue brings other agents'
+  activity, beyond a reply in an ask the session follows.
+- The `dispatch` command (`dist/dispatch.js`) prints every open thread anchored on a document
+  `dispatch doc-read` reads in full: an open ask with its question and every reply under it, and
+  a comment thread with its root and every reply's author, time and text, in place of the one line
+  of ask and comment ids that never showed a reply. The bundled `dispatch_doc_read` description
+  says so, since `dist/` was regenerated (#2366).
+- The plugin's regenerated `legion/` copy of the `legion-worker` skill's merge gate says a
+  production check of `sjawhar/legion` wakes on Dispatch's `server.started` announcing that every
+  server process serves a build containing the merge, named in the look's task as
+  `Dispatch serving build <sha> on every server process`.
+- The bundled `dist/` and `legion/` were regenerated: the contracts' ask payload
+  schema parses the `withdrawn` resolution kind an issue's close writes, the actor label reads a
+  `legion-daemon:` session id whole, the `dispatch_issue_update` and `dispatch_resolve_ask`
+  descriptions say a close withdraws an issue's open asks and a reopen brings them back, and the
+  plugin's copies of the `legion-controller` and `legion-worker` skills say the same.
+- The plugin declares daemon API contract 41 in `package.json`'s `legion.daemonApiVersion`:
+  `legion controller start` ends the operator's Oh My Pi command line with
+  `/legion-controller-start`, and pi-legion sends the controller's start message from that
+  command rather than from `session_start`, so the start turn runs after Oh My Pi's startup;
+  nothing this plugin reads or writes moved, and a session of it registers with a daemon at 41.
+  `dist/envoy-channel.js`, which embeds the number, is rebuilt.
+- The `legion-controller` skill this plugin ships says when the controller is registered: at session
+  startup, or, in a controller an operator started, from its first command once Oh My Pi has
+  started, where it said the extension's startup claim; its takeover note's reason not to set
+  `LEGION_CONTROLLER=1` says that marker makes the session the launched controller, which needs a
+  start message.
+
+### Fixed
+
+- A session whose NATS path freezes (packets stop, neither side closes) reconnects within 30 s,
+  52 s when its first redial also hangs, instead of after up to 6 minutes: the channel server
+  dials with `@legion/envoy-client/nats-connection`'s options, a ping every 10 s and the
+  connection dropped after two unanswered pings, in place of nats.js's default 120 s ping. The
+  reconnect runs the catch-up, so the session is handed the messages sent meanwhile once. `dist/`
+  was rebuilt.
+- A channel server whose NATS redial once hung (its TCP connect, or a server that never sends
+  `INFO`) still exits on SIGTERM: nats.js gave up on that redial at its 20 s dial timeout but left
+  its socket open, which held the process alive. The bundle carries `patches/nats@2.29.3.patch`,
+  which makes nats.js destroy the socket of a transport that never finished connecting. The patch
+  also makes nats.js close a stale connection without flushing it first, so a channel server whose
+  connection holds data the frozen path never acknowledged still reconnects: the flush never
+  completed behind that data, and the server never redialed. `dist/` was rebuilt.
+- A channel session whose handoff file is missing at startup runs one heartbeat, not two, so during a listener outage it makes no more registry attempts than its bounded retry allows.
+
+## Before changelog fragments
+
+### Added
+
+- The channel server delivers once each Envoy message the session missed while its NATS
+  subscriptions were down, NATS was restarting or Claude Code was not running. It asks the
+  listener's new `POST /v1/replay` for what the notification stream (72 hours) stored on the
+  session's own subject and on every topic it follows after where it last read, at channel start
+  (a resume included), on each NATS reconnect, on every heartbeat and after a new follow, and
+  hands each message the session was not given on the same path as a live one (the channel
+  notification, or the Legion bridge's inbox), with a line saying when it was published while the
+  connection was down; it runs nothing. Role messages and team or other ad-hoc topics stay live
+  only. `replay-<session id>.json` in the plugin's data directory (mode 0600, never pruned) keeps
+  the cursors, the followed topics, which the server follows again at start after the listener
+  reaped them, and up to 72 hours and 20,000 entries of what the session was handed, so a resume
+  repeats nothing (a live repeat included) and a `/clear` starts afresh. A frame that fails three
+  times, or a live failure no sweep will retry (one received before its subject's cursor started
+  included, stamped when it arrived even behind a slow delivery), is replaced by a notice naming
+  it, its fields rendered in TOON as a live card's are,
+  so a sender's multi-line summary cannot add a field of its own. A recreated stream (its
+  `stream.id` changed, or, from a listener that answers no id, its creation time; a restore moves
+  the creation time under the same id, as can a leader election after a clustered restore, and
+  that is no recreation) or
+  a cursor older than the stream's oldest message is said once as a card, also by a channel
+  started again after one that stopped before saying it; a listener
+  without the route, or unable to read the stream, is said once on stderr. A BTW that reaches
+  replay is passed over and named on stderr, never handed: the listener never sends this session
+  a BTW, and neither delivery path can show one without starting a turn. A followed topic
+  reaching a private stream subject, by the listener's own rule (another session's
+  `notifications.agent.<id>`, a failed-delivery lane, a `notifications.legion.` controller lane, or
+  a wildcard reaching one such as `notifications.agent.*`), is followed live but neither registered
+  nor replayed, since the listener refuses to store it. `dist/` was rebuilt (INFRA-439).
+
+- A person's browser edit of a spec a session wrote reaches that session's channel as one card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block.
+- The `dispatch` command (`dist/dispatch.js`) reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it; `dist/` was regenerated. The block forms, the
+  pin and the 256-byte bound past which a block is no graph node are in the commands' `--help`
+  (`dispatch read --help`, `dispatch ask --help`, `dispatch doc-edit --help`).
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line; `dist/` was
+  regenerated.
+- The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
+  filtered issue listing in one request rather than a page, for a caller that must not miss or
+  repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage
+  error. The bundled tool descriptions carry the new argument.
 - The `dispatch` command (`dist/dispatch.js`) moves an issue on its project's board:
   `dispatch issue-update --issue <KEY> --before <OTHER>` puts it above that issue,
   `--after <OTHER>` below, and both together land it between them, printed as `rank -> before KEY`
   or `rank -> after KEY`. The bundled tool descriptions carry the two arguments, and the plugin's
   own copy of the `legion-controller` skill carries the corrected backlog rule, since `dist/` and
   `legion/` were regenerated (INFRA-188).
+- The `dispatch` command (`dist/dispatch.js`) imports every architecture source of a project, one
+  per repository: `dispatch architecture-sync --project <KEY>` prints a line for each source, and
+  `--repo <owner/name>` imports that one alone. Against a Dispatch older than this release,
+  `dispatch architecture-sync --project <KEY>` falls back to that server's single-source sync and
+  prints its one line, and `--repo` needs a Dispatch of this release. The `dispatch` skill says an
+  issue's component ids may come from any of its project's source repositories, and the plugin's
+  own copy of the `legion-architect` skill says a component file goes in the branch of the source
+  repository that holds it, with an id no other source of the project uses, since `dist/` and
+  `legion/` were regenerated (INFRA-391).
+- The `dispatch` command (`dist/dispatch.js`) prints, under each ask hit of `dispatch search`,
+  where the ask stands: `Answered by …` with the options chosen and `Answer text: …`, `Closed with
+  no answer: …`, `Closed after an answer: …` with `Last answer by …`, or `Open: no answer yet.`;
+  against a Dispatch older than this release, which reports no state, `Answer state not reported
+  by this Dispatch; open the link to read the ask.` The bundled `dispatch_search` description says
+  an ask hit says whether it is answered, since `dist/` was regenerated (INFRA-569).
 
 ### Changed
+
+- The linked `dispatch-writing-specs` skill holds text kept in a rewrite of an old spec to the
+  text rules: each retelling, quotation or unlinked attribution is restated as design or cut. The
+  lines it cuts to stay under the 2,000-word guard are listed in `@sjawhar/pi-envoy`'s changelog.
+
+- The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
+  symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
+  does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:
+  the Legion reviewer names, design-gate pointer and description pointer that `legion-architect` and
+  `dispatch-first` hold, the approval Dispatch carries, "The spec is the issue's primary document",
+  "Name an issue by its `dispatch://` link", "resolve the ask it answers", "Write what is true now"
+  and "Length scales with the change" (`@sjawhar/pi-envoy`'s changelog says where each is held).
+  The generated `legion/skills/legion-architect/references/design-gate.md` has the approval
+  summary's review sentence also say what the reviews do not show.
+
+- The bundled `dispatch` command (`dist/dispatch.js`, rebuilt) carries AskGate's marker check:
+  before a gated write posts it reads the session's AskGate record (`askgate/`) and, under a live one,
+  needs a marker an Oh My Pi gate minted. A Claude Code session writes under host `claude`, whose
+  session id no Oh My Pi process records, so the check is inert here: nothing this plugin sends
+  needs a marker. The plugin has no Dispatch write tool over MCP. `dist/envoy-channel.js` is
+  rebuilt with the same shared state code, whose session pruning keeps a directory a live record
+  names.
+- `dist/` and the generated `legion/` skills are rebuilt with AskGate's file digests (the bundled
+  CLI checks each reviewed file's sha256 and refuses one changed after the review), its two-hour
+  marker age, its per-process record files and its prune of a crashed process's store, and with
+  the skill examples written in the literal form the gate reads (the finding ask and the retro
+  message). Nothing here asks for a marker under host `claude`.
+- The `dispatch` command (`dist/dispatch.js`) and the bundled tool descriptions take an ask
+  question of up to 2,000 characters and ask for its concrete case first; the generated
+  `legion/skills/legion-worker/references/findings.md` carries the concrete finding ask.
+
+- The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
+  `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
+  while its architect waits on a person's answer, and the issue field `waitingOn`, naming the
+  question (`kind: "ask"`) or, for the gate waits of a later release, the spec version
+  (`kind: "gate"`), when the wait began, and when and by what act the wait was answered (not always
+  a person's). The MCP server's strict state reader admits both, and nothing this plugin reads or
+  writes moved; `dist/` was rebuilt and a session of it registers with a daemon at 40. The
+  generated `legion-architect` skill opens a question on the root and ends its turn after handing
+  it back, takes a resume task that says "this resume is your design-approved wake" as its
+  `design-approved` wake, and has a waiting root's resume task, not a notice, name a changes
+  request; the generated `legion-controller` skill reads the `awaiting-person` wake and a waiting
+  root as no reason to label or admit anything.
+- The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
+  waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and
+  `release_children` answers `started` and `held` beside `released`, all required, so the MCP
+  server's strict readers admit the fields and a plugin built before it refuses them; a session of
+  it registers with a daemon at 38. Install it with a `legion` built from the same commit. Its
+  `legion/` copies of the `legion-architect` and `legion-controller` skills carry the blocked-by
+  rule, since `legion/` was regenerated: children linked with `--blocked-by`, a held child
+  released all the same, a never-started child that still waits handed over carrying no run, the
+  controller's free slots counted without the waiting roots in `admission.blocked`, and a root both
+  waiting and blocked read in its admission reference.
+- The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-80): under the Kubernetes runtime an issue's disk is a generic ephemeral volume its pod
+  owns, created with the pod and deleted with it, so the `workspace-init provision` container is
+  no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the lost-disk machinery it drove — the
+  provisioning exit code 3, the recovery marker and the probe for an issue's retained sessions,
+  with the `legion sessions mark-lost` command — is gone, and `runtime.kubernetes.session_store`
+  must name a store that keeps sessions in a database, `postgres` or `cloudsql-iam`. Nothing this
+  plugin reads or writes moved; a session of it registers with a daemon at 37.
+- The plugin's regenerated `legion/` copy of the `legion-worker` skill's tools reference no longer
+  tells a role to add a new image package to the licence file by hand: the worker image lists every
+  Debian package it carries in `/usr/share/doc/legion/THIRD_PARTY_NOTICES` from its own dpkg
+  database (INFRA-255). The Dockerfile's comments and its toolchain smoke step stay hand-kept.
 
 - The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
   and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
+- The bundled `envoy_publish` description (`dist/` regenerated) and the `envoy` skill say a team
+  topic, any `notifications.` topic the stream does not store, reaches a session on a serve port
+  through its machine's listener when that listener subscribes to every topic
+  (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`; the shared hub's listener does not), where they said such a
+  session received none. A session of this plugin holds its own NATS connection and receives such
+  a topic as before (INFRA-122).
+
+- `scripts/smoke-session-title.sh` starts nats-server (`-p -1`) and the Envoy listener (`PORT=0`)
+  on ports the kernel chooses and reads each back from the server's own log, instead of picking a
+  port that was free a moment earlier, which another program could take before the server bound
+  it; the Dispatch address its session is configured with, which nothing serves, is
+  `http://127.0.0.1:1` (INFRA-253).
 
 ### Fixed
 
+- The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
+  daemon records. The daemon now refuses a completion of a run the issue has left before it applies
+  any fact and names the current run's queued task, so the worker ends the turn and calls
+  `handoff_complete` again at the same commit in that task's turn, which is applied.
+- The Legion tool's `handoff_complete` waits out a daemon restart: a connection refused, reset or
+  closed before a response, or a 502 or 503 from a proxy, is retried with backoff for up to 10
+  minutes, each attempt with a fresh grant, until the MCP client cancels the request
+  (`notifications/cancelled`), after which nothing more is sent. The retry notice goes to the MCP
+  server's stderr only. Every answer the daemon gives is passed on at once.
+- `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
+  record every request you accept in Dispatch and read that record back before a turn ends.
 - The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same
   reference: its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).
@@ -91,14 +501,38 @@
 - The `dispatch` command (`dist/dispatch.js`) waits for its stdout and stderr writes before it
   exits. Bun's `process.exit` dropped whatever a pipe had not yet taken, so a Bash tool lost the
   end of any output over the pipe's buffer (8 KB to 16 KB) with exit code 0.
-- The `dispatch` command (`dist/dispatch.js`), given a bare issue key where `--issue` belongs,
-  names the fix in its refusal: `use --issue <KEY>`, with the corrected command.
+- The `dispatch` command (`dist/dispatch.js`) takes a bare issue key as the first argument of a
+  command with `--issue` as that `--issue` (`dispatch read ACME-12`), only when `--issue` is not
+  also given; a key-shaped word later in the line is refused.
 - The `dispatch` command (`dist/dispatch.js`) refuses an ask, comment or message link as `--ref`
   to `comment`, `suggest`, `doc-edit` and `doc-read`, which used to act on the link's owner and
   drop the item; the refusal names `reply_to_ask` (`--reply-to-ask`), `reply_to` (`--reply-to`) or
   `dispatch read`.
 
 ### Changed
+
+- The session's start notice names an `askgate` section in a checkout's `.envoy/envoy.json` as
+  not read, and names the session's file to set it in.
+- The `legion/` plugin's skills fix a clear defect outside a role's issue in its own tree's pull
+  request when the tree touches or depends on that code, and send any other to the controller,
+  which hands it to the tree that owns the code and files it for Legion only when none does. A
+  `dispatch ask` stays for a finding that needs a decision.
+
+- The `legion/` plugin's `plan-reviewer` reviews a spec as well as a plan, checking each factual
+  claim, and it and `plan-gap-analyst` get `Bash` for read-only commands. Its
+  `legion-architect` runs both on a root spec before every approval request, and ends the
+  request's `--summary` with their results. The bundled `dispatch request-approval` help names
+  both reviewers.
+- The plugin ships `claude-envoy:dispatch-writing-specs` in place of
+  `claude-envoy:dispatch-brainstorming`: `skills/dispatch-writing-specs` links the
+  repository's new skill, and the old link is gone. The three Dispatch skills are under 2,000 words
+  together, and `dispatch` no longer has a `references/` directory; `pi-envoy`'s changelog lists
+  what each skill holds and which rules are gone. The bundled `dispatch` command (`dist/dispatch.js`,
+  `dist/envoy-channel.js`, `dist/session-hook.js`) prints the new notice after a primary spec with
+  no ask block: a person does not watch the session's chat, and sees its need only through an open
+  ask or a spec that waits for approval. `dispatch issue --spec` and `dispatch doc-edit` point at
+  `skill://dispatch-writing-specs`. After approval, `dispatch-writing-specs` makes a new version only
+  for a change to scope, acceptance, cost, risk or a person's decision, all in one version.
 
 - The bundled Dispatch tools (`dist/dispatch.js`, `dist/envoy-channel.js`, `dist/session-hook.js`)
   carry the 32,000-character body limit, up from 2,000 (INFRA-45): the `comment`, `suggest` and
@@ -113,6 +547,10 @@
 
 ### Added
 
+- The plugin ships a fifth skill, `claude-envoy:asd-ste100`, as a symlink into the root
+  `skills/`: the ASD-STE100 rules (Simplified Technical English) for text a reader must not
+  misread. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69, with
+  its licence and without its linter.
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch read --events N` (an issue's last N
   events) and `--all-events` (every one), on an issue read and its `dispatch://KEY/log`, which list
   the last 10 without either; the bundled tool specs in `dist/envoy-channel.js` and
@@ -143,7 +581,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 35, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 39, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the
@@ -163,6 +601,12 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 39 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-208): under the Kubernetes runtime an issue pod runs one container, `roles`, whose
+  launcher runs every role, and `runtime.kubernetes.resources` in `GET /legion/v1/state`'s
+  `settings` is `{issue, controller}`; nothing this plugin reads or writes moved, and
+  `dist/envoy-channel.js`, which embeds the number, is rebuilt; a session of it registers with a
+  daemon at 39.
 - The plugin declares daemon API contract 35 in `package.json`'s `legion.daemonApiVersion`
   (LEGION-791): `GET /legion/v1/state` carries `settings`, the daemon's resolved `legion.yaml` with
   every credential, credential source and credential file path left out and a URL's userinfo masked

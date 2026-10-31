@@ -9,7 +9,7 @@ tags:
   - proof-environment
   - daemon-go
 date: 2026-10-08
-status: active
+status: superseded in part by INFRA-257 — `internal/supervise`'s table tests no longer fail in a pod, since the image carries gcc and libc6-dev with cgo off by default; the rest stands
 module: packages/daemon
 related_issues:
   - "LEGION-630"
@@ -40,6 +40,8 @@ Extends docs/solutions/testing/a-worker-pod-ships-no-go-or-tmux-provision-them-u
   from the environment; run it with `env -u LEGION_GRANT_FILE -u LEGION_GRANT`);
   `internal/launcher`'s `TestAGenerationsCredentialsLiveExactlyAsLongAsItsChild` (timing-sensitive
   under gVisor: two different assertions failed in two runs).
+  (INFRA-257: on an image with gcc the supervise table tests pass in any environment; they fail as
+  above only on an older pinned image digest without gcc.)
 - Run the packages the change touches by name (`go test ./internal/prompts/` for a prompt edit),
   and point at CI's `test` job (`.github/workflows/pr-and-main.yaml`) for the whole module; a
   branch that changes no Go source has nothing more to prove in the pod.

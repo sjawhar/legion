@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
@@ -11,8 +10,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// getArchitectureTree answers the project's component model with the work attached to it:
-// every component with its counts and issue rows, and the issues no component counts —
+// getArchitectureTree answers the project's component model — every source's components
+// together — with the work attached to it: each source's sync bookkeeping, every component with
+// its source repository, counts and issue rows, and the issues no component counts —
 // unassigned, declared not architectural, or linked only to retired components. 404
 // SOURCE_NOT_FOUND when the project has no architecture source.
 func (s *server) getArchitectureTree(w http.ResponseWriter, r *http.Request) {
@@ -22,14 +22,21 @@ func (s *server) getArchitectureTree(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("key")
 	pool := s.deps.Store.Pool
 	var tree model.ArchitectureTree
-	if err := pool.QueryRow(r.Context(), `
-		select repo, branch, last_commit, last_sync_at, last_error from architecture_sources where project_key = $1
-	`, project).Scan(&tree.Source.Repo, &tree.Source.Branch, &tree.Source.LastCommit, &tree.Source.LastSyncAt, &tree.Source.LastError); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source configured for "+project)
-			return
-		}
+	rows, err := pool.Query(r.Context(), `
+		select repo, branch, last_commit, last_sync_at, last_error from architecture_sources
+		where project_key = $1 order by id
+	`, project)
+	if err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	tree.Sources, err = pgx.CollectRows(rows, pgx.RowToStructByPos[model.ArchitectureTreeSource])
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if len(tree.Sources) == 0 {
+		writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source configured for "+project)
 		return
 	}
 	components, byID, err := loadTreeComponents(r.Context(), pool, project)
@@ -98,14 +105,16 @@ func (s *server) getArchitectureTree(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, tree)
 }
 
-// loadTreeComponents reads the project's current model in id order, each component with its
-// dependency ids and an empty issue list.
+// loadTreeComponents reads the project's current model — every source's components — in id
+// order, each component with its source repository, its dependency ids and an empty issue list.
 func loadTreeComponents(ctx context.Context, q queryer, project string) ([]*model.ArchitectureTreeComponent, map[string]*model.ArchitectureTreeComponent, error) {
 	rows, err := q.Query(ctx, `
-		select c.id, c.title, c.parent, c.external, c.paths, c.prose,
+		select c.id, s.repo, c.title, c.parent, c.external, c.paths, c.prose,
 		       coalesce((select array_agg(d.to_id order by d.to_id) from component_depends d
 		                 where d.project_key = c.project_key and d.from_id = c.id), '{}'::text[])
-		from components c where c.project_key = $1 order by c.id
+		from components c
+		join architecture_sources s on s.project_key = c.project_key and s.id = c.source_id
+		where c.project_key = $1 order by c.id
 	`, project)
 	if err != nil {
 		return nil, nil, err
@@ -115,7 +124,7 @@ func loadTreeComponents(ctx context.Context, q queryer, project string) ([]*mode
 	byID := map[string]*model.ArchitectureTreeComponent{}
 	for rows.Next() {
 		component := &model.ArchitectureTreeComponent{Issues: []model.ArchitectureTreeIssue{}}
-		if err := rows.Scan(&component.ID, &component.Title, &component.Parent, &component.External, &component.Paths, &component.Prose, &component.DependsOn); err != nil {
+		if err := rows.Scan(&component.ID, &component.Source, &component.Title, &component.Parent, &component.External, &component.Paths, &component.Prose, &component.DependsOn); err != nil {
 			return nil, nil, err
 		}
 		if component.Paths == nil {

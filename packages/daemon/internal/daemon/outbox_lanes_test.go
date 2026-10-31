@@ -152,8 +152,8 @@ func (d *postingDispatch) ListIssues(context.Context, string, []string) ([]dispa
 func (d *postingDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
 	return dispatch.Issue{Key: key}, nil
 }
-func (d *postingDispatch) SetStatus(context.Context, string, string) error {
-	return errors.New("postingDispatch takes no status")
+func (d *postingDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
+	return dispatch.Issue{}, errors.New("postingDispatch takes no status")
 }
 func (d *postingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("postingDispatch takes no hand-over")
@@ -170,12 +170,18 @@ func (d *postingDispatch) PostMessage(_ context.Context, key, body string) error
 func (d *postingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *postingDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *postingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
 func (d *postingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *postingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+func (d *postingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 
 // postsTo is how many messages were posted on issue.
@@ -203,22 +209,25 @@ func (d *laneBoard) GetIssue(_ context.Context, key string) (dispatch.Issue, err
 	defer d.mu.Unlock()
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
-func (d *laneBoard) SetStatus(_ context.Context, _ string, status string) error {
+func (d *laneBoard) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.failures > 0 {
 		d.failures--
-		return errors.New("dispatch unavailable")
+		return dispatch.Issue{}, errors.New("dispatch unavailable")
 	}
 	d.status = status
 	d.landed = append(d.landed, status)
-	return nil
+	return dispatch.Issue{}, nil
 }
 func (d *laneBoard) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("laneBoard takes no hand-over")
 }
 func (d *laneBoard) PostMessage(context.Context, string, string) error { return nil }
 func (d *laneBoard) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *laneBoard) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *laneBoard) Approval(context.Context, string) (dispatch.Approval, error) {
@@ -228,6 +237,7 @@ func (d *laneBoard) BuildCommit(context.Context) (string, error) { return "", ni
 func (d *laneBoard) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *laneBoard) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // statuses is each status that landed, in order.
 func (d *laneBoard) statuses() []string {
@@ -371,7 +381,7 @@ func startLaneTree(t *testing.T, log *slog.Logger) *laneTree {
 			tree.provisions.Add(1)
 			return workspace.Workspace{}, nil
 		},
-		remove: func(context.Context, workspace.Workspace) error { return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { return nil },
 	}
 	tree.records = wakingRecords(tree.runner)
 	runLanes(t, tree.runner, tree.clock, tree.spawn.gate.open)

@@ -25,16 +25,23 @@
 # 1, the carded Send at its retry, and nothing else. Each check prints `== <name>`, what it
 # observed, and `ok <name>`; the first that fails ends the run non-zero, naming it.
 #
-# Run it as `bash scripts/e2e/dispatch-user-turns.sh` from a checkout, devbox only: the session's
-# model is Anthropic through the Hawk model gateway on the operator's own hawk login
-# (lib/install-model-gateway.sh), so LEGION_E2E_MODEL_GATEWAY_URL is required and the keyring must
-# be unlocked. DISPATCH_USER_TURNS_OMP names another Oh My Pi (a mise tool spec such as
-# github:sjawhar/oh-my-pi@<version>) in place of the pinned one. Everything the run creates is its
-# own and goes on any exit: its scratch directory, the isolated profile under the HOME it gives Oh
-# My Pi (make_omp_home, lib/omp-home.sh), its tmux server, its listener and Dispatch, and its
-# Postgres and NATS containers. DISPATCH_USER_TURNS_EVIDENCE_DIR (default a fresh /tmp directory,
-# kept and printed) keeps the logs, the page's screenshots, the session transcript, the arguments
-# the rig's extension command recorded and every `message_start` its extension saw.
+# Run it as `bash scripts/e2e/dispatch-user-turns.sh` from a checkout, devbox only. The session's model
+# is Anthropic, on the route LEGION_E2E_MODEL_ROUTE names (`gateway`, the default, or `key-file`):
+# `gateway` goes through the Hawk model gateway on the operator's own hawk login
+# (lib/install-model-gateway.sh), so LEGION_E2E_MODEL_GATEWAY_URL is required and the keyring must be
+# unlocked; `key-file` reads the 0600 file LEGION_E2E_ANTHROPIC_KEY_FILE names on every call
+# (lib/install-key-file-model-route.sh), for a devbox with no Hawk gateway. DISPATCH_USER_TURNS_OMP
+# names another Oh My Pi (a mise tool spec such as github:sjawhar/oh-my-pi@<version>) in place of the
+# pinned one. DISPATCH_USER_TURNS_ONLY=spec-edit runs `session-registers` and the two spec-edit
+# checks alone, then ends: the spec-edit live check, which needs none of the others;
+# DISPATCH_USER_TURNS_ONLY=spec-edit-card stops after the first of them, the card's arrival.
+# Everything the run creates is its own and goes on any exit: its scratch directory, the isolated
+# profile under the HOME it gives Oh My Pi (make_omp_home, lib/omp-home.sh), the key command a
+# key-file route writes, its tmux server, its listener and Dispatch, and its Postgres and NATS
+# containers.
+# DISPATCH_USER_TURNS_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) keeps the
+# logs, the page's screenshots, the session transcript, the arguments the rig's extension command
+# recorded and every `message_start` its extension saw.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce, so no process here inherits an operator's seed.
@@ -191,25 +198,23 @@ launch_session() {
 }
 
 # ---- setup -----------------------------------------------------------------------------------------
-for tool in go docker jq curl tmux bun mise; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl python3 tmux bun mise; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 omp_tool=${DISPATCH_USER_TURNS_OMP:-$(<"$root/.omp-pin")}
 mkdir -p "$session_cwd"
 refuse_leftovers legion-e2e-user-turns
 make_omp_home "$omp_home"
 mise where "$omp_tool" >/dev/null 2>&1 || mise install "$omp_tool" >&2
-pick_port envoy_port
-pick_port dispatch_port
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/dispatch" ./cmd/dispatch)
 (cd "$root/packages/dispatch" && bun run build:web >"$evidence/logs/build-web.log" 2>&1) || fail "the SPA did not build; see $evidence/logs/build-web.log"
-note "Oh My Pi $omp_tool; listener port $envoy_port; Dispatch port $dispatch_port; run $run"
+note "Oh My Pi $omp_tool; run $run"
 
-docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=dispatch -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch \
-  -p "127.0.0.1::5432" pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
+  -p "127.0.0.1::5432" mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
 pg_port=$(docker port "$pg_container" 5432/tcp | head -1 | sed 's/.*://')
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U dispatch -d dispatch
-docker run -d --name "$nats_container" -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
+docker run -d --name "$nats_container" --cpus 1 --memory 512m -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
 until_true 90 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
 nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | sed 's/.*://')"
 
@@ -219,29 +224,51 @@ nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | 
   printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header")
 # Neither service inherits this shell: an operator's ENVOY_NATS_URL names production NATS, and a
 # HOME or XDG_CONFIG_HOME holding legion/envoy.json would hand Dispatch a production configuration.
-env -i PATH="$PATH" HOME=/nonexistent ENVOY_API_TOKEN="$(cat "$work/envoy-token")" PORT="$envoy_port" \
+# Each serves on a port the kernel chose, held from that choice until it serves on it (lib/rig.sh's
+# start_held); `env -i` clears the descriptor's variable the helper sets, so each names its own: the
+# helper hands the socket over as descriptor 3.
+start_held listener envoy_port ENVOY_LISTEN_FD -- \
+  env -i PATH="$PATH" HOME=/nonexistent ENVOY_LISTEN_FD=3 ENVOY_API_TOKEN="$(cat "$work/envoy-token")" PORT='{port}' \
   ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID="legion-e2e-user-turns-$$" NATS_URLS="$nats_url" \
-  "$work/envoy-listener" >"$evidence/logs/listener.log" 2>&1 &
-listener_pid=$!
+  "$work/envoy-listener"
 until_true 60 "the Envoy listener" listener "http://127.0.0.1:$envoy_port/v1/sessions"
-env -i PATH="$PATH" HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent XDG_DATA_HOME=/nonexistent \
+start_held dispatch dispatch_port DISPATCH_LISTEN_FD -- \
+  env -i PATH="$PATH" HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent XDG_DATA_HOME=/nonexistent \
   DATABASE_URL="postgres://dispatch:dispatch@127.0.0.1:$pg_port/dispatch?sslmode=disable" \
-  DISPATCH_AGENT_TOKEN="$(cat "$work/dispatch-token")" \
-  DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$dispatch_port" \
-  DISPATCH_SERVER_URL="http://127.0.0.1:$dispatch_port" DISPATCH_SIGNING_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" \
+  DISPATCH_AGENT_TOKEN="$(cat "$work/dispatch-token")" DISPATCH_LISTEN_FD=3 \
+  DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT='{port}' \
+  DISPATCH_SERVER_URL='http://127.0.0.1:{port}' DISPATCH_SIGNING_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" \
   DISPATCH_WEB_DIST="$root/packages/dispatch/web/dist" ENVOY_URL="http://127.0.0.1:$envoy_port" \
   ENVOY_TOKEN="$(cat "$work/envoy-token")" NATS_URLS="$nats_url" \
-  "$work/dispatch" >"$evidence/logs/dispatch.log" 2>&1 &
-dispatch_pid=$!
+  "$work/dispatch"
 until_true 90 "Dispatch to serve, with NATS" sh -c "curl -fsS http://127.0.0.1:$dispatch_port/healthz | jq -e '.ok and .nats'"
+note "listener port $envoy_port; Dispatch port $dispatch_port"
 
 # The session runs outside Legion, with no role, so it needs only the Envoy plugin, the one this
 # proof is about.
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
 note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile"
-bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" \
-  --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
-  fail "the session's model route through the Hawk model gateway could not be installed (the reason is above)"
+model_route=${LEGION_E2E_MODEL_ROUTE:-gateway}
+case "$model_route" in
+gateway)
+  bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" \
+    --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
+    fail "the session's model route through the Hawk model gateway could not be installed (the reason is above)"
+  ;;
+key-file)
+  [ -n "${LEGION_E2E_ANTHROPIC_KEY_FILE:-}" ] ||
+    fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
+  # The key command goes under $work, which cleanup removes on every exit; the call record, which
+  # holds no secret, goes with the evidence.
+  bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" \
+    --dest "$evidence/model-route" --key-dir "$work/model-key" --key-file "$LEGION_E2E_ANTHROPIC_KEY_FILE" >/dev/null ||
+    fail "the session's model route through the key file could not be installed (the reason is above)"
+  ;;
+*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
+esac
+note "model route $model_route"
+only=${DISPATCH_USER_TURNS_ONLY:-}
+case "$only" in "" | spec-edit | spec-edit-card) ;; *) fail "DISPATCH_USER_TURNS_ONLY must be spec-edit, spec-edit-card or unset, not '$only'" ;; esac
 
 # What the slash-command checks send, installed in the profile's agent dir, which the pinned host's
 # discovery reads as the user config dir (packages/coding-agent/src/discovery/builtin.ts,
@@ -377,6 +404,92 @@ forge_on_bus() {
     '.payload = $p | .payload_summary = $b | .dedupe_key = $k | .event_id = $k' <<<"$envelope")"
 }
 
+# ---- a person's spec edit --------------------------------------------------------------------------
+# The session writes a spec; a person edits it in the browser; once the document has been quiet for
+# 30 s, the session gets one artifact.human_edited card holding the diff, and rewrites the part the
+# edit left saying the old time. The quiet time is Dispatch's own: the rig sets no
+# DISPATCH_TEST_EDIT_NOTICE_QUIET.
+spec_title="Spec edit export $run"
+spec_old="The export runs at 02:00 UTC."
+spec_new="The export runs at 04:00 UTC."
+spec_ask="With \`dispatch issue\` in project UT, create an issue titled \"$spec_title\" whose spec's first section says \`$spec_old\` and whose second section repeats that time."
+# written_spec: the issue in project UT with the run's title, which only the session's create can
+# make (the title holds the run token), as one JSON object {key, artifact}; empty while there is
+# none. The listing carries no creator (its `created_by` reads null), so the creator is checked on
+# the spec's own read below.
+written_spec() {
+  human "http://127.0.0.1:$dispatch_port/api/v1/issues?project=UT" |
+    jq -c --arg t "$spec_title" 'first(.[] | select(.title == $t)) | {key, artifact: .primary_artifact_id}'
+}
+has_written_spec() { [ -n "$(written_spec)" ]; }
+spec_markdown() { human "http://127.0.0.1:$dispatch_port/api/v1/artifacts/$1/text" | jq -r .markdown; }
+# edit_cards: the Envoy cards of artifact.human_edited whose diff adds the person's sentence.
+edit_cards() {
+  jq -s --arg n "+$spec_new" '[.[] | select(.type == "custom_message" and .customType == "envoy-message")
+    | .content | if type == "string" then . else tostring end
+    | select(contains("artifact.human_edited") and contains($n))] | length' "$session_file"
+}
+has_edit_card() { [ "$(edit_cards)" -gt 0 ]; }
+# rewritten ARTIFACT VERSION: a version after VERSION lists a session (the rig's one session; the
+# person's version lists the person), and the spec no longer says 02:00 and says 04:00 in more than
+# one place.
+rewritten() {
+  local latest markdown
+  latest=$(human "http://127.0.0.1:$dispatch_port/api/v1/artifacts/$1" |
+    jq -c --argjson v "$2" '[.versions[] | select(.number > $v and any(.authors[]; .kind == "session"))] | last // empty')
+  [ -n "$latest" ] || return 1
+  markdown=$(spec_markdown "$1")
+  ! grep -q '02:00' <<<"$markdown" && [ "$(grep -o '04:00' <<<"$markdown" | wc -l)" -ge 2 ]
+}
+
+begin a-persons-spec-edit-reaches-its-writer
+spec_asked=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" \
+  -d "$(jq -nc --arg b "$spec_ask" '{body: $b, delivery: "steer"}')" | jq -r .id)
+note "asked the session for the spec (message $spec_asked)"
+until_true 60 "the session's transcript" find_session_file
+until_true 300 "the session to create the issue" has_written_spec
+until_true 300 "the session to finish its turn" settled
+spec=$(written_spec)
+spec_key=$(jq -r .key <<<"$spec")
+spec_artifact=$(jq -r .artifact <<<"$spec")
+spec_creator=$(human "http://127.0.0.1:$dispatch_port/api/v1/artifacts/$spec_artifact" | jq -c .created_by)
+jq -e '.kind == "session"' <<<"$spec_creator" >/dev/null ||
+  fail "the spec of $spec_key was created by $spec_creator, not a session: no session would be its writer"
+spec_markdown "$spec_artifact" >"$evidence/checks/spec-before.md"
+grep -qF "$spec_old" "$evidence/checks/spec-before.md" ||
+  fail "the spec of $spec_key does not hold \"$spec_old\" (checks/spec-before.md)"
+edited=$(page edit "http://127.0.0.1:$dispatch_port" "$login" "$spec_key" "$spec_old" "$spec_new" "$evidence/checks/spec-edit.png")
+edit_settled=$SECONDS
+note "page: $edited"
+jq -e '.connected == true' <<<"$edited" >/dev/null || fail "the page's document socket was not signed in: $edited"
+person_version=$(jq -r .version <<<"$edited")
+until_true 90 "the session's artifact.human_edited card" has_edit_card
+card_after=$((SECONDS - edit_settled))
+[ "$card_after" -le 60 ] || fail "the card arrived ${card_after}s after the person's version settled, want at most 60 s"
+[ "$(edit_cards)" = 1 ] || fail "the session got $(edit_cards) artifact.human_edited cards, want 1"
+jq -s '[.[] | select(.type == "custom_message" and .customType == "envoy-message") | .content
+  | if type == "string" then . else tostring end | select(contains("artifact.human_edited"))] | first' \
+  "$session_file" >"$evidence/checks/spec-edit-card.json"
+note "$spec_key spec v$person_version by $login: one card ${card_after}s after the version settled, its diff adding \"$spec_new\" (checks/spec-edit-card.json)"
+pass
+if [ "$only" = spec-edit-card ]; then
+  ok=1
+  echo "dispatch user turns e2e: PASS (DISPATCH_USER_TURNS_ONLY=spec-edit-card)"
+  exit 0
+fi
+
+begin the-writer-rewrites-what-the-edit-touched
+until_true 300 "the session's version saying 04:00 in both sections" rewritten "$spec_artifact" "$person_version"
+spec_markdown "$spec_artifact" >"$evidence/checks/spec-after.md"
+note "$spec_key: a version by the session after v$person_version says 04:00 in both sections and 02:00 nowhere (checks/spec-after.md), $((SECONDS - edit_settled))s after the person's version"
+until_true 300 "the session to finish its turn" settled
+pass
+if [ "$only" = spec-edit ]; then
+  ok=1
+  echo "dispatch user turns e2e: PASS (DISPATCH_USER_TURNS_ONLY=spec-edit)"
+  exit 0
+fi
+
 # Each body is a plain question whose answer carries the run token. A model can read an order such
 # as "answer with the one word X and nothing else" as a prompt injection and refuse it, which would
 # stall the answer waits below for a reason that has nothing to do with delivery.
@@ -431,8 +544,8 @@ pass
 
 broadcast_body="LEGION-394 $run broadcast: status, please."
 begin a-broadcast-gets-a-card
-human -X POST "http://127.0.0.1:$dispatch_port/api/v1/broadcasts" \
-  -d "$(jq -nc --arg b "$broadcast_body" --arg s "$session_id" --arg k "$run" '{body: $b, delivery: "steer", session_ids: [$s], idempotency_key: ("broadcast-" + $k)}')" >/dev/null
+human -X POST "http://127.0.0.1:$dispatch_port/api/v1/broadcasts" -H "Idempotency-Key: broadcast-$run" \
+  -d "$(jq -nc --arg b "$broadcast_body" --arg s "$session_id" '{body: $b, delivery: "steer", session_ids: [$s]}')" >/dev/null
 until_true 120 "the broadcast's card" has_card "$broadcast_body"
 [ "$(user_mentions "$broadcast_body")" = 0 ] || fail "the broadcast became a user message"
 note "a card, no user message"
@@ -699,7 +812,7 @@ pass
 
 offline_body="LEGION-394 $run Send while the session is down: my label for it is CHARLIE$run. What is my label?"
 begin a-send-while-the-session-is-down-fails
-offline=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" \
+offline=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" -H "Idempotency-Key: offline-$run" \
   -d "$(jq -nc --arg b "$offline_body" '{body: $b, delivery: "steer"}')")
 offline_sent=$SECONDS
 offline_id=$(jq -r .id <<<"$offline")
@@ -748,7 +861,7 @@ begin a-frame-forged-for-a-failed-send-inside-the-minute-gets-a-card
 # attempt: Dispatch refuses to accept a failed attempt, so it stays a card.
 listener -X DELETE "http://127.0.0.1:$envoy_port/v1/sessions/$session_id" >/dev/null
 until_true 30 "the listener to drop the session" unlisted
-unlisted_send=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" \
+unlisted_send=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" -H "Idempotency-Key: unlisted-$run" \
   -d "$(jq -nc --arg b "$unlisted_body" '{body: $b, delivery: "steer"}')")
 unlisted_sent=$SECONDS
 unlisted_id=$(jq -r .id <<<"$unlisted_send")

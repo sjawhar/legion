@@ -27,8 +27,10 @@ func TestSessionEntryFromSubscribe_CarriesDrivingFlag(t *testing.T) {
 }
 
 // envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel hostname) names
-// where the session process actually runs; it must reach the session entry as Host, kept
-// separate from MachineID (always the registering listener's own machine, never the caller's).
+// where the session process actually runs, which is the address a listener reaches the session's
+// serving port at when no host bridge of its own machine applies. It must reach the session entry
+// as Host, kept separate from MachineID (always the registering listener's own machine, never the
+// caller's), which decides which listener fans a topic out to the session.
 func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
 	got := sessionEntryFromSubscribe(subscribeBody{
 		SessionID: "ses_z",
@@ -46,11 +48,36 @@ func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
 
 func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
 	// An older plugin's subscribeBody has no "host" key; sessionEntryFromSubscribe must not
-	// invent one — HostOrMachine is where the fallback to MachineID happens, at read time.
+	// invent one: an empty Host is what sends the owning listener's delivery (the only one; no
+	// other listener delivers to the session) to its fallback, host.docker.internal, and display
+	// to MachineID (HostOrMachine).
 	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old", Port: 1}, "example-listener")
 
 	if got.Host != "" {
 		t.Fatalf("expected Host to stay empty for a payload without the field, got %+v", got)
+	}
+}
+
+// The plugin a session registers through and that plugin's build reach the session entry, with
+// the surrounding space a session id loses dropped too.
+func TestSessionEntryFromSubscribe_CarriesThePluginAndItsVersionTrimmed(t *testing.T) {
+	got := sessionEntryFromSubscribe(subscribeBody{
+		SessionID:     "ses_plugin",
+		Plugin:        " @sjawhar/pi-envoy\n",
+		PluginVersion: "\t11.0.0 ",
+	}, "example-listener")
+
+	if got.Plugin != "@sjawhar/pi-envoy" || got.PluginVersion != "11.0.0" {
+		t.Fatalf("expected plugin @sjawhar/pi-envoy at 11.0.0, got %+v", got)
+	}
+}
+
+func TestSessionEntryFromSubscribe_DefaultsThePluginAndItsVersionEmpty(t *testing.T) {
+	// A plugin predating the fields sends neither key; the entry invents neither.
+	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old"}, "example-listener")
+
+	if got.Plugin != "" || got.PluginVersion != "" {
+		t.Fatalf("expected no plugin for a payload without the fields, got %+v", got)
 	}
 }
 

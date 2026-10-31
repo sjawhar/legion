@@ -21,9 +21,13 @@ var _ supervise.Store = (*Store)(nil)
 
 // claimSelect reads a claim with the delivery pending on it, if any: the two tables are written
 // separately (a delivery changes far more often than the claim it rides on) and read together.
+// It does not read workspace_lost: nothing carries a disk forward for a launch to find lost
+// (INFRA-80). The column stays unread rather than dropped — migrations here are forward-only, and
+// the previous release's daemon still reads its own claims table, so dropping it would make
+// rolling the image back need a database restore.
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.tree_epoch, c.session,
 	c.session_file, c.locator, c.state, c.failure, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
-	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost, c.last_start_row, c.serving_generation,
+	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.last_start_row, c.serving_generation,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
 	c.plugin_contract, c.plugin_relaunch_for,
 	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
@@ -59,10 +63,10 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 	}
 	_, err := db.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, tree_epoch,
 		session, session_file, locator, state, failure, launch_failures, deaths, prompt_failures, prompt_retires,
-		boot_token_hash, capability_hash, uncertain_streak, workspace_lost, last_start_row,
+		boot_token_hash, capability_hash, uncertain_streak, last_start_row,
 		serving_generation, agent_secrets_enrollment, agent_secrets_enrollment_incarnation, suspended_by,
 		plugin_contract, plugin_relaunch_for)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -71,7 +75,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		prompt_failures = excluded.prompt_failures,
 		prompt_retires = excluded.prompt_retires, boot_token_hash = excluded.boot_token_hash,
 		capability_hash = excluded.capability_hash, uncertain_streak = excluded.uncertain_streak,
-		workspace_lost = excluded.workspace_lost, last_start_row = excluded.last_start_row,
+		last_start_row = excluded.last_start_row,
 		serving_generation = excluded.serving_generation,
 		agent_secrets_enrollment = excluded.agent_secrets_enrollment,
 		agent_secrets_enrollment_incarnation = excluded.agent_secrets_enrollment_incarnation,
@@ -82,7 +86,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State), c.Failure,
 		c.Budgets.LaunchFailures, c.Budgets.Deaths, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
-		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.WorkspaceLost, c.LastStartRow, int64(c.ServingGeneration),
+		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.LastStartRow, int64(c.ServingGeneration),
 		enrollmentID, enrollmentIncarnation, string(c.SuspendedBy),
 		c.PluginContract, c.PluginRelaunchFor,
 	)
@@ -128,21 +132,6 @@ func readClaims(ctx context.Context, q claimQuerier) ([]supervise.Claim, error) 
 		return nil, fmt.Errorf("read claims: %w", err)
 	}
 	return claims, nil
-}
-
-// IssueHasSessions is whether any stored claim of issue, retained and retired roles included,
-// recorded a session: the issue's volume must then already hold its clone and that session, so a
-// new role of the issue may be the first to notice the volume holding another role's session
-// disappeared. A session another issue of the same tree recorded is on that issue's own volume and
-// does not count.
-func (s *Store) IssueHasSessions(ctx context.Context, project, issue string) (bool, error) {
-	var exists bool
-	err := s.pool.QueryRow(ctx, `select exists (select 1 from claims where project = $1 and issue = $2 and session_file <> '')`,
-		project, issue).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("read retained sessions of issue %s: %w", issue, err)
-	}
-	return exists, nil
 }
 
 // ClaimIssue is the issue the claim of token is on, from the daemon's own claims and nothing a pane
@@ -341,7 +330,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Failure, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
-		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
+		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak,
 		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC, &by,
 		&c.PluginContract, &c.PluginRelaunchFor,
 		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)

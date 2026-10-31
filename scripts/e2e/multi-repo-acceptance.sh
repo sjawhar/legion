@@ -24,7 +24,7 @@
 #   bash scripts/e2e/multi-repo-acceptance.sh branch-base <T child KEY>
 #   bash scripts/e2e/multi-repo-acceptance.sh pin <C> <T merge sha>
 #   bash scripts/e2e/multi-repo-acceptance.sh done <KEY>...
-#   bash scripts/e2e/multi-repo-acceptance.sh second-owner <O child KEY> <pod> [container]
+#   bash scripts/e2e/multi-repo-acceptance.sh second-owner <O child KEY> <pod> [role]
 #   bash scripts/e2e/multi-repo-acceptance.sh cache <issue KEY> <pod> [container]
 #   bash scripts/e2e/multi-repo-acceptance.sh negative pr-in-x before <T child KEY>
 #   bash scripts/e2e/multi-repo-acceptance.sh negative pr-in-x after <run id> <T child KEY>
@@ -82,7 +82,7 @@ usage() {
   echo "  branch-base <T child KEY>" >&2
   echo "  pin <C> <T merge sha>" >&2
   echo "  done <KEY>..." >&2
-  echo "  second-owner <O child KEY> <pod> [container]" >&2
+  echo "  second-owner <O child KEY> <pod> [role]" >&2
   echo "  cache <issue KEY> <pod> [container]" >&2
   echo "  negative pr-in-x before <T child KEY>" >&2
   echo "  negative pr-in-x after <run id> <T child KEY>" >&2
@@ -482,13 +482,15 @@ require_pod_for_issue() {
 
 # ---- running as the role, not the bare pod shell -------------------------------------------------
 #
-# `kubectl exec` carries none of a role's own variables, so a probe run that way cannot be the
-# role's. lib/as-role.py resolves the role's agent process in the pod and runs the credential
-# probes under that process's own environment; its header says how the agent is told apart from the
-# shim's other children and why the probes are built as they are. It is streamed to `python3 -I -`
-# in the role's container over `kubectl exec -i` and prints one JSON object, which this script keeps
-# byte for byte as evidence and judges with jq. python3 is the pod's own: every role container's
-# image is checked for it at boot (internal/capabilities/image.go).
+# `kubectl exec` carries none of a role's own variables, and an issue pod's one `roles` container
+# holds every role's directories while each role sees only its own, so a probe run in the bare
+# container cannot be the role's. role_enter_sh (below) takes the probe from the `roles` container
+# into the role's own namespaces, and lib/as-role.py resolves the role's agent process there and
+# runs the credential probes under that process's own environment; its header says how the agent
+# is told apart from the shim's other children and why the probes are built as they are. It is
+# streamed to `python3 -I -` over `kubectl exec -i` and prints one JSON object, which this script
+# keeps byte for byte as evidence and judges with jq. python3 is the pod's own: the pod's image is
+# checked for it at boot (internal/capabilities/image.go).
 as_role_script="$script_dir/lib/as-role.py"
 
 # resolve_proc_root prints the /proc root as-role.py scans: the pod's own, except in a test, which
@@ -528,15 +530,25 @@ resolve_trusted_root() {
   fi
 }
 
-# as_role_probe <pod> <container> <proc root> <github url> <trusted root> runs lib/as-role.py in the
-# role's container with that file as stdin, and prints its JSON object.
+# role_enter_sh (lib/role-namespaces.sh, which the Stage 4b proof enters a role with too) runs its
+# arguments, after the role, inside that role of the issue pod's one container: it finds the role's
+# `legion launcher role-init` by its argv, refusing a role that runs none or two; enters that
+# role-init's user, mount, PID and IPC namespaces, where /proc is the role's own and role-init its
+# PID 1; and from there the user namespace of its worker-shim (role-init's child whose argv[1] is
+# worker-shim), so the command runs as the role's own user with the role's own mounts.
+# shellcheck source-path=SCRIPTDIR source=lib/role-namespaces.sh
+. "$script_dir/lib/role-namespaces.sh"
+
+# as_role_probe <pod> <role> <proc root> <github url> <trusted root> runs lib/as-role.py inside the
+# role (role_enter_sh) of the pod's `roles` container with that file as stdin, and prints its JSON
+# object.
 as_role_probe() {
-  local pod=$1 container=$2 proc_root=$3 github_url=$4 trusted_root=$5
-  kubectl exec -i "$pod" -c "$container" -- python3 -I - \
+  local pod=$1 role=$2 proc_root=$3 github_url=$4 trusted_root=$5
+  kubectl exec -i "$pod" -c roles -- sh -c "$role_enter_sh" role-enter "$role" python3 -I - \
     "$proc_root" "$LEGION_E2E_REPO_T" "$LEGION_E2E_REPO_O" "$o_owner" "$github_url" "$trusted_root" <"$as_role_script"
 }
 
-# second-owner <O child KEY> <pod> [container]: its pull request is in O (structurally,
+# second-owner <O child KEY> <pod> [role]: its pull request is in O (structurally,
 # .pullRequest.repo) and GitHub confirms it merged there (gh api .../pulls/<n> --jq .merged; the
 # daemon's `done` phase, the one a merge closes an issue into, is never merge proof by itself);
 # the pod is bound to the issue by its legion.dev/issue label, as
@@ -554,7 +566,7 @@ as_role_probe() {
 # no executable, search path or credential directory from the agent's environment, which its own
 # code can rewrite in place: see the prober's header.
 second_owner() {
-  local child=$1 pod=$2 container=${3:-implementer} pr_repo pr_number phase merged ok=1
+  local child=$1 pod=$2 role=${3:-implementer} pr_repo pr_number phase merged ok=1
   command -v kubectl >/dev/null || fail "second-owner: kubectl is required and is not on PATH"
   require_pod_for_issue "$pod" "$child"
 
@@ -579,8 +591,8 @@ second_owner() {
   github_url=$(resolve_github_url)
   trusted_root=$(resolve_trusted_root)
   probe_file="$MULTIREPO_EVIDENCE_DIR/second-owner-probe.raw"
-  raw_fetch "$probe_file" "second-owner: the credential probes in $pod ($container)" \
-    as_role_probe "$pod" "$container" "$proc_root" "$github_url" "$trusted_root"
+  raw_fetch "$probe_file" "second-owner: the credential probes in $pod ($role)" \
+    as_role_probe "$pod" "$role" "$proc_root" "$github_url" "$trusted_root"
   jq -e '
     (.pid | type == "string") and (.argv0 | type == "string") and (.argc | type == "number")
     and (.sha256 | type == "string") and (.env_match | type == "boolean")

@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { CredentialRecord } from "../../api/types";
 import { MachineLoginPage } from "./MachineLoginPage";
@@ -54,13 +54,19 @@ test("code -> lookup -> Approve posts the looked-up code", async () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Look up" }));
 
-    await waitFor(() => expect(lookupMachineCredential).toHaveBeenCalledWith("ABCD-1234"));
+    await waitFor(() =>
+      expect(lookupMachineCredential).toHaveBeenCalledWith("ABCD-1234", keyedAttempt)
+    );
     expect(await screen.findByText("worker-7.example.com")).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     await waitFor(() => expect(approveCredentialRecord).toHaveBeenCalledTimes(1));
-    expect(approveCredentialRecord).toHaveBeenCalledWith("req-2", { code: "ABCD-1234" });
+    expect(approveCredentialRecord).toHaveBeenCalledWith(
+      "req-2",
+      { code: "ABCD-1234" },
+      keyedAttempt
+    );
   } finally {
     cleanup();
     lookupMachineCredential.mockRestore();
@@ -104,13 +110,15 @@ test("code -> lookup -> Deny posts the looked-up code too, which the broker requ
     });
     fireEvent.click(screen.getByRole("button", { name: "Look up" }));
 
-    await waitFor(() => expect(lookupMachineCredential).toHaveBeenCalledWith("ABCD-1234"));
+    await waitFor(() =>
+      expect(lookupMachineCredential).toHaveBeenCalledWith("ABCD-1234", keyedAttempt)
+    );
     expect(await screen.findByText("worker-7.example.com")).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
 
     await waitFor(() => expect(denyCredentialRecord).toHaveBeenCalledTimes(1));
-    expect(denyCredentialRecord).toHaveBeenCalledWith("req-2", { code: "ABCD-1234" });
+    expect(denyCredentialRecord).toHaveBeenCalledWith("req-2", { code: "ABCD-1234" }, keyedAttempt);
   } finally {
     cleanup();
     lookupMachineCredential.mockRestore();
@@ -133,13 +141,19 @@ test("a pending service login from before token logins offers Deny alone, which 
     });
     fireEvent.click(screen.getByRole("button", { name: "Look up" }));
 
-    await waitFor(() => expect(lookupMachineCredential).toHaveBeenCalledWith("ABCD-1234"));
+    await waitFor(() =>
+      expect(lookupMachineCredential).toHaveBeenCalledWith("ABCD-1234", keyedAttempt)
+    );
     expect(await screen.findByRole("button", { name: "Deny" })).toBeDefined();
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
     await waitFor(() =>
-      expect(denyCredentialRecord).toHaveBeenCalledWith("req-2", { code: "ABCD-1234" })
+      expect(denyCredentialRecord).toHaveBeenCalledWith(
+        "req-2",
+        { code: "ABCD-1234" },
+        keyedAttempt
+      )
     );
   } finally {
     cleanup();

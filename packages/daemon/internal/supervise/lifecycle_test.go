@@ -192,7 +192,7 @@ func TestARetirementWhoseRelaunchTheTreeLifecycleRefusesLeavesNoLiveClaimWithout
 			name: "a refused prompt's retirement",
 			reach: func(h *harness) {
 				h.reach(StateReady)
-				h.conn.RefusePrompt("agent busy")
+				h.conn.RefusePrompt("the model provider refused the request")
 				h.must(RequestDeliver{Claim: h.token, Task: "the task"})
 				h.observe(runtime.Alive)
 			},

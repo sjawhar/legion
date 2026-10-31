@@ -33,11 +33,13 @@ a forward merge after retro whose fingerprint is unchanged, and what the round s
   `packages/pi-envoy/extensions/envoy.ts` through the cross-entry test that imports it by relative
   path, and fails there on a symbol the newer `@oh-my-pi/pi-utils` adds. The tester's pod needs the
   same install before its bare gates; say so in the report to the architect.
-- **A changelog entry at the head of `[Unreleased]` → `### Changed` conflicts with every sibling
-  that merges first.** This repository's release commits (`chore: release pi-legion vX.Y.Z`) leave
-  `[Unreleased]` where it is, so each concurrent branch inserts at the same line. Resolve the one
-  conflict by keeping both insertions, this branch's first; it is the conflict a documents-and-tests
-  branch should expect, and the only one here.
+- **Until changelog fragments (INFRA-629), a changelog entry at the head of the unreleased
+  section's `### Changed` conflicted with every sibling that merged first.** The release commits
+  (`chore: release pi-legion vX.Y.Z`) left that heading where it was, so each concurrent branch
+  inserted at the same line. The resolution was to keep both insertions, this branch's first.
+  Now an entry is a fragment file of its own
+  (`packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`), so this
+  conflict is gone.
 - **An unchanged fingerprint is a confirmation for the tester and the reviewer, and still a full
   pass through the daemon's table.** The daemon moves the issue to implementing on the conflict,
   the implementer merges and completes, the tester re-runs the bare gates and completes, the

@@ -108,6 +108,13 @@ describe("envoyToolSpecs", () => {
     expect(subscribe?.description).toContain("envoy.exceptions.<original-topic>");
     expect(publish?.description).toContain("at-least-once, possibly out of order across topics");
     expect(publish?.description).toContain("id for dedupe and at for freshness");
+    expect(publish?.description).toContain("errs naming each session that did not confirm");
+    expect(publish?.description).toContain(
+      "a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions"
+    );
+    expect(publish?.description).toContain(
+      "a role message errs when its holder did not confirm it within the listener's window"
+    );
   });
 });
 

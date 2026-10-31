@@ -159,9 +159,9 @@ func (l *Ledger) commit(ctx context.Context) error {
 	// which fails a healthy room over this process's own write and drops the browser's edit with
 	// it. Nothing can read a cursor standing at a version this commit has not yet made durable
 	// and write durable state from it: every durable writer of the document takes that lock
-	// first, and the stale-room evictor, which takes none, closes no room with a write of this
-	// process in flight (documentChanged, hasWriteInFlight). A commit that fails fails these
-	// rooms (fail), so the instance holding such a cursor is dropped with them.
+	// first, and the stale-room evictor, which reads the cursor to decide whether to close the
+	// room, closes none this write is open on (documentChanged, hasOpenLiveWrite). A commit that
+	// fails fails these rooms (fail), so the instance holding such a cursor is dropped with them.
 	l.takeRoomCursors()
 	err := l.service.commitConsuming(ctx, l.tx, captures, func(error) {
 		// The transaction has ended whichever way the commit went, so a rebuild's room reads the
@@ -193,7 +193,7 @@ func (l *Ledger) commit(ctx context.Context) error {
 // its own room and drop the browser's edit (TestSettlementBetweenCommitAndPublishWaitsForTheWrite,
 // TestABrowserAppendQueuedBehindThisProcessesWriteIsNotRefused). The stale-room evictor reads the
 // cursor, so a room left standing at the head here is also a room this process's own change does
-// not close (documentChanged, whose other guard is hasWriteInFlight).
+// not close (documentChanged, whose other guard is hasOpenLiveWrite).
 //
 // The two instances are one and the same for a warm write whose room is still resident. They are
 // not for a cold write, which has no cursor of its own at all (coldFork): the room it publishes
@@ -345,7 +345,8 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 // latest change (liveWrite.creditedBy), and each write's and seed's latest edit source on the
 // document's pending-settlement row. Deleting first means the write's own authors are recorded
 // after the delete that would otherwise take them out. Both commit or roll back with the content,
-// before the request context can be canceled after commit.
+// before the request context can be canceled after commit. A transaction whose every write was a
+// server lifecycle write (withLifecycleWrite) credited no one, so it records nothing here.
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	for _, written := range l.versions {
 		if err := deleteCapturedPendingAuthors(ctx, l.tx, written.artifactID, written.capture); err != nil {
@@ -438,8 +439,9 @@ func (l *Ledger) seeded(artifactID string, rendered renderedTree, actor model.Ac
 	l.seeds[artifactID] = ledgerSeed{actor: actor, rendered: rendered}
 }
 
-// writtenRendering is the rendering of the tree this transaction last wrote to artifactID: its
-// live write's (applyLive), else the tree it seeded (SeedText); none when it holds neither.
+// writtenRendering is the rendering of the tree this transaction last wrote to artifactID: the one
+// its live write's latest operation recorded (recordLiveOperation, for applyLive and applyMargin
+// alike), else the tree it seeded (SeedText); none when it holds neither.
 func (l *Ledger) writtenRendering(artifactID string) renderedTree {
 	if l == nil {
 		return renderedTree{}

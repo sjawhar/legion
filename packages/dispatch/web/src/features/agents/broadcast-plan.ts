@@ -2,7 +2,8 @@ import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contrac
 
 import type { Agent, CreateBroadcastInput, MessageDeliveryMode } from "../../api/types";
 import { MODE_LABELS } from "../conversation/delivery";
-import { sessionLabel } from "../refs/actor";
+import type { AgentPart } from "../refs/AgentName";
+
 /** A session a broadcast would leave out, with its composer-facing reason named through
  *  `MODE_LABELS`. The server's stored diagnostic keeps the wire name
  *  (`packages/dispatch/AGENTS.md`). */
@@ -22,14 +23,15 @@ export interface BroadcastPlan {
 }
 
 /** What the composer shows about the send it would make: Send's label, the one notice line, and
- *  why Send refuses, if it does. */
+ *  why Send refuses, if it does. Both lines are `AgentPart`s, so an excluded session keeps its
+ *  identity until the composer draws it through `AgentName`. */
 export interface BroadcastSendState {
   readonly label: string;
   /** The composer's one notice line, highest first: the limit, nobody reached, or the Excluded
    *  line; null when none applies. */
-  readonly notice: string | null;
+  readonly notice: readonly AgentPart[] | null;
   /** Why Send refuses, or null while it can be pressed. */
-  readonly refusal: string | null;
+  readonly refusal: readonly AgentPart[] | null;
   /** Whether `notice` is the refusal, rather than a line beside a Send that can be pressed or
    *  refuses for an empty message. */
   readonly refusalOnNotice: boolean;
@@ -112,22 +114,31 @@ function restoredBroadcastPlan(
   return { excluded, recipients: [...restored.session_ids] };
 }
 
-/** What the composer would send, and the plan it shows for it. */
+/** What the composer would send - the request and the key it goes under - and the plan it shows
+ *  for it. */
 export interface ComposedBroadcast {
   readonly input: CreateBroadcastInput;
+  readonly key: string;
   readonly plan: BroadcastPlan;
 }
 
+/** A refused send Restore draft put back: its request, and the key a re-send goes under - its own
+ *  when the send ended without Dispatch's verdict, a new one when Dispatch refused it. */
+export interface RestoredBroadcast {
+  readonly input: CreateBroadcastInput;
+  readonly key: string;
+}
+
 /**
- * The composer's one restored-or-live decision. A restored request goes out word for word and is
- * described as it is (`restoredBroadcastPlan`); otherwise the live plan of the current composition
- * names the sessions, under the composition's key.
+ * The composer's one restored-or-live decision. A restored request goes out word for word under
+ * the key it was restored with, and is described as it is (`restoredBroadcastPlan`); otherwise
+ * the live plan of the current composition names the sessions, under the composition's key.
  */
 export function composedBroadcast(
   composition: {
     readonly delivery: MessageDeliveryMode;
     readonly draft: string;
-    readonly restored: CreateBroadcastInput | null;
+    readonly restored: RestoredBroadcast | null;
     readonly selected: ReadonlySet<string>;
     readonly sendKey: string;
   },
@@ -135,25 +146,52 @@ export function composedBroadcast(
 ): ComposedBroadcast {
   const { delivery, draft, restored, selected, sendKey } = composition;
   if (restored !== null) {
-    return { input: restored, plan: restoredBroadcastPlan(restored, selected, agents) };
+    return {
+      input: restored.input,
+      key: restored.key,
+      plan: restoredBroadcastPlan(restored.input, selected, agents),
+    };
   }
   const plan = broadcastPlan(selected, agents, delivery);
   return {
-    input: { body: draft, delivery, idempotency_key: sendKey, session_ids: plan.recipients },
+    input: { body: draft, delivery, session_ids: plan.recipients },
+    key: sendKey,
     plan,
   };
+}
+
+/** `Excluded: <session> (<reason>), …`: each session a send leaves out, with its reason, as an
+ *  agent part for `AgentParts` to draw. The composer's Excluded line and the sent broadcast's
+ *  page both start from it. */
+export function excludedParts(
+  excluded: readonly { sessionId: string; storedTitle: string | undefined; reason: string }[]
+): AgentPart[] {
+  const parts: AgentPart[] = ["Excluded: "];
+  excluded.forEach(({ reason, sessionId, storedTitle }, index) => {
+    if (index > 0) parts.push(", ");
+    parts.push({ sessionId, storedTitle }, ` (${reason})`);
+  });
+  return parts;
 }
 
 /**
  * The Excluded line: every selected session the send leaves out, with its reason, and, when the
  * mode is why nobody is reached, the mode that would reach the most of them (`hint`).
  */
-function exclusionLine(excluded: readonly BroadcastExclusionPlan[], hint: string | null): string {
-  const named = excluded
-    .map((item) => `${sessionLabel(item.sessionID, item.agent?.title)} (${item.reason})`)
-    .join(", ");
-  const line = `Excluded: ${named}. Nothing is sent to them, and no other mode is substituted.`;
-  return hint === null ? line : `${line} ${hint}`;
+function exclusionLine(
+  excluded: readonly BroadcastExclusionPlan[],
+  hint: string | null
+): AgentPart[] {
+  const parts = excludedParts(
+    excluded.map((item) => ({
+      reason: item.reason,
+      sessionId: item.sessionID,
+      storedTitle: item.agent?.title,
+    }))
+  );
+  const tail = ". Nothing is sent to them, and no other mode is substituted.";
+  parts.push(hint === null ? tail : `${tail} ${hint}`);
+  return parts;
 }
 
 /**
@@ -177,13 +215,13 @@ export function broadcastSendState(
   const label = `Send to ${recipients.length}`;
   if (recipients.length > MAX_BROADCAST_RECIPIENTS) {
     const limit = `At most ${MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach ${recipients.length}.`;
-    return { label, notice: limit, refusal: limit, refusalOnNotice: true };
+    return { label, notice: [limit], refusal: [limit], refusalOnNotice: true };
   }
   if (recipients.length > 0) {
     return {
       label,
       notice: excluded.length === 0 ? null : exclusionLine(excluded, null),
-      refusal: body.trim() === "" ? "Type a message first." : null,
+      refusal: body.trim() === "" ? ["Type a message first."] : null,
       refusalOnNotice: false,
     };
   }

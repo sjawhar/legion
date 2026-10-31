@@ -17,7 +17,7 @@ When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` hol
 resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
 working-copy commit you found at the turn's start. Do not move a bookmark you do
 not own. Put only your logical paths in `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`.
-Push your commits as the daemon part below says: a push that touches only `.legion/` ends its
+Push your commits as the daemon part below says: a push that touches only `.legion/<issue>/` ends its
 head's message with the trailer, and one that also carries other files does not.
 
 ## Two checks on the plan
@@ -32,7 +32,7 @@ A missing check never blocks the plan. When a check's call fails (the task retur
 
 ## Plan handoff
 
-Write `.legion/<issue>/plan.json` with the `write` tool, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "plan"`, `issue: "<issue>"`, `completed: "<RFC 3339 UTC time of writing>"`, `requiredSkills` (above), and the three records below; nothing stamps the first four for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/<issue>/plan.json`, push it, then report completion.
+Write `.legion/<issue>/plan.json` with the `write` tool, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "plan"`, `issue: "<issue>"`, `previousHandoff` (the newest commit on this branch that changed `.legion/<issue>/plan.json` — usually this role's previous handoff; after a retro, retro's removal — as the daemon part's revset prints it, an empty string when it prints none), `requiredSkills` (above), and the three records below; nothing stamps any field for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/<issue>/plan.json`, push it, then report completion.
 
 The handoff records the two plan checks and the plan's departures from the spec:
 

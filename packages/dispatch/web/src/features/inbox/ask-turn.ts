@@ -1,15 +1,14 @@
-import type { Ask, Comment } from "../../api/types";
-import { actorLabel } from "../refs/actor";
+import type { Actor, Ask, Comment } from "../../api/types";
 
-/** The status line on an open ask card: "Waiting on you" when the human holds the turn, else
- *  "Waiting on <agent>" naming who holds it - the agent whose progress note is the newest reply,
- *  or the asker. Null when the ask is closed or the read did not carry `waiting_on`. */
-export function askTurnLabel(
+/** Who holds an open ask's turn: `"you"` when the human does, else the agent holding it - the
+ *  agent whose progress note is the newest reply, or the asker. The card draws it as "Waiting on
+ *  you" / "Waiting on <agent>". Null when the ask is closed or the read did not carry
+ *  `waiting_on`. */
+export function askTurnHolder(
   ask: Pick<Ask, "author" | "state" | "waiting_on">,
   lastReply: Pick<Comment, "author"> | undefined
-): string | null {
+): "you" | Actor | null {
   if (ask.state !== "open" || ask.waiting_on === undefined) return null;
-  if (ask.waiting_on === "human") return "Waiting on you";
-  const holder = lastReply?.author.kind === "session" ? lastReply.author : ask.author;
-  return `Waiting on ${actorLabel(holder)}`;
+  if (ask.waiting_on === "human") return "you";
+  return lastReply?.author.kind === "session" ? lastReply.author : ask.author;
 }

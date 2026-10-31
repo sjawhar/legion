@@ -1,20 +1,29 @@
-import { keepPreviousData, type QueryFunctionContext, queryOptions } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  type QueryFunctionContext,
+  queryOptions,
+  replaceEqualDeep,
+} from "@tanstack/react-query";
 
 import { beginInboxFetch, finishInboxFetch } from "../features/inbox/ask-thread-freshness";
 import { projectIssuesQueryKey } from "../features/project/issue-filters";
+import { compareTimestamps, isTimestamp } from "../lib/timestamps";
 
 import { api } from "./client";
-import { deliveryLiveFor } from "./delivery-live";
+import { liveSocketFor } from "./live-socket";
 import type {
   DeliveryLiveView,
   DeliveryMeasuresResponse,
   DeliveryPipelineResponse,
   DeliveryTimelineResponse,
   InboxRow,
+  IssueDetails,
 } from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it; it
- *  names the person by lowercase email, the form issue assignees carry. */
+ *  names the person by lowercase email, the form issue assignees carry. While it answers
+ *  `EVENT_HEAD_UNAVAILABLE` it is asked again for as long as that lasts (`queryRetry`), so the
+ *  shell shows its skeleton, never the error page. */
 export const whoAmIQuery = () =>
   queryOptions({
     queryKey: ["whoami"],
@@ -42,6 +51,43 @@ export const userStateQuery = () =>
   queryOptions({
     queryKey: ["user-state"],
     queryFn: () => api.getMyState(),
+  });
+
+/** Whether `next`, an issue put in the cache, is older than `cached`, the issue there: its
+ *  `updated_at` names an earlier instant. */
+function olderIssue(next: unknown, cached: unknown): boolean {
+  const at = (issue: unknown) =>
+    typeof issue === "object" && issue !== null ? Reflect.get(issue, "updated_at") : undefined;
+  const nextAt = at(next);
+  const cachedAt = at(cached);
+  return (
+    typeof nextAt === "string" &&
+    typeof cachedAt === "string" &&
+    isTimestamp(nextAt) &&
+    isTimestamp(cachedAt) &&
+    compareTimestamps(nextAt, cachedAt) < 0
+  );
+}
+
+/**
+ * One issue with its details (`GET /api/v1/issues/{key}`), the one query every view of an issue
+ * reads. Dispatch answers a read with the issue as it was when the read reached it, so a read
+ * already out when a write changed the issue - a slow GET started before a PATCH - can be answered
+ * after the write's own answer was put in its place (`mergeIssue`). Such an answer is older than
+ * the cached issue, and is dropped: the cache never takes an issue whose `updated_at` is earlier
+ * than the one it holds, as the event log never lets a fetched page take back the events above
+ * its head (`mergeEventPages`). The rule is the query's own, so it holds for every writer of the
+ * key: a read from any of its views, a PATCH's answer, an optimistic pick and its rollback.
+ */
+export const issueQuery = (key: string | undefined) =>
+  queryOptions({
+    queryKey: ["issue", key],
+    queryFn: (): Promise<IssueDetails> => {
+      if (key === undefined) throw new Error("An issue read needs the issue's key.");
+      return api.getIssue(key);
+    },
+    structuralSharing: (cached: unknown, next: unknown) =>
+      olderIssue(next, cached) ? cached : replaceEqualDeep(cached, next),
   });
 
 /** The viewer's per-agent conversation state: each session's Clear, read mark, and count of
@@ -108,6 +154,15 @@ export const architectureSourcesQuery = () =>
     queryFn: () => api.listArchitectureSources(),
   });
 
+/** One project's architecture sources (`[]` when it has none), read by the project page's
+ *  open-on rule and the issue components line, which shares it. Its key sits under
+ *  `architectureSourcesQuery`'s, so refreshing that list refreshes every project's too. */
+export const projectArchitectureSourcesQuery = (project: string) =>
+  queryOptions({
+    queryKey: ["architecture-sources", project],
+    queryFn: () => api.listProjectArchitectureSources(project),
+  });
+
 /** Every project that names a default assignee, read by the Settings page's Projects table and
  *  refreshed by the event a write appends. A project absent from the answer names nobody. */
 export const projectDefaultAssigneesQuery = () =>
@@ -168,8 +223,8 @@ function boardMovesSettled(context: QueryFunctionContext, project: string): Prom
 }
 
 /** What every live-owned delivery query shares (LEGION-690): its first load subscribes its view
- *  over the page's one delivery socket (`api/delivery-live.ts`), which writes the snapshot and every
- *  later change into the cache, so nothing here reads again. `meta.live` keeps the event stream's
+ *  over the page's one live socket (`api/live-socket.ts`), which writes the snapshot and every
+ *  later change into the cache, so nothing here reads again. `meta.live` keeps the event feed's
  *  refresh paths away from it (`api/query-refresh.ts`); `gcTime` 0 drops the subscription with the
  *  last observer; the page keeps the previous answer on screen while a new view's snapshot is out,
  *  as a filter change in the prototype it ports never blanks it. */
@@ -181,11 +236,23 @@ const LIVE = {
   staleTime: Number.POSITIVE_INFINITY,
 } as const;
 
+/** The body each delivery view's kind is answered with: the GET route's it mirrors. */
+interface DeliveryLiveBodies {
+  readonly timeline: DeliveryTimelineResponse;
+  readonly measures: DeliveryMeasuresResponse;
+  readonly pipeline: DeliveryPipelineResponse;
+}
+
 /** The live view's answer, which is the body of the GET route its kind mirrors. */
-function subscribeLive<B>(context: QueryFunctionContext, view: DeliveryLiveView): Promise<B> {
-  // The socket answers each view with its own route's body (packages/contracts DeliveryLiveView),
-  // which the kind the caller passes names; the frame carries the union.
-  return deliveryLiveFor(context.client).subscribe(context.queryKey, view) as Promise<B>;
+function subscribeLive<V extends DeliveryLiveView>(
+  context: QueryFunctionContext,
+  view: V
+): Promise<DeliveryLiveBodies[V["kind"]]> {
+  // The socket answers each view with its own route's body (packages/contracts DeliveryLiveView);
+  // the frame carries the union, and the view's kind names the member.
+  return liveSocketFor(context.client).subscribe(context.queryKey, view) as Promise<
+    DeliveryLiveBodies[V["kind"]]
+  >;
 }
 
 /** The delivery timeline, live: the window, the search and every facet, applied by Dispatch
@@ -195,7 +262,7 @@ export const deliveryTimelineQuery = (view: DeliveryLiveView & { kind: "timeline
     ...LIVE,
     placeholderData: keepPreviousData,
     queryKey: ["delivery", "timeline", view],
-    queryFn: (context) => subscribeLive<DeliveryTimelineResponse>(context, view),
+    queryFn: (context) => subscribeLive(context, view),
   });
 
 /** The measures panel's own read for a brushed window, live, under `["delivery"]` beside the
@@ -205,7 +272,7 @@ export const deliveryMeasuresQuery = (view: DeliveryLiveView & { kind: "measures
     ...LIVE,
     placeholderData: keepPreviousData,
     queryKey: ["delivery", "measures", view],
-    queryFn: (context) => subscribeLive<DeliveryMeasuresResponse>(context, view),
+    queryFn: (context) => subscribeLive(context, view),
   });
 
 /** One deploy-repository run with every job it ran, read by GET. A live delta that changes the
@@ -221,7 +288,7 @@ export const deliveryPipelineQuery = (view: DeliveryLiveView & { kind: "pipeline
   queryOptions({
     ...LIVE,
     queryKey: ["delivery", "pipeline", view],
-    queryFn: (context) => subscribeLive<DeliveryPipelineResponse>(context, view),
+    queryFn: (context) => subscribeLive(context, view),
   });
 
 /** The delivery timeline's configuration record, or `null` until someone sets it: the Settings

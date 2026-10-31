@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { IssueSummary } from "@legion/contracts";
-import { DispatchClient, DispatchGatewayError } from "../dispatch-http";
+import type { ArchitectureSource, IssueSummary, ItemBlocks } from "@legion/contracts";
+import { DISPATCH_WRITE_RETRY, DispatchClient, DispatchGatewayError } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
 interface RecordedRequest {
@@ -143,6 +143,22 @@ describe("DispatchClient", () => {
     }
   });
 
+  // `--all` exists to read the exact set, so a page answered to the unpaged request is refused by
+  // name: read as the listing, its first rows would pass for every issue that matched.
+  test("refuses a page answered to the unpaged request, naming the request and the cause", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ issues: [issue("DSP-1")], total: 251, limit: 50, offset: 0 }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.listAllIssues({ project: "DSP", status: "needs_review" })).rejects.toThrow(
+      "GET http://dispatch.test/api/v1/issues?project=DSP&status=needs_review asked for the " +
+        "unpaged listing and got a page, so this Dispatch pages a request that carries no limit " +
+        "and no offset."
+    );
+    expect(requests).toHaveLength(1);
+  });
+
   test("search encodes q, project, limit, and offset and returns the response body", async () => {
     const body = fakeSearchResponse(
       [
@@ -225,6 +241,34 @@ describe("DispatchClient", () => {
     });
   });
 
+  test("reads a session's answers with since and max_chars, and the caller's signal aborts it", async () => {
+    const body = { session_id: "session-1", since: "2026-10-24T00:00:00Z", total: 0, items: [] };
+    const { fetchImpl, requests } = fakeFetch([jsonResponse(body), jsonResponse(body)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const controller = new AbortController();
+
+    await expect(
+      client.sessionAnswers("session-1", {
+        since: "2026-10-24T00:00:00Z",
+        maxChars: 8000,
+        signal: controller.signal,
+      })
+    ).resolves.toEqual(body);
+    await expect(client.sessionAnswers("session-1")).resolves.toEqual(body);
+
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/agents/session-1/answers?since=2026-10-24T00%3A00%3A00Z&max_chars=8000",
+      "/api/v1/agents/session-1/answers",
+    ]);
+    const signal = requests[0]?.init.signal;
+    expect(signal?.aborted).toBe(false);
+    controller.abort();
+    expect(signal?.aborted).toBe(true);
+    expect(requests[1]?.init.signal?.aborted).toBe(false);
+  });
+
   test("maps project document and reference routes to authenticated API requests", async () => {
     const { fetchImpl, requests } = fakeFetch(
       Array.from({ length: 14 }, () => jsonResponse({ ok: true }))
@@ -269,7 +313,7 @@ describe("DispatchClient", () => {
       "/api/v1/artifacts/artifact-1/comments",
       "/api/v1/artifacts/artifact-1/comments",
       "/api/v1/artifacts/artifact-1/events?after=0&limit=200",
-      "/api/v1/issues/CORE-1/references",
+      "/api/v1/issues/CORE-1/references?versions=latest",
       "/api/v1/artifacts/artifact-1/references",
       "/api/v1/references?to=dispatch%3A%2F%2FCORE-1%2Fask%2Fask-1",
       "/api/v1/references?from=dispatch%3A%2F%2FCORE%2Fartifact%2Frunbook-md&kind=mentions%2Cattached_to&since=918",
@@ -318,7 +362,7 @@ describe("DispatchClient", () => {
     await client.docEdit("artifact-1", { ops: [], actor });
     await client.nameArtifactVersion("artifact-1", { summary: "Named", actor });
     await client.getAsk("ask-1");
-    await client.getComments("DSP-1", "artifact-1");
+    await client.getComments("DSP-1");
     await client.read("DSP-1");
 
     expect(
@@ -338,7 +382,7 @@ describe("DispatchClient", () => {
       "/api/v1/artifacts/artifact-1/edits",
       "/api/v1/artifacts/artifact-1/versions",
       "/api/v1/asks/ask-1",
-      "/api/v1/issues/DSP-1/comments?artifact=artifact-1",
+      "/api/v1/issues/DSP-1/comments",
       "/api/v1/issues/DSP-1",
       "/api/v1/issues/DSP-1/events?after=0&limit=10",
     ]);
@@ -363,9 +407,17 @@ describe("DispatchClient", () => {
     ]);
 
     for (const request of requests) {
-      expect((request.init.headers as Record<string, string>).Authorization).toBe("Bearer secret");
-      expect((request.init.headers as Record<string, string>).Accept).toBe("application/json");
+      const headers = request.init.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer secret");
+      expect(headers.Accept).toBe("application/json");
+      // Every write carries a key of its own; no read carries one.
+      if (request.init.method === "GET") expect(headers["Idempotency-Key"]).toBeUndefined();
+      else expect(headers["Idempotency-Key"]).toBeString();
     }
+    const writeKeys = requests
+      .filter((request) => request.init.method !== "GET")
+      .map((request) => (request.init.headers as Record<string, string>)["Idempotency-Key"]);
+    expect(new Set(writeKeys).size).toBe(writeKeys.length);
     expect(requestBody(requests[0] as RecordedRequest)).toEqual({
       project: "DSP",
       title: "Issue",
@@ -384,8 +436,13 @@ describe("DispatchClient", () => {
     expect(requestBody(requests[11] as RecordedRequest)).toEqual({ ops: [], actor });
     expect(requestBody(requests[12] as RecordedRequest)).toEqual({ summary: "Named", actor });
 
-    const artifactBody = requests[7]?.init.body as FormData;
-    expect(artifactBody).toBeInstanceOf(FormData);
+    // The form is sent encoded, once, so a retry sends the bytes and boundary its first attempt did.
+    const upload = requests[7] as RecordedRequest;
+    const artifactBody = await new Response(upload.init.body, {
+      headers: {
+        "Content-Type": (upload.init.headers as Record<string, string>)["Content-Type"] as string,
+      },
+    }).formData();
     expect(artifactBody.get("name")).toBe("spec.md");
     expect(artifactBody.get("primary")).toBeNull();
     expect(artifactBody.get("summary")).toBe("Initial spec");
@@ -546,7 +603,8 @@ describe("DispatchClient", () => {
   // a retry there can post a message twice: the write is told to check what took effect. A 408 or
   // 429 is the gateway's own timeout or rate limit, sent before it forwards the request, so the
   // write never reached Dispatch and a retry may succeed. Any other status still gets the same
-  // advice as a read, since the request never got past the gateway either.
+  // advice as a read, since the request never got past the gateway either. Each status is one
+  // write's last attempt here; how the attempts before it are made is dispatch-keyed-writes.test.ts.
   test("tells a write a gateway answered whether it may have reached Dispatch", async () => {
     const page = (status: number, statusText: string) =>
       new Response(`<html><body><h1>${status} ${statusText}</h1></body></html>`, {
@@ -560,7 +618,11 @@ describe("DispatchClient", () => {
       page(429, "Too Many Requests"),
       page(404, "Not Found"),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, undefined, {
+      ...DISPATCH_WRITE_RETRY,
+      pausesMs: [],
+      withinMs: 0,
+    });
     const refusal = () =>
       client.message("DSP-1", { body: "Shipped.", actor }).then(
         () => {
@@ -948,6 +1010,32 @@ describe("DispatchClient", () => {
       requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
     ).toEqual(["/api/v1/comments/comment-1"]);
   });
+
+  test("maps a comment's and a message's blocks reads to the API", async () => {
+    const blocks: ItemBlocks = {
+      item: { kind: "comment", id: "comment-1" },
+      revision: 1,
+      indexed: true,
+      blocks: [{ id: "b1", type: "paragraph", text: "Alpha.", from: 0, to: 6 }],
+    };
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse(blocks),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-1" } }),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-2" } }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    expect(await client.commentBlocks("comment-1")).toEqual(blocks);
+    await client.messageBlocks("message-1");
+    await client.messageBlocks("message-2", "s1");
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/comments/comment-1/blocks",
+      "/api/v1/messages/message-1/blocks",
+      "/api/v1/messages/message-2/blocks?session=s1",
+    ]);
+  });
 });
 
 test("maps an ask resolution to the authenticated API", async () => {
@@ -1007,5 +1095,155 @@ test("createProject surfaces PROJECT_EXISTS as the refusal's code", async () => 
     code: "PROJECT_EXISTS",
     status: 409,
     fromDispatch: true,
+  });
+});
+
+test("syncArchitectureSource refuses a repository with an empty owner or name without a request", async () => {
+  const { fetchImpl, requests } = fakeFetch([]);
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+  for (const repo of ["acme/", "/infra"]) {
+    await expect(client.syncArchitectureSource("CORE", repo)).rejects.toThrow(
+      `repository must be owner/name, got ${JSON.stringify(repo)}`
+    );
+  }
+  expect(requests).toEqual([]);
+});
+
+// A server older than the list route answers it with no route; the client reads the singular
+// route that server does serve, so a rollout that mixes versions still reads the project's model.
+describe("listArchitectureSources against a server older than the list route", () => {
+  const noRoute = jsonResponse(
+    {
+      code: "NOT_FOUND",
+      error: "no route for GET /api/v1/projects/CORE/architecture-sources",
+      hint: "GET /api/v1 lists every route",
+    },
+    404
+  );
+  const source: ArchitectureSource = {
+    project: "CORE",
+    repo: "legion/arch",
+    branch: "main",
+    enabled: true,
+    created_by: { kind: "user", id: "alice" },
+    created_at: "2026-09-23T00:00:00Z",
+    last_sync_at: null,
+    last_commit: null,
+    last_error: null,
+    components: 2,
+  };
+
+  test.each([
+    ["200 null as no source", jsonResponse(null), []],
+    [
+      "a pre-#1522 404 SOURCE_NOT_FOUND as no source",
+      jsonResponse({ code: "SOURCE_NOT_FOUND", error: "no architecture source configured" }, 404),
+      [],
+    ],
+    ["a row as that one source", jsonResponse(source), [source]],
+  ])("reads the singular route's %s", async (_answer, singular, want) => {
+    const { fetchImpl, requests } = fakeFetch([noRoute.clone(), singular]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    expect(await client.listArchitectureSources("CORE")).toEqual(want);
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/api/v1/projects/CORE/architecture-sources",
+      "/api/v1/projects/CORE/architecture-source",
+    ]);
+  });
+
+  test("throws any other answer to the singular read", async () => {
+    const { fetchImpl } = fakeFetch([
+      noRoute.clone(),
+      jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.listArchitectureSources("CORE")).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      status: 404,
+      message: "not found",
+    });
+  });
+
+  test("throws a current server's 404 for a project it does not know without the singular read", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.listArchitectureSources("CORE")).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      status: 404,
+      message: "not found",
+    });
+    expect(requests).toHaveLength(1);
+  });
+});
+
+// A server older than the every-source sync route answers it with no route; the client asks that
+// server's singular sync, so a rollout that mixes versions still syncs the project's one source.
+describe("syncArchitectureSources against a server older than the every-source sync route", () => {
+  const noRoute = jsonResponse(
+    {
+      code: "NOT_FOUND",
+      error: "no route for POST /api/v1/projects/CORE/architecture-sources/sync",
+      hint: "GET /api/v1 lists every route",
+    },
+    404
+  );
+  const source: ArchitectureSource = {
+    project: "CORE",
+    repo: "legion/arch",
+    branch: "main",
+    enabled: true,
+    created_by: { kind: "user", id: "alice" },
+    created_at: "2026-09-23T00:00:00Z",
+    last_sync_at: "2026-09-24T00:00:00Z",
+    last_commit: "abc123",
+    last_error: null,
+    components: 2,
+  };
+
+  test("returns the singular sync's row as that one source", async () => {
+    const { fetchImpl, requests } = fakeFetch([noRoute.clone(), jsonResponse(source)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    expect(await client.syncArchitectureSources("CORE")).toEqual([source]);
+    expect(
+      requests.map((request) => `${request.init.method} ${new URL(request.url).pathname}`)
+    ).toEqual([
+      "POST /api/v1/projects/CORE/architecture-sources/sync",
+      "POST /api/v1/projects/CORE/architecture-source/sync",
+    ]);
+  });
+
+  test("throws the singular sync's 404 SOURCE_NOT_FOUND for a project with no source", async () => {
+    const { fetchImpl } = fakeFetch([
+      noRoute.clone(),
+      jsonResponse({ code: "SOURCE_NOT_FOUND", error: "no architecture source configured" }, 404),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.syncArchitectureSources("CORE")).rejects.toMatchObject({
+      code: "SOURCE_NOT_FOUND",
+      status: 404,
+      message: "no architecture source configured",
+    });
+  });
+
+  test("throws a current server's 404 for a project it does not know without the singular sync", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.syncArchitectureSources("CORE")).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      status: 404,
+      message: "not found",
+    });
+    expect(requests).toHaveLength(1);
   });
 });

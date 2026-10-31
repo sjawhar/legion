@@ -620,6 +620,21 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
       );
     });
 
+    // The shim is the process whose argv[1] is worker-shim, the one rule every reader of a Legion
+    // process tree follows (lib/role-namespaces.sh): a process of the image's own binary that
+    // names worker-shim in a later argv word - a launcher, a wrapper, an agent's own command - is
+    // not it.
+    test("a process naming worker-shim in a later argv word is never the shim: FAIL", async () => {
+      const result = await scenario({
+        tree: { shimCommand: ["legion", "launcher", "--role", "worker-shim"] },
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        "expected exactly one worker-shim process whose own parent is PID 1, found 0"
+      );
+      expect(result.github.requests).toEqual([]);
+    });
+
     // The shim is also identified by the image's own binary: a process the agent names or copies
     // itself, whatever it is called and wherever it was started, is no shim.
     for (const [name, shimExe] of [

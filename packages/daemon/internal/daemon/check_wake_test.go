@@ -36,7 +36,7 @@ import (
 
 // The commits a production check wake is driven with: the merge the check looks for, the build the
 // daemon under test is built from (behind the merge, so its own boot wakes nothing), a build
-// Dispatch starts on that carries the merge, and one that does not.
+// Dispatch announces every server process serves that carries the merge, and one that does not.
 const (
 	checkWakeMerge       = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"
 	checkWakeDaemonBuild = "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
@@ -282,6 +282,10 @@ func newCheckWakeRig(t *testing.T) *checkWakeRig {
 		t.Fatalf("record the suspended implementer: %v", err)
 	}
 	writePrompt(t, cfg, implementer)
+	// A wake resumes the implementer, and a launch provisions the issue's workspace when the host
+	// has none, or when its checkout never finished — which reaches GitHub. The workspace is here
+	// already, whole, so the launch provisions nothing and no test of this rig clones from GitHub.
+	hostWorkspace(t, cfg.StateDir, "sjawhar/legion", root)
 	return rig
 }
 
@@ -378,12 +382,13 @@ func (rig *checkWakeRig) awaitWake(t *testing.T, look int, kind, detail string) 
 	})
 }
 
-// Dispatch's start, relayed on notifications.dispatch.server.started, names the build Dispatch
-// started on; the daemon, a release build from sjawhar/legion, compares it on GitHub against each
-// open production check of that repository, and a build that carries the check's merge (`ahead`)
-// wakes the check: its next look starts, recorded as woken by the Dispatch start on that build,
-// and the look's start row resumes the implementer the close left suspended. The daemon's own
-// build, compared at its boot and behind the merge, wakes nothing first.
+// Dispatch's announcement that every server process serves a build, relayed on
+// notifications.dispatch.server.started, names that build; the daemon, a release build from
+// sjawhar/legion, compares it on GitHub against each open production check of that repository, and
+// a build that carries the check's merge (`ahead`) wakes the check: its next look starts, recorded
+// as woken by the announcement (cause `dispatch start`) of that build, and the look's start row
+// resumes the implementer the close left suspended. The daemon's own build, compared at its boot
+// and behind the merge, wakes nothing first.
 func TestADispatchStartOnABuildCarryingTheMergeWakesTheCheck(t *testing.T) {
 	rig := newCheckWakeRig(t)
 	rig.boot(t)
@@ -396,8 +401,8 @@ func TestADispatchStartOnABuildCarryingTheMergeWakesTheCheck(t *testing.T) {
 	}
 }
 
-// A Dispatch start on a build that does not carry the merge (`behind`) is compared and wakes
-// nothing: the check stays at its ended look, and no start row reaches the implementer.
+// Dispatch's announcement of a build that does not carry the merge (`behind`) is compared and
+// wakes nothing: the check stays at its ended look, and no start row reaches the implementer.
 func TestADispatchStartOnABuildBehindTheMergeWakesNothing(t *testing.T) {
 	rig := newCheckWakeRig(t)
 	rig.boot(t)
@@ -715,21 +720,23 @@ func TestAnOlderDeployRunApplyingAfterTheMergeWakesTheCheck(t *testing.T) {
 
 // A run of the deploy workflow whose Apply was skipped (a preview), one whose Apply finished before
 // the merge, and a run of another workflow of the repository wake nothing: the first two are read
-// from GitHub and found no deploy after the merge, the third is no deploy and is not read at all.
+// from GitHub and found no deploy after the merge, the third is no deploy, acknowledged without a
+// transaction and not read at all. It is published first, so once the consumer, which takes one
+// message at a time in the stream's order, has taken in the two deploy runs, it has handled it.
 // The check stays at its ended look 1, nothing is kept for a next look, and the implementer stays
 // suspended.
 func TestDeployRunsThatDidNotApplyAfterTheMergeWakeNothing(t *testing.T) {
 	rig := newCheckWakeRig(t)
 	rig.boot(t)
 
+	rig.publishGitHub(t, "github-run-ci", 903, checkWakeRun{workflow: checkWakeOtherWorkflow, headSHA: checkWakeAheadBuild, jobs: []string{
+		checkWakeJob(1, "deploy", checkWakeStep("Apply", "success", 10*time.Minute)),
+	}})
 	rig.publishGitHub(t, "github-run-preview", 901, checkWakeRun{workflow: checkWakeDeployWorkflow, headSHA: checkWakeAheadBuild, jobs: []string{
 		checkWakeJob(1, "deploy", checkWakeStep("Plan", "success", 5*time.Minute), checkWakeStep("Apply", "skipped", 6*time.Minute)),
 	}})
 	rig.publishGitHub(t, "github-run-before", 902, checkWakeDeploy(checkWakeBehindBuild, -10*time.Minute))
-	rig.publishGitHub(t, "github-run-ci", 903, checkWakeRun{workflow: checkWakeOtherWorkflow, headSHA: checkWakeAheadBuild, jobs: []string{
-		checkWakeJob(1, "deploy", checkWakeStep("Apply", "success", 10*time.Minute)),
-	}})
-	rig.awaitCompared(t, "github-run-preview", "github-run-before", "github-run-ci")
+	rig.awaitCompared(t, "github-run-preview", "github-run-before")
 
 	if check := rig.check(t); check.Looks != 1 || check.LookOpen || check.LastWakeKind != "merge" || check.PendingCauseKind != "" {
 		t.Fatalf("check = look %d (open %v) woken by %q, pending %q; want look 1 still ended by the merge's look and nothing kept",

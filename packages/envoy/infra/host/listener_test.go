@@ -218,6 +218,42 @@ func TestListenerWaitForHealthy(t *testing.T) {
 	})
 }
 
+// subscribeAllTopics unset or false leaves the container's environment exactly as it was before
+// the input existed, so no existing stack's container is replaced; true appends the opt-in last.
+func TestListenerSubscribeAllTopics(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		set  *bool
+		want []string
+	}{
+		{"unset renders the environment unchanged", nil, exampleEnvs},
+		{"false renders the environment unchanged", pulumi.BoolRef(false), exampleEnvs},
+		{"true appends ENVOY_SUBSCRIBE_ALL_TOPICS=1 last", pulumi.BoolRef(true), append(slices.Clone(exampleEnvs), "ENVOY_SUBSCRIBE_ALL_TOPICS=1")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			args := exampleArgs()
+			args.SubscribeAllTopics = c.set
+			m, err := run(t, args, nil, "docker")
+			require.NoError(t, err)
+			envs, _ := envsOf(t, m.One(t, containerType))
+			require.Equal(t, c.want, envs)
+		})
+	}
+}
+
+// The watchdog recreates a removed container from its env file, so the opt-in reaches that file
+// too, as its one added line: a recreated listener keeps subscribing every notification topic.
+func TestListenerWatchdogCarriesSubscribeAllTopics(t *testing.T) {
+	args := exampleArgs()
+	args.SubscribeAllTopics = pulumi.BoolRef(true)
+	cmd, _ := watchdogOf(t, args)
+
+	want := strings.Replace(readGolden(t, "watchdog-create.golden"),
+		"ENVOY_HOST_BRIDGE=127.0.0.1\nENVEOF\n", "ENVOY_HOST_BRIDGE=127.0.0.1\nENVOY_SUBSCRIBE_ALL_TOPICS=1\nENVEOF\n", 1)
+	require.NotEqual(t, readGolden(t, "watchdog-create.golden"), want, "the golden holds the env file's last line")
+	require.Equal(t, want, cmd.Inputs["create"].StringValue())
+}
+
 func TestListenerAdoptAliasesEachChildToItsRootLevelName(t *testing.T) {
 	args := exampleArgs()
 	args.Watchdog = &host.WatchdogArgs{Host: "example-host-a"}

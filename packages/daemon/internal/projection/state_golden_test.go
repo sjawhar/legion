@@ -7,6 +7,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -31,6 +32,12 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this 
 // source.State), and it is packages/contracts' state-controller-claim fixture: the contract's own
 // schema parses it (packages/contracts/src/legion-api.test.ts), and the plugin's daemon-launched
 // controller reads it as its daemon's state (packages/pi-legion/extensions/legion.test.ts).
+//
+// It carries what Legion is waiting for too (INFRA-225), judged from the project's mirror: the
+// child LEGION-209, held at `admitted` behind an issue still in progress, and the waiting root
+// LEGION-210, behind one the daemon has never observed and so cannot call finished. LEGION-211
+// waits in the same line on an issue of its own, and is in neither `blocked` nor any judgement:
+// a root carrying a run is work already under way.
 func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	const issue = "LEGION-208"
 	architect, err := claim.NewToken("legion", issue, claim.RoleArchitect)
@@ -40,9 +47,22 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	controller := claim.ControllerToken("legion")
 	admitted := time.Date(2026, 10, 6, 18, 2, 11, 0, time.UTC)
 	store := projectionStore{
-		issues: []record.Issue{{Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "in_progress", Phase: phase.Admitted, Generation: 1, HandedOver: true}},
+		issues: []record.Issue{
+			{Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "in_progress", Phase: phase.Admitted, Generation: 1, HandedOver: true},
+			{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "todo", Phase: phase.Admitted, Generation: 1},
+			{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Status: "todo", Phase: phase.Admitted, Generation: 1, Rank: "00010", HandedOver: true},
+			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Status: "todo", Phase: phase.Implementing, Generation: 2, Rank: "00011", HandedOver: true},
+		},
 		phases: map[string][]record.PhaseRow{issue: {{Issue: issue, Role: claim.RoleArchitect, Claim: architect}}},
 		slots:  []record.Slot{{Issue: issue, Index: 0, AdmittedAt: admitted}},
+		mirror: []record.DispatchIssueRow{
+			{Key: issue, Project: "LEGION", Status: "in_progress", Blockers: []string{}, Seq: 4},
+			{Key: "LEGION-209", Project: "LEGION", Status: "todo", Blockers: []string{"LEGION-300"}, Seq: 5},
+			{Key: "LEGION-210", Project: "LEGION", Status: "todo", Blockers: []string{"LEGION-301"}, Seq: 6},
+			{Key: "LEGION-211", Project: "LEGION", Status: "todo", Blockers: []string{"LEGION-302"}, Seq: 7},
+			{Key: "LEGION-300", Project: "LEGION", Status: "in_progress", Blockers: []string{}, Seq: 8},
+			{Key: "LEGION-302", Project: "LEGION", Status: "todo", Blockers: []string{}, Seq: 9},
+		},
 	}
 	architectLocator := sandboxLocator(architect, "legion-legion-legion-208", "4b7e1c2a-0d93-4f6e-8a51-3c2f9e7d1b04", 1)
 	// The architect's session reported its live rows with its ready (LEGION-663), from the process
@@ -76,17 +96,21 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 		t.Fatalf("Project: %v", err)
 	}
 	for key, view := range state.Issues {
-		if key != issue {
-			t.Errorf("the state lists issue %q (%+v); the controller's claim is on no issue", key, view)
-		}
 		if worker, listed := view.Workers[claim.RoleController]; listed {
-			t.Errorf("issue %q lists a controller worker %+v", key, worker)
+			t.Errorf("issue %q lists a controller worker %+v: the controller's claim is on no issue", key, worker)
 		}
 	}
 	if view := state.Issues[issue]; view.Architect == nil || view.Architect.Session != "ses_architect_208" {
 		t.Errorf("%s's architect = %+v, want its ready claim", issue, view.Architect)
 	} else if view.Architect.Capabilities == nil || view.Architect.Capabilities.Incarnation != architectLocator.Incarnation {
 		t.Errorf("%s's architect capabilities = %+v, want its session's report from the process the locator names", issue, view.Architect.Capabilities)
+	}
+	want := []api.BlockedIssue{
+		{Issue: "LEGION-209", BlockedBy: []string{"LEGION-300"}},
+		{Issue: "LEGION-210", BlockedBy: []string{"LEGION-301"}},
+	}
+	if !reflect.DeepEqual(state.Admission.Blocked, want) {
+		t.Errorf("the state's blocked = %#v, want %#v: LEGION-211 carries a run and is never judged", state.Admission.Blocked, want)
 	}
 
 	state.Daemon = api.DaemonInfo{Project: "LEGION", SchemaVersion: 35, Boots: 2, FirstBootAt: admitted.Add(-time.Hour), StartedAt: admitted.Add(-time.Minute)}
@@ -107,14 +131,17 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	golden(t, "state-controller-claim.json", state)
 }
 
-// sandboxLocator is one role process in a Sandbox (contract 15): the Sandbox's name, the pod's uid,
-// the role's container (the role the token names, the controller's included) and the process
-// generation, its incarnation `<pod uid>/<generation>`.
+// sandboxLocator is one role process in a Sandbox: the Sandbox's name, the pod's uid, the pod's one
+// container (`roles` in an issue pod, `controller` in the controller's) and the process generation,
+// its incarnation `<pod uid>/<generation>`.
 func sandboxLocator(token claim.Token, sandbox, podUID string, generation uint64) *runtime.Locator {
-	role, _ := token.Role()
+	container := runtime.IssuePodContainer
+	if role, _ := token.Role(); role == claim.RoleController {
+		container = runtime.ControllerPodContainer
+	}
 	return &runtime.Locator{
 		Runtime: runtime.RuntimeSandbox, Claim: token, Incarnation: runtime.SandboxIncarnation(podUID, generation),
-		Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: sandbox, PodUID: podUID, Container: string(role), Generation: generation},
+		Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: sandbox, PodUID: podUID, Container: container, Generation: generation},
 	}
 }
 

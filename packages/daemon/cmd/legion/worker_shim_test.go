@@ -18,8 +18,8 @@ import (
 )
 
 // socketDir answers a directory short enough to hold a unix socket path: Linux's sun_path is 107
-// bytes, and t.TempDir() sits under TMPDIR, which is no longer short anywhere — a Legion role
-// container's TMPDIR is the issue's shared scratch on its volume (/legion/scratch/tmp), and a
+// bytes, and t.TempDir() sits under TMPDIR, which is no longer short anywhere — a Legion role's
+// TMPDIR is the issue's shared scratch on its volume (/legion/scratch/tmp), and a
 // developer's macOS TMPDIR is a ~49-byte path under /var/folders. Under either, t.TempDir()'s own
 // per-test name pushes the socket past sun_path and the listen fails with "bind: invalid argument"
 // before the test does anything. /tmp is the shortest base every machine has, so the socket's
@@ -394,7 +394,7 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 		home := filepath.Join(dir, strings.ReplaceAll(name, " ", "-"))
 		stateHome := filepath.Join(home, "tester")
 		t.Setenv("XDG_STATE_HOME", stateHome)
-		// The scratch the runtime hands a role container, named after the variable that tells it,
+		// The scratch the runtime hands a role, named after the variable that tells it,
 		// under a root nothing has made: every assertion below is about the shim making them.
 		scratch := filepath.Join(home, "scratch")
 		for _, variable := range podsafety.ScratchVariables {

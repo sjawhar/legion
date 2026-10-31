@@ -90,13 +90,9 @@ func (c Claim) RunsNothing() bool { return slices.Contains(runsNothing, c.State)
 // re-admitted as a root of its own keeps its roles' claims, which still name the tree it left. The
 // claim drops its old tree's epoch, so its next start binds the new tree's lifecycle and launches
 // in the new tree's resources, and keeps its session: the session is the issue's, on the host under
-// tmux, and under a sandbox on the issue's own volume or in the runtime's session database
-// (runtime.kubernetes.session_store postgres), which every tree's pods read, so it resumes in the
-// new tree while the old tree lingers. Once the old tree's cleanup has taken the issue's Sandbox and
-// volume, a file session names a transcript the new volume does not hold; the supervisor knows
-// nothing of Sandboxes, and a check here would race that cleanup, so it is left to the launch, which
-// expects the volume to hold what it left and, finding it does not, logs the volume lost once and
-// starts a fresh session (runtime.WorkspaceLost). Only a claim that runs nothing is re-pointed; one
+// tmux, and under a sandbox in the runtime's session database (runtime.kubernetes.session_store
+// postgres), which every tree's pods read, so it resumes in the new tree while the old tree
+// lingers, whatever the old tree's cleanup takes. Only a claim that runs nothing is re-pointed; one
 // whose process still runs in the old tree is a wait (wait.ErrWaiting): the new tree's start
 // suspends it first, keeping its session, and waits for that suspension to land (the daemon's
 // outbox, stopElsewhere).

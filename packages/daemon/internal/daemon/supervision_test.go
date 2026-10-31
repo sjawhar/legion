@@ -1299,62 +1299,6 @@ func secretFiles(t *testing.T, dir string) []string {
 	return names
 }
 
-// The workspace-loss reaction end to end, through the daemon's own specs, store, and supervisor: a
-// resumed root whose workspace-init found its issue's volume lost relaunches once as a fresh session
-// recovering legion/<issue>, and a suspended worker of the same issue drops the session that volume
-// held, so its resume is a fresh launch recovering the issue's branch rather than a resume that
-// would fail until its budget ran out. A worker of another issue of the tree keeps its session: its
-// issue's volume is its own, and the loss was not its.
-func TestRunRelaunchesAFreshSessionWhenTheIssueVolumeIsLostAndTellsTheIssue(t *testing.T) {
-	cfg := testConfig(t)
-	rt := fake.NewRuntime()
-	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
-	root := d.spawn(architect())
-	readyClaim(t, d, rt, root)
-	sibling := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."})
-	readyClaim(t, d, rt, sibling)
-	child := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."})
-	readyClaim(t, d, rt, child)
-	for _, step := range []struct {
-		token  claim.Token
-		action string
-	}{{sibling, "suspend"}, {child, "suspend"}, {root, "suspend"}, {root, "resume"}} {
-		if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(step.token)+"/"+step.action, nil, true); status != http.StatusOK {
-			t.Fatalf("%s %s = %d; body %s", step.action, step.token, status, body)
-		}
-	}
-	resumed := d.claim(root).Locator
-
-	rt.Emit(runtime.Observation{Locator: *resumed, Kind: runtime.Gone,
-		WorkspaceLost: true,
-		Detail:        "the issue's volume was lost: pod legion-legion-1 Failed: init container workspace-init terminated (Error, exit code 3)"})
-
-	testwait.Eventually(t, "the root's fresh relaunch and its sibling's dropped session", func() bool {
-		r, s := d.claim(root), d.claim(sibling)
-		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Locator != nil && r.Session == "" && s.Session == ""
-	})
-	if fresh := lastLaunch(t, rt, root); fresh.ResumeSessionFile != "" || fresh.WorkspaceRecoveredFrom != "legion/LEGION-1" {
-		t.Errorf("the root relaunched with %+v, want a fresh session recovering legion/LEGION-1", fresh)
-	}
-	if c := d.claim(root); c.Budgets.LaunchFailures != 0 {
-		t.Errorf("the root's lost volume was charged: %+v", c.Budgets)
-	}
-	if c := d.claim(child); c.Session != "ses_"+string(child) {
-		t.Errorf("the other issue's worker is %+v, want its session kept: the lost volume was not its issue's", c)
-	}
-	for _, worker := range []claim.Token{sibling, child} {
-		if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(worker)+"/resume", nil, true); status != http.StatusOK {
-			t.Fatalf("resume %s = %d; body %s", worker, status, body)
-		}
-	}
-	if relaunched := lastLaunch(t, rt, sibling); relaunched.ResumeSessionFile != "" || relaunched.WorkspaceRecoveredFrom != "legion/LEGION-1" {
-		t.Errorf("the sibling relaunched with %+v, want a fresh session recovering legion/LEGION-1", relaunched)
-	}
-	if relaunched := lastLaunch(t, rt, child); relaunched.ResumeSessionFile != "/sessions/"+string(child)+".jsonl" || relaunched.WorkspaceRecoveredFrom != "" {
-		t.Errorf("the other issue's worker relaunched with %+v, want its recorded session resumed", relaunched)
-	}
-}
-
 // A process the runtime reports at a stale address — alive, but holding an address the daemon no
 // longer hands its processes (LEGION-592: the daemon restarted with its worker stream, its API or a
 // service at another address and re-adopted the pod) — relaunches its recorded session at once, and

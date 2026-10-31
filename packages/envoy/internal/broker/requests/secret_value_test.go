@@ -36,7 +36,7 @@ func TestASecretWithNoValueIsRefusedBeforeAnyoneApprovesIt(t *testing.T) {
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(%s) = %+v, %v; want granted", approver, dec, err)
 	}
-	if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["UNSEEDED_KEY"] != "unseeded-v1" {
+	if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || values["UNSEEDED_KEY"] != "unseeded-v1" {
 		t.Fatalf("Values = %v, %v; want UNSEEDED_KEY=unseeded-v1", values, err)
 	}
 }
@@ -69,12 +69,12 @@ func TestAGrantStopsWhileItsSecretHasNoValueAndResumesOnceItHasOne(t *testing.T)
 				t.Fatalf("ApplyDecision(%s) = %+v, %v; want granted", approver, dec, err)
 			}
 			decided := m.Policy.Get().Version
-			if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["DEEL_API_KEY"] != "deel-v1" || values["SECOND_KEY"] != "second-v1" {
+			if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || values["DEEL_API_KEY"] != "deel-v1" || values["SECOND_KEY"] != "second-v1" {
 				t.Fatalf("Values while both have values = %v, %v; want both released", values, err)
 			}
 
 			retag(t, m, policytest.Secret("SECOND_KEY", fixtureOperator, policy.TierHuman, ""))
-			if values, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantNotLive) || !strings.Contains(err.Error(), "SECOND_KEY") {
+			if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) || !strings.Contains(err.Error(), "SECOND_KEY") {
 				t.Fatalf("Values while SECOND_KEY has no value = %v, %v; want ErrGrantNotLive naming SECOND_KEY", values, err)
 			}
 
@@ -83,7 +83,7 @@ func TestAGrantStopsWhileItsSecretHasNoValueAndResumesOnceItHasOne(t *testing.T)
 			if got := m.Policy.Get().Version == decided; got != c.decidedVersion {
 				t.Fatalf("policy version is the decided one: %v, want %v", got, c.decidedVersion)
 			}
-			if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["DEEL_API_KEY"] != "deel-v1" || values["SECOND_KEY"] != "second-v2" {
+			if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || values["DEEL_API_KEY"] != "deel-v1" || values["SECOND_KEY"] != "second-v2" {
 				t.Fatalf("Values once SECOND_KEY has a value again = %v, %v; want DEEL_API_KEY=deel-v1 and SECOND_KEY=second-v2", values, err)
 			}
 		})

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArtifactBlock } from "@legion/contracts";
 import { DISPATCH_BODY_MAX, PROJECT_KEY_RULE } from "@legion/contracts";
-import { fitOutput, runDispatchCli } from "../dispatch-cli";
+import { cliRefusals, fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures } from "../dispatch-picture-tools";
 
@@ -331,6 +331,13 @@ const server = Bun.serve({
       });
     }
     if (pathname === "/v1/interests/ses-1") return interests();
+    // A Dispatch build older than the answers route, which it therefore lacks.
+    if (pathname.endsWith("/answers")) {
+      return Response.json(
+        { code: "NOT_FOUND", error: `no route for ${request.method} ${pathname}` },
+        { status: 404 }
+      );
+    }
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
 });
@@ -427,6 +434,15 @@ describe("the dispatch CLI", () => {
     expect(code).toBe(2);
     expect(stdout).toContain("DISPATCH_SESSION_ID");
     expect(requests).toEqual([]);
+  });
+
+  test("answers against a Dispatch without the route says its build is older than the answers route, exit 1", async () => {
+    const { code, stdout } = await run(["answers"], omp);
+    expect(code).toBe(1);
+    expect(stdout).toBe(
+      `This Dispatch (http://127.0.0.1:${server.port}) has no answers route yet: its build is older than the answers route.\n`
+    );
+    expect(requests.map((request) => request.path)).toEqual(["/api/v1/agents/ses-1/answers"]);
   });
 
   test("an unknown flag is refused in command syntax, with an example", async () => {
@@ -1171,6 +1187,10 @@ describe("the dispatch CLI's envoy.json", () => {
         ...child,
       });
       expect(stdout).toStartWith("dispatch: DISPATCH_HOST is not set.");
+      // An agent in a Python cell reads this first. With a made-up session id, the CLI finds no
+      // AskGate record, so the write posts with no review.
+      expect(stdout).toContain("From an agent's session, send the command as a bash call.");
+      expect(stdout).toContain("set DISPATCH_SESSION_ID to the id of your own session");
       expect(code).toBe(2);
     }
     expect(requests).toEqual([]);
@@ -1301,6 +1321,29 @@ describe("the dispatch CLI's envoy.json", () => {
     }
     expect(requests).toEqual([]);
   });
+
+  // A Legion pod has no envoy.json: its Dispatch is DISPATCH_URL with DISPATCH_TOKEN_FILE, which
+  // the session's one long-lived shell keeps until a command unsets or empties DISPATCH_URL.
+  test("DISPATCH_TOKEN_FILE with no DISPATCH_URL says the shell lost it, not that envoy.json is missing, and exits 2, sending nothing", async () => {
+    const tokenFile = join(stateDir, "DISPATCH_TOKEN");
+    writeFileSync(tokenFile, "test-token\n");
+    const chosen = join(stateDir, "profile", "envoy.json");
+    for (const variables of [
+      { DISPATCH_TOKEN_FILE: tokenFile },
+      { DISPATCH_TOKEN_FILE: tokenFile, DISPATCH_URL: "" },
+    ]) {
+      const { code, stdout } = await run(["whoami"], {
+        ...fromFile,
+        ENVOY_CONFIG_FILE: chosen,
+        ...variables,
+      });
+      expect(stdout).toBe(
+        "dispatch: DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for\n"
+      );
+      expect(code).toBe(2);
+    }
+    expect(requests).toEqual([]);
+  });
 });
 
 describe("the dispatch CLI's subscription note", () => {
@@ -1393,11 +1436,212 @@ describe("the dispatch CLI's subscription note", () => {
     expect(requests.some((request) => request.path === "/api/v1/issues/DSP-1/messages")).toBe(true);
   });
 
+  // A write that landed before its answer was lost (409 KEY_COMMITTED) is done: the call succeeds,
+  // and its one line says the write was made and to read it back, since there is nothing to print.
+  test("a write answered KEY_COMMITTED exits 0 with one line saying to read it back", async () => {
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/v1/issues/DSP-1/messages")) {
+        return Response.json(
+          { code: "KEY_COMMITTED", error: "the write landed and its answer was lost" },
+          { status: 409 }
+        );
+      }
+      return fetch(input, init);
+    }) as typeof fetch;
+    let stdout = "";
+    const code = await runDispatchCli(
+      ["message", "--issue", "DSP-1", "--body", "hello"],
+      environment(withListener),
+      {
+        stdout: (text) => {
+          stdout += text;
+        },
+        stderr: () => {},
+        readText: () => "",
+        cwd: stateDir,
+        fetchImpl,
+      }
+    );
+
+    expect(code).toBe(0);
+    expect(stdout.trim().split("\n")).toEqual([
+      expect.stringMatching(
+        /^POST http:\/\/127\.0\.0\.1:\d+\/api\/v1\/issues\/DSP-1\/messages was made, but its answer was lost on the way back \(KEY_COMMITTED\), so this command cannot print what it made: read it back with `dispatch read`, or with the matching list for something it created\.$/
+      ),
+    ]);
+  });
+
   test("a read asks no listener", async () => {
     interests = listed([]);
     const { code } = await run(["projects"], withListener);
     expect(code).toBe(0);
     expect(requests.some((request) => request.path.startsWith("/v1/interests/"))).toBe(false);
+  });
+});
+
+// A reader of a transcript, the skill-scenario scorer among them, finds a refusal the CLI printed
+// even when a pipe hid its exit: each path below is the real CLI's, and its first line is the one
+// refusal cliRefusals reads. The CLI's other `dispatch:` lines refuse nothing.
+describe("cliRefusals", () => {
+  const fromFile = { ...omp, DISPATCH_URL: undefined, DISPATCH_TOKEN: undefined };
+  /** The one refusal `stdout` holds: its first line, and the command it names. */
+  const refusal = (stdout: string, command: string | null) => [
+    { line: stdout.split("\n")[0], command },
+  ];
+
+  test("an argument check's refusal names its command, in the call and in its dry run (exit 1)", async () => {
+    for (const argv of [
+      ["message", "--issue", "DSP-1", "--isue", "X"],
+      ["issue-update", "--status", "done"],
+      ["issue-update", "--status", "done", "--dry-run"],
+    ]) {
+      const { code, stdout } = await run(argv, omp);
+      expect(code, argv.join(" ")).toBe(1);
+      expect(cliRefusals(stdout), argv.join(" ")).toEqual(refusal(stdout, argv[0] ?? ""));
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test("each usage refusal is a refusal of no command (exit 2)", async () => {
+    const off = join(stateDir, "off.json");
+    writeFileSync(off, JSON.stringify({ dispatch: { enabled: false } }));
+    const cases: [string, readonly string[], Record<string, string | undefined>][] = [
+      ["unknown command", ["frobnicate"], omp],
+      ["no host", ["projects"], { DISPATCH_SESSION_ID: "ses-1" }],
+      ["another host", ["projects"], { DISPATCH_HOST: "vim", DISPATCH_SESSION_ID: "ses-1" }],
+      ["no omp session", ["projects"], { DISPATCH_HOST: "omp" }],
+      ["no Claude Code session", ["projects"], { DISPATCH_HOST: "claude" }],
+      ["a session id of two segments", ["projects"], { ...omp, DISPATCH_SESSION_ID: "a/b" }],
+      ["a relative ENVOY_CONFIG_FILE", ["projects"], { ...fromFile, ENVOY_CONFIG_FILE: "e.json" }],
+      ["a relative XDG_CONFIG_HOME", ["projects"], { ...fromFile, XDG_CONFIG_HOME: "rel" }],
+      ["no envoy.json", ["projects"], fromFile],
+      ["a file that turns Dispatch off", ["projects"], { ...fromFile, ENVOY_CONFIG_FILE: off }],
+      ["DISPATCH_URL with no token", ["projects"], { ...omp, DISPATCH_TOKEN: undefined }],
+    ];
+    for (const [name, argv, env] of cases) {
+      const { code, stdout } = await run(argv, env);
+      expect(code, name).toBe(2);
+      expect(stdout, name).toStartWith("dispatch: ");
+      expect(cliRefusals(stdout), name).toEqual(refusal(stdout, null));
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test("a session state the CLI cannot read is a refusal (exit 2)", async () => {
+    const corrupt = join(stateDir, "sessions", "ses-1");
+    mkdirSync(corrupt, { recursive: true });
+    writeFileSync(join(corrupt, "state.json"), "{not json");
+    const unreadable = await run(["projects"], omp);
+    expect(unreadable.code).toBe(2);
+    expect(cliRefusals(unreadable.stdout)).toEqual(refusal(unreadable.stdout, null));
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    writeFileSync(join(stateDir, "sessions"), "a file where the directory goes");
+    const unlisted = await run(["projects"], omp);
+    expect(unlisted.code).toBe(2);
+    expect(unlisted.stdout).toStartWith("dispatch: ENOTDIR: ");
+    expect(cliRefusals(unlisted.stdout)).toEqual(refusal(unlisted.stdout, null));
+    expect(requests).toEqual([]);
+  });
+
+  test("a warning, the note that the state was not written, and a moved file's notice refuse nothing", async () => {
+    const warned = await run(["read", "--issue", "DSP-3"], omp);
+    expect(warned.code).toBe(0);
+    expect(warned.stderr).toStartWith("dispatch: warning: ");
+    expect(cliRefusals(`${warned.stderr}${warned.stdout}`)).toEqual([]);
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    mkdirSync(join(stateDir, "sessions", "ses-1", "results.jsonl"), { recursive: true });
+    const unrecorded = await run(["message", "--issue", "DSP-1", "--body", "x"], omp);
+    expect(unrecorded.code).toBe(0);
+    expect(unrecorded.stdout).toContain("\ndispatch: Dispatch took the call, but this session's");
+    expect(cliRefusals(unrecorded.stdout)).toEqual([]);
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    mkdirSync(join(stateDir, ".config", "legion"), { recursive: true });
+    writeFileSync(
+      join(stateDir, ".config", "legion", "envoy.json"),
+      JSON.stringify({
+        dispatch: { enabled: true, serverUrl: `http://127.0.0.1:${server.port}`, token: "t" },
+      })
+    );
+    mkdirSync(join(stateDir, ".opencode"), { recursive: true });
+    writeFileSync(join(stateDir, ".opencode", "envoy.json"), "{}");
+    const moved = await run(["projects"], fromFile);
+    expect(moved.code).toBe(0);
+    expect(moved.stdout).toStartWith("dispatch: ");
+    expect(cliRefusals(moved.stdout)).toEqual([]);
+  });
+
+  // A refusal the CLI prints before it reaches Dispatch is logged too, whenever the call knows its
+  // session: a reader of the ledger (pi-envoy's run-end check, the skill-scenario rig) sees a call
+  // whose output a pipe, `$(…)` or another program swallowed. The host and the command need not be
+  // known for the session to be: a Python `subprocess.run(["dispatch", …])` inherits the session id
+  // without `DISPATCH_HOST`.
+  test("an early refusal is logged when the call knows its session, with no request", async () => {
+    const cases: [string, readonly string[], Record<string, string | undefined>, string][] = [
+      ["an unknown flag", ["message", "--issue", "X", "--isue", "Y"], omp, "dispatch_message"],
+      ["an unknown command", ["frobnicate"], omp, "dispatch"],
+      // The CLI checks the command's name before its flags, so a help call of an unknown command
+      // is refused, and a dry run with a bad argument is refused before it is a dry run. The
+      // skill-scenario scorer matches each ledger line to its command on this.
+      ["an unknown command's help", ["frobnicate", "--help"], omp, "dispatch"],
+      [
+        "a dry run's bad argument",
+        ["message", "--issue", "X", "--isue", "Y", "--dry-run"],
+        omp,
+        "dispatch_message",
+      ],
+      ["no host", ["projects"], { DISPATCH_SESSION_ID: "ses-1" }, "dispatch_projects"],
+      [
+        "another host",
+        ["projects"],
+        { DISPATCH_HOST: "vim", DISPATCH_SESSION_ID: "ses-1" },
+        "dispatch_projects",
+      ],
+      [
+        "Dispatch turned off",
+        ["projects"],
+        { ...omp, DISPATCH_URL: undefined, DISPATCH_TOKEN: undefined },
+        "dispatch_projects",
+      ],
+    ];
+    for (const [name, argv, env, tool] of cases) {
+      stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+      const { code, stdout } = await run(argv, env);
+      expect(code, name).toBeGreaterThan(0);
+      const logged = ledger("ses-1");
+      expect(
+        logged.map((line) => line.tool),
+        name
+      ).toEqual([tool]);
+      expect(logged[0]?.error, name).toBe(stdout.trimEnd());
+      expect(cliRefusals(`${logged[0]?.error}\n`), name).toHaveLength(1);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  // Catches: a crash, or an empty ledger file, when no session id is set at all, and a help or dry
+  // run logged as a refusal.
+  test("a call with no session logs nothing, and help and a dry run log no refusal", async () => {
+    const { code } = await run(["projects"], { DISPATCH_HOST: "omp" });
+    expect(code).toBe(2);
+    expect(existsSync(join(stateDir, "sessions"))).toBe(false);
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    await run(["doc-edit", "--help"], omp);
+    await run(["message", "--issue", "DSP-1", "--body", "hi", "--dry-run"], omp);
+    expect(existsSync(join(stateDir, "sessions", "ses-1", "results.jsonl"))).toBe(false);
+  });
+
+  test("help, a dry run's arguments, and a refusal quoted inside a line refuse nothing", async () => {
+    const help = await run(["doc-edit", "--help"], omp);
+    const dry = await run(["message", "--issue", "DSP-1", "--body", "hi", "--dry-run"], omp);
+    for (const { code, stdout } of [help, dry]) {
+      expect(code).toBe(0);
+      expect(cliRefusals(stdout)).toEqual([]);
+    }
+    expect(cliRefusals("It said: dispatch message was not called: 1 problem")).toEqual([]);
   });
 });
 

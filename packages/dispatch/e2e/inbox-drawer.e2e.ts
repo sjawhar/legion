@@ -79,7 +79,7 @@ test("a half-typed message in a live conversation survives opening the drawer, a
   }
 });
 
-test("over an issue page the drawer opens from the header, keeps its page, and Escape returns focus to the button", async ({
+test("over an issue page the drawer opens from the header, keeps its page, and Escape returns focus to the button @phone", async ({
   browser,
 }, testInfo) => {
   const { askId, issueKey } = await seedAsk("Which label for the drawer?");

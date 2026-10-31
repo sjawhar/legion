@@ -50,6 +50,29 @@ await test('headless Proof registers a typed block and round-trips its remark-di
   assert(proof.serializeMarkdown(doc) === markdown, 'typed block markdown did not round-trip');
 });
 
+await test('a host drawing of a headless typed block keeps the block\'s copy attributes', async () => {
+  const proof = await createHeadlessProof({
+    blockId: () => 'callout-id',
+    blockSchema,
+    renderBlock: () => ['section', {}, ['header', {}, 'H'], ['div', { 'data-proof-block-content': '' }, 0]] as never,
+  });
+  const node = proof.parseMarkdown(':::callout{kind="warning" title="Risk"}\nCareful.\n:::').child(0);
+  assert(node.type.name === 'callout', `parsed node type = ${node.type.name}`);
+  assert(node.attrs.blockId === 'callout-id', `callout id = ${node.attrs.blockId}`);
+  const drawn = JSON.stringify(proof.schema.nodes.callout.spec.toDOM!(node));
+  const expected = JSON.stringify([
+    'section',
+    {
+      'data-proof-block-attr-kind': 'warning',
+      'data-proof-block-attr-title': 'Risk',
+      'data-block-id': node.attrs.blockId,
+    },
+    ['header', {}, 'H'],
+    ['div', { 'data-proof-block-content': '' }, 0],
+  ]);
+  assert(drawn === expected, `host-drawn toDOM = ${drawn}`);
+});
+
 const serverOwnedSchema = {
   version: 1,
   types: [

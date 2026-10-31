@@ -88,7 +88,8 @@ the filter, so a widened filter lists more asks than the number beside the Inbox
 
 The Agents page links each agent's asks too. Its **Needs you** pill opens the Inbox filtered to
 that agent's asks waiting on you, under an `Asks from <agent> waiting on you · clear` chip. Choose
-the chip to remove the filter.
+the chip to remove the filter, or the **↗** beside it to open the agent's
+[live view](/legion/dispatch/agents/#the-live-view).
 
 ### Later and snooze
 
@@ -210,7 +211,9 @@ ask's answer and replies. Open it to see two groups:
   on the issue or document. **Unsubscribe** stops delivery to one, after you confirm. A session
   subscribed through a wider topic shows that topic and has no control.
 
-Each row shows whether the session is live. The list updates as sessions follow and leave.
+Each row shows the session as Dispatch shows every agent: its name, which opens its live view, and
+its [running mark](/legion/dispatch/agents/#how-dispatch-shows-an-agent). The list updates as
+sessions follow and leave.
 
 ## Opening the Inbox as a drawer
 

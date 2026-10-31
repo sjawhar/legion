@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,10 +162,9 @@ func TestAReservedTreeCloseFinishesItsCleanupAfterReadmission(t *testing.T) {
 // tree's cleanup does not wait on those claims, which run nothing and are no longer its, and the
 // orphan's start re-points its claim to the orphan's own tree before it starts it, so the claim
 // binds the new tree's lifecycle rather than the old tree's confirmed one. The claim keeps its
-// session and resumes it under every runtime: under tmux it is on the host; under a runtime that
-// provisions each issue's workspace in a pod it is on the issue's own volume, which the issue's
-// Sandbox keeps across the move, or in the Sandbox runtime's session database (session_store
-// postgres), which every tree's pods read.
+// session and resumes it under every runtime: under tmux it is on the host; under the Sandbox
+// runtime, which provisions each issue's workspace in a pod, it is in the session database the
+// deployment's session_store names, which every tree's pods read.
 func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -234,8 +234,8 @@ func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 			if len(spawns) != 0 || len(resumes) != 1 || resumes[0].Spec.Tree != child.Key || resumes[0].Spec.ResumeSessionFile != "/legion/sessions/planner.jsonl" {
 				t.Fatalf("resumes = %+v, spawns = %+v; want the kept session resumed once in tree %s and no fresh spawn", resumes, spawns, child.Key)
 			}
-			if got.SessionFile != "/legion/sessions/planner.jsonl" || got.WorkspaceLost {
-				t.Fatalf("orphan's planner = %+v, want its session kept and its workspace not lost", got)
+			if got.SessionFile != "/legion/sessions/planner.jsonl" {
+				t.Fatalf("orphan's planner = %+v, want its session kept", got)
 			}
 		})
 	}
@@ -271,7 +271,7 @@ func TestANeverOpenedTreesLingerClosesFinishWithoutRetrying(t *testing.T) {
 		pool:            pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "backlog"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return time.Now().Add(time.Hour) }, log: slog.New(slog.NewJSONHandler(&logs, nil)),
-		remove: func(context.Context, workspace.Workspace) error { return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { return nil },
 	}
 
 	// A person moves the waiting root to backlog: it leaves the line and lingers.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -271,7 +272,7 @@ func (d *blockingDispatch) ListIssues(context.Context, string, []string) ([]disp
 func (d *blockingDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return d.issue, nil
 }
-func (d *blockingDispatch) SetStatus(context.Context, string, string) error {
+func (d *blockingDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
 	d.mu.Lock()
 	d.writes++
 	entered, release, fail := d.entered, d.release, d.fail
@@ -282,7 +283,7 @@ func (d *blockingDispatch) SetStatus(context.Context, string, string) error {
 	if release != nil {
 		<-release
 	}
-	return fail
+	return dispatch.Issue{}, fail
 }
 func (d *blockingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("blockingDispatch takes no hand-over")
@@ -291,12 +292,18 @@ func (d *blockingDispatch) PostMessage(context.Context, string, string) error { 
 func (d *blockingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *blockingDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
 func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *blockingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+func (d *blockingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 func (d *blockingDispatch) count() int {
 	d.mu.Lock()
@@ -431,12 +438,12 @@ func (d *refusingDispatch) GetIssue(_ context.Context, key string) (dispatch.Iss
 	d.reads++
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
-func (d *refusingDispatch) SetStatus(_ context.Context, _ string, status string) error {
+func (d *refusingDispatch) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	if refusal, refused := d.refuse[status]; refused {
-		return fmt.Errorf("set Dispatch status %s: %w", status, refusal)
+		return dispatch.Issue{}, fmt.Errorf("set Dispatch status %s: %w", status, refusal)
 	}
 	d.status = status
-	return nil
+	return dispatch.Issue{}, nil
 }
 func (d *refusingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("refusingDispatch takes no hand-over")
@@ -445,12 +452,18 @@ func (d *refusingDispatch) PostMessage(context.Context, string, string) error { 
 func (d *refusingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
 }
+func (d *refusingDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
+	return nil, nil
+}
 func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
 func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *refusingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
+}
+func (d *refusingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
 }
 
 // boardDispatch is one issue's Dispatch board: it fails the first failures writes, then applies.
@@ -465,19 +478,22 @@ func (d *boardDispatch) ListIssues(context.Context, string, []string) ([]dispatc
 func (d *boardDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
-func (d *boardDispatch) SetStatus(_ context.Context, _ string, status string) error {
+func (d *boardDispatch) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	if d.failures > 0 {
 		d.failures--
-		return errors.New("Dispatch down")
+		return dispatch.Issue{}, errors.New("Dispatch down")
 	}
 	d.status = status
-	return nil
+	return dispatch.Issue{}, nil
 }
 func (d *boardDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("boardDispatch takes no hand-over")
 }
 func (d *boardDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *boardDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *boardDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
@@ -487,6 +503,7 @@ func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return ""
 func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *boardDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // A failed transaction is one row's failure, never the runner's end: a Postgres restart drops the
 // pool's connections, and the outbox has to keep draining once they are back. A claim that fails

@@ -3,12 +3,14 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -38,7 +40,7 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 	if root == nil || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || record.OutOfWorkflow(root.Status) {
 		return intake.Result{}, nil
 	}
-	catchUp, err := e.catchUp(ctx, tx, *root)
+	catchUp, awaiting, err := e.catchUp(ctx, tx, *root)
 	if err != nil {
 		return intake.Result{}, err
 	}
@@ -46,41 +48,53 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 	if err := e.store.DropCatchUps(ctx, tx, root.Key); err != nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.notice(ctx, tx, root.Key, record.Notice{Kind: "catch-up", Role: claim.RoleArchitect,
-		Reason:  fmt.Sprintf("the tree of %s at generation %d as the daemon records it now; start or resume it as your role says", root.Key, root.Generation),
-		CatchUp: &catchUp})
+	reason := fmt.Sprintf("the tree of %s at generation %d as the daemon records it now; start or resume it as your role says", root.Key, root.Generation)
+	if len(awaiting) > 0 {
+		reason += fmt.Sprintf("; in accepting, waiting for your acceptance, which no worker gives: %s (read the evidence, then sign_off or request_backward_move)", strings.Join(awaiting, ", "))
+	}
+	return intake.Result{}, e.notice(ctx, tx, root.Key, record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp})
 }
 
 // catchUp is root's tree as the record holds it: whether a hand-over created the root at this
 // generation, and whether its old root's gate came with it, the design gate policy and the root's
-// gate, and every issue of the tree in key order.
-func (e *Engine) catchUp(ctx context.Context, tx pgx.Tx, root record.Issue) (record.CatchUp, error) {
+// gate, and every issue of the tree in key order. With it come the keys, in key order, of the
+// tree's issues waiting for the architect's acceptance: each in accepting and still in the
+// workflow. No worker runs in accepting, and the one phase-finished notice that moved an issue
+// there is ended undelivered when the architect's claim has failed (the outbox's notice), so a
+// retried architect learns of the wait from its catch-up alone; the reason names these keys so
+// that the catch-up, which a revived architect reads as the tree already running, says what is
+// the architect's own to do.
+func (e *Engine) catchUp(ctx context.Context, tx pgx.Tx, root record.Issue) (record.CatchUp, []string, error) {
 	catchUp := record.CatchUp{Generation: root.Generation, Gate: record.CatchUpGate{Policy: string(e.cfg.DesignGate)}}
 	handed, err := e.store.HandedOverRoot(ctx, tx, root.Key)
 	if err != nil {
-		return record.CatchUp{}, err
+		return record.CatchUp{}, nil, err
 	}
 	if handed != nil && handed.Generation == root.Generation {
 		catchUp.HandedOver, catchUp.Carried = true, handed.GateCarried
 	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
-		return record.CatchUp{}, err
+		return record.CatchUp{}, nil, err
 	}
 	if gate != nil {
 		catchUp.Gate.Artifact, catchUp.Gate.Version, catchUp.Gate.Open = gate.ArtifactID, gate.LatestVersion, classify.DesignGateOpen(*gate)
 	}
 	issues, err := e.store.TreeIssues(ctx, tx, root.Tree)
 	if err != nil {
-		return record.CatchUp{}, err
+		return record.CatchUp{}, nil, err
 	}
 	catchUp.Issues = make([]record.CatchUpIssue, 0, len(issues))
+	awaiting := []string{}
 	for _, issue := range issues {
 		listed := record.CatchUpIssue{Key: issue.Key, Title: issue.Title, Phase: issue.Phase, Status: issue.Status}
 		if issue.Parent != nil {
 			listed.Parent = *issue.Parent
 		}
 		catchUp.Issues = append(catchUp.Issues, listed)
+		if issue.Phase == phase.Accepting && InWorkflow(issue) {
+			awaiting = append(awaiting, issue.Key)
+		}
 	}
-	return catchUp, nil
+	return catchUp, awaiting, nil
 }
