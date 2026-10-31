@@ -1,0 +1,7 @@
+kind: Added
+body: |-
+  Two skills every session with Dispatch now loads: `outside-message`, which holds when the
+  operator approves text that reaches a person outside the company, the two exclusions, the four
+  steps before the ask and what the ask carries; and `plain-words`, which holds the empty verb
+  phrases to delete from any text a person reads. Neither counts toward the 2,000-word budget of
+  the three Dispatch skills.
