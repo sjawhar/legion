@@ -77,6 +77,50 @@ func (s *supervisor) Machine(token claim.Token) (*supervise.Machine, bool) {
 	return m.machine, true
 }
 
+// claimInTurn names a claim of issue other than except whose agent is in a turn now, for the
+// adoption a phase task makes of the working copy an issue's roles share (supervise's
+// Deps.IssueInTurn). It reads each machine's published claim — StateWorking is a turn in flight —
+// rather than any record of turns kept beside them, and View never waits on the decision a machine
+// is making, so answering this can never be held up by another claim's launch or stop.
+func (s *supervisor) claimInTurn(issue string, except claim.Token) (claim.Token, bool) {
+	if issue == "" {
+		return "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for token, m := range s.machines {
+		if token == except || m.issue != issue {
+			continue
+		}
+		if m.machine.View().State == supervise.StateWorking {
+			return token, true
+		}
+	}
+	return "", false
+}
+
+// wakeIssue tells the issue's other claims that token's turn has ended, once token's own machine
+// has recorded that end: a claim holding a task it would not adopt the shared working copy for
+// can send it now (supervise's IssueTurnEnded). It is posted after the machine's decision rather
+// than beside it, because a claim woken before that decision published its end would read the
+// turn as still running and hold the task until the next sweep.
+func (s *supervisor) wakeIssue(token claim.Token) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.stopped {
+		return
+	}
+	ended, ok := s.machines[token]
+	if !ok || ended.issue == "" {
+		return
+	}
+	for other, m := range s.machines {
+		if other != token && m.issue == ended.issue {
+			m.inbox.put(supervise.IssueTurnEnded{Claim: other})
+		}
+	}
+}
+
 // OnTerminal applies one durable-state callback to every current and future machine.
 func (s *supervisor) OnTerminal(callback func(supervise.Claim, supervise.ClaimState)) {
 	s.mu.Lock()
@@ -195,6 +239,11 @@ func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 			}
 			if err := m.Handle(s.ctx, ev); err != nil {
 				s.decisionFailed(token, fmt.Sprintf("%T", ev), err, "supervise: an event failed")
+			}
+			// The turn is over and this machine has recorded that, so a claim of the same issue
+			// holding a task it would not adopt their shared working copy for may send it now.
+			if _, ended := ev.(supervise.StreamTurnEnd); ended {
+				s.wakeIssue(token)
 			}
 		}
 	}()

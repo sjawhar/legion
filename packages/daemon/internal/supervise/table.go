@@ -40,6 +40,14 @@ type StreamTurnStart struct {
 // StreamTurnEnd is the agent's turn ending.
 type StreamTurnEnd struct{ Claim claim.Token }
 
+// IssueTurnEnded is a turn ending on another claim of this claim's issue, posted by the daemon to
+// every other claim of the issue once that turn's own machine has recorded its end. The roles of
+// an issue work one jj workspace, so a phase task this claim is holding rather than adopt that
+// working copy under an open turn (sendPending) may go now. It carries no fact of its own — the
+// send asks again which claims are in a turn — so one posted for a turn another role began
+// meanwhile simply holds again.
+type IssueTurnEnded struct{ Claim claim.Token }
+
 // StreamClosed is the claim's connection closing. It says nothing about the process by itself.
 type StreamClosed struct{ Claim claim.Token }
 
@@ -297,6 +305,7 @@ func (RuntimeObservation) isEvent()   {}
 func (StreamHello) isEvent()          {}
 func (StreamTurnStart) isEvent()      {}
 func (StreamTurnEnd) isEvent()        {}
+func (IssueTurnEnded) isEvent()       {}
 func (StreamClosed) isEvent()         {}
 func (StreamLateRefusal) isEvent()    {}
 func (PromptAcked) isEvent()          {}
@@ -329,6 +338,7 @@ const (
 	onHello         eventKind = "stream_hello"
 	onTurnStart     eventKind = "stream_turn_start"
 	onTurnEnd       eventKind = "stream_turn_end"
+	onIssueTurnEnd  eventKind = "issue_turn_ended"
 	onClosed        eventKind = "stream_closed"
 	onLateRefusal   eventKind = "stream_late_refusal"
 	onAcked         eventKind = "prompt_acked"
@@ -371,6 +381,8 @@ func kindOf(ev Event) eventKind {
 		return onTurnStart
 	case StreamTurnEnd:
 		return onTurnEnd
+	case IssueTurnEnded:
+		return onIssueTurnEnd
 	case StreamClosed:
 		return onClosed
 	case StreamLateRefusal:
@@ -555,6 +567,12 @@ func fillTable(t *builder) {
 	t.ignore(onTurnEnd, "no turn is in flight", prompted...)
 	t.ignore(onTurnEnd, "the agent is not ready, so no turn of a delivery is in flight", unready...)
 	t.ignore(onTurnEnd, noProcess, gone...)
+
+	t.row(onIssueTurnEnd, "a turn ended elsewhere on the issue: send the task that was waiting for the working copy they share",
+		issueTurnEnded, []ClaimState{StateWorking}, prompted...)
+	t.ignore(onIssueTurnEnd, "the claim is in a turn of its own; what it holds goes when that turn ends", StateWorking)
+	t.ignore(onIssueTurnEnd, noSend, unready...)
+	t.ignore(onIssueTurnEnd, noSend, gone...)
 
 	// Timers.
 	t.row(onBootTimer, "the boot interval: probe the unregistered process", bootInterval,
@@ -1055,6 +1073,13 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	}
 	return m.sendPending(ctx)
 }
+
+// issueTurnEnded is a turn ending on another claim of this claim's issue. It carries nothing the
+// claim records: the send it may unblock asks for itself which claims of the issue are in a turn
+// (sendPending), so a wake that arrives while another role has started one holds the task again,
+// and a wake that never arrives — a turn whose process died instead of ending it — costs nothing,
+// because the sweep's next observation asks the same question.
+func issueTurnEnded(m *Machine, ctx context.Context, _ Event) error { return m.sendPending(ctx) }
 
 func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 	return m.probe(ctx, func(context.Context) error {

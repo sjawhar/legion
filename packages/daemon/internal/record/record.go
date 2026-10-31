@@ -413,7 +413,11 @@ type PullRequest struct {
 	// counts. A settlement moves no issue (dispatch://INFRA-714/spec R1): what it names is told to
 	// the roles that work the issue and judged by them (workflow's checks).
 	CheckedHead string
-	// Failing and Cancelled are the checks the settlement names as failed and as cancelled.
+	// Failing and Cancelled are the checks the settlement names as failed and as cancelled, and
+	// CheckRuns the latest run observed of each check name. They hold every head that shares the
+	// checked head's tree, not the checked head alone: a settlement of a head the current one
+	// replaced with handoffs merges into them, so each name reads the newest run of it over those
+	// heads (classify.SettlementFor). A check with no concluded run anywhere is in none of them.
 	Failing    []string
 	Cancelled  []string
 	CheckRuns  []AttemptRun

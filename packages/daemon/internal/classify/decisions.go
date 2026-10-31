@@ -115,7 +115,8 @@ func inWindow(named record.Named, start string, since time.Time) bool {
 // chain of recorded pushes led to it from the recorded head (chained) with nothing left for it to
 // wait for (arrivalPushes), and returns the named moves its judgement left (names, the run's). The
 // recorded CI settlement stays, as CheckedHead's: it is the new head's too once every push between
-// them is known to change only .legion/ (settled), and a settlement for another head replaces it
+// them is known to change only .legion/ (settled), a settlement of another head of that same tree
+// merges into it, and one of a head holding other code replaces it
 // (SettlementFor). GitHub's own verdict on merging the head - Mergeability and MergeState - goes
 // when the pushes say the move changed code (codeMove), and stays when they say it changed only
 // the issue's own handoffs, the same test that carries an approval across (carriedBack): a
@@ -673,12 +674,25 @@ func settled(pr record.PullRequest) bool {
 
 // SettlementFor says whether a CI settlement of candidate.Head may stand for the pull request's
 // current head, and returns the pull request ready to apply it. It may when head is the current
-// head, or a head the current one replaced through pushes that each changed only .legion/, unless
-// a settlement already stands for the current head from a head nearer it on that path, which
-// outranks it.
+// head, or a head the current one replaced through pushes that each changed only .legion/.
 // Every other settlement - an earlier code head's, a head a force push left - stands for nothing.
-// A settlement of a head other than the recorded one starts that head's fence afresh, since
-// check runs, generations and snapshots are each head's own.
+//
+// A settlement of another head than the recorded one, with the recorded one standing for the
+// current head (settled), keeps the fence rather than starting it afresh: both heads carry back
+// to the current head through pushes that changed only .legion/, so they hold one tree, and a run
+// on either is a run on the same code. What each check name comes to is then the newest run of it
+// across those heads, which the attempt set decides (ApplySettlement, over the fence
+// mergeAttemptSets keeps): a check that runs per pull request - a title check, anything on a
+// pull_request edited trigger - runs on whatever head is current and never on the code head
+// again, so its run on a handoff head is the newer one, and a check that ran only on the code
+// head keeps the conclusion it got there. The settlement then stands at the head nearer the
+// current one, which is the candidate's when the candidate carries back to the recorded head;
+// the listener's generation and snapshot number one head's own settlements, so moving the
+// recorded head starts them afresh (ApplySettlement takes them only for the head they number).
+//
+// A settlement whose head holds other code than the recorded one - the recorded settlement no
+// longer stands for the current head, a code push between them - starts the fence afresh, since
+// check runs, generations and snapshots are each tree's own.
 func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
 	head := candidate.Head
 	if !carriedBack(pr.Pushes, pr.HeadSHA, head) {
@@ -687,8 +701,13 @@ func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record
 	if head == pr.CheckedHead {
 		return pr, true
 	}
-	if head != pr.HeadSHA && settled(pr) && carriedBack(pr.Pushes, pr.CheckedHead, head) {
-		return pr, false
+	if settled(pr) {
+		if carriedBack(pr.Pushes, head, pr.CheckedHead) {
+			pr.CheckedHead = head
+			pr.Generation = 0
+			pr.Snapshot = ""
+		}
+		return pr, true
 	}
 	pr.CheckedHead = head
 	pr.Failing = []string{}
@@ -1030,14 +1049,22 @@ func boundedPushes(pushes []record.ClassifiedPush, head string) ([]record.Classi
 // ApplySettlement applies a listener CI settlement only when ClassifySettlement says it is newer,
 // merging its attempt set into the fence. It returns false for stale, duplicate, and conflicting
 // observations.
+//
+// The listener's generation and snapshot number the settlements of one head's own record, so they
+// are taken only from a settlement of the head the fence stands at (SettlementFor, which moves
+// that head to the candidate's whenever the candidate is the nearer one to the pull request's
+// head). A settlement of a head below it merges its runs and the conclusions of them, and leaves
+// the recorded head's numbering as it was.
 func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
 	if ClassifySettlement(pr, candidate) != SettlementNewer {
 		return pr, false
 	}
 	outcome := EffectiveOutcome(pr, candidate)
 	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, candidate.CheckRuns)
-	pr.Generation = candidate.Generation
-	pr.Snapshot = candidate.Snapshot
+	if candidate.Head == pr.CheckedHead {
+		pr.Generation = candidate.Generation
+		pr.Snapshot = candidate.Snapshot
+	}
 	pr.Failing = append([]string(nil), outcome.Failing...)
 	pr.Cancelled = append([]string(nil), outcome.Cancelled...)
 	return pr, true

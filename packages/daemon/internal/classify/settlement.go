@@ -20,7 +20,11 @@ const (
 // commit of a pull request, its current head or not, and the daemon takes one for the head when it
 // is the head's own or a head the current one replaced through pushes that each changed only
 // .legion/ (SettlementFor), since a handoff push can carry GitHub's skip-checks trailer and run no
-// CI; a settlement of another head than the recorded one starts the fence afresh. A check_run
+// CI; those heads hold one tree, so their settlements merge per check name and the newest run of
+// each name is what the head's CI comes to, while a settlement of a head holding other code
+// starts the fence afresh. A check still running is in no settlement at all - the listener
+// settles a commit only once every check it has seen there is terminal - so it is no verdict
+// rather than a failure. A check_run
 // delivery the listener lost is recovered only by Dispatch's webhook redelivery sweep
 // (packages/envoy/internal/dispatch/redeliver: it runs only where Dispatch has the App key and
 // NATS, every two minutes, and asks GitHub again for each delivery GitHub recorded as failed until

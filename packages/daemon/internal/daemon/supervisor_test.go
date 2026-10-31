@@ -16,6 +16,8 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/stream"
@@ -522,4 +524,101 @@ func (e *recordingEnroller) revocations() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return slices.Clone(e.revoked)
+}
+
+// The roles of an issue work one jj workspace, so a phase task's adoption of it is nobody's
+// private act: the daemon answers supervise's Deps.IssueInTurn from the claims its machines
+// publish (claimInTurn), and the tester's task waits while the implementer is in a turn. The end
+// of that turn is posted to the issue's other claims once the implementer's own machine has
+// recorded it (wakeIssue), and the waiting task is adopted and sent then.
+func TestAPhaseTaskWaitsForTheTurnOfAnotherClaimOfItsIssue(t *testing.T) {
+	project, _ := claim.ProjectToken("legion")
+	implementer, _ := claim.NewToken(project, "LEGION-209", claim.RoleImplementer)
+	tester, _ := claim.NewToken(project, "LEGION-209", claim.RoleTester)
+	ctx := context.Background()
+	rt := fake.NewRuntime()
+	conns := fake.NewConns()
+	sup := newSupervisor(ctx, nil, "legion", t.TempDir(), quietLogger())
+	sup.deps = supervise.Deps{
+		Runtime: rt, Conns: conns, Store: &outboxClaimStore{}, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
+		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+		PluginContract: api.DaemonAPIVersion,
+		Identity: func(_ context.Context, role claim.Role, _ string) (runtime.GitIdentity, error) {
+			return runtime.GitIdentity{Name: "legion-" + string(role) + "[bot]", Email: string(role) + "@example.invalid"}, nil
+		},
+		IssueInTurn: sup.claimInTurn,
+	}
+	t.Cleanup(sup.stop)
+
+	ready := func(token claim.Token, role claim.Role) (*supervise.Machine, *fake.Conn) {
+		t.Helper()
+		machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: project, Tree: "LEGION-208", Issue: "LEGION-209",
+			Role: role, State: supervise.StateQueued}, "")
+		if err != nil {
+			t.Fatalf("create %s: %v", token, err)
+		}
+		conn := fake.NewConn()
+		conns.Register(token, conn)
+		if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+			t.Fatalf("spawn %s: %v", token, err)
+		}
+		generation := machine.Claim().Generation
+		for _, ev := range []supervise.Event{
+			supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-" + string(role),
+				SessionFile: "/sessions/" + string(role) + ".jsonl", PluginContract: api.DaemonAPIVersion},
+			supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-" + string(role)},
+		} {
+			if err := machine.Handle(ctx, ev); err != nil {
+				t.Fatalf("handle %T for %s: %v", ev, token, err)
+			}
+		}
+		return machine, conn
+	}
+	writing, _ := ready(implementer, claim.RoleImplementer)
+	waiting, testerConn := ready(tester, claim.RoleTester)
+
+	// The implementer is in the turn of its own phase task, as it is while it writes the work it
+	// has just reported complete.
+	for _, ev := range []supervise.Event{
+		supervise.RequestDeliver{Claim: implementer, Task: "implement the plan", ID: "outbox:1", Phase: phase.Implementing, Generation: 1},
+		supervise.StreamTurnStart{Claim: implementer},
+	} {
+		if err := writing.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T for the implementer: %v", ev, err)
+		}
+	}
+	// Its own task's send runs on a goroutine of its own, so the adoption it makes is counted
+	// only once that send is over.
+	writing.Wait()
+	adoptions := len(rt.CallsOf("AdoptWorkingCopy"))
+
+	if err := waiting.Handle(ctx, supervise.RequestDeliver{Claim: tester, Task: "test the branch", ID: "outbox:2",
+		Phase: phase.Testing, Generation: 1}); err != nil {
+		t.Fatalf("deliver the tester's task: %v", err)
+	}
+	waiting.Wait()
+
+	if prompts := testerConn.Prompts(); len(prompts) != 0 {
+		t.Fatalf("the tester was prompted %+v while the implementer's turn was open; want its task held", prompts)
+	}
+	if got := len(rt.CallsOf("AdoptWorkingCopy")); got != adoptions {
+		t.Fatalf("adoptions = %d while the implementer's turn was open, want the %d made before it", got, adoptions)
+	}
+
+	// The turn ends through the inbox, as the worker stream's event reaches a machine, so the wake
+	// the pump posts to the issue's other claims is the one under test.
+	sup.post(implementer, supervise.StreamTurnEnd{Claim: implementer})
+
+	testwait.Eventually(t, "the tester's task to be sent once the implementer's turn ended", func() bool {
+		return len(testerConn.Prompts()) == 1
+	})
+	sent := testerConn.Prompts()[0]
+	if sent.Message != "test the branch" {
+		t.Fatalf("the tester was sent %+v, want its own task", sent)
+	}
+	made := rt.CallsOf("AdoptWorkingCopy")
+	if len(made) != adoptions+1 || made[adoptions].Identity.Name != "legion-tester[bot]" {
+		t.Fatalf("adoptions = %+v, want one more, for the tester's App", made)
+	}
 }

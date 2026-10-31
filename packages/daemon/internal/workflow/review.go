@@ -166,6 +166,17 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 // the reading worker's (dispatch://INFRA-714/spec R1). The line is the whole of what the daemon
 // knows of that head's CI, so two settlements that leave it the same say nothing new (tellChecks).
 //
+// Each name's conclusion is the newest run of it across the code head and every handoff-only head
+// above it, which is what the record holds (classify.SettlementFor): a handoff push changes
+// nothing GitHub checks, so those heads hold one tree and a run on any of them is a run on the
+// same code. That is the whole of it for a check that runs per pull request - a title check, or
+// anything on a pull_request edited trigger - which runs on whatever head is current and so never
+// on the code head again: its run on the head above is the newer one, and carrying the code
+// head's older failure past it would report a check that has since passed as red. A check still
+// running on every one of those heads is in no settlement of any of them - the listener settles a
+// commit only once every check it has seen there is terminal - so this line names it not at all:
+// a pending check is no verdict, and never a failure.
+//
 // A check run's name is whoever wrote the workflow's text, and this line is read into an agent's
 // prompt, so each name is quoted as a Go string (strconv.Quote): the quotes bound it, and a quote
 // or a newline inside it is escaped rather than closing the one around it. A name of ordinary
