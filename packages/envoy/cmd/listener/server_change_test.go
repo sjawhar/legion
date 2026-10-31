@@ -346,6 +346,7 @@ func (s *serverChangeSoak) startStandIn(t *testing.T) {
 		Topics:         []string{agentSubject, serverChangeAdHoc, serverChangeCaptured},
 		Title:          "server-change stand-in",
 		SelfSubscribed: true,
+		Delivery:       &subscribeDelivery{Consumer: true, Epoch: "epoch-1"},
 	})
 	if err != nil {
 		t.Fatalf("marshal the stand-in's registration: %v", err)

@@ -1441,6 +1441,7 @@ func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
+		consumers:  setupSessionConsumers(t),
 		streamName: "notifications",
 		streamInfo: inspector,
 	}
@@ -1449,6 +1450,7 @@ func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
 		"session_id":"ses_subscriber",
 		"self_subscribed":true,
+		"delivery":{"consumer":true,"epoch":"e"},
 		"topics":["notifications.github.example-org.example-repo.pr","notifications.github.example-org.example-repo.pr.>"]
 	}`))
 	subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
@@ -1483,6 +1485,7 @@ func TestSubscribeHandlerWarnsWhenGitHubWiringLookupFails(t *testing.T) {
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
+		consumers:  setupSessionConsumers(t),
 		streamName: "notifications",
 		streamInfo: inspector,
 	}
@@ -1491,6 +1494,7 @@ func TestSubscribeHandlerWarnsWhenGitHubWiringLookupFails(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
 		"session_id":"ses_subscriber",
 		"self_subscribed":true,
+		"delivery":{"consumer":true,"epoch":"e"},
 		"topics":["notifications.github.example-org.example-repo.pr.>"]
 	}`))
 	subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
@@ -1513,7 +1517,7 @@ func TestSubscribeHandlerWarnsWhenGitHubWiringLookupFails(t *testing.T) {
 func TestSubscribeHandlerWritesAnUnchangedInterestOnce(t *testing.T) {
 	const calls = 5
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	state := &listenerDeps{registry: registry, sessions: sessions}
+	state := &listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}
 	conn := testnats.Connect(t, testnats.URL(t))
 	t.Cleanup(conn.Close)
 	js, err := conn.JetStream()
@@ -1545,6 +1549,7 @@ func TestSubscribeHandlerWritesAnUnchangedInterestOnce(t *testing.T) {
 			"session_id":"ses_steady",
 			"dir":"/work/steady",
 			"self_subscribed":true,
+			"delivery":{"consumer":true,"epoch":"e"},
 			"topics":["notifications.team.steady"]
 		}`)))
 		if recorder.Code != http.StatusOK {
@@ -1596,15 +1601,12 @@ func TestSubscribeHandlerWarnsWhenAGitHubTopicSpellsARepositoryWithADot(t *testi
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	inspector := &fakeStreamInfo{info: &nats.StreamInfo{State: nats.StreamState{Subjects: map[string]uint64{"notifications.github.example-org.example-repo.pr.1": 1}}}}
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions, streamName: "notifications", streamInfo: inspector}
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions, consumers: setupSessionConsumers(t), streamName: "notifications", streamInfo: inspector}
 	warnings := func(t *testing.T, topic string) []string {
 		t.Helper()
-		body, err := json.Marshal(map[string]any{"session_id": "ses_subscriber", "self_subscribed": true, "topics": []string{topic}})
-		if err != nil {
-			t.Fatal(err)
-		}
+		body := consumerRegistration("ses_subscriber", "e", topic)
 		recorder := httptest.NewRecorder()
-		subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(body))))
+		subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(body)))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("subscribe %s: status %d, body %s", topic, recorder.Code, recorder.Body.String())
 		}
@@ -1658,6 +1660,7 @@ func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
+		consumers:  setupSessionConsumers(t),
 		streamName: "notifications",
 		streamInfo: lookup,
 	}
@@ -1666,6 +1669,7 @@ func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
 		"session_id":"ses_subscriber",
 		"self_subscribed":true,
+		"delivery":{"consumer":true,"epoch":"e"},
 		"topics":["notifications.github.example-org.example-repo.pr.>"]
 	}`))
 	responded := make(chan struct{})
@@ -1721,7 +1725,7 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 	}
 	routeClient.Close()
 
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
@@ -2531,11 +2535,11 @@ func TestMessageHandlersUseFirstNonEmptyLine(t *testing.T) {
 }
 func TestSubscribeHandlerStoresAndListsCapabilities(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.New("test"))
 
 	for _, body := range []string{
-		`{"session_id":"ses_capable","topics":[],"self_subscribed":true,"capabilities":["aside","btw"]}`,
-		`{"session_id":"ses_legacy","topics":[],"self_subscribed":true}`,
+		`{"session_id":"ses_capable","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"e"},"capabilities":["aside","btw"]}`,
+		`{"session_id":"ses_legacy","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"e"}}`,
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(
@@ -2574,11 +2578,11 @@ func TestSubscribeHandlerStoresAndListsCapabilities(t *testing.T) {
 // per-session route, trimmed. A registration from a plugin predating the fields lists neither key.
 func TestSubscribeHandlerStoresAndListsThePluginAndItsVersion(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	state := &listenerDeps{registry: registry, sessions: sessions}
+	state := &listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}
 	handler := subscribeHandler(state, "test-machine", logging.New("test"))
 	for _, body := range []string{
-		`{"session_id":"ses_versioned","topics":[],"self_subscribed":true,"plugin":" @sjawhar/pi-envoy ","plugin_version":" 11.0.0 "}`,
-		`{"session_id":"ses_unversioned","topics":[],"self_subscribed":true}`,
+		`{"session_id":"ses_versioned","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"e"},"plugin":" @sjawhar/pi-envoy ","plugin_version":" 11.0.0 "}`,
+		`{"session_id":"ses_unversioned","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"e"}}`,
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(body)))
@@ -2689,7 +2693,7 @@ func TestSessionRoutesReportEachSessionsDeliveryMode(t *testing.T) {
 // which nothing dials, is stored as it came.
 func TestAServingPortRegistrationWithAMalformedHostIsRefused(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.New("test"))
 	subscribe := func(t *testing.T, body map[string]any) *httptest.ResponseRecorder {
 		t.Helper()
 		encoded, err := json.Marshal(body)
@@ -2730,7 +2734,7 @@ func TestAServingPortRegistrationWithAMalformedHostIsRefused(t *testing.T) {
 	if _, err := sessions.Get("ses_no_host"); err != nil {
 		t.Fatalf("the registration without a host wrote no session entry: %v", err)
 	}
-	recorder = subscribe(t, map[string]any{"session_id": "ses_no_port", "topics": []string{}, "self_subscribed": true, "host": "example-host:80"})
+	recorder = subscribe(t, map[string]any{"session_id": "ses_no_port", "topics": []string{}, "self_subscribed": true, "host": "example-host:80", "delivery": map[string]any{"consumer": true, "epoch": "e"}})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("the registration with no port: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -2746,10 +2750,10 @@ func TestAServingPortRegistrationWithAMalformedHostIsRefused(t *testing.T) {
 // NATS. A team topic and a topic outside notifications. are stored as they always were.
 func TestSubscribeHandlerRefusesAnUncapturedNotificationTopicByName(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.New("test"))
 	subscribe := func(t *testing.T, sessionID string, topics ...string) *httptest.ResponseRecorder {
 		t.Helper()
-		encoded, err := json.Marshal(map[string]any{"session_id": sessionID, "topics": topics, "self_subscribed": true})
+		encoded, err := json.Marshal(map[string]any{"session_id": sessionID, "topics": topics, "self_subscribed": true, "delivery": map[string]any{"consumer": true, "epoch": "e"}})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -316,6 +316,21 @@ func setupPublishTestClient(t *testing.T, options ...bus.ConnectOption) *bus.Cli
 	return client
 }
 
+// setupSessionConsumers is the session-consumer connection main's listener always holds, for a
+// test that drives the registration route: a listener without one refuses every registration
+// (consumer_error), as a session receives only what its own consumer holds. Its relay records
+// what it is told and relays nothing, since no test here reads a frame.
+func setupSessionConsumers(t *testing.T) *sessionDelivery {
+	t.Helper()
+	delivery, err := connectSessionDelivery([]string{testnats.URL(t)}, logging.NewWithWriter("test", io.Discard))
+	if err != nil {
+		t.Fatalf("open the session-consumer connection: %v", err)
+	}
+	t.Cleanup(delivery.close)
+	delivery.relay = &recordingRelay{}
+	return delivery
+}
+
 type listenerAcknowledgementClock struct {
 	mu        sync.Mutex
 	elapsed   time.Duration
@@ -1681,13 +1696,13 @@ func TestSubscribeHandler_RejectsEmptySessionID(t *testing.T) {
 func TestSubscribeHandler_StoresSelfSubscribedSessionWithoutPort(t *testing.T) {
 	// Given
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	state := &listenerDeps{registry: registry, sessions: sessions}
+	state := &listenerDeps{registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}
 	handler := subscribeHandler(state, "test-machine", logging.New("test"))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/interests/subscribe",
-		strings.NewReader(`{"session_id":"ses_omp","topics":["notifications.agent.ses_omp"],"self_subscribed":true}`),
+		strings.NewReader(consumerRegistration("ses_omp", "e", "notifications.agent.ses_omp")),
 	)
 
 	// When
@@ -3509,65 +3524,40 @@ func TestListenerDeliveryHandler_FanoutRefusesUnreadableOrAmbiguousDeliveryMode(
 	}
 }
 
-func TestListenerDeliveryHandler_RecordsPortlessSelfSubscribedDeliveryAsSkipped(t *testing.T) {
-	// Given
-	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("unexpected prompt_async request")
-	}))
-	item := listenerTestEnvelope("notifications.github.owner.repo.issue.1", "self-subscribed-skip")
-	if _, err := harness.registry.Upsert(store.Interest{
-		SessionID: "ses_omp",
-		MachineID: "test-machine",
-	}, []string{item.Topic}); err != nil {
-		t.Fatalf("register interest: %v", err)
-	}
-	if err := harness.sessions.Put("ses_omp", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
-		t.Fatalf("register self-subscribed session: %v", err)
-	}
+// An entry the previous build wrote for a portless self-subscribed session is unreachable now:
+// nothing is pushed to it and no subscription of its own takes its messages, so the delivery
+// fails (session.ErrNoPushTarget) instead of counting as skipped, on a followed topic and on the
+// session's agent subject alike. Only a message a consumer holds is skipped.
+func TestListenerDeliveryHandler_RecordsPortlessSelfSubscribedDeliveryAsFailed(t *testing.T) {
+	for _, topic := range []string{"notifications.github.owner.repo.issue.1", contracts.AgentSubject("ses_omp")} {
+		t.Run(topic, func(t *testing.T) {
+			// Given
+			harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("unexpected prompt_async request")
+			}))
+			item := listenerTestEnvelope(topic, "self-subscribed-unreachable")
+			if _, err := harness.registry.Upsert(store.Interest{
+				SessionID: "ses_omp",
+				MachineID: "test-machine",
+			}, []string{item.Topic}); err != nil {
+				t.Fatalf("register interest: %v", err)
+			}
+			if err := harness.sessions.Put("ses_omp", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
+				t.Fatalf("register self-subscribed session: %v", err)
+			}
 
-	// When
-	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+			// When
+			harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
 
-	// Then
-	recorder := httptest.NewRecorder()
-	harness.metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	body := recorder.Body.String()
-	if !strings.Contains(body, `test_messages_delivered{delivery_status="skipped"} 1`) {
-		t.Fatalf("expected skipped delivery metric, got %s", body)
-	}
-	if strings.Contains(body, `test_messages_delivered{delivery_status="delivered"} 1`) {
-		t.Fatalf("expected no delivered metric for skipped push, got %s", body)
-	}
-}
-
-func TestListenerDeliveryHandler_RecordsPortlessSelfSubscribedAgentDeliveryAsSkipped(t *testing.T) {
-	// Given
-	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("unexpected prompt_async request")
-	}))
-	item := listenerTestEnvelope(contracts.AgentSubject("ses_omp"), "self-subscribed-agent-skip")
-	if _, err := harness.registry.Upsert(store.Interest{
-		SessionID: "ses_omp",
-		MachineID: "test-machine",
-	}, []string{item.Topic}); err != nil {
-		t.Fatalf("register agent interest: %v", err)
-	}
-	if err := harness.sessions.Put("ses_omp", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
-		t.Fatalf("register self-subscribed session: %v", err)
-	}
-
-	// When
-	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
-
-	// Then
-	recorder := httptest.NewRecorder()
-	harness.metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	body := recorder.Body.String()
-	if !strings.Contains(body, `test_messages_delivered{delivery_status="skipped"} 1`) {
-		t.Fatalf("expected skipped agent delivery metric, got %s", body)
-	}
-	if strings.Contains(body, `test_messages_delivered{delivery_status="delivered"} 1`) {
-		t.Fatalf("expected no delivered metric for skipped agent push, got %s", body)
+			// Then
+			body := deliveredMetrics(t, harness)
+			if strings.Contains(body, `test_messages_delivered{delivery_status="skipped"}`) {
+				t.Fatalf("expected no skipped delivery metric, got %s", body)
+			}
+			if strings.Contains(body, `test_messages_delivered{delivery_status="delivered"}`) {
+				t.Fatalf("expected no delivered metric for an unreachable session, got %s", body)
+			}
+		})
 	}
 }
 

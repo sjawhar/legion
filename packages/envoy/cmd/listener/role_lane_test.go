@@ -114,12 +114,12 @@ func startRoleLaneListeners(t *testing.T, uri string, env []string, machineIDs .
 	return listeners
 }
 
-// claimRoleThrough registers a session that takes its own messages off the bus, as Oh My Pi does,
-// through listener, has it claim role, and returns its id.
+// claimRoleThrough registers a session as Oh My Pi does, asking for the consumer its messages are
+// relayed from, through listener, has it claim role, and returns its id.
 func claimRoleThrough(t *testing.T, listener *listenerProcess, role string) string {
 	t.Helper()
 	sessionID := "ses_role_lane_" + id.New()
-	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+sessionID+`","topics":[],"self_subscribed":true}`)
+	postListener(t, listener.port, "/v1/interests/subscribe", consumerRegistration(sessionID, "epoch-1"))
 	postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+sessionID+`","role":"`+role+`"}`)
 	return sessionID
 }

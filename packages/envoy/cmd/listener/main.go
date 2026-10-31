@@ -47,8 +47,9 @@ type listenerDeps struct {
 	// leaves the lane off.
 	live *bus.Client
 	// consumers manages the session consumers registrations ask for (sessionDelivery); nil in a
-	// test that builds the handlers without it, which answers every such registration with core.
-	// delivery, below, is the delivery handlers' own configuration, which the routes share.
+	// test that builds the handlers without it, which refuses every registration with
+	// consumer_error. delivery, below, is the delivery handlers' own configuration, which the
+	// routes share.
 	consumers *sessionDelivery
 	// caches lists the stores above that are open, for the sites that treat every cache alike.
 	caches []listenerCache
@@ -985,21 +986,25 @@ func main() {
 		logger.Info("live topics subscribed", slog.String("subject", liveTopicsSubject), slog.String("queue", bus.ListenerLiveQueue(cfg.MachineID)))
 	}
 
-	// The session consumers a registration asks for are managed on a connection of their own
-	// (bus.ConnectSessionConsumers). One that fails to connect leaves every session on core
-	// delivery, which a listener of an earlier release serves too, rather than ending the start.
-	delivery := connectSessionDelivery(cfg.NATSURLs, logger)
-	// The relay of those consumers hears registrations from the moment /v1 opens, and relays once
-	// this task holds its machine's durable binding (below). Without its reply inbox no frame could
-	// be answered, so a relay that cannot subscribe one leaves every session on core delivery too.
-	var relays *sessionRelays
-	if delivery.consumers != nil {
-		relays, err = startSessionRelays(delivery, deliveryConfig)
-		if err != nil {
-			logger.Error("session relay reply subscription failed; every session stays on core delivery", slog.String("error", err.Error()))
-			delivery.close()
-			delivery = &sessionDelivery{logger: logger, now: time.Now}
-		}
+	// Every session takes its messages from a session consumer this listener manages on a
+	// connection of its own (bus.ConnectSessionConsumers), and its relay needs a reply inbox to
+	// answer frames on. There is nothing left to fall back to, so either failure ends the start,
+	// as the live topics lane's does: a listener that refuses every registration would stop at
+	// each session rather than at the rollout.
+	delivery, err := connectSessionDelivery(cfg.NATSURLs, logger)
+	if err != nil {
+		logger.Error("session consumer connection failed: every session is delivered through a consumer of its own", slog.String("error", err.Error()))
+		client.Conn.Close()
+		os.Exit(1)
+	}
+	// The relay hears registrations from the moment /v1 opens, and relays once this task holds its
+	// machine's durable binding (below).
+	relays, err := startSessionRelays(delivery, deliveryConfig)
+	if err != nil {
+		logger.Error("session relay reply subscription failed: no relayed frame could be answered", slog.String("error", err.Error()))
+		delivery.close()
+		client.Conn.Close()
+		os.Exit(1)
 	}
 	// The parts a shutdown ends, gathered once: every end of a start that serves /v1 passes them
 	// to shutdownListener.

@@ -39,8 +39,8 @@ type subscribeBody struct {
 	// Empty for a session whose plugin predates the fields.
 	Plugin        string `json:"plugin"`
 	PluginVersion string `json:"plugin_version"`
-	// Delivery asks for consumer delivery (subscribeDelivery); absent from an older plugin's
-	// registration, which stays on the core path.
+	// Delivery asks for consumer delivery (subscribeDelivery). A registration with no serving port
+	// that carries none, an older plugin's, is refused (sessionDelivery.register).
 	Delivery *subscribeDelivery `json:"delivery"`
 }
 

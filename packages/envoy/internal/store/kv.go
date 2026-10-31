@@ -641,7 +641,8 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 // it cannot decode), and the session's own subscribe is the authority on its record.
 //
 // The merged row keeps no topic reaching a private stream subject other than the
-// session's own agent subject (dropPrivateStreamTopics): a row stored before the
+// session's own agent subject, and holds them sorted (MergedTopics, which the listener's
+// registration route reads to build the same set before this write): a row stored before the
 // listener refused such a topic is cleaned at the session's next registration.
 func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64) (Interest, error) {
 	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) && !errors.Is(getErr, ErrMalformedInterest) {
@@ -654,9 +655,7 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 	item.MachineID = first(item.MachineID, curValue(cur.MachineID))
 	item.Dir = first(item.Dir, curValue(cur.Dir))
 	item.UpdatedAt = now
-	item = Merge(item, topics)
-	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
-	sort.Strings(item.Topics)
+	item.Topics = MergedTopics(sessionID, item.Topics, topics)
 	return item, nil
 }
 

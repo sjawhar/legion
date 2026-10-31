@@ -14,7 +14,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
-	"github.com/sjawhar/envoy/internal/session"
 )
 
 // Canonical policy for the listener's durable consumer. DeliverSubject is
@@ -372,11 +371,13 @@ func waitWithin(ctx context.Context, wg *sync.WaitGroup) bool {
 
 // durableNeedsDelivery reports whether the stored message on subject, stored at stream sequence
 // storedSeq, may need this listener's durable path, read from the subject alone, and when it does
-// not, how many sessions of this machine take it another way (takesStoredMessagesItself). A role
-// lane's subject always needs it. A session's agent subject does unless the session takes it
-// another way or is another listener's (agentSubjectNeedsDelivery). Any other subject does when it
-// matches a topic of an interest of this machine (the registry's subject index) whose session does
-// not take it another way; with none, the fan-out would deliver it to nobody and report nothing.
+// not, how many sessions of this machine hold it in a consumer of their own
+// (session.SessionEntry.ConsumerHoldsStored; a message stored below a consumer's start is in no
+// consumer, so the durable path still delivers it). A role lane's subject always needs it. A
+// session's agent subject does unless the session's consumer holds it or the session is another
+// listener's (agentSubjectNeedsDelivery). Any other subject does when it matches a topic of an
+// interest of this machine (the registry's subject index) whose session's consumer does not hold
+// it; with none, the fan-out would deliver it to nobody and report nothing.
 func durableNeedsDelivery(cfg listenerDeliveryHandlerConfig, subject string, storedSeq uint64) (needed bool, skipped int) {
 	if strings.HasPrefix(subject, contracts.RoleTopicPrefix) {
 		return true, 0
@@ -386,7 +387,7 @@ func durableNeedsDelivery(cfg listenerDeliveryHandlerConfig, subject string, sto
 	}
 	for _, interest := range cfg.registry.Match(cfg.machineID, subject) {
 		entry, err := cfg.sessions.Get(interest.SessionID)
-		if err != nil || !takesStoredMessagesItself(entry, storedSeq) {
+		if err != nil || !entry.ConsumerHoldsStored(storedSeq) {
 			return true, 0
 		}
 		skipped++
@@ -394,23 +395,14 @@ func durableNeedsDelivery(cfg listenerDeliveryHandlerConfig, subject string, sto
 	return false, skipped
 }
 
-// takesStoredMessagesItself reports whether the session of entry takes the stored message of
-// stream sequence storedSeq without the durable path: on consumer delivery its consumer holds
-// every message its start covers (session.SessionEntry.ConsumerHoldsStored), and with no serving
-// port a self-subscribed session's own subscription took it. A message stored below the consumer's
-// start is in no consumer, so the durable path still delivers it.
-func takesStoredMessagesItself(entry session.SessionEntry, storedSeq uint64) bool {
-	return entry.ConsumerHoldsStored(storedSeq) || (entry.SelfSubscribed && entry.Port == 0)
-}
-
 // agentSubjectNeedsDelivery is durableNeedsDelivery for sessionID's agent subject: not needed when
-// the session's live entry takes it another way (takesStoredMessagesItself, one skipped delivery),
-// nor when its cached interest names another listener, which delivers it
-// (session.HandleAgentMessage's OwnedElsewhere). Everything else is decoded and delivered: a
-// serving-port or core-path session of this machine, and a session nobody has, for which the path
-// raises its no_holder exception.
+// the session's live entry holds it in its own consumer (one skipped delivery), nor when its
+// cached interest names another listener, which delivers it (session.HandleAgentMessage's
+// OwnedElsewhere). Everything else is decoded and delivered: a serving-port session of this
+// machine, an entry the previous build wrote for a session on no consumer, for which the path
+// raises its unreachable exception, and a session nobody has, for which it raises no_holder.
 func agentSubjectNeedsDelivery(cfg listenerDeliveryHandlerConfig, sessionID string, storedSeq uint64) (needed bool, skipped int) {
-	if entry, err := cfg.sessions.Get(sessionID); err == nil && takesStoredMessagesItself(entry, storedSeq) {
+	if entry, err := cfg.sessions.Get(sessionID); err == nil && entry.ConsumerHoldsStored(storedSeq) {
 		return false, 1
 	}
 	interest, cached := cfg.registry.CachedInterest(sessionID)

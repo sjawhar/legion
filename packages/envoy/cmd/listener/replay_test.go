@@ -36,7 +36,7 @@ func newReplayRig(t *testing.T, topics ...string) *replayRig {
 	t.Helper()
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, map[string][]string{replaySession: topics}, nil)
-	deps := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	deps := &listenerDeps{client: client, registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}
 	return &replayRig{deps: deps, mux: replayMux(deps), js: client.JS()}
 }
 
@@ -571,7 +571,8 @@ type interestSubscribeAnswer struct {
 // 200, and returns the answer.
 func subscribeInterest(t *testing.T, mux *http.ServeMux, topics []string) interestSubscribeAnswer {
 	t.Helper()
-	body, err := json.Marshal(subscribeBody{SessionID: replaySession, Topics: topics, SelfSubscribed: true})
+	body, err := json.Marshal(subscribeBody{SessionID: replaySession, Topics: topics, SelfSubscribed: true,
+		Delivery: &subscribeDelivery{Consumer: true, Epoch: "e"}})
 	if err != nil {
 		t.Fatalf("marshal subscribe: %v", err)
 	}

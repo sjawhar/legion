@@ -1158,10 +1158,11 @@ func grantConfigBeforeSessionConsumers(public string) string {
 		public, strings.Join(quoted, ", "))
 }
 
-// On a hub whose grant predates session consumers, the first refused consumer call holds every
-// registration on core for ten minutes without another call: the server sees one consumer call
-// refused however many sessions register in that time, and one more after it, at the next
-// registration, which probes the grant again. The refusal is logged once.
+// On a hub whose grant predates session consumers, the first refused consumer call refuses every
+// registration for ten minutes without another call: the server sees one consumer call refused
+// however many sessions register in that time, and one more after it, at the next registration,
+// which probes the grant again. The refusal is logged once. Without the backoff every heartbeat
+// of every session would call the server and log a permissions violation there and here.
 func TestSessionConsumerWithoutTheGrantProbesItOncePerTenMinutes(t *testing.T) {
 	seed, public := testnats.User(t)
 	server, uri := testnats.StartConfig(t, grantConfigBeforeSessionConsumers(public), []string{"-DV", "-js"}, false)
@@ -1185,10 +1186,8 @@ func TestSessionConsumerWithoutTheGrantProbesItOncePerTenMinutes(t *testing.T) {
 		return calls
 	}
 	register := func(i int) {
-		answer := rig.subscribe(t, consumerRegistration(fmt.Sprintf("ses_no_grant_%d", i), "e"))
-		if answer.Delivery == nil || answer.Delivery.Mode != "core" || answer.Delivery.Reason != "no_grant" {
-			t.Fatalf("answer %s, want delivery core with reason no_grant", answer.raw)
-		}
+		refusal := rig.refusedSubscribe(t, consumerRegistration(fmt.Sprintf("ses_no_grant_%d", i), "e"))
+		refusal.requireRefused(t, http.StatusServiceUnavailable, "no_grant")
 	}
 	awaitRefusedCalls := func(want int) {
 		deadline := time.Now().Add(2 * time.Second)
@@ -1212,7 +1211,44 @@ func TestSessionConsumerWithoutTheGrantProbesItOncePerTenMinutes(t *testing.T) {
 	register(5)
 	register(6)
 	awaitRefusedCalls(2)
-	if lines := strings.Count(rig.harness.logs.String(), "sessions stay on core delivery until the grant carries them"); lines != 1 {
+	if lines := strings.Count(rig.harness.logs.String(), "every registration is refused until the grant carries them"); lines != 1 {
 		t.Fatalf("the missing grant was logged %d times, want once:\n%s", lines, rig.harness.logs.String())
 	}
+}
+
+// Every session takes its messages from a session consumer this listener manages on a connection
+// of its own, so a listener that cannot open that connection would refuse every registration: it
+// ends its start instead, exits 1 and says why, as the live topics lane's failure does
+// (TestAListenerWhoseGrantRefusesEveryTopicEndsItsStart). The connection is refused here by the
+// account's connection limit, two: the main client and the role lane take them both, and the
+// session consumers' is the third.
+func TestAListenerThatCannotOpenItsSessionConsumersEndsItsStart(t *testing.T) {
+	config := `jetstream {}
+accounts {
+  LISTENER: {
+    jetstream: enabled
+    users: [ { user: listener, password: listener } ]
+    limits: { max_connections: 2 }
+  }
+}
+`
+	_, uri := testnats.StartConfig(t, config, []string{"-js"}, false)
+	uri = strings.Replace(uri, "nats://", "nats://listener:listener@", 1)
+
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "session-consumers-refused")
+	listener.WaitExit(t, "its start")
+	output := listener.Output.String()
+	if code := listener.Cmd.ProcessState.ExitCode(); code != 1 {
+		t.Fatalf("exit code = %d, want 1:\n%s", code, output)
+	}
+	for line := range strings.SplitSeq(output, "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) != nil || record["level"] != "ERROR" {
+			continue
+		}
+		if strings.Contains(fmt.Sprint(record["msg"]), "session consumer connection failed") {
+			return
+		}
+	}
+	t.Fatalf("no ERROR says the session-consumer connection failed:\n%s", output)
 }

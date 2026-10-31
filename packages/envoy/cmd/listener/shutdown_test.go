@@ -49,7 +49,7 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 
 		role := "sigterm-test-" + strconv.Itoa(run)
 		sessionID := "ses_sigterm_holder_" + strconv.Itoa(run)
-		postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+sessionID+`","topics":[],"self_subscribed":true}`)
+		postListener(t, listener.port, "/v1/interests/subscribe", consumerRegistration(sessionID, "epoch-1"))
 		postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+sessionID+`","role":"`+role+`"}`)
 		holder := testnats.Connect(t, uri)
 		if _, err := holder.Subscribe(contracts.AgentSubject(sessionID), func(*natsgo.Msg) {}); err != nil {

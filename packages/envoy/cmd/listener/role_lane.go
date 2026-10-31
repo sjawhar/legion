@@ -185,30 +185,30 @@ func watchRoleLaneSlowConsumers(ctx context.Context, lane *bus.Client, logger *l
 // subject, stored at stream sequence storedSeq, is that session's own delivery rather than a copy
 // of one it already has (listenerDeliveryHandler). Only a serving-port session of this listener's
 // is: it has no NATS subscriber, and its consumer does not hold this copy, so the copy pushed to
-// its port is how it receives the message (roleForwardCopyDelivery). Every other recipient took
-// the forward on its own NATS connection or takes the stored copy another way
-// (takesStoredMessagesItself), and a session with no entry, or one on another listener, is nobody
-// here to push to.
+// its port is how it receives the message (roleForwardCopyDelivery). A recipient whose consumer
+// holds the copy (session.SessionEntry.ConsumerHoldsStored) takes it from there, and a session
+// with no entry, or one on another listener, is nobody here to push to.
 func storedForwardCopyIsDelivery(cfg listenerDeliveryHandlerConfig, sessionID string, storedSeq uint64) bool {
 	entry, err := cfg.sessions.Get(sessionID)
-	if err != nil || takesStoredMessagesItself(entry, storedSeq) {
+	if err != nil || entry.ConsumerHoldsStored(storedSeq) {
 		return false
 	}
 	return ownsServingPortSession(cfg, sessionID, entry)
 }
 
-// roleForwardCopyDelivery handles the stored copy of a role forward (roleForward.forwarded), which
-// the durable reads on its holder's agent subject. A holder on NATS took the forward over its own
-// subscription, a holder whose consumer holds this copy takes it from there, and a holder another
-// listener owns is that listener's, so the copy is acknowledged. A serving-port holder this listener
-// owns has no subscriber: the copy is pushed to its port and acknowledged only on the port's 204,
-// by the holder's serving-port worker on the durable path, so its order behind the holder's earlier
-// messages holds; a copy the workers cannot take goes back to the durable.
+// roleForwardCopyDelivery handles the stored copy of a role forward (roleForward.forwarded),
+// which the durable reads on its holder's agent subject. A holder whose consumer holds this copy
+// takes it from there, and a holder another listener owns is that listener's, so the copy is
+// acknowledged. A serving-port holder this listener owns has no subscriber: the copy is pushed to
+// its port and acknowledged only on the port's 204, by the holder's serving-port worker on the
+// durable path, so its order behind the holder's earlier messages holds; a copy the workers
+// cannot take goes back to the durable.
 //
 // Whether the holder's consumer holds this copy is read from the copy's own stream sequence
-// (takesStoredMessagesItself), as every other path reads it: a copy stored below that consumer's
-// start - one stored while the holder had no consumer, NAKed or left unacked, and redelivered
-// after the holder registered again - is in no consumer, and this push is how the holder gets it.
+// (session.SessionEntry.ConsumerHoldsStored), as every other path reads it: a copy stored below
+// that consumer's start - one stored while the holder had no consumer, NAKed or left unacked, and
+// redelivered after the holder registered again - is in no consumer, and this push is how the
+// holder gets it.
 // Acknowledging it on the holder's delivery mode alone loses it, and the forward counted as
 // delivered once the stream stored it (startRoleForward), so its sender was already told so.
 func roleForwardCopyDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
@@ -221,7 +221,7 @@ func roleForwardCopyDelivery(cfg listenerDeliveryHandlerConfig, message delivery
 		return
 	}
 	entry, err := cfg.sessions.Get(holder)
-	if err != nil || takesStoredMessagesItself(entry, message.storedSeq()) {
+	if err != nil || entry.ConsumerHoldsStored(message.storedSeq()) {
 		message.finalize(false)
 		return
 	}

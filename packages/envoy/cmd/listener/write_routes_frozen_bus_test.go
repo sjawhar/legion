@@ -52,7 +52,10 @@ func newWriteRouteRig(t *testing.T) *writeRouteRig {
 		t.Fatalf("open the session registry: %v", err)
 	}
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	// The session consumers connect to the server directly, not through the relay: the freeze
+	// under test is the store's, and a registration reaches the store only once it has its
+	// consumer.
+	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions, consumers: setupSessionConsumers(t)}, "test-machine", logging.New("test"))
 	return &writeRouteRig{relay: relay, registry: registry, sessions: sessions, mux: mux}
 }
 
@@ -134,7 +137,7 @@ func TestTheWriteRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *testing.
 		}
 	}
 	subscribe := func(id, topic string) string {
-		return `{"session_id":"` + id + `","topics":["` + topic + `"],"self_subscribed":true}`
+		return `{"session_id":"` + id + `","topics":["` + topic + `"],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"e"}}`
 	}
 	unsubscribe := func(id, topic string) string {
 		return `{"session_id":"` + id + `","topics":["` + topic + `"]}`

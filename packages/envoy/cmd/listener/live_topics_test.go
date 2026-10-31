@@ -267,7 +267,7 @@ const liveLaneLine = "live topics subscribed"
 func holdRole(t *testing.T, listener *listenerProcess, uri, role string) (string, <-chan contracts.Envelope) {
 	t.Helper()
 	sessionID := "ses_holder_" + id.New()
-	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+sessionID+`","topics":[],"self_subscribed":true}`)
+	postListener(t, listener.port, "/v1/interests/subscribe", consumerRegistration(sessionID, "epoch-1"))
 	postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+sessionID+`","role":"`+role+`"}`)
 	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)

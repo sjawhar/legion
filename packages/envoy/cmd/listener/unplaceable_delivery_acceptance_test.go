@@ -431,15 +431,12 @@ func TestUnplaceableAgentDeliveryRetriesThenGivesUp(t *testing.T) {
 // The give-up counter separates its causes, because an operator acts on them differently: a
 // session with no record at all may be one whose registration never landed or one that ended, and
 // a record that names nothing to push to is a session that registered before its server bound its
-// serve port. Neither is a skip: before this change both were counted delivery_status="skipped"
-// and logged "listener agent session not found anywhere", which is indistinguishable from the
-// self-subscribed session that really did receive the message over its own subscription. A push
-// that fails is no cause here at all: the durable hands every push to a serving-port session to
-// that session's worker, which pushes it until the port accepts it.
-//
-// That third outcome is asserted here too, against the same handler: a session with no port that
-// is self-subscribed is delivered - skipped only in the push this listener did not have to make -
-// and must never be counted unplaceable.
+// serve port, or one an earlier build left on the core path. Neither is a skip: before this
+// change both were counted delivery_status="skipped" and logged "listener agent session not found
+// anywhere", which said nothing about which of them it was. A push that fails is no cause here at
+// all: the durable hands every push to a serving-port session to that session's worker, which
+// pushes it until the port accepts it. Nothing here is a skip at all: only a message a session's
+// own consumer holds is skipped.
 //
 // Every cause runs at a real window over a real durable, because the separation is claimed of the
 // whole path and not of its last attempt: at a zero window every delivery is given up on its first
@@ -447,9 +444,8 @@ func TestUnplaceableAgentDeliveryRetriesThenGivesUp(t *testing.T) {
 // Each cause is deferred first, and only the delivery after the window's one deferral is given up.
 func TestGiveUpCounterSeparatesItsCauses(t *testing.T) {
 	const (
-		noRecord       = "ses_cause_no_record"
-		noPushTarget   = "ses_cause_no_push_target"
-		selfSubscribed = "ses_cause_self_subscribed"
+		noRecord     = "ses_cause_no_record"
+		noPushTarget = "ses_cause_no_push_target"
 	)
 	// No session here has a port, so nothing this harness runs may push at all.
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
@@ -463,9 +459,6 @@ func TestGiveUpCounterSeparatesItsCauses(t *testing.T) {
 	if err := harness.sessions.Put(noPushTarget, session.SessionEntry{MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register the portless session: %v", err)
 	}
-	if err := harness.sessions.Put(selfSubscribed, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
-		t.Fatalf("register the self-subscribed session: %v", err)
-	}
 
 	before := metricsBody(t, harness)
 	if got := counterValue(t, before, deliveredSeries("skipped")); got != -1 {
@@ -473,11 +466,11 @@ func TestGiveUpCounterSeparatesItsCauses(t *testing.T) {
 	}
 
 	// The harness builds its handler at a zero window, so this test builds its own from the
-	// harness's configuration. The three runs share the harness, and so the one metrics registry
+	// harness's configuration. The runs share the harness, and so the one metrics registry
 	// and the one log an operator would read.
 	cfg := harness.config
 	cfg.unplaceableRetryWindow = oneDeferralWindow
-	for _, target := range []string{noRecord, noPushTarget, selfSubscribed} {
+	for _, target := range []string{noRecord, noPushTarget} {
 		startUnplaceableDelivery(t, harness, cfg, target, 0)
 	}
 
@@ -544,14 +537,10 @@ func TestGiveUpCounterSeparatesItsCauses(t *testing.T) {
 			t.Fatalf("%s = %d, want exactly 1 - each cause is counted once, under its own label:\n%s", deliveredSeries(expected.status), got, final)
 		}
 	}
-	// The boundary: self-subscribed with no port is a delivered outcome - the session reads the
-	// message off its own subscription - and only the push is skipped. The durable acknowledges it
-	// before decoding it (durableNeedsDelivery), counting the skip with no per-message line.
-	if got := counterValue(t, final, deliveredSeries("skipped")); got != 1 {
-		t.Fatalf("%s = %d for a self-subscribed session with no port, want 1 - its message arrives over its own subscription, and nothing else here is a skip:\n%s", deliveredSeries("skipped"), got, final)
-	}
-	if got := len(deliveryRecords(t, logs, "listener agent skipped push")); got != 0 {
-		t.Fatalf("%d skipped-push lines, want none: the durable acknowledges the self-subscribed session's message before it decodes it:\n%s", got, logs)
+	// Neither cause is a skip: a session's message is skipped only when its own consumer holds it
+	// (session.SessionEntry.ConsumerRelaysStored), and no session here has one.
+	if got := counterValue(t, final, deliveredSeries("skipped")); got != -1 {
+		t.Fatalf("%s = %d, want no series at all - an undeliverable message is given up, never skipped:\n%s", deliveredSeries("skipped"), got, final)
 	}
 	if strings.Contains(logs, "listener agent session not found anywhere") {
 		t.Fatalf("a delivery still logs the line that lost these messages, instead of deferring or giving up:\n%s", logs)

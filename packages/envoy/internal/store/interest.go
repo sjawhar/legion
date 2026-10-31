@@ -69,3 +69,16 @@ func dropPrivateStreamTopics(sessionID string, topics []string) []string {
 		return bus.ReachesPrivateStreamSubject(sessionID, topic)
 	})
 }
+
+// MergedTopics is the topic set an upsert of topics into a row of sessionID holding cur stores:
+// their union (Merge), without a topic reaching a private stream subject
+// (dropPrivateStreamTopics), sorted. mergeForUpsert stores exactly this, and the listener's
+// registration route builds the session consumer's filter from it before the write
+// (cmd/listener's subscribeHandler), so the filter and the row it stores name one set: a filter
+// naming a topic the row does not would carry that topic into a session no interest of its own
+// follows.
+func MergedTopics(sessionID string, cur []string, topics []string) []string {
+	merged := dropPrivateStreamTopics(sessionID, Merge(Interest{Topics: cur}, topics).Topics)
+	slices.Sort(merged)
+	return merged
+}

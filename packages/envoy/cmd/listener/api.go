@@ -1429,6 +1429,35 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
+		// The session's consumer is filtered on the topics its interest row will hold, so the
+		// write's own merge is computed here, before the write: store.Registry.UpsertWithin adds
+		// these topics to the row it holds and drops every topic reaching a private stream subject
+		// (store.MergedTopics), and a filter naming a topic the row does not would carry into this
+		// session messages no interest of its own follows. The read is the registry cache's on
+		// every heartbeat; a read that fails refuses the registration, as the write it precedes
+		// would.
+		stored, err := storedInterestTopics(ctx, d.registry, body.SessionID)
+		if err != nil {
+			logger.Warn("listener read of the session's interest row failed",
+				slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
+			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
+			return
+		}
+		topics = store.MergedTopics(body.SessionID, stored, topics)
+		// The delivery decision comes before both writes: a session is delivered to through its
+		// own consumer alone, so a registration this listener cannot give one is refused and must
+		// leave no interest row and no session entry behind - the row would make the listener
+		// deliver to a session nothing reaches, and the entry would say a session is here that
+		// receives nothing. The consumer is created, or has its filter set to the topics about to
+		// be stored, before the registration answers, so a message published on a newly followed
+		// stored topic after the answer is the consumer's to deliver.
+		delivery, refusal := d.consumers.register(r.Context(), body, topics)
+		if refusal != nil {
+			logger.Warn("listener refused a registration it can give no session consumer",
+				slog.String("session_id", body.SessionID), slog.String("reason", refusal.Reason), slog.Int("status", refusal.status))
+			writeJSON(w, refusal.status, refusal)
+			return
+		}
 		item, err := d.registry.UpsertWithin(ctx, store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
@@ -1442,25 +1471,21 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
 			return
 		}
-		// The session's consumer, when the registration asks for one, is created or has its filter
-		// set to the topics just stored before the registration answers, so a message published on
-		// a newly followed stored topic after the answer is the consumer's to deliver.
-		delivery := d.consumers.register(r.Context(), body, item.Topics)
-		if body.Port > 0 || body.SelfSubscribed || delivery.relayed() {
-			epochChanged := false
-			if delivery.relayed() {
-				previous, err := d.sessions.Get(body.SessionID)
-				epochChanged = err != nil || previous.Delivery != session.DeliveryConsumer || previous.Epoch != delivery.epoch
-			}
-			if err := d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID, delivery)); err != nil {
-				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
-				writeStoreError(ctx, w, fmt.Errorf("session registry unavailable: %w", err), http.StatusServiceUnavailable)
-				return
-			}
-			if delivery.relayed() {
-				// The relay serves every registration answered consumer, so there is one to tell.
-				d.consumers.relay.registered(body.SessionID, epochChanged)
-			}
+		// Every registration answered writes the session's entry. All but one holds the session's
+		// consumer and is relayed (sessionDelivery.register); the exception is a serving-port
+		// session this listener could give none, which its port is pushed to instead.
+		epochChanged := false
+		if delivery.relayed() {
+			previous, err := d.sessions.Get(body.SessionID)
+			epochChanged = err != nil || previous.Delivery != session.DeliveryConsumer || previous.Epoch != delivery.epoch
+		}
+		if err := d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID, delivery)); err != nil {
+			logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
+			writeStoreError(ctx, w, fmt.Errorf("session registry unavailable: %w", err), http.StatusServiceUnavailable)
+			return
+		}
+		if delivery.relayed() {
+			d.consumers.relay.registered(body.SessionID, epochChanged)
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
 		defer cancelWarnings()
