@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { runJq } from "./run-jq";
+import { scriptFunctions } from "./script-functions";
 import { defaults } from "./stage4b-reservations";
 
 // Stage 4b's capacity reads (lib/stage4b-room.jq): the reservation an issue pod carries under the
@@ -14,11 +15,38 @@ const GiB = 1073741824;
 // 16 GiB a pod.
 const overridden = { ...defaults, issue: { ...defaults.issue, cpu: "2950m", memory: "16Gi" } };
 const defaultPod = { cpu: 3, memory: 19 * GiB };
+// The obsolete per-role run_resources shape used by the failing rehearsal. Its missing issue key
+// makes the preflight's issue-pod reservation unreadable.
+const legacyPerRoleResources = {
+  architect: { cpu: "250m", memory: "1Gi" },
+  planner: { cpu: "250m", memory: "1Gi" },
+  implementer: { cpu: "750m", memory: "6Gi" },
+  tester: { cpu: "1", memory: "5Gi" },
+  reviewer: { cpu: "500m", memory: "2Gi" },
+  merger: { cpu: "200m", memory: "1Gi" },
+  controller: { cpu: "1", memory: "4Gi" },
+};
 
 function jq(filter: string, input: unknown, args: string[] = []) {
   return JSON.parse(
     runJq(["-c", "-L", lib, ...args, `${include} ${filter}`], JSON.stringify(input))
   );
+}
+
+const stage4b = join(import.meta.dir, "..", "stage4b-sandbox-tree.sh");
+const repository = join(import.meta.dir, "..", "..", "..");
+
+function expectedIssuePodReservation(resources: object) {
+  const run = Bun.spawnSync([
+    "bash",
+    "-c",
+    `root=${JSON.stringify(repository)}
+run_resources=${JSON.stringify(JSON.stringify(resources))}
+${scriptFunctions(stage4b)("expected_issue_pod_reservation")}
+expected_issue_pod_reservation`,
+  ]);
+  if (run.exitCode !== 0) throw new Error(run.stderr.toString());
+  return JSON.parse(run.stdout.toString());
 }
 
 // node is a pool node NAME with ALLOCATABLE, Ready and schedulable unless EDIT says otherwise.
@@ -81,6 +109,22 @@ describe("issue_pod_reservation", () => {
         JSON.stringify(overridden),
       ])
     ).toEqual({ cpu: 2.95, memory: 16 * GiB });
+  });
+
+  test("refuses the per-role reservation shape by naming the missing issue CPU reservation", () => {
+    expect(() =>
+      jq("issue_pod_reservation($expected)", null, [
+        "--argjson",
+        "expected",
+        JSON.stringify(legacyPerRoleResources),
+      ])
+    ).toThrow("run_resources.issue.cpu is missing");
+  });
+
+  test("stops the preflight capacity read by naming the missing issue CPU reservation", () => {
+    expect(() => expectedIssuePodReservation(legacyPerRoleResources)).toThrow(
+      "run_resources.issue.cpu is missing"
+    );
   });
 });
 

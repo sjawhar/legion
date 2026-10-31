@@ -436,6 +436,14 @@ rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --con
 # beside what it already runs; and their sum, null when the pool has no limits to bound it. The
 # reads go through files in the run's work directory: a cluster's pods can exceed the argument list
 # a --argjson would put them in.
+# expected_issue_pod_reservation reads the cpu and memory reservation the run passes to the pool
+# capacity checks. A malformed run_resources must stop preflight before the pool-room read.
+expected_issue_pod_reservation() {
+  jq -cn -L "$root/scripts/e2e/lib" --argjson expected "$run_resources" '
+    include "stage4b-room";
+    issue_pod_reservation($expected)'
+}
+
 pool_pod_room() {
   kubectl --context "$operator" --request-timeout=30s get nodepool legion -o json >"$work/room-pool.json" || return 1
   kubectl --context "$operator" --request-timeout=30s get nodes -l karpenter.sh/nodepool=legion -o json >"$work/room-nodes.json" || return 1
@@ -3240,6 +3248,9 @@ note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor 
 # The run needs run_pods_at_once pods placed at once (tree 1's root and its two children beside tree
 # 2's root), each holding the issue pod reservation; whatever already runs on the pool's nodes,
 # of any namespace, counts against it, as does what the pool's limits already hold.
+if ! expected_pod_reservation=$(expected_issue_pod_reservation 2>&1); then
+  blocked "the run's issue pod reservation is invalid: $expected_pod_reservation"
+fi
 room=$(pool_pod_room) || blocked "the operator context could not read the legion NodePool, its nodes or the cluster's pods"
 pod_reservation=$(jq -r '"\(.pod.cpu) CPU, \(.pod.memory / 1073741824) GiB"' <<<"$room")
 note "[operator] legion pool room for the run's pods ($pod_reservation each, an issue pod under this run's reservations): $(jq -c '{room, new_pods, free_nodes: [.free_nodes[] | {node, fits, free: {cpu: .free.cpu, memoryGiB: (.free.memory / 1073741824 * 100 | floor / 100)}}]}' <<<"$room")"
