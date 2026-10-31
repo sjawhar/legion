@@ -2187,8 +2187,9 @@ echo
 echo "Case: fold-plan labels each fragment with the release that first shipped it, and push-fold lands the fold"
 # The template: clone a, detached at the base (the fold's checkout), and a bare origin whose main
 # is the base. packages/rel is released under rel-v; packages/side and packages/plain have no
-# release of their own; packages/empty has no fragment; packages/nolog has no CHANGELOG.md and,
-# since the fold refuses a fragment of a package no spec names, no fragment either.
+# release of their own; packages/empty has no fragment; packages/nolog has no CHANGELOG.md and no
+# fragment either, since fold-plan warns on stderr about a fragment of a package no spec names and
+# this case's first check expects an empty stderr.
 ft="$work/fold-template"
 mkdir -p "$ft/a"
 git init -q -b main "$ft/a"
