@@ -285,6 +285,54 @@ export interface IssueClaim {
   readonly at: string;
 }
 
+/**
+ * How long an issue claim is held for a holder the Envoy registry calls `unresponsive`: a
+ * session past the listener's live window but inside its gone horizon has missed heartbeats, not
+ * ended, and under box load that is ordinary. Dispatch refuses another agent's claim or release
+ * while the holder was last seen no longer ago than this, so a stalled session keeps the issue
+ * it is working and two sessions never write the same branch; a person still forces the claim
+ * (`force`), which is the escape this grace leaves open.
+ *
+ * Twenty minutes is four times the listener's live window (`ENVOY_SESSION_LIVE_WINDOW`, 5m) and
+ * well inside its gone horizon (`ENVOY_SESSION_GONE_HORIZON`, 1h), so a session that is merely
+ * slow keeps its work while a box that really lost one frees it long before the horizon.
+ * `scripts/gen-go.ts` emits it as `contracts.IssueClaimUnresponsiveGrace`, so the refusal the
+ * server writes and the wait a client predicts are one number.
+ */
+export const ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS = 20 * 60 * 1000;
+
+/**
+ * The state of the session holding an issue's claim, as an issue read reports it beside the
+ * claim: `live`, `unresponsive` (past the live window, inside the gone horizon - stalled, not
+ * gone, and still the holder), `gone` (past the horizon, or no registration at all), or
+ * `unknown` when the Envoy listener gave the read no list to judge it by.
+ */
+export type IssueClaimHolderState = "live" | "unresponsive" | "gone" | "unknown";
+
+/**
+ * What an issue read says about the session holding its claim. It is resolved on read from the
+ * server's copy of the listener's session list, at most 5 s old, stored in no table and never on
+ * an event payload - which is why it sits beside `claim` rather than inside it: `IssueClaim` is
+ * the payload of `issue.claimed` and `issue.released`, and a read-time state must not persist
+ * into one. A claim write judges the holder again, against the listener's authoritative
+ * per-session read, so the two can disagree by the age of that copy.
+ *
+ * All three are null when nobody holds the issue, and when a person does: a human holder has no
+ * session to be live or gone, and is released by a person alone.
+ */
+export interface IssueClaimLiveness {
+  readonly holder_state: IssueClaimHolderState | null;
+  /** RFC3339 timestamp of the holder's last registration; null when the read cannot say. */
+  readonly last_seen: string | null;
+  /**
+   * RFC3339 timestamp from which another agent may take or release the claim without `force`:
+   * the holder's `last_seen` plus `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` while it is unresponsive,
+   * the read's own time once the holder is gone, and null for a `live` holder, which no waiting
+   * frees, and for an `unknown` one, which this read cannot judge.
+   */
+  readonly takeable_at: string | null;
+}
+
 /** Done of total: the task items of a spec, or the direct children of an issue; `done` ≤ `total`. */
 export interface ProgressCount {
   readonly done: number;
@@ -2977,7 +3025,7 @@ export interface EditArtifactInput {
   readonly actor?: Actor;
 }
 
-export interface IssueDetails extends Issue, IssueRouteReach {
+export interface IssueDetails extends Issue, IssueRouteReach, IssueClaimLiveness {
   readonly progress: IssueProgress;
   readonly artifacts: Artifact[];
   readonly open_asks: Ask[];

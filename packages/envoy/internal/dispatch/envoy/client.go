@@ -4,6 +4,7 @@ package envoy
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -68,7 +69,25 @@ type Interest struct {
 	LastSeen  int64    `json:"last_seen,omitempty"`
 }
 
-// Session is the public subset of a live Envoy listener session.
+// Session states, as the listener computes them from a registration record's own age
+// (packages/envoy/internal/session's StateOf): a session is live, unresponsive or gone, and a
+// row's absence from a list is never what says so. StateUnresponsive is a session past the
+// listener's live window and inside its gone horizon: it is stalled, not dead, so it keeps its
+// role and issue claims, a message sent to it is stored for it, and nothing starts a
+// replacement for it (dispatch://INFRA-392).
+const (
+	StateLive         = "live"
+	StateUnresponsive = "unresponsive"
+	StateGone         = "gone"
+)
+
+// includeUnresponsive is the selector every session read sends: without it the listener answers
+// with the live sessions alone, which is the reading of its registry this client must never
+// make - a session that missed its heartbeats under box load is still working its issue. Each
+// read then judges by the row's own State.
+const includeUnresponsive = "?include=unresponsive"
+
+// Session is the public subset of an Envoy listener session, live or unresponsive.
 type Session struct {
 	SessionID string `json:"session_id"`
 	Title     string `json:"title"`
@@ -82,6 +101,28 @@ type Session struct {
 	Roles        []string `json:"roles"`
 	Capabilities []string `json:"capabilities"`
 	LastSeen     int64    `json:"last_seen"`
+	// State is StateLive, StateUnresponsive or StateGone, as the listener judged this record
+	// when it answered. A listener that predates the field names none, and normalize reads that
+	// as StateLive: every session such a listener answers with is one it holds live, so reading
+	// it as anything else would retire working sessions during a rollout.
+	State string `json:"state"`
+}
+
+// normalize fills in what a listener may leave out: the id of the one session that was asked
+// about, the empty lists a decoder leaves nil, and the state an older listener does not name.
+func (s *Session) normalize(sessionID string) {
+	if s.SessionID == "" {
+		s.SessionID = sessionID
+	}
+	if s.Roles == nil {
+		s.Roles = []string{}
+	}
+	if s.Capabilities == nil {
+		s.Capabilities = []string{}
+	}
+	if s.State == "" {
+		s.State = StateLive
+	}
 }
 
 // SendInput is a targeted Dispatch delivery through the listener.
@@ -151,10 +192,13 @@ func (c *Client) authorize(request *http.Request) {
 	}
 }
 
-// Sessions returns the listener's live sessions, ErrRefilling (a *RefillingError) while the
-// listener refuses the list as refilling, or ErrUnavailable.
+// Sessions returns every session the listener holds a registration for, live and unresponsive
+// alike, each carrying its own State; ErrRefilling (a *RefillingError) while the listener
+// refuses the list as refilling, or ErrUnavailable. A caller tests each row's State, never its
+// membership of the list: a list without the unresponsive rows reads every stalled session as
+// ended, which is the whole of dispatch://INFRA-392.
 func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/sessions"+includeUnresponsive, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: build GET /v1/sessions request: %v", ErrUnavailable, err)
 	}
@@ -176,12 +220,7 @@ func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 		sessions = []Session{}
 	}
 	for index := range sessions {
-		if sessions[index].Roles == nil {
-			sessions[index].Roles = []string{}
-		}
-		if sessions[index].Capabilities == nil {
-			sessions[index].Capabilities = []string{}
-		}
+		sessions[index].normalize(sessions[index].SessionID)
 	}
 	return sessions, nil
 }
@@ -295,9 +334,15 @@ func (c *Client) Unsubscribe(ctx context.Context, sessionID string, topics []str
 	return decoded.Removed, nil
 }
 
-// Role resolves a live role holder and returns its current session metadata.
+// Role resolves a role's holder and returns its current session metadata. A role answer names
+// the holder's state as holder_state rather than state, and a holder that is only unresponsive
+// is answered like any other: the listener keeps its claim, so the caller delivers to it and
+// the message waits for it. Only a holder the listener has no live claim for at all is the
+// 404 listenerResponseError carries.
 func (c *Client) Role(ctx context.Context, role string) (Session, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/roles/"+url.PathEscape(role), nil)
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, c.baseURL+"/v1/roles/"+url.PathEscape(role)+includeUnresponsive, nil,
+	)
 	if err != nil {
 		return Session{}, fmt.Errorf("%w: build GET /v1/roles/%s request: %v", ErrUnavailable, role, err)
 	}
@@ -312,37 +357,42 @@ func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 	}
 	var responseBody struct {
 		Holder string `json:"holder"`
+		// HolderState is the role answer's own name for the holder's state; an answer that
+		// carries the row's state field too agrees with it, and an older listener names
+		// neither, which normalize reads as live.
+		HolderState string `json:"holder_state"`
 		Session
 	}
 	if err := json.NewDecoder(response.Body).Decode(&responseBody); err != nil {
 		return Session{}, fmt.Errorf("%w: decode GET /v1/roles/%s response: %v", ErrUnavailable, role, err)
 	}
 	responseBody.SessionID = responseBody.Holder
-	if responseBody.Capabilities == nil {
-		responseBody.Capabilities = []string{}
-	}
+	responseBody.State = cmp.Or(responseBody.HolderState, responseBody.State)
 	if responseBody.Roles == nil {
 		responseBody.Roles = []string{role}
 	}
+	responseBody.Session.normalize(responseBody.Holder)
 	return responseBody.Session, nil
 }
 
-// Session returns one live session's listener metadata, or ErrNotFound if the listener holds no
-// record of it: a 404, or a session id the listener refuses as a KV key (a 400 for one outside
-// nats.go's key alphabet or holding an empty token, a 413 for one too long), under which no
-// session can have registered. Those three are "no record" rather than a failure because a key
-// the bucket cannot hold names nothing a read could ever find, so a caller waiting on that
-// session may stop waiting.
+// Session returns one session's listener metadata, whatever its state, or ErrNotFound if the
+// listener holds no record of it: a 404, or a session id the listener refuses as a KV key (a
+// 400 for one outside nats.go's key alphabet or holding an empty token, a 413 for one too
+// long), under which no session can have registered. Those three are "no record" rather than a
+// failure because a key the bucket cannot hold names nothing a read could ever find, so a
+// caller waiting on that session may stop waiting.
 //
-// A caller asks about the one session it holds an id for rather than scanning Sessions, because
-// that list is answered from the listener's in-memory cache alone: a session whose cache entry is
-// still being refilled is absent from the list while its record is there to be read, and a
-// missing row cannot tell the two apart. Every other status, a body that does not decode and a
+// This is the authoritative read a write makes about one session, and it answers the record's
+// own State: an unresponsive session is a 200 like any other, and only the state says whether
+// that session has ended. A caller asks here rather than scanning Sessions, because that list
+// is answered from the listener's in-memory cache alone: a session whose cache entry is still
+// being refilled is absent from the list while its record is there to be read, and a missing
+// row cannot tell the two apart. Every other status, a body that does not decode and a
 // transport failure alike are ErrUnavailable carrying the listener's own reason, so a read the
 // message bus did not answer reads as "ask again", never as "that session is gone".
 func (c *Client) Session(ctx context.Context, sessionID string) (Session, error) {
 	request, err := http.NewRequestWithContext(
-		ctx, http.MethodGet, c.baseURL+"/v1/registry/"+url.PathEscape(sessionID), nil,
+		ctx, http.MethodGet, c.baseURL+"/v1/registry/"+url.PathEscape(sessionID)+includeUnresponsive, nil,
 	)
 	if err != nil {
 		return Session{}, fmt.Errorf("%w: build GET /v1/registry/%s request: %v", ErrUnavailable, sessionID, err)
@@ -376,15 +426,7 @@ func (c *Client) Session(ctx context.Context, sessionID string) (Session, error)
 	if err := json.NewDecoder(response.Body).Decode(&session); err != nil {
 		return Session{}, fmt.Errorf("%w: decode GET /v1/registry/%s response: %v", ErrUnavailable, sessionID, err)
 	}
-	if session.SessionID == "" {
-		session.SessionID = sessionID
-	}
-	if session.Capabilities == nil {
-		session.Capabilities = []string{}
-	}
-	if session.Roles == nil {
-		session.Roles = []string{}
-	}
+	session.normalize(sessionID)
 	return session, nil
 }
 

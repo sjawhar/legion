@@ -138,7 +138,9 @@ func (s *server) loadAskThreads(ctx context.Context, askIDs []string) (map[strin
 // from one listener read for the whole batch (readRouteRoster), made only when some ask has a
 // route and only once scanAskReaches has released its pooled connection, so the listener call
 // never runs inside a transaction or with a connection held; a listener that is unconfigured or
-// does not answer marks every route's status unknown with a null holder and never fails the read.
+// does not answer marks every route's status unknown with a null holder and never fails the
+// read. A route whose holder has missed its heartbeats reads holder_unresponsive, naming that
+// holder: the ask still reaches it, since what is sent to it waits for it.
 func (s *server) loadAskReaches(ctx context.Context, askIDs []string) (map[string]askReach, error) {
 	reaches, err := scanAskReaches(ctx, s.deps.Store.Pool, askIDs)
 	if err != nil {

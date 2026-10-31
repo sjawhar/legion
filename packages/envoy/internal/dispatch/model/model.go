@@ -262,10 +262,16 @@ type Issue struct {
 
 // Route statuses: whether an issue's route reaches a running session right now.
 const (
-	// RouteLive is a role with a live holder, or a session the listener lists as live.
+	// RouteLive is a role whose holder is live, or a routed session that is live.
 	RouteLive = "live"
-	// RouteNoHolder is a role nobody live holds (unclaimed, or its holder's session lapsed), or
-	// a session the listener does not list.
+	// RouteHolderUnresponsive is a role whose holder, or a routed session that, is past the
+	// listener's live window and inside its gone horizon: it has missed heartbeats, it has not
+	// ended, and it still holds its role and its claims. The route reaches it - a message is
+	// stored for it and waits - so it is told apart from RouteLive, never folded into
+	// RouteNoHolder (dispatch://INFRA-392).
+	RouteHolderUnresponsive = "holder_unresponsive"
+	// RouteNoHolder is a role nobody holds (unclaimed, or its holder gone), or a session the
+	// registry holds no live or unresponsive record of.
 	RouteNoHolder = "no_holder"
 	// RouteUnknown is a route read while the listener gave no list to judge it by; it is never
 	// read as live, nor as no_holder.
@@ -285,12 +291,41 @@ const (
 // IssueRouteReach is whether an issue's route reaches anyone: resolved on read from the server's
 // copy of the listener's session list, at most 5 s old, stored in no table, and never part of an
 // event payload, which is why it sits beside Issue in a read response rather than in it. Every
-// field is null for an issue with no route; RouteHolder names the session only when RouteStatus
-// is RouteLive, and RouteStatusReason says why only when RouteStatus is RouteUnknown.
+// field is null for an issue with no route; RouteHolder names the session when RouteStatus is
+// RouteLive or RouteHolderUnresponsive - the route reaches that session either way - and
+// RouteStatusReason says why only when RouteStatus is RouteUnknown.
 type IssueRouteReach struct {
 	RouteStatus       *string `json:"route_status"`
 	RouteHolder       *string `json:"route_holder"`
 	RouteStatusReason *string `json:"route_status_reason"`
+}
+
+// Claim holder states: what an issue read says about the session holding its claim. The first
+// three are the registry's own states; ClaimHolderUnknown is this read's own answer for a
+// listener that gave it no list, and never a state the registry reports.
+const (
+	ClaimHolderLive         = "live"
+	ClaimHolderUnresponsive = "unresponsive"
+	ClaimHolderGone         = "gone"
+	ClaimHolderUnknown      = "unknown"
+)
+
+// IssueClaimLiveness is what an issue read says about the session holding its claim: its state,
+// when it was last seen, and from when another agent may take or release the claim without a
+// person's force. Like IssueRouteReach it is resolved on read from the server's copy of the
+// listener's session list, at most 5 s old, stored in no table and never part of an event
+// payload - which is why it sits beside Issue rather than in IssueClaim, the payload of every
+// issue.claimed and issue.released event. A claim write judges the holder again, against the
+// listener's authoritative per-session read, so a read and a write of the same moment can
+// disagree by the age of that copy.
+//
+// Every field is null when nobody holds the issue, and when a person does: a human holder has no
+// session state to read, and only a person releases their claim. TakeableAt is null for a live
+// holder, which no waiting frees, and for an unknown one, which the read cannot judge.
+type IssueClaimLiveness struct {
+	HolderState *string    `json:"holder_state"`
+	LastSeen    *time.Time `json:"last_seen"`
+	TakeableAt  *time.Time `json:"takeable_at"`
 }
 
 // IssueSummary is the lightweight issue listing representation.

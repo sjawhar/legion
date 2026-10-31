@@ -11,7 +11,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -385,5 +388,137 @@ func TestRouteStatusFilterListsOnlyOpenIssuesInThatState(t *testing.T) {
 	}
 	if got := list("unknown"); len(got.keys) != 3 || got.reasons["refilling"] != 3 {
 		t.Fatalf("route_status=unknown while the listener refills returned %v, want the three open routed issues, each refilling", got)
+	}
+}
+
+// stateRosterServer is a Dispatch server whose listener answers GET /v1/sessions from rows, and
+// answers the live rows alone to a read that did not ask for the unresponsive ones - which is
+// what the listener does. A roster built from the live-only answer is the bug
+// dispatch://INFRA-392 is about: every stalled session reads as ended.
+func stateRosterServer(t *testing.T, rows []map[string]any) *server {
+	t.Helper()
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		answer := rows
+		if r.URL.Query().Get("include") != "unresponsive" {
+			answer = nil
+			for _, row := range rows {
+				if row["state"] == "live" {
+					answer = append(answer, row)
+				}
+			}
+		}
+		_ = json.NewEncoder(w).Encode(answer)
+	}))
+	t.Cleanup(listener.Close)
+	return &server{deps: Deps{Envoy: envoy.New(listener.URL)}, lifetime: context.Background()}
+}
+
+// A session past its live window still holds its role and still receives: what is sent to it is
+// stored and waits. So a route to it reads holder_unresponsive, naming that holder, and neither
+// live (which would promise a session that answers now) nor no_holder (which the owner audit
+// reads as "nobody is working this", and which would have a person hand the work to someone
+// else). Both kinds of route answer the same way, since both reach one session.
+func TestRouteReachNamesAnUnresponsiveHolderRatherThanDroppingIt(t *testing.T) {
+	served := stateRosterServer(t, []map[string]any{
+		{"session_id": "ses-live", "state": "live", "last_seen": 1700000000000, "roles": []string{"legion-merger"}},
+		{"session_id": "ses-stalled", "state": "unresponsive", "last_seen": 1699999000000, "roles": []string{"legion-planner"}},
+	})
+	roster := served.listRouteRoster(context.Background())
+	if !roster.answered {
+		t.Fatalf("the roster did not answer: %v", roster.err)
+	}
+	for _, tc := range []struct {
+		route  string
+		status string
+		holder string
+	}{
+		{route: "session:ses-stalled", status: "holder_unresponsive", holder: "ses-stalled"},
+		{route: "role:legion-planner", status: "holder_unresponsive", holder: "ses-stalled"},
+		{route: "session:ses-live", status: "live", holder: "ses-live"},
+		{route: "role:legion-merger", status: "live", holder: "ses-live"},
+		{route: "session:ses-ended", status: "no_holder", holder: "null"},
+		{route: "role:legion-nobody", status: "no_holder", holder: "null"},
+	} {
+		reach := roster.reach(&tc.route)
+		if got, want := reachText(reach.RouteStatus, reach.RouteHolder), tc.status+" "+tc.holder; got != want {
+			t.Errorf("%s reaches %s, want %s", tc.route, got, want)
+		}
+	}
+}
+
+// The route_status filter takes the new state by name, so a reader can list exactly the issues
+// whose holder has stopped answering - and no_holder, which is the filter an audit uses to find
+// unworked issues, keeps excluding them.
+func TestRouteStatusFilterTakesHolderUnresponsive(t *testing.T) {
+	for _, value := range []string{"live", "holder_unresponsive", "no_holder", "unknown", ""} {
+		if got, err := parseRouteStatusFilter(value); err != nil || got != value {
+			t.Errorf("route_status=%q: %q, %v; want it accepted", value, got, err)
+		}
+	}
+	_, err := parseRouteStatusFilter("unresponsive")
+	if err == nil || !strings.Contains(err.Error(), "holder_unresponsive") {
+		t.Fatalf("route_status=unresponsive: %v, want a refusal naming holder_unresponsive", err)
+	}
+}
+
+// What an issue read says about the session holding its claim. The read's source is this
+// roster, so it answers for a holder the roster lists (live or unresponsive) and reads one it
+// does not list as gone; takeable_at is the instant another agent may take the claim without a
+// person, which is only ever answered for a holder that will come free.
+func TestClaimLivenessDatesWhenAnUnresponsiveHoldersClaimComesFree(t *testing.T) {
+	const lastSeen = 1700000000000
+	served := stateRosterServer(t, []map[string]any{
+		{"session_id": "ses-live", "state": "live", "last_seen": lastSeen},
+		{"session_id": "ses-stalled", "state": "unresponsive", "last_seen": lastSeen},
+	})
+	roster := served.listRouteRoster(context.Background())
+	now := time.UnixMilli(lastSeen).Add(7 * time.Minute).UTC()
+	claim := func(kind, id string) *model.IssueClaim {
+		return &model.IssueClaim{Actor: model.Actor{Kind: kind, ID: id}, At: now}
+	}
+	text := func(liveness model.IssueClaimLiveness) string {
+		part := func(value *time.Time) string {
+			if value == nil {
+				return "null"
+			}
+			return value.UTC().Format(time.RFC3339)
+		}
+		state := "null"
+		if liveness.HolderState != nil {
+			state = *liveness.HolderState
+		}
+		return state + " " + part(liveness.LastSeen) + " " + part(liveness.TakeableAt)
+	}
+	seen := time.UnixMilli(lastSeen).UTC().Format(time.RFC3339)
+	for _, tc := range []struct {
+		name  string
+		claim *model.IssueClaim
+		want  string
+	}{
+		// A live holder's claim is not takeable by waiting, so there is no instant to name.
+		{name: "a live holder", claim: claim("session", "ses-live"), want: "live " + seen + " null"},
+		// Twenty minutes past the heartbeat it was last seen at, and not before.
+		{name: "an unresponsive holder", claim: claim("session", "ses-stalled"),
+			want: "unresponsive " + seen + " " + time.UnixMilli(lastSeen).Add(20*time.Minute).UTC().Format(time.RFC3339)},
+		// No record at all: gone, takeable as of this read.
+		{name: "a holder the registry has no record of", claim: claim("session", "ses-ended"),
+			want: "gone null " + now.Format(time.RFC3339)},
+		// A person holds it until a person releases it; there is no session state to read.
+		{name: "a human holder", claim: claim("user", "alice@example.com"), want: "null null null"},
+		{name: "nobody", claim: nil, want: "null null null"},
+	} {
+		if got := text(roster.claimLiveness(tc.claim, now)); got != tc.want {
+			t.Errorf("%s: holder_state/last_seen/takeable_at = %s, want %s", tc.name, got, tc.want)
+		}
+	}
+	// A listener that gave no list cannot judge the holder, and an issue read still answers:
+	// unknown, never gone, which would read as a free claim.
+	silent := routeRoster{reason: model.RouteReasonUnreachable}
+	if got := text(silent.claimLiveness(claim("session", "ses-live"), now)); got != "unknown null null" {
+		t.Fatalf("with no list to judge by: %s, want unknown null null", got)
 	}
 }

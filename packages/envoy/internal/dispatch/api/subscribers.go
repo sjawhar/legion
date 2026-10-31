@@ -17,18 +17,25 @@ import (
 
 // subscriber is a session whose persisted Envoy interests include an issue's
 // or unlinked document's topic family, enriched with its live registry state
-// when the session is currently connected. Removable is false when the only
+// when the session is currently registered. Removable is false when the only
 // matching topic is broader than this owner (e.g. "notifications.dispatch.>"):
 // removing that topic would silently unsubscribe the session from every
 // other issue and document too, so Unsubscribe refuses it; Via then names
 // one such topic for the header to explain why. LastSeen is the session's
-// last heartbeat: the live session's own, else the one the listener still
+// last heartbeat: the registered session's own, else the one the listener still
 // knows for the interest row, else the row's updated_at, which can lag that
 // heartbeat by up to the listener's interest refresh age.
+//
+// State is the registry's own state for the session, and Live is that state being `live`
+// alone. The listener's list carries the unresponsive sessions too, so a row's presence in it
+// is no longer what makes a subscriber live: a stalled session is listed, named unresponsive,
+// and still receives - its events wait for it - which is what a reader of this list needs to
+// tell from an ended one. State is empty for a session the registry holds no record of.
 type subscriber struct {
 	SessionID string   `json:"session_id"`
 	Title     string   `json:"title"`
 	Live      bool     `json:"live"`
+	State     string   `json:"state,omitempty"`
 	LastSeen  int64    `json:"last_seen"`
 	Topics    []string `json:"topics"`
 	Removable bool     `json:"removable"`
@@ -113,9 +120,11 @@ func (s *server) writeSubscribers(w http.ResponseWriter, r *http.Request, base s
 		s.writeEnvoyError(w, err)
 		return
 	}
-	live := make(map[string]envoy.Session, len(sessions))
+	// Every session the registry holds a record of, whatever its state; the row decides what
+	// the subscriber reads as, so this is no longer the list of the live ones.
+	registered := make(map[string]envoy.Session, len(sessions))
 	for _, session := range sessions {
-		live[session.SessionID] = session
+		registered[session.SessionID] = session
 	}
 
 	result := make([]subscriber, 0)
@@ -135,9 +144,10 @@ func (s *server) writeSubscribers(w http.ResponseWriter, r *http.Request, base s
 		} else {
 			entry.Via = matched[0]
 		}
-		if session, ok := live[interest.SessionID]; ok {
+		if session, ok := registered[interest.SessionID]; ok {
 			entry.Title = session.Title
-			entry.Live = true
+			entry.State = session.State
+			entry.Live = session.State == envoy.StateLive
 			entry.LastSeen = session.LastSeen
 		}
 		result = append(result, entry)

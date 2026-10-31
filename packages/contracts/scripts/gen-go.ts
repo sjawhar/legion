@@ -20,6 +20,7 @@ import {
   IDEMPOTENCY_KEY_TTL_MS,
   IDEMPOTENCY_LEASE_MS,
   IDEMPOTENCY_REPLAYED_HEADER,
+  ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS,
   ISSUE_TITLE_MAX,
   LIVE_SOCKET_MAX_AGE_CLOSE,
   LIVE_SOCKET_MAX_AGE_MS,
@@ -114,6 +115,14 @@ const RoleTopicPrefix = "notifications.role."
 // DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts, whose doc comment states the retry promise
 // this window bounds, so the stream, the hosts and the dashboard read one number.
 const DeliveryDuplicateWindow = ${DELIVERY_DUPLICATE_WINDOW_MS} * time.Millisecond
+
+// IssueClaimUnresponsiveGrace is how long an issue claim is held for a holder the Envoy registry
+// calls unresponsive: a session that missed its heartbeats keeps the issue it is working until it
+// was last seen longer ago than this, and only then may another agent take or release the claim
+// without a person's force. Generated from ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS in
+// packages/contracts, whose doc comment states the rule, so the server's refusal and the wait a
+// client predicts are one number.
+const IssueClaimUnresponsiveGrace = ${ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS} * time.Millisecond
 
 // MintedDedupeKeyPattern is the shape of a dedupe key minted once for its message, by the listener
 // or by the shared transport's idempotency key, which DedupeKeyNamesTheUpstreamEvent counts as
