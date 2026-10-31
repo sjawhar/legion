@@ -2,32 +2,32 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-31T10:33:00Z",
-  "round": 24,
-  "testedHead": "3668fb95171b89ceabc2bbe411d10bea9aa31e07",
-  "previousTestedHead": "b5e8445e62fbeabecc151f82b7e52762866b1572",
-  "roundShape": "Confirmation round, as the architect briefed it: a forward merge of main 2ab9473a7 (with #2598) into the READY head fcec63a7, no conflict. round-shape.py v3, fcec63a7b14a5def7851e1de0c43311fb9cdd13a -> 3668fb95171b89ceabc2bbe411d10bea9aa31e07, pull request 2395: files whose own diff differs: 0; nothing equal only after normalisation. Compared from fcec63a7, the READY head the merge was made onto, as briefed; its code equals b5e8445e (retro added only docs/solutions/ and removed .legion/, both outside the script's diff). Control: 2678be4b84 -> b5e8445e62 still prints 4 files, so the script ran its diffs. Round 22 and 23's live and suite evidence stands.",
+  "completed": "2026-10-31T13:50:00Z",
+  "round": 25,
+  "testedHead": "6281961837c6c9de25c410ab192d4f2688f85127",
+  "previousTestedHead": "3668fb95171b89ceabc2bbe411d10bea9aa31e07",
+  "roundShape": "Confirmation round, as briefed: a forward merge of main b0cc910f5 (with #2594) into 3668fb95, no conflict. round-shape.py v3, 3668fb95171b89ceabc2bbe411d10bea9aa31e07 -> 6281961837c6c9de25c410ab192d4f2688f85127, pull request 2395: files whose own diff differs: 0; nothing equal only after normalisation. Control: 2678be4b84 -> b5e8445e62 still prints 4 files. Round 22 and 23's live and suite evidence stands.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer's fingerprint claim (unchanged diff) holds: round-shape.py v3 finds 0 files whose own diff differs. Build and vet re-run at 3668fb95 in packages/envoy and packages/envoy/infra, clean."
+    "how": "The implementer's unchanged-fingerprint claim holds: round-shape.py v3 finds 0 files whose own diff differs. Build and vet re-run at 62819618 in packages/envoy and packages/envoy/infra, clean."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
       "criterion": "The forward merge changes nothing in the PR's own diff; it builds",
-      "surface": "the workspace at 3668fb95 and round-shape.py v3",
-      "command": "python3 round-shape.py fcec63a7b1 3668fb9517 2395; cd packages/envoy && GOWORK=off GOMAXPROCS=4 GOMEMLIMIT=12GiB go build -p 1 ./... && go vet -p 1 ./... && go vet -p 1 -tags multiprocess ./cmd/dispatch; gofmt -l internal cmd; in a scratch copy, packages/envoy/infra: go vet -p 1 ./... && go vet -p 1 -tags natslive ./core/",
-      "observed": "0 files whose own diff differs; build, vet (with -tags multiprocess) and gofmt clean in packages/envoy; infra vets clean. Sampled memory peak during build and vet 2.75 GiB of 19, 156 samples every 2 s (the pod's cgroup, every role included); during the infra vets and their module downloads 10.59 GiB of 19, 279 samples.",
-      "headSha": "3668fb95171b89ceabc2bbe411d10bea9aa31e07",
-      "negativeControl": "round-shape.py v3 on 2678be4b84 -> b5e8445e62 prints 4 files, so a 0 here is a measured result and not a script that ran no diff."
+      "surface": "the workspace at 62819618 and round-shape.py v3",
+      "command": "python3 round-shape.py 3668fb9517 6281961837 2395; cd packages/envoy && GOWORK=off GOMAXPROCS=4 GOMEMLIMIT=12GiB go build -p 1 ./... && go vet -p 1 ./... && go vet -p 1 -tags multiprocess ./cmd/dispatch; gofmt -l internal cmd; in a scratch copy, packages/envoy/infra: go vet -p 1 ./... && go vet -p 1 -tags natslive ./core/",
+      "observed": "0 files whose own diff differs; build, vet (with -tags multiprocess) and gofmt clean in packages/envoy; infra vets clean. Sampled memory peak 2.77 GiB of 19 over the whole build and vet, 35 samples every 2 s (the sampler a named job, mem-sampler-INFRA-590, stopped by proc kill; the pod's cgroup, every role included).",
+      "headSha": "6281961837c6c9de25c410ab192d4f2688f85127",
+      "negativeControl": "round-shape.py v3 on 2678be4b84 -> b5e8445e62 prints 4 files, so the 0 is a measured result."
     },
     {
-      "criterion": "lint, typecheck, test, pr-title, envoy-go, envoy-go-race and ci-ok at 3668fb95",
+      "criterion": "lint, typecheck, test, pr-title, envoy-go, envoy-go-race and ci-ok at 62819618",
       "surface": "GitHub check runs",
-      "command": "gh api repos/sjawhar/legion/commits/3668fb95171b89ceabc2bbe411d10bea9aa31e07/check-runs --paginate",
-      "observed": "At 10:31Z: CI run 41192057348 queued since 10:16:11Z with only its changes job created (queued); pr-title queued (run 41192117517). Unread: lint, typecheck, test, pr-title, envoy-go, envoy-go-race and ci-ok - none has a result. #2395 MERGEABLE.",
-      "headSha": "3668fb95171b89ceabc2bbe411d10bea9aa31e07",
+      "command": "gh api repos/sjawhar/legion/commits/6281961837c6c9de25c410ab192d4f2688f85127/check-runs --paginate, read at 13:46Z and again before completing",
+      "observed": "CI run 41206814839 queued since 13:42:57Z with only its changes job created; pr-title queued (run 41206863892). Unread: lint, typecheck, test, pr-title, envoy-go, envoy-go-race and ci-ok. No envoy-go result, so no re-run of TestIdenticalViewsShareOneRecompute was called for. #2395 MERGEABLE.",
+      "headSha": "6281961837c6c9de25c410ab192d4f2688f85127",
       "negativeControl": "none: a read of CI"
     }
   ]
