@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-325",
+  "completed": "2026-10-31T00:44:06Z",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase worker's own rules — read every committed handoff first, commit only this phase's paths, push before completing.",
+      "skill://legion-worker/references/pr-body.md: the pull request body, what a proof is (criterion, surface, command, observed, headSha, negativeControl), and the simplify pass the body must record.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: this branch must take main in once the seed-tool child merges, so the A8 measurement runs on the larger test database; that is a need only the base meets.",
+      "skill://legion-worker/references/skip-checks-trailer.md: the handoff-only push carries the trailer; the code push does not.",
+      "skill://legion-worker/references/tools.md: how to get a Postgres in the pod for the Go tests, which need DISPATCH_TEST_DATABASE_URL.",
+      "skill://ce-simplify-code: the simplify pass pr-body.md requires on settled, recently changed code.",
+      "skill://dispatch and skill://dispatch-writing-specs: any comment or ask this phase writes on the issue.",
+      "skill://asd-ste100: every message to the architect or another role."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's phase rules and the committed handoff shape.",
+      "skill://legion-worker/references/pr-body.md: each proof needs a surface, a command, an observation, the head SHA and a negative control; this change's surfaces are the Go tests on a real Postgres, a booted Dispatch read over HTTP, and the pre-deploy census.",
+      "skill://dispatch: reading the issue and its spec.",
+      "skill://asd-ste100: every message."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's phase rules, including that a prose-only finding is fixed by the reviewer itself.",
+      "skill://legion-worker/references/review-threads.md: replying on, listing and resolving review threads, and judging a bot's finding.",
+      "skill://legion-worker/references/merge-gate.md: approving the head by SHA and what READY compares against it.",
+      "skill://ce-simplify-code: judging the simplify pass the implementer recorded.",
+      "skill://asd-ste100: every message."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1. sjawhar/legion#2535 (approved, unmerged) already rewrites refs/graph.go so the statement builder and the scan are unexported behind QueueBacklinkCounts, rewrites api/issue_queries.go and deletes loadChildren. The spec names it nowhere.",
+        "answer": "The plan's Ordering section states the rule the architect gave: whichever pull request merges second takes the other in. When #2535 lands first, task 1 writes the per-kind statements inside its unexported builder and task 3's tests follow it there. R9's loadChildren check is a child issue, so its successor naming is that child's problem."
+      },
+      {
+        "finding": "F2. The spec's Design says 'The comment-block and message-block arms keep the view's join on position is not null'. In migration 0142 the arms that carry that predicate are the two mention arms over comment_block_refs and message_block_refs and the two part_of arms targeting comment and message; the two arms whose target is comment_block or message_block carry no predicate at all. heldByABlock's three exists probes carry none either.",
+        "answer": "Task 1 gives two tables read off the view arm by arm and marks the filter on each arm. The plan records the reading as a spec departure. Task 3's A2 fixture gains a removed block (position null) that still holds a block-refs row for a node its item also mentions, which is the only row that tells the two readings apart."
+      },
+      {
+        "finding": "F3. The new search table's columns are underspecified; the document arm resolves the latest version three times and one of those needs markdown, not the vector.",
+        "answer": "Out of this pull request's scope: the architect gave search (R6) to a child issue. The finding goes to that child with the plan."
+      },
+      {
+        "finding": "F4. The new search table and the refresh queue have no delete path and, by the spec's own design, no foreign key.",
+        "answer": "Out of scope: R6 and R8 are child issues. The earlier draft's answer, which the child can take, was that every reader joins artifacts so an orphan row cannot surface, that no production code path deletes an artifact (only tests do), and that the queue row carries the item's old vector so a deleted item is still subtracted."
+      },
+      {
+        "finding": "F5. Migration 3 of the search design backfills into an already-indexed table, inside the deploy, in one transaction.",
+        "answer": "Out of scope: R6 is a child issue. The earlier draft's answer, which the child can take, was to build the table, then the trigger, then the backfill, then the index, and to record the measured backfill time."
+      },
+      {
+        "finding": "F6. Three of the change's migrations touch asks and ask_followers, whose production sizes are not on record, and a census refusal stops the whole Dispatch deploy.",
+        "answer": "Only ask_followers is in scope now. Task 2 names the risk, says the table holds three columns and no text, says this pod cannot read the size (kubectl -n dispatch auth can-i create jobs answers no, and exec is forbidden), tells the implementer to run the census against a database holding production's shape before the merge, and gives the exact query to hand to the architect when that is not reachable."
+      },
+      {
+        "finding": "F7. R3's page push-down needs two or three statement shapes, a second read for total, and breaks an existing plan test's argument list.",
+        "answer": "Out of scope: R3 is a child issue. The earlier draft's answer, which the child can take, was three fixed texts, total as a count over the filtered rows inside the one statement, and one set-based form shared by all five call sites of the two laterals."
+      },
+      {
+        "finding": "F8. The four unfixed anchor reads do not state anchor is not null, and migration 0148's index on asks is partial on exactly that.",
+        "answer": "Out of scope: R5 is a child issue. The finding, and the note that docs/write_hold_test.go counts statements whose text holds anchor->>'artifact_id' = $1, goes to that child."
+      },
+      {
+        "finding": "F9. The spec's claim that each anchor read passes a document id the server holds is supported, but the changed failure mode (a malformed id now raises 22P02 instead of returning no row) is not stated.",
+        "answer": "Out of scope: R5 is a child issue. The finding goes to that child."
+      },
+      {
+        "finding": "F10. The spec's claim that refreshed_at keeps its meaning is not shown for an incremental pass, and no acceptance line checks it.",
+        "answer": "Out of scope: R8 is a child issue. The earlier draft's answer, which the child can take, was a watermark below the queued_at of every row the pass leaves, with that invariant as a test of its own."
+      },
+      {
+        "finding": "F11. 'each in a migration of only functions and triggers' reads two ways: five migrations or one.",
+        "answer": "Out of scope: R8 is a child issue. The earlier draft's answer, which the child can take, was one migration per trigger, after migrations 0074, 0122 and 0140, each of which stands alone because create trigger takes ACCESS EXCLUSIVE on its table."
+      },
+      {
+        "finding": "F12. The larger test database that A8 and A9 rest on does not exist, and no requirement says who builds it. packages/envoy/loadtest seeds 1,000 issues.",
+        "answer": "The architect gave the seed tool to a child issue of its own. Task 5 step 3 of this plan waits for that child to merge, takes main into this branch, and then measures the count's row of A8 with it. The plan's Risks section names the wait."
+      },
+      {
+        "finding": "F13. Production binds only two node kinds, issue and ask; the decision to declare all ten builds eight statements nothing calls today.",
+        "answer": "Recorded, not changed: the spec's decision 'Every node kind is declared' states its own reason, and R1 names all ten kinds. Task 1 declares ten and refuses an undeclared kind."
+      },
+      {
+        "finding": "F14. A1 to A10 are not all machine-checkable as written. In scope here: A1 needs a traversal of every plan node rather than a substring test; A2's fixture is underspecified; A3 needs pg_get_viewdef, which nothing in the tree reads; A8 names no hardware, no repetition rule and no variance bound, and 'each changed statement' is undefined once one statement becomes ten.",
+        "answer": "Task 3 states A1 as a walk of every Plan and Plans node, in custom mode and in forced generic mode. Task 3 names the two extra fixture rows A2 needs. Task 3 gives A3's test its shape and says the view-definition read is new. Task 5 step 3 states A8 as main's text and the new text run alternately in one process on one fixture, the median of runs 2 to 12, every pair with the new median below the old, committed as a test gated on DISPATCH_BENCH_DATABASE_URL; the two statements measured are the issue read's count and the ask page's count."
+      },
+      {
+        "finding": "F15. The spec states no order, and five open pull requests touch the files it changes.",
+        "answer": "The plan's Ordering section gives the order and the merge-order rule for #2535. Migration numbers: main is at 0149 and open pull requests claim 0149 to 0152, so task 2 takes 0153 and tells the implementer to read the directory again when the file is written."
+      },
+      {
+        "finding": "F16. The spec as scoped is not one pull request's worth of work; the seams are R5, R7, R1+R2, R3+R4, R6, R8, and the measurement.",
+        "answer": "The architect settled it on 2026-10-31: INFRA-325's own pull request carries the backlink count alone, and child issues carry the rest. The plan was rewritten to that scope."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "The Summary says 'This change fixes each of these statements and keeps every result the same', and the Decision 'The statements to fix are the set measured on 2026-10-30' fixes that set as one change.",
+      "plan": "INFRA-325's own pull request carries the backlink count alone: R1, R2, A1, A2, A3, the backlink count's row of A8 and its two paths in A10. Child issues carry R3 to R10 and the seed tool for the larger test database.",
+      "evidence": "The issue's architect set this scope on 2026-10-31 and said it files the child issues itself. The plan-gap-analyst's F16 reached the same seams from the code: two new tables, seven triggers, about fourteen migrations and a fixture generator that does not exist, against sjawhar/legion#2535 at 24 files and three review rounds.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "This pull request delivers R1 and R2 and their acceptance lines; the rest of the spec is delivered by child issues of the same tree."
+      }
+    },
+    {
+      "spec": "A8 says 'the pull request shows, on the larger test database, the plan and the time of each changed statement before and after, and each changed statement's time is lower after'.",
+      "plan": "The measurement is a committed test gated on DISPATCH_BENCH_DATABASE_URL that holds main's statement text and the new text as two constants and runs them alternately in one process on one fixture, the median of runs 2 to 12 on one connection, and fails when a new median is not below the old in every base-and-head pair. The two statements are the issue read's count and the ask page's count.",
+      "evidence": "A8 as written names no hardware, no repetition rule beyond the median, and no variance bound, and it does not say what 'each changed statement' means once one statement becomes one per kind. The tree already holds two env-gated harnesses of this shape, api/search_bench_test.go and api/related_recall_test.go, and CI runs go test -timeout 20m, so a test gated on an unset variable never runs there.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A8's backlink row is met by a committed, repeatable comparison in one process on one fixture, with the rule stated as every base-and-head pair, rather than by a table in the body alone."
+        ]
+      }
+    },
+    {
+      "spec": "A2 says the equality test 'fills every arm of the view, with block-held mentions and a source of an unknown kind'.",
+      "plan": "The fixture also holds a removed block: a comment_blocks or message_blocks row whose position is null that still holds a block-refs row for a node the same item also mentions through refs.",
+      "evidence": "The view's mention arms over comment_block_refs and message_block_refs join their block table with position is not null (migration 0142_item_blocks.up.sql, lines 212 to 220), while heldByABlock's exists probes in refs/graph.go carry no position filter. A removed block therefore makes the link vanish from main's count, and no row the spec names reaches that case, so the test cannot tell a count that copies the asymmetry from one that corrects it.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A2's fixture gains one row beyond the arms the spec names, so that the equality test can decide the position rule."
+        ]
+      }
+    },
+    {
+      "spec": "The Design says 'The comment-block and message-block arms keep the view's join on position is not null', in the bullet about the structural arms of the counted kind.",
+      "plan": "The plan gives the filter arm by arm, read off migration 0142: the mention arms over comment_block_refs and message_block_refs carry it, the part_of arms targeting comment and message carry it, the two replies_to arms targeting comment_block and message_block do not, and heldByABlock's probes do not.",
+      "evidence": "migration 0142_item_blocks.up.sql: lines 206 to 220 carry where b.position is not null; lines 222 to 226 do not. refs/graph.go's blockHolds builds three exists probes with no position predicate. R2 holds the count to the view's answer, so the count copies the asymmetry.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ]
+}
