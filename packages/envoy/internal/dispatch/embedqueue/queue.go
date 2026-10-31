@@ -1,8 +1,9 @@
 // Package embedqueue durably retries the model service's embedding calls for Dispatch's meaning
 // search, on whichever place (Bedrock or Azure AI Foundry) the deployment configures. A write's
-// AFTER INSERT/UPDATE trigger (0073-0077) upserts a pending row into embeddings with the latest
-// text and a hash of it in the same transaction as the write, and this package's poller embeds
-// whatever that enqueue left pending, with the same scan-then-retry shape as the event outbox
+// AFTER INSERT/UPDATE trigger (0073-0077, and 0140's on a new version of an issue's spec) upserts a
+// pending row into embeddings with the latest text and a hash of it in the same transaction as the
+// write, and this package's poller embeds whatever that enqueue left pending, with the same
+// scan-then-retry shape as the event outbox
 // (internal/dispatch/outbox): a write never fails because the embedder did, since the model
 // service is never called inside the enqueueing transaction. A text with nothing to embed
 // (nothingToEmbed) is settled with no vector and no model call instead. The coverage pass

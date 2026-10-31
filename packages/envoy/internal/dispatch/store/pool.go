@@ -131,13 +131,14 @@ type Pool struct {
 	// mu guards each separate pool's creation against this pool's close: one lock, so a
 	// caller that loses the race is told the pool is closed rather than opening one nothing
 	// will ever close.
-	mu     sync.Mutex
-	rooms  *pgxpool.Pool
-	health *pgxpool.Pool
-	listen *pgxpool.Pool
-	leases *pgxpool.Pool
-	outbox *pgxpool.Pool
-	closed bool
+	mu      sync.Mutex
+	rooms   *pgxpool.Pool
+	health  *pgxpool.Pool
+	listen  *pgxpool.Pool
+	leases  *pgxpool.Pool
+	outbox  *pgxpool.Pool
+	horizon *pgxpool.Pool
+	closed  bool
 }
 
 // NewPool wraps an open pgx pool.
@@ -154,7 +155,15 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // the DSN another repository's URL builder writes. It is 64, from 16, since 2026-10-27: a
 // request takes a connection per statement one after another (an issue read is about eleven),
 // so under ~240 agent requests a minute the API held all sixteen and every other request waited
-// seconds for one; the database (16 vCPU) has hundreds of connections spare.
+// seconds for one. The database bounds it from above. Dispatch's database is the gcp:Dispatch
+// component's Cloud SQL Postgres instance, whose default max_connections follows its tier's
+// memory (https://cloud.google.com/sql/docs/postgres/flags, max_connections), and every server
+// pod opens up to ConnectionsPerProcess. During a roll, every pod that holds connections (the
+// replicas, the surge pod and pods still terminating, for up to their grace period) times that
+// sum must fit in max_connections less PostgreSQL's 3 superuser-reserved slots, so raising a pool
+// or the pod count is checked against it: read SHOW max_connections on the instance before
+// raising either. A new pool, or a new permanent Listener caller, goes into
+// ConnectionsPerProcess with it.
 const sharedPoolSize = 64
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
@@ -259,18 +268,21 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // (duty.Exclusive). One connection per caller that can be inside Exclusive at the same moment is
 // the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
 // connection before it learns whether the lease is held, so a pass that skips because the other
-// process holds the lease holds a connection for that round trip too. INFRA-66 leases eight names
-// - the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
-// the GitHub webhook redelivery sweep, the architecture import, the delivery reconcile and one
-// per delivery durable for the consumers' reconciliation (delivery.consumerLease, a name each for
-// delivery-events and delivery-jobs) - taken by eight callers, since each delivery intake takes
-// its own durable's name from a bind poll of its own, so eight callers can be inside Exclusive at
-// once. Eight connections are exactly those eight: the headroom is zero, not one, and the next
-// leased loop added here makes a ninth caller that waits for a connection rather than failing,
-// for as long as the longest pass then holding one. They cannot come from the shared pool:
-// a lease is held for the whole pass, which is minutes for the compaction, and the shared pool's
-// sharedPoolSize connections are what every request reads through.
-const leasePoolSize = 8
+// process holds the lease holds a connection for that round trip too. Thirteen names are leased -
+// the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
+// the block-index reconciliation, the term-statistics refresh, the GitHub webhook redelivery
+// sweep, the architecture import, the delivery reconcile, the edit-notice sweep, the repair of
+// closed and reopened issues' asks (api.RunIssueAskRepair), one per delivery durable for the
+// consumers' reconciliation (delivery.consumerLease, a name each for delivery-events and
+// delivery-jobs) and the server process registry's prune (processes.RunPrune) - taken by thirteen
+// callers, since each delivery intake takes its own durable's name from a bind poll of its own,
+// so thirteen callers can be inside Exclusive at once. Thirteen connections are exactly those
+// thirteen: the headroom is zero, not one, and the next leased loop added here makes a fourteenth
+// caller that waits for a connection rather than failing, for as long as the longest pass then
+// holding one. They cannot come from the shared pool: a lease is held for the whole pass, which
+// is minutes for the compaction, and the shared pool's sharedPoolSize connections are what every
+// request reads through.
+const leasePoolSize = 13
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
@@ -287,6 +299,21 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 // statement, so one connection is every connection it can use.
 const outboxPoolSize = 1
 
+// registryPoolSize bounds the pool the registry of live server processes stamps this process's row
+// through: processes.Register opens it from this pool's configuration with MaxConns 1, outside the
+// pools above, so it is counted here rather than by a method of Pool.
+const registryPoolSize = 1
+
+// permanentListeners is how many connections the listener pool dials and hands off for the life
+// of the process: the delivery hub, the event stream relay and the stale-room evictor (Listener).
+const permanentListeners = 3
+
+// ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
+// every pool's size, the registry's own pool (processes.Register) and the event horizon's
+// (Horizon) among them, and one connection per permanent listener, which the listener pool dials
+// and hands off rather than holds.
+const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + horizonPoolSize + permanentListeners
+
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared
 // pool's connections, and an outbox statement queued behind them holds back every event behind
@@ -297,6 +324,28 @@ func (p *Pool) Outbox() (*Pool, error) {
 		return nil, err
 	}
 	return NewPool(opened), nil
+}
+
+// horizonPoolSize bounds the pool the event log's safe horizon (events.Horizon) works through. The
+// server keeps one Horizon, whose concurrent callers share the one observation in flight, so one
+// connection serves every observation. The other statements the Horizon runs share both
+// connections with it: the stall diagnosis and the write of the proven horizon (event_horizon),
+// which run after an observation has released its waiters, and the reads every GET /auth/whoami and
+// the relay's first start make (a mark, the oldest transaction that can write the event log, the
+// persisted horizon), each one statement.
+const horizonPoolSize = 2
+
+// Horizon is the pool the event log's safe horizon (events.Horizon) takes its observations, its
+// marks and the reads beside them, its stall diagnosis and its persist write through. Every reader that pages the event log by a global id cursor - the
+// event stream relay, the delivery hub, a references read since a cursor - reads only up to what
+// an observation has proven safe. Under load the API's requests queue for the shared pool's
+// connections, and an observation queued behind them holds back every live reader of the event
+// log; on a pool of its own it waits for none of them, and holds no connection a request could
+// use. Like the rooms pool it is outside the nested-acquire guard, because a separate pool cannot
+// close the cycle the guard prevents: none of those statements (each one batch or one row) asks
+// for a second connection while it holds one.
+func (p *Pool) Horizon() (*pgxpool.Pool, error) {
+	return p.separate(&p.horizon, horizonPoolSize, "event horizon")
 }
 
 // separate opens the pool held at field on demand, sized at size and copied from the shared
@@ -327,8 +376,8 @@ func (p *Pool) separate(field **pgxpool.Pool, size int32, name string) (*pgxpool
 	return opened, nil
 }
 
-// Close releases every connection the pool holds, the document rooms and the health probe
-// included.
+// Close releases every connection the pool holds, the separate pools' - the document rooms, the
+// health probe, the listener, the leases, the outbox and the event horizon - included.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -336,10 +385,10 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health, listen, leases, outbox := p.rooms, p.health, p.listen, p.leases, p.outbox
-	p.rooms, p.health, p.listen, p.leases, p.outbox = nil, nil, nil, nil, nil
+	rooms, health, listen, leases, outbox, horizon := p.rooms, p.health, p.listen, p.leases, p.outbox, p.horizon
+	p.rooms, p.health, p.listen, p.leases, p.outbox, p.horizon = nil, nil, nil, nil, nil, nil
 	p.mu.Unlock()
-	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox} {
+	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox, horizon} {
 		if separate != nil {
 			separate.Close()
 		}
@@ -531,27 +580,60 @@ func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error)
 		return nil, err
 	}
 	release := hold(ctx)
-	if release == nil {
+	beforeCommit, _ := ctx.Value(beforeCommitKey{}).(BeforeCommit)
+	if release == nil && beforeCommit == nil {
 		return tx, nil
 	}
-	return &trackedTx{Tx: tx, release: release}, nil
+	return &trackedTx{Tx: tx, release: release, beforeCommit: beforeCommit}, nil
 }
 
-// trackedTx clears the caller's mark however the transaction ends. Callers commit and then run
-// a deferred rollback; the release absorbs that second call.
+// BeforeCommit is a step every transaction a request opens takes just before its COMMIT, inside
+// that transaction, so what it writes commits with the request's own write or not at all. An
+// error from it rolls the transaction back, and Commit returns that error.
+type BeforeCommit func(ctx context.Context, tx pgx.Tx) error
+
+type beforeCommitKey struct{}
+
+// WithBeforeCommit returns ctx carrying step, which every transaction this pool opens under ctx,
+// or a context derived from it, takes before it commits (BeforeCommit). A keyed write marks its
+// Idempotency-Key committed this way, in the transaction of the write itself (api/request_keys.go).
+// A transaction already failed when its caller commits it skips the step: pgx answers that commit
+// with its own rollback error, as it would without one.
+func WithBeforeCommit(ctx context.Context, step BeforeCommit) context.Context {
+	return context.WithValue(ctx, beforeCommitKey{}, step)
+}
+
+// trackedTx clears the caller's mark however the transaction ends, and takes the caller's
+// BeforeCommit step before it commits. Callers commit and then run a deferred rollback; the
+// release absorbs that second call. Either part may be absent: a context the pool does not track
+// has no mark, and one with no step commits as it is.
 type trackedTx struct {
 	pgx.Tx
-	release func()
+	release      func()
+	beforeCommit BeforeCommit
 }
 
 func (t *trackedTx) Commit(ctx context.Context) error {
-	defer t.release()
+	defer t.end()
+	if t.beforeCommit != nil && t.Tx.Conn().PgConn().TxStatus() == 'T' {
+		if err := t.beforeCommit(ctx, t.Tx); err != nil {
+			_ = t.Tx.Rollback(ctx)
+			return err
+		}
+	}
 	return t.Tx.Commit(ctx)
 }
 
 func (t *trackedTx) Rollback(ctx context.Context) error {
-	defer t.release()
+	defer t.end()
 	return t.Tx.Rollback(ctx)
+}
+
+// end clears the caller's mark, when the pool tracks one.
+func (t *trackedTx) end() {
+	if t.release != nil {
+		t.release()
+	}
 }
 
 type errRow struct {

@@ -3,6 +3,7 @@ package gcp_test
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,23 +27,28 @@ const (
 	dispatchEnvoyImage     = "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	dispatchTailscaleImage = "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 	dispatchProxyImage     = "example.invalid/cloud-sql-proxy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	// dispatchToolsImage is frontDoorToolsImage: the envoy image at a digest of its own, as a
+	// consumer pins it, so the app's image moving leaves it where it is.
+	dispatchToolsImage = "example.invalid/envoy@sha256:99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa"
 )
 
 func dispatchArgs() *gcp.DispatchArgs {
 	return &gcp.DispatchArgs{
-		Region:             "us-central1",
-		Hostname:           "example-dispatch",
-		TailnetDnsName:     "example-tailnet.ts.net",
-		Tags:               []string{"tag:example-dispatch"},
-		TailnetAuthKey:     pulumi.String("tskey-auth-example-0123456789"),
-		EnvoyImage:         dispatchEnvoyImage,
-		TailscaleImage:     dispatchTailscaleImage,
-		CloudSqlProxyImage: dispatchProxyImage,
-		NatsUrl:            pulumi.String("nats://example-hub.example-tailnet.ts.net:4222"),
-		NatsSeedSecret:     pulumi.String("projects/example-project/secrets/example-nats-seed"),
-		SignInClientId:     "example-client-id",
-		SignInClientSecret: pulumi.String("example-client-secret"),
-		SignInDomain:       "example.com",
+		Region:              "us-central1",
+		Hostname:            "example-dispatch",
+		TailnetDnsName:      "example-tailnet.ts.net",
+		Tags:                []string{"tag:example-dispatch"},
+		TailnetAuthKey:      pulumi.String("tskey-auth-example-0123456789"),
+		TailnetService:      pulumi.String("svc:example-dispatch"),
+		EnvoyImage:          dispatchEnvoyImage,
+		TailscaleImage:      dispatchTailscaleImage,
+		CloudSqlProxyImage:  dispatchProxyImage,
+		FrontDoorToolsImage: dispatchToolsImage,
+		NatsUrl:             pulumi.String("nats://example-hub.example-tailnet.ts.net:4222"),
+		NatsSeedSecret:      pulumi.String("projects/example-project/secrets/example-nats-seed"),
+		SignInClientId:      "example-client-id",
+		SignInClientSecret:  pulumi.String("example-client-secret"),
+		SignInDomain:        "example.com",
 	}
 }
 
@@ -64,6 +70,38 @@ func dispatchBrokerAndAppArgs(t *testing.T) *gcp.DispatchArgs {
 	args.AgentSecretsAudience = "example-broker-audience"
 	setApp(args)
 	return args
+}
+
+const (
+	// inClusterNatsURL is the NATS hub's own Service in the pods' cluster, the address
+	// natsInCluster is for: with it set the app and the listener dial this themselves.
+	inClusterNatsURL = "nats://envoy-hub.envoy.svc.cluster.local:4222"
+	// dispatchNatsReplicas and dispatchStreamMaxBytes are the two JetStream numbers the tests
+	// set: three copies of every stream and bucket, and a 64 MiB stream limit. Neither is any
+	// binary's default, so a container carrying one carries what the input asked for.
+	dispatchNatsReplicas   = 3
+	dispatchStreamMaxBytes = 64 << 20
+	// dispatchSocks5Proxy is the front door's SOCKS5 Service, the address both NATS clients
+	// carry without natsInCluster, and frontDoorPodURN and frontDoorServiceURN the two children
+	// each waits for in that mode.
+	dispatchSocks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
+	frontDoorPodURN     = "urn:pulumi:s::p::" + dispatchType + "$kubernetes:apps/v1:Deployment::example-dispatch-tailnet"
+	frontDoorServiceURN = "urn:pulumi:s::p::" + dispatchType + "$kubernetes:core/v1:Service::example-dispatch-tailnet"
+)
+
+// setInClusterNats turns natsInCluster on and points natsUrl at the hub's in-cluster Service,
+// which the two NATS clients then dial directly instead of through the front door's SOCKS5 proxy.
+func setInClusterNats(a *gcp.DispatchArgs) {
+	yes := true
+	a.NatsInCluster = &yes
+	a.NatsUrl = pulumi.String(inClusterNatsURL)
+}
+
+// setNatsNumbers sets natsReplicas and streamMaxBytes, the two settings both NATS clients carry
+// in either mode.
+func setNatsNumbers(a *gcp.DispatchArgs) {
+	a.NatsReplicas = pulumi.IntRef(dispatchNatsReplicas)
+	a.StreamMaxBytes = pulumi.IntRef(dispatchStreamMaxBytes)
 }
 
 const (
@@ -103,19 +141,41 @@ func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumit
 
 func runDispatchNamed(t *testing.T, name string, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
 	t.Helper()
+	if !providers {
+		return runDispatchWithProviders(t, name, args)
+	}
+	return runDispatchWithProviders(t, name, args, newGCPProvider, newRandomProvider)
+}
+
+// newGCPProvider and newRandomProvider declare the two providers a Dispatch program gives the
+// component, each under the name the registration golden holds.
+func newGCPProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) {
+	return gcpsdk.NewProvider(ctx, "gcp-example", &gcpsdk.ProviderArgs{})
+}
+
+func newRandomProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) {
+	return randomsdk.NewProvider(ctx, "random-example", &randomsdk.ProviderArgs{})
+}
+
+// runDispatchWithProviders runs args through the mock engine with the providers the program
+// declares, registered in the order given and passed to the component together. With none given
+// the component is called with no providers option at all, which is how a program that declares
+// none reaches it.
+func runDispatchWithProviders(t *testing.T, name string, args *gcp.DispatchArgs, providers ...func(*pulumi.Context) (pulumi.ProviderResource, error)) (*pulumitest.Mocks, error) {
+	t.Helper()
 	m := newMocks()
 	err := m.Run(func(ctx *pulumi.Context) error {
+		var declared []pulumi.ProviderResource
+		for _, newProvider := range providers {
+			provider, err := newProvider(ctx)
+			if err != nil {
+				return err
+			}
+			declared = append(declared, provider)
+		}
 		var opts []pulumi.ResourceOption
-		if providers {
-			gcpProvider, err := gcpsdk.NewProvider(ctx, "gcp-example", &gcpsdk.ProviderArgs{})
-			if err != nil {
-				return err
-			}
-			randomProvider, err := randomsdk.NewProvider(ctx, "random-example", &randomsdk.ProviderArgs{})
-			if err != nil {
-				return err
-			}
-			opts = append(opts, pulumi.Providers(gcpProvider, randomProvider))
+		if len(declared) > 0 {
+			opts = append(opts, pulumi.Providers(declared...))
 		}
 		_, err := gcp.NewDispatch(ctx, name, args, opts...)
 		return err
@@ -126,18 +186,17 @@ func runDispatchNamed(t *testing.T, name string, args *gcp.DispatchArgs, provide
 func TestDispatchSettingsApplyDefaults(t *testing.T) {
 	settings, err := gcp.ResolveDispatch(dispatchArgs())
 	require.NoError(t, err)
-	require.Equal(t, "POSTGRES_16", settings.DatabaseVersion)
-	require.Equal(t, "db-custom-1-3840", settings.DatabaseTier)
+	require.Equal(t, "POSTGRES_18", settings.DatabaseVersion)
+	require.Equal(t, "db-custom-4-15360", settings.DatabaseTier)
 	require.True(t, settings.DeletionProtection)
 	require.Equal(t, "dispatch", settings.Namespace)
 	require.Equal(t, 1, settings.Replicas)
 	require.Equal(t, "Recreate", settings.StrategyType)
 	require.Nil(t, settings.RollingUpdate, "one replica is recreated, never rolled")
-	require.Equal(t, `{"TCP":{"443":{"HTTPS":true}},"Web":{"example-dispatch.example-tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://example-dispatch.dispatch.svc.cluster.local:8766"}}}}}`, settings.ServeConfig)
 }
 
 // Unset, appCpu and appMemory are the 1 CPU and 4Gi the app container always had, as requests and
-// limits of envoy-dispatch, so a deployment that sets neither sees no change to its pod
+// limits of envoy-dispatch, so a deployment that sets neither keeps its app container's size
 // (TestDispatchPodMatchesGolden pins the whole template).
 func TestDispatchAppContainerDefaultsToOneCPUAnd4Gi(t *testing.T) {
 	settings, err := gcp.ResolveDispatch(dispatchArgs())
@@ -150,27 +209,58 @@ func TestDispatchAppContainerDefaultsToOneCPUAnd4Gi(t *testing.T) {
 	require.Equal(t, appResources("1", "4Gi"), container["resources"])
 }
 
-// The quantity forms Kubernetes reads are taken as written, up to Autopilot's bounds for the pod:
-// with cloud-sql-proxy's 200m and 256Mi, 300m and 256Mi make the 500m and 512Mi floor, 29800m
-// and 112384Mi the 30 CPU and 110Gi ceiling, and 800m and 6400Mi exactly 6.5 GiB per CPU. A
-// decimal exponent inside e-9 to e18 is valued exactly, its mantissa included.
+// proxyContainer is the app pod template's cloud-sql-proxy native sidecar.
+func proxyContainer(t *testing.T, template map[string]any) map[string]any {
+	t.Helper()
+	proxy := template["spec"].(map[string]any)["initContainers"].([]any)[0].(map[string]any)
+	require.Equal(t, "cloud-sql-proxy", proxy["name"])
+	return proxy
+}
+
+// Unset, proxyCpu and proxyMemory size the cloud-sql-proxy sidecar for one server pod's pools,
+// 1 CPU and 2Gi as its request and its limit, the sizes the proxy's own Kubernetes sidecar
+// example requests: every database call of the pod, up to dispatchConnectionsPerPod, passes
+// through its TLS.
+func TestDispatchProxyContainerDefaultsToOneCPUAnd2Gi(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.Equal(t, appResources("1", "2Gi"), proxyContainer(t, deploymentPodTemplate(t, m, "example-dispatch"))["resources"])
+}
+
+// The quantity forms Kubernetes reads are taken as written, up to Autopilot's bounds for the pod,
+// judged on the two containers' sum with the proxy's resolved size. With proxyCpu 200m and
+// proxyMemory 256Mi, 300m and 256Mi make the 500m and 512Mi floor, 29800m and 112384Mi the 30 CPU
+// and 110Gi ceiling, and 800m and 6400Mi exactly 6.5 GiB per CPU. With the proxy's default 1 CPU
+// and 2Gi, 29 and 108Gi make the ceiling, 1 and 11Gi exactly 6.5 GiB per CPU, and 100m and 256Mi
+// sit above the floor; and the proxy takes any size that keeps the pod inside them. A decimal
+// exponent inside e-9 to e18 is valued exactly, its mantissa included.
 func TestDispatchAcceptsAppResourcesWithinAutopilotsBounds(t *testing.T) {
-	for _, row := range []struct{ cpu, memory string }{
-		{"300m", "512Mi"},
-		{"300m", "256Mi"},
-		{"1.5", "6Gi"},
-		{"2", "8589934592"},
-		{"4", "16G"},
-		{"29800m", "112384Mi"},
-		{"2e0", "0.5e10"},
-		{"800m", "6400Mi"},
-		{"1", "4500000k"},
-		{"1000000000e-9", "0.000000004e18"},
+	for _, row := range []struct{ cpu, memory, proxyCPU, proxyMemory string }{
+		{"300m", "512Mi", "200m", "256Mi"},
+		{"300m", "256Mi", "200m", "256Mi"},
+		{"1.5", "6Gi", "200m", "256Mi"},
+		{"2", "8589934592", "200m", "256Mi"},
+		{"4", "16G", "200m", "256Mi"},
+		{"29800m", "112384Mi", "200m", "256Mi"},
+		{"2e0", "0.5e10", "200m", "256Mi"},
+		{"800m", "6400Mi", "200m", "256Mi"},
+		{"1", "4500000k", "200m", "256Mi"},
+		{"1000000000e-9", "0.000000004e18", "200m", "256Mi"},
+		{"29", "108Gi", "", ""},
+		{"1", "11Gi", "", ""},
+		{"100m", "256Mi", "", ""},
+		{"1", "4Gi", "250m", "1Gi"},
+		{"1", "4Gi", "4", "8Gi"},
+		{"1", "4Gi", "2500m", "1536Mi"},
 	} {
-		t.Run(row.cpu+"/"+row.memory, func(t *testing.T) {
+		t.Run(row.cpu+"/"+row.memory+"/"+row.proxyCPU+"/"+row.proxyMemory, func(t *testing.T) {
 			args := dispatchArgs()
 			args.AppCpu = pulumi.StringRef(row.cpu)
 			args.AppMemory = pulumi.StringRef(row.memory)
+			if row.proxyCPU != "" {
+				args.ProxyCpu = pulumi.StringRef(row.proxyCPU)
+				args.ProxyMemory = pulumi.StringRef(row.proxyMemory)
+			}
 			settings, err := gcp.ResolveDispatch(args)
 			require.NoError(t, err)
 			require.Equal(t, row.cpu, settings.AppCPU)
@@ -229,18 +319,6 @@ func TestDispatchRefusesAPprofPortBeforeRegistering(t *testing.T) {
 	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
 }
 
-// Above one replica the operator has accepted two overlapping envoy-dispatch processes, so the
-// Deployment rolls a new pod up before taking an old one down.
-func TestDispatchSeveralReplicasRollWithoutGoingUnavailable(t *testing.T) {
-	args := dispatchArgs()
-	args.Replicas = pulumi.IntRef(3)
-	settings, err := gcp.ResolveDispatch(args)
-	require.NoError(t, err)
-	require.Equal(t, 3, settings.Replicas)
-	require.Equal(t, "RollingUpdate", settings.StrategyType)
-	require.Equal(t, &gcp.DispatchRollingUpdate{MaxUnavailable: 0, MaxSurge: 1}, settings.RollingUpdate)
-}
-
 func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -254,16 +332,19 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an unpinned Envoy image", edit: func(a *gcp.DispatchArgs) { a.EnvoyImage = "example.invalid/envoy:latest" }, err: []string{"envoyImage", "@sha256:"}},
 		{name: "an unpinned Tailscale image", edit: func(a *gcp.DispatchArgs) { a.TailscaleImage = "example.invalid/tailscale:latest" }, err: []string{"tailscaleImage", "@sha256:"}},
 		{name: "an unpinned Cloud SQL proxy image", edit: func(a *gcp.DispatchArgs) { a.CloudSqlProxyImage = "example.invalid/cloud-sql-proxy:latest" }, err: []string{"cloudSqlProxyImage", "@sha256:"}},
+		{name: "an unpinned front-door tools image", edit: func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = "example.invalid/envoy:latest" }, err: []string{"frontDoorToolsImage", "@sha256:"}},
+		{name: "no front-door tools image", edit: func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = "" }, err: []string{"frontDoorToolsImage", "pinned by digest"}},
 		{name: "no region", edit: func(a *gcp.DispatchArgs) { a.Region = "" }, err: []string{"region", "required"}},
 		{name: "no sign-in client ID", edit: func(a *gcp.DispatchArgs) { a.SignInClientId = "" }, err: []string{"signInClientId", "required"}},
 		{name: "an invalid sign-in domain", edit: func(a *gcp.DispatchArgs) { a.SignInDomain = "Example.COM" }, err: []string{"signInDomain", "lowercase DNS name"}},
 		{name: "an empty database version", edit: func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef("") }, err: []string{"databaseVersion", "empty"}},
-		{name: "an empty database tier", edit: func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef("") }, err: []string{"databaseTier", "empty"}},
+		{name: "an empty database tier", edit: func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef("") }, err: []string{"databaseTier is empty", "leave it unset for db-custom-4-15360"}},
 		{name: "an invalid namespace", edit: func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef("Dispatch") }, err: []string{"namespace", "DNS label"}},
 		{name: "an invalid allowed namespace", edit: func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", "Legion"} }, err: []string{"allowedNamespaces[1]", "DNS label"}},
 		{name: "a namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(strings.Repeat("a", 64)) }, err: []string{"namespace", "DNS label"}},
 		{name: "an allowed namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{strings.Repeat("a", 64)} }, err: []string{"allowedNamespaces[0]", "DNS label"}},
 		{name: "no tailnet auth key", edit: func(a *gcp.DispatchArgs) { a.TailnetAuthKey = nil }, err: []string{"tailnetAuthKey", "required"}},
+		{name: "no tailnet service", edit: func(a *gcp.DispatchArgs) { a.TailnetService = nil }, err: []string{"tailnetService", "required"}},
 		{name: "no NATS URL", edit: func(a *gcp.DispatchArgs) { a.NatsUrl = nil }, err: []string{"natsUrl", "required"}},
 		{name: "no NATS seed secret", edit: func(a *gcp.DispatchArgs) { a.NatsSeedSecret = nil }, err: []string{"natsSeedSecret", "required"}},
 		{name: "no sign-in client secret", edit: func(a *gcp.DispatchArgs) { a.SignInClientSecret = nil }, err: []string{"signInClientSecret", "required"}},
@@ -317,17 +398,24 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an invalid app private key secret name", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretName = "Example_Key" }, err: []string{"appPrivateKeySecretName", "DNS subdomain"}},
 		{name: "an invalid app private key secret key", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretKey = "bad/key" }, err: []string{"appPrivateKeySecretKey", "must match"}},
 		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
+		{name: "fewer than one front-door replica", edit: func(a *gcp.DispatchArgs) { a.FrontDoorReplicas = pulumi.IntRef(0) }, err: []string{"frontDoorReplicas 0", "at least 1"}},
+		{name: "fewer than one listener replica", edit: func(a *gcp.DispatchArgs) { a.ListenerReplicas = pulumi.IntRef(-1) }, err: []string{"listenerReplicas -1", "at least 1"}},
+		{name: "no NATS copies", edit: func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(0) }, err: []string{"natsReplicas 0", "is below 1", "leave it unset for one copy"}},
+		{name: "a negative NATS copy count", edit: func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(-1) }, err: []string{"natsReplicas -1", "is below 1", "leave it unset for one copy"}},
+		{name: "more NATS copies than NATS keeps", edit: func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(6) }, err: []string{"natsReplicas 6", "is above 5, the most copies NATS keeps"}},
+		{name: "a stream byte limit of none", edit: func(a *gcp.DispatchArgs) { a.StreamMaxBytes = pulumi.IntRef(0) }, err: []string{"streamMaxBytes 0", "is below 1", "leave it unset for no limit"}},
+		{name: "a negative stream byte limit", edit: func(a *gcp.DispatchArgs) { a.StreamMaxBytes = pulumi.IntRef(-1) }, err: []string{"streamMaxBytes -1", "is below 1", "leave it unset for no limit"}},
 		{name: "a pprof port of 0", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(0) }, err: []string{"pprofPort 0", "1-65535", "leave it unset"}},
 		{name: "a negative pprof port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(-1) }, err: []string{"pprofPort -1", "1-65535"}},
 		{name: "a pprof port past 65535", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(65536) }, err: []string{"pprofPort 65536", "1-65535"}},
 		{name: "a pprof port on envoy-dispatch's own port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(8766) }, err: []string{"pprofPort 8766", "envoy-dispatch"}},
 		{name: "a pprof port on cloud-sql-proxy's port", edit: func(a *gcp.DispatchArgs) { a.PprofPort = pulumi.IntRef(5432) }, err: []string{"pprofPort 5432", "cloud-sql-proxy"}},
-		{name: "an empty app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("") }, err: []string{"appPriorityClassName is empty", "leave it unset for no priority class"}},
-		{name: "an app priority class that is no DNS subdomain", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("Example_Priority") }, err: []string{`appPriorityClassName "Example_Priority"`, "DNS subdomain"}},
-		{name: "an app priority class with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("example-priority ") }, err: []string{`appPriorityClassName "example-priority "`, "DNS subdomain"}},
-		{name: "an app priority class longer than 253 characters", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(strings.Repeat("a.", 127) + "a") }, err: []string{"appPriorityClassName", "DNS subdomain"}},
-		{name: "a system cluster-critical app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("system-cluster-critical") }, err: []string{`appPriorityClassName "system-cluster-critical"`, "reserves for its own system components"}},
-		{name: "a system node-critical app priority class", edit: func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef("system-node-critical") }, err: []string{`appPriorityClassName "system-node-critical"`, "reserves for its own system components"}},
+		{name: "an empty priority class", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef("") }, err: []string{"priorityClassName is empty", "leave it unset for no priority class"}},
+		{name: "a priority class that is no DNS subdomain", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef("Example_Priority") }, err: []string{`priorityClassName "Example_Priority"`, "DNS subdomain"}},
+		{name: "a priority class with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef("example-priority ") }, err: []string{`priorityClassName "example-priority "`, "DNS subdomain"}},
+		{name: "a priority class longer than 253 characters", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef(strings.Repeat("a.", 127) + "a") }, err: []string{"priorityClassName", "DNS subdomain"}},
+		{name: "a system cluster-critical priority class", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef("system-cluster-critical") }, err: []string{`priorityClassName "system-cluster-critical"`, "reserves for its own system components"}},
+		{name: "a system node-critical priority class", edit: func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef("system-node-critical") }, err: []string{`priorityClassName "system-node-critical"`, "reserves for its own system components"}},
 		{name: "a disruption budget of no pod", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"appPdbMinAvailable 0", "from 1 to replicas (1)", "leave it unset for no PodDisruptionBudget"}},
 		{name: "a negative disruption budget", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(-1) }, err: []string{"appPdbMinAvailable -1", "from 1 to replicas (1)"}},
 		{name: "a disruption budget above the default replica count", edit: func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(2) }, err: []string{"appPdbMinAvailable 2", "from 1 to replicas (1)"}},
@@ -335,31 +423,70 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 			a.Replicas = pulumi.IntRef(3)
 			a.AppPdbMinAvailable = pulumi.IntRef(4)
 		}, err: []string{"appPdbMinAvailable 4", "from 1 to replicas (3)"}},
+		{name: "a front-door budget of no pod", edit: func(a *gcp.DispatchArgs) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"frontDoorPdbMinAvailable 0", "from 1 to frontDoorReplicas (2)", "leave it unset for no PodDisruptionBudget"}},
+		{name: "a front-door budget above the default front-door count", edit: func(a *gcp.DispatchArgs) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(3) }, err: []string{"frontDoorPdbMinAvailable 3", "from 1 to frontDoorReplicas (2)"}},
+		{name: "a front-door budget above the front-door count", edit: func(a *gcp.DispatchArgs) {
+			a.FrontDoorReplicas = pulumi.IntRef(1)
+			a.FrontDoorPdbMinAvailable = pulumi.IntRef(2)
+		}, err: []string{"frontDoorPdbMinAvailable 2", "from 1 to frontDoorReplicas (1)"}},
+		{name: "a front-door budget measured against the app's count", edit: func(a *gcp.DispatchArgs) {
+			a.Replicas = pulumi.IntRef(5)
+			a.FrontDoorPdbMinAvailable = pulumi.IntRef(4)
+		}, err: []string{"frontDoorPdbMinAvailable 4", "from 1 to frontDoorReplicas (2)"}},
+		{name: "a listener budget of no pod", edit: func(a *gcp.DispatchArgs) { a.ListenerPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"listenerPdbMinAvailable 0", "from 1 to listenerReplicas (1)", "leave it unset for no PodDisruptionBudget"}},
+		{name: "a listener budget above the default listener count", edit: func(a *gcp.DispatchArgs) { a.ListenerPdbMinAvailable = pulumi.IntRef(2) }, err: []string{"listenerPdbMinAvailable 2", "from 1 to listenerReplicas (1)"}},
+		{name: "a listener budget above the listener count", edit: func(a *gcp.DispatchArgs) {
+			a.ListenerReplicas = pulumi.IntRef(3)
+			a.ListenerPdbMinAvailable = pulumi.IntRef(4)
+		}, err: []string{"listenerPdbMinAvailable 4", "from 1 to listenerReplicas (3)"}},
+		{name: "a lowercase database availability type", edit: func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef("regional") }, err: []string{`databaseAvailabilityType "regional"`, "ZONAL or REGIONAL"}},
+		{name: "an empty database availability type", edit: func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef("") }, err: []string{`databaseAvailabilityType ""`, "ZONAL or REGIONAL", "leave it unset for ZONAL"}},
+		{name: "an unknown database availability type", edit: func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef("MULTI_REGIONAL") }, err: []string{`databaseAvailabilityType "MULTI_REGIONAL"`, "ZONAL or REGIONAL"}},
 		{name: "an app CPU that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("two") }, err: []string{`appCpu "two"`, "Kubernetes quantity"}},
 		{name: "an app CPU with a memory suffix in the wrong case", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1gi") }, err: []string{`appCpu "1gi"`, "Kubernetes quantity"}},
 		{name: "an app memory that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4 GiB") }, err: []string{`appMemory "4 GiB"`, "Kubernetes quantity"}},
 		{name: "an empty app CPU", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("") }, err: []string{"appCpu is empty", "leave it unset for 1"}},
 		{name: "an empty app memory", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("") }, err: []string{"appMemory is empty", "leave it unset for 4Gi"}},
-		{name: "a negative app CPU", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("-1") }, err: []string{`appCpu "-1"`, "at least 300m", "less than 500m", "Autopilot raises it"}},
-		{name: "an app CPU below Autopilot's pod floor", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("250m") }, err: []string{`appCpu "250m"`, "at least 300m", "cloud-sql-proxy's 200m", "less than 500m", "Autopilot raises it"}},
-		{name: "an app memory below Autopilot's pod floor", edit: func(a *gcp.DispatchArgs) {
+		{name: "a negative app CPU", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("-1") }, err: []string{`appCpu "-1"`, "more than 0"}},
+		{name: "a zero app memory", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("0") }, err: []string{`appMemory "0"`, "more than 0"}},
+		{name: "an app CPU below Autopilot's pod floor with the proxy's", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("250m")
+			a.ProxyCpu = pulumi.StringRef("200m")
+		}, err: []string{`appCpu "250m" and proxyCpu "200m"`, "at least 500m together", "Autopilot raises"}},
+		{name: "an app memory below Autopilot's pod floor with the proxy's", edit: func(a *gcp.DispatchArgs) {
 			a.AppCpu = pulumi.StringRef("500m")
 			a.AppMemory = pulumi.StringRef("128Mi")
-		}, err: []string{`appMemory "128Mi"`, "at least 256Mi", "cloud-sql-proxy's 256Mi", "less than 512Mi", "Autopilot raises it"}},
+			a.ProxyMemory = pulumi.StringRef("256Mi")
+		}, err: []string{`appMemory "128Mi" and proxyMemory "256Mi"`, "at least 512Mi together", "Autopilot raises"}},
 		{name: "an app CPU above Autopilot's pod ceiling", edit: func(a *gcp.DispatchArgs) {
 			a.AppCpu = pulumi.StringRef("30")
 			a.AppMemory = pulumi.StringRef("64Gi")
-		}, err: []string{`appCpu "30"`, "at most 29800m", "above 30", "rejects"}},
+		}, err: []string{`appCpu "30" and proxyCpu "1"`, "at most 30 CPU together", "rejects"}},
+		// 29.5 CPU fit beside the 200m the proxy had; beside its 1 CPU the pod requests 30.5.
+		{name: "an app CPU above Autopilot's pod ceiling only with the proxy's default", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("29.5")
+			a.AppMemory = pulumi.StringRef("64Gi")
+		}, err: []string{`appCpu "29.5" and proxyCpu "1"`, "at most 30 CPU together", "rejects"}},
 		{name: "an app memory above Autopilot's pod ceiling", edit: func(a *gcp.DispatchArgs) {
 			a.AppCpu = pulumi.StringRef("20")
 			a.AppMemory = pulumi.StringRef("110Gi")
-		}, err: []string{`appMemory "110Gi"`, "at most 112384Mi", "above 110Gi", "rejects"}},
-		{name: "app CPU raised without memory to match", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("8") }, err: []string{`appCpu "8"`, `appMemory "4Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
-		{name: "app memory raised without CPU to match", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("32Gi") }, err: []string{`appCpu "1"`, `appMemory "32Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
-		{name: "app memory just above 6.5 GiB per CPU", edit: func(a *gcp.DispatchArgs) {
+		}, err: []string{`appMemory "110Gi" and proxyMemory "2Gi"`, "at most 110Gi together", "rejects"}},
+		// 109Gi fit beside the 256Mi the proxy had; beside its 2Gi the pod requests 111Gi.
+		{name: "an app memory above Autopilot's pod ceiling only with the proxy's default", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("20")
+			a.AppMemory = pulumi.StringRef("109Gi")
+		}, err: []string{`appMemory "109Gi" and proxyMemory "2Gi"`, "at most 110Gi together", "rejects"}},
+		{name: "app CPU raised without memory to match", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("8") }, err: []string{`appCpu "8", appMemory "4Gi", proxyCpu "1" and proxyMemory "2Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "app memory raised without CPU to match", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("32Gi") }, err: []string{`appCpu "1", appMemory "32Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "app memory just above 6.5 GiB per CPU with the proxy's", edit: func(a *gcp.DispatchArgs) {
 			a.AppCpu = pulumi.StringRef("800m")
 			a.AppMemory = pulumi.StringRef("6401Mi")
-		}, err: []string{`appCpu "800m"`, `appMemory "6401Mi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+			a.ProxyCpu = pulumi.StringRef("200m")
+			a.ProxyMemory = pulumi.StringRef("256Mi")
+		}, err: []string{`appCpu "800m", appMemory "6401Mi", proxyCpu "200m" and proxyMemory "256Mi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		// 1 CPU and 11Gi were refused beside the 200m and 256Mi the proxy had (9.4 GiB per CPU);
+		// beside its 1 CPU and 2Gi the pod is 2 CPU and 13Gi, exactly 6.5, and 11265Mi tips it over.
+		{name: "app memory just above 6.5 GiB per CPU with the proxy's default", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("11265Mi") }, err: []string{`appCpu "1", appMemory "11265Mi", proxyCpu "1" and proxyMemory "2Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
 		{name: "an app CPU with leading whitespace", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(" 1") }, err: []string{`appCpu " 1"`, "Kubernetes quantity"}},
 		{name: "an app CPU with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1 ") }, err: []string{`appCpu "1 "`, "Kubernetes quantity"}},
 		{name: "an app memory with leading whitespace", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(" 4Gi") }, err: []string{`appMemory " 4Gi"`, "Kubernetes quantity"}},
@@ -378,6 +505,52 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 			a.AppCpu = pulumi.StringRef("10000000000000000000000000000000000000000e-39")
 		}, err: []string{`appCpu "10000000000000000000000000000000000000000e-39"`, "decimal exponent outside e-9 to e18"}},
 		{name: "an app memory with an exponent past int's range", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("1e99999999999999999999") }, err: []string{`appMemory "1e99999999999999999999"`, "decimal exponent outside e-9 to e18"}},
+		{name: "a proxy CPU that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("one") }, err: []string{`proxyCpu "one"`, "Kubernetes quantity"}},
+		{name: "a proxy memory that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("2 GiB") }, err: []string{`proxyMemory "2 GiB"`, "Kubernetes quantity"}},
+		{name: "a proxy CPU with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("1 ") }, err: []string{`proxyCpu "1 "`, "Kubernetes quantity"}},
+		{name: "a proxy memory with an exponent outside the suffixes' range", edit: func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("2e19") }, err: []string{`proxyMemory "2e19"`, "decimal exponent outside e-9 to e18"}},
+		{name: "an empty proxy CPU", edit: func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("") }, err: []string{"proxyCpu is empty", "leave it unset for 1"}},
+		{name: "an empty proxy memory", edit: func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("") }, err: []string{"proxyMemory is empty", "leave it unset for 2Gi"}},
+		// A negative proxy size beside a large app size would pass the pod's floor on the sum.
+		{name: "a negative proxy CPU", edit: func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("-100m") }, err: []string{`proxyCpu "-100m"`, "more than 0"}},
+		{name: "a zero proxy memory", edit: func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("0Mi") }, err: []string{`proxyMemory "0Mi"`, "more than 0"}},
+		{name: "a proxy CPU below Autopilot's pod floor with the app's", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("300m")
+			a.AppMemory = pulumi.StringRef("512Mi")
+			a.ProxyCpu = pulumi.StringRef("100m")
+			a.ProxyMemory = pulumi.StringRef("256Mi")
+		}, err: []string{`appCpu "300m" and proxyCpu "100m"`, "at least 500m together", "Autopilot raises"}},
+		{name: "a proxy memory below Autopilot's pod floor with the app's", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("300m")
+			a.AppMemory = pulumi.StringRef("256Mi")
+			a.ProxyCpu = pulumi.StringRef("200m")
+			a.ProxyMemory = pulumi.StringRef("255Mi")
+		}, err: []string{`appMemory "256Mi" and proxyMemory "255Mi"`, "at least 512Mi together", "Autopilot raises"}},
+		{name: "a proxy CPU above Autopilot's pod ceiling with the app's", edit: func(a *gcp.DispatchArgs) {
+			a.ProxyCpu = pulumi.StringRef("29001m")
+			a.ProxyMemory = pulumi.StringRef("60Gi")
+		}, err: []string{`appCpu "1" and proxyCpu "29001m"`, "at most 30 CPU together", "rejects"}},
+		{name: "a proxy memory above Autopilot's pod ceiling with the app's", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("10")
+			a.ProxyCpu = pulumi.StringRef("10")
+			a.ProxyMemory = pulumi.StringRef("107Gi")
+		}, err: []string{`appMemory "4Gi" and proxyMemory "107Gi"`, "at most 110Gi together", "rejects"}},
+		{name: "proxy CPU raised without memory to match", edit: func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("8") }, err: []string{`appCpu "1", appMemory "4Gi", proxyCpu "8" and proxyMemory "2Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "proxy memory raised without CPU to match", edit: func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("10Gi") }, err: []string{`appCpu "1", appMemory "4Gi", proxyCpu "1" and proxyMemory "10Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "an app ephemeral storage that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("4 GiB") }, err: []string{`appEphemeralStorage "4 GiB"`, "Kubernetes quantity"}},
+		{name: "a proxy ephemeral storage with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.ProxyEphemeralStorage = pulumi.StringRef("1Gi ") }, err: []string{`proxyEphemeralStorage "1Gi "`, "Kubernetes quantity"}},
+		{name: "an empty app ephemeral storage", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("") }, err: []string{"appEphemeralStorage is empty", "leave it unset for Autopilot's default of 1Gi"}},
+		{name: "an empty proxy ephemeral storage", edit: func(a *gcp.DispatchArgs) { a.ProxyEphemeralStorage = pulumi.StringRef("") }, err: []string{"proxyEphemeralStorage is empty", "leave it unset for Autopilot's default of 1Gi"}},
+		// A negative size beside a large one would pass the pod's ceiling on the sum.
+		{name: "a negative app ephemeral storage", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("-1Gi") }, err: []string{`appEphemeralStorage "-1Gi"`, "more than 0"}},
+		{name: "a zero proxy ephemeral storage", edit: func(a *gcp.DispatchArgs) { a.ProxyEphemeralStorage = pulumi.StringRef("0") }, err: []string{`proxyEphemeralStorage "0"`, "more than 0"}},
+		{name: "an app ephemeral storage with an exponent past e18", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("0.0000000000000000000001e30") }, err: []string{`appEphemeralStorage "0.0000000000000000000001e30"`, "decimal exponent outside e-9 to e18"}},
+		{name: "ephemeral storage below Autopilot's pod floor", edit: func(a *gcp.DispatchArgs) {
+			a.AppEphemeralStorage = pulumi.StringRef("5Mi")
+			a.ProxyEphemeralStorage = pulumi.StringRef("4Mi")
+		}, err: []string{`appEphemeralStorage "5Mi" and proxyEphemeralStorage "4Mi"`, "at least 10Mi together", "Autopilot raises"}},
+		{name: "an app ephemeral storage above Autopilot's pod ceiling beside the proxy's default", edit: func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("9217Mi") }, err: []string{`appEphemeralStorage "9217Mi" and proxyEphemeralStorage unset (Autopilot's 1Gi)`, "at most 10Gi together", "rejects"}},
+		{name: "a proxy ephemeral storage above Autopilot's pod ceiling beside the app's default", edit: func(a *gcp.DispatchArgs) { a.ProxyEphemeralStorage = pulumi.StringRef("10Gi") }, err: []string{`appEphemeralStorage unset (Autopilot's 1Gi) and proxyEphemeralStorage "10Gi"`, "at most 10Gi together", "rejects"}},
 		{name: "an Azure endpoint without its quota", edit: func(a *gcp.DispatchArgs) {
 			setAzureKey(a)
 			a.AzureEmbedTokensPerMinute = nil
@@ -471,13 +644,19 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed in the Envoy image", "envoyImage", func(a *gcp.DispatchArgs) { a.EnvoyImage = "example.invalid/" + seed + digest }},
 		{"a seed in the Tailscale image", "tailscaleImage", func(a *gcp.DispatchArgs) { a.TailscaleImage = "example.invalid/" + seed + digest }},
 		{"a seed in the Cloud SQL proxy image", "cloudSqlProxyImage", func(a *gcp.DispatchArgs) { a.CloudSqlProxyImage = "example.invalid/" + seed + digest }},
+		{"a seed in the front-door tools image", "frontDoorToolsImage", func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = "example.invalid/" + seed + digest }},
 		{"a seed as the sign-in client ID", "signInClientId", func(a *gcp.DispatchArgs) { a.SignInClientId = seed }},
 		{"a seed inside the sign-in domain", "signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = lower + ".example.com" }},
 		{"a seed in the database version", "databaseVersion", func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef(seed) }},
 		{"a seed in the database tier", "databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef(seed) }},
+		{"a seed as the database availability type", "databaseAvailabilityType", func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef(seed) }},
 		{"a seed as the app CPU", "appCpu", func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(seed) }},
 		{"a seed as the app memory", "appMemory", func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(seed) }},
-		{"a seed as the app priority class", "appPriorityClassName", func(a *gcp.DispatchArgs) { a.AppPriorityClassName = pulumi.StringRef(lower) }},
+		{"a seed as the proxy CPU", "proxyCpu", func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef(seed) }},
+		{"a lowercase seed as the proxy memory", "proxyMemory", func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef(lower) }},
+		{"a seed as the app ephemeral storage", "appEphemeralStorage", func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef(seed) }},
+		{"a lowercase seed as the proxy ephemeral storage", "proxyEphemeralStorage", func(a *gcp.DispatchArgs) { a.ProxyEphemeralStorage = pulumi.StringRef(lower) }},
+		{"a seed as the priority class", "priorityClassName", func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef(lower) }},
 		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
 		{"a seed inside the agent secrets URL", "agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://" + lower + ".internal.example" }},
@@ -528,30 +707,44 @@ func TestDispatchRefusesASeedInTheComponentName(t *testing.T) {
 // natsUrl is an Input, checked inside the ApplyT that renders the listener's environment: core's
 // Env names its own inputs (natsUrls by index, socks5Proxy), neither of which gcp:Dispatch has,
 // so the component maps each refusal onto natsUrl, a core.InputError, and wraps it with its type
-// and name — it never panics, which would kill the provider process.
+// and name — it never panics, which would kill the provider process. With natsInCluster there is
+// no proxy whose refusal to map: the component refuses a local URL itself, before core's Env is
+// reached, and names natsUrl there too, since the pods would be dialling themselves.
 func TestDispatchRefusesABadNatsURLOnceItResolves(t *testing.T) {
 	seed, _ := testnats.User(t)
 	rows := []struct {
 		name, url, want string
+		// inCluster rows go through the component alone: gcp.DispatchListenerEnvError renders
+		// the SOCKS5 mode, which is the only mode that helper has.
+		inCluster bool
 	}{
-		{"a loopback URL", "nats://127.0.0.1:4222", "natsUrl names a local NATS server"},
-		{"a URL holding a seed", "nats://example:" + seed + "@example-hub.example-tailnet.ts.net:4222", "natsUrl holds an nkey seed (not echoed)"},
+		{name: "a loopback URL", url: "nats://127.0.0.1:4222", want: "natsUrl names a local NATS server"},
+		{name: "a URL holding a seed", url: "nats://example:" + seed + "@example-hub.example-tailnet.ts.net:4222", want: "natsUrl holds an nkey seed (not echoed)"},
+		{name: "a loopback URL with natsInCluster", url: "nats://127.0.0.1:4222", inCluster: true,
+			want: "natsUrl names a local NATS server; with natsInCluster the pods dial it directly"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			err := gcp.DispatchListenerEnvError("example-dispatch", row.url)
-			var input *core.InputError
-			require.ErrorAs(t, err, &input)
-			require.Equal(t, "natsUrl", input.Input)
-			require.ErrorContains(t, err, row.want)
-			require.NotContains(t, err.Error(), "natsUrls")
-			require.NotContains(t, err.Error(), "socks5Proxy")
-			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			if !row.inCluster {
+				err := gcp.DispatchListenerEnvError("example-dispatch", row.url)
+				var input *core.InputError
+				require.ErrorAs(t, err, &input)
+				require.Equal(t, "natsUrl", input.Input)
+				require.ErrorContains(t, err, row.want)
+				require.NotContains(t, err.Error(), "natsUrls")
+				require.NotContains(t, err.Error(), "socks5Proxy")
+				require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			}
 
 			args := dispatchArgs()
+			if row.inCluster {
+				setInClusterNats(args)
+			}
 			args.NatsUrl = pulumi.String(row.url)
-			_, err = runDispatch(t, args, true)
+			_, err := runDispatch(t, args, true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.want)
+			require.NotContains(t, err.Error(), "natsUrls")
+			require.NotContains(t, err.Error(), "socks5Proxy")
 			require.NotContains(t, strings.ToUpper(err.Error()), seed)
 		})
 	}
@@ -702,32 +895,73 @@ func TestDispatchListenerSecretHoldsOnlyItsAPIToken(t *testing.T) {
 	require.Equal(t, map[string]any{"ENVOY_API_TOKEN": "example-dispatch-listener-token-result"}, normalizedProperty(data))
 }
 
-// One replica is the default, and its Deployment carries no rollingUpdate at all: Kubernetes
-// refuses a rollingUpdate block on a Recreate Deployment.
-func TestDispatchDeploymentRecreatesOneReplicaByDefault(t *testing.T) {
-	m, err := runDispatch(t, dispatchArgs(), true)
-	require.NoError(t, err)
-
-	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
-	require.EqualValues(t, 1, spec["replicas"])
-	strategy := spec["strategy"].(map[string]any)
-	require.Equal(t, "Recreate", strategy["type"])
-	require.NotContains(t, strategy, "rollingUpdate")
+// dispatchWorkloads are the component's three Deployments, each with the input that sets its
+// replica count and the one that sets its PodDisruptionBudget.
+var dispatchWorkloads = []struct {
+	deployment       string
+	replicas, budget func(*gcp.DispatchArgs, int)
+}{
+	{"example-dispatch",
+		func(a *gcp.DispatchArgs, n int) { a.Replicas = pulumi.IntRef(n) },
+		func(a *gcp.DispatchArgs, n int) { a.AppPdbMinAvailable = pulumi.IntRef(n) }},
+	{"example-dispatch-tailnet",
+		func(a *gcp.DispatchArgs, n int) { a.FrontDoorReplicas = pulumi.IntRef(n) },
+		func(a *gcp.DispatchArgs, n int) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(n) }},
+	{"example-dispatch-listener",
+		func(a *gcp.DispatchArgs, n int) { a.ListenerReplicas = pulumi.IntRef(n) },
+		func(a *gcp.DispatchArgs, n int) { a.ListenerPdbMinAvailable = pulumi.IntRef(n) }},
 }
 
-func TestDispatchDeploymentRollsSeveralReplicas(t *testing.T) {
-	args := dispatchArgs()
-	args.Replicas = pulumi.IntRef(3)
-	m, err := runDispatch(t, args, true)
-	require.NoError(t, err)
+// deploymentSpec returns one Deployment's spec, with every output and secret wrapper off.
+func deploymentSpec(t *testing.T, m *pulumitest.Mocks, deployment string) map[string]any {
+	t.Helper()
+	return normalizedProperty(m.Named(t, "kubernetes:apps/v1:Deployment", deployment).Inputs["spec"]).(map[string]any)
+}
 
-	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
-	require.EqualValues(t, 3, spec["replicas"])
-	strategy := spec["strategy"].(map[string]any)
-	require.Equal(t, "RollingUpdate", strategy["type"])
-	rollingUpdate := strategy["rollingUpdate"].(map[string]any)
-	require.EqualValues(t, 0, rollingUpdate["maxUnavailable"])
-	require.EqualValues(t, 1, rollingUpdate["maxSurge"])
+// requireStrategy fails unless deployment runs replicas pods, recreated at one replica, with no
+// rollingUpdate block (Kubernetes refuses one on a Recreate Deployment), and rolled above it, one
+// new pod up before any old one goes down.
+func requireStrategy(t *testing.T, m *pulumitest.Mocks, deployment string, replicas int) {
+	t.Helper()
+	spec := deploymentSpec(t, m, deployment)
+	require.EqualValues(t, replicas, spec["replicas"], deployment)
+	if replicas == 1 {
+		require.Equal(t, map[string]any{"type": "Recreate"}, spec["strategy"], deployment)
+		return
+	}
+	require.Equal(t, map[string]any{
+		"type":          "RollingUpdate",
+		"rollingUpdate": map[string]any{"maxUnavailable": float64(0), "maxSurge": float64(1)},
+	}, spec["strategy"], deployment)
+}
+
+// Each Deployment takes its strategy from its own replica count: recreated at one replica, since a
+// roll runs the outgoing and incoming builds together, and rolled above it. By default the front
+// door runs two pods and rolls, so no single pod carries the tailnet name; the app and the
+// listener run one each and are recreated. One workload's count leaves the other two Deployments'
+// specs as the defaults render them.
+func TestDispatchEachWorkloadRecreatesAtOneReplicaAndRollsAbove(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	requireStrategy(t, defaults, "example-dispatch", 1)
+	requireStrategy(t, defaults, "example-dispatch-tailnet", 2)
+	requireStrategy(t, defaults, "example-dispatch-listener", 1)
+	for _, workload := range dispatchWorkloads {
+		for _, replicas := range []int{1, 3} {
+			t.Run(fmt.Sprintf("%s at %d", workload.deployment, replicas), func(t *testing.T) {
+				args := dispatchArgs()
+				workload.replicas(args, replicas)
+				m, err := runDispatch(t, args, true)
+				require.NoError(t, err)
+				requireStrategy(t, m, workload.deployment, replicas)
+				for _, other := range dispatchWorkloads {
+					if other.deployment != workload.deployment {
+						require.Equal(t, deploymentSpec(t, defaults, other.deployment), deploymentSpec(t, m, other.deployment), other.deployment)
+					}
+				}
+			})
+		}
+	}
 }
 
 // deploymentPodTemplate returns one workload's pod template, with every output and secret
@@ -772,52 +1006,34 @@ func containerEnv(t *testing.T, container map[string]any) map[string]any {
 
 // A Deployment's name and its selector are immutable in place, and the consumer patches the app's
 // Deployment by name: either one moving turns the consumer's preview into a replacement, which
-// takes the app down, rather than an update.
-func TestDispatchAppDeploymentKeepsItsNameAndSelector(t *testing.T) {
+// takes that workload down, rather than an update. The same holds for the front door's SOCKS5
+// Service, which the app and the listener dial by name; and a pod of the front door or the
+// listener wearing the app's label would be sent user traffic by Service example-dispatch.
+func TestDispatchDeploymentsKeepTheirNamesAndSelectors(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	deployment := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch")
-	require.Equal(t, "example-dispatch", deployment.Name)
-	inputs := deployment.Inputs.Mappable()
-	require.Equal(t, "example-dispatch", inputs["metadata"].(map[string]any)["name"])
-	spec := inputs["spec"].(map[string]any)
-	require.Equal(t, map[string]any{"app": "example-dispatch"},
-		spec["selector"].(map[string]any)["matchLabels"])
-	require.Equal(t, map[string]any{"app": "example-dispatch"},
-		deploymentPodTemplate(t, m, "example-dispatch")["metadata"].(map[string]any)["labels"],
-		"the pods the selector matches are the pods this Deployment creates")
+	for _, workload := range dispatchWorkloads {
+		deployment := m.Named(t, "kubernetes:apps/v1:Deployment", workload.deployment)
+		require.Equal(t, workload.deployment, deployment.Name)
+		inputs := deployment.Inputs.Mappable()
+		require.Equal(t, workload.deployment, inputs["metadata"].(map[string]any)["name"])
+		labels := map[string]any{"app": workload.deployment}
+		require.Equal(t, labels, deploymentSpec(t, m, workload.deployment)["selector"].(map[string]any)["matchLabels"])
+		require.Equal(t, labels, deploymentPodTemplate(t, m, workload.deployment)["metadata"].(map[string]any)["labels"],
+			"the pods the selector matches are the pods this Deployment creates")
+	}
+	socks5 := m.Named(t, "kubernetes:core/v1:Service", "example-dispatch-tailnet").Inputs.Mappable()
+	require.Equal(t, "example-dispatch-tailnet", socks5["metadata"].(map[string]any)["name"])
+	spec := socks5["spec"].(map[string]any)
+	require.Equal(t, map[string]any{"app": "example-dispatch-tailnet"}, spec["selector"], "the SOCKS5 Service selects the front door's pods")
+	require.Equal(t, []any{map[string]any{"port": float64(1055), "targetPort": float64(1055)}}, spec["ports"])
 }
 
-// One tailnet node holds the hostname and the single-use auth key's state, so the front door is
-// recreated at one replica whatever the app's count; and a front-door pod wearing the app's label
-// would be sent user traffic by Service example-dispatch.
-func TestDispatchFrontDoorStaysSingleWhileTheAppScales(t *testing.T) {
-	args := dispatchArgs()
-	args.Replicas = pulumi.IntRef(3)
-	m, err := runDispatch(t, args, true)
-	require.NoError(t, err)
-
-	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").Inputs.Mappable()["spec"].(map[string]any)
-	require.EqualValues(t, 1, spec["replicas"])
-	strategy := spec["strategy"].(map[string]any)
-	require.Equal(t, "Recreate", strategy["type"])
-	require.NotContains(t, strategy, "rollingUpdate", "Kubernetes refuses a rollingUpdate block on a Recreate Deployment")
-
-	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
-	labels := template["metadata"].(map[string]any)["labels"].(map[string]any)
-	require.Equal(t, map[string]any{"app": "example-dispatch-tailnet"}, labels)
-	require.NotEqual(t, "example-dispatch", labels["app"], "Service example-dispatch selects app=example-dispatch")
-	pod := template["spec"].(map[string]any)
-	require.Equal(t, "example-dispatch", pod["serviceAccountName"], "the state Secret's Role is bound to this account")
-	require.Len(t, pod["containers"].([]any), 1)
-	env := containerEnv(t, podContainer(t, template, "tailscale"))
-	require.Equal(t, "example-dispatch-tailscale-state", env["TS_KUBE_SECRET"])
-}
-
-// The app's image reaching the front door's Deployment would roll the tailnet node, and with it
-// the hostname every reader reaches Dispatch at, on every release of the app. Registering the same
-// inputs twice is the only form a mock engine can state "the front door stays up" in.
+// The app's image reaching the front door's Deployment would roll the front door's pods on every
+// release of the app. cert-publish runs on frontDoorToolsImage, an input of its own, so no
+// front-door container takes the app's image. Registering the same inputs twice is the only form a
+// mock engine can state "the front door stays up" in.
 func TestDispatchFrontDoorDoesNotRollOnTheAppsImage(t *testing.T) {
 	first, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -837,20 +1053,265 @@ func TestDispatchFrontDoorDoesNotRollOnTheAppsImage(t *testing.T) {
 		"the app's own pods carry the new image")
 }
 
+// frontDoorEnv indexes one front-door container's environment by name: a plain variable maps to
+// its value, and one from a Secret or a field to its valueFrom.
+func frontDoorEnv(t *testing.T, container map[string]any) map[string]any {
+	t.Helper()
+	env := map[string]any{}
+	for _, item := range container["env"].([]any) {
+		entry := item.(map[string]any)
+		name := entry["name"].(string)
+		require.NotContains(t, env, name, "the environment names %s once", name)
+		if value, ok := entry["value"]; ok {
+			env[name] = value
+		} else {
+			env[name] = entry["valueFrom"]
+		}
+	}
+	return env
+}
+
+// podNamed is a valueFrom that reads the pod's own name.
+var podNamed = map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.name"}}
+
+// By default the front door runs two pods and rolls them one new pod at a time with none missing,
+// so no single pod carries the tailnet name or the SOCKS5 proxy; the SOCKS5 Service selects exactly
+// the pods the Deployment creates, each of which runs the proxy.
+func TestDispatchFrontDoorRunsTwoRollingPodsBehindItsSOCKS5Service(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	requireStrategy(t, m, "example-dispatch-tailnet", 2)
+	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
+	spec := m.Named(t, "kubernetes:core/v1:Service", "example-dispatch-tailnet").Inputs.Mappable()["spec"].(map[string]any)
+	require.Equal(t, template["metadata"].(map[string]any)["labels"], spec["selector"], "the SOCKS5 Service selects the front door's pods")
+	require.Equal(t, []any{map[string]any{"port": float64(1055), "targetPort": float64(1055)}}, spec["ports"])
+	require.Equal(t, "0.0.0.0:1055", frontDoorEnv(t, podContainer(t, template, "tailscale"))["TS_SOCKS5_SERVER"],
+		"every front-door pod runs the proxy, on every address")
+}
+
+// Each front-door pod is a tailnet node of its own hosting the Tailscale Service: its own
+// ServiceAccount; tailscaled's state on the pod's emptyDir in a directory below the mount point,
+// which tailscaled can make 0700 (the kubelet owns the mount point, and tailscaled falls back to
+// an in-memory store when its chmod fails); a node named after the pod; no Kubernetes Secret
+// holding node state; no advertisement by containerboot itself, the advertiser deciding it; the
+// SOCKS5 proxy on every pod; a grace period for the preStop drain and containerboot's shutdown;
+// readiness from the advertiser's ready file alone. Its containers are cert-seed (init), tailscale,
+// cert-publish on frontDoorToolsImage and the advertiser, every one as the envoy image's uid with
+// no privilege, together requesting 700m and 768Mi. The ServiceAccount's token is not automounted:
+// cert-publish alone mounts it, projected with the certificate authority and the namespace.
+func TestDispatchFrontDoorPodHostsTheTailscaleService(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
+	pod := template["spec"].(map[string]any)
+	require.Equal(t, "example-dispatch-tailnet", pod["serviceAccountName"])
+	require.Equal(t, false, pod["automountServiceAccountToken"], "no container gets the token unless it mounts it")
+	require.EqualValues(t, 60, pod["terminationGracePeriodSeconds"])
+	require.Equal(t, map[string]any{
+		"runAsUser": float64(999), "runAsGroup": float64(999), "runAsNonRoot": true,
+		"seccompProfile": map[string]any{"type": "RuntimeDefault"},
+	}, pod["securityContext"])
+	require.Equal(t, []any{
+		map[string]any{"name": "state", "emptyDir": map[string]any{}},
+		map[string]any{"name": "serve", "configMap": map[string]any{"name": "example-dispatch-serve"}},
+		map[string]any{"name": "tls", "secret": map[string]any{"secretName": "example-dispatch-tailnet-tls", "optional": false}},
+		map[string]any{"name": "token", "projected": map[string]any{"sources": []any{
+			map[string]any{"serviceAccountToken": map[string]any{"path": "token", "expirationSeconds": float64(3607)}},
+			map[string]any{"configMap": map[string]any{"name": "kube-root-ca.crt", "items": []any{map[string]any{"key": "ca.crt", "path": "ca.crt"}}}},
+			map[string]any{"downwardAPI": map[string]any{"items": []any{map[string]any{
+				"path": "namespace", "fieldRef": map[string]any{"apiVersion": "v1", "fieldPath": "metadata.namespace"},
+			}}}},
+		}}},
+	}, pod["volumes"])
+
+	containers := podProbes(t, m, "example-dispatch-tailnet")
+	names := func(field string) []string {
+		var out []string
+		for _, item := range pod[field].([]any) {
+			out = append(out, item.(map[string]any)["name"].(string))
+		}
+		return out
+	}
+	require.Equal(t, []string{"cert-seed"}, names("initContainers"))
+	require.Equal(t, []string{"tailscale", "cert-publish", "advertiser"}, names("containers"))
+	for name, want := range map[string]struct{ image, cpu, memory string }{
+		"cert-seed":    {dispatchTailscaleImage, "100m", "128Mi"},
+		"tailscale":    {dispatchTailscaleImage, "500m", "512Mi"},
+		"cert-publish": {dispatchToolsImage, "100m", "128Mi"},
+		"advertiser":   {dispatchTailscaleImage, "100m", "128Mi"},
+	} {
+		container := containers[name]
+		require.Equal(t, want.image, container["image"], name)
+		require.Equal(t, map[string]any{"requests": map[string]any{"cpu": want.cpu, "memory": want.memory}, "limits": map[string]any{"cpu": want.cpu, "memory": want.memory}},
+			container["resources"], name)
+		require.Equal(t, map[string]any{"allowPrivilegeEscalation": false, "capabilities": map[string]any{"drop": []any{"ALL"}}},
+			container["securityContext"], name)
+		require.Contains(t, container["volumeMounts"], map[string]any{"name": "state", "mountPath": "/var/lib/frontdoor"}, "%s mounts the state volume", name)
+		if name != "tailscale" {
+			require.NotContains(t, container, "readinessProbe", "only the tailscale container's readiness counts")
+		}
+	}
+	for _, name := range []string{"cert-seed", "cert-publish"} {
+		require.Contains(t, containers[name]["volumeMounts"], map[string]any{"name": "tls", "mountPath": "/etc/frontdoor-tls", "readOnly": true}, name)
+	}
+	for name, container := range containers {
+		for _, item := range container["volumeMounts"].([]any) {
+			mount := item.(map[string]any)
+			if name == "cert-publish" && mount["name"] == "token" {
+				require.Equal(t, map[string]any{"name": "token", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount", "readOnly": true}, mount)
+				continue
+			}
+			require.NotEqual(t, "token", mount["name"], "%s mounts the ServiceAccount token", name)
+			require.NotEqual(t, "/var/run/secrets/kubernetes.io/serviceaccount", mount["mountPath"], "%s mounts the ServiceAccount token path", name)
+		}
+	}
+	require.Contains(t, containers["cert-publish"]["volumeMounts"],
+		map[string]any{"name": "token", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount", "readOnly": true}, "cert-publish calls the API server")
+
+	tailscale := containers["tailscale"]
+	env := frontDoorEnv(t, tailscale)
+	stateDir := env["TS_STATE_DIR"].(string)
+	require.Equal(t, "/var/lib/frontdoor/tailscale", stateDir)
+	require.Equal(t, stateDir, env["TS_LOGS_DIR"])
+	for _, item := range tailscale["volumeMounts"].([]any) {
+		require.NotEqual(t, stateDir, item.(map[string]any)["mountPath"], "TS_STATE_DIR is no mount point, which the pod's uid cannot chmod")
+	}
+	require.Equal(t, podNamed, env["TS_HOSTNAME"], "each pod registers under its own name")
+	require.Equal(t, "", env["TS_KUBE_SECRET"], "no Kubernetes Secret holds a node's state")
+	require.Equal(t, "false", env["TS_EXPERIMENTAL_SERVICE_AUTO_ADVERTISEMENT"], "containerboot advertises nothing by itself")
+	require.Equal(t, "0.0.0.0:1055", env["TS_SOCKS5_SERVER"])
+	require.Equal(t, "/etc/tailscale/serve.json", env["TS_SERVE_CONFIG"])
+	require.Contains(t, tailscale["volumeMounts"], map[string]any{"name": "serve", "mountPath": "/etc/tailscale"})
+	require.Equal(t, "/var/lib/frontdoor/tailscaled.sock", env["TS_SOCKET"])
+	require.Equal(t, map[string]any{"secretKeyRef": map[string]any{"name": "example-dispatch-tailnet-auth-key", "key": "TS_AUTHKEY"}}, env["TS_AUTHKEY"])
+	require.Equal(t, "--advertise-tags=tag:example-dispatch", env["TS_EXTRA_ARGS"])
+	require.Equal(t, map[string]any{
+		"exec":          map[string]any{"command": []any{"/bin/sh", "-c", "test -e /var/lib/frontdoor/service-ready"}},
+		"periodSeconds": float64(5), "failureThreshold": float64(1),
+	}, tailscale["readinessProbe"], "ready only while the advertiser's ready file exists")
+	require.Contains(t, tailscale, "livenessProbe")
+	require.Contains(t, tailscale, "startupProbe")
+	preStop := tailscale["lifecycle"].(map[string]any)["preStop"].(map[string]any)["exec"].(map[string]any)["command"].([]any)
+	require.Contains(t, preStop[2], "serve drain svc:example-dispatch", "the preStop hook drains the Service")
+	require.Contains(t, preStop[2], "logout", "the preStop hook logs the node out")
+
+	publish := containers["cert-publish"]
+	require.Equal(t, map[string]any{"HOSTNAME": podNamed}, frontDoorEnv(t, publish), "the claim gate keys its entries on the pod's own name")
+	script := publish["args"].([]any)[0].(string)
+	for _, want := range []string{"legion.dev/certificate-claims", "legion.dev/front-door-nodes", "published a later certificate",
+		"url=https://kubernetes.default.svc/api/v1/namespaces/dispatch/secrets/example-dispatch-tailnet-tls"} {
+		require.Contains(t, script, want, "cert-publish runs the claim gate and the publishing loop")
+	}
+	advertiser := containers["advertiser"]["args"].([]any)[0].(string)
+	require.Contains(t, advertiser, "certificate=example-dispatch.example-tailnet.ts.net\n", "the advertiser orders the Service name's certificate")
+	require.Contains(t, advertiser, "flag_file=/var/lib/frontdoor/advertise-service\n", "the advertiser advertises only the node the gate's flag names")
+	require.Contains(t, advertiser, "service=svc:example-dispatch\n")
+	require.Contains(t, containers["cert-seed"]["args"].([]any)[0], "seeded the cached certificate")
+}
+
+// The front door writes one object, its TLS Secret, through a Role that names that Secret alone,
+// grants get and patch alone (the claim gate's read and the scripts' merge patches; no update), and
+// binds the front door's own ServiceAccount alone; no Role lets any pod write a tailnet state
+// Secret, and no container names one. The app and the listener keep ServiceAccount <hostname>,
+// which the serviceAccountSubject output names (TestConstructOutputsTheServiceAccountIssuerAndSubject).
+func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	const roleType, bindingType = "kubernetes:rbac.authorization.k8s.io/v1:Role", "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
+	require.Len(t, registrationsOf(m, roleType), 1, "the component registers one Role")
+	require.Len(t, registrationsOf(m, bindingType), 1, "the component registers one RoleBinding")
+	role := m.Named(t, roleType, "example-dispatch-tailnet-tls").Inputs.Mappable()
+	require.Equal(t, []any{map[string]any{
+		"apiGroups": []any{""}, "resources": []any{"secrets"}, "resourceNames": []any{"example-dispatch-tailnet-tls"},
+		"verbs": []any{"get", "patch"},
+	}}, role["rules"])
+	binding := m.Named(t, bindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
+	require.Equal(t, map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "example-dispatch-tailnet-tls"}, binding["roleRef"])
+	require.Equal(t, []any{map[string]any{"kind": "ServiceAccount", "name": "example-dispatch-tailnet", "namespace": "dispatch"}}, binding["subjects"])
+	for _, r := range append(registrationsOf(m, roleType), registrationsOf(m, bindingType)...) {
+		for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
+			require.NotContains(t, s, "tailscale-state", "%s %s", r.Type, r.Name)
+		}
+	}
+
+	var accounts []string
+	for _, r := range registrationsOf(m, "kubernetes:core/v1:ServiceAccount") {
+		accounts = append(accounts, r.Name)
+	}
+	require.ElementsMatch(t, []string{"example-dispatch", "example-dispatch-tailnet"}, accounts)
+	for _, workload := range dispatchWorkloads {
+		want := "example-dispatch"
+		if workload.deployment == "example-dispatch-tailnet" {
+			want = "example-dispatch-tailnet"
+		}
+		require.Equal(t, want, deploymentPodTemplate(t, m, workload.deployment)["spec"].(map[string]any)["serviceAccountName"], workload.deployment)
+		for _, container := range podProbes(t, m, workload.deployment) {
+			env, _ := container["env"].([]any)
+			for _, item := range env {
+				entry := item.(map[string]any)
+				if entry["name"] == "TS_KUBE_SECRET" {
+					require.Equal(t, "", entry["value"], "%s names no Kubernetes Secret for tailnet state", workload.deployment)
+				}
+			}
+		}
+	}
+}
+
+// The TLS Secret holds what cert-publish writes and nothing the program declares: it is registered
+// with no data and with its data ignored, so no preview plans to undo a published certificate, and
+// no pod template carries its checksum, so a renewed certificate rolls no pod.
+func TestDispatchFrontDoorTLSSecretHoldsOnlyWhatThePodsPublish(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	secret := m.Named(t, "kubernetes:core/v1:Secret", "example-dispatch-tailnet-tls")
+	require.Equal(t, "example-dispatch-tailnet-tls", secret.Inputs.Mappable()["metadata"].(map[string]any)["name"])
+	require.NotContains(t, secret.Inputs, resource.PropertyKey("data"))
+	require.NotContains(t, secret.Inputs, resource.PropertyKey("stringData"))
+	require.ElementsMatch(t, []string{"data", "stringData"}, secret.RPC.GetIgnoreChanges())
+	for _, workload := range dispatchWorkloads {
+		annotations, _ := deploymentPodTemplate(t, m, workload.deployment)["metadata"].(map[string]any)["annotations"].(map[string]any)
+		for key := range annotations {
+			require.NotContains(t, key, "example-dispatch-tailnet-tls", workload.deployment)
+		}
+	}
+	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies(),
+		"urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Secret::example-dispatch-tailnet-tls",
+		"the front door's pods mount the Secret, so the Deployment waits for it")
+}
+
+// tailnetService names the Tailscale Service the front door hosts, and the pods host
+// svc:<hostname>, whose name the certificate and the URL carry: once it resolves to anything else,
+// the run fails naming the input and never the value.
+func TestDispatchRefusesATailnetServiceOtherThanItsOwn(t *testing.T) {
+	for _, value := range []string{"svc:another-service", "another-service", "svc:example-dispatch-other"} {
+		t.Run(value, func(t *testing.T) {
+			args := dispatchArgs()
+			args.TailnetService = pulumi.String(value)
+			_, err := runDispatch(t, args, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: tailnetService must be svc:example-dispatch")
+			require.NotContains(t, err.Error(), value)
+		})
+	}
+}
+
 // requireWaitsForTheFrontDoor fails unless deployment is created after the front door's pod and
 // its Service, the two a caller of the SOCKS5 proxy needs.
 func requireWaitsForTheFrontDoor(t *testing.T, m *pulumitest.Mocks, deployment, dials string) {
 	t.Helper()
 	deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:apps/v1:Deployment::example-dispatch-tailnet",
-		dials+" is created after the pod running the SOCKS5 proxy")
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Service::example-dispatch-tailnet",
-		dials+" dials the proxy at its Service, not at the pod")
+	require.Contains(t, deps, frontDoorPodURN, dials+" is created after the pod running the SOCKS5 proxy")
+	require.Contains(t, deps, frontDoorServiceURN, dials+" dials the proxy at its Service, not at the pod")
 }
 
-// envoy-dispatch exits 1 when it cannot reach NATS through the proxy, and its /healthz answers 503
-// until it connects, so an app pod started before the front door and its Service exist never goes
-// ready and the rollout waits it out.
+// envoy-dispatch serves without NATS: its /healthz readiness reads only Postgres, reporting nats
+// false, and its bus clients connect in the background once the front door's proxy answers. So an
+// app pod started before the front door and its Service would still go ready, serving without
+// the bus until the proxy answers; the app waits for the front door only so that it starts
+// connected.
 func TestDispatchAppWaitsForTheFrontDoor(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -869,33 +1330,137 @@ func TestDispatchListenerWaitsForTheFrontDoor(t *testing.T) {
 	requireWaitsForTheFrontDoor(t, m, "example-dispatch-listener", "the listener")
 }
 
-// Two listeners with one machine id never both bind that id's exclusive durable, and a listener
-// bound to 0.0.0.0 refuses to start without a bearer. The app reaches the listener and the proxy
-// over the network now, each running in a pod of its own.
-func TestDispatchListenerStaysSingleAndAuthenticated(t *testing.T) {
-	args := dispatchArgs()
-	args.Replicas = pulumi.IntRef(3)
-	m, err := runDispatch(t, args, true)
+// A listener bound to 0.0.0.0 refuses to start without a bearer. The app reaches the listener and
+// the proxy over the network, each running in pods of its own.
+func TestDispatchListenerIsAuthenticated(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-listener").Inputs.Mappable()["spec"].(map[string]any)
-	require.EqualValues(t, 1, spec["replicas"])
-	strategy := spec["strategy"].(map[string]any)
-	require.Equal(t, "Recreate", strategy["type"])
-	require.NotContains(t, strategy, "rollingUpdate")
-
-	const socks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
 	listenerToken := map[string]any{"name": "example-dispatch-listener", "key": "ENVOY_API_TOKEN"}
-	listener := containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener"))
+	listener := listenerEnv(t, m)
 	require.Equal(t, "example-dispatch", listener["ENVOY_MACHINE_ID"])
 	require.Equal(t, "0.0.0.0", listener["ENVOY_LISTEN_HOST"])
 	require.Equal(t, listenerToken, listener["ENVOY_API_TOKEN"])
-	require.Equal(t, socks5Proxy, listener["ENVOY_NATS_SOCKS5_PROXY"])
+	require.Equal(t, dispatchSocks5Proxy, listener["ENVOY_NATS_SOCKS5_PROXY"])
 
-	app := containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch"))
+	app := appEnv(t, m)
 	require.Equal(t, "http://example-dispatch-listener.dispatch.svc.cluster.local:9020", app["ENVOY_URL"])
 	require.Equal(t, listenerToken, app["ENVOY_TOKEN"])
-	require.Equal(t, socks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
+	require.Equal(t, dispatchSocks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
+}
+
+// dispatchNatsEnvs are the environments of the two containers that dial the NATS hub, the app's
+// envoy-dispatch and the listener's envoy-listener, keyed by container name.
+func dispatchNatsEnvs(t *testing.T, m *pulumitest.Mocks) map[string]map[string]any {
+	t.Helper()
+	return map[string]map[string]any{
+		"envoy-dispatch": appEnv(t, m),
+		"envoy-listener": listenerEnv(t, m),
+	}
+}
+
+// dispatchNatsSettings are the NATS settings one container's environment holds: of the five keys
+// the two clients share, the ones that are there, an absent key left out rather than read as an
+// empty value, so a key one side does not render never matches the other side's empty one.
+func dispatchNatsSettings(env map[string]any) map[string]any {
+	settings := map[string]any{}
+	for _, key := range []string{"NATS_URLS", "ENVOY_ALLOW_REMOTE_NATS", "ENVOY_NATS_SOCKS5_PROXY", "ENVOY_NATS_REPLICAS", "ENVOY_STREAM_MAX_BYTES"} {
+		if value, ok := env[key]; ok {
+			settings[key] = value
+		}
+	}
+	return settings
+}
+
+// With natsInCluster both NATS clients dial natsUrl themselves, so neither names the front door's
+// proxy at all: the key is absent, not empty, since ENVOY_NATS_SOCKS5_PROXY="" is a setting the
+// binaries would read as a proxy to use. The two JetStream numbers are independent of the mode and
+// reach both containers here.
+func TestDispatchInClusterNatsDropsTheProxyAndCarriesTheNumbers(t *testing.T) {
+	args := dispatchArgs()
+	setInClusterNats(args)
+	setNatsNumbers(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for container, env := range dispatchNatsEnvs(t, m) {
+		require.Equal(t, inClusterNatsURL, env["NATS_URLS"], container)
+		require.Equal(t, "1", env["ENVOY_ALLOW_REMOTE_NATS"], container)
+		require.Equal(t, strconv.Itoa(dispatchNatsReplicas), env["ENVOY_NATS_REPLICAS"], container)
+		require.Equal(t, strconv.Itoa(dispatchStreamMaxBytes), env["ENVOY_STREAM_MAX_BYTES"], container)
+		require.NotContains(t, env, "ENVOY_NATS_SOCKS5_PROXY", "%s dials the hub itself", container)
+	}
+}
+
+// natsInCluster alone renders neither number: unset, each binary keeps one copy and sets no byte
+// limit (bus.ParseNATSReplicas, bus.ParseStreamMaxBytes), which the variable's absence gives.
+func TestDispatchInClusterNatsRendersNoNumbersWhenUnset(t *testing.T) {
+	args := dispatchArgs()
+	setInClusterNats(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for container, env := range dispatchNatsEnvs(t, m) {
+		require.NotContains(t, env, "ENVOY_NATS_REPLICAS", "%s keeps one copy", container)
+		require.NotContains(t, env, "ENVOY_STREAM_MAX_BYTES", "%s sets no byte limit", container)
+	}
+}
+
+// The two numbers are inputs of their own: with natsInCluster unset they reach both containers
+// beside ENVOY_NATS_SOCKS5_PROXY, the hub still being dialled through the front door's Service.
+func TestDispatchNatsNumbersKeepTheProxyPath(t *testing.T) {
+	args := dispatchArgs()
+	setNatsNumbers(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for container, env := range dispatchNatsEnvs(t, m) {
+		require.Equal(t, strconv.Itoa(dispatchNatsReplicas), env["ENVOY_NATS_REPLICAS"], container)
+		require.Equal(t, strconv.Itoa(dispatchStreamMaxBytes), env["ENVOY_STREAM_MAX_BYTES"], container)
+		require.Equal(t, dispatchSocks5Proxy, env["ENVOY_NATS_SOCKS5_PROXY"], container)
+	}
+}
+
+// The app's NATS settings are a list written out by hand in appEnv and the listener's come out of
+// core.ListenerConfig.Env: two renderings of one deployment's bus, which this is what keeps from
+// drifting apart. Each mode is compared as the settings present with their values, so a key one
+// container leaves out never passes for the other's empty value.
+func TestDispatchAppAndListenerAgreeOnNats(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		edit     func(*gcp.DispatchArgs)
+		settings int
+	}{
+		{"through the front door's proxy", func(*gcp.DispatchArgs) {}, 5},
+		{"dialling the hub in the cluster", setInClusterNats, 4},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			row.edit(args)
+			setNatsNumbers(args)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			envs := dispatchNatsEnvs(t, m)
+			app := dispatchNatsSettings(envs["envoy-dispatch"])
+			require.Len(t, app, row.settings, "the app carries every NATS setting this mode renders")
+			require.Equal(t, app, dispatchNatsSettings(envs["envoy-listener"]),
+				"the two NATS clients of one deployment carry the same settings")
+		})
+	}
+}
+
+// A stopping listener pod keeps answering /v1 while its removal from Service example-dispatch-
+// listener reaches every node's proxy: it waits 5 s before it is signalled, and its 35 s grace
+// period covers that wait, the listener's own stop of about 26 s, and a margin.
+func TestDispatchListenerKeepsServingUntilItsRemovalFromRoutingPropagates(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	template := deploymentPodTemplate(t, m, "example-dispatch-listener")
+	require.EqualValues(t, 35, template["spec"].(map[string]any)["terminationGracePeriodSeconds"])
+	require.Equal(t, map[string]any{"preStop": map[string]any{"exec": map[string]any{"command": []any{"sleep", "5"}}}},
+		podContainer(t, template, "envoy-listener")["lifecycle"])
 }
 
 // A pod the apiserver has marked terminating leaves routing asynchronously, and it does so
@@ -1022,8 +1587,9 @@ func TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces(t *testing.T) {
 	require.Equal(t, []string{"example-dispatch-tailnet"}, ingressPods(t, rules[1], 8766))
 }
 
-// Whatever reaches the proxy at 1055 gets tailnet egress as this node, so only the two workloads
-// that dial the hub through it may; and only the app calls the listener's API at 9020.
+// Whatever reaches the proxy at 1055 gets tailnet egress as a front-door node, on every front-door
+// pod, so only the two workloads that dial the hub through it may; and only the app calls the
+// listener's API at 9020.
 func TestDispatchPoliciesFenceTheProxyAndTheListener(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1034,12 +1600,49 @@ func TestDispatchPoliciesFenceTheProxyAndTheListener(t *testing.T) {
 		policyIngressPods(t, m, "example-dispatch-listener", 9020))
 }
 
+// With natsInCluster nothing of the SOCKS5 path is rendered: no Service publishes 1055, no
+// front-door pod runs the proxy, the front door's NetworkPolicy admits nobody (1055 was its only
+// rule), and neither workload waits for the front door — the negative of
+// requireWaitsForTheFrontDoor, since there is no proxy left to be up before them. The front door
+// itself still runs: it hosts the Tailscale Service every reader reaches Dispatch at.
+func TestDispatchInClusterNatsLeavesNoSocks5Path(t *testing.T) {
+	args := dispatchArgs()
+	setInClusterNats(args)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	for _, registration := range registrationsOf(m, "kubernetes:core/v1:Service") {
+		require.NotEqual(t, "example-dispatch-tailnet", registration.Name, "no Service publishes the proxy's port")
+	}
+	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
+	require.NotContains(t, frontDoorEnv(t, podContainer(t, template, "tailscale")), "TS_SOCKS5_SERVER",
+		"no front-door pod runs the proxy")
+	require.Empty(t, policyIngressRules(t, m, "example-dispatch-tailnet", 0),
+		"the front door's policy is still there and admits nothing at all")
+	for _, deployment := range []string{"example-dispatch", "example-dispatch-listener"} {
+		deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
+		require.NotContains(t, deps, frontDoorPodURN, deployment+" waits for no front-door pod")
+		require.NotContains(t, deps, frontDoorServiceURN, deployment+" dials no proxy at a Service")
+	}
+}
+
+// The front door's serve config, ConfigMap example-dispatch-serve's serve.json, hosts the
+// Tailscale Service svc:example-dispatch, terminating TLS for its name on 443 and proxying to the
+// app's Service.
 func TestDispatchRenderingsMatchGoldens(t *testing.T) {
 	require.Equal(t, readGolden(t, "dispatch-kubeconfig.golden"),
 		gcp.DispatchKubeconfig("example-endpoint", "ZXhhbXBsZS1jYQ==", "example-dispatch"))
-	settings, err := gcp.ResolveDispatch(dispatchArgs())
+	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	require.Equal(t, readGolden(t, "dispatch-serve.golden"), settings.ServeConfig)
+	require.Equal(t, readGolden(t, "dispatch-serve.golden"), serveConfig(t, m))
+}
+
+// serveConfig is the front door's serve.json as ConfigMap <hostname>-serve holds it.
+func serveConfig(t *testing.T, m *pulumitest.Mocks) string {
+	t.Helper()
+	data := normalizedProperty(m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").Inputs["data"]).(map[string]any)
+	require.Len(t, data, 1, "the ConfigMap holds serve.json alone")
+	return data["serve.json"].(string)
 }
 
 func normalizedProperty(value resource.PropertyValue) any {
@@ -1100,8 +1703,9 @@ func TestDispatchPodMatchesGolden(t *testing.T) {
 	requirePodGolden(t, m, "example-dispatch", "dispatch-pod.golden")
 }
 
-// The front door is one tailnet node, in a pod labelled app=<hostname>-tailnet: Service <hostname>
-// selects app=<hostname> and would send user traffic to a pod wearing that label.
+// A front-door pod is a tailnet node of its own hosting the Tailscale Service, in a pod labelled
+// app=<hostname>-tailnet: Service <hostname> selects app=<hostname> and would send user traffic to
+// a pod wearing that label.
 func TestDispatchTailnetPodMatchesGolden(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1116,23 +1720,178 @@ func TestDispatchListenerPodMatchesGolden(t *testing.T) {
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
 }
 
-// Without the annotation the cluster autoscaler evicts a pod whenever it consolidates its node,
-// and the one-replica front door takes Dispatch off the tailnet until the replacement is ready:
-// every Deployment the component registers, now the app, the front door and the listener, carries it.
-func TestDispatchPodsAreNotEvictedForScaleDown(t *testing.T) {
+// dispatchRegistrations renders every registration the mock engine recorded as one line holding
+// the registration's type, its name and the URN of the parent it was registered under. A read,
+// which the engine records with no register request, renders an empty parent. The lines are
+// sorted: the Go SDK registers each resource from a goroutine of its own, so the order the engine
+// sees them in is the scheduler's and differs from run to run, and only the set of registrations
+// is the component's to decide.
+func dispatchRegistrations(m *pulumitest.Mocks) string {
+	registrations := m.Registrations()
+	lines := make([]string, 0, len(registrations))
+	for _, registration := range registrations {
+		parent := ""
+		if registration.RPC != nil {
+			parent = registration.RPC.GetParent()
+		}
+		lines = append(lines, fmt.Sprintf("%s %s parent=%s\n", registration.Type, registration.Name, parent))
+	}
+	slices.Sort(lines)
+	return strings.Join(lines, "")
+}
+
+// This golden is the component's declaration: every resource the default inputs register, and the
+// name and the parent each is given, captured before the cluster-only mode existed. A change that
+// leaves the default path alone leaves this file byte-identical, so a failure says the default
+// path moved — a resource renamed, reparented, added or dropped — and the fix is the component,
+// never the golden.
+func TestDispatchRegistrationsMatchTheGolden(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	var deployments []string
-	for _, r := range m.Registrations() {
-		if r.Type != "kubernetes:apps/v1:Deployment" {
-			continue
-		}
-		deployments = append(deployments, r.Name)
-		annotations, _ := deploymentPodTemplate(t, m, r.Name)["metadata"].(map[string]any)["annotations"].(map[string]any)
-		require.Equal(t, "false", annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"],
-			"Deployment %s's pod template lacks cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\"", r.Name)
+	require.Equal(t, readGolden(t, "dispatch-registrations.golden"), dispatchRegistrations(m))
+}
+
+// Every workload's pods keep apart at any replica count, over that Deployment's own selector:
+// required anti-affinity on the node, so a node's loss takes one pod at most, and a zone spread
+// that leaves a pod Pending rather than stacking a zone, counting a second zone before Autopilot
+// has a node there (minDomains 2). Old and new revisions count together (no matchLabelKeys), so a
+// surge pod lands away from the pods it replaces.
+func TestDispatchSpreadsEveryWorkloadAcrossNodesAndZones(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	for _, workload := range dispatchWorkloads {
+		selector := map[string]any{"matchLabels": map[string]any{"app": workload.deployment}}
+		require.Equal(t, selector, deploymentSpec(t, m, workload.deployment)["selector"])
+		pod := deploymentPodTemplate(t, m, workload.deployment)["spec"].(map[string]any)
+		require.Equal(t, map[string]any{"podAntiAffinity": map[string]any{
+			"requiredDuringSchedulingIgnoredDuringExecution": []any{map[string]any{"labelSelector": selector, "topologyKey": "kubernetes.io/hostname"}},
+		}}, pod["affinity"], workload.deployment)
+		require.Equal(t, []any{map[string]any{
+			"labelSelector":     selector,
+			"topologyKey":       "topology.kubernetes.io/zone",
+			"maxSkew":           float64(1),
+			"minDomains":        float64(2),
+			"whenUnsatisfiable": "DoNotSchedule",
+		}}, pod["topologySpreadConstraints"], workload.deployment)
 	}
-	require.ElementsMatch(t, []string{"example-dispatch", "example-dispatch-tailnet", "example-dispatch-listener"}, deployments)
+}
+
+// podChecksums returns a pod template's checksum/ annotations.
+func podChecksums(t *testing.T, m *pulumitest.Mocks, deployment string) map[string]any {
+	t.Helper()
+	annotations, _ := deploymentPodTemplate(t, m, deployment)["metadata"].(map[string]any)["annotations"].(map[string]any)
+	checksums := map[string]any{}
+	for key, value := range annotations {
+		if strings.HasPrefix(key, "checksum/") {
+			checksums[key] = value
+		}
+	}
+	return checksums
+}
+
+// A running container never re-reads a Secret it reads through its environment, so each pod
+// template carries checksum/<secret> for exactly the component Secrets its environment reads, set
+// to that Secret's resourceVersion (the mocks compute <name>-resource-version), and its Deployment
+// registers after the Secret: a changed Secret rolls the pods that read it, and no other. The
+// app reads its own Secret and ENVOY_TOKEN from the listener's; the listener its own; the front
+// door the tailnet auth key.
+func TestDispatchPodsRollWhenTheSecretsTheyReadChange(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	for deployment, secrets := range map[string][]string{
+		"example-dispatch":          {"example-dispatch-dispatch", "example-dispatch-listener"},
+		"example-dispatch-listener": {"example-dispatch-listener"},
+		"example-dispatch-tailnet":  {"example-dispatch-tailnet-auth-key"},
+	} {
+		want := map[string]any{}
+		deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
+		for _, secret := range secrets {
+			want["checksum/"+secret] = secret + "-resource-version"
+			require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Secret::"+secret, deployment)
+		}
+		require.Equal(t, want, podChecksums(t, m, deployment), deployment)
+	}
+}
+
+// podProbes returns every container of a pod template, init containers included, by name.
+func podProbes(t *testing.T, m *pulumitest.Mocks, deployment string) map[string]map[string]any {
+	t.Helper()
+	pod := deploymentPodTemplate(t, m, deployment)["spec"].(map[string]any)
+	containers := map[string]map[string]any{}
+	for _, field := range []string{"initContainers", "containers"} {
+		items, _ := pod[field].([]any)
+		for _, item := range items {
+			container := item.(map[string]any)
+			containers[container["name"].(string)] = container
+		}
+	}
+	return containers
+}
+
+// A liveness probe restarts a container, so it fails only when the process does not answer at
+// all: Dispatch's /healthz answers 503 while Postgres is down and the listener's while NATS is, and run
+// those checks on every call, so a liveness or startup probe failing on that, or waiting on it,
+// would turn a dependency outage or a slow hub into a restart of every pod. So no liveness or
+// startup command passes curl -f (any short-option cluster holding f, or --fail), none is an
+// httpGet on /healthz, and none of the app's or the listener's commands names /healthz: they ask
+// /livez, which runs no check. Every serving container of the app and the listener has both
+// probes; the listener's readiness allows the 6 s its /healthz may take to answer; and the app's
+// startup probe allows 30 minutes, since envoy-dispatch migrates the database before it listens
+// and nothing bounds a migration's run time.
+func TestDispatchLivenessFailsOnlyWhenAProcessDoesNotAnswer(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	for _, workload := range dispatchWorkloads {
+		for name, container := range podProbes(t, m, workload.deployment) {
+			for _, kind := range []string{"startupProbe", "livenessProbe"} {
+				probe, ok := container[kind].(map[string]any)
+				if !ok {
+					continue
+				}
+				if exec, ok := probe["exec"].(map[string]any); ok {
+					for _, arg := range exec["command"].([]any) {
+						arg := arg.(string)
+						shortCluster := strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--")
+						require.False(t, (shortCluster && strings.Contains(arg, "f")) || arg == "--fail",
+							"%s's %s %s passes curl %s", workload.deployment, name, kind, arg)
+					}
+				}
+				if get, ok := probe["httpGet"].(map[string]any); ok {
+					require.NotEqual(t, "/healthz", get["path"], "%s's %s %s", workload.deployment, name, kind)
+				}
+			}
+		}
+	}
+	for deployment, serving := range map[string][]string{
+		"example-dispatch":          {"cloud-sql-proxy", "envoy-dispatch"},
+		"example-dispatch-listener": {"envoy-listener"},
+	} {
+		containers := podProbes(t, m, deployment)
+		for _, name := range serving {
+			require.Contains(t, containers[name], "livenessProbe", "%s's %s", deployment, name)
+			require.Contains(t, containers[name], "startupProbe", "%s's %s", deployment, name)
+		}
+		for name, container := range containers {
+			for _, kind := range []string{"startupProbe", "livenessProbe"} {
+				probe, _ := container[kind].(map[string]any)
+				exec, _ := probe["exec"].(map[string]any)
+				command, _ := exec["command"].([]any)
+				for _, arg := range command {
+					require.NotContains(t, arg.(string), "/healthz", "%s's %s %s", deployment, name, kind)
+				}
+			}
+		}
+	}
+	ready := podProbes(t, m, "example-dispatch-listener")["envoy-listener"]["readinessProbe"].(map[string]any)
+	require.GreaterOrEqual(t, ready["timeoutSeconds"], float64(6))
+	startup := podProbes(t, m, "example-dispatch")["envoy-dispatch"]["startupProbe"].(map[string]any)
+	require.GreaterOrEqual(t, startup["periodSeconds"].(float64)*startup["failureThreshold"].(float64), float64(30*60))
+	proxy := podProbes(t, m, "example-dispatch")["cloud-sql-proxy"]
+	require.Subset(t, proxy["args"], []any{"--health-check", "--http-address=0.0.0.0", "--http-port=9801"},
+		"the proxy serves the endpoints its probes call")
 }
 
 // Pulumi's deletionProtection stops only a Pulumi delete; the instance's own setting stops the API
@@ -1179,6 +1938,30 @@ func TestDispatchDatabaseQueryInsights(t *testing.T) {
 	}, got["insightsConfig"])
 	delete(got, "insightsConfig")
 	require.Equal(t, defaults, got)
+}
+
+// The instance runs the major databaseVersion names, and POSTGRES_18 when it is unset; the
+// settings the component resolves name the same version.
+func TestDispatchInstanceRunsTheDatabaseVersion(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		version *string
+		want    string
+	}{
+		{"unset", nil, "POSTGRES_18"},
+		{"POSTGRES_16", pulumi.StringRef("POSTGRES_16"), "POSTGRES_16"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			args.DatabaseVersion = row.version
+			settings, err := gcp.ResolveDispatch(args)
+			require.NoError(t, err)
+			require.Equal(t, row.want, settings.DatabaseVersion)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			require.Equal(t, row.want, m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()["databaseVersion"])
+		})
+	}
 }
 
 // Dispatch itself trims one trailing slash off DISPATCH_AGENT_SECRETS_URL, so the component
@@ -1279,8 +2062,11 @@ func TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial(t *testing.T) {
 			require.NotContains(t, s, "BEGIN", "%s holds PEM material", registration.Name)
 			require.NotContains(t, s, "agent-secrets-token-value", "%s holds the broker token", registration.Name)
 		}
-		require.NotContains(t, secretDataKeys(unwrappedProperty(registration.Inputs["stringData"]).ObjectValue()), "DISPATCH_AGENT_SECRETS_TOKEN")
-		require.NotContains(t, secretDataKeys(unwrappedProperty(registration.Inputs["stringData"]).ObjectValue()), "DISPATCH_APP_PEM_B64")
+		// The front door's TLS Secret is registered with no data at all (its pods write it).
+		if data, ok := registration.Inputs["stringData"]; ok {
+			require.NotContains(t, secretDataKeys(unwrappedProperty(data).ObjectValue()), "DISPATCH_AGENT_SECRETS_TOKEN")
+			require.NotContains(t, secretDataKeys(unwrappedProperty(data).ObjectValue()), "DISPATCH_APP_PEM_B64")
+		}
 	}
 }
 
@@ -1528,7 +2314,7 @@ func appResources(cpu, memory string) map[string]any {
 
 // appCpu and appMemory size the app's envoy-dispatch container and nothing else: the app's pod
 // template is the default's with that one container's resources changed, so cloud-sql-proxy keeps
-// its 200m and 256Mi, and the front door's and the listener's pods match their goldens.
+// its default 1 CPU and 2Gi, and the front door's and the listener's pods match their goldens.
 func TestDispatchAppResourcesReachEnvoyDispatchAlone(t *testing.T) {
 	defaults, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1543,21 +2329,171 @@ func TestDispatchAppResourcesReachEnvoyDispatchAlone(t *testing.T) {
 	want := deploymentPodTemplate(t, defaults, "example-dispatch")
 	podContainer(t, want, "envoy-dispatch")["resources"] = appResources("2", "8Gi")
 	require.Equal(t, want, got)
-	proxy := got["spec"].(map[string]any)["initContainers"].([]any)[0].(map[string]any)
-	require.Equal(t, "cloud-sql-proxy", proxy["name"])
-	require.Equal(t, appResources("200m", "256Mi"), proxy["resources"])
+	require.Equal(t, appResources("1", "2Gi"), proxyContainer(t, got)["resources"])
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
 	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
 }
 
-// A size Autopilot would raise or reject is refused by the resolver, before the component
-// registers, so nothing beyond the test's providers exists.
+// proxyCpu and proxyMemory size the cloud-sql-proxy sidecar and nothing else, as both its request
+// and its limit: the app's pod template is the default's with that one container's resources
+// changed, so envoy-dispatch keeps its 1 CPU and 4Gi, and the front door's and the listener's pods
+// match their goldens.
+func TestDispatchProxyResourcesReachCloudSQLProxyAlone(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	for _, row := range []struct{ cpu, memory string }{{"2", "4Gi"}, {"500m", "1536Mi"}} {
+		t.Run(row.cpu+"/"+row.memory, func(t *testing.T) {
+			args := dispatchArgs()
+			args.ProxyCpu = pulumi.StringRef(row.cpu)
+			args.ProxyMemory = pulumi.StringRef(row.memory)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			got := deploymentPodTemplate(t, m, "example-dispatch")
+			require.Equal(t, appResources(row.cpu, row.memory), proxyContainer(t, got)["resources"])
+			require.Equal(t, appResources("1", "4Gi"), podContainer(t, got, "envoy-dispatch")["resources"])
+			want := deploymentPodTemplate(t, defaults, "example-dispatch")
+			proxyContainer(t, want)["resources"] = appResources(row.cpu, row.memory)
+			require.Equal(t, want, got)
+			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+		})
+	}
+}
+
+// A size Autopilot would raise or reject, judged on envoy-dispatch's and cloud-sql-proxy's sum,
+// is refused by the resolver, before the component registers, so nothing beyond the test's
+// providers exists.
 func TestDispatchRefusesAppResourcesBeforeRegistering(t *testing.T) {
-	args := dispatchArgs()
-	args.AppCpu = pulumi.StringRef("100m")
-	m, err := runDispatch(t, args, true)
-	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appCpu "100m" must be at least 300m`)
-	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+	for _, row := range []struct {
+		edit func(*gcp.DispatchArgs)
+		err  string
+	}{
+		{func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("100m")
+			a.ProxyCpu = pulumi.StringRef("200m")
+		}, `appCpu "100m" and proxyCpu "200m" must make at least 500m together`},
+		{func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("30") }, `appCpu "1" and proxyCpu "30" must make at most 30 CPU together`},
+		{func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("0") }, `proxyMemory "0" must be more than 0`},
+	} {
+		t.Run(row.err, func(t *testing.T) {
+			args := dispatchArgs()
+			row.edit(args)
+			m, err := runDispatch(t, args, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+		})
+	}
+}
+
+// sizedResources is a container's resources with an ephemeral-storage request and limit beside its
+// CPU and memory.
+func sizedResources(cpu, memory, ephemeralStorage string) map[string]any {
+	values := map[string]any{"cpu": cpu, "memory": memory, "ephemeral-storage": ephemeralStorage}
+	return map[string]any{"requests": values, "limits": values}
+}
+
+// Unset, appEphemeralStorage and proxyEphemeralStorage render nothing, so Autopilot gives each
+// container its default 1Gi and a deployment that leaves them unset renders the pod it always had
+// (TestDispatchAppContainerDefaultsToOneCPUAnd4Gi, TestDispatchProxyContainerDefaultsToOneCPUAnd2Gi
+// and TestDispatchPodMatchesGolden pin the containers' resources).
+func TestDispatchRendersNoEphemeralStorageByDefault(t *testing.T) {
+	settings, err := gcp.ResolveDispatch(dispatchArgs())
+	require.NoError(t, err)
+	require.Empty(t, settings.AppEphemeral)
+	require.Empty(t, settings.ProxyEphemeral)
+}
+
+// The quantity forms Kubernetes reads are taken as written, up to Autopilot's bounds for the pod,
+// judged on the two containers' sum with an unset one counted at Autopilot's 1Gi: 9Gi beside the
+// proxy's default makes the 10Gi ceiling, as do 8Gi and 2Gi set together, and 5Mi each the 10Mi
+// floor.
+func TestDispatchAcceptsEphemeralStorageWithinAutopilotsBounds(t *testing.T) {
+	for _, row := range []struct{ app, proxy string }{
+		{"10Mi", ""},
+		{"2Gi", ""},
+		{"4096Mi", ""},
+		{"5G", ""},
+		{"9Gi", ""},
+		{"9216Mi", ""},
+		{"0.5e10", ""},
+		{"", "256Mi"},
+		{"", "9Gi"},
+		{"8Gi", "2Gi"},
+		{"5Mi", "5Mi"},
+	} {
+		t.Run(row.app+"/"+row.proxy, func(t *testing.T) {
+			args := dispatchArgs()
+			if row.app != "" {
+				args.AppEphemeralStorage = pulumi.StringRef(row.app)
+			}
+			if row.proxy != "" {
+				args.ProxyEphemeralStorage = pulumi.StringRef(row.proxy)
+			}
+			settings, err := gcp.ResolveDispatch(args)
+			require.NoError(t, err)
+			require.Equal(t, row.app, settings.AppEphemeral)
+			require.Equal(t, row.proxy, settings.ProxyEphemeral)
+		})
+	}
+}
+
+// Each ephemeral-storage input reaches its own container alone, beside the CPU and memory it had:
+// the app's pod template is the default's with that container's resources gaining it, the other
+// container still names none, and the front door's and the listener's pods match their goldens.
+func TestDispatchEphemeralStorageReachesItsContainerAlone(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	for _, row := range []struct {
+		name       string
+		set        func(*gcp.DispatchArgs)
+		app, proxy map[string]any
+	}{
+		{"envoy-dispatch", func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("2Gi") }, sizedResources("1", "4Gi", "2Gi"), appResources("1", "2Gi")},
+		{"cloud-sql-proxy", func(a *gcp.DispatchArgs) { a.ProxyEphemeralStorage = pulumi.StringRef("256Mi") }, appResources("1", "4Gi"), sizedResources("1", "2Gi", "256Mi")},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			row.set(args)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			got := deploymentPodTemplate(t, m, "example-dispatch")
+			require.Equal(t, row.app, podContainer(t, got, "envoy-dispatch")["resources"])
+			require.Equal(t, row.proxy, proxyContainer(t, got)["resources"])
+			want := deploymentPodTemplate(t, defaults, "example-dispatch")
+			podContainer(t, want, "envoy-dispatch")["resources"] = row.app
+			proxyContainer(t, want)["resources"] = row.proxy
+			require.Equal(t, want, got)
+			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+		})
+	}
+}
+
+// An ephemeral-storage size Autopilot would raise or reject, judged on the two containers' sum, is
+// refused by the resolver, before the component registers, so nothing beyond the test's providers
+// exists. The ceiling counts the proxy at the value set for it, not at Autopilot's default.
+func TestDispatchRefusesEphemeralStorageBeforeRegistering(t *testing.T) {
+	for _, row := range []struct {
+		edit func(*gcp.DispatchArgs)
+		err  string
+	}{
+		{func(a *gcp.DispatchArgs) { a.AppEphemeralStorage = pulumi.StringRef("9217Mi") },
+			`appEphemeralStorage "9217Mi" and proxyEphemeralStorage unset (Autopilot's 1Gi) must make at most 10Gi together`},
+		{func(a *gcp.DispatchArgs) {
+			a.AppEphemeralStorage = pulumi.StringRef("9Gi")
+			a.ProxyEphemeralStorage = pulumi.StringRef("1025Mi")
+		}, `appEphemeralStorage "9Gi" and proxyEphemeralStorage "1025Mi" must make at most 10Gi together`},
+	} {
+		t.Run(row.err, func(t *testing.T) {
+			args := dispatchArgs()
+			row.edit(args)
+			m, err := runDispatch(t, args, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+		})
+	}
 }
 
 const (
@@ -1565,15 +2501,30 @@ const (
 	priorityClassType       = "kubernetes:scheduling.k8s.io/v1:PriorityClass"
 )
 
-// Unset, appPriorityClassName and appPdbMinAvailable leave the component as it was before they
-// existed: no PodDisruptionBudget, no PriorityClass read, and an app pod naming no priority class
-// (TestDispatchPodMatchesGolden pins the whole template).
+// safeToEvict reports whether deployment's pod template carries the cluster autoscaler's
+// safe-to-evict annotation, failing when it carries another value than "false".
+func safeToEvict(t *testing.T, m *pulumitest.Mocks, deployment string) bool {
+	t.Helper()
+	annotations, _ := deploymentPodTemplate(t, m, deployment)["metadata"].(map[string]any)["annotations"].(map[string]any)
+	value, ok := annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"]
+	if ok {
+		require.Equal(t, "false", value, deployment)
+	}
+	return ok
+}
+
+// Unset, priorityClassName and the three budgets leave no trace: no PodDisruptionBudget, no
+// PriorityClass read, no pod naming a priority class, and every pod template carrying
+// safe-to-evict "false", so the autoscaler never evicts a pod no budget protects.
 func TestDispatchRegistersNoBudgetOrPriorityClassUnset(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 	require.Zero(t, countRegistrations(m, podDisruptionBudgetType))
 	require.Zero(t, countRegistrations(m, priorityClassType))
-	require.NotContains(t, deploymentPodTemplate(t, m, "example-dispatch")["spec"], "priorityClassName")
+	for _, workload := range dispatchWorkloads {
+		require.NotContains(t, deploymentPodTemplate(t, m, workload.deployment)["spec"], "priorityClassName", workload.deployment)
+		require.True(t, safeToEvict(t, m, workload.deployment), workload.deployment)
+	}
 }
 
 // requireKubernetesChild asserts that r is a child of the component on its own Kubernetes
@@ -1585,86 +2536,166 @@ func requireKubernetesChild(t *testing.T, r pulumitest.Registration) {
 	require.Contains(t, r.RPC.GetDependencies(), "urn:pulumi:s::p::"+dispatchType+"$gcp:container/cluster:Cluster::example-dispatch")
 }
 
-// appPriorityClassName reaches the app's pod and nothing else: its template is the default's with
-// priorityClassName added, and the front door's and the listener's pods match their goldens. The
-// component creates no PriorityClass; it reads the named one, and the app Deployment waits on
-// that read, so a class the cluster lacks fails the update before any pod is replaced.
-func TestDispatchAppPriorityClassReachesTheAppPodAlone(t *testing.T) {
+// priorityClassName reaches every pod of the three Deployments: each template is the default's
+// with priorityClassName added. The component creates no PriorityClass; it reads the named one
+// once, and all three Deployments wait on that read, so a class the cluster lacks fails the update
+// before any pod is replaced.
+func TestDispatchPriorityClassReachesEveryPod(t *testing.T) {
 	defaults, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 	for _, class := range []string{"example-priority", "example.priority"} {
 		t.Run(class, func(t *testing.T) {
 			args := dispatchArgs()
-			args.AppPriorityClassName = pulumi.StringRef(class)
+			args.PriorityClassName = pulumi.StringRef(class)
 			m, err := runDispatch(t, args, true)
 			require.NoError(t, err)
 
-			want := deploymentPodTemplate(t, defaults, "example-dispatch")
-			want["spec"].(map[string]any)["priorityClassName"] = class
-			require.Equal(t, want, deploymentPodTemplate(t, m, "example-dispatch"))
-			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
-			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
-
+			require.Equal(t, 1, countRegistrations(m, priorityClassType), "the class is read once")
 			read := m.Named(t, priorityClassType, "example-dispatch-priority-class")
 			require.Equal(t, class, read.ID)
 			require.Nil(t, read.RPC, "the PriorityClass is read, never registered")
 			require.Equal(t, "urn:pulumi:s::p::"+dispatchType+"::example-dispatch", read.ReadRPC.GetParent())
 			require.Contains(t, read.ReadRPC.GetProvider(), "pulumi:providers:kubernetes::example-dispatch-kubernetes::")
 			require.Contains(t, read.ReadRPC.GetDependencies(), "urn:pulumi:s::p::"+dispatchType+"$gcp:container/cluster:Cluster::example-dispatch")
-			deps := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies()
-			require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$"+priorityClassType+"::example-dispatch-priority-class")
+			for _, workload := range dispatchWorkloads {
+				want := deploymentPodTemplate(t, defaults, workload.deployment)
+				want["spec"].(map[string]any)["priorityClassName"] = class
+				require.Equal(t, want, deploymentPodTemplate(t, m, workload.deployment), workload.deployment)
+				deps := m.Named(t, "kubernetes:apps/v1:Deployment", workload.deployment).RPC.GetDependencies()
+				require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$"+priorityClassType+"::example-dispatch-priority-class", workload.deployment)
+			}
 			require.ElementsMatch(t, append(defaults.Types(), priorityClassType), m.Types())
 		})
 	}
 }
 
-// appPdbMinAvailable registers one PodDisruptionBudget, named for the app, in its namespace,
-// selecting the app's pods by the label the app Deployment's own selector matches, and no other
-// workload's, with Kubernetes' default unhealthyPodEvictionPolicy. It is a Kubernetes child of the
-// component like every other, and the app's pod template is unchanged.
-func TestDispatchAppPdbCoversTheAppPods(t *testing.T) {
+// requireBudget fails unless one PodDisruptionBudget, named for deployment, in namespace, covers
+// that Deployment's pods by the selector the Deployment itself matches, with minAvailable and
+// Kubernetes' default unhealthyPodEvictionPolicy, as a Kubernetes child of the component.
+func requireBudget(t *testing.T, m *pulumitest.Mocks, deployment, namespace string, minAvailable int) {
+	t.Helper()
+	registration := m.Named(t, podDisruptionBudgetType, deployment)
+	requireKubernetesChild(t, registration)
+	budget := registration.Inputs.Mappable()
+	require.Equal(t, map[string]any{"name": deployment, "namespace": namespace}, budget["metadata"])
+	require.Equal(t, map[string]any{
+		"minAvailable": float64(minAvailable),
+		"selector":     map[string]any{"matchLabels": map[string]any{"app": deployment}},
+	}, budget["spec"])
+	require.Equal(t, deploymentSpec(t, m, deployment)["selector"], budget["spec"].(map[string]any)["selector"])
+}
+
+// Each budget input registers one PodDisruptionBudget over its own Deployment's pods alone, and
+// that Deployment's template drops safe-to-evict, which the budget replaces, and is otherwise the
+// default's; the other two Deployments keep the annotation and get no budget.
+func TestDispatchEachBudgetCoversItsOwnPods(t *testing.T) {
 	defaults, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	for _, row := range []struct {
-		replicas, minAvailable int
-		namespace              string
-	}{{1, 1, ""}, {3, 2, ""}, {3, 3, ""}, {1, 1, "example-namespace"}} {
-		t.Run(fmt.Sprintf("%d of %d in %q", row.minAvailable, row.replicas, row.namespace), func(t *testing.T) {
-			args := dispatchArgs()
-			args.Replicas = pulumi.IntRef(row.replicas)
-			args.AppPdbMinAvailable = pulumi.IntRef(row.minAvailable)
-			namespace := "dispatch"
-			if row.namespace != "" {
-				args.Namespace = pulumi.StringRef(row.namespace)
-				namespace = row.namespace
-			}
-			m, err := runDispatch(t, args, true)
-			require.NoError(t, err)
+	for _, workload := range dispatchWorkloads {
+		for _, row := range []struct {
+			replicas, minAvailable int
+			namespace              string
+		}{{1, 1, ""}, {3, 2, ""}, {3, 3, ""}, {2, 1, "example-namespace"}} {
+			t.Run(fmt.Sprintf("%s %d of %d in %q", workload.deployment, row.minAvailable, row.replicas, row.namespace), func(t *testing.T) {
+				args := dispatchArgs()
+				workload.replicas(args, row.replicas)
+				workload.budget(args, row.minAvailable)
+				namespace := "dispatch"
+				if row.namespace != "" {
+					args.Namespace = pulumi.StringRef(row.namespace)
+					namespace = row.namespace
+				}
+				m, err := runDispatch(t, args, true)
+				require.NoError(t, err)
 
-			registration := m.Named(t, podDisruptionBudgetType, "example-dispatch")
-			requireKubernetesChild(t, registration)
-			budget := registration.Inputs.Mappable()
-			require.Equal(t, map[string]any{"name": "example-dispatch", "namespace": namespace}, budget["metadata"])
-			require.Equal(t, map[string]any{
-				"minAvailable": float64(row.minAvailable),
-				"selector":     map[string]any{"matchLabels": map[string]any{"app": "example-dispatch"}},
-			}, budget["spec"])
-			deploymentSpec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
-			require.Equal(t, deploymentSpec["selector"], budget["spec"].(map[string]any)["selector"])
-			if row.namespace == "" {
-				require.Equal(t, deploymentPodTemplate(t, defaults, "example-dispatch"), deploymentPodTemplate(t, m, "example-dispatch"))
-				require.ElementsMatch(t, append(defaults.Types(), podDisruptionBudgetType), m.Types())
-			}
+				require.Equal(t, 1, countRegistrations(m, podDisruptionBudgetType))
+				requireBudget(t, m, workload.deployment, namespace, row.minAvailable)
+				for _, other := range dispatchWorkloads {
+					require.Equal(t, other.deployment != workload.deployment, safeToEvict(t, m, other.deployment),
+						"safe-to-evict on %s exactly when no budget covers it", other.deployment)
+				}
+				if row.namespace == "" {
+					want := deploymentPodTemplate(t, defaults, workload.deployment)
+					delete(want["metadata"].(map[string]any)["annotations"].(map[string]any), "cluster-autoscaler.kubernetes.io/safe-to-evict")
+					require.Equal(t, want, deploymentPodTemplate(t, m, workload.deployment))
+					require.ElementsMatch(t, append(defaults.Types(), podDisruptionBudgetType), m.Types())
+				}
+			})
+		}
+	}
+}
+
+// All three budgets set, each Deployment has its own, under its own name and selector, and no
+// template carries safe-to-evict.
+func TestDispatchBudgetsOnEveryWorkloadStayDistinct(t *testing.T) {
+	args := dispatchArgs()
+	for _, workload := range dispatchWorkloads {
+		workload.replicas(args, 3)
+		workload.budget(args, 2)
+	}
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	require.Equal(t, 3, countRegistrations(m, podDisruptionBudgetType))
+	for _, workload := range dispatchWorkloads {
+		requireBudget(t, m, workload.deployment, "dispatch", 2)
+		require.False(t, safeToEvict(t, m, workload.deployment), workload.deployment)
+	}
+}
+
+// A budget its Deployment's replica count cannot meet is refused by the resolver, naming its own
+// input, before the component registers, so nothing beyond the test's providers exists.
+func TestDispatchRefusesABudgetBeforeRegistering(t *testing.T) {
+	for _, row := range []struct {
+		edit func(*gcp.DispatchArgs)
+		err  string
+	}{
+		{func(a *gcp.DispatchArgs) { a.AppPdbMinAvailable = pulumi.IntRef(2) }, "appPdbMinAvailable 2 must be from 1 to replicas (1)"},
+		{func(a *gcp.DispatchArgs) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(3) }, "frontDoorPdbMinAvailable 3 must be from 1 to frontDoorReplicas (2)"},
+		{func(a *gcp.DispatchArgs) { a.ListenerPdbMinAvailable = pulumi.IntRef(2) }, "listenerPdbMinAvailable 2 must be from 1 to listenerReplicas (1)"},
+	} {
+		t.Run(row.err, func(t *testing.T) {
+			args := dispatchArgs()
+			row.edit(args)
+			m, err := runDispatch(t, args, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
 		})
 	}
 }
 
-// A budget the app's replica count cannot meet is refused by the resolver, before the component
-// registers, so nothing beyond the test's providers exists.
-func TestDispatchRefusesAnAppPdbBeforeRegistering(t *testing.T) {
-	args := dispatchArgs()
-	args.AppPdbMinAvailable = pulumi.IntRef(2)
-	m, err := runDispatch(t, args, true)
-	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appPdbMinAvailable 2 must be from 1 to replicas (1)`)
-	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+// databaseAvailabilityType reaches the Cloud SQL instance's settings: ZONAL, the instance's value
+// before the input existed, when unset, and REGIONAL, a standby in a second zone, when set.
+func TestDispatchDatabaseAvailabilityTypeReachesTheInstance(t *testing.T) {
+	for _, row := range []struct {
+		value *string
+		want  string
+	}{{nil, "ZONAL"}, {pulumi.StringRef("ZONAL"), "ZONAL"}, {pulumi.StringRef("REGIONAL"), "REGIONAL"}} {
+		t.Run(row.want, func(t *testing.T) {
+			args := dispatchArgs()
+			args.DatabaseAvailabilityType = row.value
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			settings := m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()["settings"].(map[string]any)
+			require.Equal(t, row.want, settings["availabilityType"])
+		})
+	}
+}
+
+// Unset, databaseTier reaches the Cloud SQL instance's settings as db-custom-4-15360, 4 vCPU and
+// 15 GB; set, it reaches them as written.
+func TestDispatchDatabaseTierReachesTheInstance(t *testing.T) {
+	for _, row := range []struct {
+		value *string
+		want  string
+	}{{nil, "db-custom-4-15360"}, {pulumi.StringRef("db-custom-2-7680"), "db-custom-2-7680"}} {
+		t.Run(row.want, func(t *testing.T) {
+			args := dispatchArgs()
+			args.DatabaseTier = row.value
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			settings := m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()["settings"].(map[string]any)
+			require.Equal(t, row.want, settings["tier"])
+		})
+	}
 }

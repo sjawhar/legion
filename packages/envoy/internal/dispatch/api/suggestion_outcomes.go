@@ -154,27 +154,38 @@ func sweepSuggestionOutcomes(ctx context.Context, pool *store.Pool) error {
 
 // RunSuggestionOutcomeSweep resolves LEGION-550's write_suggestions on its own schedule, off the
 // write path entirely: whether the agent acted on a suggestion (cited it, or updated the
-// suggested issue directly) or overrode it (kept working on what it filed instead). It stops
-// when ctx is done.
+// suggested issue directly) or overrode it (kept working on what it filed instead). The same pass
+// deletes every Idempotency-Key past its window (sweepRequestKeys, INFRA-258), and then sends every
+// delivery a process that died left owed (resumeDeliveries, the server's resumeOwedDeliveries;
+// INFRA-258), which need a pass once a minute across the processes as much as the suggestions do
+// and are no reason for a loop of their own. resumeDeliveries is nil where nothing delivers. It
+// stops when ctx is done.
 //
 // Each pass runs under suggestionOutcomeLease for one interval, so one process sweeps per
 // interval however many serve the database and a second process's tick, which falls between the
 // first's rather than on it, finds that interval swept; leases is required, as it is of every
 // leased loop (cmd/dispatch exits at boot if the lease pool cannot be opened). The period is
 // interval itself and not SuggestionSweepInterval: this loop ticks on what its caller asked for.
-func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			duty.Exclusive(ctx, leases, suggestionOutcomeLease, interval, func(ctx context.Context) {
-				if err := sweepSuggestionOutcomes(ctx, pool); err != nil {
-					slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
-				}
-			})
+// The sweeps fail apart: one's failure is logged and the others still run. The ticks are
+// duty.RunLeased's, a ticker's: the first one interval after the call, then one each interval; the
+// first tick a pass overran comes at once with the moment it was due, and only the ones after it
+// are dropped.
+func RunSuggestionOutcomeSweep(
+	ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases,
+	resumeDeliveries func(context.Context) error,
+) {
+	duty.RunLeased(ctx, leases, suggestionOutcomeLease, interval, duty.TickAfterInterval, func(ctx context.Context) {
+		if err := sweepSuggestionOutcomes(ctx, pool); err != nil {
+			slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
 		}
-	}
+		if err := sweepRequestKeys(ctx, pool); err != nil {
+			slog.Warn("dispatch: idempotency key sweep failed", "error", err)
+		}
+		if resumeDeliveries == nil {
+			return
+		}
+		if err := resumeDeliveries(ctx); err != nil {
+			slog.Warn("dispatch: delivery sweep failed", "error", err)
+		}
+	})
 }

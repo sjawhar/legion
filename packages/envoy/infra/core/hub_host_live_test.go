@@ -42,23 +42,23 @@ func TestHubListenerServesItsTailnetName(t *testing.T) {
 			// The users a hub with a listener renders: the listener's, with a seed, and the
 			// credential-free session user.
 			seed, _, uri := startSplitServer(t, image.Ref)
+			held := cmdtest.HoldPort(t)
 			served := core.ListenerConfig{
 				MachineID:    liveMachineID,
-				Port:         cmdtest.FreeTCPPort(t),
 				ListenHost:   "127.0.0.1",
 				AllowedHosts: []string{own},
 			}
-			process := startListenerConfig(t, listener, uri, seed, served)
+			process := startListenerConfig(t, listener, uri, seed, held, served)
 			// Nothing is read from a listener still answering "starting": it must hold its durable
 			// before a refusal can be the host guard's doing.
-			t.Logf("healthy /healthz body: %s", requireHealthy(t, process, served.Port, liveHealthWindow, listenerHealthy))
+			t.Logf("healthy /healthz body: %s", requireHealthy(t, process, held.Port, liveHealthWindow, listenerHealthy))
 
-			status, body := postListenerHost(t, served.Port, "/v1/interests/subscribe", subscribeBody, own)
+			status, body := postListenerHost(t, held.Port, "/v1/interests/subscribe", subscribeBody, own)
 			require.Equal(t, http.StatusOK, status,
 				"the hub's listener refused its own tailnet address %s: %s\n%s", own, body, process.Output.String())
 
 			other := "other." + hubTailnetDNSName
-			status, body = postListenerHost(t, served.Port, "/v1/interests/subscribe", subscribeBody, other)
+			status, body = postListenerHost(t, held.Port, "/v1/interests/subscribe", subscribeBody, other)
 			require.Equal(t, http.StatusMisdirectedRequest, status,
 				"the listener served a Host it was never told, %s: %s\n%s", other, body, process.Output.String())
 			require.Contains(t, body, "ENVOY_ALLOWED_HOSTS",
@@ -68,14 +68,14 @@ func TestHubListenerServesItsTailnetName(t *testing.T) {
 			// config without the list. It gets a server of its own, since two listeners of the same
 			// machine would share one durable.
 			bugSeed, _, bugURI := startSplitServer(t, image.Ref)
+			bugHeld := cmdtest.HoldPort(t)
 			unserved := served
 			unserved.AllowedHosts = nil
-			unserved.Port = cmdtest.FreeTCPPort(t)
-			bug := startListenerConfig(t, listener, bugURI, bugSeed, unserved)
+			bug := startListenerConfig(t, listener, bugURI, bugSeed, bugHeld, unserved)
 			t.Logf("healthy /healthz body of the listener without the list: %s",
-				requireHealthy(t, bug, unserved.Port, liveHealthWindow, listenerHealthy))
+				requireHealthy(t, bug, bugHeld.Port, liveHealthWindow, listenerHealthy))
 
-			status, body = postListenerHost(t, unserved.Port, "/v1/interests/subscribe", subscribeBody, own)
+			status, body = postListenerHost(t, bugHeld.Port, "/v1/interests/subscribe", subscribeBody, own)
 			require.Equal(t, http.StatusMisdirectedRequest, status,
 				"a listener without ENVOY_ALLOWED_HOSTS served the hub's own address %s: %s\n%s", own, body, bug.Output.String())
 			require.Contains(t, body, "ENVOY_ALLOWED_HOSTS",
@@ -83,8 +83,8 @@ func TestHubListenerServesItsTailnetName(t *testing.T) {
 
 			// It answers loopback, so what it refused above is the Host and not a listener that
 			// cannot serve anything.
-			loopback := "127.0.0.1:" + strconv.Itoa(unserved.Port)
-			status, body = postListenerHost(t, unserved.Port, "/v1/interests/subscribe", subscribeBody, loopback)
+			loopback := "127.0.0.1:" + strconv.Itoa(bugHeld.Port)
+			status, body = postListenerHost(t, bugHeld.Port, "/v1/interests/subscribe", subscribeBody, loopback)
 			require.Equal(t, http.StatusOK, status,
 				"the listener without the list refused loopback too, so its refusal of %s proves nothing: %s\n%s",
 				own, body, bug.Output.String())

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -230,6 +231,61 @@ func TestLoadForValidationSetsAShareReadOnlyAtItsSourceUnlessAMountWritesIt(t *t
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("sources' readOnly = %v, want %v", got, want)
 	}
+}
+
+// A Secret or ConfigMap volume's default_mode is the mode of every file it projects, written in
+// octal digits with YAML 1.1's leading 0 (kubectl's spelling) or YAML 1.2's 0o, unquoted or as a
+// string ("0440", the one octal spelling a block written as JSON can carry). It is what keeps a key
+// file at Legion's own 0440 rather than Kubernetes' default 0644, which every user in the pod may
+// read. Left out, the source carries none and Kubernetes' default stands. The loader keeps the mode
+// as written; in a pod the kubelet adds group read under the pod's fsGroup, so 0400 and 0 reach the
+// files as 0440.
+func TestLoadForValidationReadsAVolumesDefaultModeInOctal(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+`    pod:
+      volumes:
+        - {name: key, secret: {name: legion-acme-providers, items: [{key: MODEL_KEY, path: key}], default_mode: 0440}}
+        - {name: mode-0400, secret: {name: legion-operator-creds, default_mode: 0o400}}
+        - {name: route, config_map: {name: legion-operator-route, default_mode: 0444}}
+        - {name: mode-0, config_map: {name: legion-operator-roles, default_mode: 0}}
+        - {name: json, secret: {name: legion-operator-json, default_mode: "0440"}}
+        - {name: single, config_map: {name: legion-operator-single, default_mode: '0o640'}}
+        - {name: tagged, secret: {name: legion-operator-tagged, default_mode: !!int 0440}}
+        - {name: ca, secret: {name: legion-operator-ca}}
+        - {name: roles, config_map: {name: legion-operator-overlays}}
+        - {name: null-mode, secret: {name: legion-operator-null, default_mode: ~}}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := func(m *int32) string {
+		if m == nil {
+			return "unset"
+		}
+		return fmt.Sprintf("%#o", *m)
+	}
+	got := map[string]string{}
+	for _, v := range cfg.Runtime.Kubernetes.Pod.Volumes {
+		switch {
+		case v.Secret != nil:
+			got[v.Name] = mode(v.Secret.DefaultMode)
+		case v.ConfigMap != nil:
+			got[v.Name] = mode(v.ConfigMap.DefaultMode)
+		}
+	}
+	want := map[string]string{
+		"key": "0440", "mode-0400": "0400", "route": "0444", "mode-0": "0", "json": "0440", "single": "0640", "tagged": "0440",
+		"ca": "unset", "roles": "unset", "null-mode": "unset",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("volumes' defaultMode = %v, want %v", got, want)
+	}
+}
+
+// modeRefusal is load's refusal of the first volume's default_mode under its source kind, got
+// naming what the file holds there.
+func modeRefusal(kind, got string) string {
+	return "runtime.kubernetes.pod.volumes[0]." + kind + ".default_mode must be a file mode in octal digits with a leading 0 or 0o, " +
+		`from 0 to 0777, such as 0440 or "0440"; got ` + got
 }
 
 // What a block that sets only its required members settles to: the issue volume at 50Gi, both
@@ -1199,6 +1255,68 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.pod.volumes[0].config_map.items[0].path is required",
 		},
 		{
+			name: "a default_mode written in decimal",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 440}}]\n",
+			want: modeRefusal("secret", `"440"`),
+		},
+		{
+			name: "a quoted default_mode written in decimal",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, config_map: {name: a, default_mode: \"288\"}}]\n",
+			want: modeRefusal("config_map", `"288"`),
+		},
+		{
+			name: "a default_mode above 0777",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 01000}}]\n",
+			want: modeRefusal("secret", `"01000"`),
+		},
+		{
+			name: "a default_mode with a digit octal lacks",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 0o448}}]\n",
+			want: modeRefusal("secret", `"0o448"`),
+		},
+		{
+			name: "a default_mode that is the octal prefix alone",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: \"0o\"}}]\n",
+			want: modeRefusal("secret", `"0o"`),
+		},
+		{
+			name: "a default_mode YAML reads as a float",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 08}}]\n",
+			want: modeRefusal("secret", `"08"`),
+		},
+		{
+			name: "a default_mode with a digit separator",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 0_440}}]\n",
+			want: modeRefusal("secret", `"0_440"`),
+		},
+		{
+			name: "a default_mode in hexadecimal",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: 0x120}}]\n",
+			want: modeRefusal("secret", `"0x120"`),
+		},
+		{
+			name: "a signed default_mode",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: -0440}}]\n",
+			want: modeRefusal("secret", `"-0440"`),
+		},
+		{
+			name: "a plus-signed default_mode",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: +0440}}]\n",
+			want: modeRefusal("secret", `"+0440"`),
+		},
+		{
+			name: "a default_mode that is a mapping",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: key, secret: {name: a, default_mode: {mode: 0440}}}]\n",
+			want: modeRefusal("secret", "a mapping"),
+		},
+		{
+			// Kubernetes sets the mode of a projected volume's files for the whole volume, never per
+			// source, so a projected source takes no default_mode.
+			name: "a default_mode on a projected source",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: [{secret: {name: a, default_mode: 0440}}]}}]\n",
+			want: "unknown key runtime.kubernetes.pod.volumes[0].projected.sources[0].secret.default_mode",
+		},
+		{
 			name: "a projected volume with no sources",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: []}}]\n",
 			want: "runtime.kubernetes.pod.volumes[0].projected.sources must name at least one source",
@@ -1385,11 +1503,11 @@ linger_hours: 0.3
 instructions: /tmp/stage4b/instructions.md
 github_apps:
   implement:
-    app_id: "3202636"
-    private_key_command: "secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
+    app_id: "5341240"
+    private_key_command: "agent-secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
   review:
-    app_id: "3202653"
-    private_key_command: "secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
+    app_id: "5341243"
+    private_key_command: "agent-secrets GH_REVIEW_APP_PRIVATE_KEY_B64 -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
 runtime:
   kubernetes:
     namespace: legion
@@ -1478,6 +1596,27 @@ func TestAgentSecretsBlockRefusals(t *testing.T) {
 				t.Fatalf("err %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestAgentSecretsURLRefusalNamesNoCredential: a url carrying a user, a password, a query or a
+// fragment is refused without echoing it.
+func TestAgentSecretsURLRefusalNamesNoCredential(t *testing.T) {
+	for _, raw := range []string{
+		"https://tokuser9f3:hunter2pw@secrets.example",
+		"https://secrets.example/?token=qtok77",
+		"https://secrets.example/#qtok77",
+		"https://tokuser9f3:hunter2pw%zz@secrets.example",
+	} {
+		_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: \""+raw+"\"\n"+agentSecretsTokenFile), noEnv)
+		if err == nil || !strings.Contains(err.Error(), "agent_secrets.url must be an absolute URL") {
+			t.Fatalf("url %q: err %v, want the url refused", raw, err)
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("url %q: refusal %q names %q", raw, err, secret)
+			}
+		}
 	}
 }
 

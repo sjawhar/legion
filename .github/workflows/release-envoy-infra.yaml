@@ -36,6 +36,15 @@ concurrency:
   group: release-envoy-infra-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
+  # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+  # proxy.golang.org reset a download mid-stream and turned a Go lane red on a module whose hash
+  # go.sum already holds (sjawhar/legion#2512); with `|direct` the command fetches the same bytes
+  # straight from the source and checks them against go.sum, so this is a second path, not a weaker
+  # check.
+  GOPROXY: https://proxy.golang.org|direct
+
 jobs:
   # Versions, vets, tests, builds and smoke-tests the plugin and the command, and hands their
   # archives to publish as an artifact. It runs the module's code and every third-party module it
@@ -47,6 +56,7 @@ jobs:
     # with it.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     permissions:
       contents: read
     outputs:
@@ -57,12 +67,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/infra/go.mod
-          cache-dependency-path: |
-            packages/envoy/infra/go.sum
-            packages/envoy/go.sum
+          cache: false
+      # ci.yaml's go-envoy-infra, restored and never saved: only ci.yaml's main-push jobs write Go
+      # caches.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-infra-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: go-envoy-infra-${{ runner.os }}-
       - name: Determine next version
         id: version
         run: |
@@ -121,8 +139,8 @@ jobs:
             --patch-path scripts/go-third-party-notices.sh --patch-path .github/envoy-infra-targets.json \
             -- "${paths[@]}" >> "$GITHUB_OUTPUT"
       # The module's vet, both live-test tags included, and its unit tests, before anything is
-      # built: envoy-and-contracts.yaml's envoy-infra-go job, which runs them on a pull request, is
-      # not a required check, so the release checks the behaviour it publishes itself, as
+      # built: ci.yaml's envoy-infra-go job runs them on a pull request only when its filter selects
+      # the job, so the release checks the behaviour it publishes itself, as
       # release-envoy-listener.yaml runs its container smoke test in its docker job before
       # release_publish publishes. Vet compiles the live tests without running them; the unit tests
       # start no container, so this job needs no Docker.
@@ -222,6 +240,7 @@ jobs:
     # says; a skipped build gives `result == 'skipped'`, false.
     if: always() && needs.build.result == 'success' && needs.build.outputs.skip != 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
     # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
     # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.

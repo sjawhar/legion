@@ -7,18 +7,23 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"regexp"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 	ygws "github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -27,9 +32,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// testSigningKey is the one-key set the package's people stores seal refresh tokens under.
+var testSigningKey = auth.SingleSigningKey("signing-key")
+
 // headerIdentity is the test header identity that records each named person in the database.
 func headerIdentity(database *store.Store) identity.HeaderIdentity {
-	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)}
+	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)}
 }
 
 func newTestService(t *testing.T) (*Service, string) {
@@ -72,8 +80,30 @@ func TestRepairingAnUnreadableAskBlockCountsTheAskItOpens(t *testing.T) {
 		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
 		t.Fatal(err)
 	}
-	if open != 1 || outcome.AskBlocksAdded != open {
-		t.Fatalf("repair opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	if open != 1 || len(outcome.AddedAskBlocks) != open {
+		t.Fatalf("repair opened %d ask(s), reported %d", open, len(outcome.AddedAskBlocks))
+	}
+	if !slices.Equal(outcome.AddedAskBlocks, []AddedAskBlock{{ID: "ttl", Question: "Which cache TTL?"}}) {
+		t.Fatalf("repair named added blocks %+v, want ttl and its question", outcome.AddedAskBlocks)
+	}
+}
+
+// An edit names the ask blocks it added in document order, each with its question, whatever
+// their ids' order; a block already in the document is not among them.
+func TestEditNamesTheAddedAskBlocksInDocumentOrder(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#held urgency=\"med\"}\nWhich region?\n:::\n")
+	outcome, err := joinedApplyOps(service, artifactID, []model.EditOp{{
+		Op: "insert", After: "end",
+		Markdown: ":::ask{#zeta}\nWhich deployment window?\n:::\n\n> :::ask{#alpha}\n> Which cache TTL?\n> :::",
+	}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	if err != nil {
+		t.Fatalf("insert ask blocks: %v", err)
+	}
+	want := []AddedAskBlock{{ID: "zeta", Question: "Which deployment window?"}, {ID: "alpha", Question: "Which cache TTL?"}}
+	if !slices.Equal(outcome.AddedAskBlocks, want) {
+		t.Fatalf("edit named %+v, want %+v", outcome.AddedAskBlocks, want)
 	}
 }
 func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
@@ -97,8 +127,8 @@ func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
 		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
 		t.Fatal(err)
 	}
-	if open != 0 || outcome.AskBlocksAdded != open {
-		t.Fatalf("edit beside unreadable ask opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	if open != 0 || len(outcome.AddedAskBlocks) != open {
+		t.Fatalf("edit beside unreadable ask opened %d ask(s), reported %d", open, len(outcome.AddedAskBlocks))
 	}
 }
 
@@ -158,11 +188,55 @@ func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
 	}
 }
 
+// An ask's question and options are caller text, which the ask's edit writes into the block as
+// plain text and reads back through the document's own markdown pipeline. Text holding a web
+// address - after a space, after a letter and `;`, with a lowercase scheme - is written, settles,
+// and its row reads back as written, whether or not a reader takes the address for a link
+// (INFRA-531).
+func TestAnAskWhoseTextHoldsWebAddressesSettlesAsWritten(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#hosts urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich host?\n\n- A: First\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	question := "Which host, see https://x.test\n\nx;https://x.test\n\nor see http://x.test"
+	options := []model.AskOption{
+		{Label: "Secure", Description: "see https://x.test"},
+		{Label: "x;https://x.test"},
+		{Label: "Plain", Description: "see http://x.test"},
+	}
+	var stored AskBlockText
+	if err := joinedWrite(service, func(ctx context.Context) (err error) {
+		stored, err = service.SetAskBlockText(ctx, artifactID, "hosts", AskBlockEdit{Question: &question, Options: &options},
+			model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+		return err
+	}); err != nil {
+		t.Fatalf("write the ask's text: %v", err)
+	}
+	if stored.Question != question || !reflect.DeepEqual(stored.Options, options) {
+		t.Fatalf("the block reads back question=%q options=%#v, want what was written", stored.Question, stored.Options)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	var settled string
+	var optionsJSON []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select question, options from asks where block_artifact_id = $1 and block_id = 'hosts' and state = 'open'
+	`, artifactID).Scan(&settled, &optionsJSON); err != nil {
+		t.Fatalf("read the settled ask: %v", err)
+	}
+	var settledOptions []model.AskOption
+	if err := json.Unmarshal(optionsJSON, &settledOptions); err != nil {
+		t.Fatalf("decode the settled options: %v", err)
+	}
+	if settled != question || !reflect.DeepEqual(settledOptions, options) {
+		t.Fatalf("the settled ask holds question=%q options=%#v, want what was written", settled, settledOptions)
+	}
+}
+
 // A spec's decisions are ask blocks, and the write that adds one already carries its words into
 // a version: indexing it afterwards is bookkeeping over the same document. Settlement recording
 // that bookkeeping as a version of its own wrote a byte-identical version credited to nobody,
 // which stales the approval pinned to the version the agent wrote - and Legion's design gate,
-// open exactly while the approved version is the latest, closes with nothing in the event stream
+// open exactly while the approved version is the latest, closes with nothing in the event log
 // to explain it (LEGION-273).
 func TestSettlementIndexingAnAskBlockTheEditVersionedWritesNoVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
@@ -567,6 +641,2903 @@ func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
 	if asks != 0 {
 		t.Fatalf("unsupported ask rows = %d, want none", asks)
 	}
+}
+
+// Concurrent browser edits can leave an ask holding a second bullet list, which the browser keeps
+// and draws its options from the last list alone. Settlement marks it invalid and leaves its row
+// open and as it was, until an edit joins the lists.
+func TestSettlementMarksAnAskWithASecondBulletListInvalid(t *testing.T) {
+	const reason = `ask block "ask-lists", asking "Should we ship?", holds a second bullet list where its content rule, paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last`
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskMarkedInvalidAndKept(t, service, artifactID, "ask-lists", reason)
+
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children[1].Children = append(ask.Children[1].Children, ask.Children[2].Children...)
+		ask.Children = ask.Children[:2]
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for review"},
+		{Label: "Defer", Description: "Wait a week"},
+	})
+}
+
+// The ask-edit route rebuilds no decision that breaks its content rule, whatever shape breaks it:
+// a second list, a second list repeating a label, an item holding more than its text, a block
+// after the list. Every edit is refused - options, question, urgency - and writes nothing, and
+// the refusal quotes every block of the decision, its id with it, so a caller deleting one with a
+// document edit sees every word it removes.
+func TestSetAskBlockTextRefusesEveryEditOfAnAskBreakingItsContentRule(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+	defer_ := model.AskOption{Label: "Defer", Description: "Wait a week"}
+	for name, test := range map[string]struct {
+		block, quoted, kind string
+	}{
+		"second list":              {"- Defer: Wait a week\n", `"- Defer: Wait a week"`, "bullet_list"},
+		"repeated label":           {"- Ship: Only on Fridays\n", `"- Ship: Only on Fridays"`, "bullet_list"},
+		"nested sub-item":          {"- Defer: Wait a week\n  - only if finance agrees\n", `"- Defer: Wait a week\n  - only if finance agrees"`, "bullet_list"},
+		"second item paragraph":    {"- Defer: Wait a week\n\n  Finance must sign off first.\n", `"- Defer: Wait a week\n\n  Finance must sign off first."`, "bullet_list"},
+		"paragraph after the list": {"Stray words after the list\n", `"Stray words after the list"`, "paragraph"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+			editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, test.block)))
+			settleCurrentGeneration(t, service, artifactID)
+			before := liveTree(t, service, artifactID)
+			for edit, sent := range map[string]AskBlockEdit{
+				"the row's options":    {Options: &[]model.AskOption{ship, hold}},
+				"every option":         {Options: &[]model.AskOption{ship, hold, defer_}},
+				"options and question": {Question: new("Should we ship today?"), Options: &[]model.AskOption{ship, hold, defer_}},
+				"question only":        {Question: new("Should we ship today?")},
+				"urgency only":         {Urgency: new("high")},
+			} {
+				err := sendAskOptions(service, artifactID, sent)
+				assertBrokenAskEditRefused(t, service, artifactID, before, err)
+				if !strings.Contains(err.Error(), "("+test.kind+") reads "+test.quoted) {
+					t.Fatalf("%s: err = %v, want it to quote the %s %s", edit, err, test.kind, test.quoted)
+				}
+			}
+			if last := firstAsk(liveTree(t, service, artifactID)).Children[2]; last.Type != test.kind {
+				t.Fatalf("the ask's last block = %s, want the %s it was given kept", last.Type, test.kind)
+			}
+		})
+	}
+}
+
+// The refusal of a two-list decision, word for word: the content rule it breaks, the one path out,
+// and every block quoted in full by its id.
+func TestSetAskBlockTextRefusalOfATwoListAskQuotesEveryBlock(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n  - only if finance agrees\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	ask := firstAsk(liveTree(t, service, artifactID))
+	ids := make([]string, 0, len(ask.Children))
+	for _, child := range ask.Children {
+		id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+		ids = append(ids, strconv.Quote(id))
+	}
+	want := `block: ask block "ask-lists", asking "Should we ship?", holds a second bullet list where its content rule, paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last; ` +
+		`the ask-edit route does not rebuild a decision that breaks its content rule, so delete the blocks to drop, all in one document edit (dispatch doc-edit, deleting a block by its id; one edit holding one delete per block), which keeps the question's paragraphs and the first list after them, and keeps the same of every decision nested in the blocks it keeps, deleting whole a nested decision the rule leaves nothing of; ` +
+		`the blocks to delete are ` + ids[2] + `; then edit the ask; its blocks are: ` +
+		`block ` + ids[0] + ` (paragraph) reads "Should we ship?"; ` +
+		`block ` + ids[1] + ` (bullet_list) reads "- Ship: Release it\n- Hold: Wait for review"; ` +
+		`block ` + ids[2] + ` (bullet_list) reads "- Defer: Wait a week\n  - only if finance agrees"`
+	err := sendAskOptions(service, artifactID, AskBlockEdit{Urgency: new("high")})
+	if err == nil || err.Error() != want {
+		t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+	}
+}
+
+// quotedAskBlock matches a block the refusal of a broken ask quotes: its id and its markdown, each
+// Go-quoted.
+var quotedAskBlock = regexp.MustCompile(`block ("(?:[^"\\]|\\.)*") \((\w+)\) reads ("(?:[^"\\]|\\.)*")`)
+
+// textWords is every word of node's text, split at whatever is not a letter or a digit.
+func textWords(node *pmdoc.Node) []string {
+	words := []string{}
+	pmdoc.Walk(node, func(node *pmdoc.Node) bool {
+		words = append(words, strings.FieldsFunc(node.Text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })...)
+		return true
+	})
+	return words
+}
+
+// blocksToDelete matches the refusal's one delete list: every block id the caller deletes, each
+// Go-quoted, in one document edit. Where a block on it is or holds a decision, the list carries
+// the clause naming what the client refuses until that decision's ask is answered or resolved
+// (askRepairStep), which stands between the list and the ask edit after it.
+var blocksToDelete = regexp.MustCompile(`the blocks to delete are ((?:"(?:[^"\\]|\\.)*"(?:, )?)+)` +
+	`(?:; a decision among them whose ask is still open cannot be deleted by a document edit, so ` +
+	`answer or resolve that ask, or repair the decision in the document editor, before this delete)?` +
+	`; then edit the ask`)
+
+// refusalDeletes reads the block ids a refusal has the caller delete, and every block it quotes.
+func refusalDeletes(t *testing.T, err error) (deletes []string, quoted map[string]string) {
+	t.Helper()
+	var unrepresentable *ErrAskBlockUnrepresentable
+	if !errors.As(err, &unrepresentable) {
+		t.Fatalf("err = %v, want ErrAskBlockUnrepresentable", err)
+	}
+	quoted = map[string]string{}
+	for _, match := range quotedAskBlock.FindAllStringSubmatch(unrepresentable.Reason, -1) {
+		id, idErr := strconv.Unquote(match[1])
+		text, textErr := strconv.Unquote(match[3])
+		if idErr != nil || textErr != nil {
+			t.Fatalf("the refusal quotes %s and %s, which do not unquote: %v %v", match[1], match[3], idErr, textErr)
+		}
+		quoted[id] = text
+	}
+	list := blocksToDelete.FindAllStringSubmatch(unrepresentable.Reason, -1)
+	if len(list) != 1 {
+		t.Fatalf("the refusal gives %d delete lists, want one: %v", len(list), err)
+	}
+	for _, id := range regexp.MustCompile(`"(?:[^"\\]|\\.)*"`).FindAllString(list[0][1], -1) {
+		unquoted, unquoteErr := strconv.Unquote(id)
+		if unquoteErr != nil {
+			t.Fatalf("the refusal names %s to delete, which does not unquote: %v", id, unquoteErr)
+		}
+		deletes = append(deletes, unquoted)
+	}
+	return deletes, quoted
+}
+
+// followRefusal sends edit, reads the refusal's delete list, checks it names exactly the ask's
+// children at the indexes deleted, deletes every block on it in ONE document edit, and sends the
+// question and every option back with the ask edit. The decision ends valid, and no word is lost:
+// every word outside the deleted blocks is kept, every word of them the refusal quoted.
+func followRefusal(t *testing.T, service *Service, artifactID string, edit AskBlockEdit, deleted []int, question string, every []model.AskOption) {
+	t.Helper()
+	ask := firstAsk(liveTree(t, service, artifactID))
+	err := sendAskOptions(service, artifactID, edit)
+	deletes, quoted := refusalDeletes(t, err)
+	if len(quoted) != len(ask.Children) {
+		t.Fatalf("the refusal quotes %d blocks, want the ask's %d: %v", len(quoted), len(ask.Children), err)
+	}
+	want := make([]string, 0, len(deleted))
+	for _, index := range deleted {
+		id, _ := ask.Children[index].Attrs[pmdoc.BlockIDAttr].(string)
+		want = append(want, id)
+	}
+	if !slices.Equal(deletes, want) {
+		t.Fatalf("the refusal names %q to delete, want %q: %v", deletes, want, err)
+	}
+	kept, deletedWords := []string{}, []string{}
+	ops := make([]model.EditOp, 0, len(deletes))
+	for _, child := range ask.Children {
+		id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+		if !slices.Contains(deletes, id) {
+			kept = append(kept, textWords(child)...)
+			continue
+		}
+		ops = append(ops, model.EditOp{Op: "delete", Block: id})
+		for _, word := range textWords(child) {
+			if !strings.Contains(quoted[id], word) {
+				t.Fatalf("the refusal does not quote %q of block %q it has the caller delete: %v", word, id, err)
+			}
+			deletedWords = append(deletedWords, word)
+		}
+	}
+	if _, err := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
+		t.Fatalf("one document edit deleting %q, as the refusal names: %v", deletes, err)
+	}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Question: &question, Options: &every}); err != nil {
+		t.Fatalf("ask edit after the document edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", question, every)
+	after := textWords(firstAsk(liveTree(t, service, artifactID)))
+	for _, word := range append(kept, deletedWords...) {
+		if !slices.Contains(after, word) {
+			t.Fatalf("the decision lost %q: it reads %q", word, after)
+		}
+	}
+}
+
+// The refusal's one path applies when followed: the caller reads the ids to delete from the
+// refusal, deletes them with one document edit, and edits the ask, sending back the deleted list's
+// option with the words the refusal quoted.
+func TestSetAskBlockTextRefusalOfABrokenAskNamesAPathThatApplies(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n  - only if finance agrees\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	followRefusal(t, service, artifactID, AskBlockEdit{Options: &[]model.AskOption{ship, hold}}, []int{2}, "Should we ship?",
+		[]model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week, only if finance agrees"}})
+}
+
+// With two extra lists, a document edit deleting one is refused (it leaves the decision broken),
+// so the refusal names both, to delete in one document edit, which applies.
+func TestSetAskBlockTextRefusalOfAThreeListAskNamesEveryDeleteInOneEdit(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n")))
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Drop: Abandon it\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	followRefusal(t, service, artifactID, AskBlockEdit{Options: &[]model.AskOption{ship, hold}}, []int{2, 3}, "Should we ship?",
+		[]model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week"}, {Label: "Drop", Description: "Abandon it"}})
+}
+
+// Whatever shape breaks the rule - a list before the question, a paragraph after the list, a
+// paragraph holding no text before the one holding the question - the refusal names the blocks
+// whose deletion leaves the question's paragraphs and the first list after them, and a document
+// edit deleting exactly those applies.
+func TestSetAskBlockTextRefusalNamesADeleteThatAppliesWhateverTheShape(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+	emptyParagraph := func(id string) *pmdoc.Node {
+		return &pmdoc.Node{Type: "paragraph", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: id}}
+	}
+	for name, test := range map[string]struct {
+		// children is the ask's blocks, given its question paragraph and its Ship/Hold list.
+		children func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node
+		deleted  []int
+		question string
+		every    []model.AskOption
+	}{
+		"list before the question": {
+			children: func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node {
+				return []*pmdoc.Node{parsedBlock(t, "- Early: First words\n"), question, list}
+			},
+			deleted: []int{0}, question: "Should we ship?",
+			every: []model.AskOption{{Label: "Early", Description: "First words"}, ship, hold},
+		},
+		"paragraph after the list": {
+			children: func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node {
+				return []*pmdoc.Node{question, list, parsedBlock(t, "Decide by Friday.\n")}
+			},
+			deleted: []int{2}, question: "Should we ship?\n\nDecide by Friday.", every: []model.AskOption{ship, hold},
+		},
+		"empty first paragraph": {
+			children: func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node {
+				return []*pmdoc.Node{emptyParagraph("empty-para"), list, question}
+			},
+			deleted: []int{0, 1}, question: "Should we ship?", every: []model.AskOption{ship, hold},
+		},
+		"empty first paragraph, two lists": {
+			children: func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node {
+				return []*pmdoc.Node{emptyParagraph("empty-para"), list, parsedBlock(t, "- Defer: Wait a week\n"), question}
+			},
+			deleted: []int{0, 1, 2}, question: "Should we ship?",
+			every: []model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week"}},
+		},
+		"list, empty paragraph, list": {
+			children: func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node {
+				return []*pmdoc.Node{parsedBlock(t, "- Defer: Wait a week\n"), emptyParagraph("empty-para"), list, question}
+			},
+			deleted: []int{0, 1, 2}, question: "Should we ship?",
+			every: []model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week"}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+				ask := firstAsk(tree)
+				ask.Children = test.children(t, ask.Children[0], ask.Children[1])
+				return tree
+			})
+			settleCurrentGeneration(t, service, artifactID)
+			followRefusal(t, service, artifactID, AskBlockEdit{Urgency: new("high")}, test.deleted, test.question, test.every)
+		})
+	}
+}
+
+// A person's document edit can leave an ask holding no question at all, which settlement flags
+// `invalid` while it leaves the row as it was. An ask edit carrying a question writes one back
+// into the block: the option list is the node the document already held, the row takes the new
+// question, and the next settlement clears the flag. A decision holding a second list is written
+// the same way, every list of it kept as it is, since the content rule it breaks is weighed
+// after its question: no delete repairs a decision while it asks nothing.
+func TestEditAskRepairsAnEmptyQuestion(t *testing.T) {
+	t.Run("the decision keeps its content rule", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			firstAsk(tree).Children[0].Children = nil
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		options := firstAsk(liveTree(t, service, artifactID)).Children[1]
+		var stored AskBlockText
+		if err := joinedWrite(service, func(ctx context.Context) (err error) {
+			stored, err = service.SetAskBlockText(ctx, artifactID, "ask-lists",
+				AskBlockEdit{Question: new("Should we ship it today?")}, model.Actor{Kind: "user", ID: "alice"})
+			return err
+		}); err != nil {
+			t.Fatalf("the ask edit sending a question to the emptied decision: %v", err)
+		}
+		if stored.SeveralOptionLists {
+			t.Fatalf("the repair of a decision holding one list reports it as holding several, "+
+				"so its row would keep options the block does not hold: %#v", stored)
+		}
+		ask := firstAsk(liveTree(t, service, artifactID))
+		block, err := parseAskBlock(ask)
+		if err != nil {
+			t.Fatalf("the repaired block does not parse: %v", err)
+		}
+		if block.question != "Should we ship it today?" {
+			t.Fatalf("the repaired block asks %q, want the question the ask edit sent", block.question)
+		}
+		if last := ask.Children[len(ask.Children)-1]; !last.EqualWithBlockIDs(options) {
+			t.Fatalf("the question edit rewrote the option list, want the very nodes the document held")
+		}
+		settleCurrentGeneration(t, service, artifactID)
+		assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship it today?", []model.AskOption{
+			{Label: "Ship", Description: "Release it"},
+			{Label: "Hold", Description: "Wait for review"},
+		})
+	})
+
+	// The decision holds a second bullet list, which breaks its content rule, and the question is
+	// written into it all the same: rebuilding the body would keep the last list and drop the
+	// one before it, deleting a person's options unseen, so both lists are the very nodes the
+	// document held, and the row the edit reports holds the options of both.
+	t.Run("the decision holds a second bullet list", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			ask.Children[0].Children = nil
+			ask.Children = append(ask.Children, parsedBlock(t, "- Defer: Wait a week\n"))
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		bulletLists := func(ask *pmdoc.Node) []*pmdoc.Node {
+			found := []*pmdoc.Node{}
+			for _, child := range ask.Children {
+				if child.Type == "bullet_list" {
+					found = append(found, child)
+				}
+			}
+			return found
+		}
+		held := bulletLists(firstAsk(liveTree(t, service, artifactID)))
+		if len(held) != 2 {
+			t.Fatalf("the emptied decision holds %d bullet lists, want the two it was given", len(held))
+		}
+		var stored AskBlockText
+		if err := joinedWrite(service, func(ctx context.Context) (err error) {
+			stored, err = service.SetAskBlockText(ctx, artifactID, "ask-lists",
+				AskBlockEdit{Question: new("Should we ship it today?")}, model.Actor{Kind: "user", ID: "alice"})
+			return err
+		}); err != nil {
+			t.Fatalf("the ask edit sending a question to the emptied decision: %v", err)
+		}
+		ask := firstAsk(liveTree(t, service, artifactID))
+		block, err := parseAskBlock(ask)
+		if err != nil {
+			t.Fatalf("the repaired block does not parse: %v", err)
+		}
+		every := []model.AskOption{
+			{Label: "Ship", Description: "Release it"},
+			{Label: "Hold", Description: "Wait for review"},
+			{Label: "Defer", Description: "Wait a week"},
+		}
+		if block.question != "Should we ship it today?" || !slices.Equal(block.options, every) {
+			t.Fatalf("the repaired block asks %q with options %#v, want the question sent and every option of both lists",
+				block.question, block.options)
+		}
+		written := bulletLists(ask)
+		if len(written) != len(held) {
+			t.Fatalf("the question edit left %d bullet lists, want the %d the document held", len(written), len(held))
+		}
+		for index, list := range written {
+			if !list.EqualWithBlockIDs(held[index]) {
+				t.Fatalf("the question edit rewrote bullet list %d, want the very nodes the document held", index)
+			}
+		}
+		if stored.Question != block.question || !slices.Equal(stored.Options, every) {
+			t.Fatalf("the ask row takes question %q with options %#v, want what the block holds",
+				stored.Question, stored.Options)
+		}
+		// The block holds both lists, so no parse reads it as a decision and the options above
+		// are the two lists joined. The write says so, and the ask-edit route keeps the row's
+		// own options rather than writing that reading into it.
+		if !stored.SeveralOptionLists {
+			t.Fatalf("the repair of a decision holding two lists does not report them: %#v", stored)
+		}
+	})
+}
+
+// An ask edit carrying no question cannot repair an emptied question, so it is refused with the
+// step that does: sending the ask edit again with a question. Where that ask breaks its content
+// rule too the refusal says the same thing and names no delete: a document edit may not leave a
+// decision it changes unreadable, and one asking nothing is unreadable, so the deletes the
+// content rule would name are a step no caller can take yet.
+func TestEditAskOfAnEmptyQuestionNamesTheStep(t *testing.T) {
+	t.Run("the decision keeps its content rule", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			firstAsk(tree).Children[0].Children = nil
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		err := editAskUrgency(service, artifactID, "ask-lists")
+		want := `block: ask block "ask-lists" has an empty question; send this ask edit again with a question, ` +
+			`which writes it into the block`
+		if err == nil || err.Error() != want {
+			t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+		}
+		assertAskEditWroteNothing(t, service, artifactID, before, err)
+	})
+	t.Run("the decision breaks its content rule too", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			ask.Children[0].Children = nil
+			ask.Children = append(ask.Children, parsedBlock(t, "- Defer: Wait a week\n"))
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		err := editAskUrgency(service, artifactID, "ask-lists")
+		want := `block: ask block "ask-lists" has an empty question; send this ask edit again with a question, ` +
+			`which writes it into the block`
+		if err == nil || err.Error() != want {
+			t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+		}
+		// The blocks the content rule leaves no room for are deleted once the decision asks
+		// something again, so the refusal of this edit names none of them.
+		if blocksToDelete.MatchString(err.Error()) {
+			t.Fatalf("the refusal = %v, want it to name no delete while the decision asks nothing", err)
+		}
+		assertAskEditWroteNothing(t, service, artifactID, before, err)
+	})
+
+	// The paragraph a question would be written over holds no text, but it holds an image, which
+	// no question carries: writing the question would delete it unseen. The refusal quotes it and
+	// names the two places it is kept, since a document edit cannot write a question beside it:
+	// an upload of the document as a new version, which is the path an agent has, and the
+	// document editor, where a person writes it.
+	t.Run("a paragraph the question would replace holds an image", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			ask.Children[0] = parsedBlock(t, "![a photo](/photo.png)\n")
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		photo, _ := firstAsk(before).Children[0].Attrs[pmdoc.BlockIDAttr].(string)
+		err := sendAskOptions(service, artifactID, AskBlockEdit{Question: new("Should we ship?")})
+		want := `block: ask block "ask-lists" has an empty question, and writing a question into it would delete ` +
+			`what one of its paragraphs holds, which is no text: block ` + strconv.Quote(photo) +
+			` (paragraph) reads "![a photo](/photo.png)"; no document edit writes a paragraph into a decision, ` +
+			`so none reaches this block - upload the document again as a new version ` +
+			`with the question written beside that paragraph (dispatch artifact --issue <KEY>, or ` +
+			`--project <KEY> for a project's document, --name <the document> --content-file -), or write the ` +
+			`question beside it in the document editor; ` +
+			`either keeps what the paragraph holds`
+		if err == nil || err.Error() != want {
+			t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+		}
+		assertAskEditWroteNothing(t, service, artifactID, before, err)
+	})
+}
+
+// The refusals of a decision whose question a person emptied and which holds a second bullet
+// list name a path a caller can walk, step by step: the edit carrying no question is refused for
+// the question, the ask edit carrying one writes it whatever the content rule says, the refusal
+// after that names the blocks to delete, one document edit deletes them, and the ask edit after
+// it applies. The decision ends reading as one, and every word no refusal named for deletion -
+// the words under an option among them - is still in the document.
+func TestEditAskRefusalOfAnEmptyQuestionNamesAPathThatApplies(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children[0].Children = nil
+		ask.Children = append(ask.Children, parsedBlock(t, "- Defer: Wait a week\n"))
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+
+	// The urgency edit names the question, the one step that applies while the decision asks
+	// nothing: no document edit may leave it unreadable, so none of them deletes its second list.
+	urgency := editAskUrgency(service, artifactID, "ask-lists")
+	want := `block: ask block "ask-lists" has an empty question; send this ask edit again with a question, ` +
+		`which writes it into the block`
+	if urgency == nil || urgency.Error() != want {
+		t.Fatalf("refusal of the urgency edit =\n%v\nwant\n%s", urgency, want)
+	}
+	assertAskEditWroteNothing(t, service, artifactID, before, urgency)
+
+	// The ask edit sent again with a question writes it, and the row it reports holds that
+	// question and every option of both lists, which is what the block then parses back to.
+	var stored AskBlockText
+	if err := joinedWrite(service, func(ctx context.Context) (err error) {
+		stored, err = service.SetAskBlockText(ctx, artifactID, "ask-lists",
+			AskBlockEdit{Question: new("Should we ship?")}, model.Actor{Kind: "user", ID: "alice"})
+		return err
+	}); err != nil {
+		t.Fatalf("the ask edit sent again with a question, as the refusal names: %v\nrefusal: %v", err, urgency)
+	}
+	every := []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for review"},
+		{Label: "Defer", Description: "Wait a week"},
+	}
+	written, parseErr := parseAskBlock(firstAsk(liveTree(t, service, artifactID)))
+	if parseErr != nil {
+		t.Fatalf("the decision does not parse once the question is written: %v", parseErr)
+	}
+	if written.question != "Should we ship?" || !slices.Equal(written.options, every) {
+		t.Fatalf("the decision asks %q with options %#v, want the question sent and every option of both lists",
+			written.question, written.options)
+	}
+	if stored.Question != written.question || !slices.Equal(stored.Options, every) {
+		t.Fatalf("the ask row takes question %q with options %#v, want what the block holds",
+			stored.Question, stored.Options)
+	}
+
+	// The decision still breaks its content rule, so the next ask edit of it names the blocks to
+	// delete, which is a step a caller can take now that it asks something.
+	broken := editAskUrgency(service, artifactID, "ask-lists")
+	deletes, _ := refusalDeletes(t, broken)
+	ask := firstAsk(liveTree(t, service, artifactID))
+	ops := make([]model.EditOp, 0, len(deletes))
+	kept := []string{}
+	for _, child := range ask.Children {
+		if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); slices.Contains(deletes, id) {
+			ops = append(ops, model.EditOp{Op: "delete", Block: id})
+			continue
+		}
+		kept = append(kept, textWords(child)...)
+	}
+	if len(ops) != len(deletes) {
+		t.Fatalf("the refusal names %q to delete, which are not all blocks of the decision: %v", deletes, broken)
+	}
+
+	// One document edit holding those deletes, and the ask edit after it, as the refusal says.
+	if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
+		t.Fatalf("one document edit deleting %q, as the refusal names: %v\nrefusal: %v", deletes, applyErr, broken)
+	}
+	if editErr := editAskUrgency(service, artifactID, "ask-lists"); editErr != nil {
+		t.Fatalf("ask edit after deleting %q, as the refusal names: %v\nrefusal: %v", deletes, editErr, broken)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	after := liveTree(t, service, artifactID)
+	repaired := firstAsk(after)
+	if got, exists := repaired.Attrs["invalid"]; exists {
+		t.Fatalf("after following the refusals the decision is invalid: %#v", got)
+	}
+	if reason := readAskBlockStrictly(repaired); reason != nil || repaired.Attrs["urgency"] != "high" {
+		t.Fatalf("after following the refusals the decision reads %v with urgency %v, want it valid and the ask edit applied",
+			reason, repaired.Attrs["urgency"])
+	}
+	words := textWords(after)
+	for _, word := range kept {
+		if slices.Contains(words, word) {
+			continue
+		}
+		t.Fatalf("the document lost %q, which no refusal named for deletion: it reads %q", word, words)
+	}
+}
+
+// An options edit of a decision holding more than one bullet list cannot say which list an
+// option is in, so it is refused on the options while the emptied question still has it read
+// leniently: a merge across the lists would move a person's words from one into another. The
+// question alone applies, and once the decision reads as one the same options edit applies too.
+func TestEditAskOptionsOfADecisionHoldingTwoListsWaitForTheQuestion(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children[0].Children = nil
+		ask.Children = append(ask.Children, parsedBlock(t, "- Defer: Wait a week\n"))
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+	options := []model.AskOption{
+		{Label: "Ship", Description: "Release it today"},
+		{Label: "Hold", Description: "Wait for review"},
+		{Label: "Defer", Description: "Wait a week"},
+	}
+	edit := AskBlockEdit{Question: new("Should we ship?"), Options: &options}
+	err := sendAskOptions(service, artifactID, edit)
+	want := `options: this decision holds more than one bullet list, so an options edit cannot say which list ` +
+		`an option is in; send the question alone, and edit the options once the decision reads as one`
+	if err == nil || err.Error() != want {
+		t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+	}
+	assertAskEditWroteNothing(t, service, artifactID, before, err)
+	if questionErr := sendAskOptions(service, artifactID, AskBlockEdit{Question: new("Should we ship?")}); questionErr != nil {
+		t.Fatalf("the question alone, as the refusal names: %v\nrefusal: %v", questionErr, err)
+	}
+	// The decision reads as one once its second list is gone, which is the delete its own
+	// refusal names, and the options edit refused above then applies.
+	deletes, _ := refusalDeletes(t, sendAskOptions(service, artifactID, edit))
+	ops := make([]model.EditOp, 0, len(deletes))
+	for _, id := range deletes {
+		ops = append(ops, model.EditOp{Op: "delete", Block: id})
+	}
+	if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
+		t.Fatalf("one document edit deleting %q, as the refusal names: %v", deletes, applyErr)
+	}
+	if editErr := sendAskOptions(service, artifactID, edit); editErr != nil {
+		t.Fatalf("the options edit once the decision reads as one: %v", editErr)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
+// askRowCount is how many ask rows are anchored to blockID. Settlement opens a row only for a
+// block its parser reads (addedAskBlocks, readableAskBlockIDs), so a decision that never held a
+// question has none, and a document edit may delete it.
+func askRowCount(t *testing.T, service *Service, artifactID, blockID string) int {
+	t.Helper()
+	var count int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from asks where block_artifact_id = $1 and block_id = $2
+	`, artifactID, blockID).Scan(&count); err != nil {
+		t.Fatalf("count the ask rows of block %q: %v", blockID, err)
+	}
+	return count
+}
+
+// Every decision body of one to five blocks - each a paragraph holding text (P), a paragraph
+// holding none (E), a bullet list (L), or a bullet list whose item holds a nested list (N) - that
+// breaks the content rule is refused, and the refusal followed exactly as written - the same ask
+// edit again with a question where no paragraph of the body holds text, then ONE document edit
+// holding one delete per block it names, then the same ask edit - leaves the decision valid,
+// every word it did not name for deletion still in the document, and every word it did quoted in
+// it; or the refusal names no delete and says why. No body is skipped for resembling another, and
+// each block's words are its own, so a lost word names its block.
+func TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision(t *testing.T) {
+	service, _ := newTestService(t)
+	service.settle = time.Hour
+	bodies := askBodies([]string{"P", "E", "L", "N"}, 5)
+	if len(bodies) != 4+16+64+256+1024 {
+		t.Fatalf("enumerated %d bodies, want every one of 1364", len(bodies))
+	}
+	var (
+		mu                        sync.Mutex
+		broken, followed, unnamed int
+		noDelete                  = map[string]int{}
+		noDeleteShape             = map[string]string{}
+	)
+	t.Cleanup(func() {
+		t.Logf("%d bodies enumerated, %d breaking the content rule: %d followed to a valid decision, %d naming no delete and saying why, %d failing",
+			len(bodies), broken, followed, unnamed, broken-followed-unnamed)
+		for reason, count := range noDelete {
+			t.Logf("%d naming no delete (%s among them): %s", count, noDeleteShape[reason], reason)
+		}
+	})
+	for index, body := range bodies {
+		children := make([]*pmdoc.Node, len(body))
+		for position, kind := range body {
+			children[position] = askBodyBlock(t, kind, position+1)
+		}
+		if pmdoc.AskContentError(&pmdoc.Node{Type: "ask", Children: children}) == nil {
+			continue
+		}
+		broken++
+		shape := strings.Join(body, "-")
+		t.Run(shape, func(t *testing.T) {
+			t.Parallel()
+			// A document of its own on an issue of its own, so no two bodies share a lock.
+			artifactID := createIssueDocument(t, service.store, index+2, "# First")
+			seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
+			settleCurrentGeneration(t, service, artifactID)
+			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+				firstAsk(tree).Children = children
+				return tree
+			})
+			settleCurrentGeneration(t, service, artifactID)
+			before := liveTree(t, service, artifactID)
+			ask := firstAsk(before)
+			edit := AskBlockEdit{Urgency: new("high")}
+			err := sendAskOptions(service, artifactID, edit)
+			unrepresentable := askEditRefusal(t, before, "ask-lists", err)
+			breaksTheRule := true
+			if unrepresentable.Reason == emptyQuestionStep("ask-lists") {
+				before, ask, err, unrepresentable, breaksTheRule = followEmptyQuestionStep(
+					t, service, artifactID, "ask-lists", &edit, err, unrepresentable)
+			}
+			kept := textWords(before)
+			if breaksTheRule {
+				if !blocksToDelete.MatchString(unrepresentable.Reason) {
+					why := noDeleteExplanation(ask, unrepresentable.Reason)
+					if why == "" || strings.Contains(unrepresentable.Reason, "delete the blocks") {
+						t.Fatalf("the refusal names no delete list and does not say why: %v", err)
+					}
+					if !liveTree(t, service, artifactID).EqualWithBlockIDs(before) {
+						t.Fatalf("the refused ask edit wrote to the document: %v", err)
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					unnamed++
+					if noDelete[why]++; noDelete[why] == 1 {
+						noDeleteShape[why] = shape
+					}
+					return
+				}
+				deletes, quoted := refusalDeletes(t, err)
+				if len(deletes) == 0 || len(quoted) != len(ask.Children) {
+					t.Fatalf("the refusal names %q to delete and quotes %d blocks, want a delete and the ask's %d: %v", deletes, len(quoted), len(ask.Children), err)
+				}
+				ops := make([]model.EditOp, 0, len(deletes))
+				for _, id := range deletes {
+					if !slices.ContainsFunc(ask.Children, func(child *pmdoc.Node) bool { return child.Attrs[pmdoc.BlockIDAttr] == id }) {
+						t.Fatalf("the refusal names %q to delete, which is no block of the ask: %v", id, err)
+					}
+					ops = append(ops, model.EditOp{Op: "delete", Block: id})
+				}
+				kept = []string{}
+				for _, block := range before.Children {
+					if block != ask {
+						kept = append(kept, textWords(block)...)
+						continue
+					}
+					for _, child := range ask.Children {
+						id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+						if !slices.Contains(deletes, id) {
+							kept = append(kept, textWords(child)...)
+							continue
+						}
+						for _, word := range textWords(child) {
+							if !strings.Contains(quoted[id], word) {
+								t.Fatalf("the refusal does not quote %q of block %q it has the caller delete: %v", word, id, err)
+							}
+						}
+					}
+				}
+				if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
+					t.Fatalf("one document edit deleting %q, as the refusal names: %v\nrefusal: %v", deletes, applyErr, err)
+				}
+				if editErr := sendAskOptions(service, artifactID, edit); editErr != nil {
+					t.Fatalf("ask edit after deleting %q, as the refusal names: %v\nrefusal: %v", deletes, editErr, err)
+				}
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			after := liveTree(t, service, artifactID)
+			repaired := firstAsk(after)
+			if got, exists := repaired.Attrs["invalid"]; exists {
+				t.Fatalf("after following the refusal the ask is invalid: %v\nrefusal: %v", got, err)
+			}
+			block, parseErr := parseAskBlock(repaired)
+			if strictErr := readAskBlockStrictly(repaired); parseErr != nil || strictErr != nil || repaired.Attrs["urgency"] != "high" {
+				t.Fatalf("after following the refusal the ask reads %v / %v with urgency %v, want it valid and the ask edit applied\nrefusal: %v",
+					parseErr, strictErr, repaired.Attrs["urgency"], err)
+			}
+			if edit.Question != nil && block.question != *edit.Question {
+				t.Fatalf("after following the refusal the ask asks %q, want the question the follow wrote, %q\nrefusal: %v",
+					block.question, *edit.Question, err)
+			}
+			if state, question, options := blockAskRow(t, service, artifactID, "ask-lists"); state != "open" || question != block.question || !slices.Equal(options, block.options) {
+				t.Fatalf("ask row = state=%q question=%q options=%#v, want it open as the block reads: %q %#v", state, question, options, block.question, block.options)
+			}
+			words := textWords(after)
+			for _, word := range kept {
+				if !slices.Contains(words, word) {
+					t.Fatalf("the document lost %q, which the refusal did not name for deletion: it reads %q\nrefusal: %v", word, words, err)
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			followed++
+		})
+	}
+}
+
+// askBodyBlock is the block of kind - P a paragraph holding text, E a paragraph holding none, L a
+// bullet list, N a bullet list whose item holds a nested list - at position in an ask's body, its
+// words found nowhere else in the body.
+func askBodyBlock(t *testing.T, kind string, position int) *pmdoc.Node {
+	t.Helper()
+	var block *pmdoc.Node
+	switch kind {
+	case "P":
+		block = parsedBlock(t, fmt.Sprintf("Question%d asks%d?\n", position, position))
+	case "E":
+		block = &pmdoc.Node{Type: "paragraph", Attrs: pmdoc.Attrs{}}
+	case "L":
+		block = parsedBlock(t, fmt.Sprintf("- Option%d: Means%d\n- Other%d\n", position, position, position))
+	case "N":
+		block = parsedBlock(t, fmt.Sprintf("- Choice%d: Holds%d\n  - Nested%d\n", position, position, position))
+	default:
+		t.Fatalf("no ask body block of kind %q", kind)
+	}
+	block.Attrs[pmdoc.BlockIDAttr] = fmt.Sprintf("body-%d", position)
+	return block
+}
+
+// askBodies is every decision body of one to longest blocks over kinds, in order: each kind, then
+// each pair, and so on, none skipped for resembling another.
+func askBodies(kinds []string, longest int) [][]string {
+	var bodies [][]string
+	var extend func(body []string)
+	extend = func(body []string) {
+		if len(body) > 0 {
+			bodies = append(bodies, body)
+		}
+		if len(body) == longest {
+			return
+		}
+		for _, kind := range kinds {
+			extend(append(slices.Clone(body), kind))
+		}
+	}
+	extend(nil)
+	return bodies
+}
+
+// noDeleteExplanation is why reason, a refusal of an edit of ask naming no delete, names none, as
+// it says it - or "" when it does not say, or says what is not so. A refusal that names no delete
+// because no edit of deletes repairs the decision says so too: the decision is repaired in the
+// document editor, the one way out it offers, since no ask edit of another decision is one. A
+// decision asking nothing is no such end: its refusal names the step that repairs it, this same
+// ask edit again carrying a question (emptyQuestionStep), which a follow takes.
+func noDeleteExplanation(ask *pmdoc.Node, reason string) string {
+	question := slices.ContainsFunc(ask.Children, func(child *pmdoc.Node) bool {
+		return child.Type == "paragraph" && strings.TrimSpace(pmdoc.TextContent(child)) != ""
+	})
+	if question {
+		return ""
+	}
+	const explanation = "no document edit deleting this decision's blocks, or those of a decision nested in it, leaves it valid"
+	if strings.Contains(reason, explanation) && strings.Contains(reason, repairedInTheEditor) {
+		return explanation
+	}
+	return ""
+}
+
+// AskContentError reads the decisions nested in an ask too, so an ask whose own blocks keep the
+// rule breaks it when an option holds a decision with two lists. Deleting the ask's own blocks
+// repairs nothing there, and a document edit may not leave a decision it changes unreadable, so
+// the refusal names the nested decision's own extra block, by its id, as the one edit that
+// repairs both - which applies, and the ask edit after it.
+func TestSetAskBlockTextRefusalOfAnAskHoldingABrokenDecisionNamesTheNestedDelete(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	nested := parsedBlock(t, ":::ask{#ask-nested urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+	nested.Children = append(nested.Children, parsedBlock(t, "- Tuesday\n"))
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		item := firstAsk(tree).Children[1].Children[0]
+		item.Children = append(item.Children, nested)
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+	options, _ := firstAsk(before).Children[1].Attrs[pmdoc.BlockIDAttr].(string)
+	tuesday, _ := firstAsk(before).Children[1].Children[0].Children[1].Children[2].Attrs[pmdoc.BlockIDAttr].(string)
+	err := sendAskOptions(service, artifactID, AskBlockEdit{Urgency: new("high")})
+	assertBrokenAskEditRefused(t, service, artifactID, before, err)
+	deletes, quoted := refusalDeletes(t, err)
+	if !slices.Equal(deletes, []string{tuesday}) {
+		t.Fatalf("the refusal names %q to delete, want the nested decision's second list %q alone: %v", deletes, tuesday, err)
+	}
+	if !strings.Contains(quoted[options], "Tuesday") {
+		t.Fatalf("the refusal quotes the option list as %q, want the nested decision's words in it: %v", quoted[options], err)
+	}
+	ops := []model.EditOp{{Op: "delete", Block: tuesday}}
+	if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
+		t.Fatalf("one document edit deleting %q, as the refusal names: %v\nrefusal: %v", tuesday, applyErr, err)
+	}
+	if editErr := sendAskOptions(service, artifactID, AskBlockEdit{Urgency: new("high")}); editErr != nil {
+		t.Fatalf("ask edit after deleting %q, as the refusal names: %v\nrefusal: %v", tuesday, editErr, err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	repaired := firstAsk(liveTree(t, service, artifactID))
+	if reason := readAskBlockStrictly(repaired); reason != nil || repaired.Attrs["urgency"] != "high" {
+		t.Fatalf("after following the refusal the ask reads %v with urgency %v, want it valid and the ask edit applied", reason, repaired.Attrs["urgency"])
+	}
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for review"},
+	})
+	if state, question, options := blockAskRow(t, service, artifactID, "ask-nested"); state != "open" ||
+		question != "Which day?" || !slices.Equal(options, []model.AskOption{{Label: "Monday"}}) {
+		t.Fatalf("the nested ask row = state=%q question=%q options=%#v, want it open as its repaired block reads", state, question, options)
+	}
+}
+
+// The exhaustive test above with a fifth kind of block, D: a bullet list whose option holds a
+// decision of its own, valid or broken, its body cycled through every body of one to three blocks
+// over the same four kinds. Every decision body of one to four blocks over the five kinds is
+// enumerated, and each one that breaks the content rule - its own blocks', or a nested decision's,
+// which the rule reads too - is refused for every decision an option holds that settlement cannot
+// read and for the decision itself. Each refusal is followed exactly as written - the same ask
+// edit again with a question where the decision asks nothing, then ONE document edit holding one
+// delete per block it names, then the same ask edit - and leaves the decision it was sent to
+// valid, every word it did not name for deletion still in the document and every word it did
+// quoted in it; or it names no delete and says why, naming no decision that already reads as one,
+// so a caller is never sent to one, nor from the decision to the one holding it and back.
+func TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDecision(t *testing.T) {
+	service, _ := newTestService(t)
+	service.settle = time.Hour
+	nested := askBodies([]string{"P", "E", "L", "N"}, 3)
+	bodies := askBodies([]string{"P", "E", "L", "N", "D"}, 4)
+	if len(nested) != 4+16+64 || len(bodies) != 5+25+125+625 {
+		t.Fatalf("enumerated %d nested bodies and %d bodies, want every one of 84 and 780", len(nested), len(bodies))
+	}
+	var (
+		mu                               sync.Mutex
+		broken, followed, unnamed, valid int
+		noDelete                         = map[string]int{}
+		noDeleteShape                    = map[string]string{}
+	)
+	t.Cleanup(func() {
+		t.Logf("%d bodies enumerated, %d breaking the content rule: %d refusals followed to a valid decision, "+
+			"%d naming no delete and saying why; %d of the %d bodies end with the decision reading as one",
+			len(bodies), broken, followed, unnamed, valid, broken)
+		for reason, count := range noDelete {
+			t.Logf("%d naming no delete (%s among them): %s", count, noDeleteShape[reason], reason)
+		}
+	})
+	for index, body := range bodies {
+		// The blocks are built again for each use: the live room writes the nodes it is given,
+		// and the tree read back holds its own.
+		build := func(t *testing.T) []*pmdoc.Node {
+			built := make([]*pmdoc.Node, len(body))
+			for position, kind := range body {
+				if kind != "D" {
+					built[position] = askBodyBlock(t, kind, position+1)
+					continue
+				}
+				built[position] = askNestedDecisionBlock(t, position+1, nested[(index+position)%len(nested)])
+			}
+			return built
+		}
+		shape := make([]string, len(body))
+		for position, kind := range body {
+			shape[position] = kind
+			if kind == "D" {
+				shape[position] += strings.Join(nested[(index+position)%len(nested)], "")
+			}
+		}
+		if pmdoc.AskContentError(&pmdoc.Node{Type: "ask", Children: build(t)}) == nil {
+			continue
+		}
+		broken++
+		t.Run(strings.Join(shape, "-"), func(t *testing.T) {
+			t.Parallel()
+			// A document of its own on an issue of its own, so no two bodies share a lock.
+			artifactID := createIssueDocument(t, service.store, index+2, "# First")
+			seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
+			settleCurrentGeneration(t, service, artifactID)
+			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+				firstAsk(tree).Children = build(t)
+				return tree
+			})
+			settleCurrentGeneration(t, service, artifactID)
+			before := liveTree(t, service, artifactID)
+			unreadable := unreadableAsks(before)
+			whys := []string{}
+			// The decision an option holds is refused on its own first: repairing it must not
+			// wait on the decision holding it, and must not send the caller round in a circle.
+			// A decision asking nothing is read here too, since the refusal of an ask edit of it
+			// names the step that repairs it, a question, which no delete writes.
+			for _, decision := range nestedAsks(firstAsk(before).Children) {
+				if readAskBlockStrictly(decision) == nil {
+					continue
+				}
+				id, _ := decision.Attrs[pmdoc.BlockIDAttr].(string)
+				whys = append(whys, followAskRefusal(t, service, artifactID, id))
+			}
+			if readAskBlockStrictly(firstAsk(liveTree(t, service, artifactID))) != nil {
+				whys = append(whys, followAskRefusal(t, service, artifactID, "ask-lists"))
+			} else if err := editAskUrgency(service, artifactID, "ask-lists"); err != nil {
+				t.Fatalf("ask edit of the decision the nested repair left reading as one: %v", err)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			// No follow left a decision worse than it found it: every decision that still does
+			// not read as one did not read as one before any of them either, each refusal having
+			// named either a delete that repaired the decision it was sent to, or no delete at
+			// all and why.
+			after := liveTree(t, service, artifactID)
+			for id, reason := range unreadableAsks(after) {
+				if _, found := unreadable[id]; !found {
+					t.Fatalf("after following every refusal, ask block %q no longer reads as a decision: %v", id, reason)
+				}
+				// Following the refusals has reached its end: a decision that still does not read
+				// as one is refused the next edit with no delete at all, so a caller following
+				// them is never sent round a circle.
+				next := editAskUrgency(service, artifactID, id)
+				var unrepresentable *ErrAskBlockUnrepresentable
+				if !errors.As(next, &unrepresentable) || blocksToDelete.MatchString(unrepresentable.Reason) {
+					t.Fatalf("the edit of ask block %q, which still does not read as a decision (%v), = %v, want a refusal naming no delete",
+						id, reason, next)
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if readAskBlockStrictly(firstAsk(after)) == nil {
+				valid++
+			}
+			for _, why := range whys {
+				if why == "" {
+					followed++
+					continue
+				}
+				unnamed++
+				if noDelete[why]++; noDelete[why] == 1 {
+					noDeleteShape[why] = strings.Join(shape, "-")
+				}
+			}
+		})
+	}
+}
+
+// The four shapes the review of sjawhar/legion#2433 found, word for word: a decision and the one
+// an option holds both breaking the rule, where one edit must repair both; a decision holding one
+// that reads as no decision for another reason (an empty question) before the one that breaks the
+// rule, which the refusal must not name in its place; and the two where the decision holding the
+// edited one would have to change - it has no question of its own, or it is decided and broken
+// too - where the refusal names no delete and no decision to edit.
+func TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule(t *testing.T) {
+	t.Run("the decision and the one it holds both broken", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			decision := parsedBlock(t, ":::ask{#ask-nested urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+			decision.Children = append(decision.Children, parsedBlock(t, "- Tuesday\n"))
+			item := ask.Children[1].Children[0]
+			item.Children = append(item.Children, decision)
+			ask.Children = append(ask.Children, parsedBlock(t, "- Defer: Wait a week\n"))
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		outer := firstAsk(before)
+		tuesday, _ := outer.Children[1].Children[0].Children[1].Children[2].Attrs[pmdoc.BlockIDAttr].(string)
+		defer_, _ := outer.Children[2].Attrs[pmdoc.BlockIDAttr].(string)
+		// The decision an option holds cannot be repaired on its own: the delete changes the
+		// decision holding it, which the edit may not leave unreadable, so its refusal names no
+		// delete - and no decision to edit either, since an ask edit of the one holding it is not
+		// the caller's to make.
+		held := editAskUrgency(service, artifactID, "ask-nested")
+		if held == nil || blocksToDelete.MatchString(held.Error()) || sendsTheCallerOn(held.Error()) ||
+			noDeleteReason(held.Error()) != heldBackByItsHolder {
+			t.Fatalf("the refusal of the held decision = %v, want it to name no delete and no decision to edit", held)
+		}
+		assertHeldBackByItsHolder(t, before, "ask-nested", held)
+		if !liveTree(t, service, artifactID).EqualWithBlockIDs(before) {
+			t.Fatalf("the refused ask edit wrote to the document: %v", held)
+		}
+		// The decision's own refusal names one edit repairing both, in document order.
+		err := sendAskOptions(service, artifactID, AskBlockEdit{Urgency: new("high")})
+		deletes, _ := refusalDeletes(t, err)
+		if !slices.Equal(deletes, []string{tuesday, defer_}) {
+			t.Fatalf("the refusal names %q to delete, want the held decision's second list and the decision's own %q: %v",
+				deletes, []string{tuesday, defer_}, err)
+		}
+		ops := []model.EditOp{{Op: "delete", Block: tuesday}, {Op: "delete", Block: defer_}}
+		if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
+			t.Fatalf("one document edit deleting %q, as the refusal names: %v\nrefusal: %v", deletes, applyErr, err)
+		}
+		if editErr := sendAskOptions(service, artifactID, AskBlockEdit{Urgency: new("high")}); editErr != nil {
+			t.Fatalf("ask edit after deleting %q, as the refusal names: %v\nrefusal: %v", deletes, editErr, err)
+		}
+		settleCurrentGeneration(t, service, artifactID)
+		repaired := firstAsk(liveTree(t, service, artifactID))
+		if reason := readAskBlockStrictly(repaired); reason != nil || repaired.Attrs["urgency"] != "high" {
+			t.Fatalf("after following the refusal the decision reads %v with urgency %v, want it valid and the ask edit applied", reason, repaired.Attrs["urgency"])
+		}
+		if editErr := editAskUrgency(service, artifactID, "ask-nested"); editErr != nil {
+			t.Fatalf("ask edit of the held decision after the one edit: %v", editErr)
+		}
+	})
+	t.Run("an unreadable decision before the broken one", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			list := firstAsk(tree).Children[1]
+			empty := parsedBlock(t, ":::ask{#ask-y urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich month?\n\n- May\n:::\n")
+			broken := parsedBlock(t, ":::ask{#ask-nested urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+			empty.Children[0].Children = nil
+			broken.Children = append(broken.Children, parsedBlock(t, "- Tuesday\n"))
+			list.Children[0].Children = append(list.Children[0].Children, empty)
+			list.Children[1].Children = append(list.Children[1].Children, broken)
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		tuesday, _ := firstAsk(before).Children[1].Children[1].Children[1].Children[2].Attrs[pmdoc.BlockIDAttr].(string)
+		err := sendAskOptions(service, artifactID, AskBlockEdit{Urgency: new("high")})
+		if err == nil || slices.Contains(namedAsks(t, err), "ask-y") {
+			t.Fatalf("the refusal = %v, want it to name only the decision breaking the content rule, never the one with no question", err)
+		}
+		deletes, _ := refusalDeletes(t, err)
+		if !slices.Equal(deletes, []string{tuesday}) {
+			t.Fatalf("the refusal names %q to delete, want the broken decision's second list %q alone: %v", deletes, tuesday, err)
+		}
+		ops := []model.EditOp{{Op: "delete", Block: tuesday}}
+		if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
+			t.Fatalf("one document edit deleting %q, as the refusal names: %v\nrefusal: %v", tuesday, applyErr, err)
+		}
+		if editErr := sendAskOptions(service, artifactID, AskBlockEdit{Urgency: new("high")}); editErr != nil {
+			t.Fatalf("ask edit after deleting %q, as the refusal names: %v\nrefusal: %v", tuesday, editErr, err)
+		}
+		settleCurrentGeneration(t, service, artifactID)
+		after := liveTree(t, service, artifactID)
+		repaired := firstAsk(after)
+		if reason := readAskBlockStrictly(repaired); reason != nil || repaired.Attrs["urgency"] != "high" {
+			t.Fatalf("after following the refusal the decision reads %v with urgency %v, want it valid and the ask edit applied", reason, repaired.Attrs["urgency"])
+		}
+		// The decision with no question is nobody's to repair by deleting: it keeps the content
+		// rule, the refusal named none of its blocks, and settlement leaves it invalid.
+		if reason := blockByID(after, "ask-y").Attrs["invalid"]; reason != `ask block "ask-y" has an empty question` {
+			t.Fatalf("the decision with no question is invalid = %#v, want settlement's own reason", reason)
+		}
+	})
+
+	// The decision nested three deep holds no paragraph with text, so deleting the blocks its own
+	// content rule leaves no room for would keep none of them and leave a decision no parse reads.
+	// The one edit that repairs the two decisions holding it deletes that decision itself, by its
+	// own block id, and never the blocks inside it.
+	t.Run("the decision nested three deep holds no question", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			middle := parsedBlock(t, ":::ask{#ask-middle urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+			inner := parsedBlock(t, ":::ask{#ask-inner urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich month?\n\n- May\n:::\n")
+			inner.Children[0].Children = nil
+			inner.Children = append(inner.Children, parsedBlock(t, "- June\n"))
+			middle.Children[1].Children[0].Children = append(middle.Children[1].Children[0].Children, inner)
+			item := firstAsk(tree).Children[1].Children[0]
+			item.Children = append(item.Children, middle)
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		// A document edit may not delete a decision whose ask is still open. The innermost
+		// decision never held a question, so no settlement ever read it or opened a row for it.
+		if rows := askRowCount(t, service, artifactID, "ask-inner"); rows != 0 {
+			t.Fatalf("the decision that never held a question has %d ask rows, want none", rows)
+		}
+		err := editAskUrgency(service, artifactID, "ask-lists")
+		var unrepresentable *ErrAskBlockUnrepresentable
+		if !errors.As(err, &unrepresentable) {
+			t.Fatalf("the ask edit of the outermost decision = %v, want ErrAskBlockUnrepresentable", err)
+		}
+		if want := `the blocks to delete are "ask-inner";`; !strings.Contains(unrepresentable.Reason, want) {
+			t.Fatalf("the refusal = %v, want its delete list to be the innermost decision's own block alone", err)
+		}
+		if !strings.Contains(unrepresentable.Reason, "a decision among them whose ask is still open cannot be deleted by a document edit") {
+			t.Fatalf("the refusal = %v, want it to say a decision whose ask is open cannot be deleted", err)
+		}
+		assertAskEditWroteNothing(t, service, artifactID, before, err)
+		ops := []model.EditOp{{Op: "delete", Block: "ask-inner"}}
+		if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
+			t.Fatalf("one document edit deleting %q, as the refusal names: %v\nrefusal: %v", "ask-inner", applyErr, err)
+		}
+		if editErr := editAskUrgency(service, artifactID, "ask-lists"); editErr != nil {
+			t.Fatalf("ask edit after deleting %q, as the refusal names: %v\nrefusal: %v", "ask-inner", editErr, err)
+		}
+		settleCurrentGeneration(t, service, artifactID)
+		after := liveTree(t, service, artifactID)
+		for _, id := range []string{"ask-lists", "ask-middle"} {
+			decision := blockByID(after, id)
+			if reason := readAskBlockStrictly(decision); reason != nil {
+				t.Fatalf("after the repair ask block %q does not read as a decision: %v", id, reason)
+			}
+		}
+		if blockByID(after, "ask-inner") != nil {
+			t.Fatalf("the decision the refusal named is still in the document")
+		}
+	})
+
+	// The decision holding the broken one has no question of its own, so no delete inside the
+	// broken one leaves it readable. Its refusal names no delete and no decision to edit: the
+	// one holding it is repaired by its own ask edit, which writes the question it no longer
+	// holds, and that edit is not this caller's to make. Once a person writes that question back
+	// in the document editor, this same ask edit, sent again, names this decision's deletes, and
+	// following them leaves both decisions reading as decisions.
+	t.Run("the decision holding it has no question", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			decision := parsedBlock(t, ":::ask{#ask-nested urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+			decision.Children = append(decision.Children, parsedBlock(t, "- Tuesday\n"))
+			ask.Children[0].Children = nil
+			item := ask.Children[1].Children[0]
+			item.Children = append(item.Children, decision)
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		tuesday, _ := blockByID(before, "ask-nested").Children[2].Attrs[pmdoc.BlockIDAttr].(string)
+		err := editAskUrgency(service, artifactID, "ask-nested")
+		if got, want := err.Error(), heldBackRefusal(t, before); got != want {
+			t.Fatalf("refusal =\n%s\nwant\n%s", got, want)
+		}
+		assertHeldBackByItsHolder(t, before, "ask-nested", err)
+		assertAskEditWroteNothing(t, service, artifactID, before, err)
+		// The decision holding it is repaired by its own ask edit, which writes the question it
+		// no longer holds: its refusal names that step, and no delete, since a document edit
+		// writes no words into a decision.
+		holder := editAskUrgency(service, artifactID, "ask-lists")
+		want := "block: " + emptyQuestionStep("ask-lists")
+		if holder == nil || holder.Error() != want {
+			t.Fatalf("the ask edit of the decision holding it =\n%v\nwant\n%s", holder, want)
+		}
+		if blocksToDelete.MatchString(holder.Error()) {
+			t.Fatalf("the refusal of the decision holding it = %v, want it to name no delete", holder)
+		}
+		// The holder holds its question again, written where a person writes it, since no
+		// document edit of the route's own may touch it while the decision it holds breaks the
+		// content rule. This same ask edit, sent again, now names this decision's deletes.
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			blockByID(tree, "ask-lists").Children[0].Children = []*pmdoc.Node{{Type: "text", Text: "Should we ship?"}}
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		if why := followAskRefusal(t, service, artifactID, "ask-nested"); why != "" {
+			t.Fatalf("the ask edit of the held decision, the one holding it otherwise repaired, names no delete: %s", why)
+		}
+		assertHeldPairRepaired(t, service, artifactID, before, []string{tuesday})
+	})
+
+	// The decision holding the broken one is decided and broken too: deleting inside the held one
+	// leaves it broken still, and its own ask edit is one the route refuses a caller outright
+	// (`ASK_NOT_OPEN`). The refusal names no delete and no decision to edit. Its holder's own
+	// problem is repaired in the document editor - its own second list deleted, which leaves the
+	// decision it holds broken still - and this same ask edit, sent again, then names this
+	// decision's deletes, which leaves both reading as decisions, for a holder no ask edit of its
+	// own reaches.
+	t.Run("the decision holding it is decided and broken too", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		answerIndexedAsk(t, service, artifactID, "ask-lists")
+		settleCurrentGeneration(t, service, artifactID)
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			decision := parsedBlock(t, ":::ask{#ask-nested urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+			decision.Children = append(decision.Children, parsedBlock(t, "- Tuesday\n"))
+			item := ask.Children[1].Children[0]
+			item.Children = append(item.Children, decision)
+			ask.Children = append(ask.Children, parsedBlock(t, "- Defer: Wait a week\n"))
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		if state := blockByID(before, "ask-lists").Attrs["state"]; state != "answered" {
+			t.Fatalf("the decision holding it is %v, want it answered", state)
+		}
+		err := editAskUrgency(service, artifactID, "ask-nested")
+		if got, want := err.Error(), heldBackRefusal(t, before); got != want {
+			t.Fatalf("refusal =\n%s\nwant\n%s", got, want)
+		}
+		assertHeldBackByItsHolder(t, before, "ask-nested", err)
+		assertAskEditWroteNothing(t, service, artifactID, before, err)
+		// A document edit of the route's own cannot write the holder's repair: it would leave an
+		// ask it changed breaking the content rule, since the decision it holds still does
+		// (validateEditedAskBlocks), which is why the refusal sends a person to the editor first.
+		holder := blockByID(before, "ask-lists")
+		own, _ := holder.Children[len(holder.Children)-1].Attrs[pmdoc.BlockIDAttr].(string)
+		tuesday, _ := blockByID(before, "ask-nested").Children[2].Attrs[pmdoc.BlockIDAttr].(string)
+		ops := []model.EditOp{{Op: "delete", Block: own}}
+		_, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil)
+		want := `ask block "ask-nested", asking "Which day?", holds a second bullet list where its content rule, ` +
+			`paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last`
+		var invalid *ErrInvalidAskBlock
+		if !errors.As(applyErr, &invalid) || invalid.Error() != want {
+			t.Fatalf("the document edit deleting the holder's own second list %q =\n%v\nwant it refused with\n%s", own, applyErr, want)
+		}
+		// The holder repaired where a person writes it, which is where the refusal of the held
+		// decision sends them. This same ask edit, sent again, now names this decision's deletes.
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := blockByID(tree, "ask-lists")
+			ask.Children = ask.Children[:len(ask.Children)-1]
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		if why := followAskRefusal(t, service, artifactID, "ask-nested"); why != "" {
+			t.Fatalf("the ask edit of the held decision, the one holding it otherwise repaired, names no delete: %s", why)
+		}
+		assertHeldPairRepaired(t, service, artifactID, before, []string{own, tuesday})
+	})
+}
+
+// heldBackRefusal is the refusal of an ask edit of the decision ask-nested of tree, word for
+// word: a decision whose repair would have to change the decision holding it, so that no delete
+// of its own repairs it. It names no delete and no decision to edit, and quotes its three blocks
+// - its question, its options and the second list breaking its rule - by their ids, as data.
+func heldBackRefusal(t *testing.T, tree *pmdoc.Node) string {
+	t.Helper()
+	held := blockByID(tree, "ask-nested")
+	ids := make([]string, 0, len(held.Children))
+	for _, child := range held.Children {
+		id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+		ids = append(ids, strconv.Quote(id))
+	}
+	if len(ids) != 3 {
+		t.Fatalf("the held decision holds %d blocks, want its question, its options and a second list", len(ids))
+	}
+	return `block: ask block "ask-nested", asking "Which day?", holds a second bullet list where its content rule, ` +
+		`paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last; ` +
+		`the ask-edit route does not rebuild a decision that breaks its content rule, and no document edit ` +
+		`deleting blocks of this decision leaves every decision it changes readable: ` +
+		heldBackByItsHolder + `; its blocks are: ` +
+		`block ` + ids[0] + ` (paragraph) reads "Which day?"; ` +
+		`block ` + ids[1] + ` (bullet_list) reads "- Monday"; ` +
+		`block ` + ids[2] + ` (bullet_list) reads "- Tuesday"`
+}
+
+// assertHeldPairRepaired checks both decisions of the held pair read as decisions, settlement
+// left neither of them `invalid`, and the document kept every word but those of the blocks the
+// repair deletes, which deleted names by their ids and whose words are read from before.
+func assertHeldPairRepaired(t *testing.T, service *Service, artifactID string, before *pmdoc.Node, deleted []string) {
+	t.Helper()
+	after := liveTree(t, service, artifactID)
+	for _, id := range []string{"ask-lists", "ask-nested"} {
+		decision := blockByID(after, id)
+		if decision == nil {
+			t.Fatalf("ask block %q is gone from the repaired document", id)
+		}
+		if reason := readAskBlockStrictly(decision); reason != nil {
+			t.Fatalf("after the repair ask block %q does not read as a decision: %v", id, reason)
+		}
+		if invalid, exists := decision.Attrs["invalid"]; exists {
+			t.Fatalf("after the repair settlement left ask block %q invalid: %v", id, invalid)
+		}
+	}
+	dropped := map[string]bool{}
+	for _, id := range deleted {
+		block := blockByID(before, id)
+		if block == nil {
+			t.Fatalf("the repair deletes block %q, which the document did not hold", id)
+		}
+		for _, word := range textWords(block) {
+			dropped[word] = true
+		}
+	}
+	words := textWords(after)
+	for _, word := range textWords(before) {
+		if dropped[word] || slices.Contains(words, word) {
+			continue
+		}
+		t.Fatalf("the repair lost %q, which no delete it named dropped: the document reads %q", word, words)
+	}
+}
+
+// assertHeldBackByItsHolder checks a refusal saying the repair of blockID would have to change the
+// decision holding it tells the truth, recomputed here from the content rule alone: the blocks
+// that rule leaves no room for, deleted from a copy of tree, leave a decision holding blockID
+// unreadable. It reads none of the plan the refusal came from, so a repair that sent every nested
+// decision this way would be caught.
+func assertHeldBackByItsHolder(t *testing.T, tree *pmdoc.Node, blockID string, err error) {
+	t.Helper()
+	drops := blocksTheAskRuleLeavesNoRoomFor(blockByID(tree, blockID))
+	if len(drops) == 0 {
+		t.Fatalf("the refusal of %q says its repair would change the decision holding it, and the content rule leaves none of its blocks to delete: %v",
+			blockID, err)
+	}
+	pruned := tree
+	for _, id := range drops {
+		next, deleteErr := pmdoc.DeleteBlock(pruned, id)
+		if deleteErr != nil {
+			t.Fatalf("deleting block %q to weigh the refusal of %q: %v", id, blockID, deleteErr)
+		}
+		pruned = next
+	}
+	holders := decisionsHolding(tree, blockID)
+	if len(holders) == 0 {
+		t.Fatalf("the refusal of %q says a decision holds it, and none does: %v", blockID, err)
+	}
+	for _, id := range holders {
+		if holder := blockByID(pruned, id); holder != nil && readAskBlockStrictly(holder) != nil {
+			return
+		}
+	}
+	t.Fatalf("the refusal of %q says deleting its blocks would leave the decision holding it unreadable, and with %q deleted every one of %q reads as a decision: %v",
+		blockID, drops, holders, err)
+}
+
+// blocksTheAskRuleLeavesNoRoomFor is the block id of every block one repair of ask, a decision
+// breaking the content rule, would delete, read off the rule itself. A decision loses blocks of
+// its own only where its own blocks' types break the rule (askBreaksItsOwnRule), since the rule
+// reads the decisions nested in it too and repairing one of those is what repairs this one: there
+// it loses every child outside the run of paragraphs starting at its first paragraph holding text
+// and the one bullet list right after them. Whether or not it loses any, every decision nested in
+// a block it keeps is read the same way.
+func blocksTheAskRuleLeavesNoRoomFor(ask *pmdoc.Node) []string {
+	if ask == nil || pmdoc.AskContentError(ask) == nil {
+		return nil
+	}
+	keptFrom, keptTo := 0, len(ask.Children)
+	if askBreaksItsOwnRule(ask) {
+		first := slices.IndexFunc(ask.Children, func(child *pmdoc.Node) bool {
+			return child != nil && child.Type == "paragraph" && strings.TrimSpace(pmdoc.TextContent(child)) != ""
+		})
+		keptFrom, keptTo = len(ask.Children), len(ask.Children)
+		if first >= 0 {
+			keptFrom, keptTo = first, first
+			for keptTo < len(ask.Children) && ask.Children[keptTo].Type == "paragraph" {
+				keptTo++
+			}
+			if keptTo < len(ask.Children) && ask.Children[keptTo].Type == "bullet_list" {
+				keptTo++
+			}
+		}
+	}
+	drops := []string{}
+	for index, child := range ask.Children {
+		if index < keptFrom || index >= keptTo {
+			id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+			drops = append(drops, id)
+			continue
+		}
+		for _, nested := range decisionsNestedIn(child) {
+			drops = append(drops, blocksTheAskRuleLeavesNoRoomFor(nested)...)
+		}
+	}
+	return drops
+}
+
+// decisionsNestedIn is each decision nested in node that no nearer decision holds.
+func decisionsNestedIn(node *pmdoc.Node) []*pmdoc.Node {
+	if node == nil {
+		return nil
+	}
+	if node.Type == "ask" {
+		return []*pmdoc.Node{node}
+	}
+	var found []*pmdoc.Node
+	for _, child := range node.Children {
+		found = append(found, decisionsNestedIn(child)...)
+	}
+	return found
+}
+
+// decisionsHolding is the block id of each decision of tree holding the block blockID, outermost
+// first.
+func decisionsHolding(tree *pmdoc.Node, blockID string) []string {
+	var holders []string
+	var find func(node *pmdoc.Node, holding []string) bool
+	find = func(node *pmdoc.Node, holding []string) bool {
+		if node == nil {
+			return false
+		}
+		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id == blockID {
+			holders = slices.Clone(holding)
+			return true
+		}
+		if node.Type == "ask" {
+			id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+			holding = append(slices.Clone(holding), id)
+		}
+		for _, child := range node.Children {
+			if find(child, holding) {
+				return true
+			}
+		}
+		return false
+	}
+	find(tree, nil)
+	return holders
+}
+
+// namedAskBlock matches a decision a refusal names, its block id Go-quoted.
+var namedAskBlock = regexp.MustCompile(`ask block ("(?:[^"\\]|\\.)*")`)
+
+// namedAsks is the block id of each decision err, a refusal, names - never one it only quotes a
+// block of.
+func namedAsks(t *testing.T, err error) []string {
+	t.Helper()
+	named := []string{}
+	for _, match := range namedAskBlock.FindAllStringSubmatch(err.Error(), -1) {
+		id, unquoteErr := strconv.Unquote(match[1])
+		if unquoteErr != nil {
+			t.Fatalf("the refusal names ask block %s, which does not unquote: %v", match[1], unquoteErr)
+		}
+		named = append(named, id)
+	}
+	return named
+}
+
+// followAskRefusal sends an urgency edit to the ask block blockID of artifactID, which settlement
+// cannot read, and follows the refusal exactly as a caller reading it would: where it names the
+// question, this same ask edit again carrying one, which the route writes into the block whatever
+// its content rule says; where it names blocks, ONE document edit holding one delete per block it
+// names, then the same ask edit. The decision ends valid - it reads strictly, settlement leaves
+// it no `invalid` attribute and the edit applied - with every word the refusal did not name for
+// deletion still in the document and every word it did quoted in it, and, where the follow wrote
+// a question, that question is the one the decision asks and the one its ask row holds. It
+// returns "" once it has done that, and otherwise how the refusal says why it names no delete.
+// Whatever it says, every decision it names must break the content rule, so a caller is never
+// sent to one that reads as a decision.
+func followAskRefusal(t *testing.T, service *Service, artifactID, blockID string) string {
+	t.Helper()
+	edit := AskBlockEdit{Urgency: new("high")}
+	before := liveTree(t, service, artifactID)
+	ask := blockByID(before, blockID)
+	err := sendAskBlockEdit(service, artifactID, blockID, edit)
+	unrepresentable := askEditRefusal(t, before, blockID, err)
+	if _, parseErr := parseAskBlockLeniently(ask); parseErr != nil {
+		// A decision settlement cannot read for a reason no ask edit writes away - an option the
+		// parse cannot read, a block its body may not hold, attributes it does not carry - is
+		// refused before its content rule is weighed (askBlockOf), with settlement's own reason
+		// and no step of its own.
+		if unrepresentable.Reason != parseErr.Error() {
+			t.Fatalf("the refusal of the unreadable decision %q = %v, want settlement's own reason %v", blockID, err, parseErr)
+		}
+		assertAskEditWroteNothing(t, service, artifactID, before, err)
+		return "the decision does not read as one at all"
+	}
+	breaksTheRule := true
+	if unrepresentable.Reason == emptyQuestionStep(blockID) {
+		before, ask, err, unrepresentable, breaksTheRule = followEmptyQuestionStep(
+			t, service, artifactID, blockID, &edit, err, unrepresentable)
+	}
+	kept := textWords(before)
+	if breaksTheRule {
+		if !blocksToDelete.MatchString(unrepresentable.Reason) {
+			why := noDeleteReason(unrepresentable.Reason)
+			if why == "" {
+				t.Fatalf("the refusal of the edit of %q names no delete and does not say why: %v", blockID, err)
+			}
+			if why == heldBackByItsHolder {
+				assertHeldBackByItsHolder(t, before, blockID, err)
+			}
+			assertAskEditWroteNothing(t, service, artifactID, before, err)
+			return why
+		}
+		deletes, quoted := refusalDeletes(t, err)
+		if len(deletes) == 0 || len(quoted) != len(ask.Children) {
+			t.Fatalf("the refusal names %q to delete and quotes %d blocks, want a delete and the decision's %d: %v",
+				deletes, len(quoted), len(ask.Children), err)
+		}
+		ops := make([]model.EditOp, 0, len(deletes))
+		dropped := map[string]bool{}
+		for _, id := range deletes {
+			block, holder := blockByID(ask, id), askChildHolding(ask, id)
+			if block == nil || holder == nil {
+				t.Fatalf("the refusal names %q to delete, which is no block of the decision: %v", id, err)
+			}
+			holderID, _ := holder.Attrs[pmdoc.BlockIDAttr].(string)
+			for _, word := range textWords(block) {
+				if !strings.Contains(quoted[holderID], word) {
+					t.Fatalf("the refusal does not quote %q of block %q it has the caller delete: %v", word, id, err)
+				}
+				dropped[word] = true
+			}
+			ops = append(ops, model.EditOp{Op: "delete", Block: id})
+		}
+		remaining := kept[:0]
+		for _, word := range kept {
+			if !dropped[word] {
+				remaining = append(remaining, word)
+			}
+		}
+		kept = remaining
+		if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
+			t.Fatalf("one document edit deleting %q, as the refusal names: %v\nrefusal: %v", deletes, applyErr, err)
+		}
+		if editErr := sendAskBlockEdit(service, artifactID, blockID, edit); editErr != nil {
+			t.Fatalf("ask edit after deleting %q, as the refusal names: %v\nrefusal: %v", deletes, editErr, err)
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	after := liveTree(t, service, artifactID)
+	repaired := blockByID(after, blockID)
+	if got, exists := repaired.Attrs["invalid"]; exists {
+		t.Fatalf("after following the refusal of %q the decision is invalid: %v\nrefusal: %v", blockID, got, err)
+	}
+	if reason := readAskBlockStrictly(repaired); reason != nil || repaired.Attrs["urgency"] != "high" {
+		t.Fatalf("after following the refusal of %q the decision reads %v with urgency %v, want it valid and the ask edit applied\nrefusal: %v",
+			blockID, reason, repaired.Attrs["urgency"], err)
+	}
+	if edit.Question != nil {
+		block, parseErr := parseAskBlock(repaired)
+		if parseErr != nil || block.question != *edit.Question {
+			t.Fatalf("after following the refusal of %q the decision asks %q (%v), want the question the follow wrote, %q",
+				blockID, block.question, parseErr, *edit.Question)
+		}
+		if _, question, _ := blockAskRow(t, service, artifactID, blockID); question != block.question {
+			t.Fatalf("the ask row of %q holds %q, want the question the decision then holds, %q", blockID, question, block.question)
+		}
+	}
+	words := textWords(after)
+	for _, word := range kept {
+		if !slices.Contains(words, word) {
+			t.Fatalf("the document lost %q, which the refusal did not name for deletion: it reads %q\nrefusal: %v", word, words, err)
+		}
+	}
+	return ""
+}
+
+// followEmptyQuestionStep follows the one step the refusal of a decision asking nothing names
+// (emptyQuestionStep): this same ask edit again, carrying a question, which the route writes into
+// the block whatever its content rule says and which no delete could write into it. It writes
+// that question into edit, which its caller reads afterwards for the question the follow wrote,
+// and sends the same edit once more: the decision may break its content rule still, and the
+// refusal of that second edit names the blocks to delete, as it does for one that always asked
+// something.
+//
+// It returns the tree and the decision read again after the question was written, the refusal
+// the caller carries on with - the second edit's where that edit was refused, and otherwise the
+// one this step answered, which the caller reports beside a later failure - and whether the
+// decision breaks its content rule still, which is what the deletes repair. Both corpora of
+// broken bodies follow this step, the bodies enumerated over one decision
+// (TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision) and the decisions nested in
+// another (followAskRefusal), so neither can drift from the step the refusal names.
+func followEmptyQuestionStep(
+	t *testing.T,
+	service *Service,
+	artifactID, blockID string,
+	edit *AskBlockEdit,
+	refused error,
+	given *ErrAskBlockUnrepresentable,
+) (before, ask *pmdoc.Node, err error, refusal *ErrAskBlockUnrepresentable, breaksTheRule bool) {
+	t.Helper()
+	edit.Question = new(askRepairQuestion)
+	if editErr := sendAskBlockEdit(service, artifactID, blockID, *edit); editErr != nil {
+		t.Fatalf("the ask edit of %q sent again with a question, as the refusal names: %v\nrefusal: %v",
+			blockID, editErr, refused)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	before = liveTree(t, service, artifactID)
+	ask = blockByID(before, blockID)
+	next := sendAskBlockEdit(service, artifactID, blockID, *edit)
+	if next == nil {
+		return before, ask, refused, given, false
+	}
+	return before, ask, next, askEditRefusal(t, before, blockID, next), true
+}
+
+// askRepairQuestion is the question a follow writes into a decision asking nothing, the one step
+// its refusal names (emptyQuestionStep). Its words are nowhere else in the documents these tests
+// build, so the decision and its ask row are read for them afterwards.
+const askRepairQuestion = "Which way now?"
+
+// emptyQuestionStep is why an ask edit of the decision blockID is refused while no paragraph of
+// it holds text: the one step that repairs it, this same ask edit again carrying a question,
+// which the route writes into the block whatever its content rule says.
+func emptyQuestionStep(blockID string) string {
+	return fmt.Sprintf("ask block %q has an empty question; send this ask edit again with a question, "+
+		"which writes it into the block", blockID)
+}
+
+// askEditRefusal is err, the refusal of an ask edit of the decision blockID, as the caller reads
+// it, held to what no refusal may do: send the caller to edit something else before this decision
+// (sendsTheCallerOn), or name a decision of before that already reads as one, which would send a
+// caller nowhere. A decision it names that is not the one being edited must break the content
+// rule, the one thing a delete of this decision's repairs.
+func askEditRefusal(t *testing.T, before *pmdoc.Node, blockID string, err error) *ErrAskBlockUnrepresentable {
+	t.Helper()
+	var unrepresentable *ErrAskBlockUnrepresentable
+	if !errors.As(err, &unrepresentable) {
+		t.Fatalf("ask edit of the broken decision %q = %v, want ErrAskBlockUnrepresentable", blockID, err)
+	}
+	if sendsTheCallerOn(unrepresentable.Reason) {
+		t.Fatalf("the refusal of the edit of %q sends the caller to edit another decision first: %v", blockID, err)
+	}
+	for _, named := range namedAsks(t, err) {
+		found := blockByID(before, named)
+		if found == nil || readAskBlockStrictly(found) == nil {
+			t.Fatalf("the refusal names ask block %q, which reads as a decision: %v", named, err)
+		}
+		if named != blockID && pmdoc.AskContentError(found) == nil {
+			t.Fatalf("the refusal names ask block %q, which breaks no content rule: %v", named, err)
+		}
+	}
+	return unrepresentable
+}
+
+// repairedInTheEditor is the way out a refusal naming no delete offers: the decision is repaired
+// where a person writes it, never by an ask edit of another decision, which the route can refuse
+// outright - a decision that does not parse, a decided one, or another person's.
+const repairedInTheEditor = "this decision is repaired in the document editor"
+
+// heldBackByItsHolder is that way out for a decision whose repair would have to change the one
+// holding it: the reason says the deletes would leave that decision unreadable, and sends the
+// caller to the editor alone.
+const heldBackByItsHolder = "a delete inside this one changes the decision holding it, which such an edit " +
+	"may not leave unreadable, and these deletes would; " + repairedInTheEditor
+
+// noDeleteReason is how a refusal that names no delete says why, or "" when it says none of the
+// three things it can say.
+func noDeleteReason(reason string) string {
+	for _, why := range []string{
+		heldBackByItsHolder,
+		repairedInTheEditor,
+		"the document has not settled its block ids yet",
+	} {
+		if strings.Contains(reason, why) {
+			return why
+		}
+	}
+	return ""
+}
+
+// sendsTheCallerOn reports whether a refusal tells the caller to edit something else before this
+// decision. No refusal may: a decision it would send them to can be one no ask edit reaches - one
+// that does not parse, one already decided, or another person's - so following the refusals would
+// circle. The one "first" a refusal may hold names the first list it keeps.
+func sendsTheCallerOn(reason string) bool {
+	if strings.Contains(reason, "edit ask block") {
+		return true
+	}
+	for _, match := range regexp.MustCompile(`\bfirst\b[a-z ]*`).FindAllString(reason, -1) {
+		if !strings.HasPrefix(match, "first list") {
+			return true
+		}
+	}
+	return false
+}
+
+// assertAskEditWroteNothing checks a refused ask edit left the document as before.
+func assertAskEditWroteNothing(t *testing.T, service *Service, artifactID string, before *pmdoc.Node, err error) {
+	t.Helper()
+	if !liveTree(t, service, artifactID).EqualWithBlockIDs(before) {
+		t.Fatalf("the refused ask edit wrote to the document: %v", err)
+	}
+}
+
+// editAskUrgency sends the urgency edit to the ask block blockID as alice, as sendAskOptions sends
+// an edit to the document's first ask.
+func editAskUrgency(service *Service, artifactID, blockID string) error {
+	return sendAskBlockEdit(service, artifactID, blockID, AskBlockEdit{Urgency: new("high")})
+}
+
+// sendAskBlockEdit sends edit to the ask block blockID as alice.
+func sendAskBlockEdit(service *Service, artifactID, blockID string, edit AskBlockEdit) error {
+	return joinedWrite(service, func(ctx context.Context) error {
+		_, err := service.SetAskBlockText(ctx, artifactID, blockID, edit, model.Actor{Kind: "user", ID: "alice"})
+		return err
+	})
+}
+
+// unreadableAsks is why each ask block of tree does not read as settlement reads it, by block id.
+func unreadableAsks(tree *pmdoc.Node) map[string]error {
+	found := map[string]error{}
+	askReadability(tree, func(id string, reason error) bool {
+		if reason != nil {
+			found[id] = reason
+		}
+		return true
+	})
+	return found
+}
+
+// blockByID is the block carrying blockID in tree, or nil.
+func blockByID(tree *pmdoc.Node, blockID string) *pmdoc.Node {
+	var found *pmdoc.Node
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id == blockID {
+			found = node
+		}
+		return found == nil
+	})
+	return found
+}
+
+// askChildHolding is the block of ask's own body holding blockID - the block itself, or the one it
+// is nested in - or nil when no block of its body does.
+func askChildHolding(ask *pmdoc.Node, blockID string) *pmdoc.Node {
+	for _, child := range ask.Children {
+		if blockByID(child, blockID) != nil {
+			return child
+		}
+	}
+	return nil
+}
+
+// askNestedDecisionBlock is the D block of an ask's body at position: a bullet list whose option
+// holds a decision of its own, its body the blocks of body, its words found nowhere else in the
+// document.
+func askNestedDecisionBlock(t *testing.T, position int, body []string) *pmdoc.Node {
+	t.Helper()
+	list := parsedBlock(t, fmt.Sprintf("- Choice%d: Holds%d\n", position, position))
+	decision := parsedBlock(t, fmt.Sprintf(
+		":::ask{#ask-held-%d urgency=\"med\" multiple=\"false\" state=\"open\"}\nPlaceholder%d?\n:::\n", position, position))
+	children := make([]*pmdoc.Node, len(body))
+	for index, kind := range body {
+		children[index] = askHeldBodyBlock(t, kind, position, index+1)
+	}
+	decision.Children = children
+	list.Children[0].Children = append(list.Children[0].Children, decision)
+	list.Attrs[pmdoc.BlockIDAttr] = fmt.Sprintf("body-%d", position)
+	return list
+}
+
+// askHeldBodyBlock is the block of kind - the four kinds askBodyBlock builds - at index in the body
+// of the decision an option at position holds, its words found nowhere else in the document.
+func askHeldBodyBlock(t *testing.T, kind string, position, index int) *pmdoc.Node {
+	t.Helper()
+	var block *pmdoc.Node
+	switch kind {
+	case "P":
+		block = parsedBlock(t, fmt.Sprintf("Inner%dAsks%d?\n", position, index))
+	case "E":
+		block = &pmdoc.Node{Type: "paragraph", Attrs: pmdoc.Attrs{}}
+	case "L":
+		block = parsedBlock(t, fmt.Sprintf("- Pick%dOne%d: Worth%dBy%d\n- Pick%dTwo%d\n", position, index, position, index, position, index))
+	case "N":
+		block = parsedBlock(t, fmt.Sprintf("- Take%dOne%d: Carries%dBy%d\n  - Under%dOne%d\n", position, index, position, index, position, index))
+	default:
+		t.Fatalf("no held ask body block of kind %q", kind)
+	}
+	block.Attrs[pmdoc.BlockIDAttr] = fmt.Sprintf("held-%d-%d", position, index)
+	return block
+}
+
+// Before settlement stamps block ids, a block of the ask may have no id, or an id may repeat in the
+// tree, which a document edit restamps first (keeping the id on the first block in document
+// order). The refusal then names no block to delete and asks for a retry once the document
+// settles, still quoting every block. Once it settles, the retried edit names the delete, which
+// applies.
+func TestSetAskBlockTextRefusalBeforeBlockIDsSettleNamesNoDelete(t *testing.T) {
+	for name, edit := range map[string]func(t *testing.T) func(*pmdoc.Node) *pmdoc.Node{
+		"list with no id": func(t *testing.T) func(*pmdoc.Node) *pmdoc.Node {
+			list := parsedBlock(t, "- Defer: Wait a week\n")
+			pmdoc.Walk(list, func(node *pmdoc.Node) bool { delete(node.Attrs, pmdoc.BlockIDAttr); return true })
+			return appendToAsk(list)
+		},
+		"repeated id": func(t *testing.T) func(*pmdoc.Node) *pmdoc.Node {
+			return func(tree *pmdoc.Node) *pmdoc.Node {
+				outside := parsedBlock(t, "Unrelated words outside the decision.\n")
+				outside.Attrs[pmdoc.BlockIDAttr] = "dup"
+				list := parsedBlock(t, "- Defer: Wait a week\n")
+				list.Attrs[pmdoc.BlockIDAttr] = "dup"
+				tree.Children = append([]*pmdoc.Node{outside}, tree.Children...)
+				return appendToAsk(list)(tree)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+			editLiveTree(t, service, artifactID, edit(t))
+			before := liveTree(t, service, artifactID)
+			err := sendAskOptions(service, artifactID, AskBlockEdit{Urgency: new("high")})
+			assertBrokenAskEditRefused(t, service, artifactID, before, err)
+			reason := err.Error()
+			if !strings.Contains(reason, "the document has not settled its block ids yet") ||
+				!strings.Contains(reason, "retry the edit once the document settles") {
+				t.Fatalf("err = %v, want it to say the block ids have not settled and to retry", err)
+			}
+			if strings.Contains(reason, "the blocks to delete are") || strings.Contains(reason, "delete the blocks") {
+				t.Fatalf("err = %v, want it to name no block to delete", err)
+			}
+			if !strings.Contains(reason, `reads "- Defer: Wait a week"`) || !strings.Contains(reason, `reads "Should we ship?"`) {
+				t.Fatalf("err = %v, want every block quoted", err)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			followRefusal(t, service, artifactID, AskBlockEdit{Urgency: new("high")}, []int{2}, "Should we ship?", []model.AskOption{
+				{Label: "Ship", Description: "Release it"},
+				{Label: "Hold", Description: "Wait for review"},
+				{Label: "Defer", Description: "Wait a week"},
+			})
+		})
+	}
+}
+
+// A block id is the document's data, which a collaborator can make hold a shell's quotes and
+// command substitution. The refusal gives it only as Go-quoted data and names no command; %q does
+// not escape $, backtick or ' for a shell, so the reason must hold no command text to paste.
+func TestSetAskBlockTextRefusalGivesABlockIDOnlyAsQuotedData(t *testing.T) {
+	const id = `x'; $(touch pwned); echo "`
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		list := parsedBlock(t, "- Defer: Wait a week\n  - only if finance agrees\n")
+		list.Attrs[pmdoc.BlockIDAttr] = id
+		return appendToAsk(list)(tree)
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	ask := firstAsk(liveTree(t, service, artifactID))
+	if got := ask.Children[len(ask.Children)-1].Attrs[pmdoc.BlockIDAttr]; got != id {
+		t.Fatalf("the list's block id after settlement = %#v, want %q kept", got, id)
+	}
+	before := liveTree(t, service, artifactID)
+
+	err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &[]model.AskOption{{Label: "Ship", Description: "Release it"}}})
+	assertBrokenAskEditRefused(t, service, artifactID, before, err)
+	reason := err.Error()
+	if !strings.Contains(reason, "block "+strconv.Quote(id)+" (bullet_list) reads ") {
+		t.Fatalf("err = %v, want the list's id given as %s", err, strconv.Quote(id))
+	}
+	for _, banned := range []string{id, "--ops-json", "'[", "--", "$ dispatch", "dispatch doc-edit "} {
+		if strings.Contains(reason, banned) {
+			t.Fatalf("err = %v, want no %q in it", err, banned)
+		}
+	}
+}
+
+// richHoldAsk is seedIndexedShipAsk's ask with what a person wrote under its Hold option: a
+// nested sub-list, a second paragraph, bold text and a link. No ask row holds any of it, so an
+// options edit that rebuilt the list would delete words its caller never saw.
+const richHoldAsk = ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n" +
+	"Should we ship?\n\n" +
+	"- Ship: Release it\n" +
+	"- Hold: Wait for review\n\n" +
+	"  - only if **finance** agrees\n\n" +
+	"  See [the memo](https://memo.test) first.\n" +
+	":::\n"
+
+// seedIndexedRichAsk is seedIndexedShipAsk over richHoldAsk: the same question, options and row,
+// with the Hold option's item holding what the row cannot show.
+func seedIndexedRichAsk(t *testing.T) (*Service, string) {
+	t.Helper()
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, richHoldAsk)
+	settleCurrentGeneration(t, service, artifactID)
+	assertShipAskRow(t, service, artifactID, "ask-lists")
+	return service, artifactID
+}
+
+// askOptionList is the document's first ask's bullet list, the one an options edit writes.
+func askOptionList(t *testing.T, service *Service, artifactID string) *pmdoc.Node {
+	t.Helper()
+	ask := firstAsk(liveTree(t, service, artifactID))
+	for _, child := range ask.Children {
+		if child.Type == "bullet_list" {
+			return child
+		}
+	}
+	t.Fatalf("the ask holds no bullet list")
+	return nil
+}
+
+// askOptionItemMarkdown is item read as a document holding one bullet list holding it alone,
+// which is how a refusal quotes an option's item.
+func askOptionItemMarkdown(t *testing.T, list, item *pmdoc.Node) string {
+	t.Helper()
+	markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{
+		{Type: "bullet_list", Attrs: list.Attrs, Children: []*pmdoc.Node{item}},
+	}})
+	if err != nil {
+		t.Fatalf("render an option's item: %v", err)
+	}
+	return strings.TrimSpace(markdown)
+}
+
+// An options edit writes the lines it sends and nothing else: an option it sends unchanged keeps
+// the very node the document holds, so the sub-list, the second paragraph, the bold run and the
+// link's address under it survive with their own block ids and marks.
+func TestAskOptionsEditKeepsWhatItDoesNotWrite(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	list := askOptionList(t, service, artifactID)
+	before := list.Children[1]
+
+	options := []model.AskOption{
+		{Label: "Ship", Description: "Release it today"},
+		{Label: "Hold", Description: "Wait for review"},
+	}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit: %v", err)
+	}
+
+	after := askOptionList(t, service, artifactID)
+	if len(after.Children) != 2 {
+		t.Fatalf("the list holds %d items after the edit, want 2", len(after.Children))
+	}
+	if !after.Children[1].EqualWithBlockIDs(before) {
+		t.Fatalf("the unchanged option was rewritten:\nbefore %q\nafter  %q",
+			askOptionItemMarkdown(t, list, before), askOptionItemMarkdown(t, after, after.Children[1]))
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
+// An option whose description the edit changes is rewritten where it stands: its first paragraph
+// carries the new line, and every other node the item holds is the one that was there.
+func TestAskOptionsEditRewritesAnOptionAndKeepsTheRest(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	list := askOptionList(t, service, artifactID)
+	before := list.Children[1]
+
+	options := []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for the sign-off"},
+	}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit: %v", err)
+	}
+
+	after := askOptionList(t, service, artifactID).Children[1]
+	if after.Attrs[pmdoc.BlockIDAttr] != before.Attrs[pmdoc.BlockIDAttr] {
+		t.Fatalf("the rewritten item's block id = %v, want the original's %v",
+			after.Attrs[pmdoc.BlockIDAttr], before.Attrs[pmdoc.BlockIDAttr])
+	}
+	if got := strings.TrimSpace(pmdoc.TextContent(after.Children[0])); got != "Hold: Wait for the sign-off" {
+		t.Fatalf("the rewritten item's first paragraph reads %q, want the line the edit sent", got)
+	}
+	if len(after.Children) != len(before.Children) {
+		t.Fatalf("the rewritten item holds %d nodes, want the original's %d", len(after.Children), len(before.Children))
+	}
+	for index := 1; index < len(before.Children); index++ {
+		if !after.Children[index].EqualWithBlockIDs(before.Children[index]) {
+			t.Fatalf("the rewritten item's node %d was rebuilt, want the one the document held", index)
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
+// An options edit pairs each option it sends with the item already holding its label, not with
+// the item standing at its position: an edit that reorders the options carries what a person
+// wrote under an option along with that option's own label. Pairing by position would leave the
+// sub-list, the second paragraph and the link under another option's words, which is a wrong
+// record rather than a deletion anyone can see.
+func TestAskOptionsEditPairsAnOptionByItsLabelNotItsPosition(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	list := askOptionList(t, service, artifactID)
+	hold := list.Children[1]
+
+	options := []model.AskOption{
+		{Label: "Hold", Description: "Wait for review"},
+		{Label: "Ship", Description: "Release it today"},
+	}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit: %v", err)
+	}
+
+	after := askOptionList(t, service, artifactID)
+	if len(after.Children) != 2 {
+		t.Fatalf("the list holds %d items after the edit, want 2", len(after.Children))
+	}
+	if !after.Children[0].EqualWithBlockIDs(hold) {
+		t.Fatalf("the Hold option reads %q after the edit, want the item the document held, %q",
+			askOptionItemMarkdown(t, after, after.Children[0]), askOptionItemMarkdown(t, list, hold))
+	}
+	ship := after.Children[1]
+	if got := strings.TrimSpace(pmdoc.TextContent(ship.Children[0])); got != "Ship: Release it today" {
+		t.Fatalf("the second item reads %q, want the Ship line the edit sent", got)
+	}
+	if len(ship.Children) != 1 {
+		t.Fatalf("the Ship item holds %d nodes, want its line alone: nothing of Hold's belongs under it",
+			len(ship.Children))
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
+// An edit that leaves an option out, renames it, or sends no option at all drops that option's
+// item. An item holding nothing but its plain line is the edit's to drop; one holding what a
+// person wrote is not, and the whole edit is refused, quoting the item so the caller can restore
+// every word of it.
+func TestAskOptionsEditRefusesDroppingAnItemHoldingContent(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+	for _, test := range []struct {
+		name    string
+		options []model.AskOption
+		refused bool
+	}{
+		{name: "a removal", options: []model.AskOption{ship}, refused: true},
+		{name: "a rename", options: []model.AskOption{ship, {Label: "Wait", Description: "Wait for review"}}, refused: true},
+		{name: "an empty options list", options: []model.AskOption{}, refused: true},
+		{name: "an item holding nothing but its plain line", options: []model.AskOption{hold}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := seedIndexedRichAsk(t)
+			before := liveTree(t, service, artifactID)
+			list := askOptionList(t, service, artifactID)
+			options := test.options
+			err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options})
+			if !test.refused {
+				if err != nil {
+					t.Fatalf("options edit dropping a plain item: %v", err)
+				}
+				after := askOptionList(t, service, artifactID)
+				if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(list.Children[1]) {
+					t.Fatalf("the list holds %d items, want the Hold item alone as it was", len(after.Children))
+				}
+				return
+			}
+			var unrepresentable *ErrAskBlockUnrepresentable
+			if !errors.As(err, &unrepresentable) || unrepresentable.Field != "options" {
+				t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the options", err)
+			}
+			want := `options: the edit drops the option "Hold", whose list item holds more than its plain line, ` +
+				`and the ask-edit route does not delete what a person wrote under an option; its item reads ` +
+				strconv.Quote(askOptionItemMarkdown(t, list, list.Children[1])) +
+				`; send that option back with this edit, or remove what the item holds with a document edit ` +
+				`first (dispatch doc-edit, deleting a block by its id)`
+			if err.Error() != want {
+				t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+			}
+			for _, word := range []string{"finance", "the memo", "https://memo.test", "dispatch doc-edit"} {
+				if !strings.Contains(err.Error(), word) {
+					t.Fatalf("err = %v, want it to quote %q", err, word)
+				}
+			}
+			if after := liveTree(t, service, artifactID); !after.EqualWithBlockIDs(before) {
+				t.Fatalf("the refused edit changed the document")
+			}
+			assertShipAskRow(t, service, artifactID, "ask-lists")
+		})
+	}
+}
+
+// typedMark is the mark the browser's editor puts on every character a person types. Canonical
+// markdown writes none of it (pmdoc renders link, strong, emphasis, strike_through and
+// inlineCode alone), so a line carrying it reads as the plain line it is.
+func typedMark(id string) pmdoc.Mark {
+	return pmdoc.Mark{Type: "proofAuthored", Attrs: pmdoc.Attrs{
+		"id": id, "by": "user:alice", "at": int64(1_700_000_000_000),
+	}}
+}
+
+// markAsTyped puts the editor's own mark on every text node under node, as the browser leaves
+// what a person typed there.
+func markAsTyped(node *pmdoc.Node, id string) {
+	if node.Type == "text" {
+		node.Marks = []pmdoc.Mark{typedMark(id)}
+	}
+	for _, child := range node.Children {
+		markAsTyped(child, id)
+	}
+}
+
+// An option a person typed in the browser carries the editor's own mark on every character of
+// it, and no markdown writes that mark: the item holds nothing a rebuilt item would not write
+// again, so the edit that drops it is applied rather than refused for a mark no reader can see.
+func TestAskOptionsEditDropsAnItemTheEditorMarked(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		markAsTyped(firstAsk(tree).Children[1], "typed")
+		return tree
+	})
+	list := askOptionList(t, service, artifactID)
+	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofAuthored", "typed"); !found {
+		t.Fatalf("the fixture's options carry no mark of the editor's")
+	}
+	ship := list.Children[0]
+
+	options := []model.AskOption{{Label: "Ship", Description: "Release it"}}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit dropping an option the editor marked: %v", err)
+	}
+
+	after := askOptionList(t, service, artifactID)
+	if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(ship) {
+		t.Fatalf("the list holds %d items, want the Ship item alone as it was", len(after.Children))
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
+// A person typing an option in the browser leaves the whitespace they typed in its line - a
+// trailing space, or one before the colon the parse cuts the label at - under the editor's own
+// mark. That whitespace is text of the item's own, which a rebuilt item writes again, and the
+// ask row reads the same words either way, so an edit dropping such an option and one rewording
+// it are both applied rather than refused for markup the line does not hold.
+func TestAskOptionsEditOfALineHoldingTypedWhitespace(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	for _, line := range []string{"Hold: Wait for review ", "Hold : Wait for review"} {
+		t.Run("the drop of "+strconv.Quote(line), func(t *testing.T) {
+			service, artifactID := seedTypedOptionLine(t, line)
+			held := askOptionList(t, service, artifactID).Children[0]
+
+			options := []model.AskOption{ship}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+				t.Fatalf("options edit dropping an option whose line holds the whitespace a person typed: %v", err)
+			}
+
+			after := askOptionList(t, service, artifactID)
+			if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(held) {
+				t.Fatalf("the list holds %d items, want the Ship item alone as it was", len(after.Children))
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+		})
+		t.Run("the rewrite of "+strconv.Quote(line), func(t *testing.T) {
+			service, artifactID := seedTypedOptionLine(t, line)
+
+			options := []model.AskOption{ship, {Label: "Hold", Description: "Wait for the sign-off"}}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+				t.Fatalf("options edit rewording an option whose line holds the whitespace a person typed: %v", err)
+			}
+
+			after := askOptionList(t, service, artifactID)
+			if len(after.Children) != 2 {
+				t.Fatalf("the list holds %d items after the edit, want 2", len(after.Children))
+			}
+			rewritten := after.Children[1]
+			if got := pmdoc.TextContent(rewritten.Children[0]); got != "Hold: Wait for the sign-off" {
+				t.Fatalf("the rewritten item reads %q, want the line the edit sent", got)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+		})
+	}
+}
+
+// seedTypedOptionLine is seedIndexedShipAsk with the Hold option's line written as a person
+// typed it in the browser: the text line holds, under the editor's mark on every character of
+// it. The parse trims that whitespace away, so the ask row reads the option it was indexed with.
+func seedTypedOptionLine(t *testing.T, line string) (*Service, string) {
+	t.Helper()
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		hold := firstAsk(tree).Children[1].Children[1]
+		hold.Children[0].Children = []*pmdoc.Node{{Type: "text", Text: line}}
+		markAsTyped(hold, "typed")
+		return tree
+	})
+	if got := pmdoc.TextContent(askOptionList(t, service, artifactID).Children[1]); got != line {
+		t.Fatalf("the seeded option line reads %q, want %q", got, line)
+	}
+	assertShipAskRow(t, service, artifactID, "ask-lists")
+	return service, artifactID
+}
+
+// A line break a person typed is text of the option's own line, whichever way the document holds
+// it: a soft break, which the editor keeps from a paste and the markdown writes as the space a
+// reader sees, and a line feed a text node ends with, which the markdown writes as the trailing
+// whitespace it is. Neither is markup the line holds, and the ask row reads the same words
+// either way, so an edit dropping such an option and one rewording it are both applied, as they
+// are for the whitespace a person typed.
+func TestAskOptionsEditOfALineHoldingATypedBreak(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	for _, test := range []struct {
+		name   string
+		inline []*pmdoc.Node
+		text   string
+	}{
+		{
+			name: "a soft break",
+			inline: []*pmdoc.Node{
+				{Type: "text", Text: "Hold: Wait"},
+				{Type: "hardbreak", Attrs: pmdoc.Attrs{"isInline": true}},
+				{Type: "text", Text: "for review"},
+			},
+			text: "Hold: Wait\nfor review",
+		},
+		{
+			name:   "a line feed its text ends with",
+			inline: []*pmdoc.Node{{Type: "text", Text: "Hold: Wait for review\n"}},
+			text:   "Hold: Wait for review\n",
+		},
+	} {
+		t.Run("the drop of "+test.name, func(t *testing.T) {
+			service, artifactID := seedOptionLineHolding(t, test.inline, test.text)
+			held := askOptionList(t, service, artifactID).Children[0]
+
+			options := []model.AskOption{ship}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+				t.Fatalf("options edit dropping an option whose line holds the break a person typed: %v", err)
+			}
+
+			after := askOptionList(t, service, artifactID)
+			if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(held) {
+				t.Fatalf("the list holds %d items, want the Ship item alone as it was", len(after.Children))
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+		})
+		t.Run("the rewrite of "+test.name, func(t *testing.T) {
+			service, artifactID := seedOptionLineHolding(t, test.inline, test.text)
+
+			options := []model.AskOption{ship, {Label: "Hold", Description: "Wait for the sign-off"}}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+				t.Fatalf("options edit rewording an option whose line holds the break a person typed: %v", err)
+			}
+
+			after := askOptionList(t, service, artifactID)
+			if len(after.Children) != 2 {
+				t.Fatalf("the list holds %d items after the edit, want 2", len(after.Children))
+			}
+			if got := pmdoc.TextContent(after.Children[1].Children[0]); got != "Hold: Wait for the sign-off" {
+				t.Fatalf("the rewritten item reads %q, want the line the edit sent", got)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+		})
+	}
+}
+
+// seedOptionLineHolding is seedIndexedShipAsk with inline, which reads as text, written into the
+// Hold option's line as the browser left it, under the editor's mark on every character of its
+// text. The parse reads the line's words either way, so the ask row reads the option it was
+// indexed with.
+func seedOptionLineHolding(t *testing.T, inline []*pmdoc.Node, text string) (*Service, string) {
+	t.Helper()
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		hold := firstAsk(tree).Children[1].Children[1]
+		hold.Children[0].Children = inline
+		markAsTyped(hold, "typed")
+		return tree
+	})
+	if got := pmdoc.TextContent(askOptionList(t, service, artifactID).Children[1]); got != text {
+		t.Fatalf("the seeded option line reads %q, want %q", got, text)
+	}
+	assertShipAskRow(t, service, artifactID, "ask-lists")
+	return service, artifactID
+}
+
+// A person who empties a decision's question in the browser can leave the whitespace they typed
+// behind, under the editor's own mark. The markdown writes nothing of that mark, so a question
+// written over the paragraph deletes no word, and the ask edit carrying one repairs the decision
+// rather than being refused for a mark no reader can see.
+func TestEditAskRepairsAnEmptyQuestionOfTypedWhitespace(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		question := firstAsk(tree).Children[0]
+		question.Children = []*pmdoc.Node{{Type: "text", Text: " ", Marks: []pmdoc.Mark{typedMark("typed")}}}
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Question: new("Should we ship it today?")}); err != nil {
+		t.Fatalf("the ask edit sending a question to the decision a person emptied: %v", err)
+	}
+
+	block, err := parseAskBlock(firstAsk(liveTree(t, service, artifactID)))
+	if err != nil {
+		t.Fatalf("the repaired block does not parse: %v", err)
+	}
+	if block.question != "Should we ship it today?" {
+		t.Fatalf("the repaired block asks %q, want the question the ask edit sent", block.question)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship it today?", []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for review"},
+	})
+}
+
+// Rewriting an option replaces its line with the plain text the edit sends, so a link's address,
+// bold or code written in that line would be deleted unseen - what the drop refusal exists to
+// prevent. The whole edit is refused instead, quoting the line's markdown so every word of it
+// can be restored and naming both ways out.
+func TestAskOptionsEditRefusesRewritingALineHoldingMarkup(t *testing.T) {
+	for _, test := range []struct {
+		name, line, markdown, description string
+	}{
+		{
+			name:        "a link's address",
+			line:        "- Hold: see [the memo](https://memo.test)\n",
+			markdown:    "Hold: see [the memo](https://memo.test)",
+			description: "see the memo",
+		},
+		{
+			name:        "bold",
+			line:        "- Hold: wait for **finance**\n",
+			markdown:    "Hold: wait for **finance**",
+			description: "wait for finance",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+				"Should we ship?\n\n- Ship: Release it\n"+test.line+":::\n")
+			settleCurrentGeneration(t, service, artifactID)
+			before := liveTree(t, service, artifactID)
+
+			options := []model.AskOption{
+				{Label: "Ship", Description: "Release it"},
+				{Label: "Hold", Description: "wait for the sign-off"},
+			}
+			err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options})
+
+			var unrepresentable *ErrAskBlockUnrepresentable
+			if !errors.As(err, &unrepresentable) || unrepresentable.Field != "options" {
+				t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the options", err)
+			}
+			want := `options: the edit rewrites the line of the option "Hold", which holds more than its plain ` +
+				`text, and the ask-edit route does not delete the markup a person wrote in a line; its line reads ` +
+				strconv.Quote(test.markdown) +
+				`; send that option back unchanged with this edit, or rewrite the line with a document edit ` +
+				`(dispatch doc-edit, replacing quoted text with replace)`
+			if err.Error() != want {
+				t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+			}
+			assertAskEditWroteNothing(t, service, artifactID, before, err)
+			_, question, held := blockAskRow(t, service, artifactID, "ask-lists")
+			if question != "Should we ship?" || !slices.Equal(held, []model.AskOption{
+				{Label: "Ship", Description: "Release it"},
+				{Label: "Hold", Description: test.description},
+			}) {
+				t.Fatalf("the ask row = question=%q options=%#v, want it as the refused edit found it", question, held)
+			}
+		})
+	}
+}
+
+// An option that holds its markup in its own line and nothing under it is a drop the refusal
+// must still catch: the item's words are the link's address and the bold run in that one line,
+// which the plain line a rebuilt list writes would delete, and the row shows the sender none of
+// it. Weighing the item by its text alone would read the item as plain and drop it.
+func TestAskOptionsEditRefusesDroppingALineHoldingMarkup(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+		"Should we ship?\n\n- Ship: Release it\n- Hold: wait for **finance**, see [the memo](https://memo.test)\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+	list := askOptionList(t, service, artifactID)
+
+	options := []model.AskOption{{Label: "Ship", Description: "Release it"}}
+	err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options})
+
+	var unrepresentable *ErrAskBlockUnrepresentable
+	if !errors.As(err, &unrepresentable) || unrepresentable.Field != "options" {
+		t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the options", err)
+	}
+	want := `options: the edit drops the option "Hold", whose list item holds more than its plain line, ` +
+		`and the ask-edit route does not delete what a person wrote under an option; its item reads ` +
+		strconv.Quote(askOptionItemMarkdown(t, list, list.Children[1])) +
+		`; send that option back with this edit, or remove what the item holds with a document edit ` +
+		`first (dispatch doc-edit, deleting a block by its id)`
+	if err.Error() != want {
+		t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+	}
+	for _, word := range []string{"**finance**", "https://memo.test"} {
+		if !strings.Contains(err.Error(), word) {
+			t.Fatalf("err = %v, want it to quote %q", err, word)
+		}
+	}
+	assertAskEditWroteNothing(t, service, artifactID, before, err)
+	_, question, held := blockAskRow(t, service, artifactID, "ask-lists")
+	if question != "Should we ship?" || !slices.Equal(held, []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "wait for finance, see the memo"},
+	}) {
+		t.Fatalf("the ask row = question=%q options=%#v, want it as the refused edit found it", question, held)
+	}
+}
+
+// A task option carries its checkbox as its item's own `checked` attribute, which the markdown
+// writes as content, `- [x] ` or `- [ ] ` before the line: the item holds more than its plain
+// line, dropping it would delete the box and change the issue's task count under the person who
+// wrote it, and the ask row shows the sender none of that. The drop is refused, quoting the item
+// so every word and the box can be restored, while the plain option beside it is still the
+// edit's to drop. An unticked box is a task of the count as a ticked one is, so weighing an item
+// against one carrying `checked: false` rather than against one carrying no box at all would
+// drop it unseen.
+func TestAskOptionsEditRefusesDroppingATaskOption(t *testing.T) {
+	for _, test := range []struct {
+		name, box string
+		checked   bool
+	}{
+		{name: "a ticked option", box: "[x]", checked: true},
+		{name: "an unticked option", box: "[ ]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+				"Should we ship?\n\n- "+test.box+" Ship: Release it\n- Hold: Wait for review\n:::\n")
+			settleCurrentGeneration(t, service, artifactID)
+			before := liveTree(t, service, artifactID)
+			list := askOptionList(t, service, artifactID)
+			checked, isTask := list.Children[0].Attrs["checked"].(bool)
+			if !isTask || checked != test.checked {
+				t.Fatalf("the seeded Ship item is no %s task: %#v", test.box, list.Children[0].Attrs)
+			}
+
+			hold := []model.AskOption{{Label: "Hold", Description: "Wait for review"}}
+			err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &hold})
+
+			var unrepresentable *ErrAskBlockUnrepresentable
+			if !errors.As(err, &unrepresentable) || unrepresentable.Field != "options" {
+				t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the options", err)
+			}
+			want := `options: the edit drops the option "Ship", whose list item holds more than its plain line, ` +
+				`and the ask-edit route does not delete what a person wrote under an option; its item reads ` +
+				strconv.Quote(askOptionItemMarkdown(t, list, list.Children[0])) +
+				`; send that option back with this edit, or remove what the item holds with a document edit ` +
+				`first (dispatch doc-edit, deleting a block by its id)`
+			if err.Error() != want {
+				t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+			}
+			if !strings.Contains(err.Error(), test.box) {
+				t.Fatalf("err = %v, want it to quote the box %s", err, test.box)
+			}
+			assertAskEditWroteNothing(t, service, artifactID, before, err)
+			assertShipAskRow(t, service, artifactID, "ask-lists")
+
+			// The plain option beside it is the edit's to drop: what the refusal weighs is the
+			// box, not every item of a list holding one.
+			ship := []model.AskOption{{Label: "Ship", Description: "Release it"}}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &ship}); err != nil {
+				t.Fatalf("options edit dropping the plain option beside a task one: %v", err)
+			}
+			after := askOptionList(t, service, artifactID)
+			if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(list.Children[0]) {
+				t.Fatalf("the list holds %d items, want the Ship item alone as it was", len(after.Children))
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", ship)
+		})
+	}
+}
+
+// Two items can carry one label, and what a person wrote belongs to the item they wrote it
+// under. An ask's labels are unique, so one option of that label is what an edit can send, and
+// it pairs with the item that says exactly what it says, wherever that item stands, keeping it
+// whole. Pairing on the label alone would give it the first item of that label instead,
+// rewriting that item's line and dropping the item holding the sub-list, which is no edit's to
+// delete.
+func TestAskOptionsEditPairsOnTheWholeOptionBeforeTheLabel(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+		"Should we ship?\n\n- Hold: Wait for review\n\n- Hold: Wait for the memo\n\n  - only if **finance** agrees\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	list := askOptionList(t, service, artifactID)
+	if len(list.Children) != 2 {
+		t.Fatalf("the seeded list holds %d items, want the two of one label", len(list.Children))
+	}
+	held := list.Children[1]
+
+	// The option says what the second item says, and the first, which says something else, is a
+	// plain line the edit may drop. On the label alone it would take that first item, rewrite
+	// its line, and drop the second - the one holding the sub-list a person wrote.
+	options := []model.AskOption{{Label: "Hold", Description: "Wait for the memo"}}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit of two items of one label: %v", err)
+	}
+
+	after := askOptionList(t, service, artifactID)
+	if len(after.Children) != 1 {
+		t.Fatalf("the list holds %d items after the edit, want the one option the edit sent", len(after.Children))
+	}
+	if !after.Children[0].EqualWithBlockIDs(held) {
+		t.Fatalf("the option the edit sent reads %q, want the item that already said it, %q",
+			askOptionItemMarkdown(t, after, after.Children[0]), askOptionItemMarkdown(t, list, held))
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
+// A comment anchored inside what a person wrote under an option is anchored to the same words
+// after an options edit: the nodes it points into are the document's own, not a rebuilt copy.
+func TestAskOptionsEditKeepsACommentAnchoredUnderAnOption(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
+		Kind: MarkComment, ID: "c1", By: model.Actor{Kind: "user", ID: "alice"},
+	}, "finance", nil); err != nil {
+		t.Fatalf("anchor a comment inside the sub-list: %v", err)
+	}
+
+	options := []model.AskOption{
+		{Label: "Ship", Description: "Release it today"},
+		{Label: "Hold", Description: "Wait for review"},
+	}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit: %v", err)
+	}
+
+	_, quote, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "c1")
+	if !found || quote != "finance" {
+		t.Fatalf("the comment anchors to %q (found %t), want it still on \"finance\"", quote, found)
+	}
+}
+
+// Settlement writes a decided ask's recorded wording back into a block a person reworded after
+// the decision. That restore goes through the same options write, so the sub-list a person wrote
+// under an option it does not reword stays where they wrote it.
+func TestAskOptionsEditRestoringADecidedWordingKeepsASubList(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	answerIndexedAsk(t, service, artifactID, "ask-lists")
+	settleCurrentGeneration(t, service, artifactID)
+
+	// A person rewords the Ship option in the document, after the ask was decided.
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		item := firstAsk(tree).Children[1].Children[0]
+		item.Children[0].Children = []*pmdoc.Node{{Type: "text", Text: "Ship: Release it tomorrow"}}
+		return tree
+	})
+	before := askOptionList(t, service, artifactID).Children[1]
+
+	settleCurrentGeneration(t, service, artifactID)
+
+	ask := firstAsk(liveTree(t, service, artifactID))
+	block, err := parseAskBlock(ask)
+	if err != nil {
+		t.Fatalf("parse the restored ask: %v", err)
+	}
+	want := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+	if !slices.Equal(block.options, want) {
+		t.Fatalf("the restored block asks %#v, want the wording the ask was decided on", block.options)
+	}
+	if after := askOptionList(t, service, artifactID).Children[1]; !after.EqualWithBlockIDs(before) {
+		t.Fatalf("the decided-wording restore flattened what a person wrote under the option it left alone")
+	}
+}
+
+// Settlement writes a decided ask's recorded wording back into its block, and no caller can
+// answer a refusal there: an option a person added under the decision, with words under it, is
+// dropped as it was before an options edit kept an option's content, so the block and its row
+// agree again rather than disagreeing for good.
+func TestRestoringADecidedWordingDropsAnOptionTheDecisionNeverHeld(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	answerIndexedAsk(t, service, artifactID, "ask-lists")
+	settleCurrentGeneration(t, service, artifactID)
+
+	// A person adds an option of their own, holding a sub-list, after the ask was decided.
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		list := firstAsk(tree).Children[1]
+		added := parsedBlock(t, "- Defer: Wait a week\n  - only if finance agrees\n")
+		list.Children = append(list.Children, added.Children[0])
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+
+	block, err := parseAskBlock(firstAsk(liveTree(t, service, artifactID)))
+	if err != nil {
+		t.Fatalf("parse the restored ask: %v", err)
+	}
+	want := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+	if !slices.Equal(block.options, want) {
+		t.Fatalf("the restored block asks %#v, want the wording the ask was decided on", block.options)
+	}
+}
+
+// An option line a caller sends is the caller's own text, so one write may make no more of it
+// than of any other text it sends: an ask edit writes its question and its options on one budget
+// (askBlockChildren), and the items the caller sent are charged to it (editedOptionList). What
+// the document already holds under an option is no caller's text, and is charged to the merged
+// list's own budget, so an edit of one option's line is taken beside a preserved sub-list of
+// thousands of items whatever the question sent with it took of the write's.
+func TestAskOptionsEditChargesTheItemsItSendsToTheWritesBudget(t *testing.T) {
+	// A paragraph weighs 3 elements and the line of text in it 1; a list item weighs that
+	// paragraph, its own 3 and the item's text. So this question makes half of what one write may
+	// make (pmdoc.MaxDocumentElements), and leaves the other half for the options beside it.
+	const paragraphElements, itemElements = 4, 7
+	question := strings.TrimSuffix(strings.Repeat("Should we ship?\n\n", pmdoc.MaxDocumentElements/2/paragraphElements), "\n\n")
+	// Past the half the question leaves, counting the list the items are written in.
+	count := pmdoc.MaxDocumentElements/2/itemElements + 50
+
+	t.Run("the new items it sends are charged to the write", func(t *testing.T) {
+		block, err := parseAskBlock(parsedBlock(t, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+			"Should we ship?\n\n- Ship: Release it\n:::\n"))
+		if err != nil {
+			t.Fatalf("parse the ask: %v", err)
+		}
+		options := make([]model.AskOption, 0, count)
+		for index := range count {
+			options = append(options, model.AskOption{Label: fmt.Sprintf("Option %d", index), Description: "Pick it"})
+		}
+		_, err = askBlockChildren(block, AskBlockEdit{Question: &question, Options: &options}, pmdoc.NewWriteBudget())
+		if !errors.Is(err, pmdoc.ErrTooManyElements) || !strings.Contains(err.Error(), "this write's markdown makes more than") {
+			t.Fatalf("an edit sending %d new options beside its question = %v, want the refusal of what one write may make", count, err)
+		}
+	})
+
+	t.Run("the content it preserves is not", func(t *testing.T) {
+		var markdown strings.Builder
+		markdown.WriteString(":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n" +
+			"Should we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n\n")
+		for index := range count {
+			fmt.Fprintf(&markdown, "  - note %d\n", index)
+		}
+		markdown.WriteString(":::\n")
+		block, err := parseAskBlock(parsedBlock(t, markdown.String()))
+		if err != nil {
+			t.Fatalf("parse the ask holding a sub-list of %d items: %v", count, err)
+		}
+		options := []model.AskOption{
+			{Label: "Ship", Description: "Release it today"},
+			{Label: "Hold", Description: "Wait for review"},
+		}
+		children, err := askBlockChildren(block, AskBlockEdit{Question: &question, Options: &options}, pmdoc.NewWriteBudget())
+		if err != nil {
+			t.Fatalf("an edit of one option's line beside a preserved sub-list of %d items: %v", count, err)
+		}
+		held := children[len(children)-1].Children[1]
+		if len(held.Children) != 2 || held.Children[1].Type != "bullet_list" || len(held.Children[1].Children) != count {
+			t.Fatalf("the Hold option's item after the edit = %#v, want its line and the sub-list of %d items", held, count)
+		}
+	})
+}
+
+// sendAskOptions sends edit to the ask-lists block as alice (sendAskBlockEdit).
+func sendAskOptions(service *Service, artifactID string, edit AskBlockEdit) error {
+	return sendAskBlockEdit(service, artifactID, "ask-lists", edit)
+}
+
+// assertBrokenAskEditRefused checks err refuses an edit of the document's first ask, which breaks
+// its content rule, naming the rule and the document edit, quoting every block of the ask by its
+// id, and that nothing was written.
+func assertBrokenAskEditRefused(t *testing.T, service *Service, artifactID string, before *pmdoc.Node, err error) {
+	t.Helper()
+	var unrepresentable *ErrAskBlockUnrepresentable
+	if !errors.As(err, &unrepresentable) || unrepresentable.Field != "block" ||
+		!strings.Contains(err.Error(), "paragraph+ bullet_list?") ||
+		!strings.Contains(err.Error(), "dispatch doc-edit, deleting a block by its id") {
+		t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the block naming the content rule and the document edit", err)
+	}
+	for _, child := range firstAsk(before).Children {
+		id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+		name := "block " + strconv.Quote(id)
+		if id == "" {
+			name = "a block with no id"
+		}
+		if !strings.Contains(err.Error(), name+" ("+child.Type+") reads ") {
+			t.Fatalf("err = %v, want it to quote the %s %q", err, child.Type, id)
+		}
+		for _, word := range textWords(child) {
+			if !strings.Contains(err.Error(), word) {
+				t.Fatalf("err = %v, want it to quote %q", err, word)
+			}
+		}
+	}
+	if strings.Contains(err.Error(), "--ops-json") || strings.Contains(err.Error(), "'[") {
+		t.Fatalf("err = %v, want no shell-quoted ops", err)
+	}
+	if after := liveTree(t, service, artifactID); !after.EqualWithBlockIDs(before) {
+		t.Fatalf("the refused edit changed the block")
+	}
+	assertShipAskRow(t, service, artifactID, "ask-lists")
+}
+
+// answerIndexedAsk marks the ask row of blockID answered by alice, as a person deciding it does;
+// the next settlement projects that back into its block.
+func answerIndexedAsk(t *testing.T, service *Service, artifactID, blockID string) {
+	t.Helper()
+	answerJSON, err := json.Marshal(model.AskAnswer{User: "alice", Selected: []string{"Ship"}, At: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("encode answer: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update asks set state = 'answered', answer = $3 where block_artifact_id = $1 and block_id = $2
+	`, artifactID, blockID, answerJSON); err != nil {
+		t.Fatalf("answer indexed ask: %v", err)
+	}
+}
+
+// A decided ask given a second list is marked invalid and keeps its decided row; once the second
+// list is gone, settlement clears invalid and the block carries its decided wording again.
+func TestSettlementMarksADecidedAskWithASecondBulletListInvalid(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	answerIndexedAsk(t, service, artifactID, "ask-lists")
+	settleCurrentGeneration(t, service, artifactID)
+	assertAnsweredShipAsk := func(stage string) {
+		t.Helper()
+		var state string
+		var storedAnswer []byte
+		if err := service.store.Pool.QueryRow(context.Background(), `
+			select state, answer from asks where block_artifact_id = $1 and block_id = $2
+		`, artifactID, "ask-lists").Scan(&state, &storedAnswer); err != nil {
+			t.Fatalf("%s: load ask row: %v", stage, err)
+		}
+		var got model.AskAnswer
+		if err := json.Unmarshal(storedAnswer, &got); err != nil {
+			t.Fatalf("%s: decode answer: %v", stage, err)
+		}
+		if state != "answered" || got.User != "alice" || !slices.Equal(got.Selected, []string{"Ship"}) {
+			t.Fatalf("%s: ask row = state=%q answer=%#v, want answered by alice with Ship", stage, state, got)
+		}
+	}
+	assertAnsweredShipAsk("answered")
+
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	const reason = `ask block "ask-lists", asking "Should we ship?", holds a second bullet list where its content rule, paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last`
+	if got := firstAsk(liveTree(t, service, artifactID)).Attrs["invalid"]; got != reason {
+		t.Fatalf("decided ask invalid = %#v, want %q", got, reason)
+	}
+	assertAnsweredShipAsk("second list")
+
+	// Merge the second list into the first, so the block's wording differs from the decided one.
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children[1].Children = append(ask.Children[1].Children, ask.Children[2].Children...)
+		ask.Children = ask.Children[:2]
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	ask := firstAsk(liveTree(t, service, artifactID))
+	if got, exists := ask.Attrs["invalid"]; exists {
+		t.Fatalf("repaired decided ask invalid = %#v, want it cleared", got)
+	}
+	assertAnsweredShipAsk("repaired")
+	block, err := parseAskBlock(ask)
+	if err != nil {
+		t.Fatalf("parse repaired ask: %v", err)
+	}
+	want := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+	if block.question != "Should we ship?" || !slices.Equal(block.options, want) || ask.Attrs["state"] != "answered" {
+		t.Fatalf("repaired decided ask = state=%v question=%q options=%#v, want the decided wording", ask.Attrs["state"], block.question, block.options)
+	}
+}
+
+// Concurrent browser edits can leave an ask holding a paragraph after its options, which the
+// browser keeps and takes no part of its question from. Settlement marks it invalid and leaves its
+// row open and as it was, until an edit moves the paragraph into the question.
+func TestSettlementMarksAnAskWithAParagraphAfterItsOptionsInvalid(t *testing.T) {
+	const reason = `ask block "ask-paragraph", asking "Should we ship?", holds a paragraph after its options where its content rule, paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last`
+	service, artifactID := seedIndexedShipAsk(t, "ask-paragraph")
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "Decide by Friday.\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskMarkedInvalidAndKept(t, service, artifactID, "ask-paragraph", reason)
+
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children = []*pmdoc.Node{ask.Children[0], ask.Children[2], ask.Children[1]}
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-paragraph", "Should we ship?\n\nDecide by Friday.", []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for review"},
+	})
+}
+
+// seedIndexedShipAsk is a document holding one ask, "Should we ship?" with the options Ship and
+// Hold, which settlement has indexed as an open ask row. Its settlements run only when the test
+// runs them.
+func seedIndexedShipAsk(t *testing.T, blockID string) (*Service, string) {
+	t.Helper()
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#"+blockID+" urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	assertShipAskRow(t, service, artifactID, blockID)
+	return service, artifactID
+}
+
+// parsedBlock is the first block markdown parses to, stamped with block ids as the browser editor
+// would.
+func parsedBlock(t *testing.T, markdown string) *pmdoc.Node {
+	t.Helper()
+	parsed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse block: %v", err)
+	}
+	return parsed.Children[0]
+}
+
+// assertAskMarkedInvalidAndKept checks settlement flagged the document's first ask invalid for
+// reason, said so in a block.invalid event, and left its row open as seedIndexedShipAsk indexed it.
+func assertAskMarkedInvalidAndKept(t *testing.T, service *Service, artifactID, blockID, reason string) {
+	t.Helper()
+	if got := firstAsk(liveTree(t, service, artifactID)).Attrs["invalid"]; got != reason {
+		t.Fatalf("ask invalid = %#v, want %q", got, reason)
+	}
+	var eventBlockID, eventReason string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select payload->>'block_id', payload->>'reason'
+		from events where type = 'block.invalid' order by id desc limit 1
+	`).Scan(&eventBlockID, &eventReason); err != nil {
+		t.Fatalf("load block.invalid event: %v", err)
+	}
+	if eventBlockID != blockID || eventReason != reason {
+		t.Fatalf("block.invalid event = block=%q reason=%q, want block=%q reason=%q", eventBlockID, eventReason, blockID, reason)
+	}
+	assertShipAskRow(t, service, artifactID, blockID)
+}
+
+// assertShipAskRow checks the ask row of blockID is open with seedIndexedShipAsk's question and
+// options.
+func assertShipAskRow(t *testing.T, service *Service, artifactID, blockID string) {
+	t.Helper()
+	state, question, options := blockAskRow(t, service, artifactID, blockID)
+	want := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+	if state != "open" || question != "Should we ship?" || !slices.Equal(options, want) {
+		t.Fatalf("ask row = state=%q question=%q options=%#v, want it open as indexed", state, question, options)
+	}
+}
+
+// assertAskRepaired checks settlement cleared the document's first ask's invalid attribute and
+// wrote question and options to its open row.
+func assertAskRepaired(t *testing.T, service *Service, artifactID, blockID, question string, options []model.AskOption) {
+	t.Helper()
+	if got, exists := firstAsk(liveTree(t, service, artifactID)).Attrs["invalid"]; exists {
+		t.Fatalf("repaired ask invalid = %#v, want it cleared", got)
+	}
+	state, gotQuestion, gotOptions := blockAskRow(t, service, artifactID, blockID)
+	if state != "open" || gotQuestion != question || !slices.Equal(gotOptions, options) {
+		t.Fatalf("repaired ask row = state=%q question=%q options=%#v, want open with question=%q options=%#v", state, gotQuestion, gotOptions, question, options)
+	}
+}
+
+// blockAskRow is the state, question and options of the ask row anchored to blockID.
+func blockAskRow(t *testing.T, service *Service, artifactID, blockID string) (string, string, []model.AskOption) {
+	t.Helper()
+	var state, question string
+	var optionsJSON []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select state, question, options from asks where block_artifact_id = $1 and block_id = $2
+	`, artifactID, blockID).Scan(&state, &question, &optionsJSON); err != nil {
+		t.Fatalf("load ask row of block %q: %v", blockID, err)
+	}
+	var options []model.AskOption
+	if err := json.Unmarshal(optionsJSON, &options); err != nil {
+		t.Fatalf("decode ask row options: %v", err)
+	}
+	return state, question, options
 }
 
 // firstAsk is the document's first top-level ask.

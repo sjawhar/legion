@@ -180,6 +180,10 @@ func (r *statusRecorder) ListRepoProjects(context.Context) ([]dispatch.RepoProje
 	return nil, nil
 }
 
+func (r *statusRecorder) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
+}
+
 var _ dispatch.Client = (*statusRecorder)(nil)
 
 func newArchitectHarness(t *testing.T, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder, *statusRecorder) {
@@ -713,12 +717,45 @@ func TestWaveReleaseRetryFinishesAWaveAPartialFailureLeftHalfReleased(t *testing
 	}
 }
 
+// A wave that names a child twice releases it once: one Dispatch write, and the answer names it
+// once, at its first place. Before, the child was written todo twice, each write a todo event of its
+// own, and the answer named it twice.
+func TestWaveReleaseOfAChildNamedTwiceWritesItOnce(t *testing.T) {
+	h, _, statuses := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208")
+	root := "LEGION-208"
+	statuses.issues = map[string]dispatch.Issue{
+		"LEGION-208": {Key: "LEGION-208", ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		"LEGION-209": {Key: "LEGION-209", ResolvedRepo: "acme/widgets", Status: "backlog", Parent: &root},
+		"LEGION-210": {Key: "LEGION-210", ResolvedRepo: "acme/widgets", Status: "backlog", Parent: &root},
+	}
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+
+	recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{
+		"grantId": architect.grant(t), "issues": []string{"LEGION-209", "LEGION-210", "LEGION-209"},
+	}, nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("wave release = %d: %s", recorder.Code, recorder.Body)
+	}
+	var response WaveReleaseResponse
+	decodeInto(t, recorder, &response)
+	if want := []string{"LEGION-209", "LEGION-210"}; !reflect.DeepEqual(response.Released, want) {
+		t.Errorf("released = %#v, want %#v", response.Released, want)
+	}
+	if want := []statusWrite{{issue: "LEGION-209", status: "todo"}, {issue: "LEGION-210", status: "todo"}}; !reflect.DeepEqual(statuses.writes, want) {
+		t.Errorf("Dispatch writes = %#v, want each child written once: %#v", statuses.writes, want)
+	}
+}
+
 // An architect parks a child of its tree and runs a parked or signed-off child again by the same
-// Dispatch status a human would move it by: backlog, then todo. Each write's event takes the human
-// move's path through the workflow, which parks the child (leave) or starts its next run under the
-// live tree (reenterChild); the routes apply no fact of their own. The tree root is never a child,
-// a child already out of the workflow has nothing to park, a running child is parked before it
-// runs again, and a lingering tree runs nothing more.
+// Dispatch status a human would move it by: backlog, then todo. Each route applies its own write in
+// the request, as the write's event, at the sequence Dispatch answered it with and with the daemon's
+// own actor, so it takes the human move's path through the workflow, which parks the child (leave)
+// or starts its next run under the live tree (reenterChild), without waiting for the event. The
+// tree root is never a child, a child already out of the workflow has nothing to park, a running
+// child is parked before it runs again, a lingering tree runs nothing more, and a refused write
+// applies nothing.
 func TestParkAndRerunMoveAChildOfTheTreeByItsDispatchStatus(t *testing.T) {
 	h, facts, statuses := newArchitectHarness(t, nil, nil)
 	seedTree(t, h, "LEGION-208", "LEGION-209", "LEGION-210")
@@ -781,8 +818,12 @@ func TestParkAndRerunMoveAChildOfTheTreeByItsDispatchStatus(t *testing.T) {
 	if len(statuses.writes) != 2 {
 		t.Fatalf("Dispatch writes after refusals = %#v, want only the park and the re-run", statuses.writes)
 	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("facts = %#v, want none: the Dispatch write's event moves the child", got)
+	var wantFacts []intake.Fact
+	for _, write := range want {
+		wantFacts = append(wantFacts, intake.DispatchIssue{Key: write.issue, Seq: 1, Type: "issue.updated", Status: write.status, DaemonActor: true, StatusMove: true, ClaimKnown: true})
+	}
+	if got := facts.recorded(); !reflect.DeepEqual(got, wantFacts) {
+		t.Fatalf("facts = %#v, want each route's own write, as its event, and nothing for a refused write: %#v", got, wantFacts)
 	}
 }
 

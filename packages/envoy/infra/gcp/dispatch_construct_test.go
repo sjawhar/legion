@@ -11,6 +11,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -19,15 +20,25 @@ const dispatchConstructURN = "urn:pulumi:stack::project::envoy-infra:gcp:Dispatc
 
 func dispatchConstructInputs() map[string]property.Value {
 	return map[string]property.Value{
-		"region":             property.New("us-central1"),
-		"hostname":           property.New("example-dispatch"),
-		"tailnetDnsName":     property.New("example-tailnet.ts.net"),
-		"tags":               property.New(property.NewArray([]property.Value{property.New("tag:example-dispatch")})),
-		"envoyImage":         property.New(dispatchEnvoyImage),
-		"tailscaleImage":     property.New(dispatchTailscaleImage),
-		"cloudSqlProxyImage": property.New(dispatchProxyImage),
-		"signInClientId":     property.New("example-client-id"),
-		"signInDomain":       property.New("example.com"),
+		"region":              property.New("us-central1"),
+		"hostname":            property.New("example-dispatch"),
+		"tailnetDnsName":      property.New("example-tailnet.ts.net"),
+		"tags":                property.New(property.NewArray([]property.Value{property.New("tag:example-dispatch")})),
+		"envoyImage":          property.New(dispatchEnvoyImage),
+		"tailscaleImage":      property.New(dispatchTailscaleImage),
+		"cloudSqlProxyImage":  property.New(dispatchProxyImage),
+		"frontDoorToolsImage": property.New(dispatchToolsImage),
+		"tailnetService":      property.New("svc:example-dispatch"),
+		"signInClientId":      property.New("example-client-id"),
+		"signInDomain":        property.New("example.com"),
+		// The three NATS settings, so every Construct test decodes them through the plugin, where a
+		// value the plugin could not decode would refuse the Construct: the pods dial the hub in
+		// their own cluster, with three copies of every stream and a 64 MiB limit. What they render
+		// is asserted on the direct path (dispatch_test.go's natsInCluster tests). natsUrl stays the
+		// tailnet name each test sets, which is remote either way.
+		"natsInCluster":  property.New(true),
+		"natsReplicas":   property.New(float64(dispatchNatsReplicas)),
+		"streamMaxBytes": property.New(float64(dispatchStreamMaxBytes)),
 	}
 }
 
@@ -39,16 +50,33 @@ func setConstructApp(inputs map[string]property.Value) {
 	inputs["appPrivateKeySecretKey"] = property.New("private-key.b64")
 }
 
+// dispatchConstructGCP and dispatchConstructRandom are the references a consumer's program gives
+// Construct, one per provider package it declares.
+var (
+	dispatchConstructGCP    = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"}
+	dispatchConstructRandom = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + randomProviderType + "::random-example"), ID: "random-example-id"}
+)
+
 func constructDispatch(t *testing.T, inputs map[string]property.Value, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
-	m := newMocks()
-	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, map[tokens.Package]p.ProviderReference{
-		"gcp":    {Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"},
-		"random": {Urn: resource.URN("urn:pulumi:s::p::" + randomProviderType + "::random-example"), ID: "random-example-id"},
+	return constructDispatchWithProviders(t, inputs, dryRun, map[tokens.Package]p.ProviderReference{
+		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom,
 	})
+}
+
+// constructDispatchWithProviders constructs the component through the plugin's own Construct, the
+// path a consumer's pulumi up takes, with the provider references the consumer's program declares.
+func constructDispatchWithProviders(t *testing.T, inputs map[string]property.Value, dryRun bool, providers map[tokens.Package]p.ProviderReference) (*pulumitest.Mocks, p.ConstructResponse, error) {
+	t.Helper()
+	m := newMocks()
+	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, providers)
 	return m, response, err
 }
 
+// Every Input may come from another resource. tailnetService typically is the consumer's
+// Tailscale Service's name output: the serve ConfigMap built from it, and the front door's
+// Deployment, then carry that resource among their dependencies, so on a fresh stack no front-door
+// pod exists before the Service does.
 func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	inputs := dispatchConstructInputs()
 	inputs["agentSecretsUrl"] = property.New("https://example-broker.internal.example")
@@ -56,6 +84,7 @@ func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	setConstructApp(inputs)
 	for key, value := range map[string]property.Value{
 		"tailnetAuthKey":     property.New("tskey-auth-example-0123456789").WithSecret(true),
+		"tailnetService":     property.New("svc:example-dispatch"),
 		"natsUrl":            property.New("nats://example-hub.example-tailnet.ts.net:4222"),
 		"natsSeedSecret":     property.New("projects/example-project/secrets/example-nats-seed"),
 		"signInClientSecret": property.New("example-client-secret").WithSecret(true),
@@ -68,6 +97,20 @@ func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	url, ok := response.State.GetOk("url")
 	require.True(t, ok)
 	require.Equal(t, "https://example-dispatch.example-tailnet.ts.net", url.AsString())
+
+	serve := m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").RPC
+	require.Contains(t, serve.GetDependencies(), string(upstream), "the serve ConfigMap waits for the Tailscale Service")
+	require.Contains(t, serve.GetPropertyDependencies()["data"].GetUrns(), string(upstream), "serve.json is built from the resolved tailnetService")
+	frontDoor := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies()
+	require.Contains(t, frontDoor, string(upstream), "the front door's Deployment waits for the Tailscale Service")
+	require.Contains(t, frontDoor, dispatchConstructChildURN("kubernetes:core/v1:ConfigMap", "example-dispatch-serve"), "and for the ConfigMap its pods mount")
+	data := normalizedProperty(m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").Inputs["data"]).(map[string]any)
+	require.Equal(t, readGolden(t, "dispatch-serve.golden"), data["serve.json"])
+}
+
+// dispatchConstructChildURN is the URN of the constructed component's child of type typ and name.
+func dispatchConstructChildURN(typ, name string) string {
+	return "urn:pulumi:stack::project::" + dispatchType + "$" + typ + "::" + name
 }
 
 func TestConstructAcceptsUnknownDispatchInputsUnderPreview(t *testing.T) {
@@ -75,7 +118,7 @@ func TestConstructAcceptsUnknownDispatchInputsUnderPreview(t *testing.T) {
 	inputs["agentSecretsUrl"] = property.New("https://example-broker.internal.example")
 	inputs["agentSecretsAudience"] = property.New("example-broker-audience")
 	setConstructApp(inputs)
-	for _, key := range []string{"tailnetAuthKey", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
+	for _, key := range []string{"tailnetAuthKey", "tailnetService", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
 		inputs[key] = property.New(property.Computed).WithDependencies([]resource.URN{upstream})
 	}
 	_, _, err := constructDispatch(t, inputs, true)
@@ -118,9 +161,10 @@ func TestConstructRefusesDispatchPprofPortFromAnotherResource(t *testing.T) {
 	require.Empty(t, m.Types())
 }
 
-// appCpu and appMemory are plain strings, refused from another resource's output as replicas is.
+// appCpu, appMemory, proxyCpu, proxyMemory, appEphemeralStorage and proxyEphemeralStorage are
+// plain strings, refused from another resource's output as replicas is.
 func TestConstructRefusesDispatchAppResourcesFromAnotherResource(t *testing.T) {
-	for _, input := range []string{"appCpu", "appMemory"} {
+	for _, input := range []string{"appCpu", "appMemory", "proxyCpu", "proxyMemory", "appEphemeralStorage", "proxyEphemeralStorage"} {
 		t.Run(input, func(t *testing.T) {
 			inputs := dispatchConstructInputs()
 			inputs[input] = property.New("2").WithDependencies([]resource.URN{upstream})
@@ -134,12 +178,18 @@ func TestConstructRefusesDispatchAppResourcesFromAnotherResource(t *testing.T) {
 	}
 }
 
-// appPriorityClassName is a plain string and appPdbMinAvailable a plain *int, each refused from
-// another resource's output as replicas is.
-func TestConstructRefusesDispatchAppDisruptionInputsFromAnotherResource(t *testing.T) {
+// priorityClassName and databaseAvailabilityType are plain strings, and the front door's and the
+// listener's replica counts and the three budgets plain *ints, each refused from another
+// resource's output as replicas is.
+func TestConstructRefusesDispatchDisruptionInputsFromAnotherResource(t *testing.T) {
 	for input, value := range map[string]property.Value{
-		"appPriorityClassName": property.New("example-priority"),
-		"appPdbMinAvailable":   property.New(1.0),
+		"priorityClassName":        property.New("example-priority"),
+		"databaseAvailabilityType": property.New("REGIONAL"),
+		"frontDoorReplicas":        property.New(3.0),
+		"listenerReplicas":         property.New(2.0),
+		"appPdbMinAvailable":       property.New(1.0),
+		"frontDoorPdbMinAvailable": property.New(1.0),
+		"listenerPdbMinAvailable":  property.New(1.0),
 	} {
 		t.Run(input, func(t *testing.T) {
 			inputs := dispatchConstructInputs()
@@ -214,6 +264,12 @@ var azureConstructForms = []struct {
 func appEnv(t *testing.T, m *pulumitest.Mocks) map[string]any {
 	t.Helper()
 	return containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch"))
+}
+
+// listenerEnv is the listener's envoy-listener container's environment, appEnv's counterpart.
+func listenerEnv(t *testing.T, m *pulumitest.Mocks) map[string]any {
+	t.Helper()
+	return containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener"))
 }
 
 // The endpoint, the deployment and either credential are Inputs, typically an Azure resource's or
@@ -350,6 +406,10 @@ func TestConstructOutputsTheServiceAccountIssuerAndSubject(t *testing.T) {
 
 			pod := deploymentPodTemplate(t, m, "example-dispatch")["spec"].(map[string]any)
 			require.Equal(t, "example-dispatch", pod["serviceAccountName"], "the subject names the pods' own ServiceAccount")
+			listener := deploymentPodTemplate(t, m, "example-dispatch-listener")["spec"].(map[string]any)
+			require.Equal(t, "example-dispatch", listener["serviceAccountName"], "the listener runs as the account the subject names")
+			frontDoor := deploymentPodTemplate(t, m, "example-dispatch-tailnet")["spec"].(map[string]any)
+			require.Equal(t, "example-dispatch-tailnet", frontDoor["serviceAccountName"], "the front door runs as an account the subject does not name")
 		})
 	}
 }
@@ -390,4 +450,97 @@ func TestConstructTakesAWholeDispatchIntegerSentAsAFloat(t *testing.T) {
 	require.NoError(t, err)
 	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
 	require.EqualValues(t, 3, spec["replicas"])
+}
+
+// constructDispatchClusterOnly constructs a cluster-only component through the plugin's own
+// Construct, the path a consumer's pulumi up takes, from the three inputs the mode takes and a
+// gcp provider reference alone: the mode registers no RandomPassword, so a cluster-only program
+// declares no random provider.
+func constructDispatchClusterOnly(t *testing.T, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
+	t.Helper()
+	return constructDispatchWithProviders(t, map[string]property.Value{
+		"clusterOnly": property.New(true),
+		"region":      property.New("us-central1"),
+		"hostname":    property.New("example-dispatch"),
+	}, dryRun, map[tokens.Package]p.ProviderReference{"gcp": dispatchConstructGCP})
+}
+
+// A cluster-only component answers with all eight outputs. Three carry the cluster's own values,
+// which a consumer reads to reach it: the cluster's name, the service-account token issuer built
+// from the project, the location and the name, and the exec-plugin kubeconfig rendered from the
+// cluster the mocks compute. The five Dispatch would decide are an explicit empty string, present
+// and known: a field left unset would await as unknown, one value in preview and another in
+// update, while "" is the same in both and is what a consumer already reads as "not applied".
+// Hence the preview row: an empty string must be the same value there as in an update.
+func TestConstructOutputsTheClusterOnlyState(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		dryRun bool
+	}{{"an update", false}, {"a preview", true}} {
+		t.Run(row.name, func(t *testing.T) {
+			_, response, err := constructDispatchClusterOnly(t, row.dryRun)
+			require.NoError(t, err)
+			for output, want := range map[string]string{
+				"clusterName":           "example-dispatch",
+				"serviceAccountIssuer":  azureIssuer,
+				"kubeconfig":            gcp.DispatchKubeconfig("example-endpoint", "ZXhhbXBsZS1jYQ==", "example-dispatch"),
+				"url":                   "",
+				"databaseInstance":      "",
+				"principal":             "",
+				"agentToken":            "",
+				"serviceAccountSubject": "",
+			} {
+				value, ok := response.State.GetOk(output)
+				require.True(t, ok, "%s is in the state", output)
+				require.True(t, value.IsString(), "%s is a known string, not %s", output, value)
+				require.Equal(t, want, value.AsString(), output)
+			}
+		})
+	}
+}
+
+// An input that configures Dispatch, sent with clusterOnly over the wire a consumer's SDK uses,
+// is refused by name before anything registers: a stack already running Dispatch sets these, so
+// turning the mode on is refused rather than deleting what it would no longer build.
+// TestDispatchClusterOnlyRefusesEveryDispatchInput holds the refusal for every such input.
+func TestConstructRefusesADispatchInputWithClusterOnly(t *testing.T) {
+	m, _, err := constructDispatch(t, map[string]property.Value{
+		"clusterOnly": property.New(true),
+		"region":      property.New("us-central1"),
+		"hostname":    property.New("example-dispatch"),
+		"natsUrl":     property.New("nats://example-hub.example-tailnet.ts.net:4222"),
+	}, false)
+	// The component's refusal reaches the consumer through the RPC, which wraps it.
+	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: natsUrl configures Dispatch, "+
+		"which clusterOnly does not build: unset it, or unset clusterOnly")
+	require.Empty(t, m.Types())
+}
+
+// A sandbox reaches the plugin over the same wire a consumer's pulumi up uses: the nine inputs of
+// the two groups are absent from the call, as an SDK leaves out what the program never set, and
+// not sent as empty values. tailnetAuthKey and signInClientSecret arrive as nothing at all there,
+// so the component reads neither as an Input it could resolve, and answers with the in-cluster
+// address and a declaration holding no front-door resource at all, as dispatchSandboxFrontDoor
+// names them.
+func TestConstructDispatchSandbox(t *testing.T) {
+	inputs := dispatchConstructInputs()
+	// The nine inputs of the two groups, from the groups' own lists, so a group that gains an
+	// input leaves it out of this call too.
+	for _, group := range [][]dispatchInput{dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup} {
+		for _, in := range group {
+			delete(inputs, in.input)
+		}
+	}
+	inputs["allowedNamespaces"] = property.New(property.NewArray([]property.Value{property.New("legion")}))
+	inputs["natsUrl"] = property.New(inClusterNatsURL)
+	inputs["natsSeedSecret"] = property.New("projects/example-project/secrets/example-nats-seed")
+
+	m, response, err := constructDispatch(t, inputs, false)
+	require.NoError(t, err)
+	url, ok := response.State.GetOk("url")
+	require.True(t, ok)
+	require.Equal(t, dispatchSandboxURL, url.AsString())
+	for _, registration := range m.Registrations() {
+		require.NotContains(t, dispatchSandboxFrontDoor, registration.Type+" "+registration.Name, "a front door's resource registered")
+	}
 }

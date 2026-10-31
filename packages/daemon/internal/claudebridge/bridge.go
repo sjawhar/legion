@@ -87,13 +87,9 @@ type bridge struct {
 	// abort requests waiting for Claude Code's answer to it.
 	interrupt string
 	abortIDs  []string
-	// aborted is a step an interrupt ended: its result ends the turn with no follow-up.
+	// aborted is a step an interrupt ended: its result ends the turn.
 	aborted bool
 
-	stall             PhaseStall
-	lastAssistantText string
-	// handoffs are the tool_use ids of this step's `legion` handoff_complete calls.
-	handoffs map[string]bool
 	// heldBack is the shim having once fallen framesHighWater frames behind, which is logged once.
 	heldBack bool
 }
@@ -115,19 +111,14 @@ type bridge struct {
 // after its SIGTERM, the loop takes that exit at once, drainTimeout bounds what is left of Claude
 // Code's stdout and flushTimeout what is left of the shim's frames. The bounds count on what no
 // reader of the bridge's governs: Claude Code dying of SIGKILL, exec's Wait copying nothing (Claude
-// Code's stderr is a file, as a pane's is), and the log and the phase-stall file taking the loop's
-// writes.
+// Code's stderr is a file, as a pane's is), and the log taking the loop's writes.
 func Run(ctx context.Context, cfg Config) (int, error) {
 	logOut := cfg.Log
 	if logOut == nil {
 		logOut = io.Discard
 	}
-	b := &bridge{cfg: cfg, log: log.New(logOut, "[claude-bridge] ", 0), handoffs: map[string]bool{}}
+	b := &bridge{cfg: cfg, log: log.New(logOut, "[claude-bridge] ", 0)}
 	b.frames = shimwire.NewWriter(&b.encoded)
-	var err error
-	if b.stall, err = readStall(cfg.StallFile); err != nil {
-		return 1, err
-	}
 	// stop ends the outputs' writers and every reader's send, once Run returns. It does not
 	// interrupt a readLines blocked in ReadBytes, and Run does not wait for those readers.
 	stop := make(chan struct{})
@@ -407,7 +398,6 @@ func (b *bridge) prompt(p shimwire.Prompt) {
 		b.respond(shimwire.Response{ID: p.ID, Command: shimwire.TypePrompt, Success: false, Error: Busy})
 		return
 	}
-	b.setStall(b.stall.assigned())
 	b.startRun(p.Message)
 }
 
@@ -431,7 +421,6 @@ func (b *bridge) abort(id string) {
 // next step's message.
 func (b *bridge) deliver(d delivery) {
 	d.queued <- nil
-	b.setStall(b.stall.inbound())
 	if b.inRun || b.seeding {
 		b.queue = append(b.queue, d)
 		return
@@ -449,8 +438,7 @@ func (b *bridge) startRun(message string) {
 
 // step sends one user message of the turn running.
 func (b *bridge) step(message string) {
-	b.stepping, b.aborted, b.interrupt, b.lastAssistantText = true, false, "", ""
-	clear(b.handoffs)
+	b.stepping, b.aborted, b.interrupt = true, false, ""
 	b.writeUser(message)
 }
 
@@ -472,8 +460,6 @@ func (b *bridge) fromClaude(line []byte) {
 	switch head.Type {
 	case "assistant":
 		b.assistant(head.Message)
-	case "user":
-		b.toolResults(head.Message)
 	case "control_response":
 		b.controlResponse(head.Response)
 	case "control_request":
@@ -487,13 +473,9 @@ func (b *bridge) fromClaude(line []byte) {
 
 // contentBlock is one block of a stream-json message's content.
 type contentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text"`
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Input     json.RawMessage `json:"input"`
-	ToolUseID string          `json:"tool_use_id"`
-	IsError   bool            `json:"is_error"`
+	Type  string          `json:"type"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
 }
 
 func blocksOf(message json.RawMessage) []contentBlock {
@@ -504,49 +486,19 @@ func blocksOf(message json.RawMessage) []contentBlock {
 	return m.Content
 }
 
-// assistant keeps the message's text as the step's last (the phase-stall check reads it), notes each
-// `legion` handoff_complete call, and shows each tool call on the pane through the shim.
+// assistant shows each tool call of the message on the pane through the shim. Nothing else of it
+// is read: the phase machine runs in the pane's `legion` MCP server, driven by Claude Code's own
+// hooks, and the bridge is transport.
 func (b *bridge) assistant(message json.RawMessage) {
-	var texts []string
 	for _, block := range blocksOf(message) {
-		switch block.Type {
-		case "text":
-			texts = append(texts, block.Text)
-		case "tool_use":
-			if isLegionTool(block.Name) {
-				var input struct {
-					Op string `json:"op"`
-				}
-				_ = json.Unmarshal(block.Input, &input)
-				if input.Op == "handoff_complete" {
-					b.handoffs[block.ID] = true
-				}
-			}
-			args := block.Input
-			if len(args) == 0 {
-				args = json.RawMessage("{}")
-			}
-			b.emitRaw(map[string]any{"type": "tool_execution_start", "toolName": block.Name, "args": args})
-		}
-	}
-	if len(texts) > 0 {
-		b.lastAssistantText = strings.Join(texts, "\n")
-	}
-}
-
-// isLegionTool is the `legion` tool under whatever MCP server name Claude Code prefixes it with.
-func isLegionTool(name string) bool { return name == "legion" || strings.HasSuffix(name, "__legion") }
-
-// toolResults closes the phase on a handoff_complete call that succeeded.
-func (b *bridge) toolResults(message json.RawMessage) {
-	for _, block := range blocksOf(message) {
-		if block.Type != "tool_result" || !b.handoffs[block.ToolUseID] {
+		if block.Type != "tool_use" {
 			continue
 		}
-		delete(b.handoffs, block.ToolUseID)
-		if !block.IsError {
-			b.setStall(b.stall.completed())
+		args := block.Input
+		if len(args) == 0 {
+			args = json.RawMessage("{}")
 		}
+		b.emitRaw(map[string]any{"type": "tool_execution_start", "toolName": block.Name, "args": args})
 	}
 }
 
@@ -574,8 +526,7 @@ func (b *bridge) controlResponse(raw json.RawMessage) {
 }
 
 // result ends a step. The seed's ends the seeding; a turn's step is followed by the next Envoy
-// delivery, else the phase-stall follow-up, else the turn's end. A step an interrupt ended ends the
-// turn with neither.
+// delivery, else the turn's end. A step an interrupt ended ends the turn at once.
 func (b *bridge) result(subtype string, isError bool, errs []string) {
 	if b.seeding {
 		b.seeding = false
@@ -609,20 +560,11 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 		b.emitRaw(map[string]any{"type": "message_end", "message": map[string]any{
 			"role": "assistant", "stopReason": "error", "errorMessage": failure}})
 	}
-	if !b.aborted {
-		if len(b.queue) > 0 {
-			next := b.queue[0]
-			b.queue = b.queue[1:]
-			b.step(next.content)
-			return
-		}
-		state, followUp := b.stall.settle(b.lastAssistantText)
-		b.setStall(state)
-		if followUp != "" {
-			b.log.Printf("the turn ended with the phase still open; sending the follow-up")
-			b.step(followUp)
-			return
-		}
+	if !b.aborted && len(b.queue) > 0 {
+		next := b.queue[0]
+		b.queue = b.queue[1:]
+		b.step(next.content)
+		return
 	}
 	b.inRun, b.aborted, b.interrupt = false, false, ""
 	b.emit(shimwire.AgentEnd{})
@@ -630,17 +572,6 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 		next := b.queue[0]
 		b.queue = b.queue[1:]
 		b.startRun(next.content)
-	}
-}
-
-// setStall records a change of the phase-stall state where a relaunch reads it.
-func (b *bridge) setStall(state PhaseStall) {
-	if state == b.stall {
-		return
-	}
-	b.stall = state
-	if err := writeStall(b.cfg.StallFile, state); err != nil {
-		b.log.Printf("the phase-stall state %s is not recorded for a relaunch: %v", state, err)
 	}
 }
 

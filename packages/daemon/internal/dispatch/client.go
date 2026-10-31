@@ -97,6 +97,20 @@ func (c *HTTPClient) ListRepoProjects(ctx context.Context) ([]RepoProject, error
 	return mappings, nil
 }
 
+// WebhookAppInstalled reads GET /api/v1/github/app-installation/{owner}/{repo}: whether
+// Dispatch's GitHub App, the one GitHub sends repo's webhook events through to Envoy, is installed
+// on repo (owner/name). A Dispatch older than the route answers 404, an *Error Missing reports.
+func (c *HTTPClient) WebhookAppInstalled(ctx context.Context, repo string) (bool, error) {
+	owner, name, _ := strings.Cut(repo, "/")
+	var response struct {
+		Installed bool `json:"installed"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/api/v1/github/app-installation/"+url.PathEscape(owner)+"/"+url.PathEscape(name), nil, &response); err != nil {
+		return false, err
+	}
+	return response.Installed, nil
+}
+
 func deref(value *string) string {
 	if value == nil {
 		return ""
@@ -265,24 +279,38 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 	return approved, nil
 }
 
-// BuildCommit reads GET /healthz and returns the build commit Dispatch reports itself built from
-// (its `commit`), "" when it reports none: null, from a build that stamped no commit
-// (packages/envoy/cmd/dispatch's buildCommit). The route is served above Dispatch's API and
-// needs no bearer; the client sends its own as on every call. A Dispatch that answers other than
-// 2xx — its own 503 while its database or NATS is down included — is an *Error as every other
-// call's, and one that does not answer a TransientError, so the caller tells "reported none" from
-// "could not be asked".
+// BuildCommit reads GET /healthz and returns the build Dispatch's server fleet serves: its
+// `fleet_commit`, the commit of Dispatch's latest announcement that every live server process
+// serves one build (the same announcement its server.started carries, intake.ServerStarted), ""
+// when that is null, since no fleet-wide build has been announced. A body without the field is a
+// Dispatch older than the announcement, and its `commit` is read instead, the build of the one
+// process that answered, "" when that is null, from a build that stamped no commit
+// (packages/envoy/cmd/dispatch's buildCommit). The fleet's build, not the answering process's,
+// because the request goes through the Service, which mid-roll is any process's answer. The route
+// is served above Dispatch's API and needs no bearer; the client sends its own as on every call. A
+// Dispatch that answers other than 2xx — its own 503 while its database is down included — is an
+// *Error as every other call's, and one that does not answer a TransientError, so the caller tells
+// "reported none" from "could not be asked".
 func (c *HTTPClient) BuildCommit(ctx context.Context) (string, error) {
 	var response struct {
 		Commit *string `json:"commit"`
+		// FleetCommit is the field as sent, so a null one is told from one never sent.
+		FleetCommit json.RawMessage `json:"fleet_commit"`
 	}
 	if err := c.request(ctx, http.MethodGet, "/healthz", nil, &response); err != nil {
 		return "", err
 	}
-	if response.Commit == nil {
+	commit := response.Commit
+	if response.FleetCommit != nil {
+		commit = nil
+		if err := json.Unmarshal(response.FleetCommit, &commit); err != nil {
+			return "", fmt.Errorf("decode Dispatch /healthz fleet_commit: %w", err)
+		}
+	}
+	if commit == nil {
 		return "", nil
 	}
-	return *response.Commit, nil
+	return *commit, nil
 }
 
 func (c *HTTPClient) request(ctx context.Context, method, path string, body, into any) error {

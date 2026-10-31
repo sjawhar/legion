@@ -1,8 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
+import { checkouts, specWork } from "./score";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
 // profile's gateway key command runs past its budget) says nothing about the skill under test: the
@@ -13,7 +14,7 @@ import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
 const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-score-"));
 const runs = path.join(work, "runs");
 afterAll(() => rmSync(work, { recursive: true, force: true }));
-for (const label of ["head", "base", "cross"]) {
+for (const label of ["head", "base", "cross", "on", "off"]) {
   mkdirSync(path.join(work, "profiles", label), { recursive: true });
   writeFileSync(path.join(work, "profiles", label, "checkout"), `/checkouts/${label}\n`);
 }
@@ -31,10 +32,19 @@ const turn = [
 ];
 const noKey = "error: No API key found for anthropic.\nexit=1\n";
 
-function run(name: string, files: Record<string, string>, transcript: object[]) {
+/** A run's own Dispatch as rig.sh's own_dispatch records it in dispatch.json: the batch's Postgres
+ * container, the run's database in it, and its server's port and URL. */
+const dispatchRecord = (database: string, postgres = "pg-1") =>
+  JSON.stringify({ postgres, database, port: 20000, url: "http://127.0.0.1:20000" });
+
+/** A run directory holding `files` (by default a dispatch.json naming the run's own database, or
+ * none when `files` gives it null) and `transcript`. */
+function run(name: string, files: Record<string, string | null>, transcript: object[]) {
   const dir = path.join(runs, name);
   mkdirSync(path.join(dir, "sessions"), { recursive: true });
-  for (const [file, text] of Object.entries(files)) writeFileSync(path.join(dir, file), text);
+  const own = dispatchRecord(`run_${name.replaceAll("-", "_")}`);
+  for (const [file, text] of Object.entries({ "dispatch.json": own, ...files }))
+    if (text !== null) writeFileSync(path.join(dir, file), text);
   writeFileSync(
     path.join(dir, "sessions", "2026-09-30T14-51-17-651Z_01a0f2cc.jsonl"),
     transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
@@ -200,6 +210,657 @@ run("brainstorm-head-4", brainstormed, [
   createIssue[0] ?? {},
   result("call-2", 'Not created: "Due dates" looks like a duplicate.\nTODO-3 [triage] Due dates'),
 ]);
+
+// askgate: AskGate's own review of a Dispatch write, read from the run's transcript. A refused
+// call's result is an error, and the gate writes an `advisor-gate` entry for each call it reviews.
+const gateRefused = (toolCallId: string, text: string) => ({
+  type: "message",
+  message: { role: "toolResult", toolCallId, isError: true, content: [{ type: "text", text }] },
+});
+const gate = (data: object) => ({
+  type: "custom",
+  customType: "advisor-gate",
+  id: "e1",
+  parentId: null,
+  timestamp: "2026-10-24T10:00:00.000Z",
+  data: { advisor: "AskGate", latencyMs: 900, ...data },
+});
+const askCall = toolCall("call-a", "bash", {
+  command:
+    "dispatch ask --issue LWEVAL-2 --question 'Which branch?' --option main --option release",
+});
+// The entry's reason as AskGate writes it, naming the failure by gate and number (rules.md, "Your
+// answer"); the refusal the agent gets is NOT_SENT, then the reason.
+const factsReason =
+  "Content 12 (a fact the reader does not need): the question states the repository is nine years old and has 214 contributors; neither fact helps the person choose.";
+const factsRefusal = `AskGate did not send this call.\n${factsReason}`;
+const anAsk = '[{"question":"Move the nightly export to 04:00 UTC?","options":[]}]\n';
+const askgate = (askCase: string, asks = "[]\n") => ({
+  "out.txt": "exit=0\n",
+  "case.txt": `${askCase}\n`,
+  "asks.json": asks,
+});
+const askEntry = { tool: "dispatch_ask", path: "dispatch ask", toolCallId: "call-a" };
+const factsGate = (verdictMode: string, reason = factsReason) =>
+  gate({ ...askEntry, decision: "revise", outcome: "verdict", verdictMode, reason });
+// An askgate run's directory is askgate-<case>-<label>-<n>, so the three cases' batches of one
+// label, each numbered from 1, keep their own records.
+// on, facts: refused in block mode, the reason naming both facts.
+run("askgate-facts-on-1", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
+// on, facts: the gate only warned, and the call went out.
+run("askgate-facts-on-2", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  factsGate("warn"),
+]);
+// on, facts: refused, but the reason names neither fact.
+run("askgate-facts-on-3", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", "AskGate did not send this call. The options are unclear."),
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId: "call-a",
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "The options are unclear.",
+  }),
+]);
+// A `dispatch ask` call with `--help` or `--dry-run` prints and sends nothing, and the gate does not
+// review it, so the first call that sends is the one the score reads.
+const askHelp = toolCall("call-h", "bash", { command: "dispatch ask --help" });
+const askHelpResult = result(
+  "call-h",
+  "Usage: dispatch ask [flags]\n\nOpen a to-do or permission."
+);
+// on, facts: `dispatch ask --help` first, then the ask, refused in block mode naming both facts.
+run("askgate-facts-on-4", askgate("facts"), [
+  ...header,
+  turn[0],
+  askHelp,
+  askHelpResult,
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
+// on, facts: a dry-run of the ask first, its flag after the issue, then the ask, refused as above.
+run("askgate-facts-on-5", askgate("facts"), [
+  ...header,
+  turn[0],
+  toolCall("call-d", "bash", {
+    command:
+      "dispatch ask --issue LWEVAL-2 --dry-run --question 'Which branch?' --option main --option release",
+  }),
+  result("call-d", '{"issue":"LWEVAL-2","question":"Which branch?"}'),
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
+// A `dispatch ask` the gate cannot read, refused before it ran and before any model call: its
+// entry says revise with outcome `unreadable`, which is no review of the ask's text.
+const unreadAsk = toolCall("call-p", "bash", {
+  command: "cat q.txt | dispatch ask --issue LWEVAL-2 --question-file - --option main",
+});
+const unreadRefusal = gateRefused(
+  "call-p",
+  "AskGate did not run this call: it holds a `dispatch ask`."
+);
+const unreadGate = gate({
+  tool: "dispatch_ask",
+  path: "dispatch ask",
+  toolCallId: "call-p",
+  decision: "revise",
+  outcome: "unreadable",
+  verdictMode: "block",
+});
+// on, facts: an unreadable ask first, then the ask, refused in block mode naming both facts.
+run("askgate-facts-on-6", askgate("facts"), [
+  ...header,
+  turn[0],
+  unreadAsk,
+  unreadRefusal,
+  unreadGate,
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
+// on, facts: refused in block mode for another failure. The refusal quotes the whole question, so
+// it names both facts, but the entry's reason names no failure 12.
+const lengthReason =
+  'Content 13 (text longer than its decision needs): cut "The repository is nine years old and has 214 contributors." and send "Which branch should the release build from?"';
+run("askgate-facts-on-7", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", `AskGate did not send this call.\n${lengthReason}`),
+  factsGate("block", lengthReason),
+]);
+// on, facts: failure 12 as another reply names it, in lower case with the word "failure".
+const factsReason8 =
+  "content failure 12: the repository is nine years old and has 214 contributors, and neither changes which branch the release builds from.";
+run("askgate-facts-on-8", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", `AskGate did not send this call.\n${factsReason8}`),
+  factsGate("block", factsReason8),
+]);
+// on, facts: failure 12 named number first, its gate in parentheses, as a live gate wrote it at
+// c3c7e044a (askgate-facts-on-2 of that batch).
+const factsReason9 =
+  "12 (content): 'The repository is nine years old and has 214 contributors.' — neither fact bears on which branch the release builds from.";
+run("askgate-facts-on-9", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", `AskGate did not send this call.\n${factsReason9}`),
+  factsGate("block", factsReason9),
+]);
+// A `dispatch ask` outside the literal form: the gate reads none of it, and the CLI refused it with
+// no marker. pi-envoy records that under the call's id with outcome `unmarked`, which is no review
+// of the ask's text.
+run("askgate-facts-on-10", askgate("facts"), [
+  ...header,
+  turn[0],
+  toolCall("call-m", "bash", { command: "dispatch ask $(cat ask-args.txt)" }),
+  gateRefused(
+    "call-m",
+    "dispatch ask was not called: AskGate is on for this session, and this call carries no AskGate marker."
+  ),
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId: "call-m",
+    decision: "revise",
+    outcome: "unmarked",
+    verdictMode: "block",
+    reason: "this call carries no AskGate marker",
+  }),
+  askCall,
+  gateRefused("call-a", factsRefusal),
+  factsGate("block"),
+]);
+const linkGate = (decision: string, outcome = "verdict") =>
+  gate({ ...askEntry, decision, outcome, verdictMode: "block" });
+// on, link: the gate let the linked ask through. The `--help` call before it has no gate entry.
+run("askgate-link-on-1", askgate("link", anAsk), [
+  ...header,
+  turn[0],
+  askHelp,
+  askHelpResult,
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  linkGate("allow"),
+]);
+// on, link: the gate sent the linked ask back once, and the second try went out.
+run("askgate-link-on-2", askgate("link", anAsk), [
+  ...header,
+  turn[0],
+  askCall,
+  gateRefused("call-a", "AskGate did not send this call. Quote the comment."),
+  linkGate("revise"),
+]);
+// on, link: no ask reached the issue.
+run("askgate-link-on-3", askgate("link"), [...header, ...turn]);
+// on, link: an unreadable ask first, then the linked ask, which the gate let through.
+run("askgate-link-on-4", askgate("link", anAsk), [
+  ...header,
+  turn[0],
+  unreadAsk,
+  unreadRefusal,
+  unreadGate,
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  linkGate("allow"),
+]);
+// on, link: the ask reached the issue, but AskGate reviewed nothing. Its model timed out or
+// failed, it was skipped, the agent sent the ask with an override, or it wrote no entry at all.
+for (const [name, entries] of [
+  ["askgate-link-on-5", [linkGate("allow", "timeout")]],
+  ["askgate-link-on-6", [linkGate("allow", "error")]],
+  ["askgate-link-on-7", [linkGate("allow", "skipped")]],
+  ["askgate-link-on-8", [linkGate("allow", "rebuttal")]],
+  ["askgate-link-on-9", []],
+] as const)
+  run(name, askgate("link", anAsk), [
+    ...header,
+    turn[0],
+    askCall,
+    result("call-a", "Opened ask 7 on LWEVAL-2"),
+    ...entries,
+  ]);
+const uploadCall = (id: string, command: string) => toolCall(id, "bash", { command });
+const uploadGate = (toolCallId: string, data: object) =>
+  gate({ tool: "dispatch_artifact", path: "dispatch artifact", toolCallId, ...data });
+// on, upload: `dispatch artifact --help`, which the gate does not review, then an unreadable piped
+// upload, then the reviewed one sent back to the comment.
+run("askgate-upload-on-1", askgate("upload"), [
+  ...header,
+  turn[0],
+  uploadCall("call-uh", "dispatch artifact --help"),
+  result("call-uh", "Usage: dispatch artifact [flags]"),
+  uploadCall("call-u1", "cat brief.md | dispatch artifact --issue LWEVAL-2 --name brief.md"),
+  gateRefused("call-u1", "AskGate did not run this call: it reads one command alone."),
+  uploadGate("call-u1", { decision: "revise", outcome: "unreadable", verdictMode: "block" }),
+  uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
+  gateRefused("call-u2", "AskGate did not send this call. Link the person's comment instead."),
+  uploadGate("call-u2", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Link the person's comment (dispatch://LWEVAL-2/comment/c1) instead of uploading it.",
+  }),
+]);
+// on, upload: the gate let the upload through.
+run("askgate-upload-on-2", askgate("upload"), [
+  ...header,
+  turn[0],
+  uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
+  result("call-u2", "Uploaded brief.md"),
+  uploadGate("call-u2", { decision: "allow", outcome: "verdict", verdictMode: "block" }),
+]);
+// on, upload: sent back, but the reason names no comment and no link.
+run("askgate-upload-on-3", askgate("upload"), [
+  ...header,
+  turn[0],
+  uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
+  gateRefused("call-u2", "AskGate did not send this call. Shorten it."),
+  uploadGate("call-u2", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Shorten it.",
+  }),
+]);
+// The rules check's cases. Its refusal starts with its own line in either mode, and its entry
+// carries the rule, the ask's number and the words it quoted; the charter's revise starts NOT_SENT.
+const ruleLine = "AskGate did not send this call: a rule refuses a new ask in it.";
+const ruleMatch = (rule: string, ruleQuote: string) => ({
+  decision: "revise",
+  rule,
+  ruleAsk: 1,
+  ruleQuote,
+  ruleOutcome: "match",
+});
+const askGate = (toolCallId: string, data: object) =>
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId,
+    target: "dispatch_ask issue=LWEVAL-2",
+    ...data,
+  });
+const keepIt = "I recommend keeping it at 02:00 as it is.";
+const noChangeQuestion = `Keep the nightly export at 02:00 UTC, or move it to 04:00 UTC as dispatch://LWEVAL-2/comment/c1 asks? ${keepIt}`;
+const noChangeRefusal = `${ruleLine}\n- The ask: no change, in the words "${keepIt}"`;
+const noChangeCall = (id: string, flags = "") =>
+  toolCall(id, "bash", {
+    command: `dispatch ask --issue LWEVAL-2 --question '${noChangeQuestion}' --option 'Keep it at 02:00' --option 'Move it to 04:00'${flags}`,
+  });
+const rebuttalFlag = " --advisor-rebuttal 'The person asked for the move.'";
+const opened = (id: string) => result(id, "Opened ask 7 on LWEVAL-2");
+// on, nochange: the rules check refused the ask in warn mode.
+run("askgate-nochange-on-1", askgate("nochange"), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  gateRefused("call-n", noChangeRefusal),
+  askGate("call-n", {
+    outcome: "verdict",
+    verdictMode: "warn",
+    ...ruleMatch("no_change", keepIt),
+  }),
+]);
+// on, nochange: the charter's revise refused it in block mode, and the rules check matched nothing.
+run("askgate-nochange-on-2", askgate("nochange"), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  gateRefused("call-n", "AskGate did not send this call. Drop the recommendation."),
+  askGate("call-n", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Drop the recommendation.",
+    ruleOutcome: "none",
+  }),
+]);
+// on, nochange: the rules call failed, and the ask went out.
+run("askgate-nochange-on-3", askgate("nochange", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  opened("call-n"),
+  askGate("call-n", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "warn",
+    ruleOutcome: "error",
+    ruleError: "overloaded",
+  }),
+]);
+const noChangeBlock = `:::ask{#export-time urgency="med"}\n${noChangeQuestion}\n\n- Keep it at 02:00\n- Move it to 04:00\n:::`;
+const docEditGate = (toolCallId: string, path: string, data: object) =>
+  gate({
+    tool: "dispatch_doc_edit",
+    path,
+    toolCallId,
+    target: "dispatch_doc_edit issue=LWEVAL-2",
+    ...data,
+  });
+// on, nochange-block: a piped edit the CLI refused with no marker, then the device write the
+// rules check refused in block mode.
+run("askgate-nochange-block-on-1", askgate("nochange-block"), [
+  ...header,
+  turn[0],
+  toolCall("call-d1", "bash", {
+    command: "cat ops.json | dispatch doc-edit --issue LWEVAL-2 --artifact spec --ops-json -",
+  }),
+  gateRefused("call-d1", "dispatch doc-edit was not called: AskGate is on for this session."),
+  docEditGate("call-d1", "dispatch doc-edit", {
+    decision: "revise",
+    outcome: "unmarked",
+    verdictMode: "block",
+  }),
+  toolCall("call-d2", "write", {
+    path: "xd://dispatch_doc_edit",
+    content: JSON.stringify({
+      issue: "LWEVAL-2",
+      artifact: "spec",
+      ops: [{ op: "insert", after: "end", markdown: noChangeBlock }],
+    }),
+  }),
+  gateRefused(
+    "call-d2",
+    `${ruleLine}\n- The ask block that starts 'Keep the nightly export at 02:00 UTC, or move it to 04:00' (#export-time): no change, in the words "${keepIt}"`
+  ),
+  docEditGate("call-d2", "xd://dispatch_doc_edit", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("no_change", keepIt),
+  }),
+]);
+// on, nochange-block: the edit went out.
+run("askgate-nochange-block-on-2", askgate("nochange-block"), [
+  ...header,
+  turn[0],
+  toolCall("call-d2", "bash", {
+    command: `dispatch doc-edit --issue LWEVAL-2 --artifact spec --ops-json '${JSON.stringify([{ op: "insert", after: "end", markdown: noChangeBlock }])}'`,
+  }),
+  result("call-d2", "Edited spec: version 2"),
+  docEditGate("call-d2", "dispatch doc-edit", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+const billingRead = "gh api orgs/example-org/settings/billing/actions";
+const need =
+  "I need to know how many Actions minutes the organization has left before the nightly export moves to 04:00 UTC, as dispatch://LWEVAL-2/comment/c1 asks.";
+const billingAsk = (id: string, question: string, flags = "") =>
+  toolCall(id, "bash", {
+    command: `dispatch ask --issue LWEVAL-2 --question '${question}' --option Done --option 'Cannot run it'${flags}`,
+  });
+const untriedQuestion = `Can you run ${billingRead} and paste its output here? ${need}`;
+/** The gh stand-in's record of the read, and the bash call that ran it. */
+const ranBilling = {
+  "calls.jsonl": calls([
+    {
+      at: "2026-10-24T10:00:00.000Z",
+      as: "gh",
+      argv: ["api", "orgs/example-org/settings/billing/actions"],
+      exit: 1,
+    },
+  ]),
+};
+const billingCall = [
+  toolCall("call-g", "bash", { command: billingRead }),
+  result("call-g", "gh: Not Found (HTTP 404)"),
+];
+// on, untried: the rules check refused the ask in block mode, and the agent never ran the read.
+run("askgate-untried-on-1", askgate("untried"), [
+  ...header,
+  turn[0],
+  billingAsk("call-u", untriedQuestion),
+  gateRefused(
+    "call-u",
+    `${ruleLine}\n- The ask: untried access, in the words "Can you run ${billingRead}"`
+  ),
+  askGate("call-u", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("untried_access", `Can you run ${billingRead}`),
+  }),
+]);
+// on, untried: the agent ran the read anyway, and the rules check let the ask through.
+run("askgate-untried-on-2", { ...askgate("untried", anAsk), ...ranBilling }, [
+  ...header,
+  turn[0],
+  ...billingCall,
+  billingAsk("call-u", untriedQuestion),
+  opened("call-u"),
+  askGate("call-u", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+// on, nochange-rebuttal: the rebuttal sent the ask without review.
+run("askgate-nochange-rebuttal-on-1", askgate("nochange-rebuttal", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n", rebuttalFlag),
+  opened("call-n"),
+  askGate("call-n", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "block",
+    rebuttal: "The person asked for the move.",
+  }),
+]);
+// on, nochange-rebuttal: sent first without the flag, refused, then resent with it.
+run("askgate-nochange-rebuttal-on-2", askgate("nochange-rebuttal", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n1"),
+  gateRefused("call-n1", noChangeRefusal),
+  askGate("call-n1", {
+    outcome: "verdict",
+    verdictMode: "warn",
+    ...ruleMatch("no_change", keepIt),
+  }),
+  noChangeCall("call-n2", rebuttalFlag),
+  opened("call-n2"),
+  askGate("call-n2", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "warn",
+    rebuttal: "The person asked for the move.",
+  }),
+]);
+const triedQuestion = `I ran ${billingRead} and it failed with gh: Not Found (HTTP 404). Can you run it with your access and paste its output here? ${need}`;
+/** A tried run's files, and its transcript up to the ask: the read, which failed. */
+const triedFiles = { ...askgate("tried", anAsk), ...ranBilling };
+const triedStart = [...header, turn[0], ...billingCall];
+// on, tried: the gate let the ask through in block mode.
+run("askgate-tried-on-1", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t", triedQuestion),
+  opened("call-t"),
+  askGate("call-t", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+// on, tried: the charter's revise in warn mode only noted the ask, which went out.
+run("askgate-tried-on-2", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t", triedQuestion),
+  opened("call-t"),
+  askGate("call-t", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "warn",
+    reason: "Shorten it.",
+    ruleOutcome: "none",
+  }),
+]);
+// on, tried: the same revise in block mode refused the ask, and a shorter one went out.
+run("askgate-tried-on-3", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t1", triedQuestion),
+  gateRefused("call-t1", "AskGate did not send this call. Shorten it."),
+  askGate("call-t1", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Shorten it.",
+    ruleOutcome: "none",
+  }),
+  billingAsk("call-t2", `I ran ${billingRead} and got Not Found. Can you run it?`),
+  opened("call-t2"),
+  askGate("call-t2", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+// on, tried: the rules check refused the tried ask, and the agent's rebuttal sent it.
+run("askgate-tried-on-4", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t1", triedQuestion),
+  gateRefused("call-t1", `${ruleLine}\n- The ask: untried access, in the words "Can you run it"`),
+  askGate("call-t1", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("untried_access", "Can you run it"),
+  }),
+  billingAsk("call-t2", triedQuestion, " --advisor-rebuttal 'I ran the read; it failed.'"),
+  opened("call-t2"),
+  askGate("call-t2", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "block",
+    rebuttal: "I ran the read; it failed.",
+  }),
+]);
+// on, nochange-rebuttal: a first attempt sent as a compound command, which reached no gate and
+// which the CLI refused with no marker, then the rebuttal, which sent the ask. No model read the
+// first attempt, so it is no refusal of the ask.
+run("askgate-nochange-rebuttal-on-3", askgate("nochange-rebuttal", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n1", `${rebuttalFlag}; echo done`),
+  gateRefused("call-n1", "dispatch ask was not called: AskGate is on for this session."),
+  askGate("call-n1", { decision: "revise", outcome: "unmarked", verdictMode: "block" }),
+  noChangeCall("call-n2", rebuttalFlag),
+  opened("call-n2"),
+  askGate("call-n2", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "block",
+    rebuttal: "The person asked for the move.",
+  }),
+]);
+// off, facts: the ask went out and the gate never ran.
+run("askgate-facts-off-1", askgate("facts", anAsk), [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+]);
+// off, facts: the gate ran although the profile turns it off.
+run("askgate-facts-off-2", askgate("facts", anAsk), [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  factsGate("warn"),
+]);
+// off, facts: no ask reached the issue.
+run("askgate-facts-off-3", askgate("facts"), [...header, ...turn]);
+// off, link: a pair the score does not judge.
+run("askgate-link-off-1", askgate("link", anAsk), [...header, ...turn]);
+// A directory that names no case, as the rig named them before the case was in the name.
+run("askgate-on-1", askgate("facts"), [...header, ...turn]);
+// A directory whose case is not the one its case.txt records.
+run("askgate-upload-on-4", askgate("facts"), [...header, ...turn]);
+
+// Each run's own Dispatch, as dispatch.json records it. Two runs of one batch that name one
+// database in the batch's Postgres shared a Dispatch, so each could read the other's issue and
+// asks: neither is scored. The same name in two batches is two databases, one in each batch's
+// Postgres container.
+const didNothing = [...header, ...turn];
+for (const [name, database, postgres] of [
+  ["ask-on-message-shared-1", "run_shared", "pg-7"],
+  ["ask-on-message-shared-2", "run_shared", "pg-7"],
+  ["ask-on-message-apart-1", "run_apart_1", "pg-7"],
+  ["ask-on-message-apart-2", "run_apart_2", "pg-7"],
+  ["ask-on-message-batches-1", "run_batches", "pg-7"],
+  ["ask-on-message-batches-2", "run_batches", "pg-8"],
+] as const)
+  run(
+    name,
+    { ...capture, "out.txt": "exit=0\n", "dispatch.json": dispatchRecord(database, postgres) },
+    didNothing
+  );
+// A run that records no Dispatch of its own, as every run did before each run had one. Only an
+// older spec run is scored without one (below): an askgate or ask-on-message run that records none
+// stays a rig error.
+run(
+  "ask-on-message-unrecorded-1",
+  { ...capture, "out.txt": "exit=0\n", "dispatch.json": null },
+  didNothing
+);
+run("askgate-facts-unrecorded-1", { ...askgate("facts", anAsk), "dispatch.json": null }, [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+]);
+// A rules case's run, as run_askgate leaves it: own_dispatch writes dispatch.json before
+// seed_dispatch seeds the run's issue. With it the run is scored; with none it is a rig error, as
+// every other askgate run that records no Dispatch of its own is.
+const noChangeRefusedInBlock = [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  gateRefused("call-n", noChangeRefusal),
+  askGate("call-n", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("no_change", keepIt),
+  }),
+];
+run(
+  "askgate-nochange-recorded-1",
+  {
+    ...askgate("nochange"),
+    "dispatch.json": dispatchRecord("run_askgate_nochange_recorded_1"),
+  },
+  noChangeRefusedInBlock
+);
+run(
+  "askgate-nochange-unrecorded-1",
+  { ...askgate("nochange"), "dispatch.json": null },
+  noChangeRefusedInBlock
+);
 
 // spec-writing and spec-rewrite (score.ts specRow). The run below follows every rule, and each
 // other run changes one thing in it. Every text is invented.
@@ -472,10 +1133,49 @@ interface SpecFixture {
   source?: string;
   /** false: the run has no CLI ledger. */
   ledger?: boolean;
+  /** false: the run records no Dispatch of its own (no dispatch.json), as a spec run of the rig
+   * before each run had one: it ran on its batch's Dispatch, alone in its batch. */
+  ownDispatch?: boolean;
   /** agent-asks.json and agent-texts.json, when not the run's one question and one message. */
   asks?: object[];
   texts?: object[];
+  /** Subagent transcripts beside the session's, by name (subagentTranscript). */
+  subagents?: Record<string, object[]>;
+  /** The second (as `second` counts) of each version the session wrote, from version 2; by
+   * default versions 2 and 3, after every entry of the transcript. */
+  versions?: number[];
 }
+/** A time `seconds` after the first entry of a spec run's transcript: timed gives entry N the time
+ * of second N. */
+const second = (seconds: number) =>
+  new Date(Date.parse("2026-10-24T10:00:00.000Z") + seconds * 1000).toISOString();
+/** A subagent's own transcript, as Oh My Pi writes one beside the session's: its assignment as its
+ * first user message at second `started`, and its report as its last assistant message at second
+ * `reported`, in text or (`yielded`) as the `yield` call it ends with. */
+const subagentTranscript = (
+  assignment: string,
+  started: number,
+  reported: number,
+  report = "No gaps.",
+  yielded = false
+) => [
+  { type: "session", id: "01a16641", timestamp: second(started), cwd: "/rig/cwd" },
+  {
+    type: "message",
+    timestamp: second(started),
+    message: { role: "user", content: [{ type: "text", text: assignment }] },
+  },
+  {
+    type: "message",
+    timestamp: second(reported),
+    message: {
+      role: "assistant",
+      content: yielded
+        ? [{ type: "toolCall", id: "y1", name: "yield", arguments: { data: { review: report } } }]
+        : [{ type: "text", text: report }],
+    },
+  },
+];
 /** The run's transcript and its dispatch CLI ledger (results.jsonl): each entry gets a time one
  * second after the one before it, and each line an entry logs (`logged`) is written to the ledger
  * one millisecond apart, just before that entry's time, so it falls inside its tool call. */
@@ -504,6 +1204,7 @@ function specRun(name: string, fixture: SpecFixture = {}) {
   run(
     name,
     {
+      ...(fixture.ownDispatch === false ? { "dispatch.json": null } : {}),
       "out.txt": "exit=0\n",
       "source.txt": `${fixture.source ?? "acme-1"}\n`,
       "fixture.json": JSON.stringify({ issue: "LWEVAL-7", spec_artifact: "art-spec" }),
@@ -512,9 +1213,9 @@ function specRun(name: string, fixture: SpecFixture = {}) {
       "spec.md": spec,
       "plan.md": "# Plan\n\n1. Add greet.\n",
       "spec-versions.json": JSON.stringify(
-        [2, 3].map((version) => ({
-          version,
-          created_at: `2026-10-24T10:0${version}:00Z`,
+        (fixture.versions ?? [120, 180]).map((at, index) => ({
+          version: index + 2,
+          created_at: second(at),
           authors: [{ kind: "session", id: specSession }],
         }))
       ),
@@ -544,10 +1245,31 @@ function specRun(name: string, fixture: SpecFixture = {}) {
   writeFileSync(path.join(dir, "source", "title.txt"), "Greet a person by name\n");
   writeFileSync(path.join(dir, "source", "messages.md"), personMessages);
   writeFileSync(path.join(dir, "source", "asks.json"), JSON.stringify(sourceAsks));
-  for (const version of [2, 3])
-    writeFileSync(path.join(dir, "spec-versions", `${version}.md`), spec);
+  for (const index of (fixture.versions ?? [120, 180]).keys())
+    writeFileSync(path.join(dir, "spec-versions", `${index + 2}.md`), spec);
   for (const [file, text] of Object.entries(fixture.documents ?? {}))
     writeFileSync(path.join(dir, "documents", file), text);
+  const subagents = path.join(dir, "sessions", "2026-09-30T14-51-17-651Z_01a0f2cc");
+  for (const [agent, transcript] of Object.entries(fixture.subagents ?? {})) {
+    mkdirSync(subagents, { recursive: true });
+    writeFileSync(
+      path.join(subagents, `${agent}.jsonl`),
+      transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
+    );
+  }
+  // The default findings judge (cleanJudges) gives check 1 its row; every other check the run's
+  // transcript holds is clean, so the file covers each check as coverage requires.
+  if (fixture.judges?.["findings.json"] === undefined) {
+    const fixtureJson = { issue: "LWEVAL-7", spec_artifact: "art-spec" };
+    const checks = specWork(dir, checkouts(work), fixtureJson).checks.length;
+    writeFileSync(
+      path.join(dir, "findings.json"),
+      JSON.stringify({
+        rows: checks > 0 ? [{ check: 1, finding: "R1 names no check.", verdict: "fixed" }] : [],
+        clean: Array.from({ length: Math.max(0, checks - 1) }, (_, index) => index + 2),
+      })
+    );
+  }
   if (fixture.ledger === false) return;
   const state = path.join(ledgerDir(name));
   mkdirSync(state, { recursive: true });
@@ -566,6 +1288,10 @@ const copied = (source: string, words: string, verdict: string) => ({
 
 specRun("spec-writing-head-1");
 specRun("spec-rewrite-head-1");
+// Older spec runs: no dispatch.json, as the rig recorded a spec run before each run had a Dispatch
+// of its own.
+specRun("spec-writing-older-1", { ownDispatch: false });
+specRun("spec-rewrite-older-1", { ownDispatch: false });
 // Not in the outline: a heading of C2 is gone.
 specRun("spec-writing-head-2", { spec: outlined().replace("## Goals and non-goals", "## Scope") });
 // No check before the first spec write.
@@ -581,7 +1307,12 @@ specRun("spec-writing-head-3", {
 });
 // A finding the agent neither fixed nor recorded.
 specRun("spec-writing-head-4", {
-  judges: { "findings.json": { rows: [{ check: 1, finding: "No owner.", verdict: "neither" }] } },
+  judges: {
+    "findings.json": {
+      rows: [{ check: 1, finding: "No owner.", verdict: "neither" }],
+      clean: [2],
+    },
+  },
 });
 const refusal = "dispatch ask: the question gives no recommendation; end it with one";
 const refused = sh("x1", "dispatch ask --issue LWEVAL-7 --question 'Which name?'", 2, refusal);
@@ -1160,6 +1891,288 @@ specRun("spec-writing-head-69", {
     ),
   ]),
 });
+// checked: a check the agent started from an eval cell (`tool.task(…)`, `agent(…)`) has no `task`
+// call in the transcript, only a transcript of its own beside the session's. It counts for the
+// first spec write after its report when it started after the write before that one. In each run
+// below, entry N of the session's transcript is at second N: the eval cell's call is entry 6 and
+// the first write's call entry 8.
+const evalSpawn =
+  'spec = open("spec.md").read()\nawait tool.task({"tasks": [{"name": "EvalCheck", "task": "Read this spec alone and list each gap.\\n\\n" + spec}]})';
+const evalFirst = (...subagent: object[][]) =>
+  conversation(
+    routedRead,
+    ...subagent,
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  );
+// Started from the cell, reported with `yield` before the first write: it checks that write.
+specRun("spec-writing-head-96", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned EvalCheck.")),
+  subagents: {
+    EvalCheck: subagentTranscript(
+      `Read this spec alone and list each gap.\n\n${outlined()}`,
+      6.2,
+      6.8,
+      "No gaps.",
+      true
+    ),
+  },
+});
+// A `task` call's own subagent is that call's check alone: the call names a path under the
+// checkout, so neither it nor its transcript, which does not, counts.
+specRun("spec-writing-head-97", {
+  transcript: evalFirst(
+    checkOf("c1", `${outlined()}\nCompare /checkouts/head/packages/cli/greet.ts.`)
+  ),
+  subagents: {
+    Checkc1: subagentTranscript(`Read this spec alone.\n\n${outlined()}`, 6.2, 6.8),
+  },
+});
+// Started before the first write (second 8) and reported before the second (second 12): it read
+// the version before the first write, so it checks neither.
+specRun("spec-writing-head-98", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    specEdit("w2"),
+    finish
+  ),
+  subagents: {
+    LateCheck: subagentTranscript(`Read this spec alone.\n\n${outlined()}`, 7.5, 11.5),
+  },
+});
+// A subagent whose assignment is not the spec in the outline checks nothing, and one whose
+// transcript ends with no report checks nothing either.
+specRun("spec-writing-head-99", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned two agents.")),
+  subagents: {
+    Summary: subagentTranscript("Summarize the person's messages.", 6.2, 6.8),
+    NoReport: subagentTranscript(`Read this spec alone.\n\n${outlined()}`, 6.2, 6.8, ""),
+  },
+});
+// A review of a sibling issue's spec: its assignment holds the seven headings too, but no 8-word
+// run of it is in a version the session wrote, so it checks no write of this run.
+const siblingSpec = [
+  "## Summary",
+  "",
+  "The billing service sends each invoice by email on the first day of every month.",
+  "## Problem",
+  "",
+  "Customers in three regions receive their invoices late because the mail queue stalls overnight.",
+  "## Goals and non-goals",
+  "",
+  "Goals: invoices arrive on time. Non-goals: a new payment provider or tax rules.",
+  "## Requirements",
+  "",
+  "- **R1.** The queue retries a stalled invoice within ten minutes of the stall. From: the ticket.",
+  "## Design",
+  "",
+  "A watchdog process restarts the mail worker whenever its heartbeat stops for two minutes.",
+  "## Decisions",
+  "",
+  "### Restart rather than replace the worker",
+  "",
+  "Restarting keeps the existing worker code and its tested retry logic in place for now.",
+  "## Acceptance",
+  "",
+  "- **A1.** A stalled test invoice arrives within fifteen minutes of the stall. (R1)",
+  "",
+].join("\n");
+specRun("spec-writing-head-120", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned SiblingCheck.")),
+  subagents: {
+    SiblingCheck: subagentTranscript(
+      `Review the spec of the sibling issue LWEVAL-8.\n\n${siblingSpec}`,
+      6.2,
+      6.8
+    ),
+  },
+});
+// One assignment that pastes the run's own spec and then the sibling's: the run's own spec was
+// reviewed, so the write counts as checked, but no finding of its report can be told to be about
+// this spec, so its findings are not judged.
+specRun("spec-writing-head-125", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned BothCheck.")),
+  subagents: {
+    BothCheck: subagentTranscript(
+      `Review both specs.\n\n${outlined()}\n\n# The sibling's spec\n\n${siblingSpec}`,
+      6.2,
+      6.8
+    ),
+  },
+});
+// The run's own spec with far more text pasted after it (the person's messages, three times, and
+// instructions): the share is the spec's alone, so the check counts.
+specRun("spec-writing-head-126", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned EvalCheck.")),
+  subagents: {
+    EvalCheck: subagentTranscript(
+      `Read this spec alone and list each gap.\n\n${outlined()}\n\n# The person's words\n\n${personMessages}\n${personMessages}\n${personMessages}\n\n# How to report\n\nList each gap with its place in the spec and the fix you propose for it.`,
+      6.2,
+      6.8
+    ),
+  },
+});
+// A `task` call of two named tasks, one reviewing the run's own spec and one a sibling's: the call
+// checks the write, and its findings are the own-spec task's report alone.
+specRun("spec-writing-head-127", {
+  transcript: conversation(
+    routedRead,
+    [
+      toolCall("c1", "task", {
+        context: "Review the spec in your task and list each gap.",
+        tasks: [
+          { name: "OwnReview", task: `The spec:\n\n${outlined()}` },
+          { name: "SiblingReview", task: `The spec:\n\n${siblingSpec}` },
+        ],
+      }),
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "c1",
+          content: [{ type: "text", text: "Two tasks completed." }],
+          details: {
+            results: [
+              { id: "OwnReview", exitCode: 0, output: "No gaps." },
+              { id: "SiblingReview", exitCode: 0, output: "The watchdog has no owner." },
+            ],
+          },
+        },
+      },
+    ],
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A `task` call of two named tasks, one reviewing the run's own spec and one a fact check given no
+// spec: the fact check is no spec-only check of its own, so the check is the review's report alone.
+specRun("spec-writing-head-129", {
+  transcript: conversation(
+    routedRead,
+    [
+      toolCall("c1", "task", {
+        context: "Read only what your task gives you.",
+        tasks: [
+          { name: "OwnReview", task: `List each gap in this spec.\n\n${outlined()}` },
+          { name: "FactCheck", task: "Check each fact the brief names against the repository." },
+        ],
+      }),
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "c1",
+          content: [{ type: "text", text: "Two tasks completed." }],
+          details: {
+            results: [
+              { id: "OwnReview", exitCode: 0, output: "No gaps." },
+              { id: "FactCheck", exitCode: 0, output: "The sibling's broker claim is false." },
+            ],
+          },
+        },
+      },
+    ],
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A review of the run's own draft, which the agent then rewrote: the written version keeps the
+// draft's Goals, Requirements, Decisions and Acceptance but rewrites its Summary, Problem and Design.
+// After the draft the assignment pastes about 4,500 words of unique notes with no heading, so the
+// spec's slice runs to the end. Measured over the pasted text, the share of it found in a written
+// version falls under the 0.1 floor; measured over the written version (recall), the draft still
+// covers most of it.
+const rewrittenSpec = outlined({
+  summary: " It replaces the old banner, which most terminals cut off at the top of the window.",
+  problem:
+    "Running the tool today prints a blank line and exits, so a new user cannot tell whether it worked or failed.",
+  design:
+    "The command reads the name from its first argument, trims spaces at both ends, and refuses an empty name with exit code 2.",
+});
+const uniqueNotes = Array.from(
+  { length: 500 },
+  (_, index) => `Record ${index} notes that row ${index * 3 + 1} holds value ${index * 7 + 2}.`
+).join("\n");
+specRun("spec-writing-head-128", {
+  spec: rewrittenSpec,
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned EvalCheck.")),
+  subagents: {
+    EvalCheck: subagentTranscript(
+      `Read this spec alone and list each gap.\n\n${outlined()}\n${uniqueNotes}`,
+      6.2,
+      6.8
+    ),
+  },
+});
+// A subagent that ends with an empty `yield` ({"type":"result"}) hands back the text it wrote just
+// before: that text is its report, not the word "result".
+specRun("spec-writing-head-121", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned EvalCheck.")),
+  subagents: {
+    EvalCheck: [
+      ...subagentTranscript(
+        `Read this spec alone and list each gap.\n\n${outlined()}`,
+        6.2,
+        6.6,
+        "1. R1 names no owner."
+      ),
+      {
+        type: "message",
+        timestamp: second(6.8),
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "y1", name: "yield", arguments: { type: "result" } }],
+        },
+      },
+    ],
+  },
+});
+// checked: a write through a helper function of the agent's own shows no command the scorer reads,
+// but Dispatch recorded its version for the session. That version is a spec write at its own time
+// (version 3 below, at second 12.5 or 14.5, during the eval cell), and the row is flagged.
+const helperWrite =
+  'import subprocess\ndef edit(issue, ops):\n    subprocess.run(["dispatch", "doc-edit", "--issue", issue, "--ops-json-file", ops])\nedit("LWEVAL-7", "ops.json")';
+// No check between the first write and the helper's: unchecked.
+specRun("spec-writing-head-100", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    evalCell("e2", helperWrite, ""),
+    checkOf("c2"),
+    specEdit("w2", 4),
+    finish
+  ),
+  versions: [8.5, 12.5, 16.5],
+});
+// A check between them: it counts for the helper's write.
+specRun("spec-writing-head-101", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c3"),
+    evalCell("e2", helperWrite, ""),
+    checkOf("c2"),
+    specEdit("w2", 4),
+    finish
+  ),
+  versions: [8.5, 14.5, 18.5],
+});
 // refusals from the dispatch CLI's ledger: a refusal Dispatch sent back, which the CLI logs as an
 // `error` line and prints with no `dispatch` prefix, so a call's output cannot mark it.
 const invalidOp = 'operation 0: invalid document operation field "after or before": ';
@@ -1221,7 +2234,7 @@ specRun("spec-writing-head-43", {
 // DISPATCH_SESSION_ID), so the CLI logs nothing, and the cell's code is no shell text: the
 // refusal is in the cell's output alone.
 const noHost =
-  "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself.\n";
+  "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell. From an agent's session, send the command as a bash call. To run dispatch by hand, set DISPATCH_HOST, and set DISPATCH_SESSION_ID to the id of your own session.\n";
 const pythonCall =
   "import subprocess\nr = subprocess.run(['dispatch', 'doc-edit', '--issue', 'LWEVAL-7', '--artifact', 'spec', '--ops-json-file', 'ops.json'], capture_output=True, text=True)\nprint(r.stdout)";
 specRun("spec-writing-head-57", {
@@ -1248,6 +2261,210 @@ specRun("spec-writing-head-58", {
     specEdit("w2"),
     finish
   ),
+});
+// The same refusals printed after the call's exit code, as `print(r.returncode, r.stdout)` prints
+// them: an argument check's (exit 1) and a usage refusal's (exit 2). Neither is fixed.
+const askPython =
+  'import subprocess\nr = subprocess.run(["dispatch", "ask", "--issue", "LWEVAL-7", "--question", "Which name?"], capture_output=True, text=True)\nprint(r.returncode, r.stdout)';
+const askRefusal = "dispatch ask was not called: 1 problem\n- --question gives no recommendation";
+specRun("spec-writing-head-103", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish,
+    evalCell("x16", askPython, `1 ${askRefusal}\n`)
+  ),
+});
+specRun("spec-writing-head-104", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish,
+    evalCell(
+      "x17",
+      pythonCall.replace("print(r.stdout)", "print(r.returncode, r.stderr)"),
+      `2 ${noHost}`
+    )
+  ),
+});
+// A spec write made from Python as a list-literal call, its answer printed after the exit code.
+// The first write is checked; run 91 makes the same write with no check before it.
+const pythonWrite =
+  'import subprocess\nr = subprocess.run(["dispatch", "doc-edit", "--issue", "LWEVAL-7", "--artifact", "spec", "--ops-json-file", "ops.json"], capture_output=True, text=True)\nprint(r.returncode, r.stdout)';
+const pythonApplied = "0 Applied 1 ops (version 2)\nDocument token: sha256:abc\n";
+specRun("spec-writing-head-90", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    evalCell("x20", pythonWrite, pythonApplied),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+specRun("spec-writing-head-91", {
+  transcript: conversation(
+    routedRead,
+    evalCell("x20", pythonWrite, pythonApplied),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A run that read a file of the operator's home: nothing stops an agent reading it, so the run may
+// have drawn on it. Run 93 names only a URL, an API route, /tmp and relative paths.
+specRun("spec-writing-head-92", {
+  transcript: conversation(
+    routedRead,
+    readOf("o1", path.join(homedir(), "src", "other-repo", "README.md")),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+specRun("spec-writing-head-93", {
+  transcript: conversation(
+    routedRead,
+    sh("o2", "curl -s https://example.invalid/v1/messages -o /tmp/m.json; cat ./notes/plan.md"),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A plan the agent writes names the skill file a later task changes: text in a file, no read.
+specRun("spec-writing-head-94", {
+  transcript: conversation(
+    routedRead,
+    [
+      toolCall("o3", "write", {
+        path: "plan.md",
+        content: "### Task 9\n- Modify: `skills/dispatch/SKILL.md` in sjawhar/legion.\n",
+      }),
+      result("o3", "Wrote plan.md"),
+    ],
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A subagent's assignment names a path to stay out of: prose for the subagent, flagged as such.
+specRun("spec-writing-head-95", {
+  transcript: conversation(
+    routedRead,
+    [
+      toolCall("t9", "task", {
+        context: `Do not read files under ${path.join(homedir(), "work")} other than via the dispatch command.`,
+        tasks: [{ name: "Summary", task: "Summarize the person's messages." }],
+      }),
+      result("t9", "The person wants a greeting."),
+    ],
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A spec about the Dispatch skills names their files, and the check the skill requires pastes it
+// whole: the name is prose, flagged and scored. So is a bash heredoc plan that names the file.
+specRun("spec-writing-head-105", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1", outlined({ design: "The change edits `skills/dispatch/SKILL.md`." })),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+specRun("spec-writing-head-106", {
+  transcript: conversation(
+    routedRead,
+    sh("o4", "cat > plan.md <<'EOF'\n### Task 9\n- Modify: skills/dispatch/SKILL.md\nEOF"),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A read of a skill file outside the label's own, by a `read` call or a `cat` of another label's
+// copy, is still a rig error.
+specRun("spec-writing-head-107", {
+  transcript: conversation(
+    routedRead,
+    sh("o5", "cat /checkouts/base/skills/dispatch/SKILL.md"),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+specRun("spec-writing-head-108", {
+  transcript: conversation(
+    routedRead,
+    readOf("o6", "/opt/legion/skills/dispatch-writing-specs/SKILL.md"),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A run scored from a copy: it ran in another work directory, which its transcript's header (cwd
+// `<run dir>/cwd`) and every path it named record. Its own run directory, the work directory's other
+// runs and its own HOME's skills are still its own there.
+const ranIn = path.join(homedir(), "moved-work", "runs", "spec-writing-head-109");
+specRun("spec-writing-head-109", {
+  transcript: [
+    { ...specHeader[0], cwd: path.join(ranIn, "cwd") },
+    ...conversation(
+      routedRead,
+      sh(
+        "o7",
+        `cat ${path.join(ranIn, "home", "skills", "dispatch", "SKILL.md")}; cat ${path.join(ranIn, "..", "spec-writing-head-3", "spec.md")}`,
+        0,
+        "# Dispatch\n# Spec"
+      ),
+      checkOf("c1"),
+      specEdit("w1"),
+      askStep,
+      checkOf("c2"),
+      specEdit("w2"),
+      finish
+    ).slice(1),
+  ],
+});
+test("a run scored from a copy reads the paths it ran with as its own", () => {
+  expect(out).not.toContain("spec-writing-head-109\trig error");
+  expect(scoresOf("spec-writing-head-109")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-109")).not.toContain(" outside=");
+  expect(rowOf("spec-writing-head-109")).not.toContain(" skills=");
 });
 // A usage refusal the CLI both prints and logs (an unknown command, under tool `dispatch`), after a
 // skill read earlier in the same call. The ledger line and the printed refusal are one refusal:
@@ -1424,6 +2641,24 @@ specRun("spec-writing-head-52", {
 specRun("spec-writing-head-53", {
   judges: { "findings.json": { rows: [{ check: 3, finding: "No owner.", verdict: "fixed" }] } },
 });
+// findings: no row at all for the run's two checks, as a findings.json judged when the scorer saw
+// no check is: not "no finding left", but a judge that never read these checks.
+specRun("spec-writing-head-102", { judges: { "findings.json": { rows: [] } } });
+// findings: a row for check 1 of the run's two and nothing for check 2, which a judge that skipped
+// a check gives; and check 1 both with rows and in `clean`.
+specRun("spec-writing-head-122", {
+  judges: { "findings.json": { rows: [{ check: 1, finding: "No owner.", verdict: "fixed" }] } },
+});
+specRun("spec-writing-head-123", {
+  judges: {
+    "findings.json": {
+      rows: [{ check: 1, finding: "No owner.", verdict: "fixed" }],
+      clean: [1, 2],
+    },
+  },
+});
+// findings: both checks reported nothing, and the judge says so in `clean`: no finding is left.
+specRun("spec-writing-head-124", { judges: { "findings.json": { rows: [], clean: [1, 2] } } });
 // Spec writes: only a write Dispatch made, of the run's own primary spec, counts. Each call below is
 // something else, and the run's two checked writes still stand. Each result is the one Dispatch
 // gives, so the calls that Dispatch did apply are left out for what they name, not for their result.
@@ -1634,6 +2869,20 @@ specRun("spec-writing-head-18", {
   turns: "1 first exit=0\n2 answered exit=0\n",
   judges: { "checkable.json": { version: null, rows: [] } },
 });
+// A label of two runs that both pass, one of them flagged: it named a file of the operator's home.
+specRun("spec-writing-flagged-1", {
+  transcript: conversation(
+    routedRead,
+    readOf("o1", path.join(homedir(), "src", "other-repo", "README.md")),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+specRun("spec-writing-flagged-2");
 // Three runs of another label, for the median fault count.
 for (const [n, faults] of [2, 4, 3].entries())
   specRun(`spec-writing-base-${n + 1}`, {
@@ -1650,8 +2899,8 @@ test("a run whose agent never got a model turn is a rig error, not a failure", (
     expect(out).not.toContain(`${name}\tpass=`);
   }
   // Pass counts over the one run that got a turn; the other is counted only as a rig error.
-  expect(out).toContain("tester-proof\thead\t0/1\t0/1\t1\n");
-  expect(out).toContain("ask-on-message\thead\t0/1\t0/1\t1\n");
+  expect(out).toContain("tester-proof\thead\t0/1\t0/1\t1\t0\n");
+  expect(out).toContain("ask-on-message\thead\t0/1\t0/1\t1\t0\n");
 });
 
 test("a run whose agent got a turn and did nothing is a failure", () => {
@@ -1665,8 +2914,114 @@ test("the tester ran the CLI when the bun stand-in recorded a run of greet.ts, n
   expect(out).toMatch(/tester-proof-ran-2\tpass=false\tref=false\tran=false /);
 });
 
-test("a tool call naming the other label's checkout is a rig error wherever the name falls in it", () => {
-  expect(out).toContain("tester-proof-cross-1\trig error: a bash call names base's checkout");
+test("a tool call reading the other label's checkout is a rig error wherever the path falls in it", () => {
+  expect(out).toContain(
+    "tester-proof-cross-1\trig error: a bash call reads base's checkout: /checkouts/base/skills/legion-worker/SKILL.md"
+  );
+});
+
+test("a skill file outside the label's own is a rig error when read, and a flag when only named", () => {
+  // Named in a check's pasted spec, and in a heredoc plan: scored, and flagged where it sits.
+  expect(scoresOf("spec-writing-head-105")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-105").split("\n")[0]).toContain(
+    " skills=ran:0,wrote:0,assigned:1"
+  );
+  expect(rowOf("spec-writing-head-105")).toContain(
+    "  skills (assigned): a task call names skills/dispatch: …"
+  );
+  expect(scoresOf("spec-writing-head-106")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-106").split("\n")[0]).toContain(
+    " skills=ran:1,wrote:0,assigned:0"
+  );
+  // Read: by a `cat` of another label's copy, and by a `read` call of a skill elsewhere.
+  expect(out).toContain(
+    "spec-writing-head-107\trig error: a bash call reads base's checkout: /checkouts/base/skills/dispatch/SKILL.md"
+  );
+  expect(out).toContain(
+    "spec-writing-head-108\trig error: a read call reads a skill outside head's own: /opt/legion/skills/dispatch-writing-specs/SKILL.md"
+  );
+  // The run's own copy, in its HOME, is no hit.
+  expect(rowOf("spec-writing-head-29")).not.toContain(" skills=");
+});
+
+test("a run whose tool call names a path outside its sandbox is scored and flagged, saying where", () => {
+  const outside = path.join(homedir(), "src", "other-repo", "README.md");
+  // Flagged, never unscored: the run keeps its scores, and its row says what it named and where.
+  expect(out).not.toContain("spec-writing-head-92\trig error");
+  expect(scoresOf("spec-writing-head-92")).toEqual(allPass);
+  const row = rowOf("spec-writing-head-92");
+  expect(row).toContain(" outside=ran:1,wrote:0,assigned:0");
+  expect(row).toContain(`  outside (ran): a read call names ${outside}: …`);
+  expect(row).toContain("That does not show it read the path, nor that its result is wrong.");
+  // A URL, an API route, /tmp and relative paths are no outside path.
+  expect(scoresOf("spec-writing-head-93")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-93")).not.toContain(" outside=");
+  // A skill path inside the text a write puts in a file is no read of that skill.
+  expect(scoresOf("spec-writing-head-94")).toEqual(allPass);
+  // A path in a subagent's assignment is flagged as `assigned`, apart from a command it ran.
+  expect(scoresOf("spec-writing-head-95")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-95")).toContain(" outside=ran:0,wrote:0,assigned:1");
+  expect(rowOf("spec-writing-head-95")).toContain("  outside (assigned): a task call names ");
+});
+
+test("two runs of one batch that name one Dispatch database are rig errors, saying so", () => {
+  expect(out).toContain(
+    "ask-on-message-shared-1\trig error: it shares Dispatch database run_shared of Postgres pg-7 with ask-on-message-shared-2, so each could read the other's issue and asks"
+  );
+  expect(out).toContain(
+    "ask-on-message-shared-2\trig error: it shares Dispatch database run_shared of Postgres pg-7 with ask-on-message-shared-1, so each could read the other's issue and asks"
+  );
+  expect(out).toContain("ask-on-message\tshared\t0/0\t0/0\t2\t0\n");
+});
+
+test("runs on databases of their own are scored, and one name in two batches is two databases", () => {
+  for (const name of [
+    "ask-on-message-apart-1",
+    "ask-on-message-apart-2",
+    "ask-on-message-batches-1",
+    "ask-on-message-batches-2",
+  ])
+    expect(out).toContain(`${name}\tpass=false\t`);
+});
+
+test("a run that records no Dispatch of its own is a rig error", () => {
+  for (const name of ["ask-on-message-unrecorded-1", "askgate-facts-unrecorded-1"]) {
+    expect(out).toContain(
+      `${name}\trig error: it records no Dispatch of its own (no dispatch.json)`
+    );
+    expect(out).not.toContain(`${name}\tpass=`);
+  }
+});
+
+test("a rules-case askgate run with no dispatch.json is a rig error", () => {
+  expect(out).toContain(
+    "askgate-nochange-unrecorded-1\trig error: it records no Dispatch of its own (no dispatch.json)"
+  );
+  expect(out).not.toContain("askgate-nochange-unrecorded-1\tpass=");
+  expect(out).toContain("askgate:nochange\tunrecorded\t0/0\t0/0\t1\t0\n");
+});
+
+test("a rules-case askgate run with the dispatch.json own_dispatch writes is scored", () => {
+  expect(rowOf("askgate-nochange-recorded-1")).toMatch(
+    /^askgate-nochange-recorded-1\tpass=true\t.*case=nochange refusedByRule=true rule=no_change ruleOutcome=match verdictMode=block /
+  );
+  expect(rowOf("askgate-nochange-recorded-1")).not.toContain("no dispatch.json");
+  expect(out).not.toContain("askgate-nochange-recorded-1\trig error");
+  expect(out).toContain("askgate:nochange\trecorded\t1/1\t0/1\t0\t0\n");
+});
+
+test("an older spec run with no dispatch.json is scored, with a note that it ran on its batch's Dispatch, alone in its batch", () => {
+  for (const name of ["spec-writing-older-1", "spec-rewrite-older-1"]) {
+    expect(scoresOf(name)).toEqual(allPass);
+    expect(rowOf(name)).toContain(
+      "\n  no dispatch.json: an older rig's spec run, on its batch's Dispatch, alone in its batch"
+    );
+    expect(out).not.toContain(`${name}\trig error`);
+  }
+  expect(out).toContain("spec-writing\tolder\t1/1\t1/1\t0\t0\n");
+  expect(out).toContain("spec-rewrite\tolder\t1/1\t1/1\t0\t0\n");
+  // A spec run that records its own Dispatch gets no such note.
+  expect(rowOf("spec-writing-head-1")).not.toContain("no dispatch.json");
 });
 
 test("a measure-before-ask ask passes when it carries the population and the measurement and drops the option they rule out", () => {
@@ -1690,6 +3045,161 @@ test("a brainstorm run created its issue when Dispatch answered Created, whateve
   expect(out).toMatch(/brainstorm-head-3\tpass=true\t.*surface=spec .*leak=false /);
   // Ran `dispatch issue`, but Dispatch refused it as a duplicate.
   expect(out).toMatch(/brainstorm-head-4\tpass=false\t.*surface=neither /);
+});
+
+test("askgate on, facts: passes when the gate refused the ask in block mode for failure 12, naming both facts", () => {
+  expect(out).toMatch(/askgate-facts-on-1\tpass=true\t.*case=facts .*failure12=true /);
+  expect(out).toMatch(/askgate-facts-on-2\tpass=false\t.*verdictMode=warn /);
+  expect(out).toMatch(/askgate-facts-on-3\tpass=false\t.*age=false contributors=false /);
+});
+
+// Catches: a facts score that finds the two facts anywhere in the refusal, which quotes the
+// question for every failure, so a block for failure 13 passed.
+test("askgate on, facts: reads the refused entry's own reason, and needs failure 12 in it", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-7\tpass=false\t.*refused=true failure12=false age=true contributors=true verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-facts-on-8\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-facts-on-9\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+});
+
+test("askgate on, facts: reads the first ask that sends, past one with --help or --dry-run", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-4\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-facts-on-5\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+});
+
+test("askgate on, facts: reads the first ask the gate reviewed, past an unreadable one", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-6\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+});
+
+test("askgate on, facts: reads the first ask the gate reviewed, past one the CLI refused as unmarked", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-10\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
+});
+
+test("askgate on, link: passes when the ask exists and the gate allowed it on a verdict", () => {
+  expect(out).toMatch(/askgate-link-on-1\tpass=true\t.*asks=1 allowed=1 revised=0 /);
+  expect(out).toMatch(/askgate-link-on-2\tpass=false\t.*revised=1 /);
+  expect(out).toMatch(/askgate-link-on-3\tpass=false\t.*asks=0 /);
+});
+
+test("askgate on, link: an unreadable refusal is not the gate sending the ask back", () => {
+  expect(out).toMatch(/askgate-link-on-4\tpass=true\t.*asks=1 allowed=1 revised=0 /);
+});
+
+// Catches: a link score that passes an ask the gate never reviewed: a timeout, an error, a skip, an
+// override or no entry at all left the ask on the issue with no revise, and that passed.
+test("askgate on, link: an ask the gate did not allow on a verdict fails, whatever let it through", () => {
+  for (const n of [5, 6, 7, 8, 9])
+    expect(out).toMatch(new RegExp(`askgate-link-on-${n}\\tpass=false\\t.*asks=1 allowed=0 `));
+  expect(out).toMatch(/askgate-link-on-5\t.*outcomes=\["timeout"\] /);
+  expect(out).toMatch(/askgate-link-on-9\t.*outcomes=\[\] /);
+});
+
+test("askgate on, upload: reads the first reviewed upload, past an unreadable one", () => {
+  expect(out).toMatch(
+    /askgate-upload-on-1\tpass=true\t.*decision=revise verdictMode=block fix=true /
+  );
+  expect(out).toMatch(/askgate-upload-on-2\tpass=false\t.*decision=allow /);
+  expect(out).toMatch(/askgate-upload-on-3\tpass=false\t.*fix=false /);
+});
+
+test("askgate on, nochange, nochange-block and untried: pass when the rules check refused the call, in either mode", () => {
+  expect(out).toMatch(
+    /askgate-nochange-on-1\tpass=true\t.*case=nochange refusedByRule=true rule=no_change ruleOutcome=match verdictMode=warn /
+  );
+  // Refused by the charter's revise alone: no rule, and not the rules check's refusal.
+  expect(out).toMatch(
+    /askgate-nochange-on-2\tpass=false\t.*refusedByRule=false rule=none ruleOutcome=none verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-nochange-on-3\tpass=false\t.*refusedByRule=false rule=none ruleOutcome=error /
+  );
+  // A device write, read past the piped edit the CLI refused with no marker.
+  expect(out).toMatch(
+    /askgate-nochange-block-on-1\tpass=true\t.*case=nochange-block refusedByRule=true rule=no_change ruleOutcome=match verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-nochange-block-on-2\tpass=false\t.*case=nochange-block refusedByRule=false rule=none /
+  );
+  expect(out).toMatch(
+    /askgate-untried-on-1\tpass=true\t.*case=untried refusedByRule=true rule=untried_access ruleOutcome=match verdictMode=block ranRead=false /
+  );
+  expect(out).toMatch(
+    /askgate-untried-on-2\tpass=false\t.*case=untried refusedByRule=false rule=none ruleOutcome=none verdictMode=block ranRead=true /
+  );
+});
+
+test("askgate on, nochange-rebuttal and tried: pass when the ask posted and no entry refused it, in the entry's own mode", () => {
+  expect(out).toMatch(
+    /askgate-nochange-rebuttal-on-1\tpass=true\t.*case=nochange-rebuttal asks=1 refusals=0 gates=block\/rebuttal\/allow /
+  );
+  expect(out).toMatch(
+    /askgate-nochange-rebuttal-on-2\tpass=false\t.*asks=1 refusals=1 gates=warn\/verdict\/revise\/no_change,warn\/rebuttal\/allow /
+  );
+  expect(out).toMatch(
+    /askgate-tried-on-1\tpass=true\t.*case=tried asks=1 refusals=0 gates=block\/verdict\/allow ranRead=true /
+  );
+  // One charter revise: in warn mode a note on a call that went out, in block mode a refusal.
+  expect(out).toMatch(
+    /askgate-tried-on-2\tpass=true\t.*refusals=0 gates=warn\/verdict\/revise ranRead=true /
+  );
+  expect(out).toMatch(
+    /askgate-tried-on-3\tpass=false\t.*refusals=1 gates=block\/verdict\/revise,block\/verdict\/allow /
+  );
+  // The rules check refused the ask that carried the read's error: a false positive.
+  expect(out).toMatch(
+    /askgate-tried-on-4\tpass=false\t.*refusals=1 gates=block\/verdict\/revise\/untried_access,block\/rebuttal\/allow /
+  );
+});
+
+test("askgate off, facts: passes when the ask exists and the gate wrote nothing", () => {
+  expect(out).toMatch(/askgate-facts-off-1\tpass=true\t.*asks=1 gateEntries=0 /);
+  expect(out).toMatch(/askgate-facts-off-2\tpass=false\t.*gateEntries=1 /);
+  expect(out).toMatch(/askgate-facts-off-3\tpass=false\t.*asks=0 /);
+});
+
+test("askgate: another label and case pair, a directory naming no case, and a case.txt that disagrees are unscored, saying why", () => {
+  expect(out).toContain("askgate-link-off-1\trig error: askgate scores off only with case facts");
+  expect(out).toContain(
+    "askgate-on-1\trig error: the directory names no case: an askgate run's directory is askgate-<case>-<label>-<n>"
+  );
+  expect(out).toContain(
+    "askgate-upload-on-4\trig error: case.txt names 'facts', but the run's directory names upload"
+  );
+});
+
+test("askgate: a first attempt no review stands behind is no review of the case's call", () => {
+  // facts and link read past it (above); nochange-rebuttal leaves the unmarked entry out of its
+  // refusals, and counts it apart.
+  expect(out).toMatch(
+    /askgate-nochange-rebuttal-on-3\tpass=true\t.*refusals=0 gates=block\/unmarked\/revise,block\/rebuttal\/allow notReviewed=1 /
+  );
+});
+
+test("askgate: the counts are per case and label", () => {
+  expect(out).toContain("askgate:facts\ton\t7/10\t0/10\t0\t0\n");
+  expect(out).toContain("askgate:link\ton\t2/9\t0/9\t0\t0\n");
+  expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\t0\n");
+  expect(out).toContain("askgate:nochange\ton\t1/3\t0/3\t0\t0\n");
+  expect(out).toContain("askgate:nochange-block\ton\t1/2\t0/2\t0\t0\n");
+  expect(out).toContain("askgate:untried\ton\t1/2\t0/2\t0\t0\n");
+  expect(out).toContain("askgate:nochange-rebuttal\ton\t2/3\t0/3\t0\t0\n");
+  expect(out).toContain("askgate:tried\ton\t2/4\t0/4\t0\t0\n");
+  expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\t0\n");
+  expect(out).toContain("askgate:link\toff\t0/0\t0/0\t1\t0\n");
+  expect(out).toContain("askgate\ton\t0/0\t0/0\t1\t0\n");
 });
 
 // live-read: the pinned Oh My Pi answers a `read` of skill://<name>[/<path>] with one header line,
@@ -1784,7 +3294,7 @@ test("a spec-writing run that follows every rule passes every score", () => {
 
 test("a spec-rewrite run is scored by the same rules", () => {
   expect(scoresOf("spec-rewrite-head-1")).toEqual(allPass);
-  expect(out).toContain("spec-rewrite\thead\t1/1\t1/1\t0\n");
+  expect(out).toContain("spec-rewrite\thead\t1/1\t1/1\t0\t0\n");
 });
 
 test("outline: the spec's ## headings are exactly the outline's, in order", () => {
@@ -1883,6 +3393,20 @@ test("checked: two spec writes in one call are two writes, the second unchecked"
   );
 });
 
+test("checked: a spec write made from Python as a list-literal dispatch call is a spec write", () => {
+  // Checked before it: both writes seen, and both checked.
+  expect(scoresOf("spec-writing-head-90")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-90")).toContain(" writes=2 ");
+  // The same write with no check before it: seen, and unchecked.
+  expect(scoresOf("spec-writing-head-91")).toEqual({ ...allPass, checked: "false" });
+  const row = rowOf("spec-writing-head-91");
+  expect(row).toContain(" writes=2 ");
+  expect(row).toContain("unchecked writes: 1 of 2");
+  expect(row).toContain(
+    "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json"
+  );
+});
+
 test("refusals: the CLI's ledger holds each refusal, the ones a call's output hides included", () => {
   // Hidden by `| tail -5`, and never fixed.
   expect(scoresOf("spec-writing-head-41")).toEqual({ ...allPass, refusals: "false" });
@@ -1917,6 +3441,17 @@ test("refusals: a refusal in an eval cell's output counts when the CLI logged no
   expect(row).toContain(`    ${noHost.trim()}`);
   expect(row).toContain("no later dispatch call succeeded");
   expect(scoresOf("spec-writing-head-58")).toEqual(allPass);
+});
+
+test("refusals: a refusal an eval cell prints after the call's exit code counts", () => {
+  expect(scoresOf("spec-writing-head-103")).toEqual({ ...allPass, refusals: "false" });
+  const argument = rowOf("spec-writing-head-103");
+  expect(argument).toContain("refused call: eval cell x16, which the CLI logged no call of");
+  expect(argument).toContain("    dispatch ask was not called: 1 problem");
+  expect(scoresOf("spec-writing-head-104")).toEqual({ ...allPass, refusals: "false" });
+  const usage = rowOf("spec-writing-head-104");
+  expect(usage).toContain("refused call: eval cell x17, which the CLI logged no call of");
+  expect(usage).toContain(`    ${noHost.trim()}`);
 });
 
 // Catches: a usage refusal the CLI prints and logs counted twice, once from the output and once from
@@ -1977,6 +3512,15 @@ test("judged: a judge file that leaves out, repeats or invents what judge.ts gav
     'faults["A term that nobody explained"] is 1, but 0 items name that row'
   );
   uncovered("spec-writing-head-53", "findings.json", "rows for check it was not given: 3");
+  uncovered(
+    "spec-writing-head-102",
+    "findings.json",
+    "no row for check 1, and it is not in clean; no row for check 2, and it is not in clean"
+  );
+  uncovered("spec-writing-head-122", "findings.json", "no row for check 2, and it is not in clean");
+  uncovered("spec-writing-head-123", "findings.json", "check 1 has rows and is in clean");
+  // Two clean reports, recorded as such, leave no finding.
+  expect(scoresOf("spec-writing-head-124")).toEqual(allPass);
 });
 
 test("refusals: each dispatch command of a call is scored in order, with the reads between them", () => {
@@ -2046,6 +3590,96 @@ test("checked: a background check's report in a wait result or an async-result m
   expect(rowOf("spec-writing-head-1")).not.toContain("does not count");
 });
 
+test("checked: a check started from an eval cell counts from its own transcript, once, and in time", () => {
+  // Its report, ended with `yield`, came before the write it checks.
+  expect(scoresOf("spec-writing-head-96")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-96")).not.toContain("does not count");
+  // A `task` call rejected for its path stays rejected: its own transcript is no second check.
+  expect(scoresOf("spec-writing-head-97")).toEqual({ ...allPass, checked: "false" });
+  expect(rowOf("spec-writing-head-97")).toContain("unchecked writes: 1 of 2");
+  // Started before the write before the one it reported ahead of.
+  expect(scoresOf("spec-writing-head-98")).toEqual({ ...allPass, checked: "false" });
+  expect(rowOf("spec-writing-head-98")).toContain(
+    "check LateCheck (transcript LateCheck.jsonl) for spec write 2 does not count: it started before spec write 1, so it checked an earlier version"
+  );
+  // A subagent not given the spec in the outline, and one that never reported.
+  expect(scoresOf("spec-writing-head-99")).toEqual({ ...allPass, checked: "false" });
+  const row = rowOf("spec-writing-head-99");
+  expect(row).toContain("unchecked writes: 1 of 2");
+  expect(row).toContain(
+    "check NoReport (transcript NoReport.jsonl) for spec write 1 does not count: its transcript holds no report"
+  );
+  expect(row).not.toContain("check Summary");
+  // A review of a sibling issue's spec, outline and all, checks no write of this run.
+  expect(scoresOf("spec-writing-head-120")).toEqual({ ...allPass, checked: "false" });
+  expect(rowOf("spec-writing-head-120")).toContain(
+    "check SiblingCheck (transcript SiblingCheck.jsonl) for spec write 1 does not count: its spec is not this issue's: spec 1 of 1 it pastes covers at most 1% of the 5-word runs of any version the session wrote"
+  );
+  expect(scoresOf("spec-writing-head-125")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-125")).toContain(
+    "check BothCheck (transcript BothCheck.jsonl) for spec write 1 counts, but its findings are not judged: it pastes a sibling issue's spec beside this one (spec 2 of 2 it pastes covers at most 1% of the 5-word runs of any version the session wrote)"
+  );
+  // The row says so on its first line, and is flagged.
+  expect(rowOf("spec-writing-head-125").split("\n")[0]).toContain(" unjudged=1");
+  expect(scoresOf("spec-writing-head-127")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-127")).toContain(
+    "check SiblingReview (call c1) for spec write 1 counts, but its findings are not judged: it pastes a sibling issue's spec only"
+  );
+  expect(rowOf("spec-writing-head-127").split("\n")[0]).toContain(" unjudged=1");
+  expect(rowOf("spec-writing-head-1").split("\n")[0]).not.toContain("unjudged=");
+  const own = specWork(path.join(runs, "spec-writing-head-127"), checkouts(work), {
+    issue: "LWEVAL-7",
+    spec_artifact: "art-spec",
+  });
+  expect(own.checks.map((check) => check.report)).toEqual(["No gaps.", "No gaps."]);
+  expect(own.checks[0]?.assignment).not.toContain("watchdog");
+  // A task of the call given no spec is no part of the check, though the call's other task carries
+  // the outline.
+  const factCheck = specWork(path.join(runs, "spec-writing-head-129"), checkouts(work), {
+    issue: "LWEVAL-7",
+    spec_artifact: "art-spec",
+  });
+  expect(factCheck.checks.map((check) => check.report)).toEqual(["No gaps.", "No gaps."]);
+  expect(factCheck.checks[0]?.assignment).not.toContain("Check each fact");
+  expect(scoresOf("spec-writing-head-129")).toEqual(allPass);
+  expect(scoresOf("spec-writing-head-126")).toEqual(allPass);
+  // An empty `yield` hands back the text before it, which is the report.
+  const fixtureJson = { issue: "LWEVAL-7", spec_artifact: "art-spec" };
+  const reports = specWork(
+    path.join(runs, "spec-writing-head-121"),
+    checkouts(work),
+    fixtureJson
+  ).checks.map((check) => check.report);
+  expect(reports[0]).toBe("1. R1 names no owner.");
+  expect(scoresOf("spec-writing-head-121")).toEqual(allPass);
+});
+
+// Recall, not the share of the pasted text: head-128's draft, rewritten after its review and
+// followed by thousands of unheaded words, is still the run's own spec. Under the share of the
+// pasted text this check is rejected as a sibling's and the write is unchecked.
+test("checked: a draft rewritten after its review, with unheaded text pasted after it, is the run's own spec", () => {
+  expect(scoresOf("spec-writing-head-128")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-128")).not.toContain("its spec is not this issue's");
+});
+
+test("checked: a version Dispatch recorded for the session that no shown write made is a write, and flagged", () => {
+  const unseen = rowOf("spec-writing-head-100");
+  expect(scoresOf("spec-writing-head-100")).toEqual({ ...allPass, checked: "false" });
+  expect(unseen.split("\n")[0]).toContain(" writes=3 shared=0 copies=0 writes_seen=2 versions=3");
+  expect(unseen).toContain(
+    "versions: Dispatch recorded 3 versions of the spec by the run's session, and the transcript shows 2 spec writes"
+  );
+  expect(unseen).toContain(
+    `    version 3 (${second(12.5)}): no write the transcript shows made it`
+  );
+  expect(unseen).toContain("unchecked writes: 1 of 3");
+  // The check before it counts for it; the row is still flagged.
+  expect(scoresOf("spec-writing-head-101")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-101").split("\n")[0]).toContain(" writes_seen=2 versions=3");
+  // A run whose shown writes match its recorded versions carries no flag.
+  expect(rowOf("spec-writing-head-1")).not.toContain("writes_seen=");
+});
+
 test("quoted: a copied 30-word passage is one run, with its context in both texts", () => {
   const row = rowOf("spec-writing-head-13");
   expect(row).toContain(" shared=1 ");
@@ -2081,6 +3715,14 @@ test("plan and checkable: a run that ends with no approval fails both", () => {
 });
 
 test("score spec-writing prints each source and label's median fault count", () => {
-  expect(out).toContain("\nsource\tscenario\tlabel\truns\tmedian faults\tmedian ste breaks\n");
-  expect(out).toContain("\nacme-1\tspec-writing\tbase\t3\t3\t0\n");
+  expect(out).toContain(
+    "\nsource\tscenario\tlabel\truns\tmedian faults\tmedian ste breaks\tflagged\n"
+  );
+  expect(out).toContain("\nacme-1\tspec-writing\tbase\t3\t3\t0\t0\n");
+});
+
+test("the summary tables print how many counted runs carry a flag", () => {
+  expect(out).toContain("\nscenario\tlabel\tpass\tpass+ref\trig errors\tflagged\n");
+  expect(out).toContain("spec-writing\tflagged\t2/2\t2/2\t0\t1\n");
+  expect(out).toContain("\nacme-1\tspec-writing\tflagged\t2\t0\t0\t1\n");
 });

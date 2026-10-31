@@ -31,6 +31,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 type secretForm struct {
@@ -130,7 +131,7 @@ func requireSecretBrokerURL(raw string) error {
 	if u.Scheme == "https" || (u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
 		return nil
 	}
-	return usageErr{fmt.Errorf("AGENT_SECRETS_URL %q must be https, or http only when the broker's host is loopback (127.0.0.1, [::1] or localhost): the secret forms trust the broker's settings, so a plain-http broker on the network is refused", base)}
+	return usageErr{fmt.Errorf("AGENT_SECRETS_URL %q must be https, or http only when the broker's host is loopback (127.0.0.1, [::1] or localhost): the secret forms trust the broker's settings, so a plain-http broker on the network is refused", redact.URL(base))}
 }
 
 // isLoopbackHost reports whether host is "localhost" (any case) or a loopback IP literal

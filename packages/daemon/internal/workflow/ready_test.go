@@ -799,11 +799,19 @@ func refusalCode(result intake.Result) string {
 }
 
 func readyEngine(mergeQueue string) *Engine {
+	return readyEngineAt(mergeQueue, time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC))
+}
+
+// readyEngineAt is readyEngine with its clock at now.
+func readyEngineAt(mergeQueue string, now time.Time) *Engine {
 	return New(record.NewStore(), Config{
 		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
-		Clock: func() time.Time { return time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC) },
+		Clock: func() time.Time { return now },
 	}, nil)
 }
+
+// heldRedLapses is readyEngine's clock once a red it held while a head waited has lapsed (redHold).
+var heldRedLapses = time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC).Add(redHold + time.Second)
 
 // applyFacts applies each fact to pool through engine, failing the test on an error, and returns
 // the fact's result.

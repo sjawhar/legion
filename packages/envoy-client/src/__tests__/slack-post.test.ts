@@ -23,7 +23,7 @@ case "$FAKE_BROKER" in
 esac
 while [ "$1" != "--" ]; do shift; done
 shift
-echo "agent-secrets: LEGION_SLACK_BOT_TOKEN from the broker at broker.example (GCP Secret Manager project 000000000000)" >&2
+echo "agent-secrets: LEGION_SLACK_BOT_TOKEN from the broker AGENT_SECRETS_URL names (GCP Secret Manager)" >&2
 if [ "$FAKE_BROKER" = crash-after-inject ]; then
   echo "the poster's private stderr" >&2
   exit 1

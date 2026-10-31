@@ -6,7 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+
+	configpkg "github.com/sjawhar/legion/daemon/internal/config"
 )
 
 // The legion.yaml example the repository ships (deploy/kubernetes/daemon/legion.yaml.example, the
@@ -15,6 +18,44 @@ import (
 // an operator's first check. The example names no Postgres; the environment does, as its comment
 // offers.
 func TestShippedLegionYAMLExamplePassesCheckConfig(t *testing.T) {
+	checkShippedExample(t, func(example string) string { return example })
+}
+
+// The example's commented role_config_files, uncommented with the operator-roles volume and mount
+// it points to, passes the same check, and names the three roles' overlays.
+func TestShippedLegionYAMLExamplesRoleConfigFilesPassCheckConfig(t *testing.T) {
+	config := checkShippedExample(t, func(example string) string {
+		for _, line := range []string{
+			"# role_config_files:",
+			"#   implementer: [/etc/legion-operator-roles/fallback.yml]",
+			"#   tester: [/etc/legion-operator-roles/fallback.yml]",
+			"#   merger: [/etc/legion-operator-roles/fallback.yml]",
+			"        # - name: operator-roles",
+			"        #   config_map: {name: legion-operator-roles}",
+			"        # - {volume: operator-roles, mount_path: /etc/legion-operator-roles}",
+		} {
+			at := strings.Index(example, "\n"+line)
+			if at < 0 {
+				t.Fatalf("the example has no line starting %q", line)
+			}
+			uncommented := strings.Replace(line, "# ", "", 1)
+			example = example[:at+1] + uncommented + example[at+1+len(line):]
+		}
+		return example
+	})
+	cfg, err := configpkg.LoadForValidation(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.RoleConfigFiles) != 3 {
+		t.Errorf("RoleConfigFiles = %v, want the implementer's, the tester's and the merger's", cfg.RoleConfigFiles)
+	}
+}
+
+// checkShippedExample runs `legion start --check-config` on the shipped example as edit leaves
+// it, beside the files it names, and answers the file's path.
+func checkShippedExample(t *testing.T, edit func(string) string) string {
+	t.Helper()
 	legionState(t)
 	t.Setenv("LEGION_POSTGRES_DSN", "postgres://legion:legion@127.0.0.1:1/legion")
 	_, source, _, ok := runtime.Caller(0)
@@ -28,7 +69,7 @@ func TestShippedLegionYAMLExamplePassesCheckConfig(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "legion.yaml")
 	for name, contents := range map[string]string{
-		config:           string(example),
+		config:           edit(string(example)),
 		"operator-token": "operator\n",
 		"dispatch-token": "dispatch\n",
 		"envoy-token":    "envoy\n",
@@ -57,4 +98,5 @@ current-context: legion-daemon
 	if code != 0 || out.String() != want {
 		t.Fatalf("legion start --check-config on the shipped example = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 	}
+	return config
 }

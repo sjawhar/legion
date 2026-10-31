@@ -2,7 +2,8 @@
 
 Part of `skill://legion-worker`. Read it the moment your phase needs a tool the worker image may
 not carry — a database client, a linter, a one-off CLI — before you install, download, or vendor
-anything. Every path it cites is in sjawhar/legion.
+anything; before you measure Oh My Pi's binary; and when a test fails in your pod. Every path it
+cites is in sjawhar/legion.
 
 ## The five clients the image already carries
 
@@ -14,8 +15,9 @@ which you have; those need no runner.
 - `psql` — the Dispatch browser suite (`bun run e2e`) resets its database for every spec through
   `packages/dispatch/e2e/psql.ts`, which `seed.ts` calls, and the local stack (`bun run
   dispatch:local`, `packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`,
-  `psql`, `flock` and `openssl` on `PATH`, and without `docker` too unless a `DATABASE_URL` is
-  given. The image carries `go`, `flock` and `openssl`, a `DATABASE_URL` stands in for `docker`,
+  `psql`, `flock`, `openssl` and `python3` on `PATH`, and without `docker` too unless a
+  `DATABASE_URL` is given. The image carries `go`, `flock`, `openssl` and `python3`, a
+  `DATABASE_URL` stands in for `docker`,
   and `psql` was the one a role had no way to supply — so a role whose change owes that suite can
   run it.
 - `redis-cli` — no repository of the project speaks Redis today; it is carried anyway, at about a
@@ -412,3 +414,51 @@ on "The test: where it lands, and what it leaves resolving", which the convenien
 The operator's side of this — why the image carries those five clients rather than anything else,
 the five priced options with their measurements, and what the clients cost the image — is in
 `docs/kubernetes.md`, the subsection "The tools a role's own work needs".
+
+## Before you measure Oh My Pi's binary
+
+Read Oh My Pi's source first, from the fork (`sjawhar/oh-my-pi`) at the tag `.omp-pin` names, not
+from upstream's version tag: the fork's release carries code upstream's does not. `.omp-pin` reads
+`github:sjawhar/oh-my-pi@<version>`, and the git tag adds a `v` in front of that text, so find it
+rather than type it:
+
+```text
+$ git ls-remote --tags https://github.com/sjawhar/oh-my-pi.git 'v<version>'
+```
+
+Search that source by the name of a construct or a setting, never by its value: one value is
+spelled in many places, and the code that sets it may spell it in none. If the module the binary
+names is absent at that tag, the binary is the ground truth: measure it, and say the source did not
+carry it. In a pod the binary (`$LEGION_OMP_PATH`) is the build the worker image was made from,
+and your workspace's `.omp-pin` can name another, so the tag you read may not be the build you
+measure: compare `"$LEGION_OMP_PATH" --version` with the pin first, and say which build each
+figure came from
+(`docs/solutions/testing/a-worker-pods-oh-my-pi-is-the-fleets-pin-not-the-branchs-fetch-the-branchs-build-and-say-which-pin-each-figure-came-from-LEGION-247.md`).
+
+## The tests your pod cannot run
+
+Some tests fail in a Kubernetes issue pod whatever your change, because of the pod, not the branch.
+A tmux pane runs on its host, and none of this holds there. Their proof is CI's run at the head:
+cite that run, and name in your handoff each package the pod could not run. The cases below are
+the known ones, not every one: a failure they do not name is yours to explain.
+
+- **gVisor.** Every pod runs under gVisor, which does not give a test every interface the Linux
+  kernel does. In `packages/envoy` the tests of `cmd/agent-secrets`, `cmd/agent-secrets-helper`
+  and `internal/broker/helper` fail: the helper identifies its peer with `SO_PEERPIDFD`, which
+  gVisor answers `protocol not available` (`PEER_UNIDENTIFIED` in the test output). The
+  terminal-prompt tests of `cmd/agent-secrets` also need terminal job-control ioctls
+  (`inappropriate ioctl for device`), and the `SigCgt` line of `/proc/<pid>/status`, which the
+  pods' gVisor lacked on 2026-10-28; upstream gVisor added that line on 2026-09-24, so a node on a
+  later release may have it. A timing test can fail too: `internal/dispatch/pmdoc`'s linearity
+  tests time a call by the process's CPU time, which gVisor counts in 10 ms ticks, so a call under
+  10 ms can measure 0 s and the test reports `+Inf times`.
+- **No Docker.** The image carries no container runtime, so a test that starts one through
+  testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
+  `internal/tests3` (`internal/dispatch/files`, which `DISPATCH_TEST_NO_CONTAINERS=1` skips) and
+  `internal/testpg` (unless `DISPATCH_TEST_DATABASE_URL` names a Postgres).
+- **The rest, by package.** For the Dispatch server's suites (a Postgres whose only collation is
+  byte order, which `internal/dispatch/api` refuses, and `@legion/proof-editor` missing until
+  `bun install` has run):
+  `docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`.
+  For the daemon's:
+  `docs/solutions/testing/go-test-in-a-worker-pod-leaves-gowork-to-go-work-and-names-the-packages-the-pod-cannot-run-LEGION-630.md`.

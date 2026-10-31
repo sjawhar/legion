@@ -18,9 +18,11 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Image is the pgvector server image CI uses for Dispatch's Postgres service. The envoy-infra-go
-// job pulls it before the natslive tests run, so a test does not fetch it in the middle of a lane.
-const Image = "mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a"
+// Image is the pgvector server image CI uses for Dispatch's Postgres service: pgvector 0.8.7 on
+// PostgreSQL 18 (tag 0.8.7-pg18), as ghcr.io/sjawhar/legion/ci holds it, the copy of
+// pgvector/pgvector (.github/ci-images.yaml). The envoy-infra-go job pulls it before the natslive
+// tests run, so a test does not fetch it in the middle of a lane.
+const Image = "ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11"
 
 // databaseURLEnv names the Postgres server a test may be given instead of starting one. It is
 // spelled here rather than taken from internal/dispatch/store/storetest, which declares the same
@@ -34,8 +36,8 @@ const databaseURLEnv = "DISPATCH_TEST_DATABASE_URL"
 // dropped when the test ends. It is reached two ways.
 //
 // With DISPATCH_TEST_DATABASE_URL set, the database is created on the server that variable names
-// — the Postgres service the envoy-go job already runs
-// (.github/workflows/envoy-and-contracts.yaml) — and dropped from it afterwards. That variable is
+// — the Postgres service the envoy-go job of .github/workflows/ci.yaml already runs — and
+// dropped from it afterwards. That variable is
 // storetest's own, reused rather than doubled: it is how every Postgres-backed Dispatch test is
 // already told which server CI provides, and a second name would have to be set beside it on every
 // job and in every developer's shell for the same answer. Its database path is ignored exactly as
@@ -104,10 +106,12 @@ func containerURL(t testing.TB) string {
 			Image:        Image,
 			ExposedPorts: []string{"5432/tcp"},
 			Env:          map[string]string{"POSTGRES_PASSWORD": "test"},
-			// The data directory on tmpfs leaves no anonymous volume behind (the image declares
-			// one there), and with it the server fits in two CPUs and 2 GiB, as every container the
-			// repository's tests start is capped on a shared host; tmpfs counts against that memory.
-			Tmpfs: map[string]string{"/var/lib/postgresql/data": "rw"},
+			// The data directory's parent on tmpfs leaves no anonymous volume behind (the image
+			// declares one at /var/lib/postgresql, and its PostgreSQL 18 entrypoint refuses a mount at
+			// the old /var/lib/postgresql/data), and with it the server fits in two CPUs and 2 GiB, as
+			// every container the repository's tests start is capped on a shared host; tmpfs counts
+			// against that memory.
+			Tmpfs: map[string]string{"/var/lib/postgresql": "rw"},
 			HostConfigModifier: func(hostConfig *container.HostConfig) {
 				hostConfig.NanoCPUs = 2_000_000_000
 				hostConfig.Memory = 2 << 30

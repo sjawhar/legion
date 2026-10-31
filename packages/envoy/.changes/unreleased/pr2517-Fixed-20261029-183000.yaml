@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+    A listener no longer starts serving `GET /v1/sessions` or `GET /v1/registry/<session_id>` before it can report a session's roles, so a client of a healthy bus no longer reads `envoy: the message bus did not answer` from a listener that has just started. Its startup gate waited for the role claim watcher's readiness, which a first scan nats.go's idle timer ended also releases, while the view those two routes read refuses every read until that scan has delivered each claim; the gate now waits for that view to be complete (`kvwatch.Watcher.WaitComplete`, `store.Registry.WaitForCacheReady`). A start that completes no scan still serves, fail open, warning that the warm-up did not complete: a live watcher whose scans keep timing out holds the start for the gate's whole 30 seconds, while a terminal error of that watcher or its stop ends the wait at once.
+
+    The gate covers the start alone. A later `Rewatch` — a reconnect, a self-health rebuild, a recreated bucket — begins a generation of its own, and those two routes answer the same 503 until its scan completes. `/healthz` now says so when it reports no other fault: `200` with `"status": "degraded"`, an error naming the role claim view (`store.Registry.RoleViewErr`, the state `RolesHeldBy` itself reads) and the healthy answer's other fields. It is checked after every check that can answer `unhealthy`, so it hides none of them. It is degraded rather than unhealthy, and no part of `Ping`, because the view fills itself through its watcher's own rescan and a restart completes no scan that keeps timing out.
+
+    The refusal's 503, its `Retry-After: 1` and its body are unchanged.
+time: 2026-10-29T18:30:00.000000000Z
+custom:
+    Issue: pr2517

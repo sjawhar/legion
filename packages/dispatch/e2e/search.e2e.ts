@@ -1,6 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import {
+  answerAsk,
   createAsk,
   createComment,
   createIssue,
@@ -8,6 +9,7 @@ import {
   createProject,
   createProjectDocument,
   e2eAgentToken,
+  resolveAsk,
 } from "./api";
 import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
@@ -59,11 +61,7 @@ test.beforeEach(async () => {
 
 test("Ctrl+K and Cmd+K open the palette, grouped results navigate a document to its highlighted term", async ({
   browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+}) => {
   const fixture = await seedSearchFixture();
   const context = await asUser(browser, "alice");
 
@@ -133,8 +131,7 @@ test("Ctrl+K and Cmd+K open the palette, grouped results navigate a document to 
 
 test("a search term lists marked document, comment, ask, and issue-title results in issue groups", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "result-kind coverage is independent of viewport");
+}) => {
   await seedSearchFixture();
   const titleIssue = await createIssue({ project: "CORE", title: "Astrolabe calibration" });
   await createAsk(titleIssue.key, { question: "Who calibrates the astrolabe?" }, searchSession);
@@ -164,10 +161,89 @@ test("a search term lists marked document, comment, ask, and issue-title results
   }
 });
 
-test("a project-document hit is grouped under the document and opens it; a message hit opens its Conversation turn", async ({
+test("an ask hit says whether it is answered, and an answered one shows its latest answer, who gave it and the options chosen", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "result routing is independent of viewport");
+  test.skip(testInfo.project.name === "iphone", "ask hit states are independent of viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Planetarium" });
+  const answered = await createAsk(
+    issue.key,
+    {
+      options: [{ label: "Brass" }, { label: "Steel" }],
+      question: "Which orrery frame do we keep?",
+    },
+    searchSession
+  );
+  const resolved = await createAsk(
+    issue.key,
+    { question: "Should the orrery gears be oiled?" },
+    searchSession
+  );
+  await createAsk(issue.key, { question: "Who winds the orrery?" }, searchSession);
+  const first = await answerAsk(answered.id, {
+    expected_edited_at: null,
+    selected: ["Brass"],
+    text: "Keep the brass one.",
+  });
+  expect(first.answer).not.toBeNull();
+  // A long last answer with a word only its end holds: the hit carries the answer's start
+  // alone, so that word never reaches the option or its accessible name.
+  const longAnswer = `Keep the steel one after all. ${"The steel frame holds its true under a heavy load and wants no polish between voyages. ".repeat(30)}zenithward`;
+  expect(longAnswer.length).toBeGreaterThan(2000);
+  await answerAsk(answered.id, {
+    expected_answer_at: first.answer?.at,
+    expected_edited_at: null,
+    selected: [],
+    text: longAnswer,
+  });
+  await resolveAsk(
+    resolved.id,
+    { kind: "resolved", reason: "Settled in the spec." },
+    searchSession
+  );
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await openSearchFromRail(page, false);
+    await page.getByRole("combobox", { name: "Search" }).fill("orrery");
+
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    await expect(dialog.getByRole("option")).toHaveCount(3);
+    await expect(dialog.getByRole("option", { name: /^ask / })).toHaveCount(3);
+
+    const answeredHit = dialog.getByRole("option").filter({ hasText: "Which orrery frame" });
+    await expect(answeredHit).toContainText("Answered");
+    await expect(answeredHit).toContainText("alice");
+    await expect(answeredHit).toContainText("No option chosen");
+    await expect(answeredHit).toContainText("Keep the steel one after all.");
+    await expect(answeredHit).not.toContainText("zenithward");
+    // The option's name is all its text: the excerpt, the status line and the answer's start
+    // (`ANSWER_PREVIEW_CHARS` beside `AskHitStatus`), well under the 2,000-character answer.
+    await expect(answeredHit).toHaveAccessibleName(/^ask /u);
+    await expect(answeredHit).not.toHaveAccessibleName(/zenithward/u);
+    await expect(answeredHit).toHaveAccessibleName(/^[\s\S]{1,600}$/u);
+    await expect(answeredHit).not.toContainText("Keep the brass one.");
+    await expect(answeredHit).not.toContainText("Chose Brass");
+
+    const resolvedHit = dialog.getByRole("option").filter({ hasText: "orrery gears" });
+    await expect(resolvedHit).toContainText("Closed, no answer");
+    await expect(resolvedHit).toContainText("Resolved by");
+    await expect(resolvedHit).not.toContainText("Answered");
+
+    // The server's snippet drops the question's leading stop word.
+    const openHit = dialog.getByRole("option").filter({ hasText: "winds the orrery" });
+    await expect(openHit).toContainText("Open");
+    await expect(openHit).not.toContainText("Answered");
+  } finally {
+    await context.close();
+  }
+});
+
+test("a project-document hit is grouped under the document and opens it; a message hit opens its Conversation turn", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const document = await createProjectDocument("CORE", {
     content: "# Design notes\n\nThe sextant sights the horizon.\n",
@@ -221,7 +297,7 @@ test("a project-document hit is grouped under the document and opens it; a messa
   }
 });
 
-test("the rail Search control opens the palette and Escape returns focus to it", async ({
+test("the rail Search control opens the palette and Escape returns focus to it @phone", async ({
   browser,
 }, testInfo) => {
   await seedSearchFixture();
@@ -253,7 +329,7 @@ test("the rail Search control opens the palette and Escape returns focus to it",
   }
 });
 
-test("phone search rows are at least 44px, do not overflow, and a comment result opens Conversation", async ({
+test("phone search rows are at least 44px, do not overflow, and a comment result opens Conversation @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -261,6 +337,21 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
     "phone row geometry is covered by the iphone project"
   );
   const fixture = await seedSearchFixture();
+  // An answered ask whose answer runs past its three-line clamp, so the overflow check covers
+  // the ask hit's status line and answer text as well.
+  const ask = await createAsk(
+    fixture.firstIssueKey,
+    {
+      options: [{ label: "On the chart table" }, { label: "In the captain's cabin" }],
+      question: "Where does the astrolabe live between voyages?",
+    },
+    searchSession
+  );
+  await answerAsk(ask.id, {
+    expected_edited_at: null,
+    selected: ["On the chart table"],
+    text: "Keep the astrolabe on the chart table during every crossing, and recalibrate its rete against the meridian at local noon whenever the sky is clear enough to take a clean sighting. Log each reading beside the dead-reckoning position in the ship's book, note the observer and the instrument's serial number, and send any drift larger than half a degree to the instrument maker before the next voyage leaves port.",
+  });
   const context = await asUser(browser, "alice");
 
   try {
@@ -271,7 +362,10 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
     // Scoped to the palette: inbox rows carry a priority <select> whose options share the role.
     const dialog = page.getByRole("dialog", { name: "Search" });
     const options = dialog.getByRole("option");
-    await expect(options).toHaveCount(2);
+    await expect(options).toHaveCount(3);
+    await expect(dialog.getByRole("option", { name: /^ask / })).toContainText(
+      "Chose On the chart table"
+    );
     for (let index = 0; index < (await options.count()); index += 1) {
       const box = await options.nth(index).boundingBox();
       expect(box, `result option ${index} has a layout box`).not.toBeNull();
@@ -306,7 +400,9 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
   }
 });
 
-test("no results and short queries are stated, not silent", async ({ browser }, testInfo) => {
+test("no results and short queries are stated, not silent @phone", async ({
+  browser,
+}, testInfo) => {
   await seedSearchFixture();
   const context = await asUser(browser, "alice");
 
@@ -363,7 +459,7 @@ test("the agent issue API returns POSSIBLE_DUPLICATE and force creates the issue
 
 // The hint names keys a touch reader does not have, and 33px of palette is 33px of hits, so it
 // shows only where a pointer that can hover exists.
-test("the palette's keyboard hints show for a pointer and not for a touch reader", async ({
+test("the palette's keyboard hints show for a pointer and not for a touch reader @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -399,8 +495,7 @@ test("the palette's keyboard hints show for a pointer and not for a touch reader
 
 // The hits of one owner are a group named by the row above them, so a reader who cannot see
 // that row still hears which issue a hit belongs to.
-test("each palette group is named by its owner row", async ({ browser }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "the grouping is independent of viewport");
+test("each palette group is named by its owner row", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Conversation view" });
 

@@ -6,15 +6,26 @@ type PushPayload struct {
 	ChangedPathsTruncated *string `json:"changed_paths_truncated,omitempty"`
 }
 
-// PushClassification records whether a push changed only Legion handoff files.
+// PushClassification records whether a push changed only the issue's own Legion handoff files.
 type PushClassification struct {
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
 }
 
-// ClassifyPush determines whether every supplied path is a Legion handoff file. The listener's
+// HandoffPath reports whether path is one of issue's own handoff files, under .legion/<issue>/,
+// the directory each phase's role writes its handoff to and retro's last commit removes. Another
+// issue's handoffs are not issue's: its reviewer never read them and its retro does not remove
+// them, so READY refuses them as it refuses code (api's unreviewedChange), and a push changing them
+// is a code push here too. No issue has no handoffs.
+func HandoffPath(issue, path string) bool {
+	prefix := ".legion/" + issue + "/"
+	return issue != "" && len(path) >= len(prefix) && path[:len(prefix)] == prefix
+}
+
+// ClassifyPush determines whether every supplied path is one of issue's own handoff files
+// (HandoffPath), issue being the key the pushed branch, legion/<issue>, names. The listener's
 // truncation marker is authoritative because an empty changed-paths field is omitted upstream.
-func ClassifyPush(p PushPayload) PushClassification {
+func ClassifyPush(p PushPayload, issue string) PushClassification {
 	if p.ChangedPathsTruncated == nil {
 		return PushClassification{
 			Unknown: "changed_paths absent (listener predates LEGION-33)",
@@ -28,7 +39,7 @@ func ClassifyPush(p PushPayload) PushClassification {
 			return PushClassification{Unknown: "no commits listed"}
 		}
 		for _, path := range splitLines(*p.ChangedPaths) {
-			if len(path) < len(".legion/") || path[:len(".legion/")] != ".legion/" {
+			if !HandoffPath(issue, path) {
 				return PushClassification{}
 			}
 		}

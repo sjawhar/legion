@@ -462,7 +462,8 @@ func TestArchitectureSourcesListAddAndChangeBranch(t *testing.T) {
 }
 
 // Removing one source retires only the components it projected: another source's components and
-// edges stay, and an issue attached to one of each keeps the removed one as unknown.
+// edges stay, and an issue attached to one of each keeps the removed one as unknown. The times
+// recorded for the removed components (component_facts) go with them; the other source's stay.
 func TestArchitectureSourceDeleteRemovesOnlyItsComponents(t *testing.T) {
 	handler, database := newArchitectureSourceServer(t, twoSourceFake())
 	createTestProject(t, handler, "CORE")
@@ -489,12 +490,29 @@ func TestArchitectureSourceDeleteRemovesOnlyItsComponents(t *testing.T) {
 	if got, want := projection(), "legion/arch api, legion/arch store, acme/infra deploy; depends=1 snapshots=2"; got != want {
 		t.Fatalf("projection before the delete = %q, want %q", got, want)
 	}
+	facts := func() string {
+		t.Helper()
+		var recorded string
+		if err := database.Pool.QueryRow(context.Background(), `
+			select coalesce(string_agg(id || ' made=' || (made_at is not null and changed_at = made_at and digest is not null), ', ' order by id), '')
+			from component_facts where project_key = 'CORE'
+		`).Scan(&recorded); err != nil {
+			t.Fatalf("read the component facts: %v", err)
+		}
+		return recorded
+	}
+	if got, want := facts(), "api made=true, deploy made=true, store made=true"; got != want {
+		t.Fatalf("component facts before the delete = %q, want %q", got, want)
+	}
 
 	if deleted := dispatchRequest(t, handler, http.MethodDelete, sourcePath("CORE", "Legion/Arch"), nil, "alice"); deleted.Code != http.StatusNoContent {
 		t.Fatalf("delete legion/arch: status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
 	if got, want := projection(), "acme/infra deploy; depends=0 snapshots=2"; got != want {
 		t.Fatalf("projection after the delete = %q, want %q", got, want)
+	}
+	if got, want := facts(), "deploy made=true"; got != want {
+		t.Fatalf("component facts after the delete = %q, want %q", got, want)
 	}
 	read := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice"))
 	if !reflect.DeepEqual(read.Components.IDs, []string{"deploy"}) || !reflect.DeepEqual(read.Components.Unknown, []string{"api"}) {

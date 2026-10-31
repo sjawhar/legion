@@ -10,7 +10,6 @@ Dispatch is a record for the people who decide, never a log of your work.
 - Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives its rules and an example.
 - Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`). Give object and list fields as JSON.
 - Exit 1 is a refusal, 2 a usage error. A refusal lists each problem: fix them all, then call once.
-- `DOC_SERVICE_UNAVAILABLE`: the document is reloading, nothing was written; retry in a few seconds.
 
 ## Asks and ask blocks
 
@@ -18,16 +17,16 @@ Dispatch is a record for the people who decide, never a log of your work.
 
 ```md
 :::ask{urgency="med"}
-The problem and why it matters. Recommendation: the option and its reason.
+Which machines, files or people, the numbers, then "A happens to X, or B to Y?" Recommendation: the option and its reason.
 
 - Option one: what it costs.
 - Option two: what it costs.
 :::
 ```
 
-- A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`. A Legion phase worker sends its decision to its architect.
-- In Legion, file no issue for an outside finding. Fix a clear defect in code your tree uses. Hand others to the controller. Ask about decisions (`skill://legion-worker/references/findings.md`).
-- An open ask is the request. Do not raise it again in each message.
+- A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`.
+- In Legion, fix a clear defect in code your tree uses, hand others to the controller, and ask about decisions (`skill://legion-worker/references/findings.md`).
+- An open ask is the request. Do not repeat it in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
 - Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
 - When an answer's option and text disagree, the text wins.
@@ -43,18 +42,18 @@ The problem and why it matters. Recommendation: the option and its reason.
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status, and claim it only as a Legion role of its tree, even when its claim reads `· not running`, as a suspended architect's does: taking it takes the tree out of the workflow.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status or route it, and claim it only as a Legion role of its tree, even when its claim reads `· not running`, as a suspended architect's does: taking it removes the tree from the workflow.
 
-A claim delivers no comments: that turn, `dispatch issue-update --route session:<your id>` (`--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. Never route such an issue.
+A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no event Dispatch marks quiet.
 
 ## Close what you opened
 
-- An ask you opened is yours until answered or resolved. If it is answered another way or made moot, `dispatch resolve-ask` it that turn.
-- Resolve each open ask a later write names that is no longer needed; retract one a new ask replaces.
+- An ask you opened is yours until answered or resolved. `dispatch resolve-ask` it that turn once anything makes it needless: another answer, a later write, work dropped.
+- Retract an ask a new one replaces.
 
 ## Structure over stream
 
-- One issue per deliverable, its content the issue's document. Decisions are asks. A message only announces.
+- One issue per deliverable, its content the issue's document.
 - A message replies to a person or tells them what they must know now.
 - Text a person must read to decide belongs in the spec. An artifact is a real file.
 
@@ -72,12 +71,15 @@ dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
 dispatch://KEY/comment/<id>
+dispatch://KEY/comment/<id>#b-<block>[@vN]
 dispatch://KEY/message/<id>
+dispatch://KEY/message/<id>#b-<block>
 dispatch://PROJECT/artifact/<slug>[@vN]
 dispatch://PROJECT/artifact/<slug>/ask/<id>
+dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id or filename is not a reference. An ask or comment id can be an 8-hex prefix.
+A bare id or filename is not a reference. Write each id whole, from `dispatch read`'s `Ask id:` or the page URL: the command takes a prefix, a person's link does not.
 
 ## Setup and the HTTP API
 

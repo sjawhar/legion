@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // webhookRedeliveryLease is the name the running sweep takes its lease under, written here as the
@@ -63,9 +64,7 @@ func redeliverTestLeases(t *testing.T) duty.Leases {
 func captureDefaultLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
 	buffer := &lockedBuffer{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buffer, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(buffer, nil))
 	return buffer
 }
 
@@ -102,7 +101,7 @@ func TestARunningSweepWhoseLeaseIsHeldElsewhereListsNothing(t *testing.T) {
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(context.Background(), leases, webhookRedeliveryLease, 0, func(context.Context) {
+		held <- duty.Exclusive(context.Background(), leases, webhookRedeliveryLease, time.Time{}, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})

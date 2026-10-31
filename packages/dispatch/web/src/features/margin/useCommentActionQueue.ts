@@ -1,8 +1,8 @@
-import { useMutation } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 
-import { api, apiErrorCodeIn, apiErrorMessage } from "../../api/client";
+import { api, apiErrorCodeIn, apiErrorMessage, type WriteBounds } from "../../api/client";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 export type CommentAction = "accept" | "reject" | "resolve" | "reopen";
 
@@ -42,11 +42,19 @@ interface CommentActionQueueOptions<TContext> {
   onSuccess?(input: CommentActionInput): void;
 }
 
-function submitCommentAction({ id, kind }: CommentActionInput) {
-  if (kind === "accept") return api.acceptComment(id);
-  if (kind === "reject") return api.rejectComment(id);
-  if (kind === "reopen") return api.reopenComment(id);
-  return api.resolveComment(id);
+/** What the card that offered `kind` calls it, for the shell's indicator. */
+const ACTION_LABELS: Record<CommentAction, string> = {
+  accept: "Suggestion accepted",
+  reject: "Suggestion rejected",
+  reopen: "Comment reopened",
+  resolve: "Comment resolved",
+};
+
+function submitCommentAction({ id, kind }: CommentActionInput, bounds: WriteBounds) {
+  if (kind === "accept") return api.acceptComment(id, bounds);
+  if (kind === "reject") return api.rejectComment(id, bounds);
+  if (kind === "reopen") return api.reopenComment(id, bounds);
+  return api.resolveComment(id, bounds);
 }
 
 /**
@@ -64,8 +72,11 @@ export function useCommentActionQueue<TContext = undefined>({
   const queued = useRef(new Map<string, CommentAction>());
   const [queuedIds, setQueuedIds] = useState<ReadonlySet<string>>(() => new Set());
   const syncQueuedIds = () => setQueuedIds(new Set(queued.current.keys()));
-  const action = useMutation<unknown, Error, CommentActionInput, TContext>({
-    mutationFn: submitCommentAction,
+  const action = useKeyedWrite<unknown, CommentActionInput, TContext>({
+    // The card that offered the action shows its refusal (`CommentActionFailure`).
+    inline: true,
+    label: ({ kind }) => ACTION_LABELS[kind],
+    write: submitCommentAction,
     onError,
     onMutate,
     onSettled: (_data, error, input) => {

@@ -13,6 +13,11 @@ import (
 // liveTopicsSubject is what the live topics lane subscribes to: every notification topic.
 const liveTopicsSubject = bus.NotificationTopicPrefix + ">"
 
+// liveTopicsClientName is the name the lane's client carries in the NATS server's connection
+// listings and in its own log lines, which a test reads to tell this client from the listener's
+// other one.
+const liveTopicsClientName = "envoy-live-topics"
+
 // openLiveTopics opens the live topics lane: a bus client of its own, since a client holds one
 // core subscription and the main client's is the role lane, subscribed to every notification
 // topic in the machine's live queue group (bus.ListenerLiveQueue), apart from the role lane's
@@ -21,8 +26,13 @@ const liveTopicsSubject = bus.NotificationTopicPrefix + ">"
 // environment names, and it reconnects and re-subscribes on its own. It returns once NATS has
 // accepted the subscription: a server that refuses it answers before the flush's PONG, and
 // nats.go records the refusal as the connection's last error.
+//
+// The lane's connection declares itself lost two to three seconds after the hub stops answering it
+// (bus.WithSilentCutDetection). A hub whose packets stop closes nothing. On nats.go's default
+// pings (one every two minutes, two outstanding) the lane reads connected for four to six minutes
+// while no message reaches it, and it re-subscribes only once it has reconnected.
 func openLiveTopics(urls []string, machineID string, handler nats.MsgHandler) (*bus.Client, error) {
-	live, err := bus.Connect(urls, bus.WithName("envoy-live-topics"))
+	live, err := bus.Connect(urls, bus.WithName(liveTopicsClientName), bus.WithSilentCutDetection())
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}

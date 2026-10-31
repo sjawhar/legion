@@ -23,10 +23,10 @@ it, and any other change to the head voids it.
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
   and records the verdict. The CI it reads is the checks that stand for the code under review:
   those GitHub ran for the newest push of the branch that started `pull_request` workflows, when
-  every commit above that push's head changes only `.legion/` (GitHub starts no workflow run for a
-  head whose commit message carries `skip-checks: true`, which every handoff-only push before
-  retro does; retro's push carries no such line, so its head does get GitHub's workflow runs of
-  its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
+  every commit above that push's head changes only `.legion/<issue>/` (GitHub starts no workflow
+  run for a head whose commit message carries `skip-checks: true`, which every handoff-only push
+  before retro does; retro's push carries no such line, so its head does get GitHub's workflow runs
+  of its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set is the
   base branch's rulesets' required checks and its branch protection's, when it has any. Both
   branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`
@@ -46,16 +46,27 @@ it, and any other change to the head voids it.
   newest first). That commit's check-runs
   (`gh api repos/<o>/<r>/commits/<ci head>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
   every required name present, `completed` and `success` (GitHub counts `neutral` and `skipped`
-  as passing for a required check). And the compare proving only `.legion/` changed since
-  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '{handoffsOnly: ([.files[].filename] | all(startswith(".legion/"))), files: (.files | length)}'`
+  as passing for a required check). And the compare proving only `.legion/<issue>/` changed since,
+  `<issue>` being your `LEGION_ISSUE` (another issue's `.legion/` is code to the daemon and READY)
+  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '{handoffsOnly: ([.files[] | .filename, (.previous_filename // empty)] | all(startswith(".legion/<issue>/"))), files: (.files | length)}'`
   prints `handoffsOnly` `true`; `false` means code was pushed since CI ran, so wait for the new
   push's runs and read the CI head again). GitHub's compare lists at most 300 files for the whole
   comparison, so `files` at 300 is a comparison GitHub cut at its cap and `handoffsOnly` decides
   nothing: tell the architect and do not approve. A required check
-  `queued` or `in_progress`: wait. One `completed` as
-  `cancelled`, or absent: `gh run rerun <run-id>` once, then wait; when nothing will run it (a
-  check only a commit status reports, a workflow another repository defines), tell the architect
-  and do not approve. `gh pr checks <n>` is not the read: it reads only the current head, which
+  `queued` or `in_progress`: wait. One `completed` as `cancelled`, or absent: re-run that run's
+  failed and cancelled jobs, once, then wait — never the whole run, which runs again every job that
+  succeeded too. Find the run and job at the CI head: the head's runs
+  (`gh api 'repos/<o>/<r>/actions/runs?head_sha=<ci head>&per_page=100' --jq '.workflow_runs[] | [.id, .name, .event, .status, .conclusion] | @tsv'`),
+  then each candidate run's jobs
+  (`gh api repos/<o>/<r>/actions/runs/<run-id>/jobs --jq '.jobs[] | [.id, .name, .status, .conclusion] | @tsv'`).
+  A cancelled job: `gh run rerun <run-id> --failed`, which GitHub applies to the run's failed and
+  cancelled jobs and the jobs that depend on them, and to nothing that succeeded. Never
+  `--job <job-id>` alone: under a routing workflow, re-running only the final job reads the
+  cancelled results again and stays red. GitHub refuses a re-run while an attempt of that run is
+  still in progress: wait for it. When no
+  run at the CI head holds the job, or nothing will run it (a check only a commit status reports, a
+  workflow another repository defines), tell the architect and do not approve. `gh pr checks <n>`
+  is not the read: it reads only the current head, which
   at a handoff head shows only the `pr-title` runs the review events start (measured on
   sjawhar/legion#1944 at 0220b94fc2 on 2026-10-14).
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
@@ -98,7 +109,7 @@ it, and any other change to the head voids it.
   `REQUEST_CHANGES` when the code is at fault, and your own commit to fix when your prose broke
   it. The architect reads your prose commits at its acceptance (*The architect's acceptance*,
   below), and that read is no new round. A round after a READY refusal is the one exception. Its
-  approval needs the tester's `E2E` line to name the head with only `.legion/` changed since. So
+  approval needs the tester's `E2E` line to name the head with only `.legion/<issue>/` changed since. So
   there you fix no prose yourself, and you name each prose finding in a `REQUEST_CHANGES`.
 
 A reviewer's phase ends with its completion, not with its review. Every round writes a handoff
@@ -109,7 +120,7 @@ whatever CI says and the issue leaves reviewing with it. The approval waits on n
 handoff-only commit either: it ends the round whatever CI says there, since the round reads no CI
 verdict, and a red the daemon reads later — at that commit or any above it — is the code's red
 and resumes the implementer from wherever the issue is (reviewing, retro or merging) without the
-reviewer. A head your own push changed beyond `.legion/` is the exception. The daemon marks it a
+reviewer. A head your own push changed beyond `.legion/<issue>/` is the exception. The daemon marks it a
 planned red and sends nothing back for it, so wait for its checks yourself (*Fix a prose-only
 finding yourself*, above). A review of a head the handoff push then replaces names a head the pull
 request no longer has. The daemon moves the issue once both are in — the decision GitHub reports
@@ -121,7 +132,8 @@ reviewing until you finish.
 - Between the reviewer's approval and retro the issue sits in `accepting` (Dispatch status
   `needs_review`), where no worker is started: the tree's architect reads the evidence (the
   tester's handoff, the PR body's `E2E (implementer)` and `E2E (tester)` lines and the reviewer's
-  approval of the head by SHA; children still running do not hold it) and accepts with the
+  approval of the head by SHA; the daemon lets no child hold it; a parent's waits for its last
+  round, `skill://legion-architect`, section 4) and accepts with the
   `legion` tool's `sign_off`, which moves the issue to retro, or sends it back to `implementing`
   or `testing` with `request_backward_move` and a reason, which reaches the started worker's task
   as its `Reason:` line and counts a review round. The architect also reads the reviewer's own
@@ -130,7 +142,7 @@ reviewing until you finish.
   controller takes it"). The acceptance asks no `Production:` line of anyone: that line is written
   after the close (*The production check after the close*, below).
   CI red at the head in `accepting` returns the issue to `implementing` as it does in review. A
-  head the review App pushed beyond `.legion/` is the exception: the daemon marks it a planned red
+  head the review App pushed beyond `.legion/<issue>/` is the exception: the daemon marks it a planned red
   and acts on it nowhere, and GitHub holds the merge under the base branch's own rules.
 
 ## Retro
@@ -288,10 +300,11 @@ reviewing until you finish.
   repository's deploy workflow (`projects.<KEY>.deploys`), at each completed run of that workflow
   on the default branch whose named step (such as `Apply`) succeeded after the merge, once per such
   job; or, for `sjawhar/legion`, on a Legion daemon's boot on a build containing the merge, on
-  Dispatch's `server.started` naming such a build, or on the build the daemon read from Dispatch at
-  its boot. The woken look's task names the event (`Dispatch's issue.deployed: run <id> completed <t>`,
+  Dispatch's `server.started` announcing that every server process serves such a build, or on the
+  build the daemon read from Dispatch at its boot. The woken look's task names the event
+  (`Dispatch's issue.deployed: run <id> completed <t>`,
   `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <t>`,
-  `the Legion daemon's boot on build <sha>`, `Dispatch's start on build <sha>`,
+  `the Legion daemon's boot on build <sha>`, `Dispatch serving build <sha> on every server process`,
   `Dispatch's build <sha>`), and its `Production:` line names it too, so the pull request carries
   the cause. Never poll for the deploy, never wait on a reply, and never ask anyone for approval
   to deploy. Open a `dispatch ask` to a person only when the instructions name nobody for that

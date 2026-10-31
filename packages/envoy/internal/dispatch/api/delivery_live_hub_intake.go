@@ -13,15 +13,26 @@ import (
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
-// intake moves the hub's two cursors. It subscribes to the broker before it reads where the event
-// log stands, so an event committed between the two reaches it either way, and the listener's
+// intake moves the hub's two cursors. It subscribes to the broker before the event cursor is
+// resolved, so an event committed between the two reaches it either way, and the listener's
 // connection (onConnected) catches both logs up after its LISTEN, for the same reason
 // (api/events.go's subscribe-before-catch-up order).
+//
+// ready closes once the change cursor is read. The event cursor waits for a safe horizon, which a
+// transaction holding an id anywhere on the Postgres instance holds back for as long as it stays
+// open, and neither the worker's answers nor the change log depend on it, so it is resolved on a
+// goroutine of its own (seedEvents) and handed to this one (applySeed). Until it is, the hub reads
+// nothing of the event log and acts on no broker event; the catch-up that follows the cursor's
+// arrival reads what that left.
 func (h *deliveryHub) intake(ctx context.Context) {
 	broker := h.server.deps.Events
 	events, unsubscribe := broker.Subscribe()
-	defer func() { unsubscribe() }()
-	for attempt := 1; !h.readCursors(); attempt++ {
+	defer func() {
+		unsubscribe()
+		h.gaps.stop()
+	}()
+	h.seedEvents(h.server.awaitEventCursor)
+	for attempt := 1; !h.readChangeCursor(); attempt++ {
 		if !waitFor(ctx, pglisten.RedialBackoff(attempt)) {
 			return
 		}
@@ -31,10 +42,14 @@ func (h *deliveryHub) intake(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case seed := <-h.seeds:
+			h.applySeed(seed)
 		case <-h.wakeChanges:
 			h.catchUp(true, false)
 		case <-h.wakeEvents:
 			h.catchUp(false, true)
+		case <-h.gaps.due():
+			h.readEvents(false)
 		case <-h.connected:
 			h.catchUp(true, true)
 			h.note(deliveryHubNote{what: "connected"})
@@ -55,35 +70,95 @@ func (h *deliveryHub) intake(ctx context.Context) {
 	}
 }
 
-// readCursors reads where both logs stand and the open P0 issues.
-func (h *deliveryHub) readCursors() bool {
+// readChangeCursor reads where the delivery change log stands.
+func (h *deliveryHub) readChangeCursor() bool {
 	ctx, pool := h.readContext(), h.server.deps.Store.Pool
 	seq, err := delivery.LatestChangeSeq(ctx, pool)
 	var at *time.Time
 	if err == nil && seq > 0 {
 		at, err = delivery.ChangeAt(ctx, pool, seq)
 	}
-	var eventID int64
-	var eventAt time.Time
-	if err == nil {
-		eventID, eventAt, _, err = eventCursorCheck(ctx, pool, 0)
-	}
-	var p0 map[string]struct{}
-	if err == nil {
-		p0, err = delivery.OpenP0Keys(ctx, pool)
-	}
 	if err != nil {
 		if h.lifetime.Err() == nil {
-			slog.Warn("dispatch: delivery live hub could not read where the logs stand; retrying", "error", err)
+			slog.Warn("dispatch: delivery live hub could not read where the delivery change log stands; retrying", "error", err)
 		}
 		return false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.changeSeq, h.changeAt = seq, timeOrZero(at)
-	h.eventCursor, h.eventAt = eventID, eventAt
-	h.p0 = p0
 	return true
+}
+
+// hubEventSeed is an event cursor seedEvents resolved: the last event at or below a safe horizon
+// and its created_at, and the open P0 issues read once that horizon was proven.
+type hubEventSeed struct {
+	cursor int64
+	at     time.Time
+	p0     map[string]struct{}
+}
+
+// seedEvents resolves the event cursor on a goroutine of its own, run on the hub's lifetime, and
+// hands it to the intake on seeds; until the intake takes it the hub holds none (seeded false).
+// await is awaitEventCursor for the hub's first cursor and reseedEventCursor once a catch-up found
+// the log reset (catchUpEvents). The cursor is the last event at or below the first safe horizon
+// proven after the call, with its created_at, never the log's raw max(id): event ids are not
+// commit order, so a newest id the hub started on could stand above a lower id still open, which
+// no catch-up (id > cursor) would ever read. It stands on a row the reset check can compare. The
+// open P0 issues are read after that horizon, so they reflect every event at or below the cursor,
+// none of which the hub will act on.
+//
+// The wait for that horizon, which an open write anywhere on the instance can hold back, ends with
+// the hub's lifetime, or with an error once every observation has failed for a while
+// (Horizon.Await). A read that fails is tried again after the listener's redial backoff (a reseed
+// forgets the horizon again, which costs only the observations since). The seed's send gives up
+// when the lifetime ends, so a seed the intake will never take leaves no goroutine behind for
+// running to wait on.
+func (h *deliveryHub) seedEvents(await func(context.Context) (safe, id int64, at time.Time, err error)) {
+	h.seeded = false
+	h.running.Add(1)
+	go func() {
+		defer h.running.Done()
+		for attempt := 1; ; attempt++ {
+			ctx := h.readContext()
+			_, cursor, at, err := await(ctx)
+			var p0 map[string]struct{}
+			if err == nil {
+				p0, err = delivery.OpenP0Keys(ctx, h.server.deps.Store.Pool)
+			}
+			if err == nil {
+				select {
+				case h.seeds <- hubEventSeed{cursor: cursor, at: at, p0: p0}:
+				case <-h.lifetime.Done():
+				}
+				return
+			}
+			if h.lifetime.Err() != nil {
+				return
+			}
+			slog.Warn("dispatch: delivery live hub could not read where the event log stands; retrying", "error", err)
+			if !waitFor(h.lifetime, pglisten.RedialBackoff(attempt)) {
+				return
+			}
+		}
+	}()
+}
+
+// applySeed takes the event cursor seedEvents resolved, with the open P0 issues read with it, and
+// marks every view dirty: a view computed before the cursor arrived read the database at a moment
+// the hub cannot place against the cursor, so it may have missed an event committed at or below
+// it, which the hub will never act on. It then catches the log up once from the cursor: an event
+// committed while the horizon was awaited may stand above it, and its notification or broker
+// publication came while the hub held no cursor and did nothing.
+func (h *deliveryHub) applySeed(seed hubEventSeed) {
+	now := h.clock.Now()
+	h.mu.Lock()
+	h.eventCursor, h.eventAt, h.p0 = seed.cursor, seed.at, seed.p0
+	h.dirtyAllLocked(now)
+	h.mu.Unlock()
+	h.seeded = true
+	h.catchUp(false, true)
+	h.note(deliveryHubNote{what: "events seeded", through: seed.cursor})
 }
 
 // catchUp catches up the change log, the event log, or both; a read that fails is tried again a
@@ -96,11 +171,36 @@ func (h *deliveryHub) catchUp(changes, events bool) {
 		}
 	}
 	if events {
-		if err := h.catchUpEvents(); err != nil && h.lifetime.Err() == nil {
+		h.readEvents(true)
+	}
+}
+
+// readEvents catches the event log up (catchUpEvents) once the hub holds an event cursor, and
+// schedules the re-read a gap left open above the safe horizon needs (Horizon.Pending): an event
+// observed above the horizon that the catch-up could not read. The commit's notification can wake
+// a catch-up before the horizon covers that commit, since only a later observation proves an
+// earlier one safe, and nothing notifies again once the open lower ids have ended; without this
+// re-read an event held back would wait for the next unrelated commit. The wait is the relay's
+// (eventGapReread), and the timer runs only while a gap is open, so an idle hub observes nothing.
+//
+// checkReset false is that re-read, which skips the reset check, as the relay's does: it asks
+// only whether the horizon has moved, on the horizon's own connections, and reads the shared pool
+// only once the horizon stands past the cursor, so a gap a long transaction holds open takes no
+// connection a request needs. A reset is still caught at the next notification, which the
+// refill's own inserts send. A read that fails is tried again a second later, with the check.
+func (h *deliveryHub) readEvents(checkReset bool) {
+	if !h.seeded {
+		return
+	}
+	safe, gap, err := h.catchUpEvents(checkReset)
+	if err != nil {
+		if h.lifetime.Err() == nil {
 			slog.Warn("dispatch: delivery live hub could not read the events; retrying", "error", err)
 			time.AfterFunc(time.Second, func() { signal(h.wakeEvents) })
 		}
+		return
 	}
+	h.gaps.schedule(safe, gap)
 }
 
 // catchUpChanges reads every delivery change after the cursor, marking the views each can touch.
@@ -162,38 +262,45 @@ func (h *deliveryHub) catchUpChanges() error {
 	}
 }
 
-// catchUpEvents reads every event after the cursor, acting on those the hub reads. It first checks
-// for a reset log: one whose newest id is below the cursor, or whose row at the cursor is gone or
-// was created at another time than the hub read (e2e/seed.ts:20 and :150 truncate events with
-// RESTART IDENTITY). A reset moves the cursor to the newest event, reloads the open P0 issues and
-// marks every view dirty; a cursor row some other path deleted costs only that.
-func (h *deliveryHub) catchUpEvents() error {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
+// catchUpEvents reads every event after the cursor and at or below the safe horizon, acting on
+// those the hub reads, and answers the horizon it read through and whether a gap stands open
+// above it (Horizon.Pending). Event ids are not commit order (events.Broker.Append), so the read
+// is capped at the horizon H, at or below which every event is final, and the cursor moves only
+// to the last row scanned, an existing row at or below H: everything at or below the cursor is
+// final and was acted on, which is also what lets receive act on the event right after it.
+//
+// With checkReset (every catch-up but the gap re-read, readEvents) it first checks for a reset log
+// (eventCursorCheck, eventLogWasReset): one whose newest id is below the cursor, or whose row at
+// the cursor is gone or was created at another time than the hub read (e2e/seed.ts:20 and :150
+// truncate events with RESTART IDENTITY). The hub then holds no cursor until a new one is resolved
+// (seedEvents with reseedEventCursor, which forgets the old log's horizon and waits for every
+// write open at the reset to end) and taken (applySeed, which reloads the open P0 issues, marks
+// every view dirty and catches up from there); the change log's intake runs on meanwhile. A
+// cursor row some other path deleted costs only that.
+func (h *deliveryHub) catchUpEvents(checkReset bool) (safe int64, gap bool, err error) {
+	ctx, pool, horizon := h.readContext(), h.server.deps.Store.Pool, h.server.horizon()
 	h.mu.Lock()
 	cursor, at := h.eventCursor, h.eventAt
 	h.mu.Unlock()
 	from := cursor
-	maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, pool, cursor)
-	if err != nil {
-		return err
-	}
-	if maxID < cursor || (cursor > 0 && (cursorAt == nil || !cursorAt.Equal(at))) {
-		p0, err := delivery.OpenP0Keys(ctx, pool)
+	if checkReset {
+		maxID, cursorAt, err := eventCursorCheck(ctx, pool, cursor)
 		if err != nil {
-			return err
+			return 0, false, err
 		}
-		now := h.clock.Now()
-		h.mu.Lock()
-		h.eventCursor, h.eventAt, h.p0 = maxID, maxAt, p0
-		h.dirtyAllLocked(now)
-		h.mu.Unlock()
-		h.note(deliveryHubNote{what: "events caught up", from: from, through: maxID})
-		return nil
+		if eventLogWasReset(cursor, at, maxID, cursorAt) {
+			h.seedEvents(h.server.reseedEventCursor)
+			return 0, false, nil
+		}
 	}
-	for {
-		events, through, throughAt, err := liveEventsSince(ctx, pool, cursor, deliveryLivePage)
+	safe, err = horizon.Safe(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	for cursor < safe {
+		events, through, throughAt, err := liveEventsSince(ctx, pool, cursor, safe, deliveryLivePage)
 		if err != nil {
-			return err
+			return 0, false, err
 		}
 		if through == cursor {
 			break
@@ -207,20 +314,28 @@ func (h *deliveryHub) catchUpEvents() error {
 		h.mu.Unlock()
 		scanned := through - cursor
 		cursor = through
-		// Ids leave gaps, so a page that spans fewer ids than its limit scanned fewer rows: the log
-		// ran dry.
+		// Ids leave gaps, so a page that spans fewer ids than its limit scanned fewer rows: it
+		// reached the horizon.
 		if scanned < deliveryLivePage {
 			break
 		}
 	}
 	h.note(deliveryHubNote{what: "events caught up", from: from, through: cursor})
-	return nil
+	return safe, horizon.Pending(), nil
 }
 
-// receive acts on one event the broker published. Ids are allocated in commit order, so the event
-// right after the cursor is acted on at once; any other leaves a gap the store fills, or follows
-// a reset, which the catch-up's check tells.
+// receive acts on one event the broker published. The broker publishes only committed events
+// (Broker.Publish), and everything at or below the cursor is final (catchUpEvents moves it only to
+// a row at or below a safe horizon, and this only to an event right after it), so the event right
+// after the cursor leaves nothing open below it and is acted on at once, even above the horizon.
+// Any other leaves a gap below it that may still be open, or follows a reset, and goes to the
+// catch-up, which reads only up to the horizon and whose check tells a reset. While the hub holds
+// no cursor (seeded false) it acts on nothing: the catch-up after the cursor arrives (applySeed)
+// reads the event if the cursor stands below it.
 func (h *deliveryHub) receive(event model.Event) {
+	if !h.seeded {
+		return
+	}
 	h.mu.Lock()
 	next := event.ID == h.eventCursor+1
 	h.mu.Unlock()

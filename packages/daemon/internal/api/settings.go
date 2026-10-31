@@ -76,6 +76,9 @@ type Settings struct {
 	// WorkerBackends is `worker_backends`, the roles that run on a backend other than Oh My Pi by
 	// role, `{}` while the file names none.
 	WorkerBackends map[string]string `json:"worker_backends"`
+	// RoleConfigFiles is `role_config_files`, the Oh My Pi overlays one role names and no other
+	// does, by role, `{}` while the file names none.
+	RoleConfigFiles map[string][]string `json:"role_config_files"`
 }
 
 // RuntimeSettings is `runtime`: its name, the kubernetes block under that runtime alone, and the
@@ -267,6 +270,7 @@ func SettingsOf(cfg config.Config) Settings {
 		Controller:                              cfg.ControllerLaunch,
 		Capabilities:                            CapabilitiesSettings{Decided: make(map[string]string, len(cfg.Capabilities.Decided))},
 		WorkerBackends:                          make(map[string]string, len(cfg.WorkerBackends)),
+		RoleConfigFiles:                         make(map[string][]string, len(cfg.RoleConfigFiles)),
 	}
 	for i, key := range cfg.ProviderKeys {
 		settings.ProviderKeys[i] = key.Env
@@ -297,6 +301,9 @@ func SettingsOf(cfg config.Config) Settings {
 	}
 	for role, backend := range cfg.WorkerBackends {
 		settings.WorkerBackends[string(role)] = string(backend)
+	}
+	for role, files := range cfg.RoleConfigFiles {
+		settings.RoleConfigFiles[string(role)] = stringsOf(files)
 	}
 	return settings
 }

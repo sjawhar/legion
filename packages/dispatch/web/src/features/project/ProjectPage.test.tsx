@@ -40,7 +40,16 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
     multiple: false,
     opened_event_id: 1,
     options: [],
-    thread: { answers: [], edits: [], followers: [], replies: [] },
+    thread: {
+      answers: [],
+      claimant: null,
+      edits: [],
+      followers: [],
+      replies: [],
+      route: null,
+      route_status: null,
+      route_holder: null,
+    },
     priority: null,
     snoozed_until: null,
     question: "Which approach?",
@@ -67,7 +76,7 @@ function renderPage(
   if (login === null) {
     whoAmI.mockImplementation(() => Promise.withResolvers<never>().promise);
   } else {
-    whoAmI.mockResolvedValue({ kind: "user", login });
+    whoAmI.mockResolvedValue({ event_head: "0", kind: "user", login });
   }
 
   const listProjects = spyOn(api, "listProjects").mockResolvedValue(projects);

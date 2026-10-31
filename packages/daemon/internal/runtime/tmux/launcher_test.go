@@ -150,8 +150,8 @@ func TestAgentMarkersNameEveryConfiguredHarness(t *testing.T) {
 }
 
 // A launch whose backend the daemon resolved no launcher for is refused naming it, before any
-// file is written or tmux is run, and a resume of a session found nowhere with no previous
-// incarnation of another runtime to take over is the refusal to start fresh, naming the harness it
+// file is written or tmux is run, and, with `take_over` unset as this runtime has it, a resume of
+// a session found nowhere is the refusal to start fresh, naming the harness it
 // was recorded for and every sessions directory searched.
 func TestLaunchRefusesWhatItsLaunchersCannotRun(t *testing.T) {
 	stateDir := t.TempDir()

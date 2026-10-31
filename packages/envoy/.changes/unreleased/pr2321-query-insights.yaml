@@ -1,0 +1,7 @@
+kind: Added
+body: |-
+  `envoy-infra:gcp:Dispatch` takes `databaseQueryInsights`, which turns on Cloud SQL Query
+  Insights for the component's instance, recording each query's application tags and client
+  address, so a deployment sets it in its program rather than in the console, whose setting the
+  component's settings do not carry. Unset or `false`, the instance's settings carry no
+  `insightsConfig` and the instance is the one it always was.

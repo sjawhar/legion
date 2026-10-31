@@ -312,6 +312,15 @@ func TestLoadRefusesACensusWithNoMigrationOneThatIsNotASelectAndOneThatCallsAFor
 			},
 			want: "census 0001_first.census.sql: a census may not call pg_sleep",
 		},
+		// Postgres 18 reads a vertical tab before the newline as the same whitespace, so the
+		// literal continues across it just as across a space.
+		"a call after an E literal continued across a vertical tab": {
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":     {Data: []byte(first)},
+				"migrations/0001_first.census.sql": {Data: []byte("select count(*) from (select E'a'\v\n'\\'' as a, pg_sleep(1) as nap, '' as c) t")},
+			},
+			want: "census 0001_first.census.sql: a census may not call pg_sleep",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			migrations, err := Load(tc.set, "migrations")
@@ -337,6 +346,18 @@ func TestLoadAcceptsACensusWhoseCommentOrStringLiteralNamesAForbiddenFunction(t 
 			"/* nor pg_terminate_backend /* nested: pg_advisory_lock */ still a comment: U&'x' */\n" +
 			"select count(*) from a where note in ('pg_sleep', 'it''s pg_cancel_backend', E'U&\\'pg_sleep\\'',\n" +
 			"  $$pg_advisory_lock(1)$$, $q$query_to_xml('select 1')$q$, N'pg_sleep', 'a'\n  'continued pg_sleep')")},
+	}
+	if _, err := Load(set, "migrations"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}
+
+// Postgres 18 reads a vertical tab as space, so a census whose words vertical tabs separate, one
+// leading the file included, is one select.
+func TestLoadReadsAVerticalTabInACensusAsSpace(t *testing.T) {
+	set := fstest.MapFS{
+		"migrations/0001_first.up.sql":     {Data: []byte("create table a (id integer)")},
+		"migrations/0001_first.census.sql": {Data: []byte("\vselect\vcount(*)\vfrom\va\v")},
 	}
 	if _, err := Load(set, "migrations"); err != nil {
 		t.Fatalf("Load: %v", err)

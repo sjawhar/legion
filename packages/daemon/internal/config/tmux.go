@@ -32,9 +32,11 @@ type Tmux struct {
 	// TakeOver is `runtime.tmux.take_over`: the runtime whose claims this daemon takes over from
 	// the project's store, "" for none, and TakeOverKubernetes the one value accepted. With it, a
 	// claim whose recorded process a daemon running the project under that runtime left in the
-	// store (a Sandbox role process) is relaunched in a pane, charged nothing, starting a fresh
-	// agent when its session file is found nowhere on this host; without it, the tmux runtime
-	// refuses such a claim, and boot fails naming it and this key. The operator stops every process
+	// store (a Sandbox role process) is relaunched in a pane, charged nothing; and while the key
+	// is set, every claim whose session file is found nowhere on this host starts a fresh agent,
+	// this host's own claims among them, since nothing tells the two apart. Without it, the tmux
+	// runtime refuses such a claim, and boot fails naming it and this key, and a missing session
+	// is a refusal again. The operator stops every process
 	// of the other runtime first: nothing else keeps two daemons from driving one store.
 	TakeOver string
 }

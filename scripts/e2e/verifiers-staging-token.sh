@@ -2,9 +2,11 @@
 # LEGION-208's live proof of the OIDC verifiers: the branch's own `dispatch` and `listener`
 # binaries authenticate a real projected service-account token minted by the staging EKS
 # cluster, refuse a token minted for the other binary's audience, refuse a request with no
-# bearer, and still accept their shared tokens. It also proves the two refusals that keep the
-# feature honest: a half-configured OIDC pair and an issuer that does not answer both stop the
-# boot, naming what is wrong.
+# bearer, and still accept their shared tokens. It also proves what keeps the feature honest: a
+# half-configured OIDC pair stops either boot, naming the missing variable; an issuer that does
+# not answer stops the listener's boot, naming that issuer; and Dispatch, which reads no issuer at
+# boot, starts and serves against one that does not answer, answering a JWT-shaped bearer
+# 503 OIDC_ISSUER_UNAVAILABLE until it has discovered it.
 #
 # Every step is fatal and names itself — no `|| true` outside the cleanup a trap must never
 # fail on, and every wait is bounded. The run leaves no container, no process, and nothing in
@@ -64,6 +66,9 @@ claims() {
   claims_json "$1" | jq -r '"iss=\(.iss) aud=\(.aud | join(",")) sub=\(.sub) exp=\(.exp | todate)"'
 }
 
+# b64url encodes stdin as base64url without padding, a JWT segment's encoding.
+b64url() { base64 | tr -d '\n=' | tr '+/' '-_'; }
+
 # request <url> [token] → the HTTP status on stdout, the body in $body. curl reads the
 # Authorization header from a config document on stdin, so the token is never an argument.
 request() {
@@ -102,7 +107,7 @@ expect_refusal() {
   echo "  $what → refused, naming $*"
 }
 
-for tool in go docker kubectl jq curl ss base64; do
+for tool in go docker kubectl jq curl python3 base64; do
   command -v "$tool" >/dev/null || fail "$tool is required and is not on PATH"
 done
 
@@ -129,9 +134,9 @@ absent_issuer="${issuer%/*}/00000000000000000000000000000000"
 echo "== pgvector/pgvector (pinned digest) and nats:2.10 on ephemeral loopback ports"
 docker rm -f -v "$pg_name" "$nats_name" >/dev/null 2>&1 || docker ps >/dev/null # a missing container is fine; a broken docker is not
 trap cleanup EXIT
-docker run -d --name "$pg_name" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_name" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=dispatch -e POSTGRES_PASSWORD=dispatch \
-  -e POSTGRES_DB=dispatch -p 127.0.0.1::5432 pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
+  -e POSTGRES_DB=dispatch -p 127.0.0.1::5432 mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
 docker run -d --name "$nats_name" --cpus 1 --memory 512m -p 127.0.0.1::4222 -p 127.0.0.1::8222 nats:2.10 -js -m 8222 >/dev/null
 # Over TCP, not the container's unix socket: the entrypoint's bootstrap phase answers on the
 # socket while nothing listens on 5432 yet, and a client that connects then is reset.
@@ -152,16 +157,13 @@ done
 echo "  postgres 127.0.0.1:$pg_port, nats 127.0.0.1:$nats_port"
 
 database_url="postgres://dispatch:dispatch@127.0.0.1:$pg_port/dispatch"
-# The binaries take a port number, not a socket; lib/free-port.sh picks one below the ephemeral
-# range, so a port that is taken by the time they bind is a loud boot failure, not a silent pass.
-dispatch_port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for dispatch"
-listener_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$dispatch_port") || fail "no free port for the listener"
 shared_dispatch_token="dispatch-shared-$RANDOM$RANDOM"
 shared_listener_token="listener-shared-$RANDOM$RANDOM"
 
 # The environment each binary boots with. HOME is the scratch dir so the signing key and app
 # credentials land there and never in the box's ~/.local/share/dispatch, and the working
-# directory is the scratch dir so no repo .envoy/envoy.json is picked up.
+# directory is the scratch dir so no repo .envoy/envoy.json is picked up. Neither names a port:
+# the boot refusals below exit before any bind, and the boots serve on held sockets.
 dispatch_env=(
   env -i PATH="$PATH" HOME="$work/home"
   DATABASE_URL="$database_url"
@@ -169,7 +171,6 @@ dispatch_env=(
   DISPATCH_IDENTITY=header:X-Dispatch-User
   DISPATCH_IDENTITY_HEADER_TRUSTED=1
   DISPATCH_LISTEN_HOST=127.0.0.1
-  DISPATCH_PORT="$dispatch_port"
   NATS_URLS="nats://127.0.0.1:$nats_port"
 )
 listener_env=(
@@ -177,7 +178,6 @@ listener_env=(
   ENVOY_MACHINE_ID=verifiers-e2e
   NATS_URLS="nats://127.0.0.1:$nats_port"
   ENVOY_LISTEN_HOST=127.0.0.1
-  PORT="$listener_port"
   ENVOY_API_TOKEN="$shared_listener_token"
 )
 
@@ -192,15 +192,77 @@ expect_refusal "dispatch, issuer without audience" "$work/refusal-dispatch-pair.
   fail "the listener booted with ENVOY_OIDC_AUDIENCE and no ENVOY_OIDC_ISSUER"
 expect_refusal "listener, audience without issuer" "$work/refusal-listener-pair.log" \
   "ENVOY_OIDC_ISSUER is required when ENVOY_OIDC_AUDIENCE is set"
-# An issuer that does not answer stops the boot naming the issuer it could not discover.
-"${dispatch_env[@]}" DISPATCH_OIDC_ISSUER="$absent_issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
-  "$work/dispatch" >"$work/refusal-dispatch-issuer.log" 2>&1 &&
-  fail "dispatch booted against an issuer that does not answer"
-expect_refusal "dispatch, issuer that does not answer" "$work/refusal-dispatch-issuer.log" "$absent_issuer"
+# The listener reads its issuer at boot: one that does not answer stops the boot, naming it.
 "${listener_env[@]}" ENVOY_OIDC_ISSUER="$absent_issuer" ENVOY_OIDC_AUDIENCE=envoy \
   "$work/listener" >"$work/refusal-listener-issuer.log" 2>&1 &&
   fail "the listener booted against an issuer that does not answer"
 expect_refusal "listener, issuer that does not answer" "$work/refusal-listener-issuer.log" "$absent_issuer"
+
+# Every boot below serves on a port the kernel chose, held from that choice until it serves on it
+# (lib/held-port.py, which writes the port to a file and becomes the binary).
+held_port=$root/scripts/e2e/lib/held-port.py
+# shellcheck source-path=SCRIPTDIR source=lib/port-file.sh
+. "$root/scripts/e2e/lib/port-file.sh"
+# port_of WHAT FILE PID VAR LOG reads the port held-port.py wrote to FILE into VAR, failing with
+# LOG the moment PID exits first (read_port_file, lib/port-file.sh).
+port_of() {
+  local rc=0
+  read_port_file "$2" "$3" "$4" || rc=$?
+  case $rc in
+    0) ;;
+    1) fail "$1 exited before it held a port" "$5" ;;
+    *) fail "$1 held no port within ${port_file_seconds}s" "$5" ;;
+  esac
+}
+
+# wait_for_dispatch_healthz URL PID LOG [WHAT] waits up to 30 s for the dispatch at URL to answer
+# /healthz 200, leaving the answer's body in $body, and fails with LOG the moment PID exits first.
+# WHAT, when given, names the boot at the end of either failure.
+wait_for_dispatch_healthz() {
+  local i
+  for i in $(seq 1 100); do
+    curl -fs -o "$body" --max-time 5 "$1/healthz" && return 0
+    kill -0 "$2" 2>/dev/null || fail "dispatch exited during boot${4:+ $4}" "$3"
+    [ "$i" = 100 ] && fail "dispatch never answered /healthz${4:+ $4}" "$3"
+    sleep 0.3
+  done
+}
+
+echo "== dispatch serves against an issuer that does not answer"
+# INFRA-555: Dispatch reads no issuer at boot. It migrates, binds and serves, discovers the issuer
+# in the background, and until it has, /healthz reports service_tokens false and a JWT-shaped
+# bearer is 503 OIDC_ISSUER_UNAVAILABLE — never a 401, since the token was not judged.
+python3 "$held_port" exec --port-file "$work/dispatch-absent-issuer.port" --fd-env DISPATCH_LISTEN_FD -- \
+  "${dispatch_env[@]}" DISPATCH_LISTEN_FD=3 DISPATCH_PORT='{port}' \
+  DISPATCH_OIDC_ISSUER="$absent_issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
+  "$work/dispatch" >"$work/dispatch-absent-issuer.log" 2>&1 &
+dispatch_pid=$!
+dispatch_port=''
+port_of "dispatch against an issuer that does not answer" "$work/dispatch-absent-issuer.port" "$dispatch_pid" \
+  dispatch_port "$work/dispatch-absent-issuer.log"
+wait_for_dispatch_healthz "http://127.0.0.1:$dispatch_port" "$dispatch_pid" "$work/dispatch-absent-issuer.log" \
+  "against an issuer that does not answer"
+expect_body "dispatch's /healthz against an issuer that does not answer" '.service_tokens == false'
+echo "  /healthz → 200, service_tokens false"
+# Three base64url segments, so the bearer takes the verifier's path (oidc.LooksLikeJWT) rather than
+# the token lookups'. It starts eyJ as a real token does, which the log check below looks for.
+unjudged_token="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url).$(printf '{"aud":["dispatch"]}' | b64url).$(printf 'unsigned' | b64url)"
+status=$(request "http://127.0.0.1:$dispatch_port/api/v1/whoami" "$unjudged_token")
+expect_status "a JWT-shaped bearer before the issuer is discovered" 503 "$status"
+expect_body "a JWT-shaped bearer before the issuer is discovered" '.code == "OIDC_ISSUER_UNAVAILABLE"'
+echo "    body: $(redact <"$body")"
+# Stopped by its own pid, within the 30 s stopGrace it builds its shutdown for, and judged: a
+# SIGTERM is a clean stop, so any other exit status is a defect.
+kill -TERM "$dispatch_pid"
+for i in $(seq 1 100); do
+  kill -0 "$dispatch_pid" 2>/dev/null || break
+  [ "$i" = 100 ] && fail "dispatch did not stop within 30 s of its SIGTERM" "$work/dispatch-absent-issuer.log"
+  sleep 0.3
+done
+wait "$dispatch_pid" || fail "dispatch exited $? on its SIGTERM" "$work/dispatch-absent-issuer.log"
+dispatch_pid=
+grep -q 'eyJ' "$work/dispatch-absent-issuer.log" && fail "dispatch's log repeats the JWT-shaped bearer"
+echo "  stopped on SIGTERM with status 0; its log repeats no token"
 
 echo "== mint two real projected service-account tokens"
 ns="${VERIFIERS_E2E_NAMESPACE:-legion}"
@@ -222,22 +284,27 @@ case "$subject" in
 esac
 
 echo "== boot both binaries against the staging issuer"
-"${dispatch_env[@]}" DISPATCH_OIDC_ISSUER="$issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
+# Each serves on a port the kernel chose, held from that choice until it serves on it: the helper
+# opens the socket on 127.0.0.1:0, writes its port and becomes the binary (lib/held-port.py).
+# `env -i` clears the descriptor's variable the helper sets, so each names its own: the helper
+# hands the socket over as descriptor 3.
+python3 "$held_port" exec --port-file "$work/dispatch.port" --fd-env DISPATCH_LISTEN_FD -- \
+  "${dispatch_env[@]}" DISPATCH_LISTEN_FD=3 DISPATCH_PORT='{port}' \
+  DISPATCH_OIDC_ISSUER="$issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
   "$work/dispatch" >"$work/dispatch.log" 2>&1 &
 dispatch_pid=$!
-"${listener_env[@]}" ENVOY_OIDC_ISSUER="$issuer" ENVOY_OIDC_AUDIENCE=envoy \
+python3 "$held_port" exec --port-file "$work/listener.port" --fd-env ENVOY_LISTEN_FD -- \
+  "${listener_env[@]}" ENVOY_LISTEN_FD=3 PORT='{port}' ENVOY_OIDC_ISSUER="$issuer" ENVOY_OIDC_AUDIENCE=envoy \
   "$work/listener" >"$work/listener.log" 2>&1 &
 listener_pid=$!
+dispatch_port='' listener_port=''
+port_of dispatch "$work/dispatch.port" "$dispatch_pid" dispatch_port "$work/dispatch.log"
+port_of "the listener" "$work/listener.port" "$listener_pid" listener_port "$work/listener.log"
 dispatch_url="http://127.0.0.1:$dispatch_port"
 listener_url="http://127.0.0.1:$listener_port"
 # A binary that refuses to boot is a dead pid, not a slow one: say so at once, with its log,
 # instead of spending the whole window on a process that will never answer.
-for i in $(seq 1 100); do
-  curl -fs -o /dev/null --max-time 5 "$dispatch_url/healthz" && break
-  kill -0 "$dispatch_pid" 2>/dev/null || fail "dispatch exited during boot" "$work/dispatch.log"
-  [ "$i" = 100 ] && fail "dispatch never answered /healthz" "$work/dispatch.log"
-  sleep 0.3
-done
+wait_for_dispatch_healthz "$dispatch_url" "$dispatch_pid" "$work/dispatch.log"
 # The listener answers /healthz 200 with {"status":"starting"} before NATS is up, and /v1 is
 # 503 until then: wait for the healthy status, not for the port.
 for i in $(seq 1 100); do

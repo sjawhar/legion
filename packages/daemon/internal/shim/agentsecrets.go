@@ -33,7 +33,8 @@ const renewRestartDelay = 5 * time.Second
 
 // permanentRenewExitCode is agent-secrets' documented exitRenewRefused. It crosses the process
 // boundary because a terminal broker refusal (a pod renewal without its token, or an enrollment
-// that has ended) must stop the shim rather than crash-looping a renewer that cannot succeed.
+// that has ended) must stop restarting the renewer rather than crash-loop one that cannot succeed.
+// The shim and its agent keep running, with no renewer, until the pod is relaunched.
 const permanentRenewExitCode = 76
 
 // lastLineWriter forwards a child stream while retaining its final nonblank line for the shim's

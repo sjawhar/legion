@@ -42,11 +42,11 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 	assertRoleHolder(t, registry, "reviewer", "ses_live")
 	assertRoleHolder(t, registry, readableRole, readableSession)
 	for _, sessionID := range []string{"ses_live", readableSession, unreadableSession} {
-		if _, err := registry.Get(sessionID); err != nil {
+		if _, err := registry.Get(context.Background(), sessionID); err != nil {
 			t.Fatalf("get the %d-byte session's interest: %v", len(sessionID), err)
 		}
 	}
-	if err := registry.Remove("ses_elsewhere", nil); err != nil {
+	if err := registry.Remove(context.Background(), "ses_elsewhere", nil); err != nil {
 		t.Fatalf("remove a session while an unreadable claim is stored: %v", err)
 	}
 
@@ -165,11 +165,11 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 	// role bucket; bad:role is stored first, so a sweep that stops there never reaches reviewer.
 	t.Run("removing a session skips a claim it cannot read", func(t *testing.T) {
 		registry, _, _ := open(t, claim("bad:role", "ses_leaving"), claim("reviewer", "ses_leaving"), interest("ses_leaving"))
-		if err := registry.Remove("ses_leaving", nil); err != nil {
+		if err := registry.Remove(context.Background(), "ses_leaving", nil); err != nil {
 			t.Fatalf("remove a session while a claim is stored under bad:role: %v", err)
 		}
 		assertRoleHolder(t, registry, "reviewer", "")
-		if _, err := registry.Get("ses_leaving"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		if _, err := registry.Get(context.Background(), "ses_leaving"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 			t.Fatalf("ses_leaving's interest after its removal: %v, want it gone", err)
 		}
 	})

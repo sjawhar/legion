@@ -135,6 +135,8 @@ web_modules/
 
 # Output of 'npm pack'
 *.tgz
+# The nats chart gcp:ClusteredNatsHub's live test renders, vendored at the version the component pins.
+!packages/envoy/infra/gcp/testdata/nats-2.15.1.tgz
 
 # Yarn Integrity file
 .yarn-integrity
@@ -158,7 +160,8 @@ out
 .nuxt
 dist
 packages/*/dist/
-# The Claude Code plugin cache runs the plugin from its committed bundle.
+# The Claude Code plugin cache runs the plugin from main's committed bundle, which main's Rebuild
+# Claude Envoy plugin workflow writes; a pull request never commits it.
 !packages/claude-envoy/dist/
 
 # Gatsby files
@@ -269,6 +272,8 @@ $RECYCLE.BIN/
 # Playwright output (packages/dispatch e2e)
 packages/dispatch/e2e/test-results/
 packages/dispatch/e2e/playwright-report/
+# The second dashboard build two-process browser runs serve (`bun run e2e:multiprocess`)
+packages/dispatch/web/dist-b/
 
 .superpowers/sdd/
 

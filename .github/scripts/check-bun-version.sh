@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Bun is a toolchain, and CI must run the one this repository locks. The pin lives in
-# `.bun-version`; the two Dockerfile `ARG BUN_VERSION` defaults must equal it (nothing passes
-# `--build-arg`, so those defaults are what every image build resolves), and this check fails
-# until all three agree. Raising Bun is therefore three edits, made together.
+# `.bun-version`. A Dockerfile that declares `ARG BUN_VERSION` must give it the pinned version
+# as its default (nothing passes `--build-arg`, so the default is what every image build
+# resolves), and this check fails until the two agree. One file declares it today:
+# packages/daemon/docker/worker.Dockerfile, whose notices stage fetches Bun's licence at
+# `bun-v${BUN_VERSION}`. A Dockerfile that reads the variable nowhere declares no ARG for it:
+# that default would decide nothing, and a bump would carry an edit that changes no build.
 #
 # What this gate is for is accidental drift: an unpinned setup-bun step, a floating Docker tag, a
 # Bun install that never reads `.bun-version`. It does not try to stop someone who is deliberately
@@ -28,30 +31,41 @@
 #   6. an `env:` naming an `INPUT_*` variable at workflow, job, `container:` or step level — an
 #      action reads its inputs from `INPUT_*`, either way,
 #   7. a job `container:` or `services:` image on `oven/bun` whose tag is not the pinned one,
-#   8. that wrapper missing, or not holding exactly one setup-bun step whose only input is
-#      `bun-version-file: .bun-version` — it is checked for what it is, not only for what other
-#      files are not,
-#   9. a `FROM oven/bun` (case-insensitive) whose tag does not come from `${BUN_VERSION}`, an
-#      `ARG BUN_VERSION` default that disagrees with the pin, or a Dockerfile `RUN` (backslash
-#      continuations joined) that installs Bun,
+#   8. that wrapper missing, or not holding exactly one setup-bun step — that step holds
+#      `bun-version-file: .bun-version` and may also pass `no-cache` (which only turns setup-bun's
+#      cache off and cannot change the version), and any other input fails; it is checked for what
+#      it is, not only for what other files are not,
+#   9. a `FROM oven/bun` (case-insensitive) whose tag does not come from `${BUN_VERSION}`, a
+#      `FROM` on `ghcr.io/sjawhar/legion/ci` — the package every image a CI job fetches is copied
+#      into, named by digest — whose digest no row of `.github/ci-images.yaml` holds, or whose row
+#      copies another Bun release, an `ARG BUN_VERSION` default that disagrees with the pin, or
+#      a Dockerfile `RUN` (backslash continuations joined) that installs Bun,
 #  10. a tool-manager manifest (any mise file, `.tool-versions`) naming bun.
 #
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
-# read green locally. Workflows and actions are parsed as YAML, never grepped. Every problem is
-# printed with its file and line; the only non-zero exit is a named problem.
+# read green locally. Workflows and actions are parsed as YAML, never grepped, and an image
+# reference is read with the grammar of .github/scripts/ci_images.py, which is the grammar
+# .github/scripts/check-ci-images.sh reads a row of .github/ci-images.yaml with. Every problem
+# is printed with its file and line; the only non-zero exit is a named problem.
 #
 # Run from anywhere: .github/scripts/check-bun-version.sh
-# CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
+# CI runs it in ci.yaml's lint job, and its tests in ci.yaml's test job.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-python3 <<'PY'
+# The reference grammar is .github/scripts/ci_images.py's, beside this script in the repository
+# it checks, which PYTHONPATH names: a reference this gate reads is the reference the image gate
+# reads, so a row one of them counts as an oven/bun row is a row the other counts as one too.
+# PYTHONDONTWRITEBYTECODE keeps the import from leaving a __pycache__ in the tree.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 <<'PY'
 import re
 import sys
 from pathlib import Path
 
 import yaml
+
+from ci_images import split_reference
 
 
 class LineLoader(yaml.SafeLoader):
@@ -90,6 +104,11 @@ LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapp
 
 PIN_FILE = ".bun-version"
 SETUP_ACTION = Path(".github/actions/setup-bun/action.yml")
+# Every image a CI job fetches is a copy in this package, named by digest (ci.yaml's ci-images
+# job publishes it from CI_IMAGES), so a Dockerfile's Bun base names a digest and no version.
+# The row that digest belongs to is what says which Bun it is.
+CI_IMAGES = Path(".github/ci-images.yaml")
+MIRROR_REGISTRY = "ghcr.io/sjawhar/legion/ci"
 SKIP_DIRS = {".git", ".jj", "node_modules", ".venv", "vendor"}
 MISE_FILES = {
     "mise.toml",
@@ -117,6 +136,12 @@ DOCKER_RUN_BUN = re.compile(r"\bdocker\s[^\n|&;]*\brun\b[^\n|&;]*\b(oven/bun(?::
 INPUT_ASSIGNMENT = re.compile(r"INPUT_[A-Za-z0-9_-]+(?:=|<<)")
 MISE_ENTRY = re.compile(r'^"?(?:tools\.)?bun"?\s*[=:]|^bun\s|^\[tools\.bun\]')
 VERSION = re.compile(r"\d+\.\d+\.\d+")
+# The build variable this repository's Dockerfiles write a Bun tag as, and a stand-in the tag
+# grammar accepts. `oven/bun:${BUN_VERSION}` is no reference ci_images.py can read, and with the
+# variable stood in for, the rest of a reference — a host carrying a port, a tag written beside
+# a digest — is read by the one reader this repository has.
+BUN_ARG = "${BUN_VERSION}"
+BUN_ARG_STANDIN = "0bun-version-arg0"
 
 problems = []
 wrapper_setup_steps: list[tuple[int, dict]] = []
@@ -129,10 +154,22 @@ def one_line(value: object) -> str:
     return " ".join(str(value).split())
 
 
+def reference_parts(image: str) -> tuple[str, str, str, str]:
+    """(host, path, tag, digest) of an image reference, read with ci_images.py's grammar, and
+    every field "" where that grammar refuses the string. Each rule below reads the empty answer
+    as naming no Bun release and no row's digest, so a string that is not a reference fails the
+    rule it reaches instead of passing it."""
+    parts = split_reference(image.replace(BUN_ARG, BUN_ARG_STANDIN))
+    if parts is None:
+        return "", "", "", ""
+    host, path, tag, digest = parts
+    return host, path, tag.replace(BUN_ARG_STANDIN, BUN_ARG), digest
+
+
 def bun_tag_is_pinned(image: str, expected: str) -> bool:
     """An `oven/bun` reference is pinned when its tag is the pinned release, suffix and all;
-    an untagged reference is `latest`."""
-    return image.partition(":")[2].split("-")[0] == expected
+    an untagged reference is `latest`, and a string the grammar refuses carries no tag at all."""
+    return reference_parts(image)[2].split("-")[0] == expected
 
 
 def installs_bun(script: str, pinned: str = "") -> bool:
@@ -336,8 +373,8 @@ for workflow in workflows:
             )
 
 # The wrapper is judged for what it is, not only for what other files are not: a wrapper that is
-# deleted, repointed at a fork, duplicated, or given a second input would otherwise leave every
-# other rule satisfied while CI installed something else.
+# deleted, repointed at a fork, duplicated, or given any input other than `no-cache` would
+# otherwise leave every other rule satisfied while CI installed something else.
 if not SETUP_ACTION.is_file():
     problems.append(
         f"::error file={SETUP_ACTION}::{SETUP_ACTION} is missing: it is the one place Bun is "
@@ -357,7 +394,9 @@ else:
     line, step = wrapper_setup_steps[0]
     uses = str(step.get("uses"))
     options = step.get("with") if isinstance(step.get("with"), dict) else {}
-    extra = sorted(key for key in options if key != "bun-version-file")
+    # `no-cache` only says whether setup-bun caches the binary it downloads; it names no version,
+    # so the pin holds whatever its value.
+    extra = sorted(key for key in options if key not in {"bun-version-file", "no-cache"})
     if not uses.lower().startswith("oven-sh/setup-bun@"):
         problems.append(
             f"{SETUP_ACTION}:{line}: the wrapper runs {one_line(uses)}, not oven-sh/setup-bun@<ref>"
@@ -403,11 +442,50 @@ def joined_lines(text: str):
         yield start, pending.strip()
 
 
+mirror_upstreams: dict[str, str] | None = None
+
+
+def mirror_rows() -> dict[str, str]:
+    """digest -> upstream, from CI_IMAGES. Read once, and only when a FROM names the package: a
+    repository that mirrors nothing never has to hold the file."""
+    global mirror_upstreams
+    if mirror_upstreams is not None:
+        return mirror_upstreams
+    mirror_upstreams = {}
+    if not CI_IMAGES.is_file():
+        problems.append(
+            f"::error file={CI_IMAGES}::{CI_IMAGES} is missing: it is the one file that says "
+            f"which image each {MIRROR_REGISTRY} digest is a copy of"
+        )
+        return mirror_upstreams
+    content = read_text(CI_IMAGES)
+    if content is None:
+        return mirror_upstreams
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError as error:
+        problems.append(f"::error file={CI_IMAGES}::{CI_IMAGES} is not valid YAML: {one_line(error)}")
+        return mirror_upstreams
+    rows = document.get("images") if isinstance(document, dict) else None
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        digest, upstream = row.get("digest"), row.get("upstream")
+        if isinstance(digest, str) and isinstance(upstream, str):
+            mirror_upstreams[digest] = upstream
+    return mirror_upstreams
+
+
 for dockerfile in dockerfiles:
     content = read_text(dockerfile)
     if content is None:
         continue
-    for number, stripped in joined_lines(content):
+    instructions = list(joined_lines(content))
+    # The ARG's default is what every build of this repository resolves, since nothing passes
+    # `--build-arg`, so it is held to the pin wherever it is declared. A Dockerfile that reads
+    # the variable nowhere declares no ARG for it: that default would decide no byte of the
+    # image, and a bump would carry an edit that changes no build.
+    for number, stripped in instructions:
         upper = stripped.upper()
         if stripped.startswith("ARG BUN_VERSION="):
             default = stripped[len("ARG BUN_VERSION=") :].strip().strip('"')
@@ -418,10 +496,26 @@ for dockerfile in dockerfiles:
                 )
         elif upper.startswith("FROM ") and "oven/bun" in stripped.lower():
             image = stripped.split()[1]
-            if "${BUN_VERSION}" not in image.partition(":")[2]:
+            if BUN_ARG not in reference_parts(image)[2]:
                 problems.append(
                     f"{dockerfile}:{number}: {one_line(image)} hardcodes its Bun tag — use "
                     f"oven/bun:${{BUN_VERSION}} and ARG BUN_VERSION={pinned}"
+                )
+        elif upper.startswith("FROM ") and MIRROR_REGISTRY in stripped.lower():
+            image = stripped.split()[1]
+            digest = reference_parts(image)[3]
+            upstream = mirror_rows().get(digest) if digest else None
+            if upstream is None:
+                problems.append(
+                    f"{dockerfile}:{number}: {one_line(image)} names a digest no row of "
+                    f"{CI_IMAGES} holds — a FROM on {MIRROR_REGISTRY} names the digest of one of "
+                    f"its rows, which ci.yaml's ci-images job publishes"
+                )
+            elif "oven/bun" in upstream.lower() and not bun_tag_is_pinned(upstream, pinned):
+                problems.append(
+                    f"{dockerfile}:{number}: {one_line(image)} is the copy of "
+                    f"{one_line(upstream)}, but {PIN_FILE} locks {pinned} — raise both together: "
+                    f"edit that row of {CI_IMAGES} to oven/bun:{pinned} and name its digest here"
                 )
         elif upper.startswith("RUN ") and installs_bun(stripped, pinned):
             problems.append(

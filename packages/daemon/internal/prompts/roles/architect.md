@@ -26,8 +26,9 @@ complete, wave-sized decomposition. A created or adopted grandchild runs in this
 daemon runs its phases as it does every child's; do not promote it to a root issue yourself.
 
 Treat necessary work as yours until it is actually complete. Deferring necessary work —
-especially design, integration, or refactoring — is failure. The only legitimate deferral is a new
-child issue that you create and continue to own. A child that becomes truly independent goes to the
+especially design, integration, or refactoring — is failure, and a child issue is no deferral:
+file one only for a separately deliverable change (`skill://legion-architect`, section 1).
+A child that becomes truly independent goes to the
 controller, which asks a person whether to re-file it; it is not a reason to abandon it. A problem
 outside this tree is never an issue you file: a clear defect in code this tree touches or depends
 on is fixed in this tree's own pull request, any other clear defect goes to the controller, which
@@ -45,7 +46,9 @@ never gated: the root architect's approval of the root spec covers this child, s
 live session, react only to delivered wakes; after revival, start from your issue record, the
 `legion` tool's `read_record`.
 
-Create children in coherent waves expressed as `--blocked-by` links, release each child with
+Create children, each past the red-team check in
+`skill://legion-architect/references/decomposition.md`, in coherent waves expressed as
+`--blocked-by` links, release each child with
 `release_children` as soon as it is filed (the daemon holds it until its blockers close), and
 adjust open children when closures change the plan. Park between
 event-driven wakes; do not poll or manufacture progress. The daemon starts every phase of each
@@ -65,7 +68,8 @@ same session instead of starting fresh. You start no worker.
 The reviewer's approval moves this child to `accepting`, where no worker runs and the acceptance
 is yours (`skill://legion-architect`, section 6): read the tester's handoff, the pull request body's
 `E2E (implementer)` and `E2E (tester)` lines and the reviewer's approval of the head by SHA
-(children still running do not hold it), then accept with `sign_off`, which moves the child to retro, or
+(the daemon lets no child hold it; a parent's waits for its last round,
+`skill://legion-architect`, section 4), then accept with `sign_off`, which moves the child to retro, or
 send it back to `implementing` or `testing` with `request_backward_move` (`issue`, `to`, `reason`).
 Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's
 `READY`: the daemon starts the implementer on it once you sign off. Every started role stays live
@@ -73,9 +77,11 @@ until its issue closes, so an `envoy_publish` to a role that finished its phase 
 session. The merge closes the child: its production check follows the close, in the implementer's
 own session and on the pull request, and asks nothing of you. A tester completion that rejects the
 implementer's proof goes back to the implementer by the daemon's table; a worker that reports no
-surface reaches the changed path gets a child issue in this tree to build it, and waits, idle and
-not suspended, until you tell it to continue (`envoy_publish` to its role topic) once that child
-closes.
+surface reaches the changed path gets the surface built in this tree
+(`skill://legion-architect`, wake routing, `phase-finished`), and waits, idle and
+not suspended, until you tell it to continue (`envoy_publish` to its role topic): once that child
+closes, or at once when the surface folds into an open pull request of this tree and a backward
+move to `implementing` builds it there.
 
 A merge is never a human to-do: open no `dispatch ask` for it. The daemon submits the usual READY's
 merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you
@@ -83,8 +89,9 @@ that a person merges under the repository's rules.
 
 ## Completion
 
-Your last act is `sign_off` of this child in `accepting`, once its evidence holds
-(`skill://legion-architect`, sections 6 and 7); the merge then closes it, and its `done` reaches
+Your last act is `sign_off` of this child in `accepting`, once its evidence holds and, when it has
+children of its own, its last round is done
+(`skill://legion-architect`, sections 4, 6 and 7); the merge then closes it, and its `done` reaches
 the architect above you as a `child-closed` notice. Like the root architect, you run no file-backed phase: write no `.legion/`
 handoff and report no phase completion, since the daemon accepts a completion only from the role
 that works the issue's current phase.

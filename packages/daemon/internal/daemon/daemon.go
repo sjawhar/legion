@@ -105,7 +105,8 @@ const (
 	busyBackoffFirst = 250 * time.Millisecond
 )
 
-// overrides are the parts of a daemon a test replaces; the zero value is the real daemon.
+// overrides are the parts of a daemon a test replaces, and the listener `legion start` inherited;
+// the zero value is the real daemon binding its own address.
 type overrides struct {
 	// runtime builds the runtime over the worker stream in place of the configured one; nil is the
 	// configured runtime.
@@ -141,7 +142,9 @@ type overrides struct {
 	// required-checks reads and its issue branches' creates); empty, in production, is
 	// https://api.github.com.
 	githubAPI string
-	// listen opens the API listener; nil is net.Listen.
+	// listen takes the API listener for cfg's bind and port; nil binds them with net.Listen. Run's
+	// serves the socket `legion start` inherited from LEGION_LISTEN_FD (handed); a test's hands
+	// over a listener it holds.
 	listen func(network, address string) (net.Listener, error)
 	// strandedReported runs once the boot's report of the claims nothing will wake has finished,
 	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
@@ -196,8 +199,22 @@ type Build struct {
 //
 // build is the binary's own build (Build), which the boot compares against the open production
 // checks of the repository it is built from.
-func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger) error {
-	return run(ctx, cfg, build, log, overrides{})
+//
+// listener, when not nil, is the API listener the daemon serves on in place of binding cfg's bind
+// and port: the socket `legion start` inherited (LEGION_LISTEN_FD), which it checked names both.
+// Run closes it once it stops serving, as it closes a listener it binds; a refusal before the
+// listener is taken leaves it to the caller to close.
+func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, listener net.Listener) error {
+	return run(ctx, cfg, build, log, overrides{listen: handed(listener)})
+}
+
+// handed is the listen of a daemon handed listener: it takes listener, whatever address it is
+// asked for, and binds nothing. A nil listener hands nothing, and the daemon binds its own address.
+func handed(listener net.Listener) func(network, address string) (net.Listener, error) {
+	if listener == nil {
+		return nil
+	}
+	return func(string, string) (net.Listener, error) { return listener, nil }
 }
 
 func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, o overrides) error {
@@ -255,10 +272,10 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	// The mapping read waits out an unreachable Dispatch without limit, and the mapping's
-	// installation check and the App mint wait out GitHub's transient failures within appMintRetry;
-	// the boot budget bounds none of them, as it does not bound the plugin gate or the image probe:
-	// the work after them has a budget of its own.
+	// The mapping read waits out an unreachable Dispatch without limit, and the App mint waits out
+	// GitHub's transient failures within appMintRetry; a repository whose installation read fails
+	// is left out and read again, never a refused boot. The boot budget bounds none of them, as it
+	// does not bound the plugin gate or the image probe: the work after them has a budget of its own.
 	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build)
 	if err != nil {
 		st.Close()
@@ -303,6 +320,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 			log.Info("legion workflow boot stage", "stage", "launcher")
 		}
 	}
+	// The API serves on the socket it was handed (Run's listener) or binds cfg's address here.
 	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
 	listen := net.Listen
 	if o.listen != nil {
@@ -448,7 +466,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		case err == nil:
 			log.Info("legion daemon started",
 				"project", cfg.Project,
-				"address", address,
+				"address", listener.Addr().String(),
 				"workerStream", s.stream.Addr(),
 				"runtime", cfg.Runtime.Name,
 				"admissionCap", cfg.AdmissionCap,
@@ -739,7 +757,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		if err != nil {
 			return err
 		}
-		p.gate = pluginGate{
+		gate := pluginGate{
 			env:            env,
 			workDir:        cfg.StateDir,
 			invocation:     invocation,
@@ -749,8 +767,16 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			contract:       api.DaemonAPIVersion,
 			roleReferences: p.roleReferences,
 			log:            log,
-		}.verify
+		}
 		image := capabilities.Image{Launch: omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation), Env: environPairs(env), WorkDir: cfg.StateDir}
+		// The role overlays first: a cheap read whose refusal names the operator's file, before the
+		// plugin gate's slower load probes.
+		p.gate = func(ctx context.Context) error {
+			if err := checkPaneRoleOverlays(ctx, cfg, image, log); err != nil {
+				return err
+			}
+			return gate.verify(ctx)
+		}
 		p.modelFallback = func(ctx context.Context) string {
 			state, err := capabilities.ReadModelFallback(ctx, image)
 			if err != nil {
@@ -760,6 +786,34 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			return state
 		}
 		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log)
+	}
+	return nil
+}
+
+// checkPaneRoleOverlays is the boot gate's read of every role role_config_files names, as that
+// role's pane will start Oh My Pi: its PI_CONFIG_FILES, runtime.tmux.pi_config_files then its own
+// files, each file read and the role's own each read alone by image's Oh My Pi
+// (capabilities.CheckOverlays), so a file a pane's Oh My Pi would refuse refuses the boot, naming
+// the role and the file, rather than every launch of that role. The turn-scoping overlay the
+// runtime writes at each launch is Legion's own and is left out. A run that never reached an exit
+// of its own is logged, not refused, as the model-fallback read is.
+func checkPaneRoleOverlays(ctx context.Context, cfg config.Config, image capabilities.Image, log *slog.Logger) error {
+	var every []string
+	if block := cfg.Runtime.Tmux; block != nil {
+		every = block.PiConfigFiles
+	}
+	for _, role := range config.RoleConfigRoles {
+		own := cfg.RoleConfigFiles[role]
+		if len(own) == 0 {
+			continue
+		}
+		why, err := capabilities.CheckOverlays(ctx, image, slices.Concat(every, own), own)
+		if err != nil {
+			log.Warn("boot gate: Oh My Pi did not answer on some of a role's overlays; its files were read", "role", role, "error", err)
+		}
+		if why != "" {
+			return fmt.Errorf("boot gate: role_config_files.%s: the %s's Oh My Pi would not start: %s", role, role, why)
+		}
 	}
 	return nil
 }
@@ -820,7 +874,8 @@ func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, er
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
 // stream and the GitHub credential function, which boot hands the factory: the `runtime.tmux`
-// block's pane variables, Oh My Pi overlays and take_over among them.
+// block's pane variables, Oh My Pi overlays and take_over among them, and each role's own overlays
+// (role_config_files).
 func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
 	opts := tmux.Options{
 		Project:           project,
@@ -835,6 +890,7 @@ func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backen
 		ProbeInterval:     cfg.ProbeInterval,
 		AdoptTimeout:      cfg.SlowCommandTimeout,
 		ProviderEnvDir:    providerEnvDir,
+		RoleConfigFiles:   cfg.RoleConfigFiles,
 		Log:               log,
 	}
 	if block := cfg.Runtime.Tmux; block != nil {
@@ -1406,11 +1462,15 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var grants *credential.Grants
 	var claimReady func(supervise.Claim)
 	var prepare func(context.Context, intake.DispatchIssue) (intake.DispatchIssue, error)
+	var unread func(string) bool
+	var await func(repo, tree, child, parent string)
 	var githubAPI string
+	var consumerLag func(context.Context) []intake.ConsumerLag
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
-		claimReady, prepare = workflow.claimReady, workflow.prepareObserved
+		claimReady, prepare, unread, await = workflow.claimReady, workflow.prepareObserved, workflow.repositoryUnread, workflow.awaitRecovery
 		githubAPI = workflow.githubAPI
+		consumerLag = workflow.consumers.Lag
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
 	// its ready. The liveness sweep runs beside it under either mode, never behind it.
@@ -1435,6 +1495,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			settings:     api.SettingsOf(cfg),
 		},
 		StateTransactions:  st,
+		ConsumerLag:        consumerLag,
 		Supervisor:         s.supervisor,
 		BootTokens:         s.tokens,
 		Project:            p.project,
@@ -1451,6 +1512,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Pool:               st.Pool(),
 		Handlers:           handlers,
 		PrepareRepository:  prepare,
+		RepositoryUnread:   unread,
+		AwaitRecovery:      await,
 		RoleFor:            phaseRole,
 		Record:             records,
 		Dispatch:           client,
@@ -1563,10 +1626,11 @@ type source struct {
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
 // widening record.Store's fixed transaction interface; the workflow and the state route read the
-// store through it. Every read that starts from Issues is within this filtered set. Slots are not
-// filtered here: a slot's index is unique across every project's slots, so admission chooses the
-// next one over all of them and counts only its own against its cap (admit.ownSlots). The outbox's
-// claim is scoped in its SQL instead, because the lease it takes is itself the damage.
+// store through it. Every read that starts from Issues or QueuedRootsUnder is within this
+// filtered set. Slots are not filtered here: a slot's index is unique across every project's
+// slots, so admission chooses the next one over all of them and counts only its own against its
+// cap (admit.ownSlots). The outbox's claim is scoped in its SQL instead, because the lease it
+// takes is itself the damage.
 //
 // It is also where the outbox learns of its rows: every write that makes a row due — Enqueue, and
 // ExpediteOutbox — wakes the row's lane (outbox.wake) once the transaction has committed, through
@@ -1586,13 +1650,26 @@ func (s projectRecords) Issues(ctx context.Context, tx pgx.Tx) ([]record.Issue, 
 	if err != nil {
 		return nil, err
 	}
+	return s.own(all), nil
+}
+
+func (s projectRecords) QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]record.Issue, error) {
+	all, err := s.Store.QueuedRootsUnder(ctx, tx, key)
+	if err != nil {
+		return nil, err
+	}
+	return s.own(all), nil
+}
+
+// own is every issue of all in the daemon's project, in all's order.
+func (s projectRecords) own(all []record.Issue) []record.Issue {
 	issues := make([]record.Issue, 0, len(all))
 	for _, issue := range all {
 		if issue.Project == s.project {
 			issues = append(issues, issue)
 		}
 	}
-	return issues, nil
+	return issues
 }
 
 func (s projectRecords) Enqueue(ctx context.Context, tx pgx.Tx, row record.OutboxRow) error {

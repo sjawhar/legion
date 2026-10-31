@@ -79,13 +79,13 @@ func (r *Reconcile) Run(ctx context.Context, leases duty.Leases) {
 		}
 		slog.Info("dispatch delivery: no GitHub App key — the reconcile is idle")
 		return true
-	}, func(ctx context.Context) { r.leasedPass(ctx, leases) })
+	}, func(ctx context.Context, due time.Time) { r.leasedPass(ctx, leases, due) })
 }
 
 // leasedPass runs one reconcile pass under the lease, for the ReconcileInterval this loop ticks
-// on.
-func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases) {
-	duty.Exclusive(ctx, leases, deliveryReconcileLease, ReconcileInterval, r.runOnce)
+// on and the tick due at due.
+func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases, due time.Time) {
+	duty.Exclusive(ctx, leases, deliveryReconcileLease, due, ReconcileInterval, r.runOnce)
 }
 
 // runOnce performs one reconcile pass: a permission check (so a missing Actions or Pull-requests
@@ -166,7 +166,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	// Last, over everything this pass stored and what intake stored since the previous one: the
 	// issue.deployed of every pull request whose shipping run is now known. Its failure is the
 	// pass's, so last_error names it, and the rows it did not reach wait for the next pass.
-	if written, err := RecordDeployedEvents(ctx, r.pool, settings, r.events, now); err != nil {
+	if written, err := RecordDeployedEvents(ctx, r.pool, settings, r.events); err != nil {
 		record("record issue.deployed events", err)
 	} else if written > 0 {
 		slog.Info("dispatch delivery: recorded issue.deployed", "events", written, "by", "reconcile")
@@ -181,7 +181,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	}
 	// The change log keeps a day (ChangeRetention): a page away longer reads its window once. A
 	// failed prune leaves the rows for the next pass and fails nothing else.
-	if _, err := PruneChanges(ctx, r.pool, time.Now()); err != nil {
+	if _, err := PruneChanges(ctx, r.pool); err != nil {
 		slog.Error("dispatch: delivery prune changes failed", "error", err)
 	}
 }

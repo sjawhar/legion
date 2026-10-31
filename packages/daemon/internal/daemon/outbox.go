@@ -1,12 +1,12 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -630,15 +630,26 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
 // notice either, and, before any publish, a row whose architect stopped with its finished tree
-// (stoppedWithTree). A publish the listener accepts but then cannot forward, to a session that is
-// registered but no longer running, comes back as a role-lane exception and is queued again
-// (rehold, notice_exceptions.go) unless its architect stopped with its finished tree. The runner
-// executes a row it leased from memory, so a row deleted under its lease since (a catch-up a newer
-// ready dropped) is found gone in the tree's snapshot and finishes without a publish, and so does a
-// catch-up a newer one superseded (catchUpSuperseded, read against the snapshot's root and the
-// claim as it runs now): the re-hold reads the claim from memory and writes its copy outside
-// ApplyFact's lock, so it can lose the race to a ready and commit an older copy after the fresh
-// catch-up.
+// (stoppedWithTree). A listener that confirms a role message before it answers says when the
+// architect's session did not take the notice (notify.ErrNotDelivered): when the last forward
+// reached the NATS server and drew no receipt (`receipt_timeout`) — a session that is registered
+// but no longer running, or one whose connection is moving to another server — the notice is
+// queued again from the answer by the re-hold policy (reholdNotice, notice_exceptions.go) and the
+// row finishes; when the listener could not forward it at all (`delivery_failed`), as when the hub
+// is down, the row retries on its backoff as any failed publish does, so an outage drops nothing.
+// A holder that does not advertise the notice's delivery mode (notify.ErrRefusedByHolder) refuses
+// every attempt until another session holds the role, and a forward the listener's own NATS grant
+// denies (notify.ErrPublishDenied) is denied on every attempt until an operator changes the grant,
+// so either row finishes undelivered with one log line naming the reason rather than hold every
+// later notice to the architect behind the fence. A listener of an earlier release answers 200 and
+// reports a forward that then fails as a role-lane exception, which is queued again by the same
+// policy (rehold). Neither re-hold queues a copy when its architect stopped with its finished
+// tree. The runner executes a row it leased from memory, so a row deleted under its lease since (a
+// catch-up a newer ready dropped) is found gone in the tree's snapshot and finishes without a
+// publish, and so does a catch-up a newer one superseded (catchUpSuperseded, read against the
+// snapshot's root and the claim as it runs now): the re-hold reads the claim from memory and
+// writes its copy outside ApplyFact's lock, so it can lose the race to a ready and commit an older
+// copy after the fresh catch-up.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -683,8 +694,27 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	notice, key := payload.Published(row.ID)
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
+	var notDelivered notify.ErrNotDelivered
+	var refused notify.ErrRefusedByHolder
+	var denied notify.ErrPublishDenied
 	switch {
 	case published == nil:
+		return nil
+	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
+		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
+		source := cmp.Or(payload.ResendOf, row.ID)
+		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect}
+		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder); err != nil {
+			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
+		}
+		return nil
+	case errors.As(published, &refused):
+		r.log.Warn("outbox notice finished undelivered: its architect's session does not advertise the delivery mode",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "holder", refused.Holder, "error", published)
+		return nil
+	case errors.As(published, &denied):
+		r.log.Warn("outbox notice finished undelivered: the listener's NATS grant denied the forward to its architect",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "reason", denied.Message)
 		return nil
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
@@ -699,10 +729,16 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 
 // mergeQueue publishes the merger's READY packet, or the daemon's withdrawal of it, to the
 // project's merge queue role, keyed by the row so a retried row is one delivery. A role with no
-// live holder refuses every attempt until someone claims it, so waiting would retry forever; the
+// live holder refuses every attempt until someone claims it, so does a holder that does not
+// advertise the packet's delivery mode (notify.ErrRefusedByHolder) until another session holds the
+// role, and so does the listener's own NATS grant when it denies the forward
+// (notify.ErrPublishDenied) until an operator changes it, so waiting would retry forever; the
 // Dispatch message the same READY posted already carries the packet, and the issue's status shows
-// a withdrawal, so the issue is told the role had no holder, as the merger's prompt says the
-// daemon does (internal/prompts/go/merger.md), and the row is done.
+// a withdrawal, so the issue is told the role had no holder (as the merger's prompt,
+// internal/prompts/go/merger.md, says the daemon does), that its holder refused the packet, or that
+// the listener was denied the forward, and the row is done. A holder that did not confirm the packet
+// in time (notify.ErrNotDelivered) is retried on the row's backoff as any failed publish is: the
+// holder, or the session that next claims the role, can take it.
 func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
@@ -710,6 +746,16 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	err := r.notices.Publish(ctx, notify.RoleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
 	if errors.Is(err, notify.ErrNoHolder) {
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
+	}
+	var refused notify.ErrRefusedByHolder
+	if errors.As(err, &refused) {
+		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s refused the packet: its holder %s does not advertise the delivery mode, at %s",
+			payload.Role, refused.Holder, r.now().UTC().Format(time.RFC3339))})
+	}
+	var denied notify.ErrPublishDenied
+	if errors.As(err, &denied) {
+		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s: the listener's NATS grant denied the forward (%s), at %s",
+			payload.Role, denied.Message, r.now().UTC().Format(time.RFC3339))})
 	}
 	if err != nil {
 		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)
@@ -1411,11 +1457,12 @@ func (r *outbox) checkBound(ctx context.Context, row record.OutboxRow) error {
 // (record.CheckCompare), read from GitHub as the implement App, the App that merged the check's
 // pull request. A check closed since, or whose last look has started, is compared with nothing,
 // and so is one a later merge replaced since the row was queued (NamedBy). A row carrying a deploy
-// run is checkDeployRun's from there. For a build — the commit a daemon boot or a Dispatch start
-// reported itself built from — the question is whether it contains the check's merge commit. A
-// check that recorded no merge commit (an upgrade-opened one, record.ProductionCheck.MergeSHA) has
-// it read from its pull request first and recorded (recordMergeCommit), so this compare and every
-// later one has it. GitHub's compare of the merge with the build answering `identical` or `ahead`
+// run is checkDeployRun's from there. For a build — the commit a daemon boot reported itself built
+// from, or Dispatch announced every server process serves (server.started) — the question is
+// whether it contains the check's merge commit. A check that recorded no merge commit (an
+// upgrade-opened one, record.ProductionCheck.MergeSHA) has it read from its pull request first and
+// recorded (recordMergeCommit), so this compare and every later one has it. GitHub's compare of
+// the merge with the build answering `identical` or `ahead`
 // says the merge is an ancestor of the build, so the build carries it: intake.CheckWake wakes the
 // look the row was queued for, once per check (record.ProductionCheck.ID), build and cause.
 // `behind` or `diverged` is a build without the merge, and a commit GitHub does not know (404) is
@@ -1464,13 +1511,10 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 			return err
 		}
 	}
-	var compare struct {
-		Status string `json:"status"`
-	}
 	// Both commits are SHAs by the time they reach here (the merge from GitHub's own answer, the
-	// build held to workflow's buildShape before its row was queued); the escape is defence in depth,
+	// build held to workflow's buildShape before its row was queued); Compare escapes them anyway,
 	// so a value that is not keeps to its path segment rather than ending the request at a `#` or `?`.
-	err = github.Get(ctx, "/compare/"+url.PathEscape(check.MergeSHA)+"..."+url.PathEscape(payload.Build)+"?per_page=1", &compare)
+	compare, err := github.Compare(ctx, check.MergeSHA, payload.Build)
 	var answer *githubrest.Answer
 	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
 		r.log.Info("outbox check compare finished without acting: GitHub does not know the merge or the build", "row", row.ID,
@@ -1773,6 +1817,12 @@ func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 	return ghbranch.Create(ctx, github, repo, workspace.Bookmark(issue.Key), issue.DefaultBranch)
 }
 
+// removeWorkspace removes the workspace of the row's issue once its tree's linger expired. The
+// removal belongs to the tree whose linger queued it and to that linger's root generation: an issue
+// adopted into another tree since (workflow.Engine.Adopt) works in its new tree, and a tree
+// re-admitted since runs in the workspace again, so either row finishes without acting. A row
+// queued by an earlier release names no tree and is fenced by its linger alone, against the
+// issue's current tree.
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {
 	if r.supervisor == nil {
 		return errors.New("workspace removal has no claim supervisor")
@@ -1784,9 +1834,15 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if err != nil {
 		return err
 	}
+	if payload.Tree != "" && payload.Tree != issue.Tree {
+		r.log.Info("outbox workspace removal of a tree the issue left; finished without acting", "row", row.ID, "issue", issue.Key,
+			"tree", payload.Tree, "current", issue.Tree, "linger", payload.Linger)
+		return nil
+	}
 	// The removal belongs to the linger it expired, the root generation it names. Once
 	// re-admission ends that linger, the tree's new run may already work in the workspace again,
 	// even in a later linger of the tree, so a removal still backing off finishes without acting.
+	// Past the fence above, the tree the row names is the issue's own.
 	root, err := r.root(ctx, issue)
 	if err != nil {
 		return err

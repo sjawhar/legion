@@ -185,3 +185,73 @@ func TestALaunchedPaneIsToldTheOperatorsBlock(t *testing.T) {
 		}
 	}
 }
+
+// role_config_files reaches the panes of the roles it names alone: such a pane's PI_CONFIG_FILES is
+// the operator's overlays, then the role's own in order, then the turn-scoping overlay, still last
+// so its two keys outrank them all — the daemon-launched controller's pane too. A pane of a role it
+// does not name gets the very pane command a daemon without the key gives it.
+func TestOnlyTheNamedRolesPanesAreToldTheirOwnOverlays(t *testing.T) {
+	own := map[claim.Role][]string{
+		claim.RoleTester:     {"/etc/legion-operator/fallback.yml", "/etc/legion-operator/tester.yml"},
+		claim.RoleController: {"/etc/legion-operator/fallback.yml"},
+	}
+	stateDir := t.TempDir()
+	runtimeOn := func(t *testing.T, files map[claim.Role][]string) *fakeServerRuntime {
+		return newFakeServerRuntimeWith(t, staticCredential, nil, func(o *Options) {
+			o.StateDir, o.PiConfigFiles, o.RoleConfigFiles = stateDir, []string{"/etc/legion-operator/overlay.yml"}, files
+		})
+	}
+	// specs are one launch spec per role, the same for every runtime below, so two launches of a
+	// role differ by the runtime alone.
+	specs := map[claim.Role]runtime.SpawnSpec{claim.RoleController: controllerSpec(t, "omp")}
+	for _, role := range []claim.Role{claim.RoleTester, claim.RoleImplementer, claim.RoleArchitect} {
+		specs[role] = runtimeOn(t, nil).spec(t, role)
+	}
+	// launch is the new-window argv, and its pairs, of one launch of role by a runtime given the
+	// operator's overlay and files, on stateDir.
+	launch := func(t *testing.T, files map[claim.Role][]string, role claim.Role) ([]string, []string) {
+		t.Helper()
+		f := runtimeOn(t, files)
+		if _, err := f.Spawn(context.Background(), specs[role]); err != nil {
+			t.Fatalf("Spawn %s: %v", role, err)
+		}
+		for _, argv := range f.argvs {
+			if verb(argv) == "new-window" {
+				return argv, f.pairs(t)
+			}
+		}
+		t.Fatal("no new-window")
+		return nil, nil
+	}
+	turnScope := filepath.Join(stateDir, podsafety.TurnScopeFile)
+	for role, want := range map[claim.Role]string{
+		claim.RoleTester:     "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:/etc/legion-operator/fallback.yml:/etc/legion-operator/tester.yml:" + turnScope,
+		claim.RoleController: "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:/etc/legion-operator/fallback.yml:" + turnScope,
+	} {
+		if _, pairs := launch(t, own, role); !slices.Contains(pairs, want) {
+			t.Errorf("the %s's pane pairs = %q, want %q", role, pairs, want)
+		}
+	}
+	for _, role := range []claim.Role{claim.RoleImplementer, claim.RoleArchitect} {
+		with, pairs := launch(t, own, role)
+		without, _ := launch(t, nil, role)
+		if !slices.Equal(with, without) {
+			t.Errorf("the %s's new-window with another role's overlays =\n%q\nwant the one without the key:\n%q", role, with, without)
+		}
+		if want := "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:" + turnScope; !slices.Contains(pairs, want) {
+			t.Errorf("the %s's pane pairs = %q, want %q", role, pairs, want)
+		}
+	}
+}
+
+// New refuses a role's overlay PI_CONFIG_FILES cannot name, as it refuses the operator's.
+func TestNewRefusesARoleOverlayPIConfigFilesCannotName(t *testing.T) {
+	for _, file := range []string{"fallback.yml", "/etc/a:b.yml"} {
+		opts := paneEnvOptions(t, nil, nil)
+		opts.RoleConfigFiles = map[claim.Role][]string{claim.RoleMerger: {file}}
+		want := `tmux runtime: Oh My Pi overlay "` + file + `" is not an absolute path PI_CONFIG_FILES can name`
+		if _, err := New(opts); err == nil || err.Error() != want {
+			t.Errorf("New with the merger's overlay %q = %v, want %q", file, err, want)
+		}
+	}
+}
