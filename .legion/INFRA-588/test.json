@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-588",
+  "previousHandoff": "1e8492bf9b137226060af604aabdf394f909bf77",
+  "completed": "2026-10-31T22:38:00Z",
+  "round": 15,
+  "head": "aa3a96f51df0a3b4fa273b785363fec618601346",
+  "codeHead": "fea4f37cc0ab4a6004ae73c9defb386d442af054",
+  "roundNote": "Round 15 is one forward merge of main f699b131 (#2607, which stops releasing the OpenCode plugin), at code fea4f37c. The architect scoped it to the merge's five points (Envoy f0aa3e8e). Retro's commit 1e8492bf removed .legion/INFRA-588/, so this handoff is written fresh, and previousHandoff names that removal.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I re-ran each of the implementer's commands on the merged tree in the workspace: layout checker, release-push.test.sh, check-release-credentials.sh and its test, check-ci-filters.sh, fold-orphans and the fold's plan step. I also re-ran their negative control: an envoy-plugin fragment on top of the merge makes fold-orphans exit 1. Then I did the comparison they summarised as a fingerprint myself, file by file, against the approved diff. All hold."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "(1) Outside the conflict, the diff against main equals the approved diff at d696ff64",
+      "surface": "git diff in a scratch clone: approved = 1a9095e6 (d696ff64's merge base with main) -> d696ff64; merged = main f699b131 -> fea4f37c; .legion/ and docs/solutions/ (retro's) left out",
+      "command": "the changed-file lists of both diffs; then, for each file, the sha1 of its -U0 added and removed lines in each diff",
+      "observed": "54 files in each, the same 54. 51 have identical change lines. The 3 that differ are the conflict #2607 caused: .github/changelog-packages lacks the line packages/envoy-plugin=opencode-legion-envoy-v; changelog-fold.yaml's removed CHANGELOG_PACKAGES line is main's version without envoy-plugin; AGENTS.md's line says 'the six packages … (pi-legion, pi-envoy, envoy, claude-envoy, contracts, envoy-client)' where the approved line said seven with envoy-plugin",
+      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
+      "negativeControl": "the per-file comparison does flag differences: those three files"
+    },
+    {
+      "criterion": "(2) .github/changelog-packages holds exactly main's six specs, and changelog-fold.yaml reads that file with no CHANGELOG_PACKAGES",
+      "surface": "the merged tree fea4f37c and main f699b131",
+      "command": "diff of main's CHANGELOG_PACKAGES value, split one word per line, against .github/changelog-packages; grep -c CHANGELOG_PACKAGES and grep -c 'packages=$(<.github/changelog-packages)' in the merged changelog-fold.yaml",
+      "observed": "identical, 6 lines, same order (no envoy-plugin); CHANGELOG_PACKAGES 0 times in changelog-fold.yaml; the file is read in 3 steps. The fold's plan step on the merged tree: exit 0, no warning, packages claude-envoy, envoy, envoy-client, pi-envoy and pi-legion planned (contracts has no fragment)",
+      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
+      "negativeControl": "a commit adding packages/envoy-plugin/.changes/unreleased/x.yaml on the merge: fold-orphans exit 1 naming it, and the fold's plan exits 0 with one ::warning::"
+    },
+    {
+      "criterion": "(3) AGENTS.md names the file and six packages, and the layout checker exits 0",
+      "surface": "AGENTS.md at the merged tree",
+      "command": "grep -n changelog-packages AGENTS.md; bun scripts/semantic-line-breaks.ts AGENTS.md; git grep CHANGELOG_PACKAGES outside .legion",
+      "observed": "AGENTS.md:539 'the six packages `.github/changelog-packages` lists (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`), the one list the fold and the check below both read'; layout exit 0; CHANGELOG_PACKAGES remains only in check-release-credentials.test.sh's synthetic fixture, as in round 13",
+      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
+      "negativeControl": "the approved AGENTS.md line (d696ff64) names seven packages with envoy-plugin; the merge changed it to six"
+    },
+    {
+      "criterion": "(4) release.yaml and check-release-credentials.sh are main's plus only #2411's own changes, and the release and filter checks pass on the merged tree",
+      "surface": "git diff f699b131..fea4f37c over those files; the scripts run in the workspace at the merged tree",
+      "command": "git diff --stat over release.yaml, check-release-credentials.sh and its test; bash check-release-credentials.sh; bash check-release-credentials.test.sh; uv run --with pyyaml==6.0.2 bash check-ci-filters.sh; bash release-push.test.sh; bash -c 'release-push.sh fold-orphans $(<.github/changelog-packages)'",
+      "observed": "empty diff: the pull request changes none of those three files, so they equal main's. check-release-credentials exit 0, '7 credentialed job(s) and 9 build job(s) across 5 workflows…'. Its test: PASS. check-ci-filters exit 0, 29 gates. release-push.test.sh: 635 passed, 0 failed. fold-orphans exit 0",
+      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
+      "negativeControl": "the envoy-plugin fragment above fails fold-orphans"
+    },
+    {
+      "criterion": "(5) migrationid's closings are unchanged and the store tests pass",
+      "surface": "migrationid.go at the merged tree; go test against my own PostgreSQL 17.11 + pgvector (port 55434)",
+      "command": "git diff d696ff64..fea4f37c over migrationid, the daemon store and Dispatch's store.go and pool.go; git diff 1a9095e6..f699b131 over */migrations/*.up.sql; go test ./internal/store/... (daemon); go test ./migrationid/ ./internal/pgmigrate/... and ./internal/dispatch/store/ -run 'Migrat|Identifier|NumberedAfter|TakesNumbers|Healthy|Embedded' (envoy)",
+      "observed": "no change in those files; main added no migration between the two bases. Closings stay 0064_pull_request_pass_settlement.up.sql at 64 and 0149_event_horizon.up.sql at 149. Daemon store ok (47.4 s), migrations ok; migrationid, pgmigrate, pgmigratetest ok; Dispatch store ok (170.8 s)",
+      "headSha": "aa3a96f51df0a3b4fa273b785363fec618601346",
+      "negativeControl": "round 14: a shipped timestamped migration fails the daemon tests before d910aa0c (unchanged since)"
+    }
+  ],
+  "observations": [
+    "CI: fea4f37c has no runs of its own. At aa3a96f5, changes and pr-title were queued when I read them (22:37Z), and no ci-ok yet. The reviewer approves once ci-ok and pr-title are green.",
+    "Retro removes .legion/INFRA-588/ again before the new READY."
+  ]
+}
