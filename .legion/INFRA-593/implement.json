@@ -2,41 +2,41 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "completed": "2026-10-31T01:20:00Z",
+  "completed": "2026-10-31T03:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
-  "round": 11,
-  "answersReview": "Round 6 at 2dfde180 (REQUEST_CHANGES, review head 370bce4b): internal/dispatch/docs timed out under -race at 30 min with the branch merged into main. Per the architect: merge main forward (now carrying #2516's envoy-go-race-docs job), quote the package's -race time against main, and cut this PR's added test cost.",
+  "round": 12,
+  "answersReview": "Review round 7 at 20e03351 (REQUEST_CHANGES, review head f7e516d3): 1 important (two more stored-state decodes logged the doubled refusal) and 6 minors, all fixed in 800ec539; main merged forward (28e1edbb); ygo repinned from 845ce79c (on no branch) to the rc/v1.54.1-sami.1 head a23bc871 per INFRA-514's architect.",
   "proof": [
     {
-      "criterion": "The tests this PR adds pass reliably in the race lane",
+      "criterion": "Every decode of stored state refuses ygo's reasonless refusal once: history check, room load, cold read, socket admission (loadTree) and a write's fork (coldFork)",
+      "surface": "go test of internal/dispatch/docs on Postgres 16.2",
+      "command": "go test ./internal/dispatch/docs -run '^TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce$' -v; and -race -count=300",
+      "observed": "PASS; each path's error ends ': crdt: invalid update', with no doubled text, and errors.Is ErrInvalidUpdate; a cut mid-structure keeps 'encoding: unexpected end of input'.",
+      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
+      "negativeControl": "With loadTree, or coldFork, reverted to crdt.ApplyUpdateV1, the test fails: '... decode live document: crdt: invalid update: crdt: invalid update, want an invalid update ending \"crdt: invalid update\"'."
+    },
+    {
+      "criterion": "The evidence holds at the new ygo pin a23bc871: refused, parked and wording tests deterministic under -race, the tester's a22f0f29 test passing unmodified",
       "surface": "go test -race of internal/dispatch/docs on Postgres 16.2",
       "command": "GOMAXPROCS=4 CGO_ENABLED=1 go test -race -p 2 -parallel 4 ./internal/dispatch/docs -count=300 -run '^(TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks|TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt|TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce)$' -v",
-      "observed": "ok 459.4 s: 300 PASS of each of the three tests, 0 FAIL, 0 DATA RACE.",
-      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
-      "negativeControl": "At 221f3ce3, without settle = time.Hour, the tester saw 4 failures in 190 runs of the parked-update test: a settlement write landed between the stored-rows load and the room read."
+      "observed": "ok 539.8 s: 300 PASS of each, 0 FAIL, 0 DATA RACE.",
+      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
+      "negativeControl": "At b24baf7d (ygo sami.7) the tester's a22f0f29 test failed: the room read 'after / hello' while the other peer read 'after / hello world'."
     },
     {
-      "criterion": "A history that does not decode is refused naming the decoder's reason once, for the history check, the room's load and the cold read",
-      "surface": "go test of internal/dispatch/docs on Postgres 16.2",
-      "command": "go test ./internal/dispatch/docs -run '^TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce$' -v",
-      "observed": "PASS: a cut ygo refuses with no reason is refused as 'crdt: invalid update' (errors.Is ErrInvalidUpdate) by validateUpdate, warmLiveDocument and LoadDocument; a cut mid-structure keeps 'crdt: invalid update: encoding: unexpected end of input'. A probe of 57 cuts of one row on head, sami.7 and sami.4 gave the same three messages on all three, the doubled one included, so the doubled wording is ygo's, not the pin's.",
-      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
-      "negativeControl": "With decodeStoredState's check disabled, the reasonless case fails: 'the history check = crdt: invalid update: crdt: invalid update, want \"crdt: invalid update\"'."
-    },
-    {
-      "criterion": "The change keeps the package and server working",
-      "surface": "local build, vet and suites on Postgres 16.2",
-      "command": "go vet ./internal/dispatch/docs; GOMAXPROCS=4 go test -p 2 -parallel 4 -count=1 ./internal/dispatch/docs ./cmd/dispatch",
-      "observed": "vet clean; ok docs 1681.8 s, cmd/dispatch 394.5 s.",
-      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
-      "negativeControl": "TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode, which requires the room's error to equal validateUpdate's, still passes: both go through decodeStoredState."
+      "criterion": "The merge of main and the round's changes keep the packages and server working",
+      "surface": "local build, vet and suites on Postgres 16.2 (en_US collation)",
+      "command": "go build ./... && go vet (plain, -tags multiprocess, -tags memory); infra TestDispatchConnectionsPerPodIsTheServers; GOMAXPROCS=4 go test -p 2 -parallel 4 ./internal/dispatch/docs ./cmd/dispatch ./internal/dispatch/store/... ./internal/pgmigrate/...",
+      "observed": "vet clean; connection test ok (91); ok docs 1746.9 s, cmd/dispatch 389.4 s, store 424.0 s, pgmigrate 3.9 s. Fingerprint comment: https://github.com/sjawhar/legion/pull/2444#issuecomment-6538465002.",
+      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
+      "negativeControl": "Before the merge GitHub reported f7e516d3 CONFLICTING with main 21b40359; at 800ec539 it reports MERGEABLE and started CI."
     },
     {
       "criterion": "Acceptance 1, 2 and 5 at the head",
       "surface": "real envoy-dispatch built from the head on Postgres 16.2, DISPATCH_NATS_DISABLED=1, through the HTTP API",
-      "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 14)",
+      "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 15)",
       "observed": "41 rows; after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37 leaving 4 rows; the 3 young rows unchanged in version, xmin and md5; text sha256 identical; a 31st upload reads back.",
-      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
+      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
       "negativeControl": "The restarted process's first sweep tick logs candidates=0 while the hour is recorded as served."
     }
   ],
@@ -46,10 +46,8 @@
     "migration renumbered 0141 -> 0142_doc_compaction_owed (up, census, its test, AGENTS.md, changelog fragment, cmd/dispatch/README.md)"
   ],
   "deviations": [
-    "ygo stays pinned to the release candidate 845ce79c; #2444 must not merge until it repins to v1.54.1-sami.1.",
-    "Main's settlement line kept the reason because main merged a many-row log, where head's compaction leaves a cut document one row; for one cut row, ygo words the refusal 'crdt: invalid update: crdt: invalid update' on sami.4 too and has no reason to give. decodeStoredState states it once; ygo's struct reader would have to name the reason for more.",
-    "The architect's item 3 (an uncommitted go.work.sum change) does not apply here: this workspace was recreated from the pushed branch, and jj diff shows no go.work.sum change; 221f3ce3 committed none.",
-    "No merge of main this round: GitHub reports the pull request MERGEABLE."
-  ],
-  "answersTest": "Tester round 10 at 221f3ce3 (fail): the parked-update test raced the test service's 20 ms settlement (4 of 190 under -race); the settlement's failed-load line read 'crdt: invalid update: crdt: invalid update'. Per INFRA-514's architect: fix the test with settle off, state the refusal once, merge main if it conflicts (it does not)."
+    "Correction of round 11's handoff: it said ygo sami.4 words a cut row's refusal 'crdt: invalid update: crdt: invalid update' too. That was wrong. sami.4, sami.7 and sami.9 name 'encoding: unexpected end of input' for all 200 cuts of a real stored row, and the release candidate (845ce79c and a23bc871) drops it for 196: a candidate regression, whose fix is with the ygo release session (dispatch://INFRA-593/artifact/ygo-truncated-reason-patch). Until it ships, decodeStoredState states the refusal once, and the log no longer says a history was cut short.",
+    "ygo is pinned to the rc head a23bc871, not a tag; #2444 must not merge until it repins to v1.54.1-sami.1.",
+    "main's #2422 reflowed AGENTS.md and cmd/dispatch/README.md one sentence per line; this branch's six doc changes are written back into main's files in that layout, words unchanged."
+  ]
 }
