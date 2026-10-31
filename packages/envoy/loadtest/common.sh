@@ -22,6 +22,10 @@
 # stack and the roles set the LOADTEST_*_PORT variables (or pick another root). stack.sh setup
 # records the ports in ROOT/stack.json, and `stack.sh status` prints them.
 #
+# check_ephemeral_ports PORTS: refuse a port of PORTS that lies inside the machine's ephemeral
+# port range (EPHEMERAL_RANGE_FILE), which an outbound connection may hold when the stack comes
+# to bind it. stack.sh setup runs it over the ports it records.
+#
 # lock_root ROOT: one run at a time per root (README.md, "One run at a time"). It takes an
 # exclusive, non-blocking flock on ROOT/.run.lock and keeps it on file descriptor 9. The lock lasts
 # until every process that holds that descriptor has exited: the holder and the children that
@@ -101,7 +105,7 @@ declare -A PORT_VAR=(
 declare -A PORT_OFFSET=(
   [postgres]=0 [proxy]=1 [nats]=2 [nats_monitor]=3 [listener]=4 [dispatch]=5 [pprof]=6 [metrics]=7
 )
-PORT_BASE=15000
+PORT_BASE=10000
 PORT_STRIDE=10
 PORT_BLOCKS=200
 
@@ -115,12 +119,54 @@ port_block() {
 
 # default_port KEY BLOCK: the default port of KEY in block BLOCK:
 #
-#   PORT_BASE + BLOCK * PORT_STRIDE + PORT_OFFSET[KEY] = 15000 + 10k + 0..7
+#   PORT_BASE + BLOCK * PORT_STRIDE + PORT_OFFSET[KEY] = 10000 + 10k + 0..7
 #
 # The 8 offsets differ and all are below the stride, so no two ports of a block and no two ports of
 # two different blocks ever meet (two roots in one block hold the same 8 ports);
-# every port is between 15000 and 16997, inside 1024-65535 and below the ephemeral range.
+# every port is between 10000 and 11997, inside 1024-65535 and below every ephemeral range a
+# machine is likely to have. The base was 15000, whose blocks reached 16997: on a pod whose
+# ephemeral range starts at 16000 an outbound connection of the load test took a stack port
+# between steps and the next bind failed with "address already in use", which is what
+# check_ephemeral_ports now refuses up front. 10000 also clears the thousand ports the NATS test
+# rig's gates take just under that range (internal/testnats, gatePorts).
 default_port() { printf '%s\n' "$((PORT_BASE + $2 * PORT_STRIDE + PORT_OFFSET[$1]))"; }
+
+# EPHEMERAL_RANGE_FILE is where the machine's ephemeral port range is read from: two numbers on
+# one line, "LOW HIGH", as net.ipv4.ip_local_port_range holds them. A test points
+# LOADTEST_EPHEMERAL_RANGE_FILE at a file of its own; nothing here ever writes the file.
+EPHEMERAL_RANGE_FILE=${LOADTEST_EPHEMERAL_RANGE_FILE:-/proc/sys/net/ipv4/ip_local_port_range}
+
+# ephemeral_range: the machine's ephemeral port range as "LOW HIGH", or nothing when
+# EPHEMERAL_RANGE_FILE cannot be read or does not hold two numbers (a kernel or a container that
+# does not publish it), in which case no port is refused for it.
+ephemeral_range() {
+  local low="" high="" rest=""
+  [ -r "$EPHEMERAL_RANGE_FILE" ] || return 0
+  read -r low high rest <"$EPHEMERAL_RANGE_FILE" || true
+  [[ $low =~ ^[0-9]+$ && $high =~ ^[0-9]+$ && -z $rest ]] || return 0
+  ((low <= high)) || return 0
+  printf '%s %s\n' "$low" "$high"
+}
+
+# check_ephemeral_ports PORTS: die when a port of PORTS, "KEY PORT" a line as stack_ports prints
+# them, lies inside the machine's ephemeral range. A port in that range is one the kernel hands
+# to an outbound connection - the load generator's own, between one step and the next - and the
+# stack then cannot bind it ("bind: address already in use"). The refusal names the range, every
+# port inside it and the LOADTEST_*_PORT variable that moves each.
+check_ephemeral_ports() {
+  local range low high key p inside=""
+  range=$(ephemeral_range)
+  [ -n "$range" ] || return 0
+  read -r low high <<<"$range"
+  while read -r key p; do
+    [ -n "$key" ] || continue
+    if ((p >= low && p <= high)); then
+      inside+="${inside:+, }$key $p (${PORT_VAR[$key]:-no LOADTEST_*_PORT variable})"
+    fi
+  done <<<"$1"
+  [ -z "$inside" ] ||
+    die "these stack ports lie inside this machine's ephemeral port range $low-$high ($EPHEMERAL_RANGE_FILE): $inside. The kernel gives ports in that range to outbound connections, so one of them is taken while the stack runs and the next start fails with 'bind: address already in use'. Set each port's LOADTEST_*_PORT variable to a free port below $low and rerun stack.sh setup with them set"
+}
 
 # stack_ports ROOT: ROOT's ports, "KEY PORT" a line in PORT_KEYS' order: the block's default port,
 # or the value of the key's PORT_VAR when this environment sets it. stack.sh setup records them in

@@ -100,14 +100,14 @@ same step before and after its change, and compares the two rows.
 | --- | --- | --- |
 | `LOADTEST_ROOT` | `${TMPDIR:-/tmp}/dispatch-loadtest` | The directory that holds all the stack's state, binaries and step output. On a Legion pod, `$TMPDIR` is `/legion/scratch/tmp`, the issue's volume. |
 | `LOADTEST_SRC` | The checkout that holds the script | The checkout that `stack.sh setup` builds `envoy-dispatch`, `envoy-listener` and `loadgen` from. |
-| `LOADTEST_PG_PORT` | `15000 + 10k` | The Postgres port. |
-| `LOADTEST_PROXY_PORT` | `15001 + 10k` | The latency proxy port. |
-| `LOADTEST_NATS_PORT` | `15002 + 10k` | The NATS client port. |
-| `LOADTEST_NATS_MONITOR_PORT` | `15003 + 10k` | The NATS monitoring port (`/varz`). |
-| `LOADTEST_LISTENER_PORT` | `15004 + 10k` | The Envoy listener port. |
-| `LOADTEST_DISPATCH_PORT` | `15005 + 10k` | The Dispatch HTTP port. |
-| `LOADTEST_PPROF_PORT` | `15006 + 10k` | The Dispatch pprof port (`DISPATCH_PPROF_PORT`). |
-| `LOADTEST_METRICS_PORT` | `15007 + 10k` | The Dispatch metrics port. Dispatch gets `DISPATCH_METRICS_ADDR=127.0.0.1:<port>`, and the 5 s sampler scrapes its `/metrics` (Pools and admission, below). |
+| `LOADTEST_PG_PORT` | `10000 + 10k` | The Postgres port. |
+| `LOADTEST_PROXY_PORT` | `10001 + 10k` | The latency proxy port. |
+| `LOADTEST_NATS_PORT` | `10002 + 10k` | The NATS client port. |
+| `LOADTEST_NATS_MONITOR_PORT` | `10003 + 10k` | The NATS monitoring port (`/varz`). |
+| `LOADTEST_LISTENER_PORT` | `10004 + 10k` | The Envoy listener port. |
+| `LOADTEST_DISPATCH_PORT` | `10005 + 10k` | The Dispatch HTTP port. |
+| `LOADTEST_PPROF_PORT` | `10006 + 10k` | The Dispatch pprof port (`DISPATCH_PPROF_PORT`). |
+| `LOADTEST_METRICS_PORT` | `10007 + 10k` | The Dispatch metrics port. Dispatch gets `DISPATCH_METRICS_ADDR=127.0.0.1:<port>`, and the 5 s sampler scrapes its `/metrics` (Pools and admission, below). |
 | `LOADTEST_PROXY_RTT` | `1ms` | The round trip that the proxy adds, as a Go duration. Read when the proxy starts. |
 | `LOADTEST_PG_DIRECT` | unset (`1` for a `--replay` step) | `1` connects Dispatch to Postgres directly, without the proxy. Read when Dispatch starts, so set it on `run-step.sh`. `stack.json` and `meta.json` record it as `pg_direct`. |
 | `LOADTEST_DISPATCH_COMMIT` | unset | `stack.sh setup` builds `envoy-dispatch` alone from that commit (`run-step.sh --replay --dispatch-commit`). |
@@ -117,7 +117,7 @@ same step before and after its change, and compares the two rows.
 
 Every process listens on `127.0.0.1`. The default ports follow `LOADTEST_ROOT`: the root's block
 `k` is the first 8 hex digits of the sha256 of its physical path, modulo 200, and each port is
-`15000 + 10k` plus the offset above, so every port lies between 15000 and 16997 and no two ports of
+`10000 + 10k` plus the offset above, so every port lies between 10000 and 11997 and no two ports of
 a root meet. The block is a hash, not a reservation: two roots land in one block about 1 pair in
 200, and then they hold the same 8 ports. Two Legion roles of one pod, each with its own
 `LOADTEST_ROOT`, therefore almost always run a stack each with no port variable set; on a collision
@@ -127,6 +127,15 @@ refusal names the block and the remedies: set the `LOADTEST_*_PORT` variables, o
 overrides its own port, and `stack.json` keeps the port a `setup` recorded; a port that is not
 this root's block default any more is refused without the block explanation, which would name a
 block that has nothing to do with the port in use.
+
+The block lies below the ephemeral port range, the ports the kernel hands to outbound
+connections: on the Legion pods that range is 16000-65535
+(`/proc/sys/net/ipv4/ip_local_port_range`), and the base was 15000 until a root whose block ran
+to 16257 lost its Dispatch port to one of the load generator's own connections between steps -
+`bind: address already in use`, twice. `stack.sh setup` and `stack.sh start` now refuse any port
+inside the machine's range (`check_ephemeral_ports`, which reads that file and passes everything
+when it cannot), naming the range, each port inside it and the `LOADTEST_*_PORT` variable that
+moves it; a `stack.json` written under the old base is caught there.
 
 `stack.sh setup` writes the ports into `$LOADTEST_ROOT/stack.json`, and `stack.sh status` prints
 them with the path of that file. A later `setup` keeps the ports the file records and moves only
