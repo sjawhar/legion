@@ -80,6 +80,7 @@ import {
 import { MentionComposer } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
+import type { CarriedBlockIds } from "./send-request";
 import { capabilitiesForTarget, TargetedMessageCard } from "./TargetedMessageCard";
 import { useFollowLatest } from "./use-follow-latest";
 import { useAgents } from "./useAgents";
@@ -238,6 +239,7 @@ function ConversationReply({
       onReply={isClosed ? undefined : () => onReply(replyTargetFor(reply, root, issueKey))}
       quote={{
         author: parent?.author,
+        block: reply.reply_block,
         excerpt: parent?.body ?? "",
         to:
           reply.in_reply_to === null
@@ -539,10 +541,10 @@ function CommentTurn({
   const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
   /** One attempt of a comment edit's save, under the composer's key (`sendRequest`). */
   const editComment = useCallback(
-    async (id: string, body: string, bounds: WriteBounds) => {
+    async (id: string, body: string, carried: CarriedBlockIds | undefined, bounds: WriteBounds) => {
       setSavingCommentEditId(id);
       try {
-        const comment = await api.editComment(id, { body }, bounds);
+        const comment = await api.editComment(id, { body, ...carried }, bounds);
         await queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
         return comment;
       } finally {

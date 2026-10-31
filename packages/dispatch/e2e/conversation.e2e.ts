@@ -16,11 +16,17 @@ import {
   createMessage,
   createProject,
   editAsk,
+  editComment,
   getAsk,
+  getComment,
+  getCommentBlocks,
   getIssue,
   getMessage,
+  getMessageBlocks,
   patchIssue,
   putIssueState,
+  replyToCommentBlock,
+  replyToMessageBlock,
   replyToMessageDelivery,
   resolveAsk,
   resolveComment,
@@ -955,6 +961,348 @@ test("the Conversation draws one card per conversation and no event row", async 
       ].sort()
     );
     await expect(page.locator('[data-kind="activity"]')).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A comment thread's Conversation card, expanded: a collapsed card shows no reply. */
+async function expandedCommentCard(page: Page, commentID: string): Promise<Locator> {
+  const card = page.locator(`[data-turn="comment:${commentID}"]`);
+  await card.getByRole("button", { name: "Expand thread" }).click();
+  await expect(card.getByRole("list", { name: "Replies" })).toBeVisible();
+  return card;
+}
+
+/** The reply `replyID`'s `reply_block` as the server reads it now, under its thread's head. */
+async function commentReplyBlock(root: string, replyID: string) {
+  const { replies } = await getComment(root);
+  return replies.find((reply) => reply.id === replyID)?.reply_block;
+}
+
+// A reply that names one block of its parent quotes that block, not the parent's first line; an
+// edit that drops the block leaves the quote saying so.
+test("a reply quotes the passage it names", async ({ browser }) => {
+  await setLiveSessions([{ session_id: agent.actor.id, title: "Planner (e2e)" }]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Quoted passages" });
+  const comment = await createComment(issue.key, { body: "Alpha first.\n\nBeta second." });
+  const commentReply = await replyToCommentBlock(
+    issue.key,
+    comment.id,
+    "b2",
+    { body: "On the comment's second paragraph." },
+    agent
+  );
+  expect(commentReply.reply_block).toMatchObject({
+    block_id: "b2",
+    node: `comment/${comment.id}#b2`,
+    removed: false,
+    text: "Beta second.",
+  });
+  const message = await createMessage(issue.key, { body: "Gamma first.\n\nDelta second." }, agent);
+  const messageReply = await replyToMessageBlock(
+    issue.key,
+    message.id,
+    "b2",
+    { body: "On the message's second paragraph." },
+    bob
+  );
+  const thread = await getMessage(issue.key, message.id);
+  expect(thread.replies.find((reply) => reply.id === messageReply.id)?.reply_block).toMatchObject({
+    block_id: "b2",
+    node: `message/${message.id}#b2`,
+    removed: false,
+    text: "Delta second.",
+  });
+  // The blocks the replies name, as the blocks routes list them.
+  const messageBlocks = await getMessageBlocks(message.id);
+  expect(messageBlocks.indexed).toBe(true);
+  expect(messageBlocks.blocks.map(({ id, text }) => ({ id, text }))).toEqual([
+    { id: "b1", text: "Gamma first." },
+    { id: "b2", text: "Delta second." },
+  ]);
+  const commentBlocks = await getCommentBlocks(comment.id);
+  expect(commentBlocks.indexed).toBe(true);
+  expect(commentBlocks.blocks.map(({ id, text }) => ({ id, text }))).toEqual([
+    { id: "b1", text: "Alpha first." },
+    { id: "b2", text: "Beta second." },
+  ]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+
+    const messageQuote = threadReply(
+      page,
+      turn(page, "Gamma first."),
+      "On the message's second paragraph."
+    );
+    await expect(messageQuote).toContainText("Replying to Planner (e2e)'s passage — Delta second.");
+    await expect(messageQuote).not.toContainText("Gamma first.");
+
+    const card = await expandedCommentCard(page, comment.id);
+    const commentQuote = threadReply(page, card, "On the comment's second paragraph.");
+    await expect(commentQuote).toContainText("Replying to alice's passage — Beta second.");
+    await expect(commentQuote).not.toContainText("Alpha first.");
+
+    // The author's edit drops the second paragraph: the reply still names it, now removed.
+    await editComment(comment.id, { body: "Alpha first." });
+    expect(await commentReplyBlock(comment.id, commentReply.id)).toMatchObject({
+      block_id: "b2",
+      removed: true,
+      text: "Beta second.",
+    });
+    await expect(commentQuote).toContainText(
+      "Replying to alice's passage — This passage was removed."
+    );
+    await expect(commentQuote).not.toContainText("Beta second.");
+  } finally {
+    await alice.close();
+  }
+});
+
+// The Conversation tab's comment editor carries each block's id through the edit, so a reply that
+// cites the second paragraph follows it wherever the author moves it and through every rewording,
+// and the save names it (`blocks`) rather than leaving the server to match it by its text.
+test("the editor keeps a cited passage's id through move, reword, split, delete and restore", async ({
+  browser,
+}) => {
+  await setLiveSessions([{ session_id: agent.actor.id, title: "Planner (e2e)" }]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Edited passages" });
+  const body = "Alpha first.\n\nBeta second.\n\nGamma third.";
+  const comment = await createComment(issue.key, { body });
+  const reply = await replyToCommentBlock(
+    issue.key,
+    comment.id,
+    "b2",
+    { body: "Citing the second paragraph." },
+    agent
+  );
+  expect(reply.reply_block).toMatchObject({ block_id: "b2", text: "Beta second." });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await expandedCommentCard(page, comment.id);
+    const quote = threadReply(page, card, "Citing the second paragraph.");
+    await expect(quote).toContainText("Replying to alice's passage — Beta second.");
+    const field = card.getByLabel("Edit comment");
+    const select = (start: number, end: number) =>
+      field.evaluate(
+        (element: HTMLTextAreaElement, [from, to]) => {
+          element.focus();
+          element.setSelectionRange(from, to);
+        },
+        [start, end] as const
+      );
+
+    /** Opens the editor on the comment once the blocks route has answered (the ids it carries),
+     *  makes `change`, checks the field holds `edited`, saves, and answers the `blocks` Save sent. */
+    const saveEdit = async (change: () => Promise<void>, edited: string) => {
+      const blocksRead = page.waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          response.url().endsWith(`/api/v1/comments/${comment.id}/blocks`)
+      );
+      await card.getByRole("button", { exact: true, name: "Edit" }).click();
+      expect((await blocksRead).ok()).toBe(true);
+      await change();
+      await expect(field).toHaveValue(edited);
+      const saved = page.waitForResponse(
+        (response) =>
+          response.request().method() === "PATCH" &&
+          response.url().endsWith(`/api/v1/comments/${comment.id}`)
+      );
+      await card.getByRole("button", { name: "Save" }).click();
+      const response = await saved;
+      expect(response.ok()).toBe(true);
+      await expect(field).toHaveCount(0);
+      const sent = response.request().postDataJSON() as {
+        blocks?: { from: number; id: string }[];
+        body: string;
+      };
+      expect(sent.body).toBe(edited);
+      return sent.blocks;
+    };
+    /** The comment's blocks as the blocks route lists them, and the reply's cited block. */
+    const expectBlocks = async (
+      blocks: readonly { id: string; text: string }[],
+      cited: { removed: boolean; text: string }
+    ) => {
+      const read = await getCommentBlocks(comment.id);
+      expect(read.blocks.map(({ id, text }) => ({ id, text }))).toEqual(blocks);
+      expect(await commentReplyBlock(comment.id, reply.id)).toMatchObject({
+        block_id: "b2",
+        node: `comment/${comment.id}#b2`,
+        ...cited,
+      });
+      await expect(quote).toContainText(
+        `Replying to alice's passage — ${cited.removed ? "This passage was removed." : cited.text}`
+      );
+    };
+
+    // Move: cut the second paragraph with the keyboard and paste it at the end.
+    const moved = "Alpha first.\n\nGamma third.\n\nBeta second.";
+    const movedCarried = await saveEdit(async () => {
+      const cut = "\n\nBeta second.";
+      await select(body.indexOf(cut), body.indexOf(cut) + cut.length);
+      await field.press("Control+X");
+      await expect(field).toHaveValue("Alpha first.\n\nGamma third.");
+      await select(moved.length - cut.length, moved.length - cut.length);
+      await field.press("Control+V");
+    }, moved);
+    expect(movedCarried).toContainEqual({ from: moved.indexOf("Beta second."), id: "b2" });
+    await expectBlocks(
+      [
+        { id: "b1", text: "Alpha first." },
+        { id: "b3", text: "Gamma third." },
+        { id: "b2", text: "Beta second." },
+      ],
+      { removed: false, text: "Beta second." }
+    );
+
+    // Reword: the paragraph grows a sentence.
+    const reworded = `${moved} Then more.`;
+    const rewordedCarried = await saveEdit(async () => {
+      await select(moved.length, moved.length);
+      await field.pressSequentially(" Then more.");
+    }, reworded);
+    expect(rewordedCarried).toContainEqual({ from: reworded.indexOf("Beta second."), id: "b2" });
+    await expectBlocks(
+      [
+        { id: "b1", text: "Alpha first." },
+        { id: "b3", text: "Gamma third." },
+        { id: "b2", text: "Beta second. Then more." },
+      ],
+      { removed: false, text: "Beta second. Then more." }
+    );
+
+    // Split: Enter inside it, twice for a paragraph break; the part holding its start keeps b2.
+    const split = "Alpha first.\n\nGamma third.\n\nBeta second.\n\nThen more.";
+    const splitCarried = await saveEdit(async () => {
+      const space = reworded.indexOf(" Then more.");
+      await select(space, space + 1);
+      await field.press("Enter");
+      await field.press("Enter");
+    }, split);
+    expect(splitCarried).toContainEqual({ from: split.indexOf("Beta second."), id: "b2" });
+    await expectBlocks(
+      [
+        { id: "b1", text: "Alpha first." },
+        { id: "b3", text: "Gamma third." },
+        { id: "b2", text: "Beta second." },
+        { id: "b4", text: "Then more." },
+      ],
+      { removed: false, text: "Beta second." }
+    );
+
+    // Delete: the reply's passage is gone, and its quote says so.
+    const deleted = "Alpha first.\n\nGamma third.\n\nThen more.";
+    const deletedCarried = await saveEdit(async () => {
+      const start = split.indexOf("Beta second.");
+      await select(start, start + "Beta second.\n\n".length);
+      await field.press("Backspace");
+    }, deleted);
+    expect(deletedCarried?.map((block) => block.id)).not.toContain("b2");
+    await expectBlocks(
+      [
+        { id: "b1", text: "Alpha first." },
+        { id: "b3", text: "Gamma third." },
+        { id: "b4", text: "Then more." },
+      ],
+      { removed: true, text: "Beta second." }
+    );
+
+    // Restore: typing the paragraph back gives the reply its passage again.
+    await saveEdit(async () => {
+      const start = deleted.indexOf("Then more.");
+      await select(start, start);
+      await field.pressSequentially("Beta second.");
+      await field.press("Enter");
+      await field.press("Enter");
+    }, split);
+    await expectBlocks(
+      [
+        { id: "b1", text: "Alpha first." },
+        { id: "b3", text: "Gamma third." },
+        { id: "b2", text: "Beta second." },
+        { id: "b4", text: "Then more." },
+      ],
+      { removed: false, text: "Beta second." }
+    );
+  } finally {
+    await alice.close();
+  }
+});
+
+// Rewording a cited paragraph by selecting its whole text and typing new words over it is a
+// rewording (root spec R11: a block keeps its id when it is kept, moved or reworded), as it is
+// when the same body is sent without ids and matched by its text: the reply still cites it.
+test("the editor keeps a cited passage's id when its whole text is typed over", async ({
+  browser,
+}) => {
+  await setLiveSessions([{ session_id: agent.actor.id, title: "Planner (e2e)" }]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Retyped passage" });
+  const body = "Alpha first.\n\nBeta second.\n\nGamma third.";
+  const comment = await createComment(issue.key, { body });
+  const reply = await replyToCommentBlock(
+    issue.key,
+    comment.id,
+    "b2",
+    { body: "Citing the second paragraph." },
+    agent
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await expandedCommentCard(page, comment.id);
+    const quote = threadReply(page, card, "Citing the second paragraph.");
+    const blocksRead = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        response.url().endsWith(`/api/v1/comments/${comment.id}/blocks`)
+    );
+    await card.getByRole("button", { exact: true, name: "Edit" }).click();
+    expect((await blocksRead).ok()).toBe(true);
+    const field = card.getByLabel("Edit comment");
+    const start = body.indexOf("Beta second.");
+    await field.evaluate(
+      (element: HTMLTextAreaElement, [from, to]) => {
+        element.focus();
+        element.setSelectionRange(from, to);
+      },
+      [start, start + "Beta second.".length] as const
+    );
+    await field.pressSequentially("Other words entirely.");
+    const retyped = "Alpha first.\n\nOther words entirely.\n\nGamma third.";
+    await expect(field).toHaveValue(retyped);
+    const saved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" &&
+        response.url().endsWith(`/api/v1/comments/${comment.id}`)
+    );
+    await card.getByRole("button", { name: "Save" }).click();
+    expect((await saved).ok()).toBe(true);
+
+    const read = await getCommentBlocks(comment.id);
+    expect(read.blocks.map(({ id, text }) => ({ id, text }))).toEqual([
+      { id: "b1", text: "Alpha first." },
+      { id: "b2", text: "Other words entirely." },
+      { id: "b3", text: "Gamma third." },
+    ]);
+    expect(await commentReplyBlock(comment.id, reply.id)).toMatchObject({
+      block_id: "b2",
+      removed: false,
+      text: "Other words entirely.",
+    });
+    await expect(quote).toContainText("Replying to alice's passage — Other words entirely.");
   } finally {
     await alice.close();
   }

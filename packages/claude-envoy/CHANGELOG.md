@@ -1,5 +1,87 @@
 # Changelog
 
+## [main@e65900f4438b] - 2026-10-30
+
+### Added
+
+- The `dispatch` command (`dist/dispatch.js`) takes `dispatch answers`, which prints every item of
+  that list in full.
+- `tests/answers-claude.test.ts` runs the real Claude Code, the release the new repository-root
+  `.claude-code-pin` pins (2.1.311), against a stand-in model and Dispatch, and shows the list on
+  the Messages request after startup, `--resume`, `/compact` and a subagent's start. CI's
+  claude-envoy job installs that release (`.github/actions/install-claude-code`), and the test
+  refuses to skip there.
+- A third session hook, `dist/session-hook.js answers`, on every `SessionStart` (startup, resume,
+  clear, compact, fork) and every `SubagentStart`, puts what people wrote to the session in the
+  last 72 hours into the model's context: answers to its asks, replies to
+  its comments, comments on documents it wrote and messages to it, read from Dispatch's
+  `GET /api/v1/agents/{session_id}/answers` for the hook input's `session_id`, which at
+  `SubagentStart` is the parent's. It is the list every Oh My Pi model request carries, under
+  8,000 characters, newest first, with a line naming `dispatch answers` when older items are left
+  out. The hook prints within 800 ms of its start, or 150 ms after its code begins when Bun's
+  start-up alone took longer, so a slow start-up never costs a list Dispatch answers at once; it
+  exits 50 ms after that, always with status 0: when Dispatch has not answered it carries the last
+  list read, kept in `answers.json` in the session's Dispatch state directory, with when it was
+  read and why this read failed, or, when no list read before has an item to show, one line saying
+  the list could not be read and why. A `!` command in envoy.json runs in a process the hook starts
+  detached, one per session at a time, and waits on until that same deadline; a slower command
+  still runs to its end or its 10 s timeout in that process, which removes its output file and
+  reads the list with its token for the next hook. While it runs, only a list read from the
+  Dispatch URL envoy.json names now stands in, never one another Dispatch answered. Against a
+  Dispatch older than this release, which answers its own 404 "no route for …", the hook adds
+  nothing to the context and writes one line naming that Dispatch to stderr.
+
+### Changed
+
+- Daemon API contract 43: the `legion` MCP tool reads the state's new `consumers` and
+  `repositories.withoutWebhookApp` strictly, and its `handoff_complete` description names the
+  implementer's new refusal `HANDOFF_NO_PULL_REQUEST`. A daemon of contract 42 and this plugin
+  refuse each other.
+- `dispatch-first`, which every Claude Code session loads at its start, says that a result a person asked for is like a blocker: a document or artifact notifies nobody, so the document that holds the result ends with an ask block asking their next step, else a `dispatch ask`. Its rule that each ask and message stands alone is gone, since `dispatch-writing-specs` carries it where an ask is written.
+
+### Fixed
+
+- The `answers` hook adds nothing to the context when Dispatch answers its own `404 NOT_FOUND`
+  "no route for …", as a build older than the answers route does, and no list read before from
+  that Dispatch has an item to show. Before, it added a line saying the answers could not be read
+  and telling the agent to run `dispatch answers`, a command that fails against that same
+  Dispatch. A list read before from that Dispatch is still carried, its left-out line naming no
+  command. The hook writes one line to stderr naming that Dispatch and that it has no answers
+  route, also when the refresher that ran a `!` token command made the read
+  (`answers-refresh.json` carries the `notice`). A proxy's 404 page, a 200 that is no answers
+  list and every other failed read still add the line naming why.
+
+## [main@49e23926228d] - 2026-10-30
+
+### Added
+
+- The Dispatch tools take a block reference in `reply_to` and `in_reply_to` to answer one block of a comment or message, and read a block of a comment or message by its reference.
+
+### Changed
+
+- The bundled `envoy_publish` description says a role message errs when its
+  holder did not confirm it within the listener's window, and a team or other ad-hoc topic errs
+  naming each session holding its own NATS connection that registered the topic and did not
+  confirm it; a session that stopped without unregistering stays registered for up to 5 minutes
+  and is named in that time, and a named session is not a failed delivery to the others.
+- `dispatch read` asks for each referenced document's latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.
+
+### Fixed
+
+- Main's rebuild of `dist/` and `legion/` lands even when main moved while its push job waited
+  for a runner: it commits the build onto main's tip whenever it is newer than the build main
+  holds, and starts one fresh run when a build input changed in between, so main's built plugin is
+  at most one run behind its inputs and never moves backward (#2493).
+  `scripts/build-inputs.txt` lists every path that can change the build; `tests/build-inputs.test.ts`
+  runs the build and fails when the bundles or the Legion plugin read a file the list does not
+  match (the files the build's scripts read by path are listed by hand).
+- A message the listener forwards to the session's agent subject is shown with the topic it was
+  published to: the channel notification's `topic` meta is the envelope's `topic`, falling back to
+  the NATS subject only when the envelope names none, where it was always the subject. A role
+  message's forward was shown under the session's own `notifications.agent.<id>`, and so was an
+  ad-hoc topic's copy the listener now confirms with the session, which can arrive before the copy
+  on the topic itself.
+
 ## [main@1f5b08286a6d] - 2026-10-29
 
 ### Added

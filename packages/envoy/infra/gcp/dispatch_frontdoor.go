@@ -16,9 +16,10 @@ import (
 // Dispatch's front door is a Tailscale Service host (tailnet_service.go): frontDoorReplicas pods
 // of Deployment <hostname>-tailnet, each its own tailnet node registered under its pod's name, all
 // hosting the Tailscale Service svc:<hostname>. Each terminates TLS for <hostname>.<tailnetDnsName>
-// on 443 and proxies to the app's Service, and each runs tailscaled's SOCKS5 proxy on 1055, which
-// the app and the listener reach the NATS hub through at Service <hostname>-tailnet. So the name
-// every reader reaches Dispatch at, and the hub, answer while any one front-door pod serves.
+// on 443 and proxies to the app's Service. Without natsInCluster each also runs tailscaled's SOCKS5
+// proxy on 1055, which the app and the listener reach the NATS hub through at Service
+// <hostname>-tailnet. So the name every reader reaches Dispatch at, and in that mode the hub, answer
+// while any one front-door pod serves.
 //
 // Every pod holds the Service name's certificate, and Let's Encrypt issues at most 5 certificates
 // for one exact set of names in 7 days, from every account together
@@ -519,13 +520,19 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 		return corev1.PodSpecArgs{}, nil, err
 	}
 
+	// Every front-door pod runs the SOCKS5 proxy the app and the listener reach the NATS hub
+	// through, on every address, since its callers are pods of their own. With natsInCluster those
+	// two dial the hub themselves, so no pod runs a proxy: an empty socks5Server renders no
+	// TS_SOCKS5_SERVER (tailnet_service.go).
+	socks5Server := ""
+	if !s.natsInCluster {
+		socks5Server = "0.0.0.0:" + strconv.Itoa(dispatchSOCKS5Port)
+	}
 	host := tailnetServiceHost{
 		paths: paths.service, name: s.hostname,
 		authKeySecret: authKeySecret, authKeyKey: "TS_AUTHKEY",
 		tags: s.tags, serveConfig: dispatchServeConfig,
-		// Every front-door pod runs the SOCKS5 proxy the app and the listener reach the NATS hub
-		// through, on every address, since its callers are pods of their own.
-		socks5Server: "0.0.0.0:" + strconv.Itoa(dispatchSOCKS5Port),
+		socks5Server: socks5Server,
 		graceSeconds: dispatchFrontDoorGraceSeconds,
 		certificate:  fqdn,
 	}
@@ -539,7 +546,7 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 		if service != want {
 			return "", fmt.Errorf("%s: tailnetService must be %s, the Tailscale Service the front door hosts, as Tailscale's API names it (not echoed)", dispatch, want)
 		}
-		return tailnetServeHTTPS(s.hostname, s.tailnetDNSName, "http://"+clusterLocal(s.hostname, s.namespace)+":8766"), nil
+		return tailnetServeHTTPS(s.hostname, s.tailnetDNSName, s.clusterURL()), nil
 	}).(pulumi.StringOutput)
 	serve, err := corev1.NewConfigMap(ctx, serveName, &corev1.ConfigMapArgs{Metadata: metadata(serveName), Data: pulumi.StringMap{"serve.json": serveJSON}}, child...)
 	if err != nil {

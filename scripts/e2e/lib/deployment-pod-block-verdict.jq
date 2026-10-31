@@ -17,9 +17,9 @@
 #              `roles` container, an env name on that process;
 #   wrong      what the pod carries differently: its ServiceAccount, a volume's kind or object (a
 #              Secret, ConfigMap or PersistentVolumeClaim by name, an NFS export by server and
-#              path), a projected token's audience, expiry or path, a mount's sub_path or read_only,
-#              an env value. A value is never printed, only its name, so a verdict never carries an
-#              env value.
+#              path), a Secret or ConfigMap volume's defaultMode, a projected token's audience,
+#              expiry or path, a mount's sub_path or read_only, an env value. A value is never
+#              printed, only its name, so a verdict never carries an env value.
 # An issue pod's one container, `roles`, carries every mount, each at the block's path except one at
 # or under the image's home (/home/legion), which that container mounts at the same path under
 # /var/run/legion/home and each role's namespaces bind back under the home
@@ -27,8 +27,9 @@
 # containers carries every mount at the block's path. A projected token with no expiration_seconds
 # expires in 3600 s (the API server's default),
 # and a mount with no read_only is read-only (Legion's loader). A Secret or ConfigMap volume is
-# compared by its kind and object name, not its `items`; a token is checked as carried, never as
-# accepted by the service it is for.
+# compared by its kind, its object name and, when the block sets one, its default_mode (octal text,
+# such as "0440", against the pod's defaultMode; the API server stores 0644 for a volume that sets
+# none), not its `items`; a token is checked as carried, never as accepted by the service it is for.
 ($block[0]) as $b
 | . as $pod
 | ($pod.spec.volumes // [] | map({key: .name, value: .}) | from_entries) as $volumes
@@ -47,6 +48,19 @@
   def pod_source_kind: if .serviceAccountToken then "service_account_token" elif .secret then "secret" elif .configMap then "config_map" else "unknown" end;
   def volume_kind: if .projected then "projected" elif .secret then "secret" elif .config_map then "config_map" elif .persistent_volume_claim then "persistent_volume_claim" elif .nfs then "nfs" else "unknown" end;
   def pod_volume_kind: if .projected then "projected" elif .secret then "secret" elif .configMap then "config_map" elif .persistentVolumeClaim then "persistent_volume_claim" elif .nfs then "nfs" else "unknown" end;
+  # mode_bits: a block's default_mode, octal text after a leading 0 or 0o (the loader's
+  # readFileMode), as the number the pod's defaultMode holds; a number, which the loader refuses,
+  # as itself.
+  def mode_bits: if type == "number" then . else ltrimstr("0o") | explode | reduce .[] as $c (0; . * 8 + ($c - 48)) end;
+  # octal_text: a mode as octal text with a leading 0, as an operator writes it.
+  def octal_text: if . == 0 then "0" else "0" + ([recurse(if . >= 8 then (. / 8 | floor) else empty end) | . % 8 | tostring] | reverse | join("")) end;
+  # mode_findings(want; got; name): the block's default_mode against the pod's defaultMode, which
+  # the API server stores as 0644 when the volume sets none.
+  def mode_findings($want; $got; $name):
+    if $want == null then empty
+    else ($want | mode_bits) as $w | ($got // 420) as $g
+      | if $g != $w then {wrong: "volume \($name) has defaultMode \($g | octal_text), not \($w | octal_text)"} else empty end
+    end;
   # source_findings(want; got; where): a projected source of the block against the pod's.
   def source_findings($want; $got; $where):
     ($want | source_kind) as $k
@@ -72,8 +86,12 @@
      | ($v | volume_kind) as $k
      | if $pv == null then {missing: "volume \($v.name)"}
        elif ($pv | pod_volume_kind) != $k then {wrong: "volume \($v.name) is \($pv | pod_volume_kind), not \($k)"}
-       elif $k == "secret" then (if $pv.secret.secretName != $v.secret.name then {wrong: "volume \($v.name) is Secret \($pv.secret.secretName), not \($v.secret.name)"} else empty end)
-       elif $k == "config_map" then (if $pv.configMap.name != $v.config_map.name then {wrong: "volume \($v.name) is ConfigMap \($pv.configMap.name), not \($v.config_map.name)"} else empty end)
+       elif $k == "secret" then
+         (if $pv.secret.secretName != $v.secret.name then {wrong: "volume \($v.name) is Secret \($pv.secret.secretName), not \($v.secret.name)"} else empty end),
+         mode_findings($v.secret.default_mode; $pv.secret.defaultMode; $v.name)
+       elif $k == "config_map" then
+         (if $pv.configMap.name != $v.config_map.name then {wrong: "volume \($v.name) is ConfigMap \($pv.configMap.name), not \($v.config_map.name)"} else empty end),
+         mode_findings($v.config_map.default_mode; $pv.configMap.defaultMode; $v.name)
        elif $k == "persistent_volume_claim" then (if $pv.persistentVolumeClaim.claimName != $v.persistent_volume_claim.name then {wrong: "volume \($v.name) is PersistentVolumeClaim \($pv.persistentVolumeClaim.claimName), not \($v.persistent_volume_claim.name)"} else empty end)
        elif $k == "nfs" then (if $pv.nfs.server != $v.nfs.server or $pv.nfs.path != $v.nfs.path then {wrong: "volume \($v.name) is NFS export \($pv.nfs.server):\($pv.nfs.path), not \($v.nfs.server):\($v.nfs.path)"} else empty end)
        elif $k == "unknown" then {wrong: "volume \($v.name) is of a kind this verdict does not read"}

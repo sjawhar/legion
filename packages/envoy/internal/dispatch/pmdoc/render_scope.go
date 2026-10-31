@@ -112,11 +112,11 @@ func (r *renderer) inItemBelowQuotes() bool {
 // line between them, where no quote between takes a line holding only the prefix as its own: in a
 // footnote definition, where both parsers keep that line as the code's text, and in a typed block in
 // a list item, where it is a blank line the browser editor reads as spacing the nearest item. That
-// line is written there, as main wrote it, where the nearest item is spread and goldmark's
-// looseness, which this parser leaves that item's list to, reads the list's spread as it is
-// (loosenessReadsSpread), unless the document holds a shape this parser cannot decide the spacing
-// of (browserOnlyShape), where it is refused: render writes such a document again with the fences
-// alone (bareEmptyCode).
+// line is written there, as the writer before sjawhar/legion#1464 wrote it, where the nearest
+// item is spread and goldmark's looseness, which this parser leaves that item's list to, reads
+// the list's spread as it is (loosenessReadsSpread), unless the document holds a shape this
+// parser cannot decide the spacing of (browserOnlyShape), where it is refused: render writes
+// such a document again with the fences alone (bareEmptyCode).
 func (r *renderer) emptyCodeWrittenBare() bool {
 	typed := false
 	for index := len(r.scopes) - 1; index >= 0; index-- {
