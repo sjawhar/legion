@@ -451,7 +451,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - Get a tool a role's work needs into the pod — `skills/legion-worker/references/tools.md`
 
-  The image's five clients (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`, once your deployment pins a digest carrying them), the pinned runner forms for everything else (`uvx --from <package>@<version> <command>`, `bunx --package <name>@<version> <binary>`, `go run <module>@<version>`, and `uv run --with <package>==<version>` for a library rather than a command), and the resolution test that tells a harness's own extraction prefix from a client on a role's `PATH`;
+  The image's five clients (`psql`, `redis-cli`, `sqlite3`, `nc`, `dig`, once your deployment pins a digest carrying them), the pod's own test PostgreSQL every test variable points at (`LEGION_TEST_PG_DSN`, started by the roles container's launcher where the deployment sets `runtime.kubernetes.test_postgres`; `docs/kubernetes.md`, "A test database in the pod") and never the sessions database `OMP_SESSION_SQL_DSN_FILE` names, the pinned runner forms for everything else (`uvx --from <package>@<version> <command>`, `bunx --package <name>@<version> <binary>`, `go run <module>@<version>`, and `uv run --with <package>==<version>` for a library rather than a command), and the resolution test that tells a harness's own extraction prefix from a client on a role's `PATH`;
   a tool no runner reaches is an image change, whose sites that reference finds with a grep rather than listing them.
   The other half of the question is the *Run a database, broker or server the work needs* item:
   a tool works on the issue's checkout, a service the work talks to runs in the cluster.
@@ -536,7 +536,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Changelog entries are fragment files**
   — a change that earns a changelog line adds a fragment to each package it changes that has a `.changie.yaml`:
-  the seven packages `.github/workflows/changelog-fold.yaml` lists in `CHANGELOG_PACKAGES` (`pi-legion`, `pi-envoy`, `envoy-plugin`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`).
+  the six packages `.github/workflows/changelog-fold.yaml` lists in `CHANGELOG_PACKAGES` (`pi-legion`, `pi-envoy`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`).
   A package without one, such as `packages/daemon`, has no fold.
   Write it with `go run github.com/miniscruff/changie@v1.26.0 new --kind <kind> --body '<text>' --custom Issue=pr<number>` from the package directory, `<number>` being this pull request's own number.
   Every `.changie.yaml` sets `fragmentFileFormat: '{{.Custom.Issue}}-{{.Kind}}-{{.Time.Format "20060102-150405"}}'`, so the file lands at `packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`.
