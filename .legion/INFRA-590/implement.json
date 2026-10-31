@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-31T17:00:35Z",
+  "completed": "2026-10-31T20:51:46Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "1b15f353a747d01eaf3505a5bd42c8420b123453",
-  "round": "26 (review round 18, changes requested for the merge): forward merge of main 151d2d7996 (#2592, a soft claim takes a role from its predecessor only within one client instance). Conflicts in cmd/listener/role_holder.go (kept #2592's bucketSessionEntry, roleSupersession, roleSupersessionVerdict with liveness on roles.Registered; this PR's roleHolderSession comment, now naming bucketSessionEntry for the predecessor) and cmd/listener/api.go (main's verdict switch). The client-instance rule stays in the soft-claim route: only a claim takes a role from a live predecessor; roles.ResolveHolder resolves a holder for delivery and writes only the release of a gone holder. kv.go changed only comments; ClientInstanceID rides in session.SessionEntry, which roles.Buckets.Holder decodes. #2592's tests unmodified (diff hashes equal). Fingerprint eba4675c -> 0e1f9bcd. Diff-check comment 6546429898. Sampled memory peak 3.02 GiB of 19, 772 samples every 2 s.",
+  "head": "b52f6b3442f4eeb5def72e74ad1ceb0bec8b23d5",
+  "round": "27 (CI red at 1b15f353, ci-ok: envoy-smoke job 124606699168 alone, four TestLive* tests of packages/envoy/infra failing to install the Pulumi docker-4.11.0 plugin with 'no space left on device' on the runner): a forward merge of main efed4e4d3 for a fresh run, no conflict, unchanged-diff fingerprint equal (0e1f9bcd...). Main also changed ci.yaml, running-dispatch.md, packages/envoy/AGENTS.md, cmd/dispatch/README.md, cmd/dispatch/multiprocess_test.go, infra/README.md and infra/gcp/dispatch.go (mostly #2584); none adds or resizes a pool, so 91 connections; #2391 still open, so migrations 0150/0151. A re-run of the failed jobs (run 41222294411 attempt 2) was started before the architect's note and is moot. Diff-check comment 6548971704. Sampled container memory peak 14.11 GiB of 19, 339 samples every 2 s; leftover check after the stop listed nothing.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -254,6 +254,14 @@
       "observed": "roles ok 0.3 s, session ok 10.1 s, store ok 30.4 s, cmd/listener ok 412.8 s (with #2592's api_test/main_test soft-claim tests, unmodified), outbox ok 264.8 s, cmd/dispatch multiprocess ok 816.6 s; zero '--- FAIL' lines; GitHub MERGEABLE at 1b15f353.",
       "headSha": "1b15f353a747d01eaf3505a5bd42c8420b123453",
       "negativeControl": "Before the merge, git merge-tree of 7455fe29 with main reported 'CONFLICT (content)' in packages/envoy/cmd/listener/api.go and role_holder.go, and GitHub showed the head CONFLICTING."
+    },
+    {
+      "criterion": "The forward merge leaves this PR's diff unchanged and the files main also changed build, vet and test clean.",
+      "surface": "packages/envoy build and vet (cmd/dispatch with and without -tags multiprocess, cmd/listener, internal/dispatch) and the infra/gcp package",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go build ./... && go vet ./internal/dispatch/... ./cmd/dispatch/ ./cmd/listener/ && go vet -tags multiprocess ./cmd/dispatch/ && cd infra && go vet ./gcp/ && go test -p 1 -count=1 -skip 'TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd|TestARefusedDataDiskIsNeverFormattedOnALaterBoot' ./gcp/",
+      "observed": "build and vet clean; infra/gcp ok 63.1 s (the two skipped tests need mkfs.ext4, absent in this pod); unchanged-diff fingerprint 0e1f9bcd... before and after; GitHub MERGEABLE at b52f6b34.",
+      "headSha": "b52f6b3442f4eeb5def72e74ad1ceb0bec8b23d5",
+      "negativeControl": "At 1b15f353, CI's envoy-smoke job 124606699168 failed with '--- FAIL: TestLiveListenerRunsAHealthyListenerWithTheExplicitProvider' on 'no space left on device'."
     }
   ],
   "filesChanged": [
