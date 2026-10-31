@@ -2,57 +2,57 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-727",
-  "completed": "2026-10-31T06:05:00Z",
-  "round": 8,
+  "completed": "2026-10-31T10:15:00Z",
+  "round": 9,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2548",
-  "head": "476a817c96a6",
-  "answers": "The reviewer's round-2 changes request at c7010979: both important findings and all six minor ones, none deferred. Eight threads answered and resolved.",
+  "head": "afd9b5517c93",
+  "codeHead": "bc29f804",
+  "answers": "The reviewer's round-3 changes request at 476a817c: both important findings, the one it raised past the round cap because it shares a cause with the first, and all five minor ones. Six threads answered and resolved.",
   "proof": [
     {
-      "criterion": "Important 1: the document-wide `ambiguous` says something false whenever no placement was kept - a selection across a block break, or a held send written before the placement field existed",
-      "surface": "Dispatch's web app in Chromium through Playwright, against the real Go server and PostgreSQL 17.11 with pgvector, and the proof-editor and margin unit suites",
+      "criterion": "Important 1, and the defect past the cap with the same cause: an empty or short remembered side matched any text, so a whole-block selection kept a placement that told no reading apart - two readings were called alike, and after the reader's block lost the words a lone unrelated reading silently took the comment",
+      "surface": "Dispatch's web app in Chromium through Playwright, against the real Go server and PostgreSQL 17.11 with pgvector, and the proof-editor unit suite",
       "command": "cd packages/dispatch && bun run e2e -- compose-wait",
-      "observed": "12 passed (6.1m). A sixth refusal reason, `unremembered`, answers the document-wide step when no placement was kept, with its own sentence: 'The words you selected read in more than one place, and nothing kept of where you selected them says which one this <kind> is about. Your draft is kept - select the text again to attach it.' `ambiguous` keeps its wording and now means only readings whose surroundings really match - the block step, and the document step when a placement was kept. The cross-block row asserts that exact sentence and that neither 'no longer where you selected it' nor 'with the same text around them' appears. The three null-placement unit rows moved to the new reason, each comment naming the case it drives; the real-placement row keeps `ambiguous`. The false comments the reviewer named are corrected, including 'none of the four' where there are six.",
-      "headSha": "476a817c96a6",
-      "negativeControl": "The cross-block row's two new assertions are the control: at c7010979 the composer showed the 'same text around them' sentence for a case where the text around the two readings differs, and that row's text check now refuses it."
+      "observed": "14 passed. A remembered side shorter than the 32-character cap now carries the block edge it was cut at - in the block step it must sit at that block's own start or end, in the document's one text next to a newline or at its ends - and `NO_SURROUNDINGS`, which is empty because nothing was remembered, still matches every reading. Two new rows drive the real editor: a whole paragraph rewritten to read its words twice among different text is refused with the draft kept and nothing marked, and the same paragraph losing the words while one unrelated reading stands elsewhere is refused rather than moved there. The reviewer's two reproductions are unit rows as well, answering `unsurrounded` and `unplaceable`.",
+      "headSha": "bc29f804",
+      "negativeControl": "Both e2e rows are red before this change: the first sends and closes the composer with the false 'same text around them' sentence, the second creates the comment on the sentence that merely quotes the words. Writing them taught one thing worth keeping: a doc-edit that rewrites exactly the marked run leaves the mark on the new text, so each row has the sweep take the mark while the tab is away."
     },
     {
-      "criterion": "Important 2: a jj conflict marker from the forward merge is in the published API reference, and its ANCHOR_MISSING entry breaks the one-sentence-per-line rule",
-      "surface": "The repository's own line-break check and the file",
-      "command": "bun scripts/semantic-line-breaks.ts packages/envoy/cmd/dispatch/README.md",
-      "observed": "Exit 0 (it was 1 at c7010979, R1 at 2430). The marker line is gone - `grep -n '>>>>>>>'` finds nothing in the file - and the entry is three sentences on three lines. Its third sentence now states the rule the sweep implements: the mark is kept while its author has a browser on the room, and its minute runs from the moment that user's last browser left.",
-      "headSha": "476a817c96a6",
-      "negativeControl": "The check exits 1 on the entry as it stood, which is how the reviewer found it; the file now passes the same command."
+      "criterion": "Important 2, new with round 2's bridge wait: a Retry pressed during the wait started a second recovery and left a stray mark in the shared document",
+      "surface": "The margin's own React tests",
+      "command": "cd packages/dispatch && bun test --parallel web/src e2e/__tests__",
+      "observed": "2986 pass. The recovery is marked running before the wait and cleared in a finally, and after the await the store is re-read: the recovery returns unless that entry is still refused with the same mark id, and that entry's request is what readdress carries. A test presses Retry while the document is unbound and sees exactly one remarkMark. During the wait the composer now says it is re-attaching the draft rather than showing the server's refusal - a seventh reader-facing sentence, asserted like the other six - and a fake-timer row drives the path where no document binds within the bound and the reader gets the document-not-open sentence.",
+      "headSha": "bc29f804",
+      "negativeControl": "The reviewer's own reproduction is the control: two remarkMark calls for one mark id and a send under a third mark. The new test fails without the guard."
     },
     {
-      "criterion": "The six minor findings, and nothing else in the application broken by them",
-      "surface": "The whole Chromium e2e project, and both unit suites",
+      "criterion": "Nothing else in the application broke, and the merge of main changed none of this branch's lines",
+      "surface": "The whole Chromium e2e project, and the fingerprint over the pull request's own diff",
       "command": "cd packages/dispatch && bun run e2e -- --project=chromium",
-      "observed": "938 passed, 0 failed (1.0h) - including e2e/hover-preview.e2e.ts:87, which failed on this pod in earlier rounds and on main, so the two-core timing it depends on went its way this time. The six: held-sends' comment is true of the composer's own Retry and `retry()` returns void; `registerComposer` has its own context so no composer re-renders on margin hover, selection or placement; the pending report carries whether its count covered every row this tab had written and the waiter answers only such a report; one `textOf(block)` backs all three block-text reads; the re-anchor waits, bounded, for the reader's own document to bind rather than saying it is not open; and index.html is byte-identical to main again.",
-      "headSha": "476a817c96a6",
-      "negativeControl": "`git diff origin/main -- packages/dispatch/web/index.html` is empty, which is the whole claim for that one; `bunx biome check packages/dispatch` is clean with main's version, so lint never required the re-indentation."
+      "observed": "940 passed, 0 failed (1.4h) at bc29f804. main was then merged for its CI fixes (#2598's claims-doc test, which turns ci-ok red on every branch whose base predates it), with no conflict; the fingerprint over this pull request's own lines is aaf00f65ce47f728cef1e8c2f9c1d88eef8b8544774be19f74305ce9f58a8627 on both sides of the merge, unchanged, so that project run stands for the merge head. The 14 rows, both typechecks, both unit suites, biome, the README's line-break check, go vet, gofmt and the Go sweep tests (177s) were all re-run at the merge head afd9b551 anyway.",
+      "headSha": "afd9b5517c93",
+      "negativeControl": "The fingerprint is computed from the fork point at each head, so a merge that had touched one of this branch's lines would change it; it did not."
     }
   ],
   "filesChanged": [
-    "packages/proof-editor/src/record-mark-retype.ts and tests/record-mark-retype.test.ts (the sixth reason, the corrected comments, one textOf)",
-    "packages/dispatch/web/src/features/margin/margin-context.tsx, margin-context.test.ts, MentionComposer.margin.test.tsx (the new sentence, the composer registry context, the bridge-bind wait)",
-    "packages/dispatch/web/src/features/conversation/held-sends.ts, useSessionSends.ts, MentionComposer.tsx",
-    "packages/dispatch/web/src/features/doc/pending-waiter.ts, pending-waiter.test.ts, pending-sync.ts, pending-sync.test.ts, connection.test.ts, ProofDocument.test.tsx",
-    "packages/envoy/cmd/dispatch/README.md (the marker and the line breaks), packages/dispatch/web/index.html (reverted to main)",
-    "packages/dispatch/e2e/compose-wait.e2e.ts (my own row 12 only: the exact sentence asserted)"
+    "packages/proof-editor/src/record-mark-retype.ts and tests/record-mark-retype.test.ts (the block-edge rule, its two new rows, and the prose the reviewer named)",
+    "packages/dispatch/web/src/features/margin/margin-context.tsx, margin-context.test.ts, MentionComposer.margin.test.tsx (the recovery guard, the re-attaching sentence, two new rows)",
+    "packages/dispatch/web/src/features/doc/pending-sync.ts, pending-sync.test.ts, pending-waiter.ts, pending-waiter.test.ts, connection.test.ts, ProofDocument.test.tsx (countsEveryRow dropped for the reviewer's smaller fix)",
+    "packages/dispatch/web/src/features/conversation/useSessionSends.ts, packages/envoy/cmd/dispatch/README.md (prose)",
+    "packages/dispatch/e2e/compose-wait.e2e.ts (my own: two new rows and one corrected comment)"
   ],
   "trickyParts": [
-    "Closing the pending-count race needed `pending-sync.ts`, outside the files the finding named: the waiter sees only `PendingState`, and whether a count ran before or after a row's write is known only where the count is taken. The report carries it as optional fields, so no other reader of that state changed.",
-    "`ambiguous` and `unremembered` are different claims about the same shape of failure: the first says the surroundings match in more than one place, which is only knowable with a placement; the second says nothing kept says which reading was the reader's, which is the honest thing to say when nothing was kept."
+    "An empty remembered side is not 'matches anything': it is the block edge the words began or ended at. Carrying that in the value rather than inferring it from the string is what lets a null placement keep matching everything while a kept one does not.",
+    "A doc-edit that rewrites exactly the marked run leaves the mark on the new text, so neither whole-block row could take the mark by an edit alone; both have the sweep take it while the tab is away, which is the path a reader actually meets.",
+    "The bridge wait made the margin's recovery re-entrant for the first time. Marking the mark id as recovering before the await, and re-reading the store after it, are two halves of one fix: the first stops a second waiter, the second stops a stale request from overwriting the first's work."
   ],
   "deviations": [],
   "openQuestions": [
-    "The reported 'about ten seconds' is still unexplained, as every round has recorded."
+    "The reported 'about ten seconds' is still unexplained, as every round has recorded.",
+    "main's flaky listener test is fixed by #2594, which had not landed when this round merged main; #2598, the one that turns ci-ok red deterministically, is in."
   ],
   "discoveredComplexity": [
-    "The pod was restarted mid-round and the commit was unpushed. The INFRA merge lane saved it as legion/INFRA-727-rescue; I continued on it rather than redoing it, and deleted the rescue branch. The commit id is unchanged, which matters because the eight resolved review threads each cite it. Work in progress now goes to legion/INFRA-727-wip, which starts no pull-request CI.",
-    "No forward merge this round: GitHub reports the pull request MERGEABLE (mergeStateStatus BLOCKED is the required reviews and checks, not a conflict), and the branch already carries main's two CI fixes, #2551 and #2552.",
-    "e2e/hover-preview.e2e.ts:87 passed this time, after failing on this pod in rounds 3 and 5 and on main as well. It is timing, not this change, and the record now has it both ways on the same branch.",
+    "The merge was needed for a reason the rule allows - a fix for a red check that only the base has - rather than to refresh the branch.",
     "The simplify pass is spent (round 1, ce-simplify-code at 96a647eb, applied). A round answering a review runs none."
   ]
 }
