@@ -51,8 +51,10 @@ func TestStatementTimings(t *testing.T) {
 		benchtime.Statement{SQL: issueCount, Args: []any{[]string{subjects.Issue}, nodeKinds}})
 
 	// The ask page's count: every ask of one issue at once, each ask's own clarification thread
-	// excluded, which is what the page's cards show.
-	askIDs := issueAskIDs(t, runner, subjects.Issue)
+	// excluded, which is what the page's cards show. Its subject is the issue carrying the most
+	// asks, read from the database rather than taken from subjects.Issue: the heavily linked
+	// issue the other readings bind is linked by children and blockers, and carries no ask.
+	askIDs := askPageSubject(t, runner)
 	askCount, ok := backlinkCountSQL("ask", AskBacklinkExclusions)
 	if !ok {
 		t.Fatal("backlinkArms declares no arm for an ask, so the ask page's count has no statement")
@@ -61,11 +63,19 @@ func TestStatementTimings(t *testing.T) {
 		benchtime.Statement{SQL: askCount, Args: []any{askIDs, nodeKinds, AskBacklinkExclusions}})
 }
 
-// issueAskIDs is every ask of the issue, the set the ask page counts backlinks for in one call.
-// An issue with no ask would measure a count over an empty array, which answers no row whatever
-// the statement reads, so the run fails on it instead.
-func issueAskIDs(t *testing.T, runner *benchtime.Runner, issueKey string) []string {
+// askPageSubject is every ask of the issue that carries the most, the set the ask page counts
+// backlinks for in one call. The issue is read from the database so the measurement follows a
+// re-seed, and a database with no ask at all fails the run rather than measuring a count over an
+// empty array, which answers no row whatever the statement reads.
+func askPageSubject(t *testing.T, runner *benchtime.Runner) []string {
 	t.Helper()
+	var issueKey string
+	if err := runner.Conn().QueryRow(context.Background(), `
+		select issue_key from asks where issue_key is not null
+		group by issue_key order by count(*) desc, issue_key limit 1
+	`).Scan(&issueKey); err != nil {
+		t.Fatalf("read the issue carrying the most asks: %v", err)
+	}
 	rows, err := runner.Conn().Query(context.Background(),
 		`select a.id::text from asks a where a.issue_key = $1 order by a.created_at, a.id`, issueKey)
 	if err != nil {
