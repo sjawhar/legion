@@ -25,7 +25,12 @@
  * readings of the quote that block held then). Quote and surroundings together are the ordinary
  * three-part text-quote selector, and a reading of the quote is the reader's own only where the
  * text before it ends with the remembered prefix and the text after it starts with the
- * remembered suffix.
+ * remembered suffix. A side the bar kept whole - one shorter than `QUOTE_CONTEXT_CHARS`, which
+ * is a side the block began or ended nearer than the cap - carries that edge with it: a reading
+ * has to open its block where the remembered prefix opens and close it where the remembered
+ * suffix closes. Without the edge, the two empty sides a whole-block selection keeps - a
+ * heading, a list item, a table cell, a short paragraph - would answer every reading of the
+ * words anywhere, and a mark would go to a passage nothing but the words themselves names.
  *
  * The fresh mark goes over the first of these that holds: the mark's own range, while the
  * document still has it; inside the remembered block, while the document still holds it and it
@@ -54,10 +59,10 @@
  * never selected, which no refusal would ever tell them about. The refusal says which case it
  * was: the words read nowhere (`"gone"`), their own block still reads them but no reading there
  * is surrounded as theirs was (`"unsurrounded"`), two readings are surrounded alike - two of
- * their own block, or two of the document once that block is gone - so the words are where they
- * were selected and nothing says which of them the draft is about (`"ambiguous"`), the composer
- * kept nothing of where they selected and the words read in more than one place, so there is
- * nothing to tell those readings apart by (`"unremembered"`), or they read elsewhere in the
+ * their own block, or two of the document once that block is gone - so nothing kept of the
+ * selection says which of them the draft is about (`"ambiguous"`), the composer kept nothing of
+ * where they selected and the words read in more than one place, so there is nothing to tell
+ * those readings apart by (`"unremembered"`), or they read elsewhere in the
  * document and no reading of them is the reader's own to take (`"unplaceable"`), which the
  * margin puts to the reader in different words.
  *
@@ -107,13 +112,14 @@ export type RetypeOutcome = RetypedMark | RetypeRefusal;
  *  more (`"gone"`); the block the reader selected in still reads them, but no reading there is
  *  surrounded as theirs was, so the text around their words changed and nothing says which
  *  reading was theirs (`"unsurrounded"`); two readings are surrounded as theirs was - two of
- *  their own block, or two of the document once that block is gone - so their words are where
- *  they selected them and nothing says which of the two the draft is about (`"ambiguous"`); the
- *  composer kept nothing of where they selected, so nothing but the words themselves is left to
- *  go by, and they read in more than one place (`"unremembered"`); or they read somewhere else
- *  in the document and no reading of them can be taken for the reader's own (`"unplaceable"`).
- *  None of the six is the same thing to say to a reader, so none of them is the same answer. A
- *  re-mark never answers `"missing"`: a mark the document has lost is the case it is for. */
+ *  their own block, or two of the document once that block is gone - so the text the reader
+ *  read beside their words reads beside both, and nothing kept of the selection says which of
+ *  the two the draft is about (`"ambiguous"`); the composer kept nothing of where they
+ *  selected, so nothing but the words themselves is left to go by, and they read in more than
+ *  one place (`"unremembered"`); or they read somewhere else in the document and no reading of
+ *  them can be taken for the reader's own (`"unplaceable"`). None of the six is the same thing
+ *  to say to a reader, so none of them is the same answer. A re-mark never answers `"missing"`:
+ *  a mark the document has lost is the case it is for. */
 export interface RemarkRefusal {
   readonly refused:
     | "ambiguous"
@@ -242,17 +248,32 @@ export function retypeMark(
 export const QUOTE_CONTEXT_CHARS = 32;
 
 /** The text a reading has to sit between to be taken for the reader's own, as `placementOf` read
- *  it when they selected. */
+ *  it when they selected: the characters on each side, and whether that side ran to the edge of
+ *  the block the words sat in. `placementOf` cuts each side at `QUOTE_CONTEXT_CHARS`, so a side
+ *  shorter than that is the whole of what the block read there, and where the block ended is as
+ *  much of what the reader read as the characters are - all of it, for the whole-block selection
+ *  whose sides are both empty. */
 interface Surroundings {
   readonly prefix: string;
+  /** Whether `prefix` is the whole text in front of the words, back to the start of their
+   *  block. */
+  readonly prefixAtBlockStart: boolean;
   readonly suffix: string;
+  /** Whether `suffix` is the whole text after the words, on to the end of their block. */
+  readonly suffixAtBlockEnd: boolean;
 }
 
-/** The one way to ask a scan for no filter: the empty surroundings, which the text on both sides
- *  of every reading answers. A re-mark whose composer kept no placement matches against these -
- *  the words are all there ever was in that case - and so does a count of every reading a block
- *  holds. */
-const NO_SURROUNDINGS: Surroundings = { prefix: "", suffix: "" };
+/** The one way to ask a scan for no filter: no text on either side and no edge to sit at, which
+ *  every reading answers. A re-mark whose composer kept no placement matches against these - the
+ *  words are all there ever was in that case, and a side that is empty because nothing was
+ *  remembered says nothing about where a block began - and so does a count of every reading a
+ *  block holds. */
+const NO_SURROUNDINGS: Surroundings = {
+  prefix: "",
+  prefixAtBlockStart: false,
+  suffix: "",
+  suffixAtBlockEnd: false,
+};
 
 /** What one scan of a text found: every reading of the quote counted, the first of them, and the
  *  first two whose surroundings match. A third surrounded reading answers nothing any caller
@@ -267,20 +288,39 @@ interface Readings {
 }
 
 /** Whether the reading of a `length`-character quote at offset `at` of `text` is surrounded by
- *  `surroundings`: the text before it ends with the remembered prefix, and the text after it
- *  starts with the remembered suffix. Read in place, so scanning a text for its readings copies
- *  none of it. */
+ *  `surroundings`: the text before it ends with the remembered prefix, the text after it starts
+ *  with the remembered suffix, and a side remembered whole reaches the edge of this reading's
+ *  own block, as it reached the edge of the block the reader selected in. `acrossBlocks` says
+ *  whether a newline of `text` is a block break (`documentText`) or a line break inside one
+ *  block. Read in place, so scanning a text for its readings copies none of it. */
 function surroundedBy(
   text: string,
   at: number,
   length: number,
-  surroundings: Surroundings
+  surroundings: Surroundings,
+  acrossBlocks: boolean
 ): boolean {
   const prefixAt = at - surroundings.prefix.length;
+  if (prefixAt < 0 || !text.startsWith(surroundings.prefix, prefixAt)) return false;
+  // A side remembered whole ran back to the start of the reader's block, so this reading's own
+  // block has to begin where that text begins: the start of the text, or just past the newline
+  // that stands for a block break where `text` is a whole document read as one. Inside one
+  // block's own text a newline is a line break that block holds, never an edge of it.
+  if (
+    surroundings.prefixAtBlockStart &&
+    prefixAt !== 0 &&
+    !(acrossBlocks && text[prefixAt - 1] === "\n")
+  ) {
+    return false;
+  }
+  const suffixAt = at + length;
+  if (!text.startsWith(surroundings.suffix, suffixAt)) return false;
+  // The same at the other end: a suffix remembered whole ran on to the end of that block.
+  const suffixEnd = suffixAt + surroundings.suffix.length;
   return (
-    prefixAt >= 0 &&
-    text.startsWith(surroundings.prefix, prefixAt) &&
-    text.startsWith(surroundings.suffix, at + length)
+    !surroundings.suffixAtBlockEnd ||
+    suffixEnd === text.length ||
+    (acrossBlocks && text[suffixEnd] === "\n")
   );
 }
 
@@ -288,12 +328,14 @@ function surroundedBy(
  *  placement's count of a block and a re-mark's choice between that block's readings can never
  *  disagree about what reads there. `positionAt` says where the character at an offset of `text`
  *  begins in the document, which is what turns a reading into a range a mark can be written over;
- *  it is asked only for the readings a caller can still use. */
+ *  it is asked only for the readings a caller can still use. `acrossBlocks` says whether a
+ *  newline of `text` breaks a block, which is what a remembered block edge is read against. */
 function readingsOf(
   text: string,
   quote: string,
   surroundings: Surroundings,
-  positionAt: (offset: number) => number
+  positionAt: (offset: number) => number,
+  acrossBlocks: boolean
 ): Readings {
   const surrounded: MarkRange[] = [];
   let count = 0;
@@ -301,7 +343,8 @@ function readingsOf(
   if (quote === "") return { count, first, surrounded };
   for (let at = text.indexOf(quote); at !== -1; at = text.indexOf(quote, at + 1)) {
     count += 1;
-    const matches = surrounded.length < 2 && surroundedBy(text, at, quote.length, surroundings);
+    const matches =
+      surrounded.length < 2 && surroundedBy(text, at, quote.length, surroundings, acrossBlocks);
     if (first !== undefined && !matches) continue;
     const range = { from: positionAt(at), to: positionAt(at + quote.length) };
     first ??= range;
@@ -386,9 +429,11 @@ function blockWithId(
 /** Where a mark written over `range` sits, for the composer that owns it to remember: the id of
  *  the textblock that holds it, the text that block reads on each side of `quote`, at most
  *  `QUOTE_CONTEXT_CHARS` of it and shorter where the block begins or ends nearer than that, and
- *  how many readings of `quote` that block holds. Null when there is nothing to remember - the
- *  range is not inside a textblock, or that block's text does not read `quote` there, which is
- *  every selection that runs across a block break - which leaves a later re-mark the quote alone
+ *  how many readings of `quote` that block holds. A side kept shorter than the cap is the whole
+ *  of what the block read there, which a re-mark reads as the block edge it ran to
+ *  (`remarkRange`). Null when there is nothing to remember - the range is not inside a
+ *  textblock, or that block's text does not read `quote` there, which is every selection that
+ *  runs across a block break - which leaves a later re-mark the quote alone
  *  to go by. A block with no id is remembered all the same: its surroundings still say which
  *  passage this is. */
 export function placementOf(
@@ -409,7 +454,7 @@ export function placementOf(
     prefix: text.slice(Math.max(0, offset - QUOTE_CONTEXT_CHARS), offset),
     // The scan a re-mark reads this block with, so the count kept here and the readings found
     // then are the same readings.
-    readings: readingsOf(text, quote, NO_SURROUNDINGS, (at) => base + at).count,
+    readings: readingsOf(text, quote, NO_SURROUNDINGS, (at) => base + at, false).count,
     suffix: text.slice(after, after + QUOTE_CONTEXT_CHARS),
   };
 }
@@ -425,7 +470,19 @@ function remarkRange(
 ): MarkRange | RemarkRefusal {
   const held = findRecordMark(state.doc, markId);
   if (held !== null) return held.range;
-  const surroundings = placement ?? NO_SURROUNDINGS;
+  // What the placement says a reading has to sit between. A side `placementOf` kept shorter
+  // than the cap is the whole of what the block read there, so a reading has to sit at the
+  // block edge that side ran to; a composer that kept no placement has no side and no edge to
+  // answer, which is what `NO_SURROUNDINGS` says and an empty remembered side does not.
+  const surroundings: Surroundings =
+    placement === null
+      ? NO_SURROUNDINGS
+      : {
+          prefix: placement.prefix,
+          prefixAtBlockStart: placement.prefix.length < QUOTE_CONTEXT_CHARS,
+          suffix: placement.suffix,
+          suffixAtBlockEnd: placement.suffix.length < QUOTE_CONTEXT_CHARS,
+        };
   const block =
     placement === null || placement.blockId === null
       ? null
@@ -434,7 +491,7 @@ function remarkRange(
     // The reader's own block, while it still reads their words, read as the selection bar read
     // the quote out of it. One scan of it answers all three questions below.
     const blockText = textOf(block.block);
-    const readings = readingsOf(blockText, quote, surroundings, (at) => block.base + at);
+    const readings = readingsOf(blockText, quote, surroundings, (at) => block.base + at, false);
     // Two readings there surrounded as theirs was: another writer's reading of the same words
     // among the same words is not one this editor may choose between, and their own words have
     // not moved an inch, so the refusal is neither "elsewhere" nor "the text around them
@@ -457,19 +514,21 @@ function remarkRange(
   // The document is read as one text across its blocks, so a quote that runs across a break reads
   // here as the bar read it when the reader selected it.
   const { blocks, text } = documentText(state.doc);
-  const readings = readingsOf(text, quote, surroundings, (at) => positionIn(blocks, at));
+  const readings = readingsOf(text, quote, surroundings, (at) => positionIn(blocks, at), true);
   if (readings.surrounded.length === 1) return readings.surrounded[0];
-  // More than one reading surrounded alike, where the composer kept where the reader selected:
-  // the words are where they were and nothing says which of them is theirs, exactly as two
-  // alike inside the reader's own block. Saying instead that the words are no longer where they
-  // were selected would be false - they never moved.
+  // More than one reading surrounded alike, where the composer kept where the reader selected.
+  // This step runs only once their own block is gone, reads the words nowhere or never had an
+  // id, so nothing here says their words are still where they left them: what is true is that
+  // the readings left read among the text the reader read beside theirs, and nothing kept of
+  // the selection says which of them the draft is about.
   if (readings.surrounded.length > 1 && placement !== null) return { refused: "ambiguous" };
   // With no placement kept - a selection across a block break, which no one block's text reads,
-  // or a send held by a tab older than the placement - there are no surroundings to answer, so
-  // every reading answers `NO_SURROUNDINGS` and more than one of them says only that the words
-  // read in more than one place. What reads around those readings is not the same text, so the
-  // refusal for readings surrounded alike would be false here; what is true is that nothing kept
-  // of the selection says which reading was theirs. Their words never moved here either.
+  // or a send held by a tab older than the placement - there are no surroundings to answer and
+  // no block edge either, so every reading answers `NO_SURROUNDINGS` and more than one of them
+  // says only that the words read in more than one place. What reads around those readings is
+  // not the same text, so the refusal for readings surrounded alike would be false here; what
+  // is true is that nothing kept of the selection says which reading was theirs. Nothing kept
+  // says whether they moved, so the sentence for it says nothing about that either.
   if (readings.surrounded.length > 1) return { refused: "unremembered" };
   // Telling the reader the words were changed or deleted while they are plainly on the page is
   // false too. The count is of that same text, so a quote on the page across a break is never
@@ -488,7 +547,9 @@ function remarkRange(
  * one text across its blocks. Anything else is a refusal: readings the editor cannot tell apart,
  * readings in a block that held the words more than once and no longer surrounds any of them as
  * the reader's, and readings among words the reader never read beside theirs, are passages it may
- * not choose for them.
+ * not choose for them. Surrounded as `placement` remembers takes in where the block ended: a
+ * side it kept shorter than `QUOTE_CONTEXT_CHARS` is the whole of what the reader's block read
+ * there, and the reading taken has to run to the same edge of its own block.
  *
  * The id is always a fresh one. The server refuses a send because it cannot see the mark, and a
  * mark it has dropped whose local copy has not caught up would be refused again under that id, so

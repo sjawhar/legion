@@ -10,14 +10,6 @@ import { readField } from "./sync-frame";
 export interface PendingState {
   /** Rows this document holds across every tab in this browser. */
   count: number;
-  /** Whether `count` holds every row this tab had asked the store to add when it was taken.
-   *  IndexedDB runs transactions whose scopes overlap in the order they were created, so a count
-   *  holds every row whose write was issued before it and nothing issued after: a count taken
-   *  while a row's own write was still queued behind it reads a document that has yet to hold
-   *  that row. Whoever waits for this browser's edits to reach the server answers only a report
-   *  that counts them all (`pending-waiter.ts`), since the row the count missed can be the very
-   *  one being waited for. */
-  countsEveryRow: boolean;
   /** This admission cannot send the rows it holds. */
   readOnly: boolean;
   /** When the oldest dropped row was saved before a document rebuild. */
@@ -296,8 +288,8 @@ export function startPendingSync({
   let storageAvailable: boolean | undefined;
   const persistedSeqByOrdinal = new Map<number, number>();
   // The newest row this tab has asked the store to hold, by the `seq` the store assigned it: a
-  // count asked for before this grew holds every row the tab had, and one asked for earlier does
-  // not (`PendingState.countsEveryRow`).
+  // report whose count was asked for while this grew holds a document without that row, and is
+  // dropped rather than given (`report`).
   let recordedThrough = 0;
   let recorded: RecordedUpdate[] = [];
   let sent: SentFrame[] = [];
@@ -332,9 +324,16 @@ export function startPendingSync({
         // had been asked to hold when its transaction was created.
         const countedThrough = recordedThrough;
         const count = edits === undefined ? 0 : await edits.count();
+        // A row this tab wrote while the count was in flight is a row the count did not hold:
+        // IndexedDB runs transactions whose scopes overlap in the order they were created, so
+        // this count reads a document that has yet to hold that row, and on a document with
+        // nothing else pending it reads none pending. Whoever waits for this browser's edits to
+        // reach the server (`pending-waiter.ts`) would be answered by it while the row it waits
+        // for is still being written, so there is no report to give here: the row's own write
+        // asks for a fresh one as soon as it commits (`record`).
+        if (countedThrough !== recordedThrough) continue;
         const state: PendingState = {
           count,
-          countsEveryRow: countedThrough === recordedThrough,
           readOnly,
           rebuiltAt,
           stored: edits !== undefined,
@@ -342,7 +341,6 @@ export function startPendingSync({
         if (
           lastState === undefined ||
           lastState.count !== state.count ||
-          lastState.countsEveryRow !== state.countsEveryRow ||
           lastState.readOnly !== state.readOnly ||
           lastState.rebuiltAt !== state.rebuiltAt ||
           lastState.stored !== state.stored

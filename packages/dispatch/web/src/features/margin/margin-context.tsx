@@ -97,13 +97,14 @@ const DRAFT_KEPT = "Your draft is kept — select the text again to attach it.";
  *  things to be told: the words read nowhere in the document; the block the reader selected in
  *  still reads them, but the text around them changed, so nothing says which reading was theirs;
  *  they read in two places with the same text around both - two readings of that block, or two
- *  of the document once that block is gone - so they are where the reader left them and nothing
- *  says which of the two the draft is about; they read in more than one place and the composer
- *  kept nothing of where they were selected, so there is nothing to tell those readings apart
- *  by; they read somewhere else, but not in the block the reader selected in; or they cannot
- *  carry a suggestion's mark at all. Only `"unplaceable"` says the words are no longer where
- *  they were selected, because only there is that true. The server's own message is unchanged -
- *  agents' clients read it - and this one is the reader's. */
+ *  of the document once that block is gone - so the text they read beside their words reads
+ *  beside both and nothing kept of the selection says which of the two the draft is about;
+ *  they read in more than one place and the composer kept nothing of where they were selected,
+ *  so there is nothing to tell those readings apart by; they read somewhere else, but not in
+ *  the block the reader selected in; or they cannot carry a suggestion's mark at all. Only
+ *  `"unplaceable"` says the words are no longer where they were selected, because only there
+ *  is that true. The server's own message is unchanged - agents' clients read it - and this
+ *  one is the reader's. */
 export const REANCHOR_REFUSALS: Record<RemarkRefusal["refused"], (kind: ComposerKind) => string> = {
   ambiguous: (kind) =>
     `The words you selected read in more than one place with the same text around them, so nothing says which one this ${kind} is about. ${DRAFT_KEPT}`,
@@ -127,6 +128,15 @@ export const REANCHOR_REFUSALS: Record<RemarkRefusal["refused"], (kind: Composer
 export const DOCUMENT_CLOSED_REFUSAL = (kind: ComposerKind): string =>
   `The document you selected the text in is not open, so there is nothing here to attach this ${kind} to. Your draft is kept — open that document and send it again to attach it.`;
 
+/** What the composer says while the margin is still putting the mark back: a send resumed on a
+ *  reload can be refused before the reader's own document has bound its editor, and the margin
+ *  waits for that (`whenBridgeBinds`) rather than refusing at once. The server's own words for
+ *  that refusal - "anchor mark is not in the document" - are about a mark the reader never saw,
+ *  so this says what is happening to the thing they wrote instead. It asks nothing of them: the
+ *  send goes again by itself once the mark is written. */
+export const REANCHOR_IN_PROGRESS = (kind: ComposerKind): string =>
+  `Re-attaching this ${kind} to the text you selected, and sending it again…`;
+
 /** How long the margin waits for the mark it wrote again to reach the server before it sends the
  *  draft again. The document's pending count holds every tab's rows, and this page cannot make
  *  the server take another tab's, so the wait always ends and the retry goes either way. */
@@ -138,8 +148,9 @@ const REANCHOR_SEND_WAIT_MS = 5000;
  *  reload resumes a margin send pressed within `KEPT_SEND_RESUME_MS`: the refusal of a send on
  *  the document the reader is looking at can land seconds before that document's editor exists.
  *  Long enough for a document to load on a slow connection, and short enough that a reader on no
- *  document at all is not left waiting for a recovery that cannot come. */
-const BRIDGE_BIND_WAIT_MS = 10_000;
+ *  document at all is not left waiting for a recovery that cannot come. Exported for the margin
+ *  row that drives that bound. */
+export const BRIDGE_BIND_WAIT_MS = 10_000;
 
 interface MarkComposeRequest {
   anchor: ComposerAnchor;
@@ -185,9 +196,11 @@ interface OpenCompose {
 }
 
 interface MarginContextValue {
-  /** Why the compose's mark could not be written again after the server refused its send for a
-   *  mark it cannot see, in the reader's words, kept with the mark it answers: the composer shows
-   *  it in place of the server's words, and a newer anchor leaves it behind. */
+  /** What the composer says in place of the server's words for a send it refused for a mark it
+   *  cannot see, kept with the mark it answers: why the margin could not write that mark again
+   *  (`REANCHOR_REFUSALS`, `DOCUMENT_CLOSED_REFUSAL`), or that it is still writing it
+   *  (`REANCHOR_IN_PROGRESS`), while the recovery waits for a document to bind. A newer anchor
+   *  leaves it behind. */
   anchorRefusal: AnchorRefusal | undefined;
   blockFilterId: string | undefined;
   blockPlacements: ReadonlyMap<string, MarkPlacement>;
@@ -302,6 +315,11 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   // reader's to see as the server put it: the recovery has already run once for this draft, and
   // running it again would send the same words to the same refusal.
   const remarked = useRef(new Set<string>());
+  // The marks whose recovery is running, which is set before the wait for a document to bind:
+  // the reader can press Retry while that wait is out, the server refuses the same mark again,
+  // and a second recovery for it would write a second mark once the bridge binds - one of the
+  // two left in the shared document with no record of its own (dispatch://INFRA-727).
+  const recovering = useRef(new Set<string>());
   // Mirrors of the open compose and `documentBridge` for the compose callbacks, which stay stable
   // (the editor holds `composeForMark` for the document's lifetime).
   const openCompose = useRef<OpenCompose | undefined>(undefined);
@@ -354,43 +372,56 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   // it is throughout, as it does for every refusal.
   const reanchor = useCallback(
     async (held: HeldSend & { status: "refused" }): Promise<void> => {
-      const anchor = held.request.anchor;
-      if (anchor === undefined) return;
-      const kind = held.request.kind;
-      const bridge = await whenBridgeBinds();
-      // The compose's own document is not the one on screen, so there is no editor here to
-      // write its mark again. Nothing about the words is known from here - saying they were
-      // changed or deleted would send the reader looking for an edit nobody made - and opening
-      // that document is what lets the margin attach this draft.
-      if (bridge === undefined || bridge.artifactId !== anchor.artifact) {
-        setAnchorRefusal({ markId: anchor.mark_id, text: DOCUMENT_CLOSED_REFUSAL(kind) });
-        return;
+      const markId = held.request.anchor?.mark_id;
+      if (markId === undefined || recovering.current.has(markId)) return;
+      recovering.current.add(markId);
+      try {
+        // What the reader is told while the margin waits for a document: the server's sentence
+        // is about a mark they never saw, and this one is about the draft in front of them.
+        setAnchorRefusal({ markId, text: REANCHOR_IN_PROGRESS(held.request.kind) });
+        const bridge = await whenBridgeBinds();
+        // The held send as it stands now, which is what the retry will carry: while the wait
+        // was out the reader could discard the refusal - the draft a mark would belong to is
+        // gone - or type into it, and the store holds what they typed. A send that is no longer
+        // refused under this mark is not this recovery's to re-address.
+        const current = store.get(held.mutationKey);
+        if (current?.status !== "refused") return;
+        const request = current.request;
+        const anchor = request.anchor;
+        if (anchor?.mark_id !== markId) return;
+        const kind = request.kind;
+        // The compose's own document is not the one on screen, so there is no editor here to
+        // write its mark again. Nothing about the words is known from here - saying they were
+        // changed or deleted would send the reader looking for an edit nobody made - and opening
+        // that document is what lets the margin attach this draft.
+        if (bridge === undefined || bridge.artifactId !== anchor.artifact) {
+          setAnchorRefusal({ markId, text: DOCUMENT_CLOSED_REFUSAL(kind) });
+          return;
+        }
+        // What the refused send itself carries: the words the composer was opened over, and the
+        // block and surrounding text the editor wrote its mark among. Both outlive the mark and
+        // the editor state that wrote it, which is why the composer is the one that keeps them.
+        const outcome = bridge.remarkMark(markId, kind, anchor.quote, anchor.placement);
+        if ("refused" in outcome) {
+          setAnchorRefusal({ markId, text: REANCHOR_REFUSALS[outcome.refused](kind) });
+          return;
+        }
+        remarked.current.add(outcome.markId);
+        setAnchorRefusal(undefined);
+        store.readdress(held.mutationKey, { ...request, anchor: anchorAt(anchor, outcome) });
+        await bridge.whenSent(REANCHOR_SEND_WAIT_MS);
+        // The retry carries the draft the store holds, and the composer writes what the reader
+        // has typed there only a short wait after each keystroke (`KEEP_DRAFT_MS`): words typed
+        // while the margin waited would go nowhere, and the landed send would then clear the
+        // composer they are in. So the composer writes its draft now, before the retry takes it.
+        composers.current.get(hashKey(held.mutationKey))?.keepDraft();
+        store.retry(held.mutationKey);
+      } finally {
+        // The next refusal of this mark is the reader's to recover from again: a recovery that
+        // refused leaves the draft where it is, and one that sent has a mark of its own in
+        // `remarked` to answer for it.
+        recovering.current.delete(markId);
       }
-      // The reader can discard the refusal while their document is still loading: the draft the
-      // mark would belong to is gone, and a mark written for it would sit in the document with
-      // nothing to attach.
-      if (store.get(held.mutationKey)?.status !== "refused") return;
-      // What the refused send itself carries: the words the composer was opened over, and the
-      // block and surrounding text the editor wrote its mark among. Both outlive the mark and
-      // the editor state that wrote it, which is why the composer is the one that keeps them.
-      const outcome = bridge.remarkMark(anchor.mark_id, kind, anchor.quote, anchor.placement);
-      if ("refused" in outcome) {
-        setAnchorRefusal({
-          markId: anchor.mark_id,
-          text: REANCHOR_REFUSALS[outcome.refused](kind),
-        });
-        return;
-      }
-      remarked.current.add(outcome.markId);
-      setAnchorRefusal(undefined);
-      store.readdress(held.mutationKey, { ...held.request, anchor: anchorAt(anchor, outcome) });
-      await bridge.whenSent(REANCHOR_SEND_WAIT_MS);
-      // The retry carries the draft the store holds, and the composer writes what the reader has
-      // typed there only a short wait after each keystroke (`KEEP_DRAFT_MS`): words typed while
-      // the margin waited would go nowhere, and the landed send would then clear the composer
-      // they are in. So the composer writes its draft now, before the retry takes it.
-      composers.current.get(hashKey(held.mutationKey))?.keepDraft();
-      store.retry(held.mutationKey);
     },
     [store, whenBridgeBinds]
   );

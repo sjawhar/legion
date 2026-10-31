@@ -23,6 +23,7 @@ import {
   updateFrame,
 } from "./pending-fixture";
 import { type PendingState, type PendingSync, startPendingSync } from "./pending-sync";
+import { createPendingWaiter } from "./pending-waiter";
 
 /** Stands in for the provider: updates it applies from the server carry it as their origin. */
 const SERVER = { server: true };
@@ -238,7 +239,6 @@ test("a read-only first sync applies nothing and keeps the saved edits", async (
   expect((await rowsOf(artifact)).length).toBe(1);
   expect(states.at(-1)).toEqual({
     count: 1,
-    countsEveryRow: true,
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
@@ -259,7 +259,6 @@ test("a read-only admission stores none of the editor's own updates", async () =
   expect(await rowsOf(artifact)).toEqual([]);
   expect(states.at(-1)).toEqual({
     count: 0,
-    countsEveryRow: true,
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
@@ -286,7 +285,6 @@ test("a read-only load drops the heading id an earlier read-only load stored onc
   await waitFor(() =>
     expect(states.at(-1)).toEqual({
       count: 1,
-      countsEveryRow: true,
       readOnly: true,
       rebuiltAt: undefined,
       stored: true,
@@ -337,7 +335,6 @@ test("a read-only first sync drops a saved row the server already holds", async 
   expect(await rowsOf(artifact)).toEqual([]);
   expect(states.at(-1)).toEqual({
     count: 0,
-    countsEveryRow: true,
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
@@ -365,7 +362,6 @@ test("a read-only first sync keeps a saved row that changes an object attribute"
   expect((await rowsOf(artifact)).length).toBe(1);
   expect(states.at(-1)).toEqual({
     count: 1,
-    countsEveryRow: true,
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
@@ -392,7 +388,6 @@ test("a read-only first sync drops a saved row that only splits the same text in
   expect(await rowsOf(artifact)).toEqual([]);
   expect(states.at(-1)).toEqual({
     count: 0,
-    countsEveryRow: true,
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
@@ -416,7 +411,6 @@ test("a read-only first sync drops a saved row that inserts and deletes the same
   expect(await rowsOf(artifact)).toEqual([]);
   expect(states.at(-1)).toEqual({
     count: 0,
-    countsEveryRow: true,
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
@@ -436,7 +430,6 @@ test("a read-only first sync keeps a saved row that writes a margin record", asy
   expect((await rowsOf(artifact)).length).toBe(1);
   expect(states.at(-1)).toEqual({
     count: 1,
-    countsEveryRow: true,
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
@@ -456,7 +449,6 @@ test("a read-only first sync keeps a saved row that writes a root other than the
   expect((await rowsOf(artifact)).length).toBe(1);
   expect(states.at(-1)).toEqual({
     count: 1,
-    countsEveryRow: true,
     readOnly: true,
     rebuiltAt: undefined,
     stored: true,
@@ -482,7 +474,6 @@ test("a connection first admitted read-only and later writable stores and counts
   await waitFor(() =>
     expect(states.at(-1)).toEqual({
       count: 2,
-      countsEveryRow: true,
       readOnly: false,
       rebuiltAt: undefined,
       stored: true,
@@ -556,7 +547,6 @@ test("a restore that merges is recorded under the new client and the old rows ar
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
   expect(states.at(-1)).toEqual({
     count: 1,
-    countsEveryRow: true,
     readOnly: false,
     rebuiltAt: undefined,
     stored: true,
@@ -738,9 +728,8 @@ test("an edit recorded while a SyncStep2 acknowledgement is clearing stays track
 // behind it: the count answers for the document as it was, without that row, and on a document
 // with nothing else pending it reads none pending. The margin waits for this browser's edits to
 // reach the server before it sends a refused compose again, and the row such a count misses can
-// be the very mark it is waiting for, so the report says what its count holds and the wait reads
-// that rather than the count alone (`pending-waiter.ts`).
-test("a report whose count was taken before a row was written says so", async () => {
+// be the very mark it is waiting for, so that count is no report to give (`pending-waiter.ts`).
+test("a count taken before a row was written is never reported, and answers no wait", async () => {
   const held = Promise.withResolvers<void>();
   let counts = 0;
   const wrapStore = (edits: PendingEdits): PendingEdits => ({
@@ -764,13 +753,24 @@ test("a report whose count was taken before a row was written says so", async ()
   await waitFor(async () => expect((await rowsOf(artifact)).length).toBe(1));
   held.resolve();
 
-  // That count read a document with no row in it, and this tab has written one since: the report
-  // carries its none-pending count and says it does not hold every row. The count taken once the
-  // row was stored does.
-  await waitFor(() =>
-    expect(states.map((state) => [state.count, state.countsEveryRow])).toEqual([
-      [0, false],
-      [1, true],
-    ])
-  );
+  // That count read a document with no row in it, and this tab has written one since, so it is
+  // dropped: the only report is the one taken once the row was stored, which counts it.
+  await waitFor(() => expect(states.map((state) => state.count)).toEqual([1]));
+
+  // The wait the dropped report would have answered - with none pending, while the row it is
+  // waiting for was still being written - is answered by nothing this run reported.
+  const waiter = createPendingWaiter();
+  let answered = false;
+  void waiter.whenSent(artifact, 60_000).then(() => {
+    answered = true;
+  });
+  for (const state of states) waiter.report(artifact, state);
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(answered).toBe(false);
+
+  // The report that comes once the server has taken that row does answer it, so the wait was
+  // waiting for the one thing the dropped report could not say.
+  waiter.report(artifact, { count: 0, readOnly: false, rebuiltAt: undefined, stored: true });
+  await waitFor(() => expect(answered).toBe(true));
 });

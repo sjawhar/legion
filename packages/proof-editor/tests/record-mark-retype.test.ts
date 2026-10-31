@@ -404,9 +404,17 @@ test("remarkRecordMark puts the mark back on the reading its surroundings name, 
  *  read twice to begin with, and three times once a reading of them stands in front of both. The
  *  reading the reader selected is the paragraph's second and then its third, so an index of it is
  *  a different passage afterwards and the text around it is not
- *  (`packages/dispatch/e2e/compose-wait.e2e.ts`). */
+ *  (`packages/dispatch/e2e/compose-wait.e2e.ts`). Short enough that the text the placement keeps
+ *  in front of the reader's words runs back to the start of the block, which is a part of where
+ *  they sat that another writer's new first sentence takes away. */
 const TWO_READINGS = "Alpha the lazy dog. Beta the lazy dog.";
 const THREE_READINGS = "Zero the lazy dog. Alpha the lazy dog. Beta the lazy dog.";
+
+/** The same pair in a paragraph long enough for the cap to fill: the text in front of the
+ *  reader's own reading runs to `QUOTE_CONTEXT_CHARS` without reaching the block's start, so it
+ *  is text alone and a sentence written in front of it leaves it as it was. */
+const LONG_TWO_READINGS = "Alpha the lazy dog sits here. Beta the lazy dog.";
+const LONG_THREE_READINGS = "Zero the lazy dog. Alpha the lazy dog sits here. Beta the lazy dog.";
 
 /** Where the reader's own words sit in `text`, which reads them last. */
 function lastReading(text: string): { from: number; to: number } {
@@ -415,14 +423,17 @@ function lastReading(text: string): { from: number; to: number } {
 }
 
 test("remarkRecordMark keeps the reader's own reading when another writer adds one in front of it in the same block", async () => {
-  await withMarksEditor(TWO_READINGS, ({ view }) => {
-    const range = lastReading(TWO_READINGS);
+  await withMarksEditor(LONG_TWO_READINGS, ({ view }) => {
+    const range = lastReading(LONG_TWO_READINGS);
     const start = comment(view, REPEATED, BY, "", range);
     const placement = placementFor(view, range, REPEATED);
+    // The cap's worth of text in front of their words, so what the placement keeps of that side
+    // is text and nothing about where the block began.
+    expect(placement.prefix).toHaveLength(QUOTE_CONTEXT_CHARS);
     // Another writer's reading of the same words, in front of the reader's and inside their own
     // block, written in the edit that took the mark: their words are the paragraph's third
     // reading now, where they were its second.
-    rewriteParagraph(view, THREE_READINGS);
+    rewriteParagraph(view, LONG_THREE_READINGS);
     rebuildEditorState(view);
 
     const again = remarkRecordMark(view, start.id, "comment", BY, REPEATED, placement);
@@ -431,30 +442,52 @@ test("remarkRecordMark keeps the reader's own reading when another writer adds o
       expect.objectContaining({
         type: "proofComment",
         id: again.markId,
-        ...lastReading(THREE_READINGS),
+        ...lastReading(LONG_THREE_READINGS),
       }),
     ]);
   });
 });
 
-test("the surroundings the cap keeps tell those readings apart where a shorter prefix would not", async () => {
+// The same edit to a paragraph short enough that the text in front of the reader's words was all
+// there was: the placement keeps it as the block's own start, which is where their words no
+// longer sit once another writer has written a sentence in front of them. Nothing of what they
+// read around their words is left whole, so the reading is not theirs to take - the refusal says
+// the text around them changed, which is what happened (dispatch://INFRA-727).
+test("remarkRecordMark refuses the reading in a block another writer has written in front of, where the placement kept that block's start", async () => {
   await withMarksEditor(TWO_READINGS, ({ view }) => {
     const range = lastReading(TWO_READINGS);
     const start = comment(view, REPEATED, BY, "", range);
     const placement = placementFor(view, range, REPEATED);
-    // The whole text before the words, the paragraph beginning nearer than the cap.
     expect(placement.prefix).toBe("Alpha the lazy dog. Beta ");
     expect(placement.prefix.length).toBeLessThan(QUOTE_CONTEXT_CHARS);
     rewriteParagraph(view, THREE_READINGS);
     rebuildEditorState(view);
 
+    expect(remarkRecordMark(view, start.id, "comment", BY, REPEATED, placement)).toEqual({
+      refused: "unsurrounded",
+    });
+    expect(marksInDoc(view)).toEqual([]);
+  });
+});
+
+test("the surroundings the cap keeps tell those readings apart where a shorter prefix would not", async () => {
+  await withMarksEditor(LONG_TWO_READINGS, ({ view }) => {
+    const range = lastReading(LONG_TWO_READINGS);
+    const start = comment(view, REPEATED, BY, "", range);
+    const placement = placementFor(view, range, REPEATED);
+    expect(placement.prefix).toBe("ha the lazy dog sits here. Beta ");
+    rewriteParagraph(view, LONG_THREE_READINGS);
+    rebuildEditorState(view);
+
     // Two characters of that prefix - all a cap of two would have kept - read in front of
-    // "Alpha" as much as in front of "Beta", so two readings of the reader's own block answer
-    // them and neither can be taken for theirs: the block step's "ambiguous", driven by a
-    // placement whose surroundings really do answer both.
+    // "Alpha" as much as in front of "Beta", and a side that short is one the block began at,
+    // which none of the three readings does: a cap that keeps too little tells the reader's
+    // reading from the others by nothing at all, and the refusal is the block step's
+    // "unsurrounded" where before the block edge counted it was "ambiguous". Either way nothing
+    // is marked; only the cap's own prefix places the record.
     const shorter = { ...placement, prefix: placement.prefix.slice(-2) };
     expect(remarkRecordMark(view, start.id, "comment", BY, REPEATED, shorter)).toEqual({
-      refused: "ambiguous",
+      refused: "unsurrounded",
     });
     expect(marksInDoc(view)).toEqual([]);
 
@@ -464,7 +497,7 @@ test("the surroundings the cap keeps tell those readings apart where a shorter p
       expect.objectContaining({
         type: "proofComment",
         id: again.markId,
-        ...lastReading(THREE_READINGS),
+        ...lastReading(LONG_THREE_READINGS),
       }),
     ]);
   });
@@ -643,6 +676,60 @@ test("remarkRecordMark takes the reading the whole document surrounds as the rea
     // a selection nothing was kept of.
     expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement)).toEqual({
       refused: "ambiguous",
+    });
+    expect(marksInDoc(view)).toEqual([]);
+  });
+});
+
+/** A block the reader selected the whole of - a heading, a list item, a table cell, where a
+ *  suggestion usually goes, or a short line like this one. The placement keeps no text on
+ *  either side of their words, because there was none: what it keeps of where they sat is that
+ *  their words opened their block and closed it. An empty side that matched any text would
+ *  leave such a placement telling no reading from another (dispatch://INFRA-727). */
+const WHOLE_BLOCK = "Ship it now.";
+
+test("remarkRecordMark refuses a block the reader selected whole once it reads their words twice among other text", async () => {
+  await withMarksEditor(WHOLE_BLOCK, ({ view }) => {
+    const range = { from: 1, to: 1 + WHOLE_BLOCK.length };
+    const start = comment(view, WHOLE_BLOCK, BY, "", range);
+    const placement = placementFor(view, range, WHOLE_BLOCK);
+    expect(placement).toEqual({
+      blockId: expect.any(String),
+      prefix: "",
+      readings: 1,
+      suffix: "",
+    });
+    // Another writer wrote the line into a sentence and wrote it a second time. Neither reading
+    // opens its block and closes it, as the reader's words did, so neither is theirs to take:
+    // the text around their words changed, and that is what the refusal says. Before the empty
+    // sides stood for the block's edges, both readings answered them and the refusal said the
+    // two read alike with the same text around them, which they plainly do not.
+    rewriteParagraph(view, "We said Ship it now. Then: Ship it now. again");
+    rebuildEditorState(view);
+
+    expect(remarkRecordMark(view, start.id, "comment", BY, WHOLE_BLOCK, placement)).toEqual({
+      refused: "unsurrounded",
+    });
+    expect(marksInDoc(view)).toEqual([]);
+  });
+});
+
+test("remarkRecordMark refuses an unrelated reading elsewhere once the block the reader selected whole is gone", async () => {
+  await withMarksEditor(`${QUOTE}\n\nI saw it ${QUOTE} today.`, ({ view }) => {
+    const range = { from: 1, to: 1 + QUOTE.length };
+    const start = comment(view, QUOTE, BY, "", range);
+    const placement = placementFor(view, range, QUOTE);
+    expect(placement.prefix).toBe("");
+    expect(placement.suffix).toBe("");
+    // Another writer deleted the block the reader selected, and the one reading left sits in
+    // the middle of someone else's sentence. Their words opened and closed a block of their
+    // own; this reading opens and closes nothing, so it is another passage, and a record moved
+    // there is what no refusal would ever tell them about.
+    dropParagraph(view);
+    rebuildEditorState(view);
+
+    expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement)).toEqual({
+      refused: "unplaceable",
     });
     expect(marksInDoc(view)).toEqual([]);
   });

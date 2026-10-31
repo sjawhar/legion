@@ -12,8 +12,9 @@ export interface SessionSends {
    *  press is its own write, and it goes out behind every earlier message to the session still
    *  being tried. */
   readonly send: (name: MutationKey, body: string, delivery: MessageDeliveryMode) => void;
-  /** Sends a refused message again, at the back of the session's line, as every other surface's
-   *  Retry does: one body decides what a Retry carries (`HeldSends.retry`). */
+  /** Sends a refused message again, at the back of the session's line, as every Retry but a
+   *  mounted composer's does: one body decides what those carry (`HeldSends.retry`), while a
+   *  composer on screen builds its own from the fields the reader has in front of them. */
   readonly retry: (held: HeldSend) => void;
   readonly discard: (held: HeldSend) => void;
   /** Stops trying a late message once the attempt in flight settles. */

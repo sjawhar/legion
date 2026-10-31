@@ -7,7 +7,6 @@ const DOCUMENT = "artifact-1";
 
 const nothingPending: PendingState = {
   count: 0,
-  countsEveryRow: true,
   readOnly: false,
   rebuiltAt: undefined,
   stored: true,
@@ -67,27 +66,6 @@ test("a report with rows pending, or one a read-only admission cannot send, answ
     await settle();
     expect(waiting.answered).toBe(false);
 
-    waiter.report(DOCUMENT, nothingPending);
-    await settle();
-    expect(waiting.answered).toBe(true);
-  });
-});
-
-// Another edit's acknowledgement counts the rows while the re-mark's own write is still queued
-// behind that count: the count reads none pending because the store does not hold that row yet.
-// Answering from it would send the retry out naming a mark the server has never been told about,
-// which is the refusal this recovery exists to get past.
-test("a report whose count was taken before this tab's newest row answers nothing", async () => {
-  await onFakeClock(async () => {
-    const waiter = createPendingWaiter();
-    const waiting = waitFor(waiter);
-
-    waiter.report(DOCUMENT, { ...nothingPending, countsEveryRow: false });
-    await settle();
-    expect(waiting.answered).toBe(false);
-
-    // The report taken once the store holds the row - none pending, and every row of this tab
-    // counted - is the one the wait is for.
     waiter.report(DOCUMENT, nothingPending);
     await settle();
     expect(waiting.answered).toBe(true);

@@ -768,7 +768,7 @@ const ACROSS_BLOCKS_TWICE_SPEC = [
  *  reader's: refusing is right. Telling them their words are "no longer where you selected it"
  *  is not - they are exactly where they were, and only the words around them changed. Each
  *  refusal says what is true of the case it is reached in (the INFRA-512 architect's rule, this
- *  review's finding 4); the sentence for words that read in more than one place already exists. */
+ *  review's finding 4); the sentence it is told in is `unremembered`'s, asserted word for word. */
 test("a cross-block refusal does not claim the words moved while they are where they were", async ({
   browser,
 }) => {
@@ -816,6 +816,141 @@ test("a cross-block refusal does not claim the words moved while they are where 
     // in both places: the refusal claims neither.
     expect(await composer(page).textContent()).not.toContain("no longer where you selected it");
     expect(await composer(page).textContent()).not.toContain("with the same text around them");
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A spec whose one short paragraph is the whole of what a reader selects. */
+const WHOLE_BLOCK_SPEC = ["## Review", "", "Ship it now.", ""].join("\n");
+/** A spec whose first paragraph is the whole of what a reader selects, with the same words
+ *  reading once more further down among words the reader never read beside them. */
+const WHOLE_BLOCK_ELSEWHERE_SPEC = [
+  "## Review",
+  "",
+  "Ship it now.",
+  "",
+  "I heard someone say Ship it now. today.",
+  "",
+].join("\n");
+
+/** Selecting a whole block leaves nothing on either side of the words, so what the composer keeps
+ *  of their surroundings is empty on both. Empty is not "matches anything": it means the words
+ *  began and ended their block, and a reading that does not is a different passage. Here the
+ *  reader's tab is away long enough for the sweep to take the mark while another writer rewrites
+ *  that block to read those words twice, among different text both times. Neither reading is the
+ *  reader's, so Send attaches to neither and says so. */
+test("a comment on a whole block is not attached to either reading a rewrite of that block leaves", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: WHOLE_BLOCK_SPEC,
+    title: "Review the spec",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const transport = await documentTransport(page);
+    await openSpec(page, issue.key, "Ship it now.");
+    await selectEditorText(page, "Ship it now.");
+    await barAction(page, "Comment");
+    await expect(documentEditor(page).locator('span[data-proof="comment"][data-id]')).toHaveCount(
+      1
+    );
+    await composer(page).getByLabel("Comment").fill("Which one is this?");
+
+    // The tab goes away, so the sweep takes the mark; the block itself is rewritten meanwhile,
+    // and the words that come back read twice, neither of them at the block's edge.
+    transport.hold();
+    await transport.sever();
+    await editArtifact(
+      issue.primary_artifact_id,
+      {
+        ops: [
+          {
+            find: "Ship it now.",
+            op: "replace",
+            with: "We said Ship it now. Then: Ship it now. again",
+          },
+        ],
+      },
+      { actor: { id: "e2e-compose-wait", kind: "session" }, as: "agent" }
+    );
+    await page.waitForTimeout(PAST_THE_SWEEP_MS);
+    await transport.release();
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect(documentEditor(page)).toContainText("We said Ship it now.");
+
+    await send(page);
+    await expect(composer(page)).toContainText("Your draft is kept");
+    await expect(composer(page).getByLabel("Comment")).toHaveValue("Which one is this?");
+    expect(await listComments(issue.key, issue.primary_artifact_id)).toHaveLength(0);
+    expect(await markOffsets(page)).toEqual([]);
+    // Neither reading carries the text the reader had around their words: both lost the block
+    // edge the empty surroundings stood for.
+    expect(await composer(page).textContent()).not.toContain("with the same text around them");
+  } finally {
+    await alice.close();
+  }
+});
+
+/** The reader's own block loses their words while their tab is away long enough for the sweep to
+ *  take the mark, and the same words read once more somewhere else, among words they never read
+ *  beside them. That is another passage, so the comment stays unattached and the reader is told,
+ *  rather than being moved there with nothing said. */
+test("a comment on a whole block that is deleted is not moved to the one reading left elsewhere", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: WHOLE_BLOCK_ELSEWHERE_SPEC,
+    title: "Review the spec",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const transport = await documentTransport(page);
+    await openSpec(page, issue.key, "I heard someone say");
+    await selectEditorText(page, "Ship it now.");
+    await barAction(page, "Comment");
+    await expect(documentEditor(page).locator('span[data-proof="comment"][data-id]')).toHaveCount(
+      1
+    );
+    await composer(page).getByLabel("Comment").fill("Which one is this?");
+
+    transport.hold();
+    await transport.sever();
+    await editArtifact(
+      issue.primary_artifact_id,
+      {
+        ops: [
+          {
+            find: "Ship it now.",
+            occurrence: 0,
+            op: "replace",
+            with: "Nothing of the sort.",
+          },
+        ],
+      },
+      { actor: { id: "e2e-compose-wait", kind: "session" }, as: "agent" }
+    );
+    await page.waitForTimeout(PAST_THE_SWEEP_MS);
+    await transport.release();
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect(documentEditor(page)).toContainText("Nothing of the sort.");
+    await expect(documentEditor(page)).toContainText("I heard someone say Ship it now. today.");
+
+    await send(page);
+    await expect(composer(page)).toContainText("Your draft is kept");
+    await expect(composer(page).getByLabel("Comment")).toHaveValue("Which one is this?");
+    expect(await listComments(issue.key, issue.primary_artifact_id)).toHaveLength(0);
+    // Nothing is left on the sentence that merely quotes their words.
+    expect(await markOffsets(page)).toEqual([]);
   } finally {
     await alice.close();
   }

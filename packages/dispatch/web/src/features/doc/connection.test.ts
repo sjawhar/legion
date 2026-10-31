@@ -61,7 +61,6 @@ test("a read-only Hocuspocus admission signals a schema reload", () => {
 test("pending document labels describe retained, read-only, rebuilt, and unretained edits", () => {
   const retained = {
     count: 2,
-    countsEveryRow: true,
     readOnly: false,
     rebuiltAt: undefined,
     stored: true,
@@ -577,7 +576,7 @@ test("a document whose browser keeps no edits says so, and still connects", asyn
       await waitFor(() => expect(OpenSocket.opened).toHaveLength(1));
       await waitFor(() =>
         expect(pending).toEqual([
-          { count: 0, countsEveryRow: true, readOnly: false, rebuiltAt: undefined, stored: false },
+          { count: 0, readOnly: false, rebuiltAt: undefined, stored: false },
         ])
       );
     });

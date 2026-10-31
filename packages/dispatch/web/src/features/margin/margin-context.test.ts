@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import type { ComposerKind } from "../conversation/composer-model";
 import type { RemarkRefusal } from "../doc/editor";
-import { DOCUMENT_CLOSED_REFUSAL, REANCHOR_REFUSALS } from "./margin-context";
+import { DOCUMENT_CLOSED_REFUSAL, REANCHOR_IN_PROGRESS, REANCHOR_REFUSALS } from "./margin-context";
 
 const KINDS: readonly ComposerKind[] = ["ask", "comment", "suggestion"];
 const REASONS: readonly RemarkRefusal["refused"][] = [
@@ -153,10 +153,11 @@ test("the refusal for changed surroundings tells the reader what did change, and
 
 /** The refusal for two readings the same text surrounds - two of the reader's own block, or two
  *  of the document once that block is gone, both of them readings a kept placement answers:
- *  their words are exactly where they selected them and the text around them is the text they
- *  read there, so the sentence may say neither that the words moved nor that their surroundings
- *  changed. What it has to say is the one true thing left: the words read in more than one
- *  place alike, so nothing says which of them the draft is about. */
+ *  the text the reader read beside their words reads beside both, so the sentence may say
+ *  neither that their surroundings changed nor that the words moved - the document step runs
+ *  only once their own block is gone or no longer reads them, and nothing there says where
+ *  their words sit now. What it has to say is the one true thing left: the words read in more
+ *  than one place alike, so nothing says which of them the draft is about. */
 test("the refusal for readings nothing tells apart says why, and claims no edit", () => {
   for (const kind of KINDS) {
     const text = REANCHOR_REFUSALS.ambiguous(kind);
@@ -208,5 +209,30 @@ test("the refusal for a document that is not open says so, and names opening it 
       names: text.includes(`this ${kind}`),
       selectAgain: text.includes("select the text again"),
     }).toEqual({ kind, changed: false, kept: true, names: true, selectAgain: false });
+  }
+});
+
+/** What the composer reads while the margin waits for the reader's own document to bind its
+ *  editor, in place of the server's words for a mark they never saw. Not a refusal: it asks
+ *  nothing of them, claims nothing about their words, and the send goes again by itself. */
+test("the sentence for a recovery still running names what is being attached, and asks nothing", () => {
+  expect(REANCHOR_IN_PROGRESS("comment")).toBe(
+    "Re-attaching this comment to the text you selected, and sending it again…"
+  );
+  for (const kind of KINDS) {
+    const text = REANCHOR_IN_PROGRESS(kind);
+    expect({
+      kind,
+      changed: text.includes("changed or deleted"),
+      names: text.includes(`this ${kind}`),
+      refuses: REASONS.some((reason) => REANCHOR_REFUSALS[reason](kind) === text),
+      selectAgain: text.includes("select the text again"),
+    }).toEqual({ kind, changed: false, names: true, refuses: false, selectAgain: false });
+    if (kind !== "comment") {
+      expect({ kind, miscalled: text.includes("this comment") }).toEqual({
+        kind,
+        miscalled: false,
+      });
+    }
   }
 });

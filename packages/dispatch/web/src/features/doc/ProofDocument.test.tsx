@@ -290,7 +290,6 @@ test("ProofDocument reports connection status and pending edits through the tool
     act(() => {
       pending({
         count: 2,
-        countsEveryRow: true,
         readOnly: false,
         rebuiltAt: undefined,
         stored: true,
@@ -300,7 +299,6 @@ test("ProofDocument reports connection status and pending edits through the tool
     await waitFor(() =>
       expect(toolbar.current?.pending).toEqual({
         count: 2,
-        countsEveryRow: true,
         readOnly: false,
         rebuiltAt: undefined,
         stored: true,
@@ -335,7 +333,6 @@ test("the margin's wait for this browser's edits is answered by a report taken a
     act(() =>
       pending({
         count: 0,
-        countsEveryRow: true,
         readOnly: false,
         rebuiltAt: undefined,
         stored: true,
@@ -351,7 +348,6 @@ test("the margin's wait for this browser's edits is answered by a report taken a
     act(() =>
       pending({
         count: 1,
-        countsEveryRow: true,
         readOnly: false,
         rebuiltAt: undefined,
         stored: true,
@@ -363,7 +359,6 @@ test("the margin's wait for this browser's edits is answered by a report taken a
     act(() =>
       pending({
         count: 0,
-        countsEveryRow: true,
         readOnly: false,
         rebuiltAt: undefined,
         stored: true,
@@ -378,7 +373,6 @@ test("the margin's wait for this browser's edits is answered by a report taken a
     act(() =>
       pending({
         count: 1,
-        countsEveryRow: true,
         readOnly: true,
         rebuiltAt: undefined,
         stored: true,
