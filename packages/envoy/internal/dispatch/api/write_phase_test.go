@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -205,14 +206,32 @@ func transactionIDHolders(t *testing.T, database *store.Store) (int, string) {
 	return holders, running
 }
 
-// awaitNoTransactionIDHolder waits until no backend holds a transaction id. An issue create
-// leaves one write running past its answer: the refresh of the project's search term statistics
-// its related-item check starts for a project that has none (ensureSearchTermStats), a
-// background write with an id of its own. A test that counts every backend waits it out first,
-// as the refusal tests wait it out, so what it counts afterwards is the writers it drives.
+// awaitNoTransactionIDHolder waits until the TEST project's search term statistics are committed
+// and then until no backend holds a transaction id. An issue create leaves one write running past
+// its answer: the refresh of the project's search term statistics its related-item check starts
+// for a project that has none (ensureSearchTermStats), a background write with an id of its own.
+// That refresh can begin after the create answers, and its rebuild takes its id only once it
+// inserts, so a moment with no holder does not show it has ended; its row of search_term_totals,
+// written in the same transaction, does. A test that counts every backend waits it out first, as
+// the refusal tests wait it out, so what it counts afterwards is the writers it drives.
 func awaitNoTransactionIDHolder(t *testing.T, database *store.Store) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var refreshed bool
+		if err := database.Pool.QueryRow(context.Background(), `
+			select exists (select 1 from search_term_totals where project_key = 'TEST')
+		`).Scan(&refreshed); err != nil {
+			t.Fatalf("read search_term_totals: %v", err)
+		}
+		if refreshed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the TEST project's search term statistics were not refreshed within 30s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	for {
 		holders, running := transactionIDHolders(t, database)
 		if holders == 0 {
@@ -311,6 +330,86 @@ func TestTwoWritersOfOneOwnerSerializeWithoutATransactionID(t *testing.T) {
 	}
 	if lastSeq != expected-1 {
 		t.Fatalf("issue last_seq = %d, want %d, the last event's", lastSeq, expected-1)
+	}
+}
+
+// Two PATCHes of one issue that each add a label serialize on the issue's owner lock, the point
+// that replaced the issue row's `for no key update` in their read phase. Adding a label reads the
+// issue's labels and writes the union back, so two PATCHes that read the same labels would drop
+// one another's label. Both wait for the lock's holder with no transaction id, then each reads
+// what the one before it committed: both labels land, and the issue's sequence has no gap.
+func TestTwoPatchesOfOneIssueSerializeOnItsOwnerLockAndLoseNoUpdate(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	issue := createInteractionIssue(t, handler, "TEST", "Two patches", "A spec")
+	awaitNoTransactionIDHolder(t, database)
+
+	holder, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin the lock holder: %v", err)
+	}
+	defer func() { _ = holder.Rollback(context.Background()) }()
+	if err := store.LockOwner(context.Background(), holder, store.IssueOwner(issue.Key)); err != nil {
+		t.Fatalf("take the issue's owner lock: %v", err)
+	}
+
+	addLabel := func(label string, answered chan<- *httptest.ResponseRecorder) {
+		answered <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key,
+			map[string]any{"labels_add": []string{label}}, "alice")
+	}
+	answers := make(chan *httptest.ResponseRecorder, 2)
+	go addLabel("alpha", answers)
+	go addLabel("bravo", answers)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case response := <-answers:
+			t.Fatalf("a PATCH answered %d %s while another transaction held the issue's owner lock", response.Code, response.Body.String())
+		default:
+		}
+		waiting, holdingXid := ownerLockWaiters(t, database)
+		if holdingXid != 0 {
+			t.Fatalf("%d of %d PATCHes wait on the issue's owner lock holding a transaction id, want none", holdingXid, waiting)
+		}
+		if waiting >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d PATCHes waited on the issue's owner lock within 10s, want 2", waiting)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	var lastSeqBefore int
+	if err := database.Pool.QueryRow(context.Background(), `select last_seq from issues where key = $1`, issue.Key).Scan(&lastSeqBefore); err != nil {
+		t.Fatalf("read the issue's sequence: %v", err)
+	}
+	if err := holder.Commit(context.Background()); err != nil {
+		t.Fatalf("release the issue's owner lock: %v", err)
+	}
+	for range 2 {
+		if response := awaitResponse(t, answers); response.Code != http.StatusOK {
+			t.Fatalf("PATCH answered %d %s, want 200", response.Code, response.Body.String())
+		}
+	}
+
+	var labels []string
+	var lastSeq int
+	if err := database.Pool.QueryRow(context.Background(), `select labels, last_seq from issues where key = $1`, issue.Key).Scan(&labels, &lastSeq); err != nil {
+		t.Fatalf("read the issue: %v", err)
+	}
+	if !slices.Contains(labels, "alpha") || !slices.Contains(labels, "bravo") {
+		t.Fatalf("issue labels = %v, want both alpha and bravo: one PATCH overwrote the other's label", labels)
+	}
+	if lastSeq < lastSeqBefore+2 {
+		t.Fatalf("issue last_seq = %d, want at least %d: two PATCHes, an event each", lastSeq, lastSeqBefore+2)
+	}
+	var events, maxSeq int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*), coalesce(max(seq), 0) from events where issue_key = $1
+	`, issue.Key).Scan(&events, &maxSeq); err != nil {
+		t.Fatalf("read the issue's events: %v", err)
+	}
+	if events != maxSeq || maxSeq != lastSeq {
+		t.Fatalf("issue events = %d with max seq %d and last_seq %d, want one event per seq up to last_seq", events, maxSeq, lastSeq)
 	}
 }
 
