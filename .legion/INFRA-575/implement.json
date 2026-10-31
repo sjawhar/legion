@@ -2,11 +2,12 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-575",
-  "completed": "2026-10-31T12:05:00Z",
-  "round": 8,
+  "completed": "2026-10-31T13:40:00Z",
+  "round": 9,
   "answersTestFailures": [
     "The only failure of .legion/INFRA-575/test.json round 6: CI's `dispatch` lane was red at the code head b1e074f1 on e2e/references.e2e.ts:26, `Error: locator.screenshot: Element is not attached to the DOM`, taken straight after `setViewportSize({ width: 1440 })`. The row is this change's own: below 1280 px the card lives in the Inbox row, and from 1280 px the row becomes a short row and the card is drawn again in the reading column, so the resize unmounts the node the locator resolved at 390 px. Fixed in the row, with no product change.",
-    "The daemon's return for `ci-ok` red at 35ac3205: the red is `envoy-go`, which `ci-ok` only condenses. It is not this change's and no second re-run is owed (the architect's instruction after the first), so the evidence stands in place of a green lane - see the CI proof below."
+    "The daemon's return for `ci-ok` red at 35ac3205: the red is `envoy-go`, which `ci-ok` only condenses. It is not this change's and no second re-run is owed (the architect's instruction after the first), so the evidence stands in place of a green lane - see the CI proof below.",
+    "The second return for `ci-ok` red is answered by a forward merge, not by a third re-run: run 41182693696 checked out `Merge 24f71ce731e7 into 1d3e69553791`, and main's #2598 (1a9095e6), which fixed the very test it failed on, landed at 08:42Z after that merge ref was computed, so both attempts replayed a tree without the fix. main@origin is merged forward at 7d0324c3e218 with the branch's own lines unmoved (fingerprint 0e5c5590...dc93e1 before and after), and CI runs fresh there."
   ],
   "proof": [
     {
@@ -48,6 +49,14 @@
       "observed": "Attempt 1: every lane green but `envoy-go`, with `ci-ok` red only because it condenses it - `lint`, `test`, `contracts`, `dispatch`, `docs / build`, `dispatch-browser-multiprocess`, `changes`, `claude-envoy`, `envoy-client`, `envoy-plugin`, `envoy-smoke`, `pi-envoy`, `pi-legion`, `pi-shared` all passed. I re-ran the failed jobs once (`gh run rerun 41182693696 --failed`). Attempt 2 failed the same lane on the same test and the same cause: `--- FAIL: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries`, preceded twice by `ERROR broker: OAuth request failed error=\"The authorization server encountered an unexpected condition that prevented it from fulfilling the request. the database is down\"`, then `FAIL github.com/sjawhar/envoy/internal/broker/oauth`. That is the lane's own Postgres, not an assertion about behaviour. Per the architect's instruction I did not re-run a second time.",
       "headSha": "24f71ce731e79507568c94cec7334a27a8163ec7",
       "negativeControl": "This branch changes no Go file at all: `jj diff --from e65900f4438b --to 24f71ce731e7 --name-only` lists no `.go`, `go.mod`, `go.sum` or `go.work`, and the failing package is `packages/envoy/internal/broker/oauth`, which nothing here touches. The lane is flaky on main independently of this branch: main's own CI run 41171988894 failed `envoy-go` (on `TestAReconnectCatchesUpWhatTheListenerMissed`, a different flake of the same lane) while main's run 41185715628 passed it."
+    },
+    {
+      "criterion": "The pane and the change view still behave as every earlier round proved them, at the forward-merge head that carries main's 238 changed files.",
+      "surface": "The built Dispatch SPA served by the real Go server against a real Postgres, in this pod's harness (LEGION_ROLE=impl3), whole Chromium project.",
+      "command": "cd packages/dispatch && source /legion/harness/env.sh && bun run e2e -- --project=chromium",
+      "observed": "935 passed, 25 skipped, 1 failed (1.1 h) at 7d0324c3e218. The eight rows of inbox-reading-pane.e2e.ts and every row of the seven spec files this change touches are green. hover-preview.e2e.ts:87 - main's own red, carried through every round of this pull request - now passes: main fixed it in #2581 and the merge brought that fix in. The one failure is e2e/delivery.e2e.ts:215, which fails inside the spec's own shapePosition helper (`page.evaluate: TypeError: Cannot read properties of undefined (reading 'series')`), a row this change cannot reach.",
+      "headSha": "7d0324c3e218ec6b6760fc1acf9f8b446b29b3e7",
+      "negativeControl": "That one row is the suite's own flake, not this change's: re-run alone at the same head with --repeat-each=3 it is green three times out of three (51 passed, 2.2 m), and the branch touches neither e2e/delivery.e2e.ts nor the Delivery page nor its chart - `jj diff --from 'fork_point(main@origin | @-)' --to @- --name-only` lists no delivery file. The control the other way is the merge itself: the same command at the pre-merge head 24f71ce731e7 was 933 passed, 25 skipped and 1 failed with hover-preview red, so the merge changed exactly the two rows main's own fixes own."
     }
   ],
   "filesChanged": [
@@ -56,7 +65,8 @@
   "trickyParts": [
     "A locator held across `setViewportSize` is a handle to a node, and this change makes 1280 px a remount boundary for every Inbox card: below it the card is the row's, from it the card is the column's. Any row that resolves a card at one width and acts on it at another must resolve it again after the switch. e2e/inbox-pane.ts's `askCard` is the helper that reads which layout a width draws; use it rather than `page.getByTestId('ask-<id>')` in a row that resizes.",
     "A harness note, paid for the hard way this round: /legion/harness is shared by every role of the issue and only the databases are per lane. Its setup script now refuses to start Postgres while `pg_isready -h 127.0.0.1 -p 55432` answers, because neither obvious guard works across roles - `pg_ctl status` reads a pid file a pod move leaves stale, and `pgrep` cannot see another role's postmaster at all, since each role has its own PID namespace. Trusting the pid file started a second postmaster, whose failure to bind made the running one shut itself down; the tester lost nothing only because its measurements had already landed. The three facts are written above that guard in the script.",
-    "`ci-ok` condenses the selected lanes, so a red `ci-ok` names no cause: read the run's jobs with `filter=latest` before judging a return, or the one red lane is invisible behind it."
+    "`ci-ok` condenses the selected lanes, so a red `ci-ok` names no cause: read the run's jobs with `filter=latest` before judging a return, or the one red lane is invisible behind it.",
+    "A `pull_request` run checks out the merge ref computed when its event fired, and `gh run rerun` replays that same ref: a red a base fix has since cured cannot be cleared by any number of re-runs, only by a forward merge. The run's own log names the ref it used (`HEAD is now at <sha> Merge <head> into <base>`), which is the one place to read it."
   ],
   "deviations": [],
   "openQuestions": [
