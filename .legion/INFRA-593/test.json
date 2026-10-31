@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-593",
-  "completed": "2026-10-31T04:22:00Z",
-  "round": 12,
-  "headTested": "800ec5393830b1c60ba79f9cd894bba74aa20854",
-  "prHead": "61a3ec76aac7ea26b3e81f3b58349cda81472a31",
-  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-12-txt",
-  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-12-tar-gz",
+  "completed": "2026-10-31T06:20:00Z",
+  "round": 13,
+  "headTested": "eb992560d00799f117f86275ac233bc9bd368149",
+  "prHead": "938134fd71912b70d6061ffc479e3d493ed0dd5b",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-13-txt",
+  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-13-tar-gz",
   "previousRounds": [
     "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
@@ -19,71 +19,56 @@
     "dispatch://INFRA-593/artifact/infra-593-tester-round-8-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-9-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-10-txt",
-    "dispatch://INFRA-593/artifact/infra-593-tester-round-11-txt"
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-11-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-12-txt"
   ],
   "roundShape": {
     "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3",
-    "oldHead": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
-    "newHead": "800ec5393830b1c60ba79f9cd894bba74aa20854",
+    "oldHead": "800ec5393830b1c60ba79f9cd894bba74aa20854",
+    "newHead": "eb992560d00799f117f86275ac233bc9bd368149",
     "differs": [
-      "packages/envoy/AGENTS.md",
-      "packages/envoy/cmd/dispatch/README.md",
-      "packages/envoy/go.mod",
-      "packages/envoy/go.sum",
-      "packages/envoy/internal/dispatch/docs/compaction.go",
-      "packages/envoy/internal/dispatch/docs/compaction_test.go",
-      "packages/envoy/internal/dispatch/docs/decode_reason_test.go",
       "packages/envoy/internal/dispatch/docs/fold.go",
-      "packages/envoy/internal/dispatch/docs/history_fold_test.go",
-      "packages/envoy/internal/dispatch/docs/livewrite.go",
-      "packages/envoy/internal/dispatch/docs/load_fold_test.go",
-      "packages/envoy/internal/dispatch/docs/mutation.go",
-      "packages/envoy/internal/dispatch/docs/parked_peer_update_test.go",
-      "packages/envoy/internal/dispatch/docs/persistence.go",
-      "packages/envoy/internal/dispatch/docs/refused_peer_update_test.go",
-      "packages/envoy/internal/dispatch/docs/service.go",
-      "packages/envoy/internal/dispatch/docs/tree.go",
+      "packages/envoy/internal/dispatch/docs/fold_reason_test.go",
+      "packages/envoy/internal/dispatch/docs/testhooks.go",
       "packages/envoy/internal/dispatch/docs/websocket.go"
     ],
     "equalOnlyAfterMigrationNormalisation": [],
-    "round": "full (ygo pin and runtime files)"
+    "round": "narrow, on the architect's call"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its proofs: the refused, parked and wording tests 300x each under -race at a23bc871 (300/300, 0 DATA RACE); the wording test per path (each of the five decodeStoredState sites reverted alone fails its path); its e2e steps are covered by scenU4/scenC2/scenD at this head. Its claim 'route every decode of stored state through one refusal' is contradicted at fold.go:259 (the failure below)."
+    "how": "Its fix is proven by my red test 7c35d610, byte-identical at the head and passing, failing with fold.go reverted; its call classification checked call by call; its client table checked by git grep at the head and by reading INFRA-707's browsertype; the suites re-run."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "Review round 7 and this round's commit: every decode of stored state refuses ygo's reasonless refusal once (decodeStoredState); the fold a room's load, a cold read and a compaction make of the stored rows is one.",
-      "evidence": "fold.go:259 applies each stored row with crdt.ApplyUpdateV1. On the real binary (scenD: 21 rows, row 10 cut to half) both unfoldable-log lines read 'apply a stored document update: crdt: invalid update: crdt: invalid update'. Red test (commit 7c35d610): TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce in packages/envoy/internal/dispatch/docs/fold_reason_test.go. `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<postgres> go test ./internal/dispatch/docs -run '^TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce$' -count=1` fails at the head: 'the fold's refusal = \"apply a stored document update: crdt: invalid update: crdt: invalid update\", want an invalid update ending \": crdt: invalid update\", stated once'. With fold.go:259 calling decodeStoredState(doc, update) it passes, and so does TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce."
-    }
-  ],
-  "proofOfWhatHeld": [
-    {
-      "criterion": "Architect check 3: ygo #343's server-made close drops a peer's unread input; no keystroke is lost after the reconnect.",
-      "surface": "envoy-dispatch head 800ec539 and main 21b40359, real processes on Postgres 16.2; a throwaway Go typing client on the document websocket that sends sync step 1 on open and answers the room's step 1 with step 2, as @hocuspocus/provider 2.15.3 (the web app's locked version: startSync, readSyncStep1 -> writeSyncStep2) does",
-      "command": "SIDE=head MODE=sigterm bash scenK.sh (x4); SIDE=head MODE=behind bash scenK.sh (x3); SIDE=main MODE=sigterm|behind bash scenK.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-12-tar-gz)",
-      "observed": "1,500 numbered keystrokes, one per 10 ms. Head through two SIGTERMs and restarts, 4 runs: 1,500/1,500 stored in order each; in 3 runs the room had dropped written keystrokes (7, 378, 1,113 clock units, up to 159 keystrokes) that the resend restored. Head with a second process's inserts closing the room behind the durable head (4-5 closes logged per run), 3 runs: 1,500/1,500 in order plus the 3 inserted paragraphs; the room had dropped 126-203 written units at reconnects, restored by the resend. Main (sami.4): 1,500/1,500 in both modes; it also dropped written keystrokes on behind-head closes (119-259 units), restored by the resend. Limit: no real browser was driven; the provider's resend was read in its source.",
-      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
-      "negativeControl": "NO_RESEND=1 (the client does not answer the room's step 1), head, SIGTERM: the room lacked 3,927 units at reconnect and 543 of 1,500 keystrokes were stored, 957 missing."
+      "criterion": "Round 12's failure fixed: the fold of stored rows refuses ygo's reasonless error once (architect checks 1 and 3).",
+      "surface": "internal/dispatch/docs at eb992560 against Postgres 16.2; envoy-dispatch built from eb992560 and from 800ec539, real processes, NATS off",
+      "command": "go test ./internal/dispatch/docs -run '^(TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce|TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce)$' at the head and with fold.go reverted to 800ec539; CUTTER=<reasonless-cut finder> bash scenD.sh on both binaries (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-13-tar-gz)",
+      "observed": "Head: both PASS. fold.go reverted: the fold test FAILs ('the fold's refusal = \"apply a stored document update: crdt: invalid update: crdt: invalid update\"'). Real binary, row 10 of 21 cut where ygo gives no reason (2,541 of 4,124 bytes): both unfoldable-log lines read 'apply a stored document update: crdt: invalid update', once each; rows left as stored, 0.26 CPU-s in 200 s. A half cut keeps 'encoding: unexpected end of input'. Every remaining crdt Apply/Merge/Diff call in the package, read in context, decodes live or incoming state as the PR body says.",
+      "headSha": "eb992560d00799f117f86275ac233bc9bd368149",
+      "negativeControl": "800ec539's binary on the same kind of cut (2,423 of 4,002 bytes) logs 'apply a stored document update: crdt: invalid update: crdt: invalid update' on both lines."
     },
     {
-      "criterion": "Architect checks 1 and 2: the refused, parked and wording tests reliable at a23bc871; a22f0f29's power kept; the wording test fails per path when its call site is reverted.",
-      "surface": "internal/dispatch/docs at 800ec539 against Postgres 16.2, and copies with one change each",
-      "command": "CGO_ENABLED=1 GOMAXPROCS=4 go test -race -p 2 -parallel 4 -count=300 -run '<the three tests>'; the edited refused test on sami.7 and sami.9; the original a22f0f29 file at the head x20; decode_reason_test.go with each of fold.go:89, livewrite.go:546, mutation.go:920, websocket.go:165, websocket.go:205 reverted to crdt.ApplyUpdateV1",
-      "observed": "300 PASS each, 0 FAIL, 0 DATA RACE (478 s). The refused test's only edit swaps its private liveMarkdown for main's currentLiveMarkdown (the room's rendered replica or a snapshot); the edited test fails on sami.7 and sami.9 with a22f0f29's message, and the original passes 20/20 at the head. Each reverted site fails decode_reason_test.go on its own path (the cold read, the cold write's fork, the socket's admission, the history check, the room's load).",
-      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
-      "negativeControl": "sami.7/sami.9 for the refused test; the reverted sites for the wording test."
+      "criterion": "Architect check 2: no /ws/doc client relies on input ygo #343's server-made close drops, loadtest/browsertype included.",
+      "surface": "the repository at eb992560, and INFRA-707's branch legion/INFRA-707 at 6b5c1050",
+      "command": "git grep -n '/ws/doc' eb992560 outside tests and markdown; git grep loadtest for ws/ and Dial; git show 6b5c1050:packages/envoy/loadtest/browsertype/main.go and its docstest.go",
+      "observed": "At the head: the web app's connection.ts, the e2e browser harness that watches it, the server route, a contracts comment; loadtest opens /ws/live only. browsertype exists only on legion/INFRA-707: it dials /ws/doc itself through docstest.DialContext (the protocol, no browser), answers the room's step 1 with step 2 (docstest.go:146), and never reconnects: a connection that ends records 'the connection ended before the run did' and exits 1. A server-made close mid-run therefore drops its unread keystrokes and fails its run, on load-test documents.",
+      "headSha": "eb992560d00799f117f86275ac233bc9bd368149",
+      "negativeControl": "Round 12's typing client with its resend off lost 957 of 1,500 keystrokes across a SIGTERM; browsertype has no resend after a close at all, so its run fails rather than recovering."
     },
     {
-      "criterion": "Architect check 4: round 9/10's held scenarios at this head.",
-      "surface": "envoy-dispatch main 21b40359 and head 800ec539, real processes on Postgres 16.2, NATS off, HTTP API",
-      "command": "bash scenU4.sh; bash scenD.sh; bash scenC2.sh",
-      "observed": "Upgrade through 0150 (schema 150): start sweep candidates=4 compacted=4 rows_deleted=31, no multi-row document unnamed. Rolling update with main killed: head's queue folded main's unnamed document 121 s after a read. Unfoldable log: left as stored, logged once (doubled wording, the failure), 0.28 CPU-s in 200 s. 12 writers during a sweep: every text exact, also after a cold restart, 12 owed, no ERROR. go build/vet ./... and the infra vets clean.",
-      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
-      "negativeControl": "Main 21b40359's upload is the case doc_compaction_owed misses; only head's queue, through a read, folded it."
+      "criterion": "Architect check 4: the docs and cmd/dispatch suites.",
+      "surface": "packages/envoy at eb992560 against Postgres 16.2",
+      "command": "GOMAXPROCS=4 go test -p 2 -parallel 4 -count=1 ./cmd/dispatch, then ./internal/dispatch/docs",
+      "observed": "cmd/dispatch ok 292.3 s; internal/dispatch/docs ok 1,471.8 s (the packages/contracts fixtures exported with the source).",
+      "headSha": "eb992560d00799f117f86275ac233bc9bd368149",
+      "negativeControl": "The fold test inside the docs suite fails when fold.go is reverted (check 1)."
     }
   ],
-  "ci": "Read on GitHub at 800ec539, run 41164827059, 04:13 UTC: pr-title success; lint, typecheck, test, dispatch, envoy-go, envoy-go-race and envoy-go-race-docs queued (unread). This push carries the red test and no trailer, so CI runs at its head and will show the red test failing."
+  "notes": [
+    "INFRA-707's loadtest/browsertype does not reconnect: under ygo #343 a server-made close during its run drops its unread keystrokes and fails the run. The fix, if INFRA-707's stored-order check must hold across a close, is in INFRA-707's code; told to the INFRA-514 architect."
+  ],
+  "ci": "Read on GitHub at eb992560, run 41170205555, 06:16 UTC: lint, typecheck, test, pr-title, envoy-go-race success. Unread: dispatch, envoy-go and envoy-go-race-docs in progress."
 }
