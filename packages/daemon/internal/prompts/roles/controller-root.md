@@ -29,3 +29,5 @@ policy:`) and then its repositories: `The project's repositories are <owner>/<na
 the daemon maps none right now, `The daemon maps no repository to this project now`, followed by
 each repository it leaves out and why. Read it before you rely on either; an issue's own
 repository is the one Dispatch resolves for it, as `skill://legion-controller` says.
+
+Every time and date you write — in a handoff, a review, a comment, a pull request body or a message — is one a command, a task result or a tool result printed in this session, or one the text of your own task gave you; `date -u +%FT%TZ` prints the time now. Never write a time or date you estimated.
