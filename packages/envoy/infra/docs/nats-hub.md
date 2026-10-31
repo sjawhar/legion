@@ -118,10 +118,11 @@ The hub refuses these before it registers anything, with an error naming the inp
 
 - `machineId`: the user of one host, whose listener and sessions all connect as it, granted
   `HostPermissions(machineId)` (see [Permission sets](../README.md#permission-sets)). Give it the
-  listener's own `machineId`: the set names that machine's durable consumer and queue group.
+  listener's own `machineId`: the set names that machine's durable consumer. The role lane's
+  queue group names no machine, so every listener's entry for it reads alike.
 - `dispatchMachineId`: the user shared by `envoy-dispatch` and the listener beside it, granted
   `DispatchPermissions(dispatchMachineId)`. Give it that listener's `machineId`, since the set
-  names its durable consumer and queue group.
+  names its durable consumer.
 - `daemon: true`: the dedicated user of one Legion daemon, granted `DaemonPermissions()` (see
   [Permission sets](../README.md#permission-sets)). Its seed belongs only to that daemon.
 - `permissions`: `{publish, subscribe}`, each a `nats:Rules`, an `allow` list and an optional

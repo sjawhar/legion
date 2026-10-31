@@ -278,7 +278,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoMachines(t *testing.T) {
 	const (
 		holderID = "ses_two_machines_holder"
 		role     = "two-machines-role"
-		messages = 16
+		messages = 32
 	)
 	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
@@ -300,12 +300,9 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoMachines(t *testing.T) {
 	postListener(t, first.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
 	postListener(t, first.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
 	frames := receiveAsSession(t, client, holderID)
-	// The second machine reads the claim from the role bucket and the holder from its own session
-	// cache, which can trail the registration the first machine took. Warm it before the publishes,
-	// so a forward it takes resolves the holder rather than releasing a lapsed claim.
-	if status, answer := callListener(t, second.port, http.MethodGet, "/v1/roles/"+role, ""); status != http.StatusOK {
-		t.Fatalf("the second machine's lookup of %s: status %d %s, want 200", role, status, answer)
-	}
+	// Nothing warms the second machine: its session cache can still trail the registration the
+	// first machine took when NATS hands it a message, and resolution falls through to the role
+	// and session buckets themselves, so whichever machine takes a message resolves the holder.
 
 	publish := func(dedupeKey string) {
 		t.Helper()
@@ -351,6 +348,12 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoMachines(t *testing.T) {
 	byFirst, bySecond := roleForwards(first), roleForwards(second)
 	if byFirst+bySecond != messages {
 		t.Fatalf("the two machines logged %d + %d role forwards, want %d in all", byFirst, bySecond, messages)
+	}
+	// Both machines must be members of the one group, or a count of one delivery each proves
+	// nothing: a second machine that never joined the lane also forwards none. NATS spreads a
+	// group's messages over its members; all 32 on one has probability 2^-31.
+	if byFirst == 0 || bySecond == 0 {
+		t.Fatalf("the first machine forwarded %d and the second %d of %d: one of them is not a member of the listeners' one role-lane queue group", byFirst, bySecond, messages)
 	}
 }
 

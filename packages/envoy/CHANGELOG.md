@@ -61,11 +61,18 @@
   request to the holder's agent subject and the holder is read from the shared role and session
   buckets, so any listener can make it. The NATS grant entry moves with it: a listener's,
   Dispatch's and a host's user now subscribe `notifications.role.> envoy-listener-role-lane`
-  instead of `notifications.role.> envoy-listener-<machine id>`, so a hub's rendered users must
-  be deployed with the listeners. While a rollout runs, a listener still in the old group and
-  one in the new are two groups, and a holder can receive one copy from each until every
-  listener carries this release. The live-topics lane keeps its own per-machine group,
-  `envoy-listener-live-<machine id>`, since it delivers to the sessions on its own machine.
+  instead of `notifications.role.> envoy-listener-<machine id>`. Deploy the hub's rendered users
+  first and the listeners after them: a listener of this release whose server still carries only
+  the old entry has its role subscription refused and ends its start, and a running listener of
+  an earlier release keeps the subscription it already opened, since NATS checks a subscription
+  when it is opened. While the two releases run together they are two queue groups, so a holder
+  can receive one copy from each until every listener carries this release - the state this
+  release ends, not one it creates. The one listener NATS gives a role message is now the only
+  one that forwards it, so a resolution or forward failure is one `delivery_failed` or
+  `receipt_timeout` exception for that message rather than one per machine, and no other
+  machine's copy stands in for it; the role lane has no retry either way. The live-topics lane
+  keeps its own per-machine group, `envoy-listener-live-<machine id>`, since it delivers to the
+  sessions on its own machine.
 - A session that subscribed to an issue's topic now hears what the agents on that issue do.
   Every published event's payload carries `quiet` (`events.Quiet`), whether the event carries
   nothing for a reader following its owner topic: a delivery receipt, an anchor refresh,
