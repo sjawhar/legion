@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-31T10:17:17Z",
+  "completed": "2026-10-31T13:43:45Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "3668fb95171b89ceabc2bbe411d10bea9aa31e07",
-  "round": "24 (CI red at the retro head fcec63a7, ci-ok: envoy-go failed on main's TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries alone, fixed on main by #2598 1a9095e6): a forward merge of main 2ab9473a7, no conflict, unchanged-diff fingerprint equal (eba4675c...). #2391 still open, so migrations stay 0150/0151 and connections 91. This file is restored from 8807a5d8, since retro removed .legion/INFRA-590/. Diff-check comment 6542125516. Sampled memory peak 3.57 GiB of 19, 281 samples every 2 s.",
+  "head": "6281961837c6c9de25c410ab192d4f2688f85127",
+  "round": "25 (CI red at 3668fb95, ci-ok: envoy-go job 124521125018 failed on TestAReconnectCatchesUpWhatTheListenerMissed, fixed on main by #2594 3b0ae77e9, and TestIdenticalViewsShareOneRecompute, a flake of main's; neither in a file this PR touches): a forward merge of main b0cc910f5, no conflict, unchanged-diff fingerprint equal (eba4675c...). #2391 still open, so migrations stay 0150/0151 and connections 91. Diff-check comment 6544145910. Sampled memory peak 3.47 GiB of 19, 68 samples every 2 s.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -238,6 +238,14 @@
       "observed": "build and vet clean; internal/broker/oauth ok 4.3 s; outbox ok 268.0 s; unchanged-diff fingerprint eba4675c... before and after the merge; GitHub MERGEABLE at 3668fb95.",
       "headSha": "3668fb95171b89ceabc2bbe411d10bea9aa31e07",
       "negativeControl": "At fcec63a7, before the merge, CI's envoy-go job 124477897791 failed with '--- FAIL: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries'."
+    },
+    {
+      "criterion": "The forward merge carries main's reconnect catch-up test fix and leaves the reviewed change as it was; the delivery hub, whose listener uses this PR's pglisten change, passes its two failed tests.",
+      "surface": "internal/dispatch/api delivery-hub tests and internal/pglisten on pod Postgres 17",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go build ./... && go vet ./internal/dispatch/... ./internal/pglisten/ ./internal/bus/ ./cmd/dispatch/ && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -p 1 -count=5 -run 'TestAReconnectCatchesUpWhatTheListenerMissed$|TestIdenticalViewsShareOneRecompute$' ./internal/dispatch/api/ && go test -p 1 -count=1 ./internal/pglisten/",
+      "observed": "build and vet clean; both hub tests -count=5 ok (26.2 s); pglisten ok; unchanged-diff fingerprint eba4675c... before and after; GitHub MERGEABLE at 62819618.",
+      "headSha": "6281961837c6c9de25c410ab192d4f2688f85127",
+      "negativeControl": "At 3668fb95, before the merge, CI's envoy-go job 124521125018 failed with '--- FAIL: TestAReconnectCatchesUpWhatTheListenerMissed' and '--- FAIL: TestIdenticalViewsShareOneRecompute'."
     }
   ],
   "filesChanged": [
