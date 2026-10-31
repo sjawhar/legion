@@ -43,11 +43,17 @@ const TITLES = [
 
 /** `count` open asks, each on its own issue, oldest first; `from` picks the first title. */
 async function seedAsks(prefix: string, count: number, from = 0) {
+  // The issues are independent of one another - their titles share no terms - so they are created
+  // together; the asks stay serial because their order is what the Inbox lists.
+  const issues = await Promise.all(
+    Array.from({ length: count }, (_value, index) => {
+      const title = TITLES[from + index];
+      if (title === undefined) throw new Error("out of issue titles");
+      return createIssue({ project: "CORE", title });
+    })
+  );
   const asks = [];
-  for (let index = 0; index < count; index += 1) {
-    const title = TITLES[from + index];
-    if (title === undefined) throw new Error("out of issue titles");
-    const issue = await createIssue({ project: "CORE", title });
+  for (const [index, issue] of issues.entries()) {
     asks.push({
       ask: await createAsk(
         issue.key,
@@ -94,9 +100,13 @@ async function seedBothSections() {
   const waiting = await seedAsks("Yours", 6);
   const target = waiting[2];
   if (target === undefined) throw new Error("target ask missing");
-  for (const { ask, issue } of await seedAsks("Theirs", 4, 6)) {
-    await createComment(issue.key, { ask_id: ask.id, body: "Clarify first." });
-  }
+  // The four clarifications are independent of one another and all land before the browser opens:
+  // they are what puts their asks under Waiting on agents.
+  await Promise.all(
+    (await seedAsks("Theirs", 4, 6)).map(({ ask, issue }) =>
+      createComment(issue.key, { ask_id: ask.id, body: "Clarify first." })
+    )
+  );
   return target;
 }
 
@@ -114,6 +124,7 @@ async function leaveRow(page: Page): Promise<void> {
     .toBe(true);
 }
 
+// SLOW(>=2s): eleven seeded writes, a ten-card Inbox and the progress note's round trip.
 test("a row being typed into stays put, draft and all, when an agent's progress note flips its turn, and moves only once the reader leaves it @phone", async ({
   browser,
 }) => {
@@ -157,6 +168,7 @@ test("a row being typed into stays put, draft and all, when an agent's progress 
   }
 });
 
+// SLOW(>=2s): eleven seeded writes, a ten-card Inbox and the Ask back's round trip.
 test("the reader's own Ask back keeps the row where it is and the view still, until they leave it @phone", async ({
   browser,
 }) => {
@@ -238,6 +250,7 @@ test("the row at the viewport centre stays put when a P0 ask arrives above it @p
   }
 });
 
+// SLOW(>=2s): eleven seeded writes, two answers and two scroll-and-measure cycles.
 test("the row under the pointer stays put when a row above it is answered elsewhere, and is let go once the pointer leaves the list @phone", async ({
   browser,
 }) => {
@@ -397,12 +410,12 @@ async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
     await nextFrame(page);
     release.resolve();
     await delivered.promise;
-    // Keep travelling inside the gap while the released response renders. Each move is still pointer
-    // motion, but none rests on a row the viewport anchor could hold.
+    // Keep travelling inside the gap while the released response renders. Each move is still
+    // pointer motion, but none rests on a row the viewport anchor could hold; `nextFrame` is the
+    // observable the move is paced by, so a step needs nothing else.
     for (let step = 0; step < 10; step += 1) {
       await page.mouse.move(x, gap + (step % 2));
       await nextFrame(page);
-      await page.waitForTimeout(25);
     }
 
     const targetY = sixthBox.y + sixthBox.height / 2;
@@ -429,6 +442,7 @@ async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
   }
 }
 
+// SLOW(>=2s): nine seeded writes, a viewport resize and ~19 pointer-to-frame round trips.
 test("a travelling pointer keeps its destination when a P0 row arrives @phone", async ({
   browser,
 }) => {
@@ -444,6 +458,7 @@ test("a travelling pointer keeps its destination when a P0 row arrives @phone", 
   }
 });
 
+// SLOW(>=2s): eleven seeded writes, a viewport resize and ~19 pointer-to-frame round trips.
 test("a travelling pointer crosses a grouped owner without losing its destination @phone", async ({
   browser,
 }) => {
