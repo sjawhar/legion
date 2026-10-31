@@ -1,14 +1,15 @@
 // handlers_ui_records.go: GET /v1/credential-requests/{record} and POST .../approve and .../deny,
-// the routes a listed service calls with its own Kubernetes ServiceAccount token (accountAuth) to
-// read one record and to decide a machine login, and the record shape that read and POST
-// /v1/machine-logins/lookup both answer. A machine login is decided here on the caller's word:
-// the token proves which service is calling, and the service names the deciding person in the
-// body's approver field, who must be one the record's rule admits (record.MayDecide) and must
-// type the login's code. Each such decision is logged with the caller that relayed it and the
-// approver it named. A secret request is never decided here: it is decided only on the broker's
-// own approval page (internal/broker/approval), by a person signed in to the broker, and these
-// routes refuse it naming that page. A service's machine login, which only a broker before token
-// logins opened, may only be denied: approving it is 400 SERVICE_LOGS_IN_WITH_TOKEN.
+// the routes that read one record and decide a machine login, and the record shape that read and
+// POST /v1/machine-logins/lookup both answer. A machine login is decided on the caller's word by
+// a listed service calling with its own Kubernetes ServiceAccount token: the token proves which
+// service is calling, and the service names the deciding person in the body's approver field,
+// who must be one the record's rule admits (record.MayDecide) and must type the login's code.
+// Each such decision is logged with the caller that relayed it and the approver it named. A
+// secret request is never decided here, by any caller: it is decided only on the broker's own
+// approval page (internal/broker/approval), by a person signed in to the broker, and the two
+// decide routes refuse it naming that page before they look at the caller at all. A service's
+// machine login, which only a broker before token logins opened, may only be denied: approving
+// it is 400 SERVICE_LOGS_IN_WITH_TOKEN.
 package api
 
 import (
@@ -181,39 +182,48 @@ type decisionResponse struct {
 	State string `json:"state"`
 }
 
-func (s *server) approveRecord(w http.ResponseWriter, r *http.Request, callerName string) {
-	s.decideRecord(w, r, callerName, true)
+func (s *server) approveRecord(w http.ResponseWriter, r *http.Request) {
+	s.decideRecord(w, r, true)
 }
 
-func (s *server) denyRecord(w http.ResponseWriter, r *http.Request, callerName string) {
-	s.decideRecord(w, r, callerName, false)
+func (s *server) denyRecord(w http.ResponseWriter, r *http.Request) {
+	s.decideRecord(w, r, false)
 }
 
-// decideRecord decides a machine login (machine.Service.ApplyDecision), the one kind of record a
-// service may decide, and refuses every other record, writing nothing, with 403
-// DECIDE_ON_BROKER_PAGE naming the record's approval page: a secret request is decided only there,
-// by a person signed in to the broker, never on a service's word. The record's kind is read before
-// anything else, so a secret request is refused whatever the body says. A machine login's
-// decision is logged with the caller that relayed it and the approver it named, the record of who
-// acted, since that name is the caller's to state.
-func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, callerName string, approve bool) {
+// decideRecord refuses a secret request for every caller and decides a machine login for a
+// listed service. It reads the record's kind first, before anything about the caller: a secret
+// request answers 403 DECIDE_ON_BROKER_PAGE naming its page on the broker, whether or not the
+// caller holds a ServiceAccount token, since no token makes one decidable here and a caller
+// turned away with 401 or ACCOUNT_NOT_LISTED would be told the wrong thing to do. Nothing is
+// written and no body is read for that refusal. Every other record is then authenticated exactly
+// as the other account routes are (authenticate with authAccount: the source address's bucket,
+// the ServiceAccount token, and BROKER_API_ACCOUNTS), and only afterwards does a record id no
+// record has answer 404, so an unauthenticated caller learns no more about which ids exist than
+// a machine login's own answer tells it. A machine login's decision is logged with the caller
+// that relayed it and the approver it named, the record of who acted, since that name is the
+// caller's to state.
+func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bool) {
 	recordID, ok := pathRecordID(w, r, "record", "RECORD_ID_INPUT")
 	if !ok {
 		return
 	}
-	kind, err := s.deps.Machine.RecordKind(r.Context(), recordID)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such credential request")
-		return
-	case err != nil:
-		writeInternal(w, "read credential request kind", err)
-		return
-	}
-	if kind != record.KindLauncherCredential {
+	kind, kindErr := s.deps.Machine.RecordKind(r.Context(), recordID)
+	if kindErr == nil && kind != record.KindLauncherCredential {
 		page := s.approveURL(recordID)
 		writePageRefusal(w, http.StatusForbidden, "DECIDE_ON_BROKER_PAGE",
 			"a secret request is decided only on the secrets broker's own page, by a person signed in to the broker: "+page, page)
+		return
+	}
+	who, ok := s.authenticate(w, r, authAccount)
+	if !ok {
+		return
+	}
+	switch {
+	case errors.Is(kindErr, pgx.ErrNoRows):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such credential request")
+		return
+	case kindErr != nil:
+		writeInternal(w, "read credential request kind", kindErr)
 		return
 	}
 	var body decideBody
@@ -223,7 +233,7 @@ func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, callerName
 	if !requireApprover(w, body.Approver) {
 		return
 	}
-	slog.Info("decision relayed", "caller", callerName, "approver", body.Approver, "record", recordID, "approve", approve)
+	slog.Info("decision relayed", "caller", who.account, "approver", body.Approver, "record", recordID, "approve", approve)
 	s.decideMachineLogin(w, r, recordID, approve, body)
 }
 

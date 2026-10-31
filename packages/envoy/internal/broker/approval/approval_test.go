@@ -19,7 +19,7 @@ import (
 // nonce, a state, the record's approver as login_hint, and no offline access or forced consent;
 // signed in, the page prints the record's facts from the broker's own record, with Approve and
 // Deny, every other pending request the person may decide, and "Approve all N shown". A machine
-// login's record answers 303 to the broker's machine-login page; a record another person must
+// login's record links Dispatch's page and offers no button; a record another person must
 // decide names who and offers only the switch; an unknown record is a 404 to a signed-in person
 // and the sign-in, naming no one, to everyone else.
 func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
@@ -108,11 +108,15 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 		t.Errorf("the page carries a script:\n%s", res.Body)
 	}
 
-	t.Run("a machine login is decided on the machine-login page", func(t *testing.T) {
+	t.Run("a machine login links Dispatch's page and offers no button", func(t *testing.T) {
 		machineRecord, _ := r.machineLogin(t, newKey(t), ada, "ada-laptop")
-		res := b.Get(t, "/approve/"+machineRecord)
-		if want := r.url + "/machine"; res.Status != http.StatusSeeOther || res.Header.Get("Location") != want {
-			t.Errorf("the machine login's record = %d to %q, want 303 to %s:\n%s", res.Status, res.Header.Get("Location"), want, res.Body)
+		res := b.Page(t, machineRecord)
+		if !strings.Contains(pageText(t, res.Body), "Machine login for ada-laptop") ||
+			!strings.Contains(res.Body, `href="`+brokertest.MachineLoginURL+`"`) {
+			t.Errorf("the machine login's page does not link %s:\n%s", brokertest.MachineLoginURL, res.Body)
+		}
+		if decisionForm(t, res.Body, machineRecord) != nil {
+			t.Errorf("the machine login's page offers a decision form:\n%s", res.Body)
 		}
 	})
 

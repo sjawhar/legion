@@ -1072,14 +1072,17 @@ func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
 	}
 }
 
-// TestTheAccountRoutesDecideNoSecretRequest pins that no route a service calls decides a secret
-// request: the listed caller's approve and deny of an agent_secret record — naming the record's
-// own approver, another login or none, with a code or a body that is not one — each answer 403
-// DECIDE_ON_BROKER_PAGE carrying the record's page as approve_url and in the message, and write
-// nothing: the record stays pending, with no event, no grant and no audit row. Without a
-// ServiceAccount token it is still 401. The same routes still decide a machine login with its code,
-// and the secret request is decided on the broker's page, after which the routes still refuse it.
-func TestTheAccountRoutesDecideNoSecretRequest(t *testing.T) {
+// TestEveryCallerDecidingASecretRequestGetsDecideOnBrokerPage pins that the two decide routes
+// refuse a secret request before they look at the caller at all: approve and deny of an
+// agent_secret record — naming the record's own approver, another login or none, with a code or
+// a body that is not one — each answer 403 DECIDE_ON_BROKER_PAGE carrying the record's page as
+// approve_url and in the message, and write nothing: the record stays pending, with no event, no
+// grant and no audit row. A caller with no ServiceAccount token and a caller whose account
+// BROKER_API_ACCOUNTS does not list get that same refusal, not 401 and not ACCOUNT_NOT_LISTED,
+// since no credential would let either decide one here. The same routes still decide a machine
+// login with its code, and the secret request is decided on the broker's page, after which the
+// routes still refuse it.
+func TestEveryCallerDecidingASecretRequestGetsDecideOnBrokerPage(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "", "DEEL_API_KEY")
@@ -1096,10 +1099,16 @@ func TestTheAccountRoutesDecideNoSecretRequest(t *testing.T) {
 	}
 	before := written()
 
-	status, body := ts.req(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", nil,
-		map[string]any{"approver": testApprover})
-	if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKEN_INVALID" {
-		t.Fatalf("approve with no ServiceAccount token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, body)
+	for name, headers := range map[string]map[string]string{
+		"no ServiceAccount token": nil,
+		"an unlisted account":     {"Authorization": "Bearer " + ts.accountToken(t, unlistedAccount, "", time.Hour)},
+	} {
+		status, body := ts.req(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", headers,
+			map[string]any{"approver": testApprover})
+		refusal := decode[wirePageRefusal](t, body)
+		if status != http.StatusForbidden || refusal.Code != "DECIDE_ON_BROKER_PAGE" || refusal.ApproveURL != page || !strings.Contains(refusal.Error, page) {
+			t.Fatalf("approve with %s = %d %s, want 403 DECIDE_ON_BROKER_PAGE naming %s", name, status, body, page)
+		}
 	}
 	for _, route := range []string{"approve", "deny"} {
 		for name, decision := range map[string]any{
@@ -1139,7 +1148,7 @@ func TestTheAccountRoutesDecideNoSecretRequest(t *testing.T) {
 	if got := ts.record(t, recordID); got.State != "denied" || got.Decided == nil || got.Decided.Login != testApprover {
 		t.Fatalf("record after its approver's deny on the page = %+v, want denied by %s", got, testApprover)
 	}
-	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", map[string]any{"approver": testApprover})
+	status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", map[string]any{"approver": testApprover})
 	if status != http.StatusForbidden || decode[wirePageRefusal](t, body).Code != "DECIDE_ON_BROKER_PAGE" {
 		t.Fatalf("approve the decided record = %d %s, want 403 DECIDE_ON_BROKER_PAGE", status, body)
 	}

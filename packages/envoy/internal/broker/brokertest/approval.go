@@ -42,7 +42,7 @@ func SignIn(issuer *oidctest.Issuer, key *oidctest.Key) config.SignIn {
 func NewApprovalPage(t *testing.T, signIn config.SignIn, publicURL string, st *store.Store, m *requests.Machine) *approval.Page {
 	t.Helper()
 	page, err := approval.New(approval.Config{
-		SignIn: signIn, PublicURL: publicURL, Store: st, Machine: m,
+		SignIn: signIn, PublicURL: publicURL, MachineLoginURL: MachineLoginURL, Store: st, Machine: m,
 	})
 	if err != nil {
 		t.Fatalf("approval.New: %v", err)

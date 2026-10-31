@@ -446,11 +446,11 @@ func main() {
 		slog.Info("token exchange", "state", "on", "kubernetes", cfg.ExchangeK8sAudience != "", "github", cfg.ExchangeGitHubIssuer != "",
 			"accounts", len(cfg.ExchangeAccounts), "workflows", len(cfg.ExchangeWorkflows))
 	}
-	// verification_uri is the machine-login page, where the person types the code.
+	// verification_uri is Dispatch's machine-login page, where the person types the code.
 	provider, err := oauth.New(oauth.Config{
 		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL,
 		AccessLifetime:  time.Duration(cfg.AccessTokenSeconds) * time.Second,
-		RefreshLifetime: credentialLifetime, VerificationURL: cfg.PublicURL + "/machine",
+		RefreshLifetime: credentialLifetime, VerificationURL: cfg.MachineLoginURL,
 		ProofSkew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
 		Exchange:  exchangeConfig,
 	}, oauthStore)
@@ -464,7 +464,8 @@ func main() {
 	// The approval page signs a person in with the broker's own client and returns them to
 	// BROKER_PUBLIC_URL as resolved above.
 	page, err := approval.New(approval.Config{
-		SignIn: cfg.SignIn, PublicURL: cfg.PublicURL, Store: st, Machine: reqMachine,
+		SignIn: cfg.SignIn, PublicURL: cfg.PublicURL, MachineLoginURL: cfg.MachineLoginURL,
+		Store: st, Machine: reqMachine,
 	})
 	fatal(err)
 

@@ -149,14 +149,17 @@ func routes() []apiRoute {
 		// pending list's row does.
 		{http.MethodGet, "/v1/credential-requests/{record}", accountAuth((*server).readRecord)},
 		// Approve a pending machine login as the named person, who must type its code: the broker
-		// takes the person's name on the caller's word. A secret request is decided only on the
-		// broker's own page by a person signed in to the broker, so this refuses one, writing
-		// nothing, with 403 DECIDE_ON_BROKER_PAGE naming that page.
-		{http.MethodPost, "/v1/credential-requests/{record}/approve", accountAuth((*server).approveRecord)},
-		// Deny a pending machine login as the named person, who must type its code, on the caller's
-		// word as with approve. A secret request is refused, writing nothing, with 403
-		// DECIDE_ON_BROKER_PAGE naming the page where a person signed in to the broker denies it.
-		{http.MethodPost, "/v1/credential-requests/{record}/deny", accountAuth((*server).denyRecord)},
+		// takes the person's name on the caller's word, from a listed service's ServiceAccount
+		// token, which the handler verifies itself. The row is public because a secret request is
+		// refused before any caller is looked at: it is decided only on the broker's own page by
+		// a person signed in to the broker, so this answers 403 DECIDE_ON_BROKER_PAGE naming that
+		// page to every caller, token or none, writing nothing.
+		{http.MethodPost, "/v1/credential-requests/{record}/approve", public((*server).approveRecord)},
+		// Deny a pending machine login as the named person, who must type its code, on the
+		// caller's word and behind the same authentication as approve. A secret request is
+		// refused the same way, writing nothing, with 403 DECIDE_ON_BROKER_PAGE naming the page
+		// where a person signed in to the broker denies it.
+		{http.MethodPost, "/v1/credential-requests/{record}/deny", public((*server).denyRecord)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", accountAuth((*server).lookupMachineLogin)},
 		// List the machine logins the named person may revoke, every service's, such as the Legion
@@ -212,7 +215,8 @@ func routes() []apiRoute {
 		// checks the id's shape, then the session, then the record: a malformed id is a 400, a
 		// request with no live session, or with ?switch=1, redirects to the sign-in provider and
 		// returns here, and only a signed-in person's unknown record id is a 404. A machine
-		// login's record answers 303 to the broker's machine-login page, where one is decided.
+		// login's record is printed with the note that it is decided by typing its code on
+		// Dispatch's machine-login page, and offers no button.
 		{http.MethodGet, "/approve/{record}", signInAuth((*approval.Page).ServeRecord)},
 		// Decide records an approval page printed, as the signed-in person: a form from the
 		// broker's own origin only, carrying the page's token, which binds it to the session and to

@@ -78,6 +78,9 @@ type Config struct {
 	// PublicURL is BROKER_PUBLIC_URL as the broker resolved it: the one origin every POST must
 	// come from, and the base of the sign-in's redirect URI, <PublicURL>/signin/callback.
 	PublicURL string
+	// MachineLoginURL is BROKER_MACHINE_LOGIN_URL, Dispatch's page where a person types a
+	// machine login's code; a machine login's record links it and offers no button.
+	MachineLoginURL string
 	// Store holds the sessions.
 	Store *store.Store
 	// Machine reads the records and decides them (ReadRecord, PendingForApprover, ApplyDecision).
@@ -89,10 +92,8 @@ type Page struct {
 	cfg Config
 	// origin is PublicURL's origin as a browser serializes it in an Origin header.
 	origin string
-	// redirectURL is the sign-in's redirect URI, and machinePage the broker's own machine-login
-	// page, where a machine login is decided and never here.
+	// redirectURL is the sign-in's redirect URI.
 	redirectURL string
-	machinePage string
 
 	// flow is the provider's code flow, discovered at the first sign-in that needs it rather than
 	// at boot, so a provider outage never stops the broker serving machines; a failed discovery
@@ -110,8 +111,7 @@ func New(cfg Config) (*Page, error) {
 	if cfg.Store == nil || cfg.Machine == nil {
 		return nil, errors.New("approval: the page needs the store and the request machine")
 	}
-	base := strings.TrimRight(cfg.PublicURL, "/")
-	return &Page{cfg: cfg, origin: originOf(u), redirectURL: base + "/signin/callback", machinePage: base + "/machine"}, nil
+	return &Page{cfg: cfg, origin: originOf(u), redirectURL: strings.TrimRight(cfg.PublicURL, "/") + "/signin/callback"}, nil
 }
 
 // originOf is u's origin as a browser serializes it: lowercase scheme and host, and the port only

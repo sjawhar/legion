@@ -442,8 +442,8 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		}
 		status, answer := accountCall(t, base, http.MethodPost, "/v1/credential-requests/"+recordB+"/approve",
 			map[string]string{"Authorization": "Bearer " + idToken}, map[string]any{"approver": ada})
-		if status != http.StatusUnauthorized || decodeError(t, answer).Code != "ACCOUNT_TOKEN_INVALID" {
-			t.Fatalf("the account approve route with ada's Dispatch ID token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, answer)
+		if status != http.StatusForbidden || decodeError(t, answer).Code != "DECIDE_ON_BROKER_PAGE" {
+			t.Fatalf("the account approve route with ada's Dispatch ID token = %d %s, want 403 DECIDE_ON_BROKER_PAGE", status, answer)
 		}
 		requirePending(f.pods(t, base), podB, requestB, "ada's Dispatch ID token")
 	})

@@ -45,12 +45,12 @@ func TestMain(m *testing.M) {
 }
 
 // validEnv is a complete, minimal valid environment: every test starts from a copy of this and
-// overrides or deletes just the variable(s) under test. BROKER_MACHINE_LOGIN_URL is not in it,
-// since the broker no longer reads it.
+// overrides or deletes just the variable(s) under test.
 func validEnv() map[string]string {
 	return map[string]string{
 		"BROKER_DATABASE_URL":              "postgres://x",
 		"BROKER_PUBLIC_URL":                "https://secrets.internal.example",
+		"BROKER_MACHINE_LOGIN_URL":         "https://dispatch.internal.example/credentials/machine",
 		"BROKER_SECRETS_PREFIX":            "example/agent-secrets/",
 		"BROKER_SECRETS_KMS_KEY_ARN":       "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
 		"BROKER_SIGNIN_ISSUER":             "https://accounts.example.com",
@@ -69,42 +69,32 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
-// TestLoadIgnoresTheMachineLoginURLAndNeedsTheSignIn: BROKER_MACHINE_LOGIN_URL is read by
-// nothing, so a deployment that still sets it and one that does not both load, while a
-// configuration missing one of the four BROKER_SIGNIN_* settings refuses to start naming it.
-func TestLoadIgnoresTheMachineLoginURLAndNeedsTheSignIn(t *testing.T) {
-	t.Run("with BROKER_MACHINE_LOGIN_URL", func(t *testing.T) {
+// TestLoadRequiresMachineLoginURL: the page a person types a machine login's code into is
+// required, and must be an absolute http(s) URL, since the device grant names it to the machine.
+func TestLoadRequiresMachineLoginURL(t *testing.T) {
+	for _, v := range []string{"", "/credentials/machine", "dispatch.example/credentials/machine", "ftp://dispatch.example/x", "https:///x"} {
 		e := validEnv()
-		e["BROKER_MACHINE_LOGIN_URL"] = "https://dispatch.internal.example/credentials/machine"
-		if _, err := Load(env(e)); err != nil {
-			t.Fatalf("Load with BROKER_MACHINE_LOGIN_URL set = %v, want it ignored", err)
+		e["BROKER_MACHINE_LOGIN_URL"] = v
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_MACHINE_LOGIN_URL") {
+			t.Errorf("Load(BROKER_MACHINE_LOGIN_URL=%q) = %v, want a refusal naming it", v, err)
 		}
-	})
-
-	t.Run("without BROKER_MACHINE_LOGIN_URL", func(t *testing.T) {
-		if _, err := Load(env(validEnv())); err != nil {
-			t.Fatalf("Load with no BROKER_MACHINE_LOGIN_URL = %v, want no error", err)
-		}
-	})
-
-	t.Run("a missing sign-in setting", func(t *testing.T) {
-		e := validEnv()
-		delete(e, "BROKER_SIGNIN_DOMAIN")
-		_, err := Load(env(e))
-		if err == nil || !strings.Contains(err.Error(), "missing BROKER_SIGNIN_DOMAIN") {
-			t.Fatalf("Load without BROKER_SIGNIN_DOMAIN = %v, want a refusal naming it", err)
-		}
-	})
+	}
+	cfg, err := Load(env(validEnv()))
+	if err != nil || cfg.MachineLoginURL != "https://dispatch.internal.example/credentials/machine" {
+		t.Fatalf("Load = (%q, %v), want the machine login URL", cfg.MachineLoginURL, err)
+	}
 }
 
-// TestLoadRefusesAURLWithoutPrintingItsCredential: a BROKER_PUBLIC_URL that carries a credential
-// and is refused names the variable and the value as redact.NotPrinted, never the user name,
-// password or query; a clean refused value is named as written.
+// TestLoadRefusesAURLWithoutPrintingItsCredential: a BROKER_PUBLIC_URL or BROKER_MACHINE_LOGIN_URL
+// that carries a credential and is refused names the variable and the value as
+// redact.NotPrinted, never the user name, password or query; a clean refused value is named as
+// written.
 func TestLoadRefusesAURLWithoutPrintingItsCredential(t *testing.T) {
 	for _, row := range []struct{ name, value, want string }{
 		{"BROKER_PUBLIC_URL", "https://tokuser9f3:hunter2pw@secrets.example/v1?token=qtok77", redact.NotPrinted},
 		{"BROKER_PUBLIC_URL", "https://tokuser9f3:hunter2pw%zz@secrets.example", redact.NotPrinted},
 		{"BROKER_PUBLIC_URL", "https://secrets.example/v1", `"https://secrets.example/v1"`},
+		{"BROKER_MACHINE_LOGIN_URL", "ftp://tokuser9f3:hunter2pw@dispatch.example/x", redact.NotPrinted},
 	} {
 		e := validEnv()
 		e[row.name] = row.value

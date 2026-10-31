@@ -588,17 +588,17 @@ func TestEndToEnd(t *testing.T) {
 	})
 
 	// Step 7: a secret request is decided only on the broker's own page, by its approver signed in
-	// to the broker: the account route, given the approver's own login, answers 403
-	// DECIDE_ON_BROKER_PAGE naming that page, and with no ServiceAccount token 401; another person
-	// signed in to the page is offered no decision; the request is still pending, and its
-	// approver's approval on the page then releases the value.
+	// to the broker: the account route answers 403 DECIDE_ON_BROKER_PAGE naming that page to a
+	// listed caller giving the approver's own login and to a caller with no ServiceAccount token
+	// alike; another person signed in to the page is offered no decision; the request is still
+	// pending, and its approver's approval on the page then releases the value.
 	t.Run("7_TheAccountRoutesOrAnotherPersonDecideNothing", func(t *testing.T) {
 		requestID, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e wrong login", "NOTION_API_KEY")
 
 		status, body := ts.req(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", nil,
 			map[string]any{"approver": testApprover})
-		if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKEN_INVALID" {
-			t.Fatalf("approve with no ServiceAccount token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, body)
+		if status != http.StatusForbidden || decode[wireError](t, body).Code != "DECIDE_ON_BROKER_PAGE" {
+			t.Fatalf("approve with no ServiceAccount token = %d %s, want 403 DECIDE_ON_BROKER_PAGE", status, body)
 		}
 		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
 			map[string]any{"approver": testApprover})

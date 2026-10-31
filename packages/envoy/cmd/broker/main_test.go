@@ -57,11 +57,13 @@ func signInClientSecretFile(t *testing.T) string {
 }
 
 // productionEnv is the configuration every broker needs besides its addresses and database: the
-// namespace it serves, the key every secret there is on, and the four settings a person signs in
-// to its approval page with, which it refuses to start without.
+// namespace it serves, the key every secret there is on, the page a machine login's code is
+// typed on, and the four settings a person signs in to its approval page with, which it refuses
+// to start without.
 func productionEnv(t *testing.T) []string {
 	t.Helper()
 	return []string{
+		"BROKER_MACHINE_LOGIN_URL=https://dispatch.example/credentials/machine",
 		"BROKER_SECRETS_PREFIX=" + testSecretsPrefix,
 		"BROKER_SECRETS_KMS_KEY_ARN=" + testSecretsKMSKeyARN,
 		"BROKER_SIGNIN_ISSUER=" + testSignInIssuer,
@@ -104,6 +106,7 @@ func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
 		return map[string]string{
 			"BROKER_DATABASE_URL":              "postgres://unused",
 			"BROKER_PUBLIC_URL":                "https://secrets.internal.example",
+			"BROKER_MACHINE_LOGIN_URL":         "https://dispatch.example/credentials/machine",
 			"BROKER_SERVICES":                  "example-service=system:serviceaccount:example:example-sa example-service=system:serviceaccount:example:another-sa",
 			"BROKER_SECRETS_PREFIX":            "example/agent-secrets/",
 			"BROKER_SECRETS_KMS_KEY_ARN":       "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
