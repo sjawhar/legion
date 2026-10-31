@@ -572,7 +572,7 @@ func TestPublishHandler_RoleMessageReachesTheCurrentHolderWithoutTheRoleLane(t *
 
 	claimRecorder := httptest.NewRecorder()
 	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role_b","role":"legion-delivery"}`))
-	roleSetHandler(claimDeps, "test-machine").ServeHTTP(claimRecorder, claimRequest)
+	roleSetHandler(claimDeps, "test-machine", logging.New("test")).ServeHTTP(claimRecorder, claimRequest)
 	if claimRecorder.Code != http.StatusOK {
 		t.Fatalf("claim registered role B: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
 	}
@@ -711,7 +711,7 @@ func TestPublishHandler_RoleFreshDeafHolderAnswersReceiptTimeout(t *testing.T) {
 
 	claimRecorder := httptest.NewRecorder()
 	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_deaf","role":"`+role+`"}`))
-	roleSetHandler(claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
+	roleSetHandler(claimState, "test-machine", logging.New("test")).ServeHTTP(claimRecorder, claimRequest)
 	if claimRecorder.Code != http.StatusOK {
 		t.Fatalf("claim deaf holder: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
 	}
@@ -1086,7 +1086,7 @@ func TestSessionHealthFields_PopulatedAfterReady(t *testing.T) {
 func TestRoleSetHandler_Validation(t *testing.T) {
 	registry := setupAdminTestRegistry(t, nil)
 	state := &listenerDeps{registry: registry}
-	handler := roleSetHandler(state, "test-machine")
+	handler := roleSetHandler(state, "test-machine", logging.New("test"))
 
 	cases := []struct {
 		name       string
@@ -1134,7 +1134,7 @@ func TestRoleSetHandler_Validation(t *testing.T) {
 func TestRoleSetHandler_SetsRole(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	state := &listenerDeps{registry: registry, sessions: sessions}
-	handler := roleSetHandler(state, "test-machine")
+	handler := roleSetHandler(state, "test-machine", logging.New("test"))
 	if err := sessions.Put("ses_role", session.SessionEntry{MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register role session: %v", err)
 	}

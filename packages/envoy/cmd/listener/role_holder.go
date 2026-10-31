@@ -214,6 +214,26 @@ func liveSessionEntry(
 	return entry, err
 }
 
+// bucketSessionEntry is sessionID's entry read from the session bucket itself
+// (session.SessionRegistry.Refresh) and from nowhere else, for the one decision that must not be
+// made on a cached entry: a soft claim naming a predecessor, which reads that predecessor's client
+// instance id to decide whether the role passes to the claimant (POST /v1/roles/set). It asks the
+// cache nothing, not even as a first answer the way liveSessionEntry does, because the cache
+// follows the bucket through a watcher and so trails it: the entry it still holds can carry an
+// instance id that session has since replaced, or no id at all where the bucket has one, and a
+// stale entry would then decide who keeps a role - handing it to a client instance the predecessor
+// no longer belongs to, which is the whole point of reading the id.
+//
+// nats.ErrKeyNotFound is the bucket's word that the session is gone, and the caller acts on it;
+// any other error is a read that did not answer, on which nothing is taken from a holder. The read
+// gets bound, derived from ctx, so a route answers its 503 inside the deadline its own caller
+// holds.
+func bucketSessionEntry(ctx context.Context, sessions *session.SessionRegistry, sessionID string, bound time.Duration) (session.SessionEntry, error) {
+	readCtx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	return sessions.Refresh(readCtx, sessionID)
+}
+
 // roleHolderSession is liveSessionEntry as the role paths that hold no request context ask it: the
 // reaper answers no caller at all, and shares one bound with role delivery's resolution
 // (resolveRoleHolder under context.Background()), so every such decision that can take a role from
