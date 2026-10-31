@@ -58,6 +58,24 @@ pods, a write blocked for a third of a second completed the moment the page sent
 written, and failed 8 of 300 runs. Those two helpers are for tests of a slow page itself, such as
 one whose queue overflows.
 
+## A test that starts jj or git names a working directory
+
+jj searches upward from the directory it runs in for the closest `.jj` and opens that repository, and it has no ceiling option.
+`-R` names the workspace for a command that opens one, and the two that create a repository, `jj git clone` and `jj git init --colocate`, take no `-R` at all.
+A child process started with no working directory of its own inherits the test process's, which in a Legion issue pod is inside `$LEGION_WORKSPACE`, a jj workspace of the pod's real shared clone under `/legion/repos`.
+So a test whose jj child names no directory opens and writes that clone, and the same test is green on a GitHub runner, whose checkout is git-only with no `.jj` anywhere above it (dispatch://INFRA-623).
+
+- Set `Dir` on every `exec.Command` a test starts that runs `jj`, and on every one that runs `git`, to a directory the test made.
+  A `--git-dir` is not enough on its own: it tells git which repository to act on and leaves the child standing wherever the test process stands, which is what the next reader of the command has to work out again.
+
+- The two probes that got this wrong were copies of one helper, `requireFilters` in `packages/daemon/internal/workspace/isolation_test.go` and the same probe inlined in `packages/daemon/internal/runtime/sandbox/boundary_test.go`, each running `jj config list` with no `Dir`.
+  A probe is as much a jj child as a fixture is.
+
+- A test that drives `packages/daemon/internal/workspace` needs nothing of its own: `execRunner.Run` refuses a `Command` whose `Dir` is not absolute, and refuses a jj command that creates a repository when that directory, or any above it, holds a `.jj` (`refuseEnclosingWorkspace`).
+  `TestProvisionLeavesTheEnclosingRepositoryUntouched` holds both on a runner, by provisioning from inside a decoy repository.
+
+- A test that builds a repository of its own puts it under `t.TempDir()`, so a `TMPDIR` inside a checkout is the one case that refuses rather than the one that corrupts.
+
 ## Containers a test starts
 
 Every container a test or a proof script starts carries a CPU limit and a memory limit sized to its
