@@ -461,7 +461,7 @@ func (s *Service) warmFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		// held at once.
 		write.releaseFork()
 	}
-	fork, err := buildFork(write, incremental, gained)
+	fork, err := s.buildForkHeld(ctx, write, incremental, gained)
 	if err != nil {
 		// A fork an update failed to reach is in an unknown state, and so is the rendering taken
 		// from it: the next operation rebuilds both.
@@ -541,16 +541,27 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 			return s.warmFork(ctx, write)
 		}
 	}
+	// The decode runs under a grant of the copy-heap bound of its own, covered once the read and
+	// the room's check above are done, so the write holds no part of the bound while it reads or
+	// waits for a lock, and given back once the fork is the write's: the read's own fold took and
+	// gave back a grant of its own (fold). Its wait ends with the write's context.
+	release, err := holdCopy(ctx, len(loaded.Update))
+	if err != nil {
+		return nil, err
+	}
 	fork := newDocumentCopy(crdt.WithClientID(write.clientID))
 	if len(loaded.Update) > 0 {
 		if err := crdt.ApplyUpdateV1(fork, loaded.Update, nil); err != nil {
+			release()
 			// A room's load of the same history would fail it, as loadTree does.
 			s.failRoom(write.artifactID, fmt.Errorf("decode live document: %w", err))
 			return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 		}
 	}
 	loaded.Update = nil
-	if err := applyTransactionWrites(fork, write.updates); err != nil {
+	err = applyTransactionWrites(fork, write.updates)
+	release()
+	if err != nil {
 		return nil, err
 	}
 	write.fork, write.cold, write.forkSeq = fork, true, 0
@@ -567,6 +578,22 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		s.afterForkRead(write.artifactID)
 	}
 	return fork, nil
+}
+
+// buildForkHeld is buildFork under a grant of the copy-heap bound where it builds a new fork from
+// gained, the room's whole state: a full-state decode, covered once the room's read is done and
+// given back once the fork is the write's. Bringing a kept fork up to date decodes only what the
+// room gained since, and takes none. Its wait ends with ctx, the write's.
+func (s *Service) buildForkHeld(ctx context.Context, write *liveWrite, incremental bool, gained []byte) (*crdt.Doc, error) {
+	if incremental {
+		return buildFork(write, incremental, gained)
+	}
+	release, err := holdCopy(ctx, len(gained))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return buildFork(write, incremental, gained)
 }
 
 // buildFork brings write's kept fork up to date with gained, what its room gained since the fork

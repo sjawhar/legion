@@ -917,6 +917,24 @@ export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolea
 }
 
 /**
+ * Makes the document's next socket wait `ms` before its admission, as a browser in a burst waits
+ * for its room before the server answers its upgrade; 0 takes the hold back. Test-only endpoint
+ * (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh).
+ */
+export function holdDocumentAdmission(
+  artifactId: string,
+  ms: number,
+  options: ApiOptions = {}
+): Promise<void> {
+  return request<void>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/_test/hold-admission`,
+    "POST",
+    { ms },
+    options
+  );
+}
+
+/**
  * Makes every keyed `method` request to `path` (the exact request path) take `delayMs` longer on
  * the server: once Dispatch has claimed its key, the run waits that long on the handler's own
  * context before the handler runs, so a write Dispatch is slow to finish is slow server-side

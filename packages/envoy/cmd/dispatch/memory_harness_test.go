@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -35,8 +36,9 @@ import (
 // The real-process harness the memory tests (memory_test.go) drive Dispatch through: a test
 // binary that runs main as a Dispatch server on the shared test database (memoryTestServeEnv), the
 // server's resident memory read from /proc, and requests over HTTP and the document websocket.
-// Both files build only under the `memory` tag, which the dispatch-memory CI job sets: their rows
-// run past go test's default deadline, so the unit run of every Go package leaves them out.
+// Both files build only under the `memory` tag, which the shards of ci.yaml's dispatch-memory job
+// set (.github/workflows/ci.yaml): their rows run past go test's default deadline, so the unit
+// run of every Go package leaves them out.
 
 const memoryTestToken = "memory-test-token"
 
@@ -45,7 +47,8 @@ type memoryHarness struct {
 	t        *testing.T
 	database *store.Store
 	issue    string
-	// env is added to every server's environment.
+	// env is added to every server's environment, after the harness's own: a variable it repeats
+	// wins, since exec.Cmd keeps the last value of each.
 	env []string
 }
 
@@ -111,6 +114,11 @@ type memoryServer struct {
 	output  *lockedBuffer
 	exited  chan struct{}
 	idle    int64
+	// trace is the file the server samples its memory into (DISPATCH_MEMORY_TRACE,
+	// memory_trace.go), which peakResident reads for what the pod's kernel would charge the
+	// server, where this kernel keeps pages the runtime released counted in VmRSS, and for what
+	// the server's own Go memory limit bounds, on every kernel.
+	trace string
 }
 
 // start starts a Dispatch server on a loopback port the kernel chose and the test holds from that
@@ -120,6 +128,10 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	t.Helper()
 	held := cmdtest.HoldPort(t)
 	port := strconv.Itoa(held.Port)
+	// Every server samples its memory: peakResident reads the trace for what the Go memory limit
+	// bounds, what the runtime has mapped less what it has handed back, which no kernel's /proc
+	// reports, and on a kernel without VmHWM for what the pod's kernel would charge as well.
+	trace := filepath.Join(t.TempDir(), "memory.trace")
 	command := exec.Command(os.Args[0])
 	command.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -135,10 +147,24 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		"DISPATCH_PORT=" + port,
 		"DISPATCH_WEB_DIST=" + t.TempDir(),
 		"DISPATCH_SERVER_URL=http://127.0.0.1:" + port,
+		// main sets the runtime's memory limit from the control group it runs in
+		// (setGoMemoryLimit), which here is the runner's, so the bounds above idle the memory
+		// tests hold (memory_test.go) would be weighed under whatever limit the runner happens to
+		// expose. Every server runs with none unless its test sets GOMEMLIMIT or AUTOMEMLIMIT in
+		// env.
+		"AUTOMEMLIMIT=off",
+		// The test-only routes, for the one the drives read whether a room is resident through
+		// (memoryServer.roomLive), which loads and rebuilds nothing.
+		"DISPATCH_TEST_HOOKS=1",
+		// The server's own reading of what the runtime has mapped and what of it the runtime has
+		// handed back, which is what the Go memory limit bounds and what a pod's kernel charges
+		// (peakResident, memory_trace.go). One file for each server, which its test's temporary
+		// directory takes away with it.
+		"DISPATCH_MEMORY_TRACE=" + trace,
 	}
 	command.Env = append(command.Env, h.env...)
 	held.Pass(command, "DISPATCH_LISTEN_FD")
-	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{})}
+	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{}), trace: trace}
 	command.Stdout, command.Stderr = server.output, server.output
 	err := command.Start()
 	// The server holds its own copy of the socket from here on, so it releases the port when it
@@ -198,36 +224,225 @@ func (p *memoryServer) stop(t *testing.T) {
 	}
 }
 
+// With AUTOMEMLIMIT=off a real server sets no memory limit, whatever control group the runner puts
+// it in, and its boot line says so. The test pins the variable itself rather than trusting the
+// harness's pin or the runner's control group. A container with no readable limit is the provider
+// row of TestTheGoMemoryLimitIsNinetyPercentOfTheContainers (main_test.go).
+func TestTheGoMemoryLimitIsNotSetWithAutomemlimitOff(t *testing.T) {
+	harness := newMemoryHarness(t)
+	harness.env = append(harness.env, "AUTOMEMLIMIT=off")
+	server := harness.start(t)
+	server.stop(t)
+	output := server.output.String()
+	const line = "dispatch: no go memory limit set: GOMEMLIMIT or AUTOMEMLIMIT=off in the environment, so the container's was not read"
+	if count := strings.Count(output, line); count != 1 {
+		t.Fatalf("the server logged %q %d times, want once:\n%s", line, count, output)
+	}
+	if strings.Contains(output, "dispatch: go memory limit") {
+		t.Fatalf("the server set a memory limit with AUTOMEMLIMIT=off:\n%s", output)
+	}
+}
+
 // resident is the server's resident memory in bytes, VmRSS now or VmHWM its peak.
 func (p *memoryServer) resident(t *testing.T, field string) int64 {
 	t.Helper()
+	resident, found, err := p.readResident(field)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, p.output.tail())
+	}
+	if !found {
+		t.Fatalf("no %s in the server's status", field)
+	}
+	return resident
+}
+
+// readResident is resident for a goroutine other than the test's, and reports whether the
+// server's status has the field at all.
+func (p *memoryServer) readResident(field string) (int64, bool, error) {
 	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", p.command.Process.Pid))
 	if err != nil {
-		t.Fatalf("read the server's memory (has it died?): %v\n%s", err, p.output.tail())
+		return 0, false, fmt.Errorf("read the server's memory (has it died?): %w", err)
 	}
 	for _, line := range strings.Split(string(status), "\n") {
 		if value, ok := strings.CutPrefix(line, field+":"); ok {
 			kibibytes, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimSpace(value), " kB"), 10, 64)
 			if err != nil {
-				t.Fatalf("parse %s %q: %v", field, value, err)
+				return 0, true, fmt.Errorf("parse %s %q: %w", field, value, err)
 			}
-			return kibibytes << 10
+			return kibibytes << 10, true, nil
 		}
 	}
-	t.Fatalf("no %s in the server's status", field)
-	return 0
+	return 0, false, nil
 }
 
 // peakAboveIdle runs during and reports the most the server's resident memory rose above what it
-// held idle, freshly started, while it ran.
+// held idle, freshly started, while it ran, as the pod's own kernel would charge it.
 func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 	t.Helper()
-	// Writing 5 to clear_refs resets the peak (VmHWM) to the memory resident now.
-	if err := os.WriteFile(fmt.Sprintf("/proc/%d/clear_refs", p.command.Process.Pid), []byte("5"), 0); err != nil {
-		t.Fatalf("reset the server's peak memory: %v", err)
+	peak := p.peakResident(t, during)
+	if peak.charged != peak.resident {
+		t.Logf("peak resident memory %d MiB as the pod's kernel charges it, of %d MiB VmRSS, whose difference is memory the runtime had handed back and this kernel still counts",
+			peak.charged>>20, peak.resident>>20)
 	}
-	during()
-	return p.resident(t, "VmHWM") - p.idle
+	return peak.charged - p.idle
+}
+
+// residentSampleInterval is how often peakResident reads the server's resident memory where the
+// kernel keeps no peak of it.
+const residentSampleInterval = 5 * time.Millisecond
+
+// podPeak is the most memory one step of a drive left the server holding, read three ways, so
+// that no one of them can hide another's error.
+type podPeak struct {
+	// charged is what a pod's own kernel would charge the server at its most: VmHWM where this
+	// kernel keeps one, and vmrss - heap_released over the step's trace samples where it does
+	// not. It is what the pod's 4 GiB bounds.
+	charged int64
+	// held is the most the step's trace samples read of what the runtime has mapped and not
+	// handed back, total - heap_released, which is what the Go memory limit bounds. It is read
+	// of the runtime's own accounting, so neither a kernel that keeps released pages resident nor
+	// one that drops them moves it.
+	held int64
+	// resident is the raw VmRSS peak, which on gVisor counts pages the runtime has handed back
+	// and whose scattered releases it did not drop.
+	resident int64
+	// limit is the Go memory limit the runtime reported through the step, math.MaxInt64 where it
+	// ran under none.
+	limit int64
+	// samples is how many of the server's trace samples fell in the step. A step with none was
+	// weighed on VmRSS alone: charged is then the VmRSS peak, and held and limit are zero.
+	samples int
+}
+
+// peakResident runs during and reports the most memory the server held while it ran, each way
+// podPeak records.
+//
+// Where /proc keeps a resident peak, as Linux does on CI's runner, that is VmHWM, reset first by
+// writing 5 to clear_refs, and exact. gVisor, which this repository's sandboxes run in, keeps
+// neither: its status has no VmHWM line and its /proc no clear_refs, so there a goroutine reads
+// VmRSS every residentSampleInterval while during runs, and a spike shorter than that interval
+// can pass unseen.
+//
+// gVisor's VmRSS also counts pages the Go runtime has handed back. It drops a page only where the
+// madvise(MADV_DONTNEED) that released it covered 2 MiB or more - measured on 2026-10-29 on this
+// sandbox: of a touched 1 GiB mapping, releases of 4 KiB and of 64 KiB at a time, scattered or
+// contiguous, dropped nothing of VmRSS, and releases of 2 MiB and over dropped every byte they
+// covered - and the collector's scavenger releases in smaller pieces. The pod's kernel charges
+// what the runtime has mapped less what it has released, which is what the Go memory limit
+// bounds, so on gVisor the charged peak is taken from the server's own trace (memory_trace.go) as
+// vmrss - heap_released. At the heaviest step of
+// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory the two read 3,669 and 4,361
+// MiB on 2026-10-29, a difference of 692 MiB the pod's kernel would not charge.
+//
+// That correction is a subtraction this kernel can make twice: a release of 2 MiB or more leaves
+// VmRSS and is subtracted again as released heap, which undercounts the charge. What catches such
+// an undercount is the trace's other reading, total - heap_released, which no kernel touches and
+// the Go memory limit bounds (requireUnderThePod, browser_memory_test.go); a drive that weighs
+// its server against the pod asserts both. At that same step the two readings differed by 22 MiB
+// the undercount's way, where every other step of those drives read the charge 25 to 41 MiB above
+// what the runtime itself accounts for.
+//
+// Each memory drive's comment records the peaks it was last measured at this way. Figures older
+// than this correction, which those comments name as VmRSS, were read as VmRSS on a sandbox, so
+// each is the higher of the two by whatever its server had released.
+func (p *memoryServer) peakResident(t *testing.T, during func()) podPeak {
+	t.Helper()
+	_, keepsPeak, err := p.readResident("VmHWM")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, p.output.tail())
+	}
+	var from time.Time
+	var resident int64
+	if keepsPeak {
+		if err := os.WriteFile(fmt.Sprintf("/proc/%d/clear_refs", p.command.Process.Pid), []byte("5"), 0); err != nil {
+			t.Fatalf("reset the server's peak memory: %v", err)
+		}
+		from = time.Now()
+		during()
+		resident = p.resident(t, "VmHWM")
+	} else {
+		stop, sampled := make(chan struct{}), make(chan int64, 1)
+		go func() {
+			ticker := time.NewTicker(residentSampleInterval)
+			defer ticker.Stop()
+			peak := int64(0)
+			for {
+				if resident, _, err := p.readResident("VmRSS"); err == nil {
+					peak = max(peak, resident)
+				}
+				select {
+				case <-stop:
+					sampled <- peak
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+		from = time.Now()
+		func() {
+			defer close(stop)
+			during()
+		}()
+		resident = max(<-sampled, p.resident(t, "VmRSS"))
+	}
+	peak := p.tracePeaks(t, from, time.Now())
+	peak.resident = resident
+	// VmHWM is the peak this kernel itself charged, with nothing the runtime released ever
+	// counted in it, and a step the trace holds no sample of - one shorter than
+	// memoryTraceInterval - leaves VmRSS as the only reading there is.
+	if keepsPeak || peak.samples == 0 {
+		peak.charged = resident
+	}
+	return peak
+}
+
+// tracePeaks is what the server's own trace (memory_trace.go) read of its memory between from and
+// to: the charged and held peaks of podPeak, the Go memory limit the runtime held through them,
+// and how many samples it read. Its resident field is the caller's to fill. No sample falls in a
+// window shorter than memoryTraceInterval, and none at all where the server wrote no trace, which
+// leaves every field zero.
+func (p *memoryServer) tracePeaks(t *testing.T, from, to time.Time) podPeak {
+	t.Helper()
+	peak := podPeak{}
+	if p.trace == "" {
+		return peak
+	}
+	written, err := os.ReadFile(p.trace)
+	if err != nil {
+		t.Fatalf("read the server's memory trace %s: %v", p.trace, err)
+	}
+	for _, line := range strings.Split(string(written), "\n") {
+		sample := map[string]string{}
+		for _, field := range strings.Fields(line) {
+			name, value, _ := strings.Cut(field, "=")
+			sample[name] = value
+		}
+		taken, err := time.Parse(time.RFC3339Nano, sample["time"])
+		if err != nil || taken.Before(from) || taken.After(to) {
+			continue
+		}
+		read := func(field string) int64 {
+			value, err := strconv.ParseInt(sample[field], 10, 64)
+			if err != nil {
+				t.Fatalf("the server's memory trace holds a sample without its %s: %s", field, line)
+			}
+			return value
+		}
+		resident, released, total, limit := read("vmrss"), read("heap_released"), read("total"), read("go_memory_limit")
+		// A kernel that keeps none of a field writes -1 for it (memoryTraceStatus), and the
+		// runtime reports no class of memory as negative or its whole mapping as nothing.
+		if resident <= 0 || released < 0 || total <= 0 || limit <= 0 {
+			t.Fatalf("the server's memory trace holds a sample no kernel or runtime can have written: %s", line)
+		}
+		if peak.limit != 0 && limit != peak.limit {
+			t.Fatalf("the server's memory trace reads a Go memory limit of %d bytes and then of %d, so no one limit bounds the step: %s", peak.limit, limit, line)
+		}
+		peak.limit = limit
+		peak.charged = max(peak.charged, resident-released)
+		peak.held = max(peak.held, total-released)
+		peak.samples++
+	}
+	return peak
 }
 
 type response struct {
@@ -356,17 +571,12 @@ func requireAnswered(t *testing.T, upload uploadResult) {
 // whole document - and closes once the room has sent it.
 func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 	t.Helper()
-	address := "ws" + strings.TrimPrefix(p.base, "http") + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
-	connection, answer, err := gws.DefaultDialer.Dial(address, http.Header{"X-Dispatch-User": {"alice"}})
+	connection, err := p.dialDocument(artifactID)
 	if err != nil {
-		t.Fatalf("connect to the document's room: %v (%#v)", err, answer)
+		t.Fatal(err)
 	}
 	defer connection.Close()
-	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarString(artifactID)
-		encoder.WriteVarUint(0)
-	})
-	if err := connection.WriteMessage(gws.BinaryMessage, append(frame, ygsync.EncodeSyncStep1(crdt.New())...)); err != nil {
+	if err := connection.WriteMessage(gws.BinaryMessage, documentFrame(artifactID, frameSync, ygsync.EncodeSyncStep1(crdt.New()))); err != nil {
 		t.Fatalf("ask the room for the document: %v", err)
 	}
 	if err := connection.SetReadDeadline(time.Now().Add(2 * time.Minute)); err != nil {
@@ -381,7 +591,7 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 		if _, err := decoder.ReadVarString(); err != nil {
 			continue
 		}
-		if kind, err := decoder.ReadVarUint(); err != nil || kind != 0 {
+		if kind, err := decoder.ReadVarUint(); err != nil || kind != frameSync {
 			continue
 		}
 		if kind, _, err := ygsync.ReadSyncMessage(decoder.RemainingBytes()); err == nil && kind == ygsync.MsgSyncStep2 {
@@ -396,8 +606,377 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 	time.Sleep(3 * time.Second)
 }
 
+// The tags of the document socket's frames this harness reads and writes: Hocuspocus's framing,
+// which Dispatch's rooms speak (internal/dispatch/docs/service.go:612), puts the room's name before
+// each (sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:66-80).
+const (
+	frameSync       = 0
+	frameSyncStatus = 8
+	framePing       = 9
+	framePong       = 10
+)
+
+// documentFrame is a frame of the document socket of room: its name, tag, then payload.
+func documentFrame(room string, tag uint64, payload []byte) []byte {
+	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarString(room)
+		encoder.WriteVarUint(tag)
+	})
+	return append(frame, payload...)
+}
+
+// dialDocument connects to the document's room as a person's browser does: signed in, read-write
+// at the server's schema version (schemaReadOnly, internal/dispatch/docs/websocket.go:388-390).
+// The server answers the upgrade only once it has admitted the browser and loaded the document
+// (Service.ServeHTTP, websocket.go:274-353), and a burst of browsers to documents at the bound
+// queues behind the counts of their stored versions and the loads, which share the copy-heap
+// bound (storedCountWeight, copyHeaps) and two processors, so a browser waits for that answer as
+// long as a browser does rather than the 45 seconds gorilla's default dialer gives up after. An
+// upgrade the server answers with an HTTP status in place of the socket is an *upgradeRefused.
+func (p *memoryServer) dialDocument(artifactID string) (*gws.Conn, error) {
+	address := "ws" + strings.TrimPrefix(p.base, "http") + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	dialer := gws.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: 10 * time.Minute}
+	connection, answer, err := dialer.Dial(address, http.Header{"X-Dispatch-User": {"alice"}})
+	if err != nil {
+		if answer != nil {
+			return nil, &upgradeRefused{status: answer.StatusCode, err: err}
+		}
+		return nil, fmt.Errorf("connect to the document's room: %w", err)
+	}
+	return connection, nil
+}
+
+// upgradeRefused is a document socket's upgrade the server answered with an HTTP status, such as
+// the 503 its admission answers for anything but the room budget's refusal.
+type upgradeRefused struct {
+	status int
+	err    error
+}
+
+func (u *upgradeRefused) Error() string {
+	return fmt.Sprintf("connect to the document's room: %v (status %d)", u.err, u.status)
+}
+
+func (u *upgradeRefused) Unwrap() error { return u.err }
+
+// browserAnswerWithin is how long a browser waits for the room to answer what it sent: an update's
+// apply on a document at the bound, with its rendering and its replica's apply of it, takes about a
+// second here, and two of them share two processors with whatever else the drive has open.
+const browserAnswerWithin = 2 * time.Minute
+
+// browser is a document socket a test holds open as the dashboard's editor holds one. A goroutine
+// of its own reads every frame the server sends, so a socket held open while its room broadcasts
+// never fills the server's queue for it - ygo closes a peer whose queue fills
+// (provider/websocket/peer.go:763-810) - and hands on only the answers to what the test sent: a
+// SyncStatus, a Pong, a SyncStep2, among which a SyncStep2 another browser of the room handed back
+// and the room relayed, which await passes over. The rest - the room's own step 1, awareness, other
+// browsers' updates - is read and dropped, so the test process keeps no document for a socket it
+// holds.
+type browser struct {
+	room       string
+	connection *gws.Conn
+	answers    chan browserAnswer
+	// ended is closed once the read loop has stopped, and end is why: a *gws.CloseError where
+	// the server closed the socket with a close frame.
+	ended     chan struct{}
+	end       error
+	left      chan struct{}
+	leaveOnce sync.Once
+}
+
+// browserAnswer is one frame the room sent in answer: a SyncStatus's flag, a Pong, or a SyncStep2's
+// update, which is the room's whole state for a browser that asked with nothing.
+type browserAnswer struct {
+	tag    uint64
+	status uint64
+	state  []byte
+}
+
+// openBrowser is tryOpenBrowser for the test's own goroutine, failing it unless the room admits
+// the browser.
+func (p *memoryServer) openBrowser(t *testing.T, artifactID string) *browser {
+	t.Helper()
+	opened, err := p.tryOpenBrowser(artifactID)
+	if err != nil {
+		t.Fatalf("open document %s in a browser: %v", artifactID, err)
+	}
+	return opened
+}
+
+// tryOpenBrowser connects to the document's room and waits for the room's whole state, which ygo
+// sends a peer once the room has loaded and the peer is registered in it
+// (provider/websocket/server.go:2108-2114), then sends a Ping and waits for its Pong: a first frame
+// lifts ygo's handshake deadline (server.go:2122-2145), so a socket held open without an edit is
+// not closed thirty seconds in. A socket the server closes before any of that - the room budget's
+// refusal, which completes the upgrade only to close it (refuseOverRoomBudget,
+// internal/dispatch/docs/websocket.go:245-248) - returns the *gws.CloseError it was closed with.
+func (p *memoryServer) tryOpenBrowser(artifactID string) (*browser, error) {
+	connection, err := p.dialDocument(artifactID)
+	if err != nil {
+		return nil, err
+	}
+	opened := &browser{
+		room:       artifactID,
+		connection: connection,
+		answers:    make(chan browserAnswer, 4),
+		ended:      make(chan struct{}),
+		left:       make(chan struct{}),
+	}
+	go opened.read()
+	if _, err := opened.await(frameSync); err != nil {
+		opened.leave()
+		return nil, err
+	}
+	if err := opened.ping(); err != nil {
+		opened.leave()
+		return nil, err
+	}
+	return opened, nil
+}
+
+func (b *browser) read() {
+	defer close(b.ended)
+	for {
+		_, message, err := b.connection.ReadMessage()
+		if err != nil {
+			b.end = err
+			return
+		}
+		decoder := encoding.NewDecoder(message)
+		if _, err := decoder.ReadVarString(); err != nil {
+			continue
+		}
+		tag, err := decoder.ReadVarUint()
+		if err != nil {
+			continue
+		}
+		answer := browserAnswer{tag: tag}
+		switch tag {
+		case frameSyncStatus:
+			if answer.status, err = decoder.ReadVarUint(); err != nil {
+				continue
+			}
+		case framePong:
+		case frameSync:
+			kind, update, err := ygsync.ReadSyncMessage(decoder.RemainingBytes())
+			if err != nil || kind != ygsync.MsgSyncStep2 {
+				continue
+			}
+			answer.state = update
+		default:
+			continue
+		}
+		select {
+		case b.answers <- answer:
+		case <-b.left:
+			return
+		}
+	}
+}
+
+// await is the room's next answer, which must carry tag, or the reason the socket ended first. A
+// SyncStep2 the room relays from another browser of the room - the whole state that browser handed
+// back, which ygo relays to the room's other peers as the frame it arrived in (applySyncUpdate,
+// sjawhar/ygo v1.51.3-sami.7, provider/websocket/peer.go:247-264) - reads as the answer to a request
+// for the room's state would, so a wait for any other answer passes over it.
+func (b *browser) await(tag uint64) (browserAnswer, error) {
+	timer := time.NewTimer(browserAnswerWithin)
+	defer timer.Stop()
+	for {
+		var answer browserAnswer
+		select {
+		case answer = <-b.answers:
+		case <-b.ended:
+			select {
+			case answer = <-b.answers:
+			default:
+				return browserAnswer{}, b.end
+			}
+		case <-timer.C:
+			return browserAnswer{}, fmt.Errorf("the room sent nothing tagged %d within %s", tag, browserAnswerWithin)
+		}
+		if answer.tag == frameSync && tag != frameSync {
+			continue
+		}
+		if answer.tag != tag {
+			return answer, fmt.Errorf("the room answered with a frame tagged %d, want %d", answer.tag, tag)
+		}
+		return answer, nil
+	}
+}
+
+func (b *browser) write(frame []byte) error {
+	return b.connection.WriteMessage(gws.BinaryMessage, frame)
+}
+
+// ping sends a Ping and waits for the Pong: the socket is open and its peer reads in its room.
+func (b *browser) ping() error {
+	if err := b.write(documentFrame(b.room, framePing, nil)); err != nil {
+		return err
+	}
+	_, err := b.await(framePong)
+	return err
+}
+
+// state is the room's whole state, as a SyncStep2 answers a browser that asks with an empty state
+// vector.
+func (b *browser) state(t *testing.T) []byte {
+	t.Helper()
+	if err := b.write(documentFrame(b.room, frameSync, ygsync.EncodeSyncStep1(crdt.New()))); err != nil {
+		t.Fatalf("ask the room for its state: %v", err)
+	}
+	answer, err := b.await(frameSync)
+	if err != nil {
+		t.Fatalf("read the room's state: %v", err)
+	}
+	return answer.state
+}
+
+// updateFrame is the frame the editor sends a change in: a sync Update.
+func (b *browser) updateFrame(update []byte) []byte {
+	return documentFrame(b.room, frameSync, ygsync.EncodeUpdate(update))
+}
+
+// stateFrame is the frame the editor hands its whole state over in: a SyncStep2.
+func (b *browser) stateFrame(state []byte) []byte {
+	return documentFrame(b.room, frameSync, encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(ygsync.MsgSyncStep2)
+		encoder.WriteVarBytes(state)
+	}))
+}
+
+// send sends frame, an Update or a SyncStep2, and reports whether the room applied what it carries,
+// from the SyncStatus ygo answers each with on a Hocuspocus-framed socket (provider/websocket/
+// peer.go:233-264). For one the room did not apply it returns too the close that followed: the
+// update hook's refusal, sent at once after its SyncStatus(0) (peer.go:254-260), or the websocket
+// library's, which closes a frame past the server's read limit before any room reads it, with no
+// SyncStatus at all. Nil where the socket stays open, as it does for an update that fails to apply.
+func (b *browser) send(frame []byte) (applied bool, closed *gws.CloseError, err error) {
+	written := b.write(frame)
+	if written == nil {
+		answer, err := b.await(frameSyncStatus)
+		switch {
+		case err == nil && answer.status == 1:
+			return true, nil, nil
+		case err == nil:
+			// Refused or failed: a refusal's close follows its SyncStatus(0) at once.
+			select {
+			case <-b.ended:
+			case <-time.After(5 * time.Second):
+				return false, nil, nil
+			}
+		case !errors.As(err, &closed):
+			return false, nil, err
+		}
+	} else {
+		// The server closed the socket while the frame was being written: what it closed with is
+		// what the read loop read.
+		select {
+		case <-b.ended:
+		case <-time.After(5 * time.Second):
+			return false, nil, written
+		}
+	}
+	if errors.As(b.end, &closed) {
+		return false, closed, nil
+	}
+	if written != nil {
+		return false, nil, written
+	}
+	return false, nil, b.end
+}
+
+// closed waits for the socket to end, and is the close frame it ended with.
+func (b *browser) closed() (*gws.CloseError, error) {
+	select {
+	case <-b.ended:
+	case <-time.After(browserAnswerWithin):
+		return nil, fmt.Errorf("the socket was still open after %s", browserAnswerWithin)
+	}
+	var closed *gws.CloseError
+	if !errors.As(b.end, &closed) {
+		return nil, fmt.Errorf("the socket ended without a close frame: %w", b.end)
+	}
+	return closed, nil
+}
+
+// leave closes the socket as a browser leaving the page does.
+func (b *browser) leave() {
+	b.leaveOnce.Do(func() {
+		close(b.left)
+		_ = b.connection.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(gws.CloseNormalClosure, ""), time.Now().Add(time.Second))
+		_ = b.connection.Close()
+	})
+}
+
+// proofFragment is the Yjs fragment a document's Proof tree is kept in
+// (internal/dispatch/docs/tree.go:19), which this package cannot read.
+const proofFragment = "prosemirror"
+
+// browserDocument is a browser's copy of a document, which it edits and sends the updates of. It
+// is a Yjs document of the test's own, under a client id of its own, so an update it makes from a
+// state copied into several documents (cloneDocuments) applies to each of them alike: a drive
+// encodes one update once and sends the same bytes to every room, and holds one document for it.
+type browserDocument struct {
+	doc      *crdt.Doc
+	fragment *crdt.YXmlFragment
+}
+
+func newBrowserDocument(t *testing.T, state []byte) *browserDocument {
+	t.Helper()
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
+		t.Fatalf("decode the document's state: %v", err)
+	}
+	return &browserDocument{doc: doc, fragment: doc.GetXmlFragment(proofFragment)}
+}
+
+// browserEdit is the one update a browser holding state sends for change.
+func browserEdit(t *testing.T, state []byte, change func(tree *pmdoc.Node)) []byte {
+	t.Helper()
+	return newBrowserDocument(t, state).edit(t, change)
+}
+
+func (d *browserDocument) tree(t *testing.T) *pmdoc.Node {
+	t.Helper()
+	tree, err := pmdoc.Read(d.fragment)
+	if err != nil {
+		t.Fatalf("read the browser's document: %v", err)
+	}
+	return tree
+}
+
+// edit makes change to the document's Proof tree, written by the tree diff the server's own writes
+// make, which keeps every Yjs type the change leaves alone (pmdoc.Update), and returns the update
+// that one transaction made, which is what the editor sends for it.
+func (d *browserDocument) edit(t *testing.T, change func(tree *pmdoc.Node)) []byte {
+	t.Helper()
+	tree := d.tree(t)
+	change(tree)
+	var update []byte
+	stop := d.doc.OnUpdate(func(made []byte, _ any) { update = made })
+	defer stop()
+	if err := d.doc.TransactE(func(txn *crdt.Transaction) error { return pmdoc.Update(txn, d.fragment, tree) }); err != nil {
+		t.Fatalf("write the browser's edit: %v", err)
+	}
+	if update == nil {
+		t.Fatal("the browser's edit changed nothing")
+	}
+	return update
+}
+
+// size is the document's rendering measured as the server measures a room's (pmdoc.MeasureDocument).
+func (d *browserDocument) size(t *testing.T) pmdoc.DocumentSize {
+	t.Helper()
+	markdown, err := pmdoc.Render(d.tree(t))
+	if err != nil {
+		t.Fatalf("render the browser's document: %v", err)
+	}
+	return pmdoc.MeasureDocument(markdown)
+}
+
 // lockedBuffer is the server's output, written by the process's copying goroutine and read by the
-// test when it fails.
+// test when it fails, or whole by a test that asserts what the server logged.
 type lockedBuffer struct {
 	mu     sync.Mutex
 	buffer bytes.Buffer
@@ -407,6 +986,12 @@ func (b *lockedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buffer.Write(data)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }
 
 func (b *lockedBuffer) tail() string {

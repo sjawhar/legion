@@ -184,6 +184,46 @@ test("an acknowledgement of 0 clears nothing", async () => {
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
 });
 
+test("a too-large refusal drops the refused update's row alone, after a not-applied answer kept it", async () => {
+  const { artifact, doc, sync, type } = await scripted();
+  sync.socketOpened();
+  const first = type("first");
+  const refused = type(" too large");
+  const after = type(" after");
+  sync.frameWritten(updateFrame(first));
+  sync.frameWritten(updateFrame(refused));
+  sync.frameWritten(updateFrame(after));
+
+  await sync.frameReceived(syncStatusFrame(true));
+  await sync.frameReceived(syncStatusFrame(false));
+  expect(await rowsOf(artifact)).toEqual([
+    [artifact, doc.clientID, 2],
+    [artifact, doc.clientID, 3],
+  ]);
+
+  await sync.dropRefused(Promise.resolve());
+  expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 3]]);
+});
+
+test("a too-large refusal of a SyncStep2 drops no row, and a new socket forgets the refusal", async () => {
+  const { artifact, doc, sync, type } = await scripted();
+  sync.socketOpened();
+  type("first");
+  sync.frameWritten(syncStep2Frame(Y.encodeStateAsUpdate(doc)));
+  await sync.frameReceived(syncStatusFrame(false));
+  await sync.dropRefused(Promise.resolve());
+  expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
+
+  sync.frameWritten(updateFrame(type(" second")));
+  await sync.frameReceived(syncStatusFrame(false));
+  sync.socketOpened();
+  await sync.dropRefused(Promise.resolve());
+  expect(await rowsOf(artifact)).toEqual([
+    [artifact, doc.clientID, 1],
+    [artifact, doc.clientID, 2],
+  ]);
+});
+
 test("a SyncStatus frame that ends before its flag consumes no sent frame", async () => {
   const logged = spyOn(console, "error").mockImplementation(() => {});
   try {

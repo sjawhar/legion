@@ -18,7 +18,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
-	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -155,11 +154,15 @@ func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 // read cold; marginRoom is the room a margin write's fork was warm-built from, which its publish
 // tags the update against, and the zero pointer for every other write.
 func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, actor model.Actor, rendered renderedTree, contentChanged bool, rendering publishedRendering, marginRoom weak.Pointer[crdt.Doc]) error {
-	// Every write is refused when the live state it leaves could not be decoded, the one check
-	// that decodes a whole second copy of the document. The caller has let go of whatever tree it
-	// held from before the change, so the decode runs beside the fork and the tree the change left,
-	// not a third tree (LEGION-504).
-	if err := refuseUndecodable(op.fork); err != nil {
+	// Every write is refused when the live state its transaction would leave the room is past the
+	// decode cap, the one check that encodes a whole document once the room's ceiling and what the
+	// transaction adds pass the cap: the room's, in the measurer's turn, or the fork's where no
+	// room is behind it (refuseUndecodable). The caller has let go of whatever tree it held from
+	// before the change, so the encode runs beside the fork and the tree the change left, not a
+	// third tree (LEGION-504). Only a room the count leaves within what the transaction adds of
+	// the cap is copied as well, for the one count, as the three server writes copy it
+	// (structsAfter).
+	if err := s.refuseUndecodable(op.write, op.fork, op.updates); err != nil {
 		return err
 	}
 	update, err := mergeUpdates(op.updates)
@@ -348,7 +351,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		return err
 	}
 	// The tree before the write has served every use it has, so it is let go before the record's
-	// decode check (LEGION-504).
+	// decode-cap check (LEGION-504).
 	before, weighedFrom = nil, nil
 	// What the room's update observer can take in place of rendering the room after this update
 	// (publishedRendering): this operation's rendering, when its fork was read warm.
@@ -896,16 +899,29 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 }
 
 // loadTree is the tree of the document a socket's admission check reads (heldTree, else the stored
-// document decoded), with the durable state it decoded the document from, nil when this server
-// holds the document. A durable history that does not decode is ErrDocumentUnloadable and fails
-// the room, as ygo's own load of it would.
-func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *persistence.LoadResult, error) {
+// document decoded), with the durable state it read and that decode (decodeStoredState): the copy
+// and what its conflict scans passed, which the room's load takes for its scan total and its
+// replica (preloadedDocument, LoadDoc), so the admission's decode is the load's own. The preload is
+// nil when this server holds the document. A durable history that does not decode is
+// ErrDocumentUnloadable and fails the room, as ygo's own load of it would.
+//
+// The read's fold, when the history holds several updates, and the decode run under one grant of
+// the copy-heap bound (copyGrant), whose wait ends with ctx, the socket's request: one that ends
+// first answers ctx's error and holds nothing of the bound. The grant is given back once the copy
+// is the preload's, which the admission reserved in the room budget (reserveRoom), and before the
+// room fails, whose eviction can wait.
+func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *preloadedDocument, error) {
 	tree, held, err := s.heldTree(ctx, artifactID)
 	if err != nil || held {
 		return tree, nil, err
 	}
-	loaded, err := s.persistence.Load(ctx, artifactID)
+	copyCtx, grant, done := withCopyGrant(ctx)
+	loaded, err := s.persistence.Load(copyCtx, artifactID)
+	if err == nil {
+		err = grant.cover(copyCtx, len(loaded.Update))
+	}
 	if err != nil {
+		done()
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, nil, err
 		}
@@ -913,17 +929,19 @@ func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node,
 		return nil, nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
 	if len(loaded.Update) == 0 {
-		return nil, &loaded, nil
+		done()
+		return nil, &preloadedDocument{loaded: loaded}, nil
 	}
-	doc := newDocumentCopy()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+	decoded, err := decodeStoredState(loaded.Update)
+	done()
+	if err != nil {
 		// The room carries the decode failure as its cause, which a reader that meets the
 		// failed room answers as DOC_SERVICE_UNAVAILABLE; this read met the history itself.
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
 		return nil, nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
-	tree, err = treeOf(doc)
-	return tree, &loaded, err
+	tree, err = treeOf(decoded.doc)
+	return tree, &preloadedDocument{loaded: loaded, decoded: decoded}, err
 }
 
 func renderTokenTree(tree *pmdoc.Node) (string, string, error) {

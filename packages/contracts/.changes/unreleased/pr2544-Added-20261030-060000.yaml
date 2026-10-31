@@ -1,0 +1,25 @@
+kind: Added
+body: |-
+    Four exports for the closes the document websocket refuses a browser with, generated into Go
+    beside `DOCUMENT_SCHEMA_CLOSE_CODE` so the server's closes and the dashboard's reading of them
+    cannot drift apart. `DOCUMENT_TOO_LARGE_CLOSE_CODE` (4413) with `DOCUMENT_TOO_LARGE_CLOSE_REASON`
+    (`DOC_TOO_LARGE`) is permanent: the update would take the document past a bound of its own - the
+    1 MiB of markdown every server write obeys, past which an update may still carry 8 KiB of new
+    content until the document has crept 64 KiB over it; the 1,048,576 structs ygo decodes in one
+    update; the 9.5 MiB a document may hold that no rendering shows; or the heaviest whole-state
+    message a browser may hand back - so the dashboard drops the refused edit and re-reads the
+    document rather than reconnecting into the same refusal. `DOCUMENT_TOO_TANGLED_CLOSE_REASON`
+    (`DOC_TOO_TANGLED`) is a second reason for the same code: merging the update would scan more of
+    the document's items than the room allows one apply to scan, so it is refused whole, with nothing
+    of it stored or relayed, and the dashboard says "Your last edit was not saved: Dispatch could not
+    merge it into this document quickly enough. Your other edits are kept."
+    `DOCUMENT_NEEDS_REBUILD_CLOSE_REASON` (`DOC_NEEDS_REBUILD`) is a third: the document cannot take
+    the update until it is rebuilt, either because its edit history has used up what the room lets its
+    applies scan or because the browser still holds the history a rebuild of the document replaced, and
+    the dashboard offers that rebuild beside the notice. `DOCUMENT_BUSY_CLOSE_CODE` (4503) with
+    `DOCUMENT_BUSY_CLOSE_REASON` (`DOC_BUSY`) is transient: the memory budget over the documents
+    Dispatch holds open is full and no room can be closed, so the dashboard keeps the edit it could not
+    send and lets the provider's own backoff retry it.
+time: 2026-10-30T06:00:00.000000000Z
+custom:
+    Issue: pr2544

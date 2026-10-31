@@ -1944,6 +1944,203 @@ func TestQuiesceDocumentsHookIsGatedByTestHooksEnabled(t *testing.T) {
 	}
 }
 
+// The room-budget hook is a browser test's alone: unmounted without DISPATCH_TEST_HOOKS, and with
+// them it sets the budget it answers, restoring the real one for zero.
+func TestRoomBudgetHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/_test/room-budget", map[string]int64{"bytes": 1 << 20}, "alice")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("room-budget hook without TestHooksEnabled: status=%d, want %d", response.Code, http.StatusNotFound)
+	}
+	hooked, _, _ := newTestServer(t, testServerOptions{testHooks: true})
+	for _, row := range []struct{ bytes, want int64 }{{1 << 20, 1 << 20}, {0, 2 << 30}} {
+		response := dispatchRequest(t, hooked, http.MethodPost, "/api/v1/artifacts/_test/room-budget", map[string]int64{"bytes": row.bytes}, "alice")
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), fmt.Sprintf(`"bytes":%d`, row.want)) {
+			t.Fatalf("room-budget hook with %d bytes: status=%d body=%s, want 200 naming %d", row.bytes, response.Code, response.Body.String(), row.want)
+		}
+	}
+}
+
+// The room-live hook is a real-process drive's alone: unmounted without DISPATCH_TEST_HOOKS, and
+// with them it answers whether the document's room is resident in the server - after a write
+// that loaded it, and not once it is closed - without loading the document to answer.
+func TestRoomLiveHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	unhooked := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/00000000-0000-0000-0000-000000000001/_test/live", nil, "alice")
+	if unhooked.Code != http.StatusNotFound {
+		t.Fatalf("room-live hook without TestHooksEnabled: status=%d, want %d", unhooked.Code, http.StatusNotFound)
+	}
+	hooked, database, deps := newTestServer(t, testServerOptions{testHooks: true})
+	issue := createInteractionIssue(t, hooked, "TEST", "Live room", "A spec.")
+	live := func(what string) bool {
+		t.Helper()
+		response := dispatchRequest(t, hooked, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/_test/live", nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("room-live hook %s: status=%d body=%s, want 200", what, response.Code, response.Body.String())
+		}
+		return decodeBody[struct {
+			Live bool `json:"live"`
+		}](t, response).Live
+	}
+	service, ok := deps.Docs.(*docs.Service)
+	if !ok {
+		t.Fatalf("the test server's documents are a %T, want *docs.Service", deps.Docs)
+	}
+	ctx := context.Background()
+	if err := service.Evict(ctx, issue.PrimaryArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	if live("before any write") || live("asked again") {
+		t.Fatal("the hook says a closed document's room is resident, or its first answer loaded it")
+	}
+	if _, err := replaceDocumentText(database, service, issue.PrimaryArtifactID, "# Live\n\nWritten.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	if !live("after a write") {
+		t.Fatal("the hook says the room a write loaded is not resident")
+	}
+	if err := service.Evict(ctx, issue.PrimaryArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	if live("after the room closed") {
+		t.Fatal("the hook says a closed room is resident")
+	}
+}
+
+// The hold-admission hook is a browser test's alone: unmounted without DISPATCH_TEST_HOOKS, and with
+// them it makes the document's next socket wait the time it names before the server answers its
+// upgrade, once: the socket after it is answered at once. A wait past two minutes, or below zero,
+// is refused.
+func TestHoldAdmissionHookIsGatedByTestHooksEnabled(t *testing.T) {
+	const hold = 1500 * time.Millisecond
+	handler := newTestHandler(t)
+	unhooked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/00000000-0000-0000-0000-000000000001/_test/hold-admission", map[string]int64{"ms": 1000}, "alice")
+	if unhooked.Code != http.StatusNotFound {
+		t.Fatalf("hold-admission hook without TestHooksEnabled: status=%d, want %d", unhooked.Code, http.StatusNotFound)
+	}
+	// A document service that signs browsers in, as Dispatch's does, under an API with the hooks.
+	database := storetest.Open(t)
+	seedPeople(t, database, "alice")
+	service := docs.New(docs.Deps{Store: database, Identity: headerIdentity(database), Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	deps, err := NewDeps(DepsInput{
+		Store:            database,
+		Identity:         headerIdentity(database),
+		AgentTokens:      sharedAgentTokens(t, "agent-token"),
+		Docs:             service,
+		ServerURL:        "https://dispatch.example",
+		TestHooksEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies: %v", err)
+	}
+	hooked := http.NewServeMux()
+	t.Cleanup(Register(hooked, t.Context(), deps).Wait)
+	issue := createInteractionIssue(t, hooked, "TEST", "Held admission", "A spec.")
+	path := "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/_test/hold-admission"
+	for _, ms := range []int64{-1, 120_001} {
+		if refused := dispatchRequest(t, hooked, http.MethodPost, path, map[string]int64{"ms": ms}, "alice"); refused.Code != http.StatusBadRequest {
+			t.Fatalf("hold-admission hook for %d ms: status=%d body=%s, want %d", ms, refused.Code, refused.Body.String(), http.StatusBadRequest)
+		}
+	}
+	documentServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(documentServer.Close)
+	open := func(what string) time.Duration {
+		t.Helper()
+		started := time.Now()
+		connection, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(documentServer.URL, "http")+"/ws/doc/"+issue.PrimaryArtifactID, http.Header{"X-Dispatch-User": {"alice"}})
+		if err != nil {
+			t.Fatalf("open the document %s: response=%#v err=%v", what, response, err)
+		}
+		took := time.Since(started)
+		_ = connection.Close()
+		return took
+	}
+	if held := dispatchRequest(t, hooked, http.MethodPost, path, map[string]int64{"ms": hold.Milliseconds()}, "alice"); held.Code != http.StatusNoContent {
+		t.Fatalf("hold-admission hook: status=%d body=%s, want %d", held.Code, held.Body.String(), http.StatusNoContent)
+	}
+	if took := open("with the hold"); took < hold {
+		t.Fatalf("the held socket's upgrade was answered after %s, want at least the %s hold", took, hold)
+	}
+	if took := open("after the hold was used"); took >= hold {
+		t.Fatalf("the socket after the held one was answered after %s, want it answered without the %s hold", took, hold)
+	}
+}
+
+// The used-up hook is a browser test's alone: unmounted without DISPATCH_TEST_HOOKS, and with them
+// it leaves the document's history near enough a room's scan total that the rebuild it refused
+// before takes it, the re-scan of its history named as why.
+func TestUsedUpHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	unhooked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/00000000-0000-0000-0000-000000000001/_test/used-up", nil, "alice")
+	if unhooked.Code != http.StatusNotFound {
+		t.Fatalf("used-up hook without TestHooksEnabled: status=%d, want %d", unhooked.Code, http.StatusNotFound)
+	}
+	hooked, _, _ := newTestServer(t, testServerOptions{testHooks: true})
+	issue := createInteractionIssue(t, hooked, "TEST", "Used up", "A spec.")
+	rebuildPath := "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/rebuild"
+	if refused := dispatchRequest(t, hooked, http.MethodPost, rebuildPath, map[string]any{}, "alice"); refused.Code != http.StatusConflict {
+		t.Fatalf("rebuild before the hook: status=%d body=%s, want %d", refused.Code, refused.Body.String(), http.StatusConflict)
+	}
+	used := dispatchRequest(t, hooked, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/_test/used-up", nil, "alice")
+	if used.Code != http.StatusNoContent {
+		t.Fatalf("used-up hook: status=%d body=%s, want %d", used.Code, used.Body.String(), http.StatusNoContent)
+	}
+	rebuilt := dispatchRequest(t, hooked, http.MethodPost, rebuildPath, map[string]any{}, "alice")
+	if rebuilt.Code != http.StatusOK {
+		t.Fatalf("rebuild after the hook: status=%d body=%s, want 200", rebuilt.Code, rebuilt.Body.String())
+	}
+	if why := decodeBody[docs.RebuildReport](t, rebuilt).ValidationError; !strings.Contains(why, "re-scan of the document's live state scans") {
+		t.Fatalf("the rebuild after the hook names %q as why, want the re-scan of the document's history", why)
+	}
+}
+
+// The tangled hook is a browser test's alone: unmounted without DISPATCH_TEST_HOOKS, and with them
+// it appends to the document's stored history the tens of thousands of items it measured - it
+// answers an error rather than leave a tangle an insert at its head scans within the items one
+// unweighed apply may (docs.Service.TangleBeyondOneApplyForTest), or one that leaves the room near
+// its scan total. Far more of that total is left than one apply may scan: a rebuild is still
+// refused, as it is for any document far from a cap, so what refuses a browser's apply on the
+// tangle is the per-apply scan ceiling and not a used-up room. The hook writes no rendering, as
+// the used-up hook writes none: the markdown a reader sees changes when the room the next browser
+// loads settles.
+func TestTangledHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	unhooked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/00000000-0000-0000-0000-000000000001/_test/tangled", nil, "alice")
+	if unhooked.Code != http.StatusNotFound {
+		t.Fatalf("tangled hook without TestHooksEnabled: status=%d, want %d", unhooked.Code, http.StatusNotFound)
+	}
+	hooked, database, _ := newTestServer(t, testServerOptions{testHooks: true})
+	issue := createInteractionIssue(t, hooked, "TEST", "Tangled", "A spec.")
+	storedStructs := func(what string) int64 {
+		t.Helper()
+		loaded, err := docs.NewPgVersioned(database).Load(context.Background(), issue.PrimaryArtifactID)
+		if err != nil {
+			t.Fatalf("load the stored history %s the hook: %v", what, err)
+		}
+		structs, err := docs.StateStructsForTest(loaded.Update)
+		if err != nil {
+			t.Fatalf("walk the stored history %s the hook: %v", what, err)
+		}
+		return structs
+	}
+	before := storedStructs("before")
+	tangled := dispatchRequest(t, hooked, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/_test/tangled", nil, "alice")
+	if tangled.Code != http.StatusNoContent {
+		t.Fatalf("tangled hook: status=%d body=%.300s, want %d", tangled.Code, tangled.Body.String(), http.StatusNoContent)
+	}
+	// Tens of thousands, the tangle's own count, without pinning the test to the length it is
+	// given: one apply of a browser's may scan 27,594 items (scanCeiling(0)), and the tangle is
+	// past that.
+	if added := storedStructs("after") - before; added < 30_000 {
+		t.Fatalf("the hook added %d structs to the stored history, want the tens of thousands of the tangle", added)
+	}
+	rebuildPath := "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/rebuild"
+	if refused := dispatchRequest(t, hooked, http.MethodPost, rebuildPath, map[string]any{}, "alice"); refused.Code != http.StatusConflict {
+		t.Fatalf("rebuild after the tangled hook: status=%d body=%.300s, want %d", refused.Code, refused.Body.String(), http.StatusConflict)
+	}
+}
+
 func TestJSONMutationsRequireApplicationJSON(t *testing.T) {
 	handler := newTestHandler(t)
 	body := `{"key":"TEST","name":"Test project"}`

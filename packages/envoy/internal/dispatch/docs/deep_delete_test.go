@@ -34,6 +34,11 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 		)
 		service, artifactID := newTestService(t)
 		service.settle = time.Hour
+		// The chain leaves the Proof schema (a document nests at most 1,000 levels), so no count of
+		// its rendering ever lands, and the room budget charges every element the peer adds at the
+		// densest price until one does (roomCharge): the budget would refuse the chain long before it
+		// is deep enough to need a stack per level. What is under test is the delete, not the budget.
+		service.budget.setLimit(1 << 50)
 		seedServiceText(t, service, artifactID, "before")
 		httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 		t.Cleanup(httpServer.Close)

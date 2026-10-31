@@ -839,6 +839,9 @@ jobs:
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
               - 'packages/envoy/internal/dispatch/docs/docstest/*'
+              # internal/dispatch/docs reads its own testdata (struct_cap_measure_test.go:57, the
+              # stored history of a long edited document).
+              - 'packages/envoy/internal/dispatch/docs/testdata/**'
               - 'packages/envoy/internal/dispatch/duty/*'
               - 'packages/envoy/internal/dispatch/events/*'
               - 'packages/envoy/internal/dispatch/identity/*'
@@ -905,6 +908,9 @@ jobs:
               - 'packages/envoy/internal/dispatch/delivery/**'
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
+              # internal/dispatch/docs reads its own testdata (struct_cap_measure_test.go:57, the
+              # stored history of a long edited document).
+              - 'packages/envoy/internal/dispatch/docs/testdata/**'
               - 'packages/envoy/internal/dispatch/duty/*'
               - 'packages/envoy/internal/dispatch/embed/*'
               - 'packages/envoy/internal/dispatch/embedqueue/*'
@@ -2642,16 +2648,47 @@ jobs:
         run: go test -race -timeout 60m ./internal/dispatch/docs/
         working-directory: packages/envoy
 
-  # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
-  # row starts a Dispatch server, drives it over HTTP and the document websocket and reads its
-  # resident memory from /proc, and together they run past go test's default ten-minute deadline,
-  # which took envoy-go red at 600 s (run 37116639565). They build only under the `memory` tag, so
-  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own.
+  # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go and the other files
+  # built under the `memory` tag, LEGION-481): each row starts a Dispatch server, drives it over
+  # HTTP and the document websocket and reads its resident memory from /proc. They build only
+  # under the `memory` tag, so envoy-go's unit run leaves them out: that run is under go test's
+  # default ten-minute package deadline, which they took red at 600 s (run 37116639565).
+  #
+  # The package is sharded because one job no longer holds it. The browser-room rows
+  # (browser_memory_test.go) drive a server for up to 602 s each, and the 107 tests the package
+  # built under the tag when this was measured took 5754 s of test time in one pass on the
+  # development pod - the merge with main's own rows leaves 140 - a
+  # gVisor sandbox roughly two and a half times slower than a GitHub runner, where the same
+  # package without the browser rows is 3081 s against the twenty minutes the unsharded job took
+  # on main. A single run was already past a 60-minute deadline on the pod. Six shards divide it
+  # into 667-1854 s there, the worst being the shard that drew the three heaviest rows, which is
+  # about twelve minutes on a runner: the 40-minute deadline below holds that even if every heavy
+  # row fell into one shard (3211 s on the pod, under 21 minutes on a runner).
+  #
+  # A shard takes its tests from the package's own list, `go test -tags memory -list '.*'
+  # ./cmd/dispatch`: the n-th name of that list, counted from one, belongs to shard
+  # ((n - 1) mod shards) + 1, and the shard runs exactly those names under `-run '^(…)$'`. Every
+  # test therefore lands in exactly one shard, a new one with no edit here, and because the heavy
+  # rows sit next to each other in their files, dealing the list round-robin spreads them across
+  # the shards rather than piling them into one. A shard that lists no test fails instead of
+  # passing on an empty run, which is what a package that stopped building, or a shard number
+  # past the end of the matrix, would otherwise look like.
+  #
+  # The shards are one job to ci-ok, which is what condenses them: a matrix job's `result` in its
+  # needs context is `success` only when every shard succeeded, so a failed, cancelled or skipped
+  # shard takes dispatch-memory red there (.github/scripts/ci-ok.sh).
   dispatch-memory:
+    name: dispatch-memory (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
     needs: changes
     if: needs.changes.outputs.dispatch_memory == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 50
+    strategy:
+      # Every shard's verdict is wanted at once: a red shard must not cancel its siblings, since
+      # which rows fail is the finding.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -2675,7 +2712,17 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Memory tests of the Dispatch server
-        run: go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch
+        env:
+          MEMORY_SHARD: ${{ matrix.shard }}
+          MEMORY_SHARDS: ${{ strategy.job-total }}
+        run: |
+          go test -tags memory -list '.*' ./cmd/dispatch > "$RUNNER_TEMP/memory-tests.txt"
+          all=$(grep -E '^(Test|Example|Fuzz)' "$RUNNER_TEMP/memory-tests.txt")
+          mine=$(printf '%s\n' "$all" | awk -v shard="$MEMORY_SHARD" -v shards="$MEMORY_SHARDS" '(NR - 1) % shards + 1 == shard')
+          [ -n "$mine" ] || { echo "::error::shard $MEMORY_SHARD of $MEMORY_SHARDS takes none of the $(printf '%s\n' "$all" | grep -c . ) tests ./cmd/dispatch lists"; exit 1; }
+          echo "shard $MEMORY_SHARD of $MEMORY_SHARDS runs $(printf '%s\n' "$mine" | wc -l) of $(printf '%s\n' "$all" | wc -l) tests:"
+          printf '%s\n' "$mine"
+          go test -tags memory -count=1 -timeout 40m -v -run "^($(printf '%s\n' "$mine" | paste -sd'|' -))$" ./cmd/dispatch
         working-directory: packages/envoy
 
   # The two-process tests (packages/envoy/cmd/dispatch/multiprocess_test.go, INFRA-66): each row

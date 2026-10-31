@@ -422,7 +422,7 @@ A document no room holds is forked from the store (`coldFork`) and loads no room
 an upload's version on such a fork takes out the stored updates through the head that read loaded and no in-flight credit.
 A browser's room load takes no lock the write holds, so a room that loads while `coldFork` reads the store is forked from instead and the stored copy is dropped undecoded, and one that loads later is forked from at the write's next operation.
 Every mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading its own;
-`applyLive` lets that tree go before the one check that decodes a second copy of the state (`refuseUndecodable`);
+`applyLive` lets that tree go before the one check that encodes the whole fork to count its structs (`refuseUndecodable`);
 and a write drops its fork and rendering once it commits, before its publish loads the room (`releaseFork`), since a pooled connection's context can keep the write reachable long after it answered (LEGION-504).
 A token's encoding (`pmdoc.EncodeTokenJSON`) is held once per call, in one buffer for the document and all its blocks, and dropped when the call returns;
 LEGION-504's concern was more copies per token and their retention, and neither holds.
@@ -485,7 +485,9 @@ the read answers 200 without `anchor_block` and with `anchor_block_error`, logge
 `api.documentErrorCode` names that error for the read and for `writeHandlerError` alike, and both take its codes in one order, so `anchor_block_error` is the code the block route answers the same error with.
 `DOC_SERVICE_UNAVAILABLE` is a room or store that could not serve the document, taken before any cause the error carries:
 a failed room carries the error another operation failed it with (settlement's schema refusal, a settlement that failed three times - its warm-up refused because the issue had closed, among others - a writer's failed or cancelled commit, a failed store write or load, a history that did not decode), which says nothing of this request.
-`DOCUMENT_UNLOADABLE` (409) is a stored history this request itself could not decode (`docs.ErrDocumentUnloadable`), the one state `POST /api/v1/artifacts/{id}/rebuild` repairs and the one code the dashboard offers that rebuild for.
+`DOCUMENT_UNLOADABLE` (409) is a stored history this request itself could not decode (`docs.ErrDocumentUnloadable`), one of the states `POST /api/v1/artifacts/{id}/rebuild` repairs and the one code the dashboard offers that rebuild for.
+The rebuild is also the recovery from either cap a history that loads can reach:
+one so near the decode cap or the room's edit-scan total that every write is refused (`docs.nearACap`) is rebuilt from its own text, its room in this server closed first.
 `DOC_SCHEMA` is a tree outside the schema:
 one the document holds is a `docs.OutsideSchemaError`, which `treeOf` and `documentMarkdown` classify where they read or render a document's tree, so every route that starts from it - `GET /text`, `GET /blocks`, `POST /edits`, `POST /versions` - answers 409 with its one message, while a schema refusal of a tree a write itself produced is a 500 (`producedSchemaError`).
 Both are taken after the refusals that name the caller's own input or a missing block, so an ask block the renderer refused stays `400 INVALID_ASK_BLOCK`.
@@ -509,7 +511,7 @@ Websocket admission still uses `loadTree`, because it needs the raw stored updat
 
 A read of a resident room outside a write never walks the live tree.
 It reads the room as of one moment (`readLive`):
-the replica the room's update observer keeps (`renderedReplica`, below), when it holds every update the room has committed, or a copy taken under the room's document lock (`snapshotDocument`, `crdt.EncodeStateAsUpdateV1`) while the room has no replica - no transaction has reached it since it loaded - while another holds the replica or the observer waits for it, and in the moment between a commit and the observer that classifies it.
+the replica the room's update observer keeps (`renderedReplica`, below), when it holds every update the room has committed, or a copy taken under the room's document lock (`snapshotDocument`, `crdt.EncodeStateAsUpdateV1`) while the room has no replica - its load's own decode failed, so the replica waits for the room's next commit to start from - while another holds the replica or the observer waits for it, and in the moment between a commit and the observer that classifies it.
 A read never moves the replica.
 `GET /text`, `GET /blocks` and the block route use this resident tree through `heldTree`;
 the document websocket's admission check (`loadTree`), a read outside any transaction (`docTree`), a published write's loss check (`recordPublishedLoss`), a version's capture (`captureLiveTextAndAuthors`) and settlement's reads of the room (`settleRoomWithin`'s first read and its version's, and the block-id backfill's read, through `liveTree`) read it so, so a torn read is never versioned as the document;
@@ -536,10 +538,10 @@ A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s su
 a room looked up again with `GetDoc` once that Apply returned can have been evicted in between.
 
 The replica's lock is the one a room's browsers wait on.
-The update observer takes it for every peer update (`renderedReplica.observe`), and ygo broadcasts the update to the room's other browsers only once the observer has returned (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go`), so a read holding the replica for its walk holds every other browser's copy of the keystroke.
+The update observer takes it for every peer update (`renderedReplica.observe`), and ygo broadcasts the update to the room's other browsers only once the observer has returned (sjawhar/ygo v1.54.1-sami.1, `provider/websocket/peer.go:270-279`), so a read holding the replica for its walk holds every other browser's copy of the keystroke.
 A read therefore only tries the lock, and reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads never queue behind each other or ahead of a waiting observer.
 `BenchmarkKeystrokeBesideReads` measures the wait:
-a keystroke's transaction and the observer's whole turn with the replica - the drain of the room's update log, the update applied to the replica and the render (`renderedReplica.observe`, through `renderDocumentForUpdate` since the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads.
+the peer update hook, a keystroke's transaction and the observer's whole turn with the replica - the drain of the room's update log, the content each drained update added charged to the room budget, the update applied to the replica and the render (`renderedReplica.observe`, through `renderDocumentForUpdate` since the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads.
 One run of each - the render's own cost, hundreds of ms a keystroke regardless of which read mechanism races beside it, put repeated sampling out of this pass's time budget - keystroke latency p50 / p90 / p99 in ms, on the development machine (32 cores, load 75 to 80) and on half a processor (`GOMAXPROCS=1` under a 50% CPU quota, production's allotment):
 
 | Reads beside the keystrokes | 32 cores, one every 250 ms | 32 cores, back to back | Half a processor, one every 250 ms | Half a processor, back to back |
@@ -548,11 +550,16 @@ One run of each - the render's own cost, hundreds of ms a keystroke regardless o
 | copies | 634.5 / 940.3 / 1264 | 663.2 / 823.7 / 974.4 | 1205 / 1478 / 1676 | 1337 / 1547 / 1691 |
 | the replica, tried (this design) | 685.8 / 990.7 / 1469 | 705.7 / 1107 / 2015 | 1137 / 1437 / 1606 | 1368 / 1558 / 1692 |
 
+Those three rows were measured before the peer update hook stood in the keystroke's path, and have not been run again since:
+what the hook itself costs the browser whose keystroke it weighs is `BenchmarkPeerUpdateWeighing`, which times the walk, the netting against the room's state vector, the apply-heap estimate and the struct total for a keystroke-sized update against a 524 KiB room both under the byte bound and at it, and reports its percentiles in milliseconds so they can be read against a keystroke's latency here.
+
 The render dominates every row now, on both designs:
 at half a processor the three keystroke counts are within one run's noise of each other, matching round 2's real-browser, end-to-end measurement of the same three modes (PR comment, not reproduced here).
 On 32 cores the replica still costs more at the tail than a copy does - about 50 ms at its median and 200 ms at p99 reading every 250 ms, growing to about 1 s at p99 reading back to back - the same direction this design's trade-off has shown since round 1, now measured on top of the render's own cost rather than in isolation from it.
 A replica of the reads' own would remove that tail (measured early in this PR's history, before this benchmark counted the render, at `93a77af2`) and was rejected for its memory:
-a room read while resident would hold a second whole copy of its document until eviction, about 6.6 MiB of heap at 51 KiB, 63 MiB at 524 KiB and 123 MiB at 1 MiB, with nothing bounding how many rooms hold one.
+a room read while resident would hold a third whole copy of its document until eviction, about 500 bytes of heap for each element its markdown makes, 605 to 616 at 51 KiB (`bytesOfHeapAnElement`, `TestAResidentRoomsHeapPerByteOfItsMarkdown`), so about 29 MB for a mebibyte of prose, whose 57,600 elements cost 58 MB at the two copies a room already holds.
+The figure this paragraph carried before that measurement, 120 bytes of heap a byte of markdown and so 123 MiB at a mebibyte, was read off a benchmark shape four times denser than any room can hold at that size.
+The room budget charges every room both its copies (`roomCopies`), so a third would raise what a resident room costs by half, and nothing in that design counts it.
 Copying the observer's rendered tree under the lock instead of walking the replica would hold it about 45 ms rather than about 105 ms at 524 KiB, but would keep that tree resident (about 22 MiB) and still need the replica for the loss check, which walks the document itself.
 A read's own cost (`BenchmarkLiveDocumentRead`, the development machine at load about 40):
 a 524 KiB document's tree read took about 68 ms walking the live tree, 283 ms through a copy and 86 ms through the replica (77 ms with a keystroke to catch up), and its render about 181, 391 and 194 ms.
@@ -576,13 +583,29 @@ A helper that walks the room inside `Server.Apply` outside a transaction, as an 
 Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment (`internal/dispatch/docs/persistence.go`) states the rule and its reason:
 whether the service builds the decoder (`newDocumentCopy`:
 the copy, a write's fork, every decode of the stored history, including `stateThrough`'s fold and read-back, and the store's check of each update it appends) or ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms).
+The queue caps parked delete ranges apart from parked structs, each at `maxUpdateItems`.
+ygo decodes a room's stored state with the queue lifted and sets it before `OnLoadDocument` runs (sjawhar/ygo v1.54.1-sami.1, `provider/websocket/server.go:1727-1728`, `:1792-1794`);
+the service decoded that state under the queue first (`loadTree`, `LoadDoc`'s `rescan`), so the room starts within it, and the hook's applies and every peer's are held to it (`TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad`).
 ygo's check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 In a room, which keeps what it parks across updates, the queue is also the most the room's peers can park, about ten times ygo's default.
 `TestTheStoreTakesOneBrowserUpdateItsRoomTook` and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates a check at ygo's default queue refuses, which fails the room;
 `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`, `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
+That cap, 1,048,576 items (`maxUpdateItems`), is a bound on what a document may hold as well as on what one update may carry:
+a room's whole state is one update to the next load that reads it, so a room whose state held more could never be loaded again once its updates were folded.
+Three paths hold it.
+The peer update hook keeps each room's struct total, counted at its load and moved by every update it admits, and refuses `4413 DOC_TOO_LARGE` an update that would take the total past the cap, whatever it inserts or deletes - a delete that cuts the middle of an item splits it and adds structs - reserving the addition before the apply and taking it back when the apply fails (`docs/peer_update.go`, `structTotal`);
+it confirms a total near the cap by an exact count before it admits (`nearBounds`), since the server's own writes move the room without the hook.
+Every write through `applyLive` is refused when the live state it would leave could not be decoded (`refuseUndecodable`, which encodes the write's fork and counts its structs, adding the splits parked structs can still cause, so it refuses every state a decode would).
+And the three writes that add no caller text and run through no `refuseGrowth` - the block-id stamp of settlement and of the backfill, the sweep of unrecorded marks, and settlement's repair of a returning answer - write into the live document itself rather than a fork they could drop, so each asks `leavesPastDecodeCap` of the room before it writes and leaves a document it would carry past as it was:
+first the room's struct ceiling plus what the write's updates add at most, which costs no encode and clears every document well short of the cap;
+then, in the measurer's turn, the room's exact total;
+then, in the same turn, the write's updates applied to a copy of the room.
+One turn runs at a time for the whole service, so two rooms never hold a copy each for it, and each of the three waits for it on its own goroutine, never on a peer's read loop.
+A history that stands at or near the cap is recovered only by `POST /api/v1/artifacts/{id}/rebuild` (`docs.nearACap`), since every write to it is refused.
+
 A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's edit, a read outside any transaction - stays resident until it has been idle for a minute (`roomIdleTimeout`), when ygo's idle sweeper evicts it.
-ygo's default, eager eviction, evicts a room the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go` checks only the peers):
+ygo's default, eager eviction, evicts a room the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (sjawhar/ygo v1.54.1-sami.1, `provider/websocket/peer.go:585-620` checks only the peers):
 the callback's write then lands on the evicted room and reaches the store only through its retiring persistence worker, while the next access has already loaded the store without it and serves, and takes, the next write on a document missing the first.
 Two such writes, each a diff of the same document, merge into a document neither wrote, and into one holding no block at all once each kept a block the other replaced:
 the healthy-room probe met it as a socket closed with `DOC_SCHEMA`.
@@ -643,6 +666,47 @@ The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts 
 A room an `Apply` opened with no peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
 `PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
+Above that count stands the room budget (`docs/room_budget.go`, `roomBudget`), which charges the open rooms the heap they hold:
+2 GiB of the task's 4 GiB, under the 3.6 GiB soft memory limit the server gives the Go runtime at boot from its container's own (90 per cent of it, automemlimit's default ratio, `setGoMemoryLimit` in `cmd/dispatch/main.go`; `GOMEMLIMIT` or `AUTOMEMLIMIT` in the environment replaces it).
+The rest of that limit is the request path's, the cold reads' 256 MiB rendering cache's (`documentReadBudget`, which the room budget does not count) and the slack the collector needs.
+Each room is charged at both its copies:
+the greater of its elements at 500 bytes each, its structs at 170 and its rendered bytes at 12 (`copyHeap`, each measured on resident rooms), or, for a rendering `pmdoc.MeasureDocument` could not finish counting, its bytes at the densest price, 1,126.
+Beside that count stands the structure part, what a count of the rendering cannot see:
+each struct a browser's update adds at 650 bytes a copy, each item its integration or a delete range's apply can split at 200, the text it carries at 2 a byte and its Any, JSON and format values at 120, charged from the same walk the peer update hook weighs the update by.
+The server's own writes, which that hook never sees, are charged the same structure by the room's update observer.
+A room is counted again as it loads and then at most once every 15 s (`roomCountInterval`), or at once when its uncounted charge passes 16 MiB (`earlyCountCharge`), so a paste is counted within one count rather than fifteen seconds later and typing never reaches it.
+An admission reserves its document's stored version at the same price before the room loads (`storedRoomReservation`), and the load's own count replaces the reservation.
+
+The budget refuses only a browser's socket (`reserveRoom`), never `Server.Apply`:
+the server's own work - an API write, the unrecorded-mark sweep, settlement's repair - opens its room over the budget, and a room so opened is closed once nothing holds it (`closeOnceUnused`, `closeIfOpenedOverBudget`).
+Over the limit, or short of what the admissions waiting on it need, the rooms holding nothing that outlasts them are closed (`sweepRooms`), and an admission that finds the budget short waits for those closes - the settle delay and `admissionFlushAllowance`, 8 s, for the settlement and flush a close owes - before it is refused `4503 DOC_BUSY`.
+When the charges are still over the limit with nothing left to close, `full` is raised:
+the one signal the peer update hook reads, with one atomic load, since it runs on a peer's read loop and takes neither the budget's lock nor a room's state lock.
+While it is up, an update that inserts anything is refused `4503` in every room, whatever it leaves the document's bytes at, and one that only deletes is admitted while the charges stay within the 256 MiB pressure reserve past the limit (`pressureReserveBytes`), so a full document can still be cut.
+
+Two more bounds hold what is transient rather than resident, each a third of what the Go memory limit leaves above the room budget, that cache and the pressure reserve (1,181,116,006 bytes), with the last third left as slack for what neither weighs, the collector's headroom among it.
+The collector runs at the runtime's own ratio of garbage to live heap:
+Dispatch reads and sets no `GOGC`, and the memory limit is what holds the pod.
+At that ratio the heap goal of a server whose budget is full is the limit itself, so the garbage waiting to be freed fills every byte the limit leaves and the memory the pod's kernel charges parks under it - that memory being what the runtime holds less what it has released, which is what the limit bounds.
+The worst case the two bounds allow charged the pod 3,665 MiB of its 4,096 over 402 s (`TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory`, 2026-10-29).
+The VmRSS a sandboxed run reads is higher - 4,171 MiB over the same run - because gVisor keeps the pages the runtime released resident;
+Dispatch's own pods are not sandboxed, and the drive reads what the pod's kernel charges (`peakResident`).
+The 4,302 and 4,424 MiB earlier runs recorded were that same VmRSS, not a pod's charge, and a collector held to a tighter ratio bought nothing against them:
+following the room budget's charge the drive charged 3,691 to 3,695 MiB in 539 and 547 s, and a ratio pinned at a seventh of the live heap at boot cost every server all the time - the drive whose eight rooms charge 464 MB took 2,072 s under it against 503 s at the runtime's own (`TestTheRoomBudgetDoesNotOverchargeTypingAndPasting`).
+The apply-heap bound (`applyHeapBound`, 393,705,335 bytes) holds the estimated heap of the browsers' applies the hook weighs:
+an update whose own share of the estimate passes 2 MiB (`unweighedApplyHeapBytes`) applies only once it holds its estimate out of the bound, or the whole bound when its estimate passes it, so a reconnect storm's whole-state handoffs decode a few at a time rather than all at once, while typing never waits on it.
+An estimate past all of 1,181,116,006 (`applyTooHeavyBytes`) is answered with an error and never applied.
+The copy-heap bound (`copyHeapBound`, the next 393,705,336 bytes) holds the pod's full-state decodes - a room's load, a write's fork, a cold read's or a compaction's fold, the replica's build from a base, the measurer's copy for a server write, a rebuild's decodes - at 48 bytes a byte of the encoded state each decodes (`copyHeapPerByte`), and the count an admission makes of its stored version at 160 bytes a byte of that version's markdown, capped at 78 MiB, beside the largest row of the history it walks at 4 bytes a byte (`storedCountWeight`).
+A decode weighing more than the whole bound waits for all of it and runs alone, never refused:
+a stored document must always load.
+
+Every remote apply is held to an allowance of conflict scans as well (`docs/scan_budget.go`, `roomScans`):
+integrating an item scans the items between its left and right origins, so one update of items naming an early left origin and no right origin scans its list over and over.
+A browser's update gets the lesser of the per-apply ceiling, 400,000 items (`perFrameScanCeiling`, 213 to 320 ms of the room's lock measured at it), and what is left of the room's 1,000,000-item scan total (`roomScanTotal`), which counts the re-scan of the stored state the load decoded and every transaction the room has committed or refused since;
+an update the hook does not weigh gets only what its scan marks can hold in what is left of the 2 MiB it may hold unweighed, 76 bytes a mark.
+An apply that would pass its allowance is refused and taken back out whole, `4413 DOC_TOO_TANGLED`, or `DOC_NEEDS_REBUILD` once the room's total is used up, where a room still takes an apply scanning 64 items or fewer (`usedUpScanBudget`) so that typing in place goes on.
+The server's own remote applies get the ceiling whatever is left, so a server write never fails its room for the total, and only a rebuild, which stores a fresh history, starts the total again.
+
 `@hocuspocus/provider` renews its awareness every 15 to 18 s and closes a socket that has delivered no message for 30 s, and counts every message and nothing else: a websocket ping reaches no page.
 ygo returns a read-write peer's awareness update to every peer, including its sender, so a lone editor receives that renewal.
 A read-only peer receives ygo's bounded empty awareness response and cannot change shared awareness.
@@ -650,7 +714,7 @@ Dispatch writes no document-socket keep-alive frames.
 
 The room's update observer renders a replica of the room, the one its reads walk, not the live tree, since ygo fires it after the transaction has released the document's lock and another write can be integrating meanwhile (`renderedReplica`).
 The replica moves only through the room's commits, one at a time and in commit order:
-ygo appends each committed transaction's update to the room's update log under the document's lock, before any observer of that transaction runs (`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains the log, applying each update in turn and comparing the rendering it leaves with the one before it (`renderedReplica.changedBy`).
+ygo appends each committed transaction's update to the room's update log under the document's lock, before any observer of that transaction runs (`crdt.UpdateLog`, sjawhar/ygo v1.54.1-sami.1, `crdt/update_log.go:53-80`), and the observer that holds the replica's lock drains the log, applying each update in turn, and what it parked after it, and comparing the rendering it leaves with the one before it (`renderedReplica.changedBy`).
 It renders the replica for that only when it cannot know the rendering otherwise, and three cases it knows exactly.
 A margin write's publish into the room instance its fork was warm-built from changes no text (`liveWriteOrigin.marginOnly`, the margin record paragraph above), so it is unchanged.
 A published live write's update carries its operation's rendering, taken when the replica still stands at the epoch and foreign-commit count the operation's fork read found before it encoded the room:
@@ -658,16 +722,20 @@ the replica has then consumed nothing since that read but published writes' comm
 ygo encodes the room's whole delete set in every update, so that holds only on the room instance the fork was read from:
 a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch;
 for the same reason a margin write forked cold, or published into a replaced room, is not taken as margin-only.
-And an update whose version is at or below the head the room instance's load folded (`roomInstance.loadedHead`) is already in the replica, which starts from the room as of its first commit, so applying it changes nothing:
+And an update whose version is at or below the head the room instance's load folded (`roomInstance.loadedHead`) is already in the replica, which starts from the copy the room's load decoded, so applying it changes nothing:
 a cold write's publish into the room its own publish loaded is never rendered.
 So every committed update is classified, and its authors credited, exactly once, by whichever observer reaches the log first, against the room as the commit before it left it.
 Catching the replica up to the room instead took in every commit since the last one rendered:
 when a published write's observer ran first, it counted a browser's edit in its own change, which credits no one, and the browser's own observer then found nothing changed, so the browser was on no version and in no pending row.
 The update an observer is handed cannot stand in for the log:
 two transactions' observers run concurrently in either order, and each update carries the room's whole delete set.
-The log records the room's state as of just before its first transaction since the load, which the replica starts from, so a room that is only read holds no replica;
+The replica is the copy the room's load decoded of the stored state (`decodeStoredState`, handed to `keepReplica`), so every room holds two copies of its document from its load on - the live document ygo decoded of those same bytes, and the replica - whether it is only read or has taken an update since, and the room budget charges it at both (`roomCopies`).
+The log records the room's state as of just before the room's first transaction since the load, which that copy stands at.
+A load whose own decode failed hands the replica no copy, so it starts from the log's first base instead and a read of the room takes a copy under the document's lock until it does;
 a replica that cannot apply an update starts again from a fresh base at the room's next commit (`UpdateLog.Reset`), and counts the updates it could not place as content changes.
 A repair's update is applied and rendered like any other, so the update after it is measured against the room it left, but its class is recorded by its own observer.
+The same drain charges the room budget the content each update added, a repair's included, before the replica renders any of them (`renderedReplica.chargeAdded`), so each committed update is charged once whichever observer drains it, and the rendering published next holds it.
+The room's first measurement is its load's rendering, published as the replica is made (`keepReplica`, `publishLoadedSize`), which the room budget charges the load by and the peer update hook weighs the room's first update against.
 The test hooks around the observer (`beforeObserveUpdate`, `afterCreditUpdate`) hold an observer, not an update:
 another transaction's observer classifies a held one's update if it reaches the log first.
 On a 1 MiB document the render took about 160 ms and a whole copy about 420 ms, and the replica holds a whole copy's heap (above) while its room is resident.

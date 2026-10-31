@@ -1,4 +1,5 @@
 import { afterEach, expect, jest, spyOn, test } from "bun:test";
+import { DOCUMENT_BUSY_CLOSE_CODE, DOCUMENT_TOO_LARGE_CLOSE_CODE } from "@legion/contracts";
 import { waitFor } from "@testing-library/react";
 import { createDecoder, readVarString, readVarUint, readVarUint8Array } from "lib0/decoding";
 import * as Y from "yjs";
@@ -11,6 +12,7 @@ import {
   isSchemaReadOnly,
   loadDocumentTransport,
   pendingNotice,
+  refusedEditNotice,
   wsUrl,
 } from "./connection";
 import {
@@ -92,7 +94,12 @@ class OpenSocket extends EventTarget {
     queueMicrotask(() => this.dispatchEvent(new Event("open")));
   }
 
-  close(): void {}
+  /** Whether the client closed this socket. */
+  closed = false;
+
+  close(): void {
+    this.closed = true;
+  }
 
   send(data: Uint8Array): void {
     this.sent.push(new Uint8Array(data));
@@ -114,6 +121,11 @@ interface ProviderHarness {
   admissions: boolean[];
   /** Each pending state the host was told of, in order. */
   pending: PendingState[];
+  /** Each close for want of room the host was told of, `true` as it closes and `false` once a
+   *  frame of this browser's is applied again (`DOCUMENT_BUSY_CLOSE_CODE`). */
+  busy: boolean[];
+  /** The reason of each refused edit the host was told of (`DOCUMENT_TOO_LARGE_CLOSE_CODE`). */
+  refusals: string[];
   /** Whether the host was told that the first admission's restore finished. */
   synced(): boolean;
   /** The `index`th socket the provider opened, once the provider has written to it. */
@@ -144,21 +156,27 @@ async function withProvider(
     let synced = false;
     const admissions: boolean[] = [];
     const pending: PendingState[] = [];
+    const busy: boolean[] = [];
+    const refusals: string[] = [];
     connection = connect(artifact, {
       onAdmission: (readOnly) => admissions.push(readOnly),
+      onBusy: (waiting) => busy.push(waiting),
       onOutsideSchema() {},
       onPending: (state) => pending.push(state),
       onStatus() {},
       onSynced: () => {
         synced = true;
       },
+      onTooLarge: (reason) => refusals.push(reason),
       schemaVersion: 1,
     });
     await body({
       admissions,
+      busy,
       connection,
       draw: (next) => random.mockReturnValue(next),
       pending,
+      refusals,
       async socket(index) {
         await waitFor(() => expect(OpenSocket.opened[index]?.sent.length).toBeGreaterThan(0));
         return OpenSocket.opened[index] as OpenSocket;
@@ -630,4 +648,100 @@ test("a document's first connect opens at once, and each reconnect after a serve
   } finally {
     jest.useRealTimers();
   }
+});
+
+/**
+ * Takes the provider's `index`th socket through a writable admission and the acknowledgement of
+ * the SyncStep2 it wrote, which is what every refusal test below starts from.
+ */
+async function admitWritable(
+  harness: ProviderHarness,
+  artifact: string,
+  index: number
+): Promise<OpenSocket> {
+  const socket = await harness.socket(index);
+  socket.receive(authenticatedFrame("read-write", artifact));
+  socket.receive(syncStep1Frame(Uint8Array.of(0), artifact));
+  socket.receive(syncStep2Frame(Y.encodeStateAsUpdate(new Y.Doc()), artifact));
+  await waitFor(() => expect(harness.synced()).toBe(true));
+  socket.receive(syncStatusFrame(true, artifact));
+  return socket;
+}
+
+for (const refusal of [
+  {
+    name: "too large",
+    reason: "DOC_TOO_LARGE",
+    notice:
+      "Your last edit was not saved: it would make this document larger than a Dispatch document may be. Your other edits are kept.",
+  },
+  {
+    name: "too tangled to merge",
+    reason: "DOC_TOO_TANGLED",
+    notice:
+      "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept.",
+  },
+  {
+    name: "needing a rebuild",
+    reason: "DOC_NEEDS_REBUILD",
+    notice:
+      "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.",
+  },
+]) {
+  test(`a real provider closed as ${refusal.name} drops the refused edit's row and stops for the host`, async () => {
+    const artifact = artifactId();
+    await withProvider(artifact, async (harness) => {
+      const socket = await admitWritable(harness, artifact, 0);
+      const text = harness.connection.doc.getText("t");
+      text.insert(0, "kept");
+      text.insert(text.length, " refused");
+      const clientId = harness.connection.doc.clientID;
+      await waitFor(async () =>
+        expect(await rowsOf(artifact)).toEqual([
+          [artifact, clientId, 1],
+          [artifact, clientId, 2],
+        ])
+      );
+      socket.receive(syncStatusFrame(true, artifact));
+      socket.receive(syncStatusFrame(false, artifact));
+      socket.dispatchEvent(
+        new CloseEvent("close", { code: DOCUMENT_TOO_LARGE_CLOSE_CODE, reason: refusal.reason })
+      );
+
+      await waitFor(() => expect(harness.refusals).toEqual([refusal.reason]));
+      expect(refusedEditNotice(refusal.reason)).toBe(refusal.notice);
+      expect(await rowsOf(artifact)).toEqual([]);
+      // The provider's own close handler starts a reconnect before the connection's runs; the
+      // connection's disconnect closes it, so no socket is left for the provider to sync on.
+      expect(OpenSocket.opened.every((opened) => opened.closed)).toBe(true);
+    });
+  });
+}
+
+test("a real provider closed as busy reconnects, keeps the edit, and says when it is taken", async () => {
+  const artifact = artifactId();
+  await withProvider(artifact, async (harness) => {
+    const socket = await admitWritable(harness, artifact, 0);
+    harness.connection.doc.getText("t").insert(0, "waits for room");
+    const clientId = harness.connection.doc.clientID;
+    await waitFor(async () => expect(await rowsOf(artifact)).toEqual([[artifact, clientId, 1]]));
+    socket.receive(syncStatusFrame(false, artifact));
+    socket.dispatchEvent(
+      new CloseEvent("close", { code: DOCUMENT_BUSY_CLOSE_CODE, reason: "DOC_BUSY" })
+    );
+
+    expect(harness.busy).toEqual([true]);
+    await waitFor(() => expect(OpenSocket.opened).toHaveLength(2));
+    expect(await rowsOf(artifact)).toEqual([[artifact, clientId, 1]]);
+    const reconnected = await harness.socket(1);
+    reconnected.receive(authenticatedFrame("read-write", artifact));
+    reconnected.receive(syncStep1Frame(Uint8Array.of(0), artifact));
+    reconnected.receive(syncStep2Frame(Y.encodeStateAsUpdate(new Y.Doc()), artifact));
+    // The reconnected provider's SyncStep2 carries the edit, and the server applies it.
+    reconnected.receive(syncStatusFrame(true, artifact));
+
+    await waitFor(() => expect(harness.busy).toEqual([true, false]));
+    await waitFor(async () => expect(await rowsOf(artifact)).toEqual([]));
+    expect(harness.refusals).toEqual([]);
+  });
 });

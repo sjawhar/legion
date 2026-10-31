@@ -1,0 +1,274 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-179",
+  "completed": "2026-10-27T14:13:31Z",
+  "plan": "dispatch://INFRA-179/artifact/plan-md",
+  "planVersion": 8,
+  "specVersion": 23,
+  "branchHeadPlannedFrom": "230fd5b1d3b1",
+  "architectDecisions": [
+    {
+      "decision": "The budget charges structs (option 2), as a plan departure; the spec does not change.",
+      "source": "Envoy 6efccd271528e3c6c9690491db6a1a1a, 2026-10-26T07:02:03Z",
+      "detail": "Built at 0e25538d and 34b97c25."
+    },
+    {
+      "decision": "Standing instructions: fix defects in touched or depended-on code in this pull request; merge main only for a conflict GitHub reports or a red check main has fixed.",
+      "source": "Envoy cbc32ff746a78e60796a420fa26b8c4d, 2026-10-26T07:10:14Z",
+      "detail": "dispatch://INFRA/artifact/goals-md"
+    },
+    {
+      "decision": "D11: ygo v1.51.3-sami.5's integrate-scan bound replaces the dropped interim per-parent guard; pin sami.5 and merge main forward for the conflict with #2236, keeping sami.5.",
+      "source": "Envoy ca278f3e1567fa990620cb03fd31b5bd, 2026-10-26T18:47:59Z",
+      "detail": "SetMaxIntegrateScan in OnLoadDocument on every success path; copies unbounded; refusal closed 4413; real-process scan-frame test; measure V3 and patch ygo by the format-patch / dispatch artifact / envoy_send 01a16640-8259-71ed-bb68-1e4927b77a01 route if material."
+    },
+    {
+      "decision": "Scan refusal reason DOC_TOO_TANGLED with its own sentence; scan bound 4x the measured honest maximum, stop over 35,000, with the offline-reconnect-paste case; D12 is an absolute per-room struct cap S, not a ratio.",
+      "source": "Envoy 647a1d5210d4c20a61afa06dd5b168da, 2026-10-26T19:11:26Z",
+      "detail": "S: 4x the whole-state frame at S <= 64 MiB, S with margin above the heaviest server-storable document and a long-edited 5 KiB session, else stop and report; 4413 DOC_TOO_LARGE; parked items count; delete-only exempt (decode cap still binds); after the walker, before the 4503 rule. The #2236 merge keeps main's OpenUpdateLog replica and the load measurement, with a test failing if either is lost."
+    },
+    {
+      "decision": "R-D12 replaces the struct cap: a 9.5 MiB browser-path unrendered-bytes bound (exact room total, 4413 DOC_TOO_LARGE); message floor max(4 x 12,598,044, 1.25 x F=44,936,089) = 54 MiB; binary and embed content from browsers refused; an unmeasured room weighs an update on its own bytes.",
+      "source": "Envoy 69933e63 (2026-10-26T23:06:58Z) via the implementer's RESUME.md; restated in Envoy 990b370573c6d9048527d88774eb809a, 2026-10-27T13:52:22Z",
+      "detail": "Cite 1.69 MB at the element bound plus 4.1 MB of creep for 9.5 MiB. A1 gains a margin-flood case and a frame-at-F case."
+    },
+    {
+      "decision": "R-A2: RebuildDocument accepts a decodable history at or near the decode cap or the room's scan total, never any history merely because markdown is supplied; a browser reconnecting with old state cannot push it back; departure 6 corrected.",
+      "source": "Envoy 990b370573c6d9048527d88774eb809a, 2026-10-27T13:52:22Z",
+      "detail": "Tests: the 27-rewrite and at-cap long-edited documents rebuild small and read the same; a browser holding the replaced history cannot hand it back."
+    },
+    {
+      "decision": "R-D11 (B)/(C): each apply scans at most min(~400,000 weighed by the apply-heap bound, the room's remaining scan total ~506,000 counted at load); 4413 DOC_TOO_TANGLED; ygo sami.6 (per-apply budget callback, IntegrateScanned, V3 fix) through 01a16640, pinned before testing; order A1/A2, (B)/(C), sami.6, then steps 4-7.",
+      "source": "Envoy 990b370573c6d9048527d88774eb809a, 2026-10-27T13:52:22Z",
+      "detail": "No fixed or proportional per-update allowance."
+    },
+    {
+      "decision": "Open points of the three rulings: plan defaults accepted with conditions; none needs the person.",
+      "source": "Envoy 26aa36189ffa3eaca7edd055db2c9daa, 2026-10-27T14:07:08Z",
+      "detail": "Reserve-and-refund debit with the drain inside the allowance; server applies get the ceiling and count; total 506,000 as >=15x the long session with tests; unweighed updates ~27,600 scans; used-up room 64 scans and a larger apply refused DOC_NEEDS_REBUILD and dropped, covered by settled ask 42109497 ('nobody loses text' removed); near = total - 35,800; rebuild offered with an e2e case red at base and green at head; confirmation warns of dropped unsent edits; retired overwrite/delete refused after an editor-source search recorded in the handoff; frame total refused at F for inserts, delete-only exempt."
+    }
+  ],
+  "done": [
+    "Plan tasks 1-7 at 27b5bf99 (see plan v7).",
+    "2191c79a main merged for #2236 with ygo sami.5; 9a23b440 struct cap measured and found infeasible; f6dd6e41 integrate-scan bound with 4413 DOC_TOO_TANGLED (last green); 7c86936e unrendered bound and 54 MiB floor (parked, unit tests pass); 230fd5b1 rebuild near the decode cap (parked, tests never run)."
+  ],
+  "remainingWork": [
+    "Step 0: rebuild the proof environment (Postgres with pgvector, Chromium, base clone), download the implementer's tarball (dispatch://INFRA-179/artifact/infra179-implementer-scratch-tgz v3) and rebuild the ygo clone from sami.5 plus the V3 patch plus ygo-api-wip.diff.",
+    "Step 1: finish the unrendered bound; add the frame total refused at F for inserts with delete-only exempt; cmd/dispatch mirrors (54 MiB); two real-process A1 tests; re-point peer_update.go citations.",
+    "Step 2: run and fix the rebuild tests; rebuild near the scan total; retired overwrite/delete refusal after the editor-source search; the route closes this process's resident room for a history near a cap; liveness probe becomes a read; rebuild route texts.",
+    "Step 3: finish and test the ygo scan-budget API, format-patch, dispatch artifact, envoy_send to 01a16640; pin sami.6.",
+    "Step 4: the scan budget in Dispatch (origins, room total at load with measured cost, reserve/refund, used-up 64 scans and DOC_NEEDS_REBUILD in contracts, editor, dashboard rebuild offer and its e2e case); remove the fixed integrateScanBound and its tests; the committed measurements and unit tests named in plan v8.",
+    "Step 5: the per-row keystroke gate at the sami.6 head; applyHeapBound subtracts pressureReserveBytes; replace '18 to 23 per cent'.",
+    "Step 6: the real-process proofs (plan v7 step 5 with S dropped, the scan-frame test rebuilt against the ceiling, the reload test added).",
+    "Step 7: documents with current numbers and the dead pmdoc test.",
+    "Step 8: A2 at merge base and head including the DOC_NEEDS_REBUILD case, the pull request, the production check."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: references/pr-body.md (body, proofs on a production-like surface, simplify pass), references/conflicts-and-rewrites.md (step 1 is a forward merge of main), references/review-threads.md; the editor gains a sentence, so A2's Chromium run is the proof",
+      "ce-simplify-code: the simplify pass over the scan-bound accounting and the struct cap, which add refusal paths beside the walker's and the struct total's and must reuse their shape",
+      "dispatch-first and dispatch: every write to Dispatch, including the ygo sami.6 patch artifact on INFRA-179 and downloading the implementer's scratch tarball; a finding outside the issue is an ask"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md defines what the tester drives (the real Dispatch process over real websockets, a hostile non-editor client, a scan frame, the Chromium e2e) and what it may not re-run (lint, types, unit suites are CI's work)",
+      "dispatch-first and dispatch: for any ask the tester opens about something outside this issue"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the review round's order and references/review-threads.md for threads; the reviewer reads plan.md v8's departures beside spec v23",
+      "dispatch-first and dispatch: for any ask the reviewer opens"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "1. A budget of 0 means unbounded in the ygo API, and nothing says what a used-up room does; dropping an offline session conflicts with plan v7's 'nobody loses text'.",
+        "answer": "Used-up room: 64-scan budget, a larger apply refused 4413 DOC_NEEDS_REBUILD and dropped under the settled ask 42109497; plan v7's wording removed (architect)."
+      },
+      {
+        "finding": "2. Debit timing is unset and one apply plus its drain can scan twice its budget.",
+        "answer": "Reserve before the apply, refund from IntegrateScanned after, drain inside the allowance; step 3 confirms from ygo when OnAfterTransaction fires and whether rolled-back scans can be read."
+      },
+      {
+        "finding": "3. Server remote applies go through the same budget; a short budget fails the room.",
+        "answer": "Server publish, inject and repair always get the per-frame ceiling and their scans count toward the total; TestAServerWriteIsNeverRefusedByTheRoomsScanTotal."
+      },
+      {
+        "finding": "4. Counting the total at load has no source and an unstated cost.",
+        "answer": "Step 4 measures which decode supplies it and its cost against A3's fifty-load burst; A3 is re-proven if a decode is added."
+      },
+      {
+        "finding": "5. Reload scans of existing heavy histories are unmeasured.",
+        "answer": "TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed over the heaviest server-storable, agent-rewritten and at-cap long-edited documents."
+      },
+      {
+        "finding": "6. The ~506,000 derivation is a time figure and the '+4..105' claim is contradicted (+169).",
+        "answer": "Stated as at least 15x the honest long session's 33,308 with TestTheRoomScanTotalHoldsFifteenHonestLongSessions; 'exactly' dropped (re-scan is the admitted count plus a few hundred)."
+      },
+      {
+        "finding": "7. How the 400k ceiling composes with the apply-heap bound is undefined.",
+        "answer": "Reading B: unweighed updates get (2 MiB - share)/76 (~27,600) scans; weighed updates up to 400k with marks in their estimate; the scan-refused estimate rows and applyHeapBound's comment are rewritten."
+      },
+      {
+        "finding": "8. 250 ms understates the hold at GOMAXPROCS=1 with the replica and drain; refused frames are free to repeat.",
+        "answer": "BenchmarkAnApplyJustUnderTheScanCeiling at GOMAXPROCS=1 with replica, stop line 500 ms; refused applies debit their scans if ygo reports them."
+      },
+      {
+        "finding": "9. Recovery from a used-up total is unreachable (human-only, refused while live, offered only for DOCUMENT_UNLOADABLE), 'near' has no number, a rebuild drops unsent edits, and the liveness probe rebuilds.",
+        "answer": "near = total - 35,800; DOC_NEEDS_REBUILD with its sentence and the dashboard's rebuild offer and e2e case; the route closes this process's resident room for a history near a cap (plan decision after plan review round 1); confirmation warns of dropped edits; the probe becomes a read; route texts listed."
+      },
+      {
+        "finding": "10. The retired guard misses overwrites and deletes, is lost on undecodable rebuilds, and grows.",
+        "answer": "Overwrites and deletes refused after an editor-source search recorded in the handoff; entries never pruned and counted in both totals (architect)."
+      },
+      {
+        "finding": "11. Residual 1 lets one string struct grow the frame past F and the floor.",
+        "answer": "A frame total re-based at each count, refused 4413 DOC_TOO_LARGE at F for inserts, delete-only exempt; A1 asserts both."
+      },
+      {
+        "finding": "12. sami.6's contents and the re-runs after its pin are unsettled; the API's tests never ran; parkedCopyHeap becomes dead.",
+        "answer": "Step 3 runs and fixes the ygo tests, sends the patch, pins sami.6; parkedCopyHeap removed; 'Proofs to run again after the sami.6 pin' lists the re-runs."
+      },
+      {
+        "finding": "13. Superseded tests and spec text must change; new tests unnamed; the label R-A2 clashes with acceptance A2; two figures for the server-stored frame.",
+        "answer": "Step 4 removes the fixed-bound tests; S and its test dropped; new tests named in steps 1-6 and the acceptance table; departures 6, 11, 12 rewritten and 5 extended; one figure (12,598,044)."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "Once the measurement is at or over the bound, the hook ... admits it only when what it inserts is under 8 KiB.",
+      "plan": "What it inserts is measured as clocks beyond the room's state vector; the editor drops a refused edit by deleting its saved row and rebuilding from a fresh server read.",
+      "evidence": "A browser's first message is the whole live state; measured literally every editor of a large document would be closed, which A1 forbids.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "A browser's admission reserves from the stored version's bytes at the densest price.",
+      "plan": "The admission counts the stored version once per version and uses the densest price only where goldmark cannot finish.",
+      "evidence": "1,048,576 x 1,058 x 2 = 2,218,786,816 bytes, over the 2 GiB budget: no 1 MiB document could be admitted, so A3's fortieth room could not hold.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "An API write needs no room ... the mark sweep and settlement's repair ... their room is closed as soon as the write lands.",
+      "plan": "The publish loads a room; every room loaded without a socket reservation while the budget is over its limit is evicted once unused.",
+      "evidence": "livewrite.go:303 and :614-616.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A4 gains: with the budget full, an API write and the mark sweep on documents with no resident room succeed and leave no room once settlement ends."
+        ]
+      }
+    },
+    {
+      "spec": "A room is charged its latest measured document, both copies, plus the bytes of the updates taken since that measurement.",
+      "plan": "A structure part at measured prices and content factors that only retirement clears; added content at the densest price until a count (architect's choice).",
+      "evidence": "gcflood: one 1,000,008-byte update of 500,000 GC structs keeps 64,645,200 bytes of heap with the rendering unchanged, and a count clears its 1 MB charge.",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "A room's charge is no longer bounded by the document bound."
+        ],
+        "acceptance": [
+          "A1 gains a non-editor flood case; A3 gains an over-charge guard."
+        ]
+      }
+    },
+    {
+      "spec": "Under the bound an update is admitted on that comparison alone ... turns away a single huge frame before anything decodes it.",
+      "plan": "Every update is walked without per-struct allocation; malformed frames, subdocuments, moves and unknown roots are answered not-applied. Binary and embed content and changes to the retired root are refused too.",
+      "evidence": "ContentIDsFromUpdateV1 allocated an item per struct and a decode error called apply(), integrating structs before the failure.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The hook refuses content no editor sends.",
+        "acceptance": [
+          "A1 gains cases (c) and (d)."
+        ]
+      }
+    },
+    {
+      "spec": "The rebuild route is not one of these and stays as it is: it restores the server's own stored text (Design, R5); the apply refuses an update that does not decode.",
+      "plan": "The hook refuses with 4413 an update that would take the room's struct total past 1,048,576; RebuildDocument also accepts a decodable history at or near the decode cap or near the room's scan total, retires its clients, closes this process's resident room first, and drops connected browsers' unsent edits, which the confirmation says.",
+      "evidence": "A second 600,000-struct GC frame left a 2,200,030-byte state that no longer decodes; only a rebuild clears a history's structs or scans; the route refused any live document (rebuild.go:100-102).",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The rebuild route accepts histories near either cap and closes a resident room for them.",
+        "acceptance": [
+          "A1 gains case (b) and the rebuild tests; A2 gains the DOC_NEEDS_REBUILD rebuild case."
+        ]
+      }
+    },
+    {
+      "spec": "While the budget is over ... one that only deletes still applies.",
+      "plan": "Delete-only updates under pressure are admitted up to a reserve, measured at 256 MiB, then refused 4503.",
+      "evidence": "A delete in the middle of an item splits it and adds structs; room_budget.go:131-151 records the measurement behind 256 MiB.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A4's hundred shrinking updates fit inside the reserve."
+        ]
+      }
+    },
+    {
+      "spec": "Not in the spec.",
+      "plan": "Each admitted apply takes its estimated transient heap from a pod-wide byte bound; an update whose estimate passes the whole bound is refused SyncStatus(0) (errApplyTooHeavy).",
+      "evidence": "Every first sync sends the whole state (9,577,606 bytes at the browser-grown floor), which ygo decodes in full; a reconnect storm stacks those decodes.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Large applies are weighed pod-wide; an update too heavy for the whole bound is refused."
+      }
+    },
+    {
+      "spec": "A room is counted at most once in every few seconds.",
+      "plan": "At most once every 15 s, or at once past 16 MiB uncounted; uncounted additions charged at the densest price.",
+      "evidence": "At 5 s one keystroke row reached +10.89% on p50 against the tenth (tree.go:416-434).",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "A charge can be 15 s old but never more than 16 MiB of uncounted content behind."
+        ]
+      }
+    },
+    {
+      "spec": "The keystroke benchmark is run with and without the hook, three runs each at half a processor.",
+      "plan": "BenchmarkKeystrokeBesideReads routes keystrokes through the hook on bounded rooms; merge base and head, six runs each at GOMAXPROCS=1; every row's p50 within +10%.",
+      "evidence": "The original benchmark never called the hook (live_read_bench_test.go).",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1's cost clause is a named command with a per-row p50 gate."
+        ]
+      }
+    },
+    {
+      "spec": "Not in the spec: it bounds bytes, structs and memory but not the time one update holds the document's lock.",
+      "plan": "Each remote apply of a browser's update scans at most min(the per-frame ceiling ~400,000, or ~27,600 for an unweighed update, and the room's remaining scan total of 506,000 counted at load), through ygo sami.6's budget API; refused 4413 DOC_TOO_TANGLED, or DOC_NEEDS_REBUILD once the total is used up.",
+      "evidence": "ygo: 2,000 items against 20,000 took 20.8 s and 2,365,640,192 bytes; an honest offline handoff scans 3.086 per own struct and 7,160-35,800 at 20-100 paragraphs, so no fixed per-update bound admits it without admitting a tangle; the honest long session admits 33,308 scans.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "A per-apply scan budget, two close reasons and sentences, a rebuild offer, and ygo sami.6.",
+        "acceptance": [
+          "A1 gains TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas against the ceiling and TestTheRoomScanTotalSurvivesAReloadOverARealSocket."
+        ]
+      }
+    },
+    {
+      "spec": "The floor is four times the measured whole-state frame of the heaviest document a browser can leave live.",
+      "plan": "A browser may not grow a room's unrendered bytes past 9,961,472 or its frame total past F = 44,936,089 (inserts only); the floor is max(4 x 12,598,044, 1.25 x F), 54 MiB.",
+      "evidence": "No absolute struct cap keeps 4x the frame under 64 MiB and admits every honest document (TestNoAbsoluteStructCapBothKeepsTheFrameAndClearsWhatRoomsHold); the walk cannot tell margin from attributes and marks: 1,692,989 unrendered bytes at the element bound plus about 4.1 MB of creep.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1 gains the margin-flood case and the heaviest-handoff case with the refusal at F and a delete-only update admitted at F."
+        ]
+      }
+    }
+  ]
+}
