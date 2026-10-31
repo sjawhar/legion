@@ -2,27 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-607",
-  "completed": "2026-10-31T14:00:40Z",
-  "previousHandoff": "15e954cefcf25cc1afc2cb6fe0e8b25fab644a56",
-  "testedHead": "03a63aa83280663163f2127ac99c62be953c364f",
-  "codeHead": "2814030326bc55e74be057cf968bd9d7293f518d",
-  "round": 19,
-  "scope": "Confirmation round (architect, 13:02Z): 28140303 merges main b4dc9f96 (with #2594) into 04e390bf, one text-only conflict in .dispatch/architecture/dispatch-docs.md. round-shape.py v3 (dispatch://INFRA-598/artifact/round-shape-py, version 3): 'old head 04e390bf6e613f7ec9f07473c3ccc0ec25e588f1 -> new head 2814030326bc55e74be057cf968bd9d7293f518d; files whose own diff differs: 0'; no list of files equal only after normalisation.",
+  "completed": "2026-10-31T21:02:07Z",
+  "previousHandoff": "4f35566df21d344c46be7e42b0bf27ac30780590",
+  "testedHead": "feb0d2bb86c37b151bebc53e31a4154a1869654a",
+  "codeHead": "0cc849d426288ecdeba31ec3f76284d9e6af6812",
+  "round": 20,
+  "scope": "Narrow round (architect, 18:14Z): 382271f8 makes three bus tests wait for the consumer's PushBound to read true, then false (awaitPushBound), before they release or drain a restored binding, because nats-server applies push interest on the consumer's own goroutine; 0cc849d4 then merges main bb27e1ee with no conflict. round-shape.py v3: 'old head 2814030326bc55e74be057cf968bd9d7293f518d -> new head 0cc849d426288ecdeba31ec3f76284d9e6af6812; files whose own diff differs: 1: packages/envoy/internal/bus/release_test.go'; no list of files equal only after normalisation.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "round-shape v3 shows the PR's own diff unchanged. dispatch-docs.md at 28140303 has no conflict markers; its first paragraph is main's new text (the room's awareness handling) and its second is this PR's background-loops paragraph, unchanged. Build step at 28140303 (export of packages/envoy, GOFLAGS=-p=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB): go build ./... and go vet ./... clean; infra go vet ./... and go vet -tags natslive ./core/ clean. Migrations 0150-0156 follow main's 0149_event_horizon; dispatchConnectionsPerPod = 90 (infra/gcp/dispatch.go:98)."
+    "how": "release_test.go is the only file whose diff changed, and its change is the awaitPushBound helper and its use in TestDrainSubscriptionEndsWhatARestoreBoundAfterTheSubscriptionEnded, TestReleaseFailedUnsubscribesWhatARestoreBound and TestDrainSubscriptionDrainsTheHandleARestoreBound. The three pass 200 of 200 each under -race and 50 of 50 each at GOMAXPROCS=1 beside a CPU loader; the bus package passes whole under -race."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Confirmation round: the PR's own diff is unchanged by the merge of main, the conflict keeps both paragraphs, the head builds and vets, migrations 0150-0156 and connections 90 stand",
-      "surface": "round-shape.py v3 over the workspace; git diff of dispatch-docs.md 04e390bf..28140303; an export of packages/envoy at 28140303",
-      "command": "python3 round-shape.py 04e390bf6e613f7ec9f07473c3ccc0ec25e588f1 2814030326bc55e74be057cf968bd9d7293f518d 2391; git diff 04e390bf 28140303 -- .dispatch/architecture/dispatch-docs.md; go build ./... && go vet ./...; (cd infra && go vet ./... && go vet -tags natslive ./core/)",
-      "observed": "0 files differ. dispatch-docs.md changes only in main's first paragraph; 0 conflict markers. Build and all vets exit 0. Memory after the build: 1.93 GiB of 19 (one reading; no sampler for a build-only run).",
-      "headSha": "2814030326bc55e74be057cf968bd9d7293f518d",
-      "negativeControl": "round-shape.py v3 reported 2 differing files in round 17 (85d493fc -> 0f60ac74), so its 0 here is a real comparison."
+      "criterion": "The three tests are stable: -race -count=200",
+      "surface": "An export of packages/envoy at 0cc849d4; the tests' in-process nats-server",
+      "command": "CGO_ENABLED=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB GOFLAGS=-p=1 go test -race -count=200 -run '^(TestDrainSubscriptionEndsWhatARestoreBoundAfterTheSubscriptionEnded|TestReleaseFailedUnsubscribesWhatARestoreBound|TestDrainSubscriptionDrainsTheHandleARestoreBound)$' -v ./internal/bus/",
+      "observed": "200 PASS and 0 FAIL for each of the three; 0 DATA RACE; ok in 879.3 s.",
+      "headSha": "0cc849d426288ecdeba31ec3f76284d9e6af6812",
+      "negativeControl": "The same tests with release_test.go as it stood before 382271f8 (the !PushBound-only wait) are the control below."
+    },
+    {
+      "criterion": "The three tests are stable at GOMAXPROCS=1 beside a CPU loader, and a control with the old wait",
+      "surface": "The same export, and a copy with release_test.go replaced by its version at 28140303 (identical to 382271f8's parent); a named-job CPU loader of three busy shell loops (the pod's CPU quota is 3 cores), confirmed burning about 57% each by ps",
+      "command": "GOMAXPROCS=1 go test -count=50 -run '<the three>' -v ./internal/bus/ for head and control; then the control again with -race",
+      "observed": "Head: 50 PASS and 0 FAIL each (288 s). Control: 50 PASS and 0 FAIL each (228 s), and again with -race 50 PASS and 0 FAIL each (237 s). THE OLD WAIT NEVER FAILED here in 300 runs under load: this pod did not reproduce the flake, so the fix's value rests on its reasoning (nats-server applies interest asynchronously, so only PushBound true then false proves both were applied), not on a red here.",
+      "headSha": "0cc849d426288ecdeba31ec3f76284d9e6af6812",
+      "negativeControl": "The control is the negative control; it did not fail."
+    },
+    {
+      "criterion": "The bus package whole under -race",
+      "surface": "The same export",
+      "command": "CGO_ENABLED=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB GOFLAGS=-p=1 go test -race -count=1 -v ./internal/bus/",
+      "observed": "482 PASS, 0 FAIL, 1 SKIP (TestHoldsSeedAllocatesAtMostOneCopyPerDecoding: 'skipping in -race mode'), 0 DATA RACE; ok in 333.8 s.",
+      "headSha": "0cc849d426288ecdeba31ec3f76284d9e6af6812",
+      "negativeControl": "The 1 SKIP is the test's own -race refusal, so the run is a -race run."
     }
   ],
-  "ci": "NOT RUN when I completed, as the architect directed (complete at the next read with any still queued named unread). CI run 41203627480 for 28140303 queued since 2026-10-31T13:00:54Z; at 14:00:21Z lint, typecheck, test, dispatch, envoy-go and envoy-e2e-local were queued and ci-ok not yet created; pr-title success. 35 runs queued repo-wide. UNREAD: lint, typecheck, test, dispatch, envoy-go, envoy-e2e-local, ci-ok. The reviewer reads ci-ok before approving."
+  "memory": "Named-job sampler mem-sampler-infra-607 over every Go run of the round: 997 samples, 2 s apart; sampled peak 2.75 GiB of 19.",
+  "leftoverCheck": "After proc://cpu-loader-infra-607/kill and proc://mem-sampler-infra-607/kill I ran ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|mem.samples|while :|timeout 7200': it printed no lines.",
+  "evidence": "dispatch://INFRA-607/artifact/round20-flake-fix-evidence-tar-gz (the PASS/FAIL lines of each run and the memory samples)",
+  "ci": "At 0cc849d4 (21:01Z): ci-ok success, with lint, typecheck, test, pr-title, dispatch, envoy-go, envoy-go-race, envoy-e2e-local and every other non-skipped lane success (25 green, none failing). CI run 41228271904 was queued from 18:12:43Z. No lane unread."
 }
