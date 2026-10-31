@@ -1106,12 +1106,12 @@ while read -r seq_no m; do
 done < <(stored_comments | jq -r '"\(.seq) \(.marker)"')
 published_order=()
 while read -r m; do published_order+=("$m"); done < <(
-  jq -r 'select(.kind == "issue" and .expected == 1 and (.event | startswith("comment-"))) | .marker' "$events" |
+  jq -r 'select(.kind == "issue" and .expected == 1 and (.source | startswith("comment-"))) | .marker' "$events" |
     while read -r m; do printf '%s %s\n' "${stream_seq[$m]:-0}" "$m"; done | sort -n | cut -d' ' -f2)
 # Only the first followed issue's comments: the order is read back from that issue's own subject,
 # and --second-followed-issue's comment is stored on another (its delivery is counted like any
 # other event, above).
-written_order=$(jq -r 'select(.kind == "issue" and .expected == 1 and (.event | startswith("comment-"))) | .marker' "$events" | tr '\n' ' ')
+written_order=$(jq -r 'select(.kind == "issue" and .expected == 1 and (.source | startswith("comment-"))) | .marker' "$events" | tr '\n' ' ')
 if [[ "${published_order[*]} " != "$written_order" ]]; then
   printf 'note: Dispatch published %s'"'"'s comments in another order than they were written: written %s; stored %s\n' \
     "$followed_issue" "$written_order" "${published_order[*]}" | tee -a "$table"
