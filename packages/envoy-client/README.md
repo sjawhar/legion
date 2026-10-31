@@ -201,8 +201,13 @@ uses the stack runs only with `LEGION_E2E_ENVOY_STACK=1`.
 
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish
 accept optional `inReplyTo`, `supersedes`, `urgency`, `expectsReply`, and `expiresAt` metadata.
-Successful direct sends return both the envelope and listener-selected recipient; publishes return
-the envelope and an optional role holder. Network failures and 5xx responses retry once after
+Successful direct sends return both the envelope and listener-selected recipient. A publish returns
+the envelope and an optional role holder. A role publish has three answers, told apart by status.
+200 is a live holder that took the message, named by `holder`. 202 is a message the listener kept
+for the session that claims the role next, with `kept`, `keptReason` (`unclaimed` or
+`holder_lapsed`) and `holder` when a lapsed claim named one. 404 is nothing kept, thrown as an
+`EnvoyApiError`, and the sender's own fallback must run. A sender that keeps a queue of its own
+passes `keep: false` to get the 404. Network failures and 5xx responses retry once after
 250 ms. Listener error responses preserve their `error` and optional `expected` fields. The
 listener's bearer is the `token` the client is given (`envoySettings`); without one it sends no
 `Authorization` header.
