@@ -2,42 +2,42 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "completed": "2026-10-31T09:20:00Z",
+  "completed": "2026-10-31T12:00:00Z",
   "stateTable": [
     "See .legion/INFRA-251/r15-state-table.md (states KEPT / CLAIMED(r) / HELD(c,d) / TOLD, the transitions with their code sites, the validity rule on naming and telling, how claims, holds and DeliveredRows read under issue keys)."
   ],
   "proof": [
     {
-      "criterion": "Review 5720641456's three losses fixed at the cause: kept decisions keyed by the issue they are about, the tree told resolved from the record when a start or catch-up names it or tells it",
-      "surface": "internal/admit/lost_kept_decisions_test.go (commit bb7e3e4c7d2e, red on 06fecd41): a child handed over without its run, an orphaned parked child, a queued root adopted into a live tree (and the same into a tree whose architect already runs), a grandchild handed over beside its parent in both orders; real admission and engine over PostgreSQL 17.2",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 900 go test -count=1 -run 'TestAChildHandedOverWithoutItsRun|TestAnOrphanedParkedChild|TestAQueuedRootAdopted|TestAnAdoptionIntoATreeWhoseArchitectRuns|TestAGrandchildHandedOver|TestAHandedOver' ./internal/admit/",
-      "observed": "All pass. On 06fecd41's code each failed naming the lost decision (e.g. 'the start task of LEGION-209 = \"\", want it to name dispatch://LEGION-209/ask/ask-1'; 'the architect of LEGION-168 was told [\"\"], want dispatch://LEGION-214/ask/ask-1 named once'; the grandchild's child-first order lost LEGION-210's decision).",
-      "headSha": "7179f6e5802f8a208b27684061a175ae9f49c728",
-      "negativeControl": "With Adopt's new catch-up disabled, TestAnAdoptionIntoATreeWhoseArchitectRunsWritesItACatchUp fails: 'after the adoption the architect of LEGION-168 was told [], want dispatch://LEGION-214/ask/ask-1 named once by a catch-up the adoption writes'."
+      "criterion": "A decision told in a turn whose confirmation write failed is told again on the next start, never lost (the architect's ruling: a failed write that cannot record a telling tells again; told twice is the lesser fault)",
+      "surface": "TestADecisionToldInATurnWhoseConfirmationFailedIsToldAgain (the tester's 37cd79f1 rewritten to the ruling, a41683764d4b), the held-task rig over real PostgreSQL with a trigger refusing the tell",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 600 go test -count=1 -v -run TestADecisionToldInATurnWhoseConfirmationFailedIsToldAgain ./internal/daemon/",
+      "observed": "PASS (1.0s): after the failed confirmation and the turn's end, the re-admitted root's start task names the decision again.",
+      "headSha": "6adfab5a3cb6b4d5ad2ccb1197db3f5427c71a09",
+      "negativeControl": "The tester's original assertion (never named again) fails on this code by design; the architect ruled that behaviour the accepted one and no hand-over design changed."
     },
     {
-      "criterion": "Round 13's red test and every kept-decision test pass under issue keys; told at confirmation, never at queue; hold A (telling only while the issue stands in the teller's tree) and hold B (a held root task confirmed only by its own turn)",
-      "surface": "internal/daemon kept-decision tests (parked_decision_test.go, catch_up_settling_test.go, held_task_handover_test.go, root_hears_main_paths_test.go, kept_decision_handover_seeds_test.go) and supervise",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 1500 go test -count=1 -timeout 24m -run 'TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild|TestKeptDecisionsRegressionSeeds|TestKeptDecisionsReachTheCurrentArchitectOnce|TestAHeldTask|TestAClosingTree|TestARootThatMainsCode|TestADecisionAStaleStart|TestAReadyLeaves|TestAReceiptTimeout|TestOnlyADelivered|TestAStartWhoseForget|TestARetriedStart|TestACatchUpLeavesOut|TestAStartThatFinds' -v ./internal/daemon/",
-      "observed": "All 18 PASS, round 13's red test unmodified (9.4s), regression seeds 100s, default property run 55s. TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn (the tester's round-9 test) was changed: its injected failure was the start's own forget, which no longer exists (a delivered start forgets nothing; the confirmation tells); the first run now succeeds and the row is retried as a lost finish; its assertions (retry queues nothing, prompts nothing, the decision is gone after the turn) are unchanged.",
-      "headSha": "7179f6e5802f8a208b27684061a175ae9f49c728",
-      "negativeControl": "The round-9 test still fails if the retry re-delivers: its assertions are the ones that caught it before."
+      "criterion": "CI's select-e2e-proofs gate knows the devbox proof",
+      "surface": ".github/e2e-scripts.json `elsewhere` (be610b5fd63d); .github/scripts/select-e2e-proofs.sh and its test",
+      "command": "EVENT=schedule GITHUB_OUTPUT=<file> bash .github/scripts/select-e2e-proofs.sh; bash .github/scripts/select-e2e-proofs.test.sh",
+      "observed": "selects 5 hosted proofs with no error; test 94 passed, 0 failed.",
+      "headSha": "6adfab5a3cb6b4d5ad2ccb1197db3f5427c71a09",
+      "negativeControl": "At 386cddb1 CI's test job failed 'Results: 77 passed, 17 failed' with '::error file=.github/e2e-scripts.json::scripts/e2e/parked-decision-devbox.sh is in neither list'."
     },
     {
-      "criterion": "The property model reaches every transition the review named and the architect asked for, and holds over the full sweep",
-      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce: hand-over of a child with and without its run, a person orphaning a parked child, a grandchild handed over beside its parent in either order, adoption of a queued root, tree close (warnKeptDecisionsOfAClosedTree checked), an issue handed over inside a catch-up's publish and between a held task's queue and its confirmation, plus the earlier operations",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 LEGION_KEPT_PROPERTY_RUNS=500 LEGION_KEPT_PROPERTY_STEPS=300 timeout 3500 go test -count=1 -timeout 58m -v -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/",
-      "observed": "First sweep: 498 of 500 seeds passed; seed 48 (an adoption into a tree whose architect already ran told nobody: fixed in Adopt, 84f461e108ff) and seed 69 (one decision told twice to the same architect; passes after the fix, pinned to watch it) failed. Both pinned in keptLongRegressionSeeds. Second sweep: ok in 1662s, 500 seeds: 772 members handed over (94 without their run), 228 children orphaned, 500 queued roots adopted, 2031 trees closed, 494 restarts with a streaming agent, 497 foreign turns, 1012 publishes held open for an interleaving, every listener mode reached.",
-      "headSha": "7179f6e5802f8a208b27684061a175ae9f49c728",
-      "negativeControl": "On 06fecd41's code the extended model failed 16 of 30 default seeds: finding 2 in 15 (e.g. seed 1 step 118), finding 3 at seed 11 step 121, finding 1 at seeds 53, 61, 105."
+      "criterion": "envoy-go's red at the fork point clears with main; the learnings are named by pull request number",
+      "surface": "main 8d0030ea merged forward (db67bd2e67b9), keeping main's claims_doc_test.go; docs/solutions/*-pr2163.md",
+      "command": "cd packages/envoy && go test -count=1 -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries ./internal/broker/oauth/",
+      "observed": "ok. The five learnings are renamed <slug>-pr2163.md; nothing referenced the old names. check-private-names exit 0.",
+      "headSha": "6adfab5a3cb6b4d5ad2ccb1197db3f5427c71a09",
+      "negativeControl": "At 386cddb1 CI's envoy-go failed TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (job 124492545211), main's test at the old fork point."
     },
     {
-      "criterion": "Nothing else regresses; main merged forward because GitHub reported #2163 conflicting",
-      "surface": "The whole daemon module at 84f461e108ff (main's only daemon change since is prompt markdown); at the merge 7179f6e5802f: internal/prompts, pi-legion's skills guard, check-private-names, check-ci-images tree",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go build ./... && go vet ./... && gofmt -l internal cmd; timeout 3300 go test -count=1 -p 1 -timeout 54m ./internal/... ./cmd/... -skip '<Docker-only, tmux-on-PATH, scratch-Dispatch pgvector tests, the keeper flake>'",
-      "observed": "Every package ok (daemon 651.7s, admit 278.3s, workflow 399.5s, intake 107.6s, store 56.4s, supervise 27.0s, record 36.5s, sandbox 201.9s, workspace 315.4s, cmd/legion 116.8s, and the rest). At the merge: prompts ok, skills guard 13 pass, private names exit 0, ci-images tree passes.",
-      "headSha": "7179f6e5802f8a208b27684061a175ae9f49c728",
-      "negativeControl": "The skipped tests need rootless Docker, a tmux binary, the pgvector extension, or are the keeper flake that fails on main too."
+      "criterion": "The property sweep and the daemon suite hold at the head",
+      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce and the whole daemon module at 6adfab5a3cb6",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 LEGION_KEPT_PROPERTY_RUNS=500 LEGION_KEPT_PROPERTY_STEPS=300 timeout 3500 go test -count=1 -timeout 58m -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/ ; go build ./... && go vet ./... && gofmt -l internal cmd; timeout 3300 go test -count=1 -p 1 -timeout 54m ./internal/... ./cmd/... -skip '<Docker-only, tmux, pgvector, keeper flake>'",
+      "observed": "Sweep ok (1600.3s, 500 seeds x 300 steps). build, vet, gofmt clean; every package ok (daemon 635.7s, admit 262.0s, workflow 384.9s, intake 63.3s, store 50.3s, supervise 25.0s, sandbox 204.3s, workspace 317.3s, cmd/legion 127.8s, and the rest).",
+      "headSha": "6adfab5a3cb6b4d5ad2ccb1197db3f5427c71a09",
+      "negativeControl": "Round 15's mutations of the same model still hold (hand-over, DeliveredRows, RootHears, the adoption catch-up)."
     }
   ],
   "filesChanged": [
@@ -55,11 +55,8 @@
     "A mark whose issue the record does not hold is kept, never dropped: a decision is dropped from a task only where the record shows another tree owes it."
   ],
   "deviations": [
-    "CLAIMED->HELD happens in the claim store's delivery write, not at the start's settlement, so holding, telling at confirmation, releasing at retire and moving to a taken-back delivery's new id share the delivery row's transaction; a settlement-time move left a window where a confirmation lands first and the decision is told twice.",
-    "The tester's round-9 test TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn was modified: the failure it injected (the start's forget) no longer exists; it now drives a lost finish, with its assertions unchanged. Ledger entry.",
-    "Tests that asserted the deleted MoveKeptDecisions/ReKeepDeliveredDecisions or the root column were changed to the issue-keyed form (listed in filesChanged).",
-    "main merged forward (7179f6e5802f, main d7e1daaa) because GitHub reported #2163 CONFLICTING: main relaid AGENTS.md and scripts/e2e/README.md one sentence per line (#2474); this branch's AGENTS.md paragraph and devbox command, and its README entry and section, were re-applied on main's layout. Fingerprint before 951576098d84d8bd87415817580735fa9d577c17b02ed44bd11903fc8388390c at 84f461e108ff, after 3fbd7a286b70e906b22bae9613429f76eb1433aa5ff5c448b7cf97945ca17b60 at the merge. main's migrations still end at 0064, so 0065/0066 keep their numbers.",
-    "The pod was replaced twice this round; work was saved to legion/INFRA-251-wip and the branch is deleted after this push.",
+    "The tester's red test 37cd79f1 was rewritten to the architect's ruling (renamed ...IsToldAgain; asserts the decision is named again on the next start). Ledger entry, by the architect's instruction.",
+    "main merged forward (db67bd2e67b9, main 8d0030ea): envoy-go's only red is a fork-point test main changed (claims_doc_test.go); main's side kept, no conflict. Fingerprint before bc5d140972b2da926ffc32b561f08226676eeb527bbdb260d4d594780b5f9151 at 5545ece4, after 76a935014e558eb2e87bb3d64bbde63db3524b8bc2cb83b3d4bb413a9aedd1f3 at the merge.",
     "The listener rollout case the reviewer judged out of scope remains."
   ],
   "openQuestions": [],
