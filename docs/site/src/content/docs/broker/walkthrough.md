@@ -1,6 +1,6 @@
 ---
 title: Walkthrough
-description: One secret request from start to finish, with a still of each page - an agent asks the secrets broker for an API key, a person approves it on the broker's own page, and the agent's command runs with it.
+description: A narrated video of one secret request from start to finish - an agent asks the secrets broker for an API key, a person approves it on the broker's own page, and the agent's command runs with it.
 sidebar:
   order: 5
 ---
@@ -13,11 +13,14 @@ from. The machine also sets `AGENT_SECRETS_APPROVE_URL` to Dispatch's address, w
 `agent-secrets machine login` print Dispatch's machine-login page to open.
 [Log a machine in](/legion/broker/guides/log-a-machine-in/) sets all of this up.
 
-A tour of one secret request, on example data: the Dispatch workspace's person is
+<video controls preload="metadata" poster="/legion/media/broker/walkthrough.jpg" style="width: 100%" aria-label="Walkthrough: an agent requests a secret and a person approves it on the secrets broker's own page">
+  <source src="/legion/media/broker/walkthrough.mp4" type="video/mp4">
+  <track kind="captions" src="/legion/media/broker/walkthrough.vtt" srclang="en" label="English" default>
+</video>
+
+A narrated tour of one secret request, recorded on example data: the Dispatch workspace's person is
 `alice@example.com`, the agent's machine is `example-host-build`, and the secret, `DEMO_API_KEY`,
-holds a made-up value. The narrated recording of this tour is being remade for the broker's own
-approval page, so this page shows no video until it is; the steps below are the current ones, with
-a still of each page.
+holds a made-up value. The steps below are the ones the video shows, with a still of each page.
 
 ## 1. Log the machine in, once
 
@@ -61,11 +64,11 @@ request for alice's secret `ALICE_DEPLOY_KEY`; the page is the same for any requ
 
 ![The Inbox, with a secret request for ALICE_DEPLOY_KEY under Credential requests, Needs you 1 beside Inbox in the sidebar, and Blocked on you: 1 item](/legion/media/broker/inbox-credential-request.png)
 
-The link opens the request's page on the broker. Alice signed in to the broker earlier that day, so
-it opens at once; otherwise the broker would have her sign in with her Workspace account first and
-bring her back here. The page prints, from the broker's own record, what was asked for, by which
-enrollment, why, for how long, who may approve it and its state. The request named no `--ttl`, so
-its grant lasts until the session ends.
+The link opens the request's page on the broker. The browser in the video holds no broker session
+yet, so the link passes through the broker's sign-in, which signs alice in and brings her to the
+page; with a session already held it opens at once. The page prints, from the broker's own record,
+what was asked for, by which enrollment, why, for how long, who may approve it and its state. The
+request named no `--ttl`, so its grant lasts until the session ends.
 
 ![The secrets broker's page Approve a secret request, signed in as alice@example.com: the secret ALICE_DEPLOY_KEY, requested by a pod enrollment the broker verified, its reason, lasting until the session ends, its requested and expiry times, approver alice@example.com, state pending, and Approve and Deny buttons](/legion/media/broker/credential-request.png)
 
@@ -76,9 +79,10 @@ She clicks **Approve** on the broker's page, and the page says what became of th
 ## 5. The command runs
 
 The waiting command checks the broker every few seconds, so it carries on within a few seconds of
-the approval (10 at most): it receives `DEMO_API_KEY` in its environment and runs. The demo command
-prints the key's length and last four characters to show it arrived. `agent-secrets status
-<request>` names who decided the request.
+the approval (10 at most): it receives `DEMO_API_KEY` in its environment and runs. The video
+shortens that wait, which took 12 seconds in the recording. The demo command prints the key's
+length and last four characters to show it arrived. `agent-secrets status <request>` names who
+decided the request.
 
 ## 6. The live grant
 

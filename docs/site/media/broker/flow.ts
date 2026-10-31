@@ -35,12 +35,12 @@ export function rigState(): RigState {
   };
 }
 
-/** What the agent machine prints: the machine login's code, a pending request's id and its page on
- *  the broker (the whole address, then the record id it ends in), and the demo command's line once
- *  the key reached it. */
+/** What the agent machine prints: the machine login's code, a pending request's id and the store
+ *  it was asked of, its page on the broker (the whole address, then the record id it ends in), and
+ *  the demo command's line once the key reached it. */
 export const printed = {
   loginCode: /machine login code: ([A-Z0-9]{4}-[A-Z0-9]{4})/,
-  requestWaiting: /request (\S+) is waiting for approval/,
+  requestWaiting: /request (\S+) to .+ is waiting for approval/,
   approvePage: /(https?:\/\/\S+\/approve\/([0-9a-f]{64}))/,
   keyReached: /DEMO_API_KEY reached this command/,
 };

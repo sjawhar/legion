@@ -72,9 +72,10 @@ const shell = "agent";
 
 interface Section {
   file: string;
-  /** A terminal section's span, or a browser page's whole life: from its creation to the end of
-   *  its context's close. Playwright records a page from its first frame to its close, so the
-   *  file is at most this long. */
+  /** A terminal section's span, from the recorder's start to the detach that ends it, or a
+   *  browser page's whole life: from its creation to the end of its context's close. Playwright
+   *  records a page from its first frame to its close, and a cast's last event is the farewell
+   *  the detach draws, so the file is at most this long. */
   wallSeconds: number;
   /** A browser section's scripted actions alone, which its file must at least cover. */
   actSeconds?: number;
@@ -157,7 +158,9 @@ function castEnd(cast: string): number {
 /** Records one terminal section: an asciinema cast of a client attached to the agent's shell
  *  while `act` runs, ended by detaching that client. The detached client's farewell line is the
  *  cast's last event, so the detach is where the cast's clock meets the wall clock: a mark lies
- *  as far before the cast's end as it did before the detach. */
+ *  as far before the cast's end as it did before the detach, and the section's wall clock ends
+ *  where that detach returned. What the recorder takes to exit afterwards is not part of the
+ *  recording, and a loaded machine stretches it well past the cast's own length. */
 async function terminalSection(file: string, act: (mark: Mark) => Promise<void>): Promise<void> {
   const cast = join(rawDir, file);
   const recorder = `rec-${file.replace(/\W/g, "-")}`;
@@ -192,13 +195,16 @@ async function terminalSection(file: string, act: (mark: Mark) => Promise<void>)
   await act(marks.mark);
   const detached = Date.now();
   tmux("detach-client", "-s", shell);
+  // The farewell the detach draws, the cast's last event, falls between those two instants, so
+  // the section's wall clock runs to this one and the cast is never longer than its section.
+  const ended = Date.now();
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline && hasSession(recorder)) await sleep(100);
   if (hasSession(recorder)) throw new Error(`${file}: the recorder never exited`);
   sections.push({
     file,
     marks: marks.seconds(detached - castEnd(cast) * 1000),
-    wallSeconds: (Date.now() - started) / 1000,
+    wallSeconds: (ended - started) / 1000,
   });
 }
 
@@ -563,13 +569,14 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
           const row = dispatch.inboxRequest(page);
           await expect(row).toBeVisible();
           mark("inbox");
-          await sleep(2_500);
+          // Long enough to name the Inbox's link and the sign-in it passes through.
+          await sleep(3_500);
           await clickVisibly(page, row);
           await expect(broker.requestReason(page)).toBeVisible();
           await expect(broker.signedIn(page)).toBeVisible();
           mark("record");
-          // Long enough to say what the page shows before the pointer moves to Approve.
-          await sleep(6_000);
+          // Long enough to say what the broker's page shows before the pointer moves to Approve.
+          await sleep(9_000);
           await clickVisibly(page, broker.approve(page));
           mark("approve");
           markTerminal("approve");
