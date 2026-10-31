@@ -2,26 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T13:33:30Z",
-  "round": 14,
-  "reviewedCodeHead": "141704508a7254de319a64f0b5ee602343f78d1f",
+  "completed": "2026-10-31T00:50:30Z",
+  "round": 15,
+  "reviewedCodeHead": "9cabeaf6ff6d35ec0c7105e282b062d3a3e8beb5",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 1,
-  "roundShape": "Full round: merge 3760e51c resolves runtime conflicts with main's #2508 (outbox/publisher.go, outbox/batch.go, internal/bus/async.go, confirm.go, nats.go, recovery.go, cmd/dispatch/main.go), then fix 14170450.",
-  "ci": "At 14170450 only pr-title had a result when read (lint, typecheck, test and the long suites queued since 12:30Z). A request for changes does not wait on CI.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 14170450; both request changes on the finding below.",
+  "roundShape": "Full round: since 141704508a72 the branch carries 4fc3e0d2 (round-14 fix), runtime merges 811dced0, fd93819c, 896ea1f6, 9cabeaf6, the tester's red test 5981eb81 and the overlapping-batch fix 767794be.",
+  "ci": "At 9cabeaf6 when read: lint, typecheck, pr-title success; test, envoy-go, envoy-go-race queued. A request for changes does not wait on CI.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 9cabeaf6; both request changes on the wake gap below.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/bus/async.go:375", "description": "A window Request never reads #2508's per-subject denial record: its flush finds a denial only through conn.LastError() (confirmPublished -> publishDenial, confirm.go:132-162), one slot per connection, so when another violation lands between a Request's publish and the read, a denied role forward comes back errPublishUnconfirmed, waits out roleReceiptTimeout, ends ErrNotAcknowledged, is counted reason=\"failed\" (batch.go:541-545) and backs off with a publish_error naming another subject's violation. The merge comment says a Request reaches the record; it does not. DeepReview15's scratch probe: 8 concurrent denied Requests on one window, 1 of 8 answered ErrPublishDenied in 3 of 3 runs (2-3 under -race); with sentAt taken before PublishMsg (async.go:355) and deniedPublish(subject, sentAt) read on the request goroutine both when the flush comes back unconfirmed and in the timer arm, 8 of 8. Fix that way, with a several-Requests test."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/batch.go:544", "description": "Role-forward outcomes that are not NATS failures are counted reason=\"failed\": a route held pending by forward.err (stale holder, kept claim, churned claim, failed read) and a holder that sent no receipt after a confirmed flush. The metric's HELP (cmd/dispatch/main.go:431) and docs say failed means the send did not reach NATS, so a stale holder reads as an outage on every retry. Give them their own reason, or say so in the HELP and docs; settle after the finding above."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/lease.go:516", "description": "An event that commits for an owner while that owner is in flight can be left unread until an unrelated wake or the next back-off (up to retry.MaxDelay, 5 min). Its wake is taken by the scan (lease.go:484) and starts a batch that skips the owner; the owner's batch, held by a silent holder (send.connection set by ErrNotAcknowledged, so settleOwner skips it, publisher.go:263-268), releases it only at its end through lanes.release, which wakes nothing (lease.go:581); and missed is set only when a batch read zero rows (batch.sendable == 0). So if the skipping batch read any other owner (an issue whose role-forward retry fell due, the usual state under a silent role), the owner's new event is never re-read when the scan returns; nextRetry sees only rows with next_attempt_at set. Its topic and session copies, which before 767794be went out right after the batch, wait minutes. Fix: record in lanes.reserve that a read ran with owners excluded and set missed from that, or wake on a batch-end release that is not natsLost, blocked or fenced; test with a second issue whose retry falls due as e2 commits."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:276", "description": "settleOwner (publisher.go:259-309) duplicates the batch-end settle+record (356-401): when it returns without recording (a released event, or a passed deadline), the batch end settles the same events again, and settleEvent's backOff logs the ERROR line (and the dead-letter line at attempt 10) twice for one attempt. Extract one settle-and-record helper used by both."}
   ],
-  "judgement": "Events held behind a denied head with no attempt or log line of their own: no finding. Nothing is lost (main never delivered the denied subject either and retried forever; the branch delivers the head and then its followers in order once the grant returns, where main's build delivered comment 1 after 2-5). The head logs slog.Error \"dispatch outbox: publish event\" on every attempt, naming the denied subject, which is what INFRA-749's filter matches; held events carry the head's next_attempt_at. One stall main lacked: an owner's notifications.dispatch.* subjects share one key, so a hand-written grant denying one event type of the family holds the others; every shipped grant allows notifications.>.",
   "verifiedCorrect": [
-    "quiet in every envelope: envelope() is the only builder; retries and role forwards reuse it.",
-    "Every settled send counted once in settle: refused, denied, failed (ErrUnavailable included); fenced and ctx-cut sends count nothing; held sends are never issued.",
-    "The window's acknowledged reads deniedPublish first under the send's own time; install and onReconnect clear the record; /metrics and PublishFailures wired in cmd/dispatch/main.go; cmd/listener/api.go keeps #2508's change.",
-    "TestRunCountsADeniedSubjectOncePerRefusedMessage on two issues is required by per-issue order; assertions unchanged.",
-    "Fix 14170450: no race between flush result, reply and connection change; the flush goroutine never blocks and ends by the deadline; a flush denial is still reported; the test failed 2 of 2 against the old synchronous flush."
-  ]
+    "No two batches hold one owner: lanes.reserve reads and takes owners under lanes.mu; an early release comes after recordBatch committed, so a re-read sees the record; per-(owner, destination) order holds across batches.",
+    "Fencing: every early record checks the deadline and the SQL hold check; fenced, NATS-lost and failed batches end the others; scan returns only at inflight 0 and publish releases the hold after serve returns, so no record follows Release; done is buffered to concurrentBatches, so no slot leaks.",
+    "4fc3e0d2: Request reads deniedPublish under its own sentAt on the request goroutine (flush-unconfirmed and timer arm); holder and unanswered metric reasons with HELP and docs updated.",
+    "Merges: migrations 0150_duty_holds/0151_outbox_claim after 0149_event_horizon, connections 91, #2542's HookedConnectionEvents beside ConnectionChanged."
+  ],
+  "prBody": "Added the 4-slot residual to Not proven / risk (several silent holders arriving apart can hold every slot; tester measured 2 of 40 late, max 2.41 s), and dropped 'delays no other issue's events' from the owner-lane line, which that residual contradicts."
 }
