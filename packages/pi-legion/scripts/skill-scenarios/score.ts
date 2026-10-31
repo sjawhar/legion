@@ -118,15 +118,17 @@ const DaemonLine = z.looseObject({
 const nonEmpty = z.string().min(1);
 /** The tester's handoff as the tester role's prompt spells it (the `test` shape; nothing in the
  * daemon holds it to one), as far as the score reads it: the stamps the tester writes itself
- * (`schemaVersion` 1, `phase` test, its `issue`, `completed` an RFC 3339 time), the implementer's
- * proof verdict, the failures, and the tester's own proof, each entry's six fields non-empty.
+ * (`schemaVersion` 1, `phase` test and its `issue`), the implementer's proof verdict, the
+ * failures, and the tester's own proof, each entry's six fields non-empty. The body carries no
+ * time, since Dispatch records when it was written; the object is loose, so a body from a checkout
+ * whose prompt still asks for `completed` reads too, and the comparison measures the rule the score
+ * is about rather than the prompt the labels vary.
  * Nothing stamps a handoff for the tester: it writes the whole body and records it with
  * `dispatch handoff-write`. */
-const TestHandoff = z.looseObject({
+export const TestHandoff = z.looseObject({
   schemaVersion: z.literal(1),
   phase: z.literal("test"),
   issue: nonEmpty,
-  completed: z.iso.datetime({ offset: true }),
   implementerProof: z.looseObject({ verdict: z.enum(["verified", "rejected"]), how: nonEmpty }),
   failures: z.array(z.looseObject({ criterion: z.string(), evidence: z.string() })).optional(),
   proof: z

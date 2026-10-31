@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
-import { checkouts, specWork } from "./score";
+import { checkouts, specWork, TestHandoff } from "./score";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
 // profile's gateway key command runs past its budget) says nothing about the skill under test: the
@@ -77,7 +77,6 @@ const testBody = (sha: string) => ({
   schemaVersion: 1,
   phase: "test",
   issue: "LWEVAL-1",
-  completed: "2026-09-30T17:29:00Z",
   implementerProof: { verdict: "verified", how: `ran bun greet.ts Ada at ${sha.slice(0, 12)}` },
   failures: [],
   failed: 0,
@@ -3091,6 +3090,62 @@ test("a completion naming another version than the record's is out of order", ()
 test("a push that changes the code under the PR's head fails the proof", () => {
   expect(out).toMatch(/tester-proof-rec-4\tpass=false\t.* proof=false pushes=1 .* ordered=true /);
   expect(out).toContain("the push changed [greet.ts]");
+});
+
+// The tester writes its handoff body whole, and its prompt names no time (Dispatch records when the
+// handoff was written): a body with no `completed` key is what the prompt asks for, so the schema
+// reads it and the run is scored. Before the prompt dropped the time, the schema demanded
+// `completed`, so such a body failed the run's proof check (`proofProblems`) and scored `pass=false`.
+test("a tester handoff that carries no completed time is read, and one with no issue is not", () => {
+  const handoff = {
+    schemaVersion: 1,
+    phase: "test",
+    issue: "LWEVAL-1",
+    implementerProof: { verdict: "verified", how: "ran `bun greet.ts Ada` at the head" },
+    proof: [
+      {
+        criterion: "`bun greet.ts <name>` prints the greeting it returns",
+        surface: "the CLI",
+        command: "bun greet.ts Ada",
+        observed: "prints Hello, Ada! and exits 0",
+        headSha: "0f2cc1d4e8b0a1f6c7d2e3b4a5968778695a4b3c",
+        negativeControl: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
+      },
+    ],
+  };
+  expect(TestHandoff.safeParse(handoff).success).toBe(true);
+  const { issue: _issue, ...noIssue } = handoff;
+  expect(TestHandoff.safeParse(noIssue).success).toBe(false);
+});
+
+// The scorer reads every label's runs, and each label's agent gets the role prompt of its own
+// checkout (`worker-pane.ts` composes it from `<checkout>/packages/daemon`). So the documented
+// comparison `rig.sh batch tester-proof 5 head base` has the base label's tester write the shape
+// its own checkout's prompt spells — a `completed` time — and the head label's tester write this
+// one. A schema that refuses either shape scores that label `pass=false`
+// for a reason that is not the tester-proof rule, which makes the comparison measure the prompt
+// change rather than the rule.
+test("a tester handoff of a checkout whose prompt still asks for a completed time is read too", () => {
+  const handoff = {
+    schemaVersion: 1,
+    phase: "test",
+    issue: "LWEVAL-1",
+    completed: "2026-10-31T01:30:00Z",
+    implementerProof: { verdict: "verified", how: "ran `bun greet.ts Ada` at the head" },
+    proof: [
+      {
+        criterion: "`bun greet.ts <name>` prints the greeting it returns",
+        surface: "the CLI",
+        command: "bun greet.ts Ada",
+        observed: "prints Hello, Ada! and exits 0",
+        headSha: "0f2cc1d4e8b0a1f6c7d2e3b4a5968778695a4b3c",
+        negativeControl: "bun greet.ts → exit 2, usage: greet.ts <name> on stderr",
+      },
+    ],
+  };
+  expect(TestHandoff.safeParse(handoff).success).toBe(true);
+  const { implementerProof: _proof, ...noVerdict } = handoff;
+  expect(TestHandoff.safeParse(noVerdict).success).toBe(false);
 });
 
 test("a tool call reading the other label's checkout is a rig error wherever the path falls in it", () => {

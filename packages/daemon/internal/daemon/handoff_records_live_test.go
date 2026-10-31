@@ -703,7 +703,7 @@ func (r *handoffRecordsLive) cliOut(session string, args ...string) (cliOutput, 
 // re-encoding would change, indented, and ending in a newline.
 func (r *handoffRecordsLive) bigBody(issue string, n int) []byte {
 	var b strings.Builder
-	fmt.Fprintf(&b, "{\n  \"schemaVersion\": 1,\n  \"phase\": \"implement\",\n  \"issue\": %q,\n  \"completed\": \"2026-10-27T00:00:0%dZ\",\n", issue, n)
+	fmt.Fprintf(&b, "{\n  \"schemaVersion\": 1,\n  \"phase\": \"implement\",\n  \"issue\": %q,\n", issue)
 	b.WriteString("  \"note\": \"naïve café — 𝄞 <tag> & \\u003c\\u00e9\\/ kept as written\",\n  \"proof\": [\n")
 	for i := 0; b.Len() < 40*1024; i++ {
 		if i > 0 {

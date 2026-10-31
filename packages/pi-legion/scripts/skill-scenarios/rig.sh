@@ -1354,11 +1354,11 @@ EOF
   C1=$(g rev-parse HEAD)
   g push -q "$R/remote.git" "legion/$worker_key"
   : >"$R/pushes.log"
-  # The implement handoff as the implementer records it with `dispatch handoff-write`: the four
-  # stamps (schemaVersion, phase, issue, completed) and the phase's fields. The PR's head is the
-  # implementer's code commit, since no handoff commit sits above it.
-  jq -n --arg key "$worker_key" --arg head "$C1" --arg completed "$(date -u -d "@$((start + index))" +%FT%TZ)" '
-    {schemaVersion:1, phase:"implement", issue:$key, completed:$completed,
+  # The implement handoff as the implementer records it with `dispatch handoff-write`: the three
+  # stamps (schemaVersion, phase, issue) and the phase's fields; Dispatch records when it was
+  # written. The PR's head is the implementer's code commit, since no handoff commit sits above it.
+  jq -n --arg key "$worker_key" --arg head "$C1" '
+    {schemaVersion:1, phase:"implement", issue:$key,
      filesChanged:["greet.ts","greet.test.ts"],
      proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
        surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,

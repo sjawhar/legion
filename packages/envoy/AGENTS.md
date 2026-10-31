@@ -184,7 +184,7 @@ Each item below names a task and where its code is, then notes on it.
   A process whose heartbeat lapsed (frozen, cut from the database) or whose row was pruned checks its keys again under the registry's lock before it counts as live once more (`Registration.renew`);
   beside a live process whose keys it does not share it is refused (`Registration.Lost`), stops serving after its HTTP drain, and exits 1
 
-- **Phase handoffs on an issue**: `internal/dispatch/api/handoffs.go`, `store/migrations/0150_handoffs.up.sql`
+- **Phase handoffs on an issue**: `internal/dispatch/api/handoffs.go`, `store/migrations/0151_handoffs.up.sql`
 
   A session records its handoff for one phase of an issue with `POST /api/v1/issues/{key}/handoffs/{phase}` (bearer only:
   the session names itself in `actor`, a cookie caller is `403 HANDOFF_FORBIDDEN`);

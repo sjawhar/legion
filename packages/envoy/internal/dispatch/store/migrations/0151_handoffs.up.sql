@@ -1,4 +1,4 @@
--- 0150_handoffs.up.sql — phase handoffs recorded on their issue.
+-- 0151_handoffs.up.sql — phase handoffs recorded on their issue.
 --
 -- sjawhar/legion#2354: Legion's phase handoffs move from committed `.legion/<KEY>/<phase>.json`
 -- files to records on the Dispatch issue. This migration creates handoffs, the phase handoffs a
@@ -26,7 +26,7 @@
 -- nothing existing is read or rewritten, and the release before this one never names it, so it
 -- rolls (cmd/dispatch/README.md, "Database migrations") and its census answers 0. Its foreign key
 -- holds issues in SHARE ROW EXCLUSIVE only while the table is created. It follows
--- 0137_request_keys through 0149_event_horizon, which already use the preceding migration numbers.
+-- 0137_request_keys through 0150, which already use the preceding migration numbers.
 create table handoffs (
   id uuid primary key default gen_random_uuid(),
   issue_key text not null references issues(key) on delete cascade,

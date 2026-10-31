@@ -399,7 +399,7 @@ test("a handoff body expands to one row per top-level field and one per proof en
   const body = JSON.stringify({
     schemaVersion: 1,
     phase: "implement",
-    completed: true,
+    verified: true,
     note: null,
     files: ["a.ts", "b.ts"],
     ci: { status: "green" },
@@ -409,7 +409,7 @@ test("a handoff body expands to one row per top-level field and one per proof en
   expect(handoffFields(body)).toEqual([
     { field: "schemaVersion", json: false, label: "schemaVersion", text: "1" },
     { field: "phase", json: false, label: "phase", text: "implement" },
-    { field: "completed", json: false, label: "completed", text: "true" },
+    { field: "verified", json: false, label: "verified", text: "true" },
     { field: "note", json: false, label: "note", text: "null" },
     { field: "files", json: true, label: "files", text: '[\n  "a.ts",\n  "b.ts"\n]' },
     { field: "ci", json: true, label: "ci", text: '{\n  "status": "green"\n}' },

@@ -65,6 +65,8 @@ fingerprints are unchanged; a test-only fix leaves them so.
   `legion` tool's `handoff_write` refused a payload carrying `schemaVersion`, `phase` or
   `completed`, because the CLI stamped those itself, and a refused write after a
   `jj split -m … .legion/implement.json` left an empty handoff commit to fold the real write into.
+  No handoff carries a `completed` field since dispatch://INFRA-336: a handoff's time is when
+  Dispatch recorded it (`created_at`).
 - **The jj operation-log rule reads every word of a bash command.** A commit message or a
   `legion gh` PR body that names `jj` beside a word on the rule's list (the LEGION-84 key contains
   `abandon`) is refused with the operation-log warning. Say "the per-repo keep-unreachable-commits

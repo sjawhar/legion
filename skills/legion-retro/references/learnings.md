@@ -46,7 +46,7 @@ title: "Descriptive title matching the H1"
 category: subdirectory-name
 tags:
   - searchable-topic
-date: YYYY-MM-DD
+date: YYYY-MM-DD # (`date -u +%F` prints it)
 status: active
 module: affected-module
 related_issues:

@@ -23,7 +23,7 @@ async function seedHandoffs(): Promise<string> {
       schemaVersion: 1,
       phase: "implement",
       issue: issue.key,
-      completed: true,
+      verified: true,
       summary: "First pass",
       proof: [
         { claim: "unit tests pass", command: "bun run test" },
@@ -39,7 +39,7 @@ async function seedHandoffs(): Promise<string> {
       schemaVersion: 1,
       phase: "implement",
       issue: issue.key,
-      completed: true,
+      verified: true,
       summary: "Second pass, review addressed",
       files: ["web/src/a.ts", "web/src/b.ts"],
       proof: [
@@ -107,7 +107,7 @@ test("the Conversation lists each handoff version, and expanding one shows its f
     await expect(field("schemaVersion")).toContainText("1");
     await expect(field("phase")).toContainText("implement");
     await expect(field("issue")).toContainText(key);
-    await expect(field("completed")).toContainText("true");
+    await expect(field("verified")).toContainText("true");
     await expect(field("summary")).toContainText("Second pass, review addressed");
     // An array field is indented JSON.
     await expect(field("files").locator("pre")).toContainText('"web/src/a.ts"');
@@ -161,7 +161,7 @@ test("a handoff written while the Conversation is open arrives without a reload"
         schemaVersion: 1,
         phase: "implement",
         issue: key,
-        completed: true,
+        verified: true,
         summary: "Third pass, written while the Conversation was open",
         proof: [
           { claim: "browser suite green", command: "bun run e2e" },

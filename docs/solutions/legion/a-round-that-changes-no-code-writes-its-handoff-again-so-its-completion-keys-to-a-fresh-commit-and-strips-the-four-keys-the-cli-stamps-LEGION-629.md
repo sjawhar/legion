@@ -46,6 +46,7 @@ related_issues:
   dispatch://LEGION-565 stamped `issue`; when the CLI's reserved list grows, the sweep in
   docs/solutions/daemon/handoff-schema-migration-patterns.md ("Search for `handoff_write` across the
   role prompts and `skills/legion-worker/SKILL.md`") covers that snippet too.
+  No handoff carries a `completed` field since dispatch://INFRA-336: a handoff's time is the committer date of the commit that carries it.
 
 ## Evidence
 

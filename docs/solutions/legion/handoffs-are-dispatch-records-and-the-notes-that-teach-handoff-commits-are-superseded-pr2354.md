@@ -49,6 +49,10 @@ handoff-only push or its `skip-checks: true` trailer. None of those exists after
 
 These notes still hold. Each handoff clause in them is corrected in place: the removed mechanism
 in the past tense, beside one sentence that says what holds now:
+- `docs/solutions/best-practices/a-field-no-reader-reads-can-be-load-bearing-through-its-bytes-….md`,
+  the committed handoff and `previousHandoff` in its evidence;
+- `docs/solutions/best-practices/a-path-query-answers-the-commit-that-deleted-the-path-too-….md`,
+  retro's removal of `.legion/<issue>/`;
 - `docs/solutions/daemon/codebase-index-file-placement.md`, the table row that put a worker's
   handoff under `.legion/`;
 - `docs/solutions/daemon/targeted-delta-filtering-pattern.md`, its `.legion/` rebase-conflict

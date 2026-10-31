@@ -16,6 +16,9 @@ body: |-
     the old daemon still runs, then roll out the daemon and the plugins, then run the import again,
     which catches a file an old worker pushed in between, until no line asks for another run and
     none says `kept`.
+    A handoff record carries no `completed` time and no `previousHandoff`: Dispatch records when it
+    was written, and its version names the record before it. A reviewer's still carries
+    `headReviewed`.
 time: 2026-10-28T10:40:23.525829083Z
 custom:
     Issue: pr2354
