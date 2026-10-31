@@ -2,73 +2,60 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-575",
-  "completed": "2026-10-31T05:10:00Z",
-  "round": 5,
+  "completed": "2026-10-31T08:00:00Z",
+  "round": 6,
   "implementerProof": {
     "verdict": "verified",
-    "how": "The unit rows it names were re-run here: `bun test web/src/features/inbox/Inbox.test.tsx web/src/features/inbox/AskCard.test.tsx web/src/features/doc/change-set.test.ts` -> 91 pass, 0 fail, and `cd packages/proof-editor && bun run test` -> 220 pass, 0 fail. Because all five defect fixes are pinned by unit rows alone and the review found all five on the page, each was then driven on the real page with throwaway probes of my own (removed before this handoff): D1, D2, D3, D4 and D5 are listed one by one under `proof` below, four of them green on the page. Its e2e proof re-ran too, inside the whole-project run below. Its one claim I could not confirm is the whole of defect 1 and 2's story: `Enter` reaches the selected block, but it does not put the reader in the field it opens (failure 1). Its round's e2e was 7 spec files, 88 rows - not the whole chromium project, which INFRA-92 requires of a layout change and which is where failure 2 shows."
+    "how": "Every command of round 6's four proofs was re-run here, in a pod recreated twice during the round (the harness was rebuilt from scratch: Postgres 17 + pgvector on the issue volume, Playwright's chromium installed again). (1) and (2): `bun run e2e -- e2e/inbox-reading-pane.e2e.ts e2e/nav.e2e.ts --project=chromium` -> 11 passed, among them my own red row `Enter opens the selected decision block's note field and puts the focus in it` (green, and unmodified: `git diff 8a60de863a2a 8cb0c2c9` touches that file not at all) and the nav row, whose own subject - the sidebar makes no per-issue request - is kept while its expectation is corrected to what the Inbox reads now. (3) the whole chromium project at this head -> 933 passed, 25 skipped, 1 failed (59.0m), the same counts it reported, the one failure being e2e/hover-preview.e2e.ts:87, main's own. (4) CI exists at the code head b1e074f1 (run 41171179735) and is read below. Its claim that a unit row cannot be the control for the focus fix is right and I checked the shape of it on the page: the behaviour is there only when React has committed the render the press schedules."
   },
-  "failed": 2,
+  "failed": 1,
   "failures": [
     {
-      "criterion": "Enter answers the selected question: it opens a decision block's note field AND puts the reader in it, as this change's own documentation says (docs/site/src/content/docs/dispatch/keyboard.md: `Enter` - Answer the selected ask (moves into its answer box, opening the note field of a decision block first)), and as Inbox.tsx's Enter binding intends (`inAnswerHand(NOTE_DISCLOSURE_SELECTOR)?.click();` then `inAnswerHand(\"[data-ask-answer]\")?.focus()`).",
-      "evidence": "Red row `Enter opens the selected decision block's note field and puts the focus in it` in packages/dispatch/e2e/inbox-reading-pane.e2e.ts, commit d542d2dac754880a47917be4fdf99a38d89126ef, pushed. Command: `source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium -g \"note field\"`. At a87c4269 it fails: `expect(locator).toBeFocused() failed; Locator: getByTestId('inbox-pane').locator('[data-dispatch-ask-block=\"rollout-order\"]').locator('article[data-testid^=ask-]').locator('[data-ask-answer]'); Received: inactive`. A diagnostic probe printed the whole sequence on the page: after ONE Enter the disclosure reads aria-expanded=true and the card holds one [data-ask-answer] box, and document.activeElement is BODY; after a SECOND Enter the focus is that box. So the field opens and the reader is not in it, and every keystroke after it is still the Inbox's keymap - `j` walks the list while the reader believes they are writing an answer. Why the unit row misses it: `fireEvent` flushes React synchronously, so the textarea exists by the time `focus()` runs; in a browser the click's state update has not rendered yet, so `focus()` finds nothing. The fix needs the focus after the render (the box's own autofocus on open, or a focus the disclosure's own effect takes), and the red row above is the check."
-    },
-    {
-      "criterion": "The whole chromium project is green at the head, which is how a layout change is proven (INFRA-92), and no row of the suite is left red by this round's refactor.",
-      "evidence": "`bun run e2e -- --project=chromium` at d542d2da: 931 passed, 25 skipped, 3 failed (1.0h). One failure is my red row above and one is e2e/hover-preview.e2e.ts:87, which is main's (proven in earlier rounds on a clean export of main, and fixed on main by #2581). The third is new this round: `e2e/nav.e2e.ts:14 sidebar shows Inbox, Pinned, one row per project with its open-ask badge, and Settings - never an issue row - on desktop and in the phone drawer @phone`. It reproduces with its file run alone (1 failed, 1 passed), so it is no shared-CPU failure: `expect(received).toEqual(expected)` with `Array [ \"?pinned=true\", - \"/api/v1/issues/CORE-2\" ]` - the reading column no longer makes the one per-issue read the row was taught to expect in round 1. Nothing of the head is lost with it: ReadingPaneHead.tsx:108 takes the priority from the ask row (`<PriorityControl issueKey={ask.issue_key} priority={ask.priority} />`), and e2e/inbox.e2e.ts:768, which drives that control through the pane head, is green in the same run. So this is the refactor making the column read less, and the row's expectation is now stale and this change's to correct (with the saved read named in the body, since it is an improvement worth stating). It is a failure of the round rather than a defect of the product: the implementer's own round ran 7 spec files and 88 rows, not the project, so nothing of theirs could have shown it."
+      "criterion": "CI is green at the head the reviewer reads. The browser rows this change rewrote hold on CI's machine as well as on this pod - a row that races the Inbox's own width switch is this change's to settle, since the switch is what this change introduced.",
+      "evidence": "CI run 41171179735 at the code head b1e074f1: `lint`, `test`, `contracts`, `docs / build`, `dispatch-browser-multiprocess`, `claude-envoy`, `envoy-client`, `envoy-plugin`, `envoy-smoke`, `pi-envoy`, `pi-legion`, `pi-shared`, `changes` all green; `dispatch` FAILED; `envoy-go` failed too and is not this change's (below). The `dispatch` lane's one red row is `e2e/references.e2e.ts:26 an issue and its ask show a cross-project message and structural backlinks`: `Error: locator.screenshot: Element is not attached to the DOM` at e2e/references.e2e.ts:91, `await askCard.screenshot({ path: desktopAsk })`, taken straight after `await page.setViewportSize({ height: 900, width: 1440 })` (lines 89-91). That is this change's own layout switch: below 1280 px the card lives in the Inbox row, and from 1280 px the row becomes a short row and the card is drawn again in the reading column, so the node the locator resolved at 390 px is unmounted by the resize. Measured on the page rather than inferred: a throwaway probe held the element Playwright holds while it waits for stability, resized 390 -> 1440, and read it back - `before={\"connected\":true,\"inRow\":true} after={\"connected\":false,\"inRow\":true} cards drawn now=1`. So the screenshot at 1440 races the unmount; it wins on this pod (the row passed in my whole-project run and 3 of 3 times run alone) and lost on CI's machine. The row is one of the 23 files this change rewrote against the pane (commit fe5ad7408). The fix is the row's: after the resize, resolve the card again where this width draws it - the reading column - and wait for it before the screenshot, or take the 1440 shot of the column's card by its own locator. A flaky row that is red at the head leaves the reviewer and the merge gate nothing to read."
     }
   ],
   "proof": [
     {
-      "criterion": "Defect 1 of the review: with the pane on, Enter on a list control is that control's, not a jump into the selected question's answer box.",
+      "criterion": "Round 5's failure 1, the architect's keyboard contract and this change's own documentation: one Enter opens the selected decision block's note field AND puts the reader in it, and what they type reaches the answer.",
       "surface": "The Inbox page of a running Dispatch at 1440 px, driven in a real Chromium.",
-      "command": "A throwaway probe (e2e/tmp-probe-575b.e2e.ts, removed) run with: source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/tmp-probe-575b.e2e.ts --project=chromium",
-      "observed": "Green. The assignee filter button holding the focus takes Enter - it opens (aria-expanded true) and document.activeElement is not a TEXTAREA - and the selection behind it does not move; a row's own issue link takes Enter and the page lands on /issues/<key>.",
-      "headSha": "a87c4269e23390716e69561a89d656336261629a",
-      "negativeControl": "The review's own probe at the previous head is the control: `ENTER default prevented: true focus now: TEXTAREA`."
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium",
+      "observed": "9 passed, my red row among them: one Enter now leaves `aria-expanded=true` AND the box focused, and the typed sentence lands in the box with the selection unmoved. The row is unmodified by this round.",
+      "headSha": "8cb0c2c90e7d0f0acf7168f562b457a307bb93c8",
+      "negativeControl": "The row was red at a87c4269 (`toBeFocused` received `inactive`, the focus on BODY after one Enter, the box focused only by a second). The implementer's own control at this head - the fix's one line neutered - fails the same row again."
     },
     {
-      "criterion": "Defect 2: in a document with several open decision blocks, the digits act on the selected block, not on the first block in document order.",
-      "surface": "The same Inbox, on a seeded spec with two open decision blocks, the second named by ?item=.",
-      "command": "The same probe file and command.",
-      "observed": "Green: `1` ticks the SECOND block's first option (`The last hour`) and leaves the first block's (`Ledger first`) unticked.",
-      "headSha": "a87c4269e23390716e69561a89d656336261629a",
-      "negativeControl": "The review's finding is the control: before the fix the first open block's option was ticked. The paired Enter case is failure 1 above, so this fix is confirmed and its sibling is not."
+      "criterion": "What the focus fix changes beside the key it was written for: a pointer open of the note field, a field already open, and the card below the column's width.",
+      "surface": "The same running Dispatch at 1440 px and at 390 px, driven by throwaway probes of mine (removed before this handoff).",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/tmp-probe-575d.e2e.ts (and 575e) --project=chromium",
+      "observed": "A pointer open of the disclosure lands the reader in the field and typing reaches it (focus=answer box; the value is what was typed) - the deliberate half of the fix, driven here for the first time. Escape out of the field and Enter again puts them back in it (`after Escape, focus=the row, disclosure=true, boxes=1`; `after the second Enter, focus=answer box`), so the branch for a box that already exists works. At 390 px the card has `0 disclosure(s) and 1 box(es)`: below the column's width the row draws AskCard's full variant, whose box is always shown, so nothing of the fix applies there and nothing changed.",
+      "headSha": "8cb0c2c90e7d0f0acf7168f562b457a307bb93c8",
+      "negativeControl": "Two probe failures of my own were checked rather than filed: one pressed Enter before the column had drawn its card (the row's wait on `aria-expanded` is what makes that honest), and one assumed a disclosure at 390 px where the card has none. Both are the probe's fault, and the second is a fact about the design, recorded above."
     },
     {
-      "criterion": "Defect 3: Change answer then Cancel leaves no draft behind, so no card claims a recorded answer was never sent.",
-      "surface": "The Answers page (/answers), which lists the reader's own answer and opens its card with Change answer - the surface that offers Cancel - and then the document's own block card and the Inbox.",
-      "command": "The same probe file and command.",
-      "observed": "Green: after Change answer and Cancel the page holds no `closed before you sent your answer` text and no `ask-unsent-answer` anywhere, the row still shows the recorded `Ledger first`, and neither the document's decision block nor the Inbox shows the banner.",
-      "headSha": "a87c4269e23390716e69561a89d656336261629a",
-      "negativeControl": "The review's probe: `BANNER: This question closed before you sent your answer, so it was not sent. Your text is here to copy.First note`, over the reader's own recorded answer."
+      "criterion": "Round 5's failure 2: the sidebar row is green again with its own subject kept, and no other row of the suite is left red by the refactor (INFRA-92: the whole project, never one row).",
+      "surface": "The whole Chromium project of the Dispatch browser suite.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- --project=chromium",
+      "observed": "958 rows: 933 passed, 25 skipped, 1 failed (59.0m) at 8cb0c2c9. The one failure is e2e/hover-preview.e2e.ts:87, main's own (proven in earlier rounds on a clean export of main, fixed on main by #2581). e2e/nav.e2e.ts:13 is green on chromium, its expectation now `[\"?pinned=true\"]` with a comment saying what the Inbox reads, and its assertions on the sidebar's rows, badges and absent issue rows untouched.",
+      "headSha": "8cb0c2c90e7d0f0acf7168f562b457a307bb93c8",
+      "negativeControl": "My own run at d542d2da is the control: 931 passed, 25 skipped, 3 failed - the red row, the nav row and hover-preview. Two are green here and the third is unchanged."
     },
     {
-      "criterion": "Defect 4: an approval's word marks land on their own characters, with a hard break before them.",
-      "surface": "The reading column's approval, on a document whose approved version holds `Line one  \\nthe canary word.` and a plain paragraph, both changed since.",
-      "command": "The same probe file and command.",
-      "observed": "Green: the column's added marks read exactly [`parrot`, `seven`] and its removed-word marks exactly [`canary`, `three`] - the first pair after a hard break, the second in a plain paragraph.",
-      "headSha": "a87c4269e23390716e69561a89d656336261629a",
-      "negativeControl": "The review's probe: the decoration drew `anary ` for `canary`, one character out per break."
+      "criterion": "The documentation lane that cost rounds 2 and 3 is green at this head, and so is everything else static except the two lanes named in the failure.",
+      "surface": "GitHub Actions, read on GitHub and re-run by nobody.",
+      "command": "gh api --paginate 'repos/sjawhar/legion/actions/runs/41171179735/jobs?filter=all&per_page=100'",
+      "observed": "`docs / build` success - the first CI confirmation of round 3's screenshot work - with `lint`, `test`, `contracts`, `changes`, `dispatch-browser-multiprocess`, `claude-envoy`, `envoy-client`, `envoy-plugin`, `envoy-smoke`, `envoy-go-race-pmdoc`, `pi-envoy`, `pi-legion`, `pi-shared` all green.",
+      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
+      "negativeControl": "Round 2's reading of the same lane is the control: `docs / build` failed there with `4 shot(s) failed`."
     },
     {
-      "criterion": "Defect 5: the word diff is bounded, so two unrelated large blocks cannot hold the main thread.",
-      "surface": "The reading column's approval on a document whose two 3000-word blocks both changed whole.",
-      "command": "The same probe file and command.",
-      "observed": "Green: the column drew the marked version in 1312 ms and 1562 ms on two runs of this 2-CPU pod, and a key pressed straight after still moved the selection, so the thread was the reader's.",
-      "headSha": "a87c4269e23390716e69561a89d656336261629a",
-      "negativeControl": "The review's benchmark of the unbounded path is the control: 679 ms at 1000 words, 8.1 s at 3000, 39 s at 6000 - against 1.3 s here for two 3000-word blocks end to end, page load included."
-    },
-    {
-      "criterion": "The reading pane, the change view and the keys still do what the spec says after five fixes and thirteen refactors (A1, A3 and the architect's ruling).",
-      "surface": "The Inbox and document pages of a running Dispatch at 1440, 1280, 1279 and 390 px and in the drawer, and the whole Chromium project of the suite.",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium, then bun run e2e -- --project=chromium",
-      "observed": "The reading-pane file: 8 passed before my red row was added, the two rows I wrote for the architect's ruling and the implementer's refusal row among them, all unmodified by this round (`git diff 77787bae3564 a87c4269` over that file is one addition and no change to either of mine). The whole project at d542d2da: 931 passed, 25 skipped, 3 failed, the three being my red row, main's hover-preview row and the stale nav row of failure 2.",
-      "headSha": "d542d2dac754880a47917be4fdf99a38d89126ef",
-      "negativeControl": "Round 1's run of the whole reading-pane spec on the base commit 14d907b6fdd3: 7 failed, 0 passed, which is A1's and A3's 'fails on the commit before the change'."
+      "criterion": "The `envoy-go` lane's failure is not this change's.",
+      "surface": "GitHub Actions on this branch and on main, and the branch's own diff.",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/124453826212/logs; the same read of envoy-go on the last eight ci.yaml runs on main; git diff --name-only $(git merge-base HEAD origin/main) HEAD",
+      "observed": "Ours failed `--- FAIL: TestResumeFromBeforeTheKeptDayGetsASnapshot` in `github.com/sjawhar/envoy/internal/dispatch/api`. main's own runs fail the same lane on other tests of the same packages - run 41171988894 `--- FAIL: TestAReconnectCatchesUpWhatTheListenerMissed`, run 41164510541 `--- FAIL: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries` - so the lane is red on main itself this night. And this branch changes no Go at all: the diff against the merge base lists no `.go` file and nothing under packages/envoy/.",
+      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
+      "negativeControl": "A Go file in that diff would refute it; there is none. The failing test names differ between our run and main's, which is the shape of a flaky lane rather than a defect either tree introduced."
     }
   ],
-  "ci": "Read, not re-run. The implementer's code head a395dc20 got CI run 41161396138, which was cancelled in full when my red-test push moved the branch (GitHub's pull_request concurrency), and its PR Title run 41161552105 passed. The run that now judges the branch is 41162987965 at d542d2da, queued when last read. Expect that run's dispatch lane to be RED: it carries my red row, which is the point of the row. A reviewer reading CI should read it at the head the next implement round pushes, not at this one.",
-  "environment": "The issue pod, which was recreated during this round: the browser harness (/legion/harness) went with the previous pod's disk, so every run above was made before that, on the harness /legion/harness/setup.sh builds - Postgres 17 with pgvector on 127.0.0.1:55432, the tester's own databases, Playwright browsers on the issue volume, 2 CPUs, one Playwright worker. The red row and this handoff are pushed; nothing else of that turn remains in the workspace."
+  "environment": "The issue pod, recreated twice during this round (06:15-06:36Z and again before it). The harness was rebuilt from nothing: /legion/harness/setup.sh and env.sh written again, Postgres 17 with pgvector on 127.0.0.1:55432, the tester's own databases, `bunx playwright install chromium` into /legion/harness/ms-playwright, 2 CPUs, one Playwright worker. Nothing of mine is unpushed: the probes were throwaway and are removed, and the workspace stands clean."
 }
