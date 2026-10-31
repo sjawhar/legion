@@ -29,6 +29,9 @@ export interface Shot<Seeded> {
   readonly alt: string;
   readonly route: string | ((seeded: Seeded) => string);
   readonly viewport: Viewport;
+  /** Overrides the desktop viewport's 1440x900 (CSS pixels), for a shot of what a window of
+   *  another width shows. A phone is always the iPhone 13 profile. */
+  readonly size?: { readonly width: number; readonly height: number };
   /** Server-side writes that bring the seeded data to the state this shot shows, before the page
    *  opens. Shots run in the order declared, so a set can follow one record through a journey. */
   readonly prepare?: (seeded: Seeded) => Promise<void>;
