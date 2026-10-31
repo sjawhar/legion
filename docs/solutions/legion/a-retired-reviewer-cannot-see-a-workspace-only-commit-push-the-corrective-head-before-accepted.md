@@ -60,6 +60,7 @@ fingerprints are unchanged; a test-only fix leaves them so.
   *empty* handoff commit; fold the real write into it with
   `jj squash --into <that change> .legion/implement.json` and push sideways rather than stacking a
   second commit.
+  No handoff carries a `completed` field since dispatch://INFRA-336: a handoff's time is the committer date of the commit that carries it.
 - **The jj operation-log rule reads every word of a bash command.** A commit message or a
   `legion gh` PR body that names `jj` beside a word on the rule's list (the LEGION-84 key contains
   `abandon`) is refused with the operation-log warning. Say "the per-repo keep-unreachable-commits
