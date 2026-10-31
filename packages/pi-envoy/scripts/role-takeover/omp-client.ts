@@ -4,8 +4,9 @@
  * `scripts/smoke-role-takeover.sh` only.
  *
  * It loads the real `extensions/envoy.ts` from this checkout and hands it the stand-in host the
- * package's own suite uses (`createPi` in `extensions/envoy.test.ts`): one session manager whose
- * id and branch the driver moves, `pi.appendEntry` writing into that branch, and
+ * package's own suite is driven against (`createStandInHost` in `test/stand-in-host.ts`, which
+ * `extensions/envoy.test.ts` wraps as `createPi`): one session manager whose id and branch the
+ * driver moves, `pi.appendEntry` writing into that branch, and
  * `context.setInterval` dropping the heartbeat timer rather than arming one, so no tick of it
  * interleaves with what the smoke drives. Nothing else is faked: the extension dials the smoke's
  * natsd, and every listener call goes over HTTP to the smoke's recording proxy (`envoy.url` in
@@ -29,16 +30,10 @@
  */
 import { appendFileSync } from "node:fs";
 import type { PiApi } from "@legion/pi-shared/pi-types";
-import { z } from "zod";
 import envoyExtension from "../../extensions/envoy";
+import { createStandInHost, type EventHandler } from "../../test/stand-in-host";
 
 const ROLE_CLAIM_ENTRY = "envoy-role-claim";
-
-interface BranchEntry {
-  readonly type: "custom";
-  readonly customType: string;
-  readonly data: unknown;
-}
 
 interface Command {
   readonly id?: string;
@@ -51,26 +46,13 @@ interface Command {
   readonly detach?: boolean;
 }
 
-interface RegisteredTool {
-  readonly name: string;
-  readonly execute: (
-    id: string,
-    parameters: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-    onUpdate: unknown,
-    context: unknown
-  ) => Promise<unknown>;
-}
-
-type EventHandler = (event: unknown, context: unknown) => Promise<unknown>;
-
 const { ROLE_TAKEOVER_CWD, ROLE_TAKEOVER_CLIENT_LOG } = process.env;
 const cwd = ROLE_TAKEOVER_CWD ?? process.cwd();
 
 let sessionID = "";
-const entries: BranchEntry[] = [];
-const tools: RegisteredTool[] = [];
-const handlers = new Map<string, EventHandler>();
+// One host, shared with the package's own suite: its `entries` are this session's branch, which
+// the extension's `pi.appendEntry` writes into.
+const { entries, handlers, pi, tools } = createStandInHost();
 const notices: string[] = [];
 /** Handlers a `detach` command left running, awaited by `join`. */
 const detached: Promise<unknown>[] = [];
@@ -107,27 +89,8 @@ const context = {
   },
 };
 
-const pi = {
-  zod: z,
-  registerTool: (tool: RegisteredTool) => {
-    tools.push(tool);
-  },
-  registerCommand: () => undefined,
-  registerMessageRenderer: () => undefined,
-  getCommands: () => [],
-  on: (event: string, handler: EventHandler) => {
-    handlers.set(event, handler);
-  },
-  sendMessage: () => undefined,
-  sendUserMessage: () => undefined,
-  sendUserInput: () => undefined,
-  appendEntry: (customType: string, data: unknown) => {
-    entries.push({ type: "custom", customType, data });
-  },
-};
-
-// The stand-in host is a subset of the real `PiApi`: the extension reads only what `createPi`
-// in the package's own suite supplies, and the cast is that same narrowing.
+// The stand-in host is a subset of the real `PiApi`: the extension reads only what the suite's
+// host supplies, and the cast is that same narrowing.
 envoyExtension(pi as unknown as PiApi);
 
 /** Replaces the branch with the transcript a resumed, forked or fresh session carries. */

@@ -348,6 +348,19 @@ every budget the run prints is measured in. Its scratch is a `mktemp -d` under `
 exit trap removes. Exit 0 is `SMOKE <arm> PASS:`, 1 is `SMOKE <arm> FAIL:` naming the observation
 that failed, and 2 is a refusal.
 
+## local-stack.sh
+
+The loopback Envoy stack the three smokes above bring up, in one sourced file: a free loopback
+port below the kernel's ephemeral range (`port_range`, `port_open`, `pick_port`), the natsd and
+listener builds (`build_natsd`, `build_listener`, each taking the `packages/envoy` directory to
+build from, which is how `smoke-role-takeover.sh --base-rev` builds the listener from another
+revision), the argv and assignments each service is run with (`set_natsd_argv`, `set_listener_env`)
+and when it is up (`natsd_serving`, `listener_healthy`, polled with `poll_until`). It is sourced,
+never run: it starts no process, so every script keeps its own isolation, logs, traps, timeouts,
+messages and exit codes. A caller defines `refuse` and sets `local_stack_fail` to the function an
+exhausted port range is reported through (`refuse`, or `smoke-replay.sh`'s `fail`).
+`packages/envoy-client/test/envoy-stack.ts` is the same stack for the TypeScript suite.
+
 ## skill-scenarios/rig.sh
 
 Replays skill scenarios on real agents, to compare two versions of a skill. Each label is one

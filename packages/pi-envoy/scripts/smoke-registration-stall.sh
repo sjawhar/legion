@@ -47,6 +47,13 @@ readonly script_dir
 repo_root="$(cd -- "${script_dir}/../../.." && pwd)"
 readonly repo_root
 
+# The loopback stack --local-stack brings up, shared with scripts/smoke-replay.sh and
+# scripts/smoke-role-takeover.sh: the ports, the two builds, what each service is run as and when
+# it is up. `pick_port` reports an exhausted range the way everything else here refuses.
+local_stack_fail=refuse
+# shellcheck source=packages/pi-envoy/scripts/local-stack.sh
+source "${script_dir}/local-stack.sh"
+
 # The refresh interval and the record lifetime, out of the tree rather than out of this file.
 settings_file="${repo_root}/packages/envoy-client/src/envoy-settings.ts"
 registry_file="${repo_root}/packages/envoy/internal/session/registry.go"
@@ -236,58 +243,38 @@ if [[ -n "$token_file" ]]; then
 fi
 
 # --local-stack: natsd and the listener built from this checkout, on loopback ports of their own,
-# exactly as scripts/smoke-replay.sh and packages/envoy-client/test/envoy-stack.ts start them. The
-# trap above stops both.
+# exactly as scripts/smoke-replay.sh and packages/envoy-client/test/envoy-stack.ts start them
+# (scripts/local-stack.sh, which all three share). The trap above stops both.
 nats_port=""
 if ((local_stack == 1)); then
-  read -r ephemeral_low _ </proc/sys/net/ipv4/ip_local_port_range
-  port_floor=10000
-  ((ephemeral_low > port_floor + 1000)) ||
-    refuse "the kernel's ephemeral range starts at ${ephemeral_low}, leaving no ports below it above ${port_floor}"
-  # pick_port VAR: a loopback port nothing answers on, below the kernel's ephemeral range and
-  # distinct from this run's earlier picks.
-  picked_ports=" "
-  pick_port() {
-    local candidate i
-    for ((i = 0; i < 200; i++)); do
-      candidate=$((port_floor + RANDOM % (ephemeral_low - port_floor)))
-      [[ "$picked_ports" != *" ${candidate} "* ]] || continue
-      (exec 3<>"/dev/tcp/127.0.0.1/${candidate}") 2>/dev/null && continue
-      picked_ports+="${candidate} "
-      printf -v "$1" '%s' "$candidate"
-      return 0
-    done
-    refuse "no free loopback port below ${ephemeral_low}"
-  }
+  port_range
   mkdir -p "${scratch}/bin"
   note "building natsd and the listener from ${repo_root}/packages/envoy"
-  (cd -- "${repo_root}/packages/envoy" &&
-    go build -o "${scratch}/bin/natsd" ./internal/testnats/cmd/natsd &&
-    go build -o "${scratch}/bin/listener" ./cmd/listener) ||
+  build_natsd "${repo_root}/packages/envoy" "${scratch}/bin/natsd" &&
+    build_listener "${repo_root}/packages/envoy" "${scratch}/bin/listener" ||
     refuse "go build of natsd or the listener failed (the reason is above)"
   pick_port nats_port
   pick_port listener_port
-  env -i PATH="$PATH" HOME="${scratch}/nats-home" \
-    "${scratch}/bin/natsd" -p "$nats_port" -js -store_dir "${scratch}/nats-store" \
+  set_natsd_argv "${scratch}/bin/natsd" "$nats_port" "" "${scratch}/nats-store"
+  env -i PATH="$PATH" HOME="${scratch}/nats-home" "${natsd_argv[@]}" \
     >"${scratch}/natsd.log" 2>&1 &
   nats_pid=$!
   for _ in $(seq 150); do
-    grep -q 'Server is ready' "${scratch}/natsd.log" && break
+    natsd_serving "${scratch}/natsd.log" && break
     sleep 0.2
   done
-  grep -q 'Server is ready' "${scratch}/natsd.log" ||
+  natsd_serving "${scratch}/natsd.log" ||
     refuse "natsd did not start: $(tail -n 5 "${scratch}/natsd.log")"
   envoy_url="http://127.0.0.1:${listener_port}"
-  env -i PATH="$PATH" HOME="${scratch}/listener-home" PORT="$listener_port" \
-    ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID="smoke-registration-stall-$$" \
-    NATS_URLS="nats://127.0.0.1:${nats_port}" "${scratch}/bin/listener" \
-    >"${scratch}/listener.log" 2>&1 &
+  set_listener_env "$listener_port" "nats://127.0.0.1:${nats_port}" "smoke-registration-stall-$$"
+  env -i PATH="$PATH" HOME="${scratch}/listener-home" "${listener_env[@]}" \
+    "${scratch}/bin/listener" >"${scratch}/listener.log" 2>&1 &
   listener_pid=$!
   for _ in $(seq 300); do
-    curl -fsS --max-time 2 "${envoy_url}/healthz" | jq -e '.status == "healthy"' >/dev/null 2>&1 && break
+    listener_healthy "$envoy_url" && break
     sleep 0.2
   done
-  curl -fsS --max-time 2 "${envoy_url}/healthz" | jq -e '.status == "healthy"' >/dev/null 2>&1 ||
+  listener_healthy "$envoy_url" ||
     refuse "the listener did not become healthy at ${envoy_url}: $(tail -n 5 "${scratch}/listener.log")"
   note "local stack: natsd (pid ${nats_pid}) on nats://127.0.0.1:${nats_port}, listener (pid ${listener_pid}) at ${envoy_url}"
 fi

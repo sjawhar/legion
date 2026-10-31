@@ -74,6 +74,13 @@ readonly repo_root
 readonly drivers="${script_dir}/role-takeover"
 readonly channel_server="${repo_root}/packages/claude-envoy/bin/envoy-channel.ts"
 
+# The loopback stack this smoke shares with smoke-registration-stall.sh and smoke-replay.sh: the
+# ports, the two builds, what each service is run as and when it is up. `pick_port` reports an
+# exhausted range the way everything else here refuses.
+local_stack_fail=refuse
+# shellcheck source=packages/pi-envoy/scripts/local-stack.sh
+source "${script_dir}/local-stack.sh"
+
 base_rev=""
 while (($# > 0)); do
   case "$1" in
@@ -104,10 +111,7 @@ done
 [[ -f "${repo_root}/node_modules/nats/package.json" ]] ||
   refuse "${repo_root}/node_modules has no nats package: run bun install in the checkout"
 
-read -r ephemeral_low _ </proc/sys/net/ipv4/ip_local_port_range
-readonly port_floor=10000
-((ephemeral_low > port_floor + 1000)) ||
-  refuse "the kernel's ephemeral range starts at ${ephemeral_low}, leaving no ports below it above ${port_floor}"
+port_range
 
 # ---- scratch, processes and teardown ----------------------------------------------------------
 work="$(mktemp -d "${TMPDIR:-/tmp}/smoke-role-takeover.XXXXXX")"
@@ -164,35 +168,11 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-port_open() {
-  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
-}
-
-# pick_port VAR: a loopback port nothing answers on, below the kernel's ephemeral range and
-# distinct from this run's earlier picks.
-picked_ports=" "
-pick_port() {
-  local candidate i
-  for ((i = 0; i < 200; i++)); do
-    candidate=$((port_floor + RANDOM % (ephemeral_low - port_floor)))
-    [[ "$picked_ports" != *" ${candidate} "* ]] || continue
-    port_open "$candidate" && continue
-    picked_ports+="${candidate} "
-    printf -v "$1" '%s' "$candidate"
-    return 0
-  done
-  refuse "no free loopback port below ${ephemeral_low}"
-}
-
 # wait_for SECONDS COMMAND...: polls COMMAND every 0.2 s; 1 once SECONDS have passed.
 wait_for() {
-  local deadline=$((SECONDS + $1))
+  local seconds=$1
   shift
-  while ((SECONDS < deadline)); do
-    if "$@" >/dev/null 2>&1; then return 0; fi
-    sleep 0.2
-  done
-  "$@" >/dev/null 2>&1
+  poll_until "$seconds" 0.2 "$@"
 }
 
 # ---- the results -------------------------------------------------------------------------------
@@ -270,9 +250,9 @@ fi
 readonly listener_source
 
 note "building natsd from ${repo_root}/packages/envoy and the listener from ${listener_source}"
-(cd -- "${repo_root}/packages/envoy" && go build -o "${work}/bin/natsd" ./internal/testnats/cmd/natsd) ||
+build_natsd "${repo_root}/packages/envoy" "${work}/bin/natsd" ||
   refuse "go build of natsd failed (the reason is above)"
-(cd -- "$listener_source" && go build -o "${work}/bin/listener" ./cmd/listener) ||
+build_listener "$listener_source" "${work}/bin/listener" ||
   refuse "go build of the listener failed (the reason is above)"
 
 pick_port nats_port
@@ -282,24 +262,19 @@ readonly nats_port monitor_port listener_port
 readonly envoy_url="http://127.0.0.1:${listener_port}"
 readonly nats_url="nats://127.0.0.1:${nats_port}"
 
-(exec env -i PATH="$PATH" HOME="${work}/nats-home" \
-  "${work}/bin/natsd" -p "$nats_port" -m "$monitor_port" -js -store_dir "${work}/nats-store") \
+set_natsd_argv "${work}/bin/natsd" "$nats_port" "$monitor_port" "${work}/nats-store"
+(exec env -i PATH="$PATH" HOME="${work}/nats-home" "${natsd_argv[@]}") \
   >"${work}/logs/natsd.log" 2>&1 &
 service_pids+=($!)
-nats_ready() {
-  grep -q 'Server is ready' "${work}/logs/natsd.log"
-}
-wait_for 60 nats_ready || refuse "natsd did not start: $(tail -n 5 "${work}/logs/natsd.log")"
+wait_for 60 natsd_serving "${work}/logs/natsd.log" ||
+  refuse "natsd did not start: $(tail -n 5 "${work}/logs/natsd.log")"
 note "natsd serves ${nats_url} (monitoring 127.0.0.1:${monitor_port})"
 
-(exec env -i PATH="$PATH" HOME="${work}/listener-home" PORT="$listener_port" \
-  ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID="smoke-role-takeover-$$" NATS_URLS="$nats_url" \
+set_listener_env "$listener_port" "$nats_url" "smoke-role-takeover-$$"
+(exec env -i PATH="$PATH" HOME="${work}/listener-home" "${listener_env[@]}" \
   "${work}/bin/listener") >"${work}/logs/listener.log" 2>&1 &
 service_pids+=($!)
-listener_ready() {
-  curl -fsS --max-time 2 "${envoy_url}/healthz" | jq -e '.status == "healthy"'
-}
-wait_for 90 listener_ready ||
+wait_for 90 listener_healthy "$envoy_url" ||
   refuse "the listener did not become healthy: $(tail -n 5 "${work}/logs/listener.log")"
 note "the listener is healthy at ${envoy_url}"
 

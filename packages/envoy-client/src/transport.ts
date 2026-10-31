@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { type Envelope, EnvelopeSchema } from "@legion/contracts";
 import { z } from "zod";
 import { normalizeEnvoyUrl } from "./envoy-settings";
@@ -178,7 +177,9 @@ export type SubscribeInput = {
  * starts, for every registration and deregistration it makes.
  */
 export function newClientInstanceID(): string {
-  return randomBytes(16).toString("hex");
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
 }
 
 export type UnsubscribeInput = {
