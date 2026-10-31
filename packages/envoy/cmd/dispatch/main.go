@@ -439,7 +439,7 @@ func main() {
 	met := metrics.New()
 	outboxPublishFailures := met.NewCounter(
 		"envoy_dispatch_outbox_publish_failures_total",
-		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), holder (a role forward its holder's resolution held pending, with nothing sent), unanswered (NATS took the forward and the role's holder sent no receipt) or failed (every other failure)",
+		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), holder (a role forward its holder's resolution held pending, with nothing sent), unanswered (NATS took the forward and the answer never came: the role holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the stored copy) or failed (every other failure)",
 	)
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()

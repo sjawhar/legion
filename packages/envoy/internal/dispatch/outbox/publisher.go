@@ -112,9 +112,10 @@ type Deps struct {
 // reason: "denied" for a send the server refused under this connection's own publish permissions,
 // "refused" for one NATS refuses however often it is retried, "holder" for a role forward its
 // holder's resolution held pending with nothing sent, "unanswered" for a forward NATS took whose
-// holder sent no receipt, and "failed" for every other failure (sendChains). Every increment goes
-// through here: a Deps built without a counter - the package's own tests - then counts nothing
-// instead of dereferencing nil.
+// answer never came - the holder's receipt, or the stream's acknowledgement of the stored copy
+// for a holder with a serving port (roleForward.send) - and "failed" for every other failure
+// (sendChains). Every increment goes through here: a Deps built without a counter - the package's
+// own tests - then counts nothing instead of dereferencing nil.
 func (d Deps) countPublishFailure(reason string) {
 	if d.PublishFailures == nil {
 		return
@@ -172,8 +173,8 @@ func failedAnswer(err error) <-chan error {
 // in whatever order their answers allow. A send that fails holds back only its own chain, and an
 // event that is not due holds back its owner's later events only from the destinations it has not
 // reached. An event whose recipient read failed holds them back too, from every session key its
-// list neither names nor it already reached, until its retry. What the batch came to is written in
-// one statement (recordBatch).
+// list neither names nor it already reached, until its retry. What an owner came to is written in
+// one statement, and what the owners left at the batch's end came to in one more (recordBatch).
 //
 // A failure is classified once every answer is in. A send that met a lost or replaced connection
 // (bus.ErrUnavailable) is no fault of its event, and its event is released with no attempt
@@ -197,11 +198,13 @@ func failedAnswer(err error) <-chan error {
 // hold-backs and releases are written only while holder still holds the hold on the database's
 // clock (recordBatch).
 func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (batchResult, error) {
-	pending, stopped, err := readBatch(ctx, deps)
+	pending, stopped, excluded, err := readBatch(ctx, deps)
 	if err != nil {
 		return batchResult{}, err
 	}
-	return publishBatch(ctx, deps, hold, holder, pending, stopped)
+	result, err := publishBatch(ctx, deps, hold, holder, pending, stopped)
+	result.excluded = excluded
+	return result, err
 }
 
 // publishBatch is scanBatch's work after the read: it resolves pending's destinations, sends them,
@@ -213,10 +216,12 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 // (sendChains), so its next events and the owners this batch left behind are read while the rest
 // of the batch is still sending: a chain waiting for a role holder's receipt then holds back its
 // own owner's later events alone. An owner with a send that failed for the connection, one with a
-// send the hold's deadline fenced, one with an event released, and every owner of a batch whose
-// context has ended wait for the batch's end instead, where the connection check below decides
-// what their sends came to. Whichever way an owner settles, every lane the read took is given
-// back before the batch returns.
+// send the hold's deadline fenced, one with a send the batch's stop left unmade, one read past
+// the hold's deadline, and every owner of a batch whose context has ended wait for the batch's
+// end instead, where the connection check below decides what their sends came to: each of those
+// is an owner an early settle would release or leave unrecorded, so it is settled once, there.
+// Whichever way an owner settles, every lane the read took is given back before the batch
+// returns.
 func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, pending []pendingEvent, stopped bool) (batchResult, error) {
 	result := batchResult{}
 	events := make([]*batchEvent, len(pending))
@@ -253,56 +258,76 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 	changed := deps.Publisher.ConnectionChanged()
 	window := deps.Publisher.WindowUntil(hold.Deadline)
 	result.started = time.Now()
-	recorded := map[string]struct{}{}
+	settled := map[string]struct{}{}
 	var recordErr error
 	lostHold := false
-	settleOwner := func(owner string) {
-		if ctx.Err() != nil {
-			return
-		}
-		for _, event := range byOwner[owner] {
-			for _, send := range event.sends {
-				if send.connection || send.fenced {
-					return
-				}
-			}
-		}
+	// settleAndRecord settles each due event of owned (settleEvent), defers the due events their
+	// owners' windows left unread (deferPastWindow) and writes what they all came to in one
+	// statement. Every event the batch settles goes through here once, so each is logged once:
+	// an owner settled as its own chains finish, and at the batch's end every event no owner's
+	// settle recorded. Nothing is written once a send met the publisher hold's deadline or the
+	// deadline has passed, the record being the last act checked against it; the batch is then
+	// left unrecorded and reported fenced.
+	settleAndRecord := func(owned []*batchEvent, releaseUnacknowledged bool) (settlement, error) {
 		var outcomes []outcome
-		count := 0
-		for _, event := range byOwner[owner] {
+		var done settlement
+		for _, event := range owned {
 			if !event.due {
 				continue
 			}
-			event.outcome = settleEvent(event, false)
-			if event.outcome.state == released {
-				return
-			}
-			if event.outcome.state == published {
-				count++
-			}
+			event.outcome = settleEvent(event, releaseUnacknowledged)
 			outcomes = append(outcomes, event.outcome)
+			switch event.outcome.state {
+			case published:
+				done.published++
+			case released:
+				done.released = true
+			}
 		}
 		if !stopped {
-			outcomes = append(outcomes, deferPastWindow(byOwner[owner])...)
+			outcomes = append(outcomes, deferPastWindow(owned)...)
 		}
-		if !time.Now().Before(hold.Deadline()) {
-			return
+		if done.released && !result.fenced && ctx.Err() == nil {
+			slog.Error("dispatch outbox: NATS is unreachable, so the batch's released events wait for the next scan")
+		}
+		if result.fenced || !time.Now().Before(hold.Deadline()) {
+			slog.Error("dispatch outbox: the publisher hold's deadline passed before the batch was recorded, so it is left unrecorded",
+				"events", len(outcomes))
+			result.fenced = true
+			return done, nil
 		}
 		// Written even when ctx has ended: a process stopping mid-batch records what NATS already
 		// accepted and releases the rest.
 		record, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 		defer cancel()
 		holds, err := recordBatch(record, deps, outcomes, holder)
-		recorded[owner] = struct{}{}
+		done.wrote, done.holds = true, holds
+		return done, err
+	}
+	settleOwner := func(owner string) {
+		if ctx.Err() != nil || !time.Now().Before(hold.Deadline()) {
+			return
+		}
+		for _, event := range byOwner[owner] {
+			for _, send := range event.sends {
+				if send.connection || send.fenced || send.state == unsent {
+					return
+				}
+			}
+		}
+		done, err := settleAndRecord(byOwner[owner], false)
+		settled[owner] = struct{}{}
 		switch {
 		case err != nil:
 			recordErr = err
-		case !holds:
+		case !done.wrote:
+			return
+		case !done.holds:
 			slog.Error("dispatch outbox: the publisher hold is no longer this process's, so the owner's back-offs and releases were not written",
 				"holder", holder, "owner", owner)
 			lostHold = true
 		default:
-			result.published += count
+			result.published += done.published
 			delete(lanesHeld, owner)
 			deps.lanes.releaseEarly(owner)
 		}
@@ -353,54 +378,28 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 		}
 	}
 
-	var outcomes []outcome
 	var rest []*batchEvent
-	anyReleased := false
 	for _, event := range events {
-		if _, ok := recorded[event.owner]; ok {
-			continue
-		}
-		rest = append(rest, event)
-		if !event.due {
-			continue
-		}
-		event.outcome = settleEvent(event, releaseUnacknowledged)
-		outcomes = append(outcomes, event.outcome)
-		switch event.outcome.state {
-		case published:
-			result.published++
-		case released:
-			anyReleased = true
+		if _, ok := settled[event.owner]; !ok {
+			rest = append(rest, event)
 		}
 	}
-	if !stopped {
-		outcomes = append(outcomes, deferPastWindow(rest)...)
-	}
-	if anyReleased && !result.fenced && ctx.Err() == nil {
-		slog.Error("dispatch outbox: NATS is unreachable, so the batch's released events wait for the next scan")
-	}
-	if result.fenced || !time.Now().Before(hold.Deadline()) {
-		slog.Error("dispatch outbox: the publisher hold's deadline passed before the batch was recorded, so it is left unrecorded",
-			"events", len(outcomes))
-		result.fenced = true
-		return result, nil
-	}
-	// Written even when ctx has ended: a process stopping mid-batch records what NATS already
-	// accepted and releases the rest.
-	record, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
-	defer cancel()
-	holds, err := recordBatch(record, deps, outcomes, holder)
+	done, err := settleAndRecord(rest, releaseUnacknowledged)
+	result.published += done.published
 	if err != nil {
 		result.blocked = true
 		return result, err
 	}
-	if !holds {
+	if !done.wrote {
+		return result, nil
+	}
+	if !done.holds {
 		slog.Error("dispatch outbox: the publisher hold is no longer this process's, so the batch's back-offs and releases were not written",
 			"holder", holder)
 		lostHold = true
 	}
 	result.fenced = result.fenced || lostHold
-	result.blocked = stopped || anyReleased
+	result.blocked = stopped || done.released
 	if recordErr != nil {
 		result.blocked = true
 		return result, recordErr
@@ -425,13 +424,26 @@ func connectionReplaced(changed <-chan struct{}) bool {
 // earlier than started, and published how many it marked published. blocked is a batch after which
 // the scan stops: a row it could not read, an event it released, or its record failed. fenced is
 // the publisher hold's deadline passing during it, or its record finding the hold another's, and
-// natsLost a probe of its connection failing after its sends failed for the connection.
+// natsLost a probe of its connection failing after its sends failed for the connection. excluded
+// is a read that left the owners the batches beside it held out (lanes.reserve): it may have read
+// past their events, so the scan reads again once every batch has given its owners back.
 type batchResult struct {
 	sendable, sent, published int
 	firstID, lastID           int64
 	started                   time.Time
 	blocked, fenced           bool
 	natsLost                  bool
+	excluded                  bool
+}
+
+// settlement is what one settle-and-record (publishBatch's settleAndRecord) came to: how many of
+// its events it marked published, whether any of them was released, whether it wrote them at all
+// - a batch past the publisher hold's deadline is left unrecorded - and, when it wrote, whether
+// the hold was still this process's.
+type settlement struct {
+	published    int
+	released     bool
+	wrote, holds bool
 }
 
 // outcomeState is what an event of a batch came to.
@@ -759,8 +771,14 @@ func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) e
 		resolvable = append(resolvable, event)
 		_, _, _ = eventDestinations(event.event, item.Topic, event.routing, want)
 	}
-	found, err := loadLookups(ctx, gated{db: deps.Store.Pool, lanes: deps.lanes}, want)
-	if err != nil {
+	// The lookups' statements run one after another, and the gate is held from the first to the
+	// last (lanes.statement), so no other batch's statement is run between two of them.
+	var found *lookups
+	if err := deps.lanes.statement(func() error {
+		var err error
+		found, err = loadLookups(ctx, deps.Store.Pool, want)
+		return err
+	}); err != nil {
 		return err
 	}
 	for _, event := range resolvable {

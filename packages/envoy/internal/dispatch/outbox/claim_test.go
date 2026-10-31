@@ -23,7 +23,7 @@ func TestReadingABatchWritesNoRow(t *testing.T) {
 	seeded := seedUnpublishedEvents(t, database, broker, 3)
 
 	for read := range 2 {
-		pending, stopped, err := readBatch(ctx, Deps{Store: database})
+		pending, stopped, _, err := readBatch(ctx, Deps{Store: database})
 		if err != nil || stopped {
 			t.Fatalf("read %d: stopped=%v err=%v", read, stopped, err)
 		}
@@ -62,7 +62,7 @@ func TestAPendingEventIsNeverRead(t *testing.T) {
 	})
 	ready := seedUnpublishedEvents(t, database, broker, 1)
 
-	pending, stopped, err := readBatch(ctx, Deps{Store: database})
+	pending, stopped, _, err := readBatch(ctx, Deps{Store: database})
 	if err != nil || stopped {
 		t.Fatalf("read past the pending command: stopped=%v err=%v", stopped, err)
 	}
@@ -108,7 +108,7 @@ func TestAnEventThatIsNotDueIsReadOnlyAsABlockerOfItsOwner(t *testing.T) {
 	}
 	fresh := message("T-1", "fresh")
 
-	pending, _, err := readBatch(ctx, Deps{Store: database})
+	pending, _, _, err := readBatch(ctx, Deps{Store: database})
 	if err != nil {
 		t.Fatalf("read the batch: %v", err)
 	}

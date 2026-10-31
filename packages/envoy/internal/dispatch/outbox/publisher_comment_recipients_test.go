@@ -997,7 +997,7 @@ func TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed(t *testing.T) 
 
 		deps := Deps{Store: database, Publisher: &recordingPublisher{}}
 		holder := holding(t, deps).instance
-		pending, _, err := readBatch(context.Background(), deps)
+		pending, _, _, err := readBatch(context.Background(), deps)
 		if err != nil {
 			t.Fatalf("scan the batch: %v", err)
 		}
@@ -1027,7 +1027,7 @@ func TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed(t *testing.T) 
 
 		deps := Deps{Store: database, Publisher: &recordingPublisher{}}
 		holder := holding(t, deps).instance
-		pending, _, err := readBatch(context.Background(), deps)
+		pending, _, _, err := readBatch(context.Background(), deps)
 		if err != nil {
 			t.Fatalf("scan the batch: %v", err)
 		}

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
@@ -133,11 +132,12 @@ func (o *Outbox) Publishing() bool {
 // connection released), and the holder's one retry timer, armed to the earliest back-off due
 // (nextRetry). Nothing scans on a period.
 //
-// On ctx's end the holder takes no further batch. In the batch in flight it makes no further send,
-// settles the sends still in flight as lost (sendChains), records what NATS already answered and
-// releases the rest (scanBatch), and then releases the hold (publish), which wakes a standby at
-// once. Run returns once that is done and every wake source has stopped; a graceful stop of the
-// process waits for that before it closes the pool, up to cmd/dispatch's outboxStopBudget.
+// On ctx's end the holder takes no further batch. In each batch in flight it makes no further
+// send, settles the sends still in flight as lost (sendChains), records what NATS already
+// answered and releases the rest (scanBatch), and then releases the hold (publish), which wakes
+// a standby at once. Run returns once that is done and every wake source has stopped; a graceful
+// stop of the process waits for that before it closes the pool, up to cmd/dispatch's
+// outboxStopBudget.
 func (o *Outbox) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -469,9 +469,10 @@ func (o *Outbox) scan(ctx context.Context, hold fence) scanEnd {
 		}
 		if inflight == 0 {
 			if missed && !stop {
-				// A batch read nothing because the others held its owners, and they have given
-				// those lanes back since: read once more rather than wait for a wake that may
-				// already have been spent on that batch.
+				// A batch read past the owners the others held, and they have given those lanes
+				// back since: read once more rather than wait for a wake that may already have
+				// been spent on that batch. The read that follows leaves no owner out, since
+				// none is in flight, so it sets no missed read of its own and the scan ends.
 				missed, due = false, true
 				continue
 			}
@@ -511,9 +512,10 @@ func (o *Outbox) scan(ctx context.Context, hold fence) scanEnd {
 			case batch.published == 0 && batch.sendable < batchSize:
 				// Nothing more to read now, which the batches still running may change: the scan
 				// starts none of its own accord and returns once the last one has, unless a wake
-				// or an owner one of them releases falls due first. A batch that read nothing at
-				// all was shut out by the owners they hold, so it is read again once they end.
-				missed = missed || (batch.sendable == 0 && inflight > 0)
+				// or an owner one of them releases falls due first. A batch that read past the
+				// owners the others held may have left their events unread, so it is read again
+				// once every batch has given its owners back.
+				missed = missed || batch.excluded
 			default:
 				due = true
 			}
@@ -540,8 +542,8 @@ type lanes struct {
 	inFlight map[string]struct{}
 	// statements is the outbox pool's one statement at a time. The pool has two connections, one
 	// of them the publisher hold's renewal, so a renewal would queue behind two batches running a
-	// statement each. It is held around a statement, the drain of its rows included, and never
-	// across a send.
+	// statement each. It is held around a statement, the drain of its rows included, and around
+	// the sequence of statements one lookup read makes (loadLookups), and never across a send.
 	statements sync.Mutex
 	// wake is the scan's wake (Outbox.signal), given when an owner is released, so its next events
 	// and the owners a full batch left behind are read at once.
@@ -554,11 +556,14 @@ func newLanes(wake func()) *lanes {
 }
 
 // reserve runs read with the owners in flight, which read leaves alone, and takes the owners of
-// the rows it read, both under one lock. A batch run with no lanes - one by itself, as scanBatch's
-// other callers run it - leaves no owner out and takes none.
-func (l *lanes) reserve(read func(inFlight []string) ([]pendingEvent, bool, error)) ([]pendingEvent, bool, error) {
+// the rows it read, both under one lock. excluded reports that owners were left out of the read,
+// so the scan knows the batch may have read past their events and reads again once they are
+// given back (Outbox.scan). A batch run with no lanes - one by itself, as scanBatch's other
+// callers run it - leaves no owner out and takes none.
+func (l *lanes) reserve(read func(inFlight []string) ([]pendingEvent, bool, error)) (pending []pendingEvent, stopped, excluded bool, err error) {
 	if l == nil {
-		return read([]string{})
+		pending, stopped, err = read([]string{})
+		return pending, stopped, false, err
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -566,13 +571,13 @@ func (l *lanes) reserve(read func(inFlight []string) ([]pendingEvent, bool, erro
 	for owner := range l.inFlight {
 		inFlight = append(inFlight, owner)
 	}
-	pending, stopped, err := read(inFlight)
+	pending, stopped, err = read(inFlight)
 	for _, item := range pending {
 		if item.owner != "" {
 			l.inFlight[item.owner] = struct{}{}
 		}
 	}
-	return pending, stopped, err
+	return pending, stopped, len(inFlight) > 0, err
 }
 
 // release gives owner's lane back, telling the scan nothing: a batch that gives its lanes back as
@@ -613,47 +618,13 @@ func (l *lanes) unlock() {
 	}
 }
 
-// statement runs fn, one statement on the outbox's pool, with no other batch's statement beside
-// it.
+// statement runs fn on the outbox's pool with no other batch's statement beside it: one
+// statement, or the run of them a lookup read makes, which holds the gate from its first to its
+// last.
 func (l *lanes) statement(fn func() error) error {
 	l.lock()
 	defer l.unlock()
 	return fn()
-}
-
-// gated is the pool's read surface (queryer) with every statement run under the lanes' gate: the
-// lock is taken for the query and given back when its rows close, which is as long as the
-// statement holds one of the pool's connections. Every read it serves drains and closes its rows
-// within itself (pgx.ForEachRow), so the gate is given back inside the read that took it.
-type gated struct {
-	db    queryer
-	lanes *lanes
-}
-
-func (g gated) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	g.lanes.lock()
-	rows, err := g.db.Query(ctx, sql, args...)
-	if err != nil {
-		g.lanes.unlock()
-		return nil, err
-	}
-	return &gatedRows{Rows: rows, lanes: g.lanes}, nil
-}
-
-// gatedRows gives the gate back when its statement's rows close, once however often Close is
-// called, which pgx.Rows allows and readBatch does.
-type gatedRows struct {
-	pgx.Rows
-	lanes  *lanes
-	closed bool
-}
-
-func (r *gatedRows) Close() {
-	r.Rows.Close()
-	if !r.closed {
-		r.closed = true
-		r.lanes.unlock()
-	}
 }
 
 // nextRetry is how long until the earliest back-off of an unpublished event falls due, read from

@@ -153,7 +153,9 @@ const readBatchSQL = `
 // it are not read, and the batch is the rows before it and that row, backed off. The read leaves
 // the owners the batches running beside this one hold alone, and takes the owners of the rows it
 // read, both under the lanes' one lock (lanes.reserve): publishBatch gives each of them back.
-func readBatch(ctx context.Context, deps Deps) ([]pendingEvent, bool, error) {
+// excluded reports that owners were left out of it, which the scan reads as a batch that may have
+// read past their events (batchResult.excluded).
+func readBatch(ctx context.Context, deps Deps) (pending []pendingEvent, stopped, excluded bool, err error) {
 	return deps.lanes.reserve(func(inFlight []string) ([]pendingEvent, bool, error) {
 		return readRows(ctx, deps, inFlight)
 	})

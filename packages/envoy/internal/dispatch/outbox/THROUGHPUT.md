@@ -157,7 +157,7 @@ against main with #2225.
 | `TestABatchCutOffInFlightKeepsItsOrder` (connection cut with acknowledgements in flight at 150 ms round trip) | Fails on the first pipelined build: 100 events backed off, then reordered | Passes: every event released, no attempt counted, stream in id order with no duplicates | Passes: every event released, no attempt counted, each destination in id order, no duplicates |
 | `TestAnOutboxThatDiesBetweenAckAndMarkPublishesAgainWithoutDuplicates` | Passes | Passes: republished once the claim lapses, the stream's MsgId drops every repeat | Passes: republished once the dead holder's hold lapses, the stream's MsgId drops every repeat |
 | `TestABackedOffEventHoldsBackOnlyItsDestination` (one session's subject fails for an event; or the session holds the issue's role and withholds its receipt for the event) | n/a | Fails: the session takes the later events first, `[2 3 1]` | Passes: the topic family takes the later events at once, the session all three in order; the role variant fails before the role forward, since the holder then receives nothing from the outbox |
-| `TestAnIssuesEventsGoToEachDestinationOneAtATime` | n/a | n/a | Passes: nothing is marked or backed off until every answer of the batch is in |
+| `TestAnIssuesEventsGoToEachDestinationOneAtATime` | n/a | n/a | Passes: nothing of an owner is marked or backed off until every answer of that owner is in |
 | `TestAnOutboxStoppedMidBatchMarksTheAnsweredAndReleasesTheRest` | n/a | Passes; fails if the outcome write uses the cancelled context | Passes |
 
 ## What order consumers rely on
@@ -173,8 +173,9 @@ against main with #2225.
 
 ## Known limits, not addressed here
 
-- A failed outcome write resends the whole batch. JetStream drops the repeats by MsgId, a role
-  forward's included, and a role's holder drops a repeat forward by its dedupe key.
+- A failed outcome write resends what it was for: an owner settled as its own chains finished, or
+  every owner the batch's own write covers. JetStream drops the repeats by MsgId, a role forward's
+  included, and a role's holder drops a repeat forward by its dedupe key.
 - A session that takes an issue's events on two destinations (its topic family and its own
   subject) can see a later event's first copy before an earlier one's when the stream fails one
   subject and not the other (`planChains`).
