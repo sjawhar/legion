@@ -573,7 +573,7 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 	})
 
 	// A role nobody holds: the listener keeps the message for the role's next holder and answers
-	// 200, so the line is an accepted one. There is still no holder to name.
+	// 202, so the line is an accepted one. There is still no holder to name.
 	unclaimed := contracts.RoleTopicPrefix + "recorded-unclaimed"
 	keptUnclaimed, keptUnclaimedRecord := publish(sendBody(map[string]any{
 		"topic":          unclaimed,
@@ -581,14 +581,14 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 		"source_session": sender,
 		"message":        "nobody holds this",
 	}))
-	if keptUnclaimed.Code != http.StatusOK {
-		t.Fatalf("a publish to a role nobody holds: status %d, body %s; want 200 for a kept message", keptUnclaimed.Code, keptUnclaimed.Body.String())
+	if keptUnclaimed.Code != http.StatusAccepted {
+		t.Fatalf("a publish to a role nobody holds: status %d, body %s; want 202 for a kept message", keptUnclaimed.Code, keptUnclaimed.Body.String())
 	}
 	assertRecordFields(t, keptUnclaimedRecord, map[string]any{
 		"msg":            "listener publish",
 		"level":          "INFO",
 		"outcome":        "accepted",
-		"status":         float64(http.StatusOK),
+		"status":         float64(http.StatusAccepted),
 		"topic":          unclaimed,
 		"source_session": sender,
 	})
@@ -610,14 +610,14 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 		"source_session": sender,
 		"message":        "is the holder still there?",
 	}))
-	if lapsed.Code != http.StatusOK {
-		t.Fatalf("a publish to a role whose holder lapsed: status %d, body %s; want 200 for a kept message", lapsed.Code, lapsed.Body.String())
+	if lapsed.Code != http.StatusAccepted {
+		t.Fatalf("a publish to a role whose holder lapsed: status %d, body %s; want 202 for a kept message", lapsed.Code, lapsed.Body.String())
 	}
 	assertRecordFields(t, lapsedRecord, map[string]any{
 		"msg":             "listener publish",
 		"level":           "INFO",
 		"outcome":         "accepted",
-		"status":          float64(http.StatusOK),
+		"status":          float64(http.StatusAccepted),
 		"topic":           lapsedTopic,
 		"source":          "agent",
 		"source_session":  sender,

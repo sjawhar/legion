@@ -63,10 +63,12 @@ type sendResponse struct {
 	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
-// publishResponse is the publish route's 200: the envelope as the listener built it, the holder a
-// role send's message reached, and - for a role send the listener could not deliver and kept on
-// the role's kept lane instead (roleSend.kept) - Kept and the case it was kept for. Both are
-// absent from every other answer, a delivered role send's included.
+// publishResponse is the publish route's accepted answer: the envelope as the listener built it,
+// the holder a role send's message reached, and - for a role send the listener could not deliver
+// and kept on the role's kept lane instead (roleSend.kept) - Kept and the case it was kept for.
+// Both are absent from every other answer, a delivered role send's included. A role send has
+// three answers and a sender tells them apart by status: 200, a live holder took the message;
+// 202, nobody holds the role and the message waits for whoever claims it; 404, nothing was kept.
 type publishResponse struct {
 	contracts.Envelope
 	Holder     string      `json:"holder,omitempty"`

@@ -601,7 +601,7 @@ func TestMessageHandlersRejectBlankMessage(t *testing.T) {
 
 // Each route that resolves a role names the state it found. The lookup still answers 404 with the
 // reason, unclaimed or holder_lapsed; the publish route now keeps the message for the role's next
-// holder and answers 200 with kept true and the same reason as kept_reason. Both release a lapsed
+// holder and answers 202 with kept true and the same reason as kept_reason. Both release a lapsed
 // holder's claim.
 func TestRoleHolderStateIsNamedByEachRoutesAnswer(t *testing.T) {
 	type roleError struct {
@@ -613,8 +613,8 @@ func TestRoleHolderStateIsNamedByEachRoutesAnswer(t *testing.T) {
 	}
 	assertKept := func(t *testing.T, recorder *httptest.ResponseRecorder, reason, holder string) {
 		t.Helper()
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200 for a message the listener kept; body = %s", recorder.Code, recorder.Body.String())
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202 for a message the listener kept; body = %s", recorder.Code, recorder.Body.String())
 		}
 		t.Logf("kept role response: %s", recorder.Body.String())
 		var kept struct {
@@ -632,7 +632,7 @@ func TestRoleHolderStateIsNamedByEachRoutesAnswer(t *testing.T) {
 	}
 	tests := []struct {
 		name string
-		// kept is whether this route keeps a role message it cannot deliver, answering 200,
+		// kept is whether this route keeps a role message it cannot deliver, answering 202,
 		// where the lookup, which has no message to keep, answers its 404.
 		kept    bool
 		request func() *http.Request
@@ -1115,7 +1115,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	// stand-in connects with the parent's.
 	uri := testnats.URL(t)
 
-	t.Run("unheld role is kept and answered 200 without publishing on the role topic", func(t *testing.T) {
+	t.Run("unheld role is kept and answered 202 without publishing on the role topic", func(t *testing.T) {
 		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
 		if err != nil {
 			t.Fatalf("subscribe to unheld role: %v", err)
@@ -1133,8 +1133,8 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.role.unheld","message":"please review"}`))
 		handler.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200 for a kept message; body = %s", recorder.Code, recorder.Body.String())
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202 for a kept message; body = %s", recorder.Code, recorder.Body.String())
 		}
 		t.Logf("publish unheld role: %s", recorder.Body.String())
 		var kept struct {
@@ -1192,8 +1192,8 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 			"/v1/messages/publish",
 			strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`),
 		))
-		if publishRecorder.Code != http.StatusOK {
-			t.Fatalf("publish status = %d, want 200 for a kept message; body = %s", publishRecorder.Code, publishRecorder.Body.String())
+		if publishRecorder.Code != http.StatusAccepted {
+			t.Fatalf("publish status = %d, want 202 for a kept message; body = %s", publishRecorder.Code, publishRecorder.Body.String())
 		}
 		var kept struct {
 			Kept       bool   `json:"kept"`

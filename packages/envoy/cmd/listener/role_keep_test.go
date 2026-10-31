@@ -19,7 +19,7 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// keptPublishAnswer is the publish route's 200 for a role message it kept: the envelope as it was
+// keptPublishAnswer is the publish route's 202 for a role message it kept: the envelope as it was
 // stored, with the kept fields the answer carries only then.
 type keptPublishAnswer struct {
 	contracts.Envelope
@@ -85,7 +85,7 @@ func publishToRole(t *testing.T, d *listenerDeps, role, body string) (*httptest.
 	t.Helper()
 	recorder, _ := publishThrough(d, body)
 	var answer keptPublishAnswer
-	if recorder.Code == http.StatusOK {
+	if recorder.Code == http.StatusOK || recorder.Code == http.StatusAccepted {
 		if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
 			t.Fatalf("decode the publish answer for role %s: %v", role, err)
 		}
@@ -94,7 +94,7 @@ func publishToRole(t *testing.T, d *listenerDeps, role, body string) (*httptest.
 }
 
 // A role nobody holds is no longer a refusal: the listener keeps the message on that role's kept
-// lane for whoever claims the role next, and answers its sender 200 saying so. The stored copy
+// lane for whoever claims the role next, and answers its sender 202 saying so. The stored copy
 // keeps its own role topic, so the next holder is handed the message as its sender sent it.
 func TestAPublishToAnUnheldRoleIsKeptAndAnsweredWithItsReason(t *testing.T) {
 	d, client := keptRoleDeps(t)
@@ -102,8 +102,8 @@ func TestAPublishToAnUnheldRoleIsKeptAndAnsweredWithItsReason(t *testing.T) {
 
 	recorder, answer := publishToRole(t, d, role,
 		`{"topic":"`+contracts.RoleTopicPrefix+role+`","source":"agent","message":"nobody holds this yet"}`)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("publish to an unheld role: status %d, body %s; want 200", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("publish to an unheld role: status %d, body %s; want 202", recorder.Code, recorder.Body.String())
 	}
 	if !answer.Kept || answer.KeptReason != "unclaimed" || answer.Holder != "" {
 		t.Fatalf("the answer is %+v, want kept with reason unclaimed and no holder", answer)
@@ -135,8 +135,8 @@ func TestAPublishToALapsedClaimIsKeptAndTheClaimIsStillReleased(t *testing.T) {
 
 	recorder, answer := publishToRole(t, d, role,
 		`{"topic":"`+contracts.RoleTopicPrefix+role+`","source":"agent","message":"is the holder still there?"}`)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("publish to a lapsed claim: status %d, body %s; want 200", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("publish to a lapsed claim: status %d, body %s; want 202", recorder.Code, recorder.Body.String())
 	}
 	if !answer.Kept || answer.KeptReason != "holder_lapsed" || answer.Holder != holder {
 		t.Fatalf("the answer is %+v, want kept with reason holder_lapsed naming %s", answer, holder)
@@ -178,8 +178,8 @@ func TestAClaimForwardsEachKeptRoleMessageToItsNewHolderExactlyOnce(t *testing.T
 
 	recorder, answer := publishToRole(t, d, role,
 		`{"topic":"`+contracts.RoleTopicPrefix+role+`","source":"agent","message":"wait for the next holder"}`)
-	if recorder.Code != http.StatusOK || !answer.Kept {
-		t.Fatalf("publish to an unheld role: status %d, body %s; want 200 kept", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusAccepted || !answer.Kept {
+		t.Fatalf("publish to an unheld role: status %d, body %s; want 202 kept", recorder.Code, recorder.Body.String())
 	}
 	waitForKeptRoleMessage(t, client, role, answer.EventID)
 
