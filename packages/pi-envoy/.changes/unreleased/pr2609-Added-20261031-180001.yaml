@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+  Every model request shows each Envoy card with `delivered:`, the time the session got it, after its `at:` send time, and with `waited:` in words once the two are 15 minutes or more apart, so a session reading its inbox late does not take a card's send time for the present time. The card stored in the transcript is unchanged.
+time: 2026-10-31T18:00:01.000000000Z
+custom:
+    Issue: pr2609
