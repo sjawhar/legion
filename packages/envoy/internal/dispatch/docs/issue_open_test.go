@@ -79,8 +79,8 @@ func requireEnds(t *testing.T, peer *docstest.Peer, what string) {
 	}
 }
 
-// roomMarkdown is what service's resident room of artifactID renders, "" with none resident.
-func roomMarkdown(t *testing.T, service *Service, artifactID string) string {
+// residentRoomMarkdown is what service's resident room of artifactID renders, "" with none resident.
+func residentRoomMarkdown(t *testing.T, service *Service, artifactID string) string {
 	t.Helper()
 	live := service.srv.GetDoc(artifactID)
 	if live == nil {
@@ -120,7 +120,7 @@ func requireKeystrokeDropped(t *testing.T, service *Service, peer *docstest.Peer
 	case <-time.After(roomWait(t)):
 		t.Fatal("the room never answered the request for its document")
 	}
-	if markdown := roomMarkdown(t, service, artifactID); strings.Contains(markdown, "typed on a closed issue") {
+	if markdown := residentRoomMarkdown(t, service, artifactID); strings.Contains(markdown, "typed on a closed issue") {
 		t.Fatalf("the room took a read-only browser's keystroke on the closed issue: it holds %q", markdown)
 	}
 	if moved := storedHead(t, service.store, artifactID); moved != head {
@@ -199,7 +199,7 @@ func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateA
 	}
 	typeOver(t, alice, "before", "typed before the close")
 	waitFor(t, roomWait(t), "task A's room to take alice's keystroke", func() bool {
-		return strings.Contains(roomMarkdown(t, taskA, artifactID), "typed before the close")
+		return strings.Contains(residentRoomMarkdown(t, taskA, artifactID), "typed before the close")
 	})
 	writeIssueClosed(t, taskB.store, "DOC-1", true)
 	requireEnds(t, alice, "closing the issue through task B left alice's browser on task A connected")

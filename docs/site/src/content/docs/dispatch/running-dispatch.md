@@ -188,6 +188,15 @@ Separate the keys with one space or one line feed. Every whitespace character se
 so a key itself holds none, and two in a row, a CR LF among them, enclose an empty key, which
 Dispatch refuses to start with.
 
+On a deployment built by `envoy-infra`'s `gcp:Dispatch`, you write no key and edit no Secret:
+each step above is one `pulumi up` of the component's `signingKeyGenerations`, the ordered list
+of key generations `DISPATCH_SIGNING_KEY` holds. A deployment running one key is at `[0]`; step 1
+is `[0, 1]`, step 2 is `[1, 0]`, and step 3 is `[1]`. The component generates each generation's
+key, renders them in the list's order and replaces the app's pods on each apply, which is the
+restart each step needs. Its README (`packages/envoy/infra/README.md`) holds the rest of the
+procedure: which pods roll, what a dropped generation costs, and the two lists the component
+refuses.
+
 ## Running it on your machine
 
 To see Dispatch working, seeded with example issues, asks, agents and a broadcast and opened

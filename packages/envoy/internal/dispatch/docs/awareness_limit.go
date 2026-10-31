@@ -21,7 +21,7 @@ import (
 // the room's other readers (:2265), and that apply fires the same change (:1582-1586), so every
 // tab sends the other readers' client ids back on its own socket. Nothing in the protocol bounds
 // what a socket names. ygo applies a peer's awareness frame whole and broadcasts it to every peer
-// of the room, its sender included (provider/websocket/peer.go:110-131, 785-793), and the room's
+// of the room, its sender included (provider/websocket/peer.go:113-134, 796-801), and the room's
 // relay then sends it to every other process (awareness_relay.go), so one tab's frame naming
 // thousands of invented client ids used to cost every reader of every process an entry each, and
 // the room it filled had nothing left for the reader who joined next.
@@ -37,7 +37,7 @@ import (
 // to the sender carries that frame too.
 //
 // A socket's clients go with it: ygo tracks the client ids a peer announced and removes them as
-// the peer disconnects (provider/websocket/peer.go:474-501, 503-689), which the relay carries to
+// the peer disconnects (provider/websocket/peer.go:484-509, 511-697), which the relay carries to
 // the other processes like any other removal, and the filter frees a client's place as the socket
 // takes that client away. So a room's awareness holds its sockets' clients at most, and the
 // sockets of a process are themselves bounded (Service.canAddConnection).
@@ -60,7 +60,7 @@ const (
 	// maxAwarenessBytesPerRoom, so nothing a reader sends comes near it; a larger one reaches ygo
 	// as an awareness message naming no client, which applies and broadcasts as no change. It
 	// bounds what the filter buffers for a socket, well under the 64 MiB message ygo's own reader
-	// buffers (provider/websocket/server.go:148, 2049).
+	// buffers (provider/websocket/server.go:148, 2061).
 	maxAwarenessMessageBytes = 256 << 10
 	// maxDocumentMessageHeader is how many bytes of a message the filter reads to learn what the
 	// message is: Hocuspocus frames each one with the document's name and the message's type
