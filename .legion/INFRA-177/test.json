@@ -2,45 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-31T01:56:00Z",
-  "round": 20,
-  "headTested": "7caa4eb89e61a63293ac395fb4d078e69c2c1239 (code head 8f21fdf701a9: merges 11cb25c1 with main 8fd342e4 and 84641aed with main 39b51494, and 8f21fdf7's three pr2422 notes)",
-  "scope": "Per the architect: a merge round after READY was withdrawn for a conflict. Only the lines the merges moved, handoff-records.sh, and the required CI.",
-  "fingerprint": "changed: a9d4f392304a5d1b25f78868efea6361c0bd070b1f4bcc7952518315ff9e7fec at ca1e146a -> fac79d580b3429bedbd6e514501d7076a183e9cecb566c9d23af0d2b9ee8c501 at 8f21fdf7 (PR diff against its fork point, context 0, hunk headers and index lines stripped, .legion and docs/solutions left out). Files whose PR lines moved: bun.lock, architect-root.md, skills/legion-architect/SKILL.md, wake-routing.md, skills/legion-worker/SKILL.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, 0150_handoffs.up.sql. No code file moved.",
+  "completed": "2026-10-31T05:08:00Z",
+  "round": 21,
+  "headTested": "d29a6a043799f93fcdc7d849abb581c40aa1e017 (code head e6a3698a4c16: the merge with main d7e1daaa after the reviewer's approval at 738f171f)",
+  "scope": "Merge round: only the lines the merge moved, handoff-records.sh, and the required CI. The workspace was recreated before this round; it held the pushed branch, my round-20 handoff included, and nothing of mine was unpushed.",
+  "fingerprint": "changed: fac79d580b3429bedbd6e514501d7076a183e9cecb566c9d23af0d2b9ee8c501 at 8f21fdf7 -> 0e9a858fe9c217522abc6bf497a0991e77df8b3182b0ffbb6892f58e27f0ca2e at e6a3698a (PR diff against its fork point, context 0, hunk headers and index lines stripped; .legion, docs/solutions and claude-envoy dist/ and legion/ left out). Both values equal the implementer's. Files whose PR lines moved: AGENTS.md, docs/kubernetes.md, scripts/e2e/README.md. No code file moved. skills/AGENTS.md, the one conflict, has unchanged PR lines.",
   "checks": {
-    "bun.lock": "the PR's three version bumps are gone because main now carries them: bun.lock at the head is identical to main's.",
-    "resolvedPromptsAndSkills": "architect-root.md, legion-architect/SKILL.md, wake-routing.md and legion-worker/SKILL.md keep main's new text (its reworded line, the dropped integration-test clause, the 'parent's last round' row) with this change's wording on the same lines ('the planner's plan handoff', 'dispatch handoff-read', 'no handoff is a commit', 'a push refused after the handoff import moved the branch'); architect.md's PR lines did not move. Grep for skip-checks, .legion/<, handoff file, handoff-only, committed handoff and handoff commit in the five files: one hit, wake-routing.md's pull-request-missing row ('the handoff commit'), which is main's own text, unchanged by this PR, and still true: the commit the implementer completed at.",
-    "relaidEnvoyDocs": "packages/envoy/AGENTS.md and cmd/dispatch/README.md: the sentence sets differ only where #2422's one-sentence-per-line layout split or joined them and turned the route table into a list. Every fact is present at the head: the Phase handoffs component item with handoffs.go and 0150, the session-only POST and 403 HANDOFF_FORBIDDEN, DispatchHandoffBodyMax, handoff.recorded, handoffRequestLimit 1,576,960, routeBody, 413 CAP_EXCEEDED on the handoff write, the changed_paths sentence; the README's four handoff routes with their auth and answers, and 1,576,960 bytes in the limit list.",
-    "migration0150": "the SQL of 0150_handoffs.up.sql is byte-identical to ca1e146a's (non-comment lines diffed); the census file is unchanged. The README paragraph moved into the migration's own header, as main's README now requires (line 634: 'A new migration describes itself in the header comment of its own .up.sql'), and the header carries every fact the paragraph had (columns, cascade, lowercase-slug check, versions from 1 unique, text not jsonb, author, created_at, a new table that rolls, census 0, follows 0137-0149).",
-    "notes8f21fdf7": "main's three pr2422 notes are corrected in place (each rule kept, each handoff-push or retro-removal clause 'before sjawhar/legion#2354' beside what holds now) and listed in the superseding note's corrected list.",
-    "generatedCopies": "packages/claude-envoy/dist and legion/ are identical to main's at the head, as #2423 requires."
+    "relaidDocs": "Every sentence of the PR's added lines, normalized to words, is found contiguous in the merged AGENTS.md (26 of 26), docs/kubernetes.md (119 of 120) and scripts/e2e/README.md (144 of 147). The four left over sit on table-to-list joins; a word diff of their whole sections across the merge shows them unchanged: kubernetes.md 'Handoff records on the Dispatch issue (daemon API contract 44)' 393 = 393 words, ratio 1.0; 'Moving the handoffs onto their Dispatch issues' 1879 = 1879, ratio 1.0; README '## handoff-records.sh' 1178 = 1178, ratio 1.0; '## handoff-cutover-github.sh' 610 -> 616, the only insertions 'Each item below names a' and 'then', the table turned list as #2474's rule says; the 'a seventh holder' line's only change 'rows' -> 'items'; AGENTS.md's legion handoffs import item 233 = 233, ratio 1.0.",
+    "removedLines": "Of the PR's removed lines, the 12 whose words still appear in the merged files are all re-added by the PR itself (reflowed lines), each appearing exactly as often as on main.",
+    "skillsAgents": "skills/AGENTS.md keeps this change's legion-retro/ and legion-worker/ rows (handoff records on the Dispatch issue; retro removes nothing) and main's new outside-message/ and plain-words/ rows.",
+    "generatedCopies": "claude-envoy dist/ and legion/ and bun.lock are identical to main's at the code head."
   },
-  "numbers": "free on main 39b51494: main's daemon API contract 43 (head 44), daemon migration 0064 (head 0065), Dispatch migration 0149 (head 0150).",
-  "mergeability": "git merge-tree of the head with main 39b51494 is clean; GitHub reports UNKNOWN (still computing) at 7caa4eb8.",
-  "ci": "Read 01:55Z: the code head 8f21fdf7 has no check runs of its own, since it was pushed beneath the tip; at the tip 7caa4eb8 changes is queued, so the required test job has not run and has not settled green. Read as running, not waited for.",
+  "numbers": "free on main 3f7b3e75: daemon API contract 43 there (head 44), daemon migration 0064 (head 0065), Dispatch migration 0149 (head 0150).",
+  "mergeability": "GitHub: MERGEABLE, BLOCKED (required checks not yet run) at d29a6a04; git merge-tree with main 3f7b3e75, which moved past the fork d7e1daaa, is clean.",
+  "ci": "Read 05:07Z: the code head e6a3698a has no check runs of its own (pushed beneath the tip); at the tip d29a6a04 changes is queued, so the required test job has not run and has not settled green. Read as running, not waited for.",
+  "notesForRetro": "None that teaches the old mechanism: the merge brought 4 notes, and main after the fork none, matching handoff commit, handoff-only, handoff push, skip-checks: true or retro removing .legion/. Two #2474 notes mention .legion/ harmlessly: 'list jj diff ... outside .legion/' (true on main and harmless after the cutover) and dated evidence 'retro removed .legion/'.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's fingerprint and its per-commit account on #2354 against the PR diff at both heads, and handoff-records.sh on a fresh database."
+    "how": "Recomputed both fingerprints (equal to the implementer's), and re-ran its word check of the relaid files independently, section by section."
   },
-  "notesForRetro": "none found beyond 8f21fdf7's three",
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Handoff records end to end after the merges with main 8fd342e4 and 39b51494",
+      "criterion": "Handoff records end to end after the merge with main d7e1daaa",
       "surface": "scripts/e2e/handoff-records.sh: the real dispatch CLI, the real Dispatch server and the whole daemon",
-      "command": "source /legion/harness/env.sh && LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/legion_t20?sslmode=disable' LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
-      "observed": "9 checks; --- PASS: TestHandoffRecordsLive (28.19s); handoff records e2e: PASS in 41s",
-      "headSha": "7caa4eb89e61a63293ac395fb4d078e69c2c1239",
-      "negativeControl": "its a6-control: a 262,145-byte body -> 413 CAP_EXCEEDED; a3: another session's record -> 403 HANDOFF_SESSION_MISMATCH"
+      "command": "source /legion/harness/env.sh && LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/legion_t21?sslmode=disable' LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
+      "observed": "9 checks; --- PASS: TestHandoffRecordsLive (26.69s); handoff records e2e: PASS in 40s",
+      "headSha": "d29a6a043799f93fcdc7d849abb581c40aa1e017",
+      "negativeControl": "its a10 leg: with Dispatch down, handoff/complete -> 502 DISPATCH_READ_FAILED 'complete again once Dispatch answers; this completion changed nothing'; a6-control: a 262,145-byte body -> 413 CAP_EXCEEDED"
     },
     {
-      "criterion": "The merges moved only layout and conflict lines: the migration's SQL and every relaid fact are unchanged",
-      "surface": "the PR diff against its fork point at ca1e146a and 8f21fdf7",
-      "command": "per-file comparison of the PR's +/- lines at both heads; diff of 0150_handoffs.up.sql without comments; grep of each relaid fact in packages/envoy/AGENTS.md and cmd/dispatch/README.md",
-      "observed": "8 files moved, none of them code; SQL byte-identical; every fact present",
-      "headSha": "7caa4eb89e61a63293ac395fb4d078e69c2c1239",
-      "negativeControl": "the fingerprint itself: a9d4f392 at ca1e146a against fac79d58 at 8f21fdf7 shows the comparison does detect the moved lines"
+      "criterion": "The merge moved only layout: every handoff section of the three relaid documents says what it said",
+      "surface": "the PR diff against its fork point at 8f21fdf7 and e6a3698a, and the merged files",
+      "command": "per-file comparison of the PR's +/- lines at both heads; per-sentence contiguous word match; difflib word diff of each handoff section at 8f21fdf7 and e6a3698a",
+      "observed": "3 files moved, none code; every handoff section word-identical except the cutover section's table-to-list connective 'Each item below names a ... then'",
+      "headSha": "d29a6a043799f93fcdc7d849abb581c40aa1e017",
+      "negativeControl": "the same word diff on the cutover section does report the two inserted connectives, so the comparison detects a moved word"
     }
   ]
 }
