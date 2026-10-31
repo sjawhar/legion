@@ -15,6 +15,7 @@ import {
   BRIDGE_BIND_WAIT_MS,
   type DocumentBridge,
   MarginProvider,
+  REANCHOR_IN_PROGRESS,
   useMargin,
 } from "./margin-context";
 import { issue, specArtifact, stubDocumentBridge } from "./margin-fixture";
@@ -560,6 +561,50 @@ test("a second missing anchor after the margin re-anchored is the reader's to se
     expect(within(composer).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe(
       "Please revise."
     );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// The held send stays refused while the margin waits for the mark it wrote to reach the server:
+// `readdress` only amends that send, so a composer left with no line of the margin's own falls
+// back to the server's words - "anchor mark is not in the document", about a mark the reader
+// never saw - between the re-mark and the retry (dispatch://INFRA-727).
+test("the composer never shows the server's words between the re-mark and the retry's outcome", async () => {
+  const sent = Promise.withResolvers<void>();
+  let waiting = false;
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark: (_markId, _kind, quote, placement) => ({ markId: "m-2", placement, quote }),
+    whenSent: async () => {
+      waiting = true;
+      return sent.promise;
+    },
+  });
+  let attempts = 0;
+  const createComment = spyOn(api, "createComment").mockImplementation(async () => {
+    attempts += 1;
+    if (attempts === 1) throw ANCHOR_MISSING;
+    return undefined as never;
+  });
+  const view = renderMarginCompose(bridge);
+
+  try {
+    const composer = await sendMarginComment("Please revise.");
+    // The mark is written and the send re-addressed to it, and the retry is waiting on this
+    // browser's edits: what the composer shows now it shows for the whole of that wait.
+    await waitFor(() => expect(waiting).toBe(true));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(within(composer).getByText(REANCHOR_IN_PROGRESS("comment"))).toBeTruthy();
+    expect(within(composer).queryByText("anchor mark is not in the document")).toBeNull();
+    expect(createComment).toHaveBeenCalledTimes(1);
+
+    sent.resolve();
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    // The retry was answered, and the line the recovery put up went with it.
+    await waitFor(() => expect(screen.queryByText(REANCHOR_IN_PROGRESS("comment"))).toBeNull());
   } finally {
     view.unmount();
     createComment.mockRestore();

@@ -774,3 +774,58 @@ test("a count taken before a row was written is never reported, and answers no w
   waiter.report(artifact, { count: 0, readOnly: false, rebuiltAt: undefined, stored: true });
   await waitFor(() => expect(answered).toBe(true));
 });
+
+// The count a report drops for a row written behind it is left to that row's own write to ask
+// for again. A write the store refuses - the browser's quota, say - is as much the end of that
+// write as a commit, and without a report of its own the toolbar keeps the count it was showing
+// and a `whenSent` waiting on one runs to its bound (dispatch://INFRA-727).
+test("a row whose write the store refuses still asks for the count the dropped report owed", async () => {
+  const held = Promise.withResolvers<void>();
+  const reached = Promise.withResolvers<void>();
+  const quota = new Error("QuotaExceededError");
+  let holdNextCount = false;
+  let refuseNextWrite = false;
+  const wrapStore = (edits: PendingEdits): PendingEdits => ({
+    ...edits,
+    async count() {
+      const taken = await edits.count();
+      if (!holdNextCount) {
+        return taken;
+      }
+      // The count the first row's write asked for, answering only once the refused row below
+      // has been written: `report` drops it, because it reads a document without that row.
+      holdNextCount = false;
+      reached.resolve();
+      await held.promise;
+      return taken;
+    },
+    record(update) {
+      const row = edits.record(update);
+      if (!refuseNextWrite) {
+        return row;
+      }
+      refuseNextWrite = false;
+      return { seq: row.seq, written: row.written.then(() => Promise.reject(quota)) };
+    },
+  });
+  const logged = spyOn(console, "error").mockImplementation(() => {});
+  const { artifact, states, type } = await scripted(artifactId(), undefined, wrapStore);
+  try {
+    await waitFor(() => expect(states.map((state) => state.count)).toEqual([0]));
+
+    holdNextCount = true;
+    type("first");
+    await reached.promise;
+    refuseNextWrite = true;
+    type(" second");
+    await waitFor(async () => expect((await rowsOf(artifact)).length).toBe(2));
+    held.resolve();
+
+    // The held count was dropped, and the refused write asked for the one that counts both
+    // rows: the reader is shown what this browser is holding, not what it held an edit ago.
+    await waitFor(() => expect(states.map((state) => state.count)).toEqual([0, 2]));
+    expect(logged).toHaveBeenCalledWith("Could not store a pending document edit", quota);
+  } finally {
+    logged.mockRestore();
+  }
+});

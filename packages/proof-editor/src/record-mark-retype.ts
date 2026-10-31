@@ -287,55 +287,70 @@ interface Readings {
   readonly surrounded: readonly MarkRange[];
 }
 
+/** One block of a document's text: where its own content opens in the document, where its first
+ *  character sits in that text, and how many characters it reads there. The list of them is what
+ *  every scan is given, because it is the only thing that says where a block begins and ends: a
+ *  newline of the text says nothing, `textOf` reading a hard break and a code block's own lines
+ *  as newlines exactly as it reads the break between two blocks. */
+interface TextBlock {
+  readonly at: number;
+  readonly base: number;
+  readonly length: number;
+}
+
+/** The block of `blocks` the character at offset `at` reads in: the last one that opens at or
+ *  before it, found by halving the list. The newline between two blocks belongs to the block in
+ *  front of it, which is where a reading that stops at that break stops. */
+function blockAt(blocks: readonly TextBlock[], at: number): TextBlock {
+  let low = 0;
+  let high = blocks.length - 1;
+  while (low < high) {
+    const middle = (low + high + 1) >> 1;
+    if (blocks[middle].at <= at) low = middle;
+    else high = middle - 1;
+  }
+  return blocks[low];
+}
+
 /** Whether the reading of a `length`-character quote at offset `at` of `text` is surrounded by
  *  `surroundings`: the text before it ends with the remembered prefix, the text after it starts
  *  with the remembered suffix, and a side remembered whole reaches the edge of this reading's
- *  own block, as it reached the edge of the block the reader selected in. `acrossBlocks` says
- *  whether a newline of `text` is a block break (`documentText`) or a line break inside one
- *  block. Read in place, so scanning a text for its readings copies none of it. */
+ *  own block, as it reached the edge of the block the reader selected in. That edge is read from
+ *  `blocks` and from nothing else, a newline of `text` being no block break to go by. Read in
+ *  place, so scanning a text for its readings copies none of it. */
 function surroundedBy(
   text: string,
   at: number,
   length: number,
   surroundings: Surroundings,
-  acrossBlocks: boolean
+  blocks: readonly TextBlock[]
 ): boolean {
   const prefixAt = at - surroundings.prefix.length;
   if (prefixAt < 0 || !text.startsWith(surroundings.prefix, prefixAt)) return false;
   // A side remembered whole ran back to the start of the reader's block, so this reading's own
-  // block has to begin where that text begins: the start of the text, or just past the newline
-  // that stands for a block break where `text` is a whole document read as one. Inside one
-  // block's own text a newline is a line break that block holds, never an edge of it.
-  if (
-    surroundings.prefixAtBlockStart &&
-    prefixAt !== 0 &&
-    !(acrossBlocks && text[prefixAt - 1] === "\n")
-  ) {
-    return false;
-  }
+  // block has to begin where that text begins.
+  if (surroundings.prefixAtBlockStart && blockAt(blocks, prefixAt).at !== prefixAt) return false;
   const suffixAt = at + length;
   if (!text.startsWith(surroundings.suffix, suffixAt)) return false;
   // The same at the other end: a suffix remembered whole ran on to the end of that block.
   const suffixEnd = suffixAt + surroundings.suffix.length;
-  return (
-    !surroundings.suffixAtBlockEnd ||
-    suffixEnd === text.length ||
-    (acrossBlocks && text[suffixEnd] === "\n")
-  );
+  if (!surroundings.suffixAtBlockEnd) return true;
+  const block = blockAt(blocks, suffixEnd);
+  return block.at + block.length === suffixEnd;
 }
 
 /** The readings of `quote` in `text`: the one scan this module makes over any text, so a
  *  placement's count of a block and a re-mark's choice between that block's readings can never
- *  disagree about what reads there. `positionAt` says where the character at an offset of `text`
- *  begins in the document, which is what turns a reading into a range a mark can be written over;
- *  it is asked only for the readings a caller can still use. `acrossBlocks` says whether a
- *  newline of `text` breaks a block, which is what a remembered block edge is read against. */
+ *  disagree about what reads there. `blocks` says where each block of `text` begins and ends -
+ *  one block's own text is scanned as a list of that one block, a whole document as the list
+ *  `documentText` reads it with - which is what a remembered block edge is read against and what
+ *  turns a reading into a range a mark can be written over; the position of a reading is worked
+ *  out only for the readings a caller can still use. */
 function readingsOf(
   text: string,
   quote: string,
   surroundings: Surroundings,
-  positionAt: (offset: number) => number,
-  acrossBlocks: boolean
+  blocks: readonly TextBlock[]
 ): Readings {
   const surrounded: MarkRange[] = [];
   let count = 0;
@@ -344,21 +359,13 @@ function readingsOf(
   for (let at = text.indexOf(quote); at !== -1; at = text.indexOf(quote, at + 1)) {
     count += 1;
     const matches =
-      surrounded.length < 2 && surroundedBy(text, at, quote.length, surroundings, acrossBlocks);
+      surrounded.length < 2 && surroundedBy(text, at, quote.length, surroundings, blocks);
     if (first !== undefined && !matches) continue;
-    const range = { from: positionAt(at), to: positionAt(at + quote.length) };
+    const range = { from: positionIn(blocks, at), to: positionIn(blocks, at + quote.length) };
     first ??= range;
     if (matches) surrounded.push(range);
   }
   return { count, first, surrounded };
-}
-
-/** One block of a document's text: where its own content opens in the document, where its first
- *  character sits in that text, and how many characters it reads there. */
-interface TextBlock {
-  readonly at: number;
-  readonly base: number;
-  readonly length: number;
 }
 
 /** One block's own text, read as the selection bar reads a quote out of the document:
@@ -398,14 +405,7 @@ function documentText(doc: ProseMirrorNode): { blocks: TextBlock[]; text: string
  *  spans a gap, and it begins where the block in front of it ends - which is where a reading that
  *  stops at the break stops, and where one that starts there starts. */
 function positionIn(blocks: readonly TextBlock[], at: number): number {
-  let low = 0;
-  let high = blocks.length - 1;
-  while (low < high) {
-    const middle = (low + high + 1) >> 1;
-    if (blocks[middle].at <= at) low = middle;
-    else high = middle - 1;
-  }
-  const block = blocks[low];
+  const block = blockAt(blocks, at);
   return block.base + Math.min(at - block.at, block.length);
 }
 
@@ -449,12 +449,15 @@ export function placementOf(
   const offset = range.from - base;
   if (text.slice(offset, offset + quote.length) !== quote) return null;
   const after = offset + quote.length;
+  // The block is the whole of what the scan below is given, so it opens where its text opens
+  // and ends where it ends: the edges a side kept shorter than the cap ran to.
+  const blocks = [{ at: 0, base, length: text.length }];
   return {
     blockId: blockIdOf($start.parent),
     prefix: text.slice(Math.max(0, offset - QUOTE_CONTEXT_CHARS), offset),
     // The scan a re-mark reads this block with, so the count kept here and the readings found
     // then are the same readings.
-    readings: readingsOf(text, quote, NO_SURROUNDINGS, (at) => base + at, false).count,
+    readings: readingsOf(text, quote, NO_SURROUNDINGS, blocks).count,
     suffix: text.slice(after, after + QUOTE_CONTEXT_CHARS),
   };
 }
@@ -491,7 +494,9 @@ function remarkRange(
     // The reader's own block, while it still reads their words, read as the selection bar read
     // the quote out of it. One scan of it answers all three questions below.
     const blockText = textOf(block.block);
-    const readings = readingsOf(blockText, quote, surroundings, (at) => block.base + at, false);
+    const readings = readingsOf(blockText, quote, surroundings, [
+      { at: 0, base: block.base, length: blockText.length },
+    ]);
     // Two readings there surrounded as theirs was: another writer's reading of the same words
     // among the same words is not one this editor may choose between, and their own words have
     // not moved an inch, so the refusal is neither "elsewhere" nor "the text around them
@@ -514,7 +519,7 @@ function remarkRange(
   // The document is read as one text across its blocks, so a quote that runs across a break reads
   // here as the bar read it when the reader selected it.
   const { blocks, text } = documentText(state.doc);
-  const readings = readingsOf(text, quote, surroundings, (at) => positionIn(blocks, at), true);
+  const readings = readingsOf(text, quote, surroundings, blocks);
   if (readings.surrounded.length === 1) return readings.surrounded[0];
   // More than one reading surrounded alike, where the composer kept where the reader selected.
   // This step runs only once their own block is gone, reads the words nowhere or never had an

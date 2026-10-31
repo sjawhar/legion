@@ -330,7 +330,8 @@ export function startPendingSync({
         // nothing else pending it reads none pending. Whoever waits for this browser's edits to
         // reach the server (`pending-waiter.ts`) would be answered by it while the row it waits
         // for is still being written, so there is no report to give here: the row's own write
-        // asks for a fresh one as soon as it commits (`record`).
+        // asks for a fresh one as soon as it settles, whether the store takes the row or
+        // refuses it (`record`).
         if (countedThrough !== recordedThrough) continue;
         const state: PendingState = {
           count,
@@ -382,6 +383,11 @@ export function startPendingSync({
         () => report(),
         (error: unknown) => {
           console.error("Could not store a pending document edit", error);
+          // The report this row's write was left to give (`report`, above) is owed whether the
+          // store took the row or refused it - the browser's quota, say: the count a report in
+          // flight dropped for this row is nowhere else, so without this the toolbar keeps the
+          // count it was showing, and a `whenSent` waiting on that report runs to its bound.
+          return report();
         }
       );
     return entry;

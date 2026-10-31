@@ -133,7 +133,10 @@ export const DOCUMENT_CLOSED_REFUSAL = (kind: ComposerKind): string =>
  *  waits for that (`whenBridgeBinds`) rather than refusing at once. The server's own words for
  *  that refusal - "anchor mark is not in the document" - are about a mark the reader never saw,
  *  so this says what is happening to the thing they wrote instead. It asks nothing of them: the
- *  send goes again by itself once the mark is written. */
+ *  send goes again by itself once the mark is written. It stands from the moment the recovery
+ *  starts until the retry's own outcome, the held send staying refused the whole way through -
+ *  `readdress` only amends it - so a composer left with no line of the margin's own would read
+ *  the server's sentence again between the two. */
 export const REANCHOR_IN_PROGRESS = (kind: ComposerKind): string =>
   `Re-attaching this ${kind} to the text you selected, and sending it again…`;
 
@@ -198,9 +201,9 @@ interface OpenCompose {
 interface MarginContextValue {
   /** What the composer says in place of the server's words for a send it refused for a mark it
    *  cannot see, kept with the mark it answers: why the margin could not write that mark again
-   *  (`REANCHOR_REFUSALS`, `DOCUMENT_CLOSED_REFUSAL`), or that it is still writing it
-   *  (`REANCHOR_IN_PROGRESS`), while the recovery waits for a document to bind. A newer anchor
-   *  leaves it behind. */
+   *  (`REANCHOR_REFUSALS`, `DOCUMENT_CLOSED_REFUSAL`), or that the recovery is still running
+   *  (`REANCHOR_IN_PROGRESS`), from the wait for a document to bind to the answer the retry it
+   *  makes is given. A newer anchor leaves it behind. */
   anchorRefusal: AnchorRefusal | undefined;
   blockFilterId: string | undefined;
   blockPlacements: ReadonlyMap<string, MarkPlacement>;
@@ -407,7 +410,12 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
           return;
         }
         remarked.current.add(outcome.markId);
-        setAnchorRefusal(undefined);
+        // The same line, under the mark the retry will name: the held send is refused until
+        // that retry is answered - `readdress` only amends it - so clearing it here puts the
+        // server's "anchor mark is not in the document", about a mark the reader never saw,
+        // back in front of them for the length of the wait below. `onOutcome` takes it down
+        // when the retry's own outcome comes.
+        setAnchorRefusal({ markId: outcome.markId, text: REANCHOR_IN_PROGRESS(kind) });
         store.readdress(held.mutationKey, { ...request, anchor: anchorAt(anchor, outcome) });
         await bridge.whenSent(REANCHOR_SEND_WAIT_MS);
         // The retry carries the draft the store holds, and the composer writes what the reader
@@ -454,6 +462,13 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
         !remarked.current.has(markId)
       ) {
         void reanchor(send);
+        return;
+      }
+      // A refusal of a send the margin re-addressed itself: that recovery is over, whatever the
+      // refusal says, so the line it put up goes and the server's own words are the reader's to
+      // read. Running the recovery again would send the same words to the same refusal.
+      if (remarked.current.has(markId)) {
+        setAnchorRefusal((shown) => (shown?.markId === markId ? undefined : shown));
       }
     });
     return () => {

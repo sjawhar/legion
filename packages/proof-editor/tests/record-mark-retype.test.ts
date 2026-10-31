@@ -671,9 +671,9 @@ test("remarkRecordMark takes the reading the whole document surrounds as the rea
 
     // Two readings left, each surrounded as the placement remembers and nothing to tell them
     // apart: a record on the passage the reader never selected is worse than one they can
-    // attach again, and their words never moved. This is the document-wide step's "ambiguous" -
-    // the surroundings the composer kept really do answer both readings - never the refusal for
-    // a selection nothing was kept of.
+    // attach again. This is the document-wide step's "ambiguous" - the surroundings the
+    // composer kept really do answer both readings - never the refusal for a selection nothing
+    // was kept of.
     expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement)).toEqual({
       refused: "ambiguous",
     });
@@ -730,6 +730,61 @@ test("remarkRecordMark refuses an unrelated reading elsewhere once the block the
 
     expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement)).toEqual({
       refused: "unplaceable",
+    });
+    expect(marksInDoc(view)).toEqual([]);
+  });
+});
+
+/** The reader's line written as a line of another block rather than as a block of its own: a
+ *  hard break inside a paragraph, and a line of a fenced code block. `documentText` reads both
+ *  of those line breaks as the newline it reads a block break as - Milkdown's `hardbreak`
+ *  stands for one newline, and a code block keeps its own - so what tells a block's edge from a
+ *  line's edge is where the blocks begin and end, never the character in front of a reading
+ *  (dispatch://INFRA-727). */
+const HARD_BREAK_LINES = `Notes:\\\n${WHOLE_BLOCK}\\\nLater text here.`;
+const CODE_BLOCK_LINES = `\`\`\`\nNotes:\n${WHOLE_BLOCK}\nLater text here.\n\`\`\``;
+
+test("remarkRecordMark refuses a line inside another block once the block the reader selected whole is gone", async () => {
+  for (const lines of [HARD_BREAK_LINES, CODE_BLOCK_LINES]) {
+    await withMarksEditor(`${WHOLE_BLOCK}\n\n${lines}`, ({ view }) => {
+      const range = { from: 1, to: 1 + WHOLE_BLOCK.length };
+      const start = comment(view, WHOLE_BLOCK, BY, "", range);
+      const placement = placementFor(view, range, WHOLE_BLOCK);
+      expect(placement).toEqual({
+        blockId: expect.any(String),
+        prefix: "",
+        readings: 1,
+        suffix: "",
+      });
+      // Another writer deleted the block the reader selected whole. The one reading left is a
+      // line in the middle of a block of someone else's, which opens and closes nothing: the
+      // newlines around it are that block's own, and a record put there is one on a passage
+      // the reader never selected that no refusal would ever tell them about.
+      dropParagraph(view);
+      rebuildEditorState(view);
+
+      expect(remarkRecordMark(view, start.id, "comment", BY, WHOLE_BLOCK, placement)).toEqual({
+        refused: "unplaceable",
+      });
+      expect(marksInDoc(view)).toEqual([]);
+    });
+  }
+});
+
+test("remarkRecordMark refuses two blocks the document reads the reader's whole block in once theirs is gone", async () => {
+  await withMarksEditor(`${WHOLE_BLOCK}\n\n${WHOLE_BLOCK}\n\n${WHOLE_BLOCK}`, ({ view }) => {
+    const range = { from: 1, to: 1 + WHOLE_BLOCK.length };
+    const start = comment(view, WHOLE_BLOCK, BY, "", range);
+    const placement = placementFor(view, range, WHOLE_BLOCK);
+    // Their own block is gone, and two blocks left open and close on those words alone as
+    // theirs did: the empty sides are those blocks' own edges, so both readings answer them
+    // and nothing kept of the selection says which of the two the draft is about. The
+    // document-wide step's "ambiguous", for a selection a placement does describe.
+    dropParagraph(view);
+    rebuildEditorState(view);
+
+    expect(remarkRecordMark(view, start.id, "comment", BY, WHOLE_BLOCK, placement)).toEqual({
+      refused: "ambiguous",
     });
     expect(marksInDoc(view)).toEqual([]);
   });

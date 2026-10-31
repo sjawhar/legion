@@ -955,3 +955,69 @@ test("a comment on a whole block that is deleted is not moved to the one reading
     await alice.close();
   }
 });
+
+/** A spec whose second paragraph holds the same words on a line of its own, reached by a hard
+ *  break rather than a paragraph break. The line looks like a block to anyone reading the
+ *  document's text for newlines, and is not one. */
+const HARD_BREAK_SPEC = [
+  "## Review",
+  "",
+  "Ship it now.",
+  "",
+  "Notes:  ",
+  "Ship it now.  ",
+  "Later text here.",
+  "",
+].join("\n");
+
+/** The words the reader selected were the whole of their block, so what the composer kept of
+ *  their surroundings is the block's two edges. A line inside another paragraph has no such
+ *  edges, however much the document's text reads like it does: a hard break is a newline there,
+ *  and so is every line of a code block. The comment belongs to neither, so once the reader's own
+ *  block has lost the words Send attaches nothing and says so. */
+test("a comment on a whole block is not moved to a line of another paragraph", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: HARD_BREAK_SPEC,
+    title: "Review the spec",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const transport = await documentTransport(page);
+    await openSpec(page, issue.key, "Later text here.");
+    await selectEditorText(page, "Ship it now.");
+    await barAction(page, "Comment");
+    await expect(documentEditor(page).locator('span[data-proof="comment"][data-id]')).toHaveCount(
+      1
+    );
+    await composer(page).getByLabel("Comment").fill("Which one is this?");
+
+    transport.hold();
+    await transport.sever();
+    await editArtifact(
+      issue.primary_artifact_id,
+      {
+        ops: [{ find: "Ship it now.", occurrence: 0, op: "replace", with: "Nothing of the sort." }],
+      },
+      { actor: { id: "e2e-compose-wait", kind: "session" }, as: "agent" }
+    );
+    await page.waitForTimeout(PAST_THE_SWEEP_MS);
+    await transport.release();
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect(documentEditor(page)).toContainText("Nothing of the sort.");
+
+    await send(page);
+    await expect(composer(page)).toContainText("Your draft is kept");
+    await expect(composer(page).getByLabel("Comment")).toHaveValue("Which one is this?");
+    expect(await listComments(issue.key, issue.primary_artifact_id)).toHaveLength(0);
+    // Nothing is left on the line inside the second paragraph.
+    expect(await markOffsets(page)).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
