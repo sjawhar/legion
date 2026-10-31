@@ -2,81 +2,61 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-575",
-  "completed": "2026-10-31T03:05:00Z",
-  "round": 5,
-  "answersReview": "Review 5720252758 at ee131f72, changes requested: five correctness defects and thirteen maintainability findings, all eighteen threads answered and resolved, plus the bun.lock revert the review asked for. Code head a395dc20852a1a8c25d8ee64a0131a0ba639724f.",
+  "completed": "2026-10-31T06:15:00Z",
+  "round": 6,
+  "answersTestFailures": [
+    "Failure 1 of .legion/INFRA-575/test.json round 5: one Enter opened the selected decision block's note field but left the reader out of it, so every keystroke after it was still the Inbox's keymap. Fixed, and the tester's red row passes unmodified.",
+    "Failure 2: e2e/nav.e2e.ts:14 expected a per-issue read the column no longer makes. The expectation is corrected, with a comment saying what the Inbox reads now; the row's own subject, that the sidebar makes no per-issue request, is untouched."
+  ],
   "proof": [
     {
-      "criterion": "Defect 1: with the reading pane on, Enter on a list control (a row's owner link, Later (n), the bulk bar, a filter) is that control's, not a jump into the selected question's answer box.",
-      "surface": "The Inbox at pane width, rendered with its real keymap, where the reviewer's own probe found the defect.",
-      "command": "cd packages/dispatch && bun test web/src/features/inbox/Inbox.test.tsx -t \"Enter is the link's or the button's\"",
-      "observed": "Green: the focused link and the focused filter button each receive Enter (fireEvent.keyDown answers true, the default not prevented) and keep the focus, and a row's own Enter still reaches the answer box.",
-      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
-      "negativeControl": "With the old `when` restored (`paneShown ? !focusInPane() && …`) the row fails: `expect(fireEvent.keyDown(link, { key: \"Enter\" })).toBe(true)` receives false, which is the keymap having taken the key and called preventDefault."
+      "criterion": "One Enter opens the selected decision block's note field and puts the reader in it, in a real browser; what they type then reaches the answer and the selection does not move.",
+      "surface": "The Inbox page of a running Dispatch at 1440 px - the built SPA served by the real Go server against a real Postgres, driven in a real Chromium - with a decision block in the column.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium -g \"note field\"",
+      "observed": "Green: the tester's own row, `Enter opens the selected decision block's note field and puts the focus in it`, unmodified (e2e/inbox-reading-pane.e2e.ts:742, commit d542d2dac754).",
+      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
+      "negativeControl": "With the fix's one line neutered (`focusNoteOnOpen.current = false`) and the tree otherwise final, that row fails at its focus assertion: `expect(locator).toBeFocused() failed … unexpected value \"inactive\"`. A unit row cannot be this control: `fireEvent` wraps the click in `act()`, which flushes the render and its effects inside the press, so the defective code passed a one-press unit row too. The browser row is the proof, and the unit rows beside it say so."
     },
     {
-      "criterion": "Defect 2: in a document with several open decision blocks, 1-9 and Enter act on the selected block, not on the first open block in document order.",
-      "surface": "The same Inbox, with two answerable decision cards drawn in the column.",
-      "command": "cd packages/dispatch && bun test web/src/features/inbox/Inbox.test.tsx -t \"the answer keys act on the selected decision block\"",
-      "observed": "Green: two decision asks of one document, ?item= naming the second, `1` ticking the second block's first option and Enter opening its note disclosure while the first block's stays shut.",
-      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
-      "negativeControl": "With the lookups restored to the whole pane the row fails: `1` ticks the first block's option, and the wait on the selected card's option times out."
+      "criterion": "The sidebar still makes no per-issue request, and the row says so against what the Inbox reads today.",
+      "surface": "The same running Dispatch, at the desktop width and in the phone drawer.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/nav.e2e.ts --project=chromium (and --project=iphone)",
+      "observed": "Green on both projects. The recorded requests are now `[\"?pinned=true\"]`: the list is one GET /inbox, the column draws the selected question from the row it already holds, and only a decision-block question has its issue read, for the one closed_at field the live document is handed - which these three ordinary asks are not.",
+      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
+      "negativeControl": "The row was red at d542d2da with `Array [ \"?pinned=true\", - \"/api/v1/issues/CORE-2\" ]`, and reproduced with its file run alone, so it was no shared-CPU failure: the expectation, not the page, was stale."
     },
     {
-      "criterion": "Defect 3: Change answer then Cancel leaves no draft behind, so no card claims a recorded answer was never sent.",
-      "surface": "An answered ask's card.",
-      "command": "cd packages/dispatch && bun test web/src/features/inbox/AskCard.test.tsx -t \"Change answer\"",
-      "observed": "Green: after Change answer and Cancel there is no 'closed before you sent your answer' line and no leftover draft, so the column no longer holds that question either.",
-      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
-      "negativeControl": "The reviewer's probe is the control: before the fix it printed `BANNER: This question closed before you sent your answer, so it was not sent. Your text is here to copy.First note` over the reader's own recorded answer, on every card for that ask."
-    },
-    {
-      "criterion": "Defect 4: an approval's word marks land on their own characters, with a hard break before them.",
-      "surface": "The editor's change decorations, built against a real ProseMirror document.",
-      "command": "cd packages/proof-editor && bun run test",
-      "observed": "220 pass, 0 fail, including the new hard-break case: a decoration over `canary` after a `\\n` draws `canary`, where it drew `anary ` before.",
-      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
-      "negativeControl": "The reviewer's probe: `\"Line one  \\nthe canary word.\"` has textContent `\"Line one\\nthe canary word.\"`, one character per break, which `textRuns` did not count; the new case fails without the leafText advance."
-    },
-    {
-      "criterion": "Defect 5: the word diff is bounded, so two unrelated large blocks cannot hold the main thread.",
-      "surface": "The pairing module both surfaces read.",
-      "command": "cd packages/dispatch && bun test web/src/features/doc/change-set.test.ts",
-      "observed": "Green, with a row for a pair past the bound: the pair is drawn as one whole-block removal and one whole-block addition rather than word by word. Measured here with diff@9: unbounded 1000 words 655 ms and 3000 words 7.7 s; bounded, the worst case is about 113 ms, and a tenth of a 3000-word block changed still diffs word by word (47 ms).",
-      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
-      "negativeControl": "The reviewer's benchmark is the control for the unbounded path: 679 ms at 1000 words, 8.1 s at 3000, 39 s at 6000."
-    },
-    {
-      "criterion": "The reading pane, the change view and the keys still behave as the spec says, after five fixes and thirteen refactors.",
-      "surface": "The Inbox page and the document pages of a running Dispatch - the built SPA served by the real Go server against a real Postgres, driven in a real Chromium - at 1440, 1280, 1279 and 390 px and in the drawer.",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts e2e/inbox.e2e.ts e2e/inbox-drawer.e2e.ts e2e/keyboard-inbox.e2e.ts e2e/keyboard.e2e.ts e2e/doc.e2e.ts e2e/artifacts.e2e.ts --project=chromium",
-      "observed": "88 passed. The eight rows of inbox-reading-pane.e2e.ts are among them, unmodified, two of them the tester's.",
-      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
-      "negativeControl": "Each of the two behaviour changes among the refactors carries its own red-before row: Next change offered where no mark drew (the button was there before the guard), and `j` from a held question (it selected the first row before the fix)."
+      "criterion": "The whole layout change, not one row (INFRA-92), at the head that merges.",
+      "surface": "The whole Chromium project of the Dispatch browser suite.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- --project=chromium",
+      "observed": "959 rows: 933 passed, 25 skipped, 1 failed (1.0h) at head b1e074f1a8ec. The one failure is e2e/hover-preview.e2e.ts:87, which is main's own. Both of the tester's round-5 failures are green in this run, and no other row is red.",
+      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
+      "negativeControl": "The tester's own run at d542d2da is the control: 931 passed, 25 skipped, 3 failed - its red row, the nav row and hover-preview. Two of the three are green here and the third is unchanged."
     },
     {
       "criterion": "Everything static is green here before the push, and CI runs on the code head.",
       "surface": "The repository's own gates, and GitHub Actions.",
-      "command": "bunx biome check packages/dispatch/ packages/proof-editor/; bun run typecheck and bun run test in each package; gh api 'repos/sjawhar/legion/actions/runs?head_sha=a395dc20…'",
-      "observed": "biome `Checked 778 files, No fixes applied`; proof-editor typecheck clean and 220 pass 0 fail; dispatch typecheck clean and 3060 pass 0 fail. GitHub created CI run 41161396138 for this head, queued when read; I did not wait for it, as the daemon reads CI itself.",
-      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
-      "negativeControl": "Round 4's reading of the same question is the control for the push shape: a head carrying `skip-checks: true` answered total_count 0, and an untrailered head answers with its runs."
+      "command": "bunx biome check packages/dispatch/; bun run typecheck and bun run test in packages/dispatch; gh api 'repos/sjawhar/legion/actions/runs?head_sha=b1e074f1a8ec…'",
+      "observed": "biome `Checked 733 files, No fixes applied`; typecheck clean; 3061 pass, 0 fail. GitHub created two runs for this head, CI 41171179735 (queued when read) and PR Title 41171179693 (success). I did not wait for CI: the daemon reads it.",
+      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
+      "negativeControl": "The run at the tester's head d542d2da is red by design, since it carries the tester's red row; this head's run is the first to judge the fixed code."
     }
   ],
   "filesChanged": [
-    "4d610a30d062 - the five correctness defects: features/inbox/Inbox.tsx (the answer keys resolve the selected ask's own card; Enter asks what holds the focus), features/inbox/useAskAnswerForm.ts (change-mode text is the form's own), packages/proof-editor/src/editor-change-decorations.ts (a leaf counts its leafText characters), features/doc/change-set.ts (the bounded diff and its whole-block fallback), and the unit rows beside each",
-    "a59a216aef1d - the thirteen maintainability findings: new features/inbox/pane-selection.ts and features/inbox/draft-store.ts; Inbox.tsx, ReadingPane.tsx, ReadingPaneHead.tsx, AskCard.tsx, answer-drafts.ts, reply-drafts.ts, ChangeView.tsx, ProofDocument.tsx, ArtifactDocument.tsx, VersionView.tsx, change-marks.ts, change-set.ts, packages/proof-editor/src/lib.ts and editor-change-decorations.ts; both AGENTS.md files; the deleted packages/dispatch/.changes tree; the unit suites beside each",
-    "a395dc20852a - bun.lock back to the base's copy"
+    "packages/dispatch/web/src/features/inbox/AskCard.tsx - the compact card's note disclosure focuses the field it reveals, in the commit that mounts it, when the open was the control's own; the reason field beside it already followed this pattern",
+    "packages/dispatch/web/src/features/inbox/Inbox.tsx - Enter presses the disclosure and leaves the focus to the card; its own focus() call remains for a box that already exists",
+    "packages/dispatch/e2e/nav.e2e.ts - the expectation and a comment saying what the Inbox reads now",
+    "packages/dispatch/web/src/__tests__/ask-card.test.tsx and features/inbox/Inbox.test.tsx - the unit rows, each saying that the browser row is what proves the focus"
   ],
   "trickyParts": [
-    "bun.lock in this workspace is rewritten by every `bun install`: the base's copy records older workspace versions for envoy-plugin, pi-envoy and pi-legion than their package.json files carry, so bun corrects it each time even when it installs nothing. The commit keeps the base's copy; after any install, restore it (`jj -R \"$LEGION_WORKSPACE\" restore --from <the merge base> bun.lock`) before committing or pushing, and note that `jj restore --from main@origin` is wrong once main has moved past the merge base.",
-    "The two behaviour changes hidden among the refactors are the ones to re-read: Next change is now offered only while the drawn version carries marked blocks, and `j` from a question held past its row steps on from where that row stood. Both carry their own unit row."
+    "A reader who opens the note disclosure with the pointer now lands in the field too. That is the deliberate consequence of putting the fix where the field is revealed rather than in the key that asked for it, and no row of the suite depended on the focus staying put after that click.",
+    "The defect was invisible to unit tests by construction: `fireEvent` wraps a click in `act()`, which flushes the render and its effects inside the press, so the box exists synchronously there and the defective code passed. Only the browser shows the commit happening after the handler returns. Any later change to this path is judged by the browser row, not by a unit row."
   ],
   "deviations": [],
   "openQuestions": [
-    "e2e/hover-preview.e2e.ts:87 is main's, fixed on main by sjawhar/legion#2581 at df771175, which I confirmed green in this pod (the row five times and the whole spec once). The architect has ruled against a forward merge to pick it up, since CI's own dispatch lane passed that row at our head, and sjawhar/legion has no merge queue, so this pull request merges on its own head's required checks."
+    "e2e/hover-preview.e2e.ts:87 is main's own and is fixed on main by sjawhar/legion#2581 at df771175, which I confirmed green in this pod. The architect has ruled against a forward merge to pick it up, since CI's own dispatch lane passed that row at our head, and sjawhar/legion has no merge queue, so this pull request merges on its own head's required checks."
   ],
   "discoveredComplexity": [
-    "Two of the five correctness defects are the price of one decision: the column draws the whole live document, so every open decision block of it is answerable, and anything the keys reach by a document-wide selector reaches the wrong block. Both fixes narrow the keys to the selected ask's own card."
+    "The Inbox's keys reach controls that other components own and draw. Two rounds of defects came from that seam: the keys reaching the wrong block's card, and the key reaching a box that did not exist yet. Both are fixed by letting the owner do the work - the selected ask's own card, and the disclosure that reveals the field."
   ]
 }
