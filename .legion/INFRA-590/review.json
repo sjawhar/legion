@@ -2,25 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-31T00:50:30Z",
-  "round": 15,
-  "reviewedCodeHead": "9cabeaf6ff6d35ec0c7105e282b062d3a3e8beb5",
+  "completed": "2026-10-31T04:26:00Z",
+  "round": 16,
+  "reviewedCodeHead": "2678be4b84152baa164f065f54350e33ae432f1e",
+  "reviewerProseCommit": "7fc3a1fb3ab65452ff8d0a729ca47f03ed585682 (comments only, outbox/publisher.go recordBatch: a failed write leaves only the events it covered; outbox/lease.go: the scan's re-read can meet a batch a wake starts beside it)",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 1,
-  "roundShape": "Full round: since 141704508a72 the branch carries 4fc3e0d2 (round-14 fix), runtime merges 811dced0, fd93819c, 896ea1f6, 9cabeaf6, the tester's red test 5981eb81 and the overlapping-batch fix 767794be.",
-  "ci": "At 9cabeaf6 when read: lint, typecheck, pr-title success; test, envoy-go, envoy-go-race queued. A request for changes does not wait on CI.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 9cabeaf6; both request changes on the wake gap below.",
+  "minor": 0,
+  "ci": "Code head 2678be4b: lint, typecheck, test, pr-title, envoy-go, envoy-go-race all completed success. My comment-only push 7fc3a1fb has no CI run at all: GitHub reports the pull request CONFLICTING (mergeable_state dirty) with main's d7e1daaaaf (#2474, scripts/e2e/README.md re-laid one sentence per line), and GitHub runs no pull_request workflow for a conflicting head.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 2678be4b; both approve with no correctness finding.",
+  "threads": "Round-15 threads PRRT_kwDORFy7ds6yL80U and PRRT_kwDORFy7ds6yL80X accepted (replies 4430238584, 4430238742); none unresolved.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/lease.go:516", "description": "An event that commits for an owner while that owner is in flight can be left unread until an unrelated wake or the next back-off (up to retry.MaxDelay, 5 min). Its wake is taken by the scan (lease.go:484) and starts a batch that skips the owner; the owner's batch, held by a silent holder (send.connection set by ErrNotAcknowledged, so settleOwner skips it, publisher.go:263-268), releases it only at its end through lanes.release, which wakes nothing (lease.go:581); and missed is set only when a batch read zero rows (batch.sendable == 0). So if the skipping batch read any other owner (an issue whose role-forward retry fell due, the usual state under a silent role), the owner's new event is never re-read when the scan returns; nextRetry sees only rows with next_attempt_at set. Its topic and session copies, which before 767794be went out right after the batch, wait minutes. Fix: record in lanes.reserve that a read ran with owners excluded and set missed from that, or wake on a batch-end release that is not natsLost, blocked or fenced; test with a second issue whose retry falls due as e2 commits."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:276", "description": "settleOwner (publisher.go:259-309) duplicates the batch-end settle+record (356-401): when it returns without recording (a released event, or a passed deadline), the batch end settles the same events again, and settleEvent's backOff logs the ERROR line (and the dead-letter line at attempt 10) twice for one attempt. Extract one settle-and-record helper used by both."}
+    {"severity": "important", "file": "PR #2395 (mergeability)", "description": "The head conflicts with main's #2474 on scripts/e2e/README.md (text only), so no CI runs on 7fc3a1fb and the PR cannot merge. Merge main forward carrying 7fc3a1fb; a text-only conflict with an unchanged PR diff is a confirmation round under the architect's 10:27Z rule."}
   ],
   "verifiedCorrect": [
-    "No two batches hold one owner: lanes.reserve reads and takes owners under lanes.mu; an early release comes after recordBatch committed, so a re-read sees the record; per-(owner, destination) order holds across batches.",
-    "Fencing: every early record checks the deadline and the SQL hold check; fenced, NATS-lost and failed batches end the others; scan returns only at inflight 0 and publish releases the hold after serve returns, so no record follows Release; done is buffered to concurrentBatches, so no slot leaks.",
-    "4fc3e0d2: Request reads deniedPublish under its own sentAt on the request goroutine (flush-unconfirmed and timer arm); holder and unanswered metric reasons with HELP and docs updated.",
-    "Merges: migrations 0150_duty_holds/0151_outbox_claim after 0149_event_horizon, connections 91, #2542's HookedConnectionEvents beside ConnectionChanged."
-  ],
-  "prBody": "Added the 4-slot residual to Not proven / risk (several silent holders arriving apart can hold every slot; tester measured 2 of 40 late, max 2.41 s), and dropped 'delays no other issue's events' from the owner-lane line, which that residual contradicts."
+    "Round-15 finding 1 closed: lanes.reserve reports excluded owners, batchResult.excluded sets missed, the re-read runs with nothing in flight and cannot loop; TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack fails at 9cabeaf6.",
+    "Round-15 finding 2 closed: settleAndRecord is the single settle-and-record path; settleOwner leaves connection, fenced and unsent owners to the batch end; each owner settled once; TestAnOwnerLeftForTheBatchsEndLogsItsFailureOnce fails at 9cabeaf6.",
+    "loadLookups under the statement gate: batches hold at most one outbox connection, the renewal keeps the other; lock order mu then statements, no cycle.",
+    "Merge 2678be4b (#2422): AGENTS.md and cmd/dispatch/README.md keep main's layout with this PR's content; no code conflict; migrations 0150/0151, connections 91."
+  ]
 }
