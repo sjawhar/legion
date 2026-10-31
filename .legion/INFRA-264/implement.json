@@ -2,9 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-264",
-  "completed": "2026-10-31T19:20:00Z",
+  "completed": "2026-10-31T21:12:00Z",
   "round": 7,
   "answers": "CI red at the retro head 61e45835: the required aggregator ci-ok, red because the dispatch job failed one Playwright row of packages/dispatch/e2e/overlapping-marks.e2e.ts (job 124592486461, 1 failed of 1433 passed). This round changes no file of the change: it establishes that the row is a flake, re-runs the failed jobs once, and records the evidence. The product proofs stand where round six's and the tester's round-six handoff left them.",
+  "ciAtTheCodeHead": "Read on GitHub and recorded for no later step to trust. Attempt 2 of run 41216990032 at 61e45835 is green end to end: the dispatch job completed success at 2026-10-31T20:31:04Z and the ci-ok aggregator at 2026-10-31T20:59:52Z (it waited 29 minutes for an ubuntu-24.04 runner), with every other job of the attempt success or skipped. The heads this round pushed carry the skip-checks trailer and start no run of their own, so 61e45835 is where the verdict is read.",
   "codeChanged": false,
   "proof": [
     {
