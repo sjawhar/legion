@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    Daemon API contract 43: the `legion` MCP tool reads the state's new `consumers` and
-    `repositories.withoutWebhookApp` strictly, and its `handoff_complete` description names the
-    implementer's new refusal `HANDOFF_NO_PULL_REQUEST`. A daemon of contract 42 and this plugin
-    refuse each other.
-time: 2026-10-28T20:00:00Z
-custom:
-    Issue: pr2478

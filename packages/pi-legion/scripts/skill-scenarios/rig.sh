@@ -252,9 +252,9 @@ judge_model=anthropic/$route_model_id
 [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" != provider ] || judge_model=${LEGION_E2E_MODEL_PROVIDER:-}/$route_model_id
 judge_thinking=high
 # The container every judge runs in (cmd_judge_omp), by digest: Ubuntu 24.04, whose glibc runs the
-# pinned omp binary. The digest is mirror.gcr.io's (AGENTS.md: Docker Hub images through Google's
-# mirror).
-judge_image=mirror.gcr.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+# pinned omp binary. Every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci, named by
+# digest, which ci.yaml's ci-images job publishes from .github/ci-images.yaml.
+judge_image=ghcr.io/sjawhar/legion/ci@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 # The superpowers skills a spec run's profile holds as its own user skills (cmd_profile).
 superpowers_skills=(writing-plans brainstorming)
 
@@ -752,12 +752,14 @@ lock_services() {
 # servers at once, so max_connections is 30 for each concurrent run and 20 more for psql.
 services_up() {
   evidence=$S
+  # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
   docker run -d --name "$tag-pg" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
-    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
+    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
     -c max_connections=$((30 * ${SKILL_SCENARIOS_PARALLEL:-5} + 20)) >/dev/null
   pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
   [ -n "$pg_port" ] || fail "docker assigned Postgres no host port"
-  docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
+  # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+  docker run -d --name "$tag-nats" --cpus 1 --memory 512m -p 127.0.0.1::4222 ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f -js >/dev/null
   nats_port=$(docker port "$tag-nats" 4222/tcp | sed -n '1s/.*://p')
   [ -n "$nats_port" ] || fail "docker assigned NATS no host port"
   until_true 60 "Postgres to accept TCP connections" docker exec "$tag-pg" pg_isready -h 127.0.0.1 -p 5432 -U postgres

@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -59,7 +60,8 @@ const (
 // Column shape after kind, list: issue_key, owner_artifact_id, artifact_id, id, block_id,
 // issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at, own, r.
 // block_id is an ask's typed block only while it is a node of the reference graph
-// (askBlockNodeSQL).
+// (askBlockNodeSQL). The ask arm's anchor cast is store.CastableUUID's, which answers the document
+// every spelling of an artifact_id Postgres casts names.
 func searchKeywordLegs(rank func(searchColumn string) string) string {
 	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
@@ -90,7 +92,7 @@ func searchKeywordLegs(rank func(searchColumn string) string) string {
    where c.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
   union all
   select 'ask' as kind, 'keyword', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end,
-         coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text, ` + askBlockNodeSQL + `,
+         coalesce(k.artifact_id, k.block_artifact_id, ` + store.CastableUUID(`k.anchor->>'artifact_id'`) + `), k.id::text, ` + askBlockNodeSQL + `,
          i.title, i.status, p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at),
          false, ` + rank("k.search") + `
     from asks k
@@ -324,7 +326,7 @@ meaning_ask_candidates as (
 ),
 meaning_ask as (
   select 'ask' as kind, 'meaning' as list, issue_key, case when issue_key is null then coalesce(artifact_id, block_artifact_id) else null::uuid end,
-         coalesce(artifact_id, block_artifact_id, (anchor->>'artifact_id')::uuid), id::text, block_id,
+         coalesce(artifact_id, block_artifact_id, ` + store.CastableUUID(`anchor->>'artifact_id'`) + `), id::text, block_id,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_ask_candidates where r >= $10

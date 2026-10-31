@@ -32,15 +32,15 @@ var eventKinds = []string{kindComment, kindAnchored, kindReply, kindEdit, kindUp
 var primaryEventType = map[string]string{
 	// internal/dispatch/api/comment_create.go:639 (createCommentFor appends comment.created for
 	// a plain comment, an anchored comment and a reply alike).
-	kindComment:  "comment.created",
-	kindAnchored: "comment.created",
-	kindReply:    "comment.created",
+	kindComment:  evCommentCreated,
+	kindAnchored: evCommentCreated,
+	kindReply:    evCommentCreated,
 	// internal/dispatch/api/artifacts.go:751 (commitArtifactVersionEvent, which editArtifact
 	// calls at :921 for a changed document with a summary).
-	kindEdit: "artifact.version",
+	kindEdit: evArtifactVersion,
 	// internal/dispatch/api/artifacts.go:493 (storeArtifact: an upload to an existing document is
 	// artifact.version; artifact.created only for a new one).
-	kindUpload: "artifact.version",
+	kindUpload: evArtifactVersion,
 }
 
 // replyAnchoredShare is the share of replies made in anchored threads: production had 1,217 of

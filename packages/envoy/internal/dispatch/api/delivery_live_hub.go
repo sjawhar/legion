@@ -164,7 +164,9 @@ const (
 //
 // Three goroutines start on the first Subscribe and run until lifetime ends: the listener; the
 // intake, which alone moves the two cursors (the delivery change log's and the event log's) and
-// marks views dirty; and the worker, which alone recomputes, so one recompute runs at a time.
+// marks views dirty; and the worker, which alone recomputes, so one recompute runs at a time. The
+// intake resolves the event cursor, which waits for a safe horizon, on a fourth that ends once it
+// has (seedEvents), at the start and after a reset of the event log.
 type deliveryHub struct {
 	server   *server
 	clock    hubClock
@@ -180,11 +182,19 @@ type deliveryHub struct {
 
 	once    sync.Once
 	running sync.WaitGroup
-	// ready closes once the intake has read where both logs stand, which the worker waits for.
+	// ready closes once the intake has read where the delivery change log stands, which the worker
+	// waits for. The event cursor is resolved apart (seedEvents), so neither waits on the horizon.
 	ready chan struct{}
 	// Each wake holds at most one pending signal: what it asks for covers every signal before it.
 	wakeWork, wakeChanges, wakeEvents, connected chan struct{}
 	barrier                                      chan chan struct{}
+	// seeds hands the intake the event cursor seedEvents resolved; one slot, as one runs at a time.
+	seeds chan hubEventSeed
+	// seeded is whether the intake holds an event cursor, false while seedEvents resolves one; and
+	// gaps schedules the re-read of an event gap left open above the safe horizon (readEvents).
+	// Only the intake goroutine touches them.
+	seeded bool
+	gaps   eventGapReread
 
 	mu    sync.Mutex
 	views map[string]*deliveryView // by canonical view key
@@ -195,6 +205,8 @@ type deliveryHub struct {
 	changeAt  time.Time
 	epoch     int64
 	// eventCursor and eventAt are the last event id scanned and its created_at, to tell a reset log.
+	// Every event at or below eventCursor is final (catchUpEvents, receive); both mean nothing
+	// while the intake holds no cursor (seeded false).
 	eventCursor int64
 	eventAt     time.Time
 	// p0 is the open P0 issues (OpenP0Keys), kept current from issue event payloads.
@@ -305,7 +317,7 @@ type deliveryFreshnessVerdict struct {
 
 // deliveryHubNote is one thing the hub did, for a test's observe.
 type deliveryHubNote struct {
-	what          string // "recompute begin", "recompute end", "events caught up", "connected", "broker dropped"
+	what          string // "recompute begin", "recompute end", "events caught up", "events seeded", "connected", "broker dropped"
 	view          string // the view's key
 	cause         string
 	sent          int
@@ -349,6 +361,7 @@ func newDeliveryHub(s *server, lifetime context.Context, clock hubClock) *delive
 		wakeWork: make(chan struct{}, 1), wakeChanges: make(chan struct{}, 1),
 		wakeEvents: make(chan struct{}, 1), connected: make(chan struct{}, 1),
 		barrier: make(chan chan struct{}),
+		seeds:   make(chan hubEventSeed, 1),
 		views:   map[string]*deliveryView{},
 		conns:   map[deliveryLiveConn]map[string]*deliverySub{},
 		p0:      map[string]struct{}{},
@@ -424,7 +437,8 @@ func (h *deliveryHub) onNotify(channel, payload string) {
 	}
 }
 
-// catchUpNow catches both logs up and returns once it has, or once the hub's lifetime ended.
+// catchUpNow catches both logs up and returns once it has, or once the hub's lifetime ended. The
+// event log is caught up only once the intake holds an event cursor (applySeed).
 func (h *deliveryHub) catchUpNow() {
 	done := make(chan struct{})
 	select {

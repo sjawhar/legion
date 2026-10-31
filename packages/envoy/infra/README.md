@@ -11,7 +11,7 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. |
 | `envoy-infra:gcp:NatsHub` | A NATS server with JetStream on one Google Cloud VM that joins a tailnet, where its clients reach it: see [docs/nats-hub.md](docs/nats-hub.md), which says what it deploys, its inputs and how it is updated, with an example. |
 | `envoy-infra:gcp:ClusteredNatsHub` | NATS with JetStream as three servers on a GKE cluster, one per zone, through the `nats` Helm chart, with an optional tailnet entry whose hosts also run Envoy's session listener: see [gcp:ClusteredNatsHub](#gcpclusterednatshub). |
-| `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster, or that cluster alone with `clusterOnly`: see [gcp:Dispatch](#gcpdispatch). |
+| `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster; inside that cluster alone with the tailnet inputs unset, or the cluster alone with `clusterOnly`: see [gcp:Dispatch](#gcpdispatch). |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
 starts, so it needs only a NATS server with JetStream to reach. It creates them at the deployment's
@@ -544,8 +544,12 @@ also serves Dispatch's API in-cluster to the namespaces `allowedNamespaces` name
 refuses every other namespace. The front door's SOCKS5 Service on port 1055, which only a
 deployment without `natsInCluster` has, and the listener's Service on port 9020 are reachable only
 from the workloads their own policies name: the app and the listener may dial the proxy, and the
-app alone may dial the listener. With `clusterOnly` it deploys the cluster, its VPC and Cloud NAT
-alone and none of the rest, and the table below says which resources that is.
+app alone may dial the listener. The front door is built only where the tailnet inputs are set:
+with that whole group unset the component builds none, and Dispatch is then reached at the app's
+own Service inside the cluster, by the namespaces `allowedNamespaces` names alone (the sandbox,
+below). With `clusterOnly` it deploys the cluster, its VPC and Cloud NAT alone and none of the
+rest. The table below says which resources each of those is, the sandbox in the paragraph under
+it.
 
 | Resource | Purpose | With `clusterOnly` |
 | --- | --- | --- |
@@ -560,18 +564,42 @@ alone and none of the rest, and the table below says which resources that is.
 | Three Deployments | The app at `replicas` pods, the front door at `frontDoorReplicas` (2 by default) and the listener at `listenerReplicas` (1 by default), each `Recreate` at one pod and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, by its own count. Every pod carries required pod anti-affinity on `kubernetes.io/hostname` and a `topology.kubernetes.io/zone` spread with `minDomains: 2`, both over its own Deployment's pods, and every serving container a startup and a liveness probe ([The pods](#the-pods)). The app and the listener have a 35-second termination grace period, a five-second pre-stop wait and the stop each is built for; the front door 60 seconds, for its drain ([The front door](#the-front-door)). Every container has equal requests and limits. A pod template whose Deployment has no PodDisruptionBudget carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`; one whose Deployment has a budget does not. | Not built |
 | Up to three PodDisruptionBudgets | `<hostname>` with `appPdbMinAvailable`, `<hostname>-tailnet` with `frontDoorPdbMinAvailable` and `<hostname>-listener` with `listenerPdbMinAvailable`, each over its own Deployment's pods (`app=<name>`) alone, with that `minAvailable` and Kubernetes' default `unhealthyPodEvictionPolicy`, so a drain cannot take that workload below that many ready pods. | Not built |
 
+The sandbox builds every resource of that table except the front door's: no `<hostname>-tailnet`
+Deployment, Service, NetworkPolicy or ServiceAccount, no `<hostname>-tailnet-auth-key` or
+`<hostname>-tailnet-tls` Secret, neither the Role nor the RoleBinding `<hostname>-tailnet-tls`,
+and no `<hostname>-serve` ConfigMap. Two Deployments remain, the app and the listener, each with
+its Service, its NetworkPolicy and the budget its own input turns on, and the app's policy admits
+the `allowedNamespaces` alone. The Secret `<hostname>-dispatch` holds `DATABASE_URL`,
+`DISPATCH_AGENT_TOKEN` and `DISPATCH_SIGNING_KEY` alone, since the mode takes no sign-in input.
+
 ### Inputs
 
 The schema requires `region` and `hostname` alone. Thirteen inputs that configure Dispatch itself
-— `tailnetDnsName`, `tags`, `tailnetAuthKey`, `tailnetService`, the four digest-pinned images
-`envoyImage`, `tailscaleImage`, `cloudSqlProxyImage` and `frontDoorToolsImage`, `natsUrl`,
-`natsSeedSecret`, `signInClientId`, `signInClientSecret` and `signInDomain` — are optional in the
-schema and required by the resolver while `clusterOnly` is off, which refuses each missing one by
-name as it always did. They are optional in the schema because a generated SDK's constructor
-refuses a nil required input, so a cluster-only consumer, which sets none of them, could not call
-the component at all while they stayed required. `tailnetAuthKey`, `tailnetService`,
-`natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
-resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
+are optional in the schema, and the resolver is what requires them while `clusterOnly` is off.
+Four of them — the digest-pinned images `envoyImage` and `cloudSqlProxyImage`, `natsUrl` and
+`natsSeedSecret` — every deployment sets, and each missing one is refused by name as it always
+was. The other nine are two groups, each set whole or left wholly unset: the tailnet group
+`tailnetDnsName`, `tags`, `tailnetAuthKey`, `tailnetService`, `tailscaleImage` and
+`frontDoorToolsImage`, which builds the front door and serves Dispatch at its tailnet name, and
+the sign-in group `signInClientId`, `signInClientSecret` and `signInDomain`, which runs people's
+browser sign-in. With the tailnet group unset the component is the sandbox (below); with the
+sign-in group unset Dispatch takes agent tokens alone and nobody signs in through a browser: no
+`DISPATCH_SIGNIN_*` variable is rendered, and the app refuses every `dsession` cookie, one minted
+while sign-in was on included, since the deployment's own `DISPATCH_SIGNING_KEY` goes on verifying
+such a cookie for its thirty days and nobody is left to confirm the person is still a member. A
+personal agent token a person minted in Settings while sign-in was on keeps acting for that
+person, and with no sign-in nobody can sign in to revoke it, so revoke those tokens before a stack
+drops its sign-in inputs. Such a stack also pins an `envoyImage` built from a sjawhar/legion
+`main` commit at or after this change: `envoy-dispatch` in an older image exits 1 when it is given
+no `DISPATCH_SIGNIN_*` setting, so the app's pods never start. A
+group set in part is refused by the per-input refusal it always gave, trailing one clause that
+names every input of that group still unset, such as `(the tailnet inputs are set together or not
+at all; unset: tags, tailnetAuthKey)`, so one run names the whole shortfall. The thirteen are
+optional in the schema because a generated SDK's constructor refuses a nil required input, so a
+cluster-only consumer, which sets none of them, could not call the component at all while they
+stayed required. `tailnetAuthKey`, `tailnetService`, `natsUrl`, `natsSeedSecret`, and
+`signInClientSecret` are Pulumi inputs and may come from another resource or stack.
+`tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
 defaults to `POSTGRES_18`, `databaseTier` to `db-custom-4-15360`, `namespace` to `dispatch`, and
 `deletionProtection` to `true`; it sets both Pulumi's own guard and the Cloud SQL instance's
 `deletionProtectionEnabled`, which refuses a delete from the API or the console too, and the
@@ -600,6 +628,25 @@ a preview and in an update. A stack already running Dispatch cannot turn it on: 
 the inputs the mode refuses, so the update is refused before anything it would no longer build is
 deleted.
 
+With the tailnet group unset the component is the sandbox: it builds its cluster, its database
+and its app as it always does, and no front door at all. The mode requires `natsInCluster`, since
+the pods reach a tailnet NATS hub only through the front door's SOCKS5 proxy and no front door
+runs one here, and at least one `allowedNamespaces` entry, since the app's NetworkPolicy is then
+its only ingress and a policy with no rule admits nobody; each missing one is refused by name. It
+refuses `frontDoorReplicas` and `frontDoorPdbMinAvailable`, which size and protect a front door it
+does not build, and every sign-in input, since browser sign-in needs a redirect origin an OAuth
+provider takes and an in-cluster `http://` address is not one. The `url` output and the app's
+`DISPATCH_SERVER_URL` are then `http://<hostname>.<namespace>.svc.cluster.local:8766`, the app's
+own ClusterIP Service, which terminates no TLS, so Dispatch is reached inside its own cluster
+alone, by the pods of the namespaces `allowedNamespaces` names, with the agent tokens its API
+takes. Its app gets no `DISPATCH_SIGNIN_*` setting, so nobody signs in through a browser and every
+request that needs a person answers `401 NO_IDENTITY`, one carrying a `dsession` cookie minted
+while a stack ran sign-in included: the deployment's own `DISPATCH_SIGNING_KEY` still verifies that
+cookie for its thirty days, and no membership check is left behind it. A sandbox stack pins an
+`envoyImage` built from a sjawhar/legion `main` commit at or after this change: `envoy-dispatch` in
+an older image exits 1 when it is given no `DISPATCH_SIGNIN_*` setting, so the app's pods never
+start.
+
 `databaseVersion` defaults to `POSTGRES_18`; envoy-infra v2.9.1 and every release before this
 change defaulted to `POSTGRES_16`. A stack that leaves `databaseVersion` unset is upgraded in place
 from its current major version to PostgreSQL 18 at its first `pulumi up` after its `envoy-infra`
@@ -612,10 +659,11 @@ instance running it ([Upgrade the database major version
 in-place](https://cloud.google.com/sql/docs/postgres/upgrade-major-db-version-inplace)). To keep
 PostgreSQL 16, set `databaseVersion: POSTGRES_16` before moving the pin.
 
-`tailnetService`, required with `clusterOnly` off, is the Tailscale Service the front door's pods
-host, as Tailscale's API names it. It must resolve to `svc:<hostname>`, the name the certificate
-and the URL carry, and any other value fails the update once it resolves, naming the input and
-never echoing the value. The component never creates the Service: the consumer declares it in the
+`tailnetService`, one of the tailnet group and so set wherever that group is, is the Tailscale
+Service the front door's pods host, as Tailscale's API names it. It must resolve to
+`svc:<hostname>`, the name the certificate and the URL carry, and any other value fails the
+update once it resolves, naming the input and never echoing the value. The component never
+creates the Service: the consumer declares it in the
 tailnet with its one port, `tcp:443`, gives it an auto-approval for `tags` in the tailnet policy,
 and passes the `Name` output of its `tailscale.Service` here. The auto-approval only lets the
 front door's nodes host the Service; it gives no client access. A Tailscale Service is a grant
@@ -629,7 +677,7 @@ that ConfigMap and for whatever the value came from, so on a fresh stack no pod 
 Service before it exists: a node that advertises a Service before it exists is not approved when
 the Service appears.
 
-`frontDoorToolsImage`, required with `clusterOnly` off and pinned by digest like the other three
+`frontDoorToolsImage`, one of the tailnet group and pinned by digest like the other three
 images, is the image the front door's `cert-publish` container runs on. Its scripts call
 `/bin/sh`, `curl`, `openssl` 3, `base64`, GNU `date`, `sed`, `grep` and `tr`, so the image must
 carry them all; the envoy image does, and the Tailscale image, which is busybox with neither
@@ -1080,9 +1128,15 @@ process" in `packages/envoy/cmd/dispatch/README.md` holds the preconditions. The
 the first, since every pod reads the one `DISPATCH_SIGNING_KEY` in the Secret
 `<hostname>-dispatch`. The second bounds what a migration may change, since the rolling update
 runs the new image's migrations while the previous build is still serving: "Database migrations"
-in the same README holds the rule. Each process closes a client connection after its next response
-once the connection is 60 seconds old, so after a roll the front door's and the in-cluster
-callers' keep-alive connections spread onto the pods that have just come up.
+in the same README holds the rule. Event writes on different issues commit out of id order, and a
+process reads the event log for its live readers only up to the safe horizon below which every
+event is final. A build from before that change (#2392) reads past an event still open below the
+newest one, so during a roll that first brings the change, at more than one replica, an old pod's
+live stream and delivery hub can skip an event a new pod commits out of id order; deploy that
+release at one replica, which recreates the pod, and raise the count afterwards. Each process
+closes a client connection after its next response once the connection is 60 seconds old, so
+after a roll the front door's and the in-cluster callers' keep-alive connections spread onto the
+pods that have just come up.
 
 Every container reads its environment once, at start, and Dispatch reads the Azure key file and
 the NATS seed once, at boot, as the listener reads the seed, so a pod boots on a secret's new value
@@ -1144,6 +1198,11 @@ kubectl -n dispatch run census --rm -it --restart=Never --image=<envoyImage> \
 ```
 
 ### The front door
+
+The front door is built only where the tailnet group is set (`tailnetDnsName`, `tags`,
+`tailnetAuthKey`, `tailnetService`, `tailscaleImage` and `frontDoorToolsImage`). With that group
+unset the component registers none of its pods, Services, policies, accounts, Secrets or its
+ConfigMap, and the rest of this section is about a deployment that has one.
 
 The front door's `frontDoorReplicas` pods each run a tailnet node of their own, registered under
 the pod's name (`TS_HOSTNAME` from `metadata.name`), and all of them host one Tailscale Service,
@@ -1319,6 +1378,39 @@ JetStream numbers both containers carry; every other property above is unchanged
       streamMaxBytes: 1073741824
 ```
 
+A sandbox stack sets neither the tailnet group nor the sign-in group, and sets the two inputs the
+mode then requires: `natsInCluster`, since no front door runs a proxy to a tailnet hub, and
+`allowedNamespaces`, which is the app's only ingress.
+
+```yaml
+resources:
+  gcp:
+    type: pulumi:providers:gcp
+  random:
+    type: pulumi:providers:random
+  dispatch:
+    type: envoy-infra:gcp:Dispatch
+    properties:
+      region: <region>
+      hostname: example-dispatch
+      envoyImage: example/envoy@sha256:<digest>
+      cloudSqlProxyImage: example/cloud-sql-proxy@sha256:<digest>
+      natsUrl: nats://envoy-hub.envoy.svc.cluster.local:4222
+      natsInCluster: true
+      natsSeedSecret: projects/example-project/secrets/example-nats-seed
+      allowedNamespaces: [example-agents]
+    options:
+      providers:
+        - ${gcp}
+        - ${random}
+```
+
+Its `url` output is `http://example-dispatch.dispatch.svc.cluster.local:8766`, and the pods of the
+namespace `example-agents` are the only readers the app's NetworkPolicy admits. They read it with
+agent tokens: its app has no `DISPATCH_SIGNIN_*` setting, so nobody signs in through a browser and
+every request that needs a person answers `401 NO_IDENTITY`, one carrying a `dsession` cookie from
+a stack that ran sign-in before included.
+
 ## host:Listener
 
 ### What `host:Listener` deploys
@@ -1449,7 +1541,9 @@ envoy-infra:gcp:Dispatch needs a "random" provider in its providers option
 By default the docker provider waits up to 90 seconds for the container's health check to pass,
 and `pulumi up` fails if it does not. The check passes once `/healthz` answers `200`, which it does
 from `starting` on, before the listener has connected to NATS. A listener is connected when
-`/healthz` answers `"status":"healthy"`. The answers are listed under
+`/healthz` answers `"status":"healthy"` or `"status":"degraded"`: a degraded answer is a
+dependency that repairs itself, such as a role claim view whose first scan has not delivered every
+claim, and the listener behind it is connected and serving. The answers are listed under
 [Health and readiness](https://sjawhar.github.io/legion/dispatch/envoy/#health-and-readiness).
 
 `waitForHealthy: false` creates the container without waiting on its health check. Use it for a
@@ -1717,8 +1811,8 @@ A listener named `<N>` registers these resources, each a child of the component:
 | `<N>-execution-nats-nkey-seed-read` | `aws:iam/rolePolicy:RolePolicy` | The same on `seedSecretArn`, only when it is given. |
 | `<N>-task` | `aws:ecs/taskDefinition:TaskDefinition` | `family`, `cpu` and `memory` on Fargate (`awsvpc`), with the one container below, created after both policies and after `apiTokenSecretVersionId`'s resource. |
 | `<N>-service` | `aws:ecs/service:Service` | One task in `subnetIds` with `securityGroupId` and no public address, its port 9020 in `targetGroupArn`, registered in Cloud Map, with ECS Exec on, created after `natsServiceArn`'s resource. It deploys at 100% minimum and 200% maximum, so a healthy target stays in the target group; the circuit breaker rolls back a replacement that keeps failing to start, the service waits for steady state, ECS ignores load-balancer health for 120 s while a task starts, and create and update time out after 15 minutes. |
-| `<N>-<filter>` | `aws:cloudwatch/logMetricFilter:LogMetricFilter` | Eight, on the log group; `envoy-infra render metric-filters` prints them. |
-| `<N>-<alarm>` | `aws:cloudwatch/metricAlarm:MetricAlarm` | Five, below. |
+| `<N>-<filter>` | `aws:cloudwatch/logMetricFilter:LogMetricFilter` | Nine, on the log group; `envoy-infra render metric-filters` prints them. |
+| `<N>-<alarm>` | `aws:cloudwatch/metricAlarm:MetricAlarm` | Six, below. |
 
 The log group, the Cloud Map service, the task definition, the service and the alarms carry
 `baseTags` and `service: <N>`; the policies and the filters carry none.
@@ -1747,12 +1841,14 @@ ECS injects its secrets from their ARNs: `ENVOY_GITHUB_WEBHOOK_SECRET` with `git
 Each alarm pages `alarmTopicArn` on one matching line in five minutes (`Sum` over 300 s at least 1,
 missing data not breaching) and sends the OK transition there too, so the channel sees the signal
 stop: `<N>-publish-failure` (a JetStream publish that did not complete), `<N>-webhook-refused` (a
-delivery NATS can never take, answered 422), `<N>-stream-subject-dropped` (a start that dropped
-another deployment's overlapping stream subject), `<N>-durable-refused` (a start that refused its
-durable consumer) and `<N>-subscribe-exhausted` (a start that gave up binding its durable
-subscription). `<N>-publish-failure` and `<N>-webhook-refused` count a GitHub delivery's first
-failure or refusal in each listener task: a later one of the same delivery, such as each of the
-redeliveries Dispatch's sweep asks for over 72 hours, is logged
+delivery NATS can never take, answered 422), `<N>-reconnect-hooks-stalled` (a KV watch rebuild that
+has not succeeded for a minute after a NATS reconnect, so the listener's caches serve what they
+last held and `/healthz` answers 200 `degraded`), `<N>-stream-subject-dropped` (a start that
+dropped another deployment's overlapping stream subject), `<N>-durable-refused` (a start that
+refused its durable consumer) and `<N>-subscribe-exhausted` (a start that gave up binding its
+durable subscription). `<N>-publish-failure` and `<N>-webhook-refused` count a GitHub delivery's
+first failure or refusal in each listener task: a later one of the same delivery, such as each of
+the redeliveries Dispatch's sweep asks for over 72 hours, is logged
 `redelivery <delivery>: <action> refused` (or `failed`), which no filter counts, so one delivery
 pages once per task, and again after a restart. Each description names `logGroupName` as the log
 to read, and assumes the wiring of the deployment the alarms were written for: that GitHub

@@ -41,10 +41,15 @@ const reconcileWait = 30 * time.Second
 // connection reconciles the stream and only then starts its keeper (bus.WithConnectInBackground),
 // so the helper waits, at the latest for reconcileWait, until the stream holds what the settings
 // ask of it (reconciledFor), or until the client logs that reconcile's failure: main's constructor
-// no longer returns a refusal of the server, which reaches the log as the reconnect hook's failure
-// (`envoy nats reconnect hook failed`). A refused start is closed, so it retries no more, and the
-// logged error is returned. It sets the default logger to record the client's lines until the
-// test ends: a test that calls it must not run in parallel.
+// no longer returns a refusal of the server, which reaches the log as a failed run of the
+// reconnect hooks (reconcileFailure). A refused start is closed, so it retries no more, and the
+// logged error is returned. The helper waits for this client's own reconcile, not for a stream
+// that already looks reconciled: it returns only once the client's hooks have covered a
+// connection event (bus.Client.HookedConnectionEvents). An earlier start of the same test can
+// leave the stream holding what the settings ask of it, and a helper that returned on that alone
+// would let a check that the next start wrote nothing pass before this start had written at all.
+// It sets the default logger to record the client's lines until the test ends: a test that calls
+// it must not run in parallel.
 func startDispatchStream(t *testing.T, urls []string, overrides map[string]string) (*bus.Client, error) {
 	t.Helper()
 	env := bootEnvironment(overrides)
@@ -68,13 +73,13 @@ func startDispatchStream(t *testing.T, urls []string, overrides map[string]strin
 			client.Close()
 			return nil, errors.New(refusal)
 		}
-		if client.Connected() {
+		if client.Connected() && client.HookedConnectionEvents() >= 1 {
 			if info, err = client.JS().StreamInfo(bus.Stream); err == nil && reconciled(info.Config) {
 				return client, nil
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("Dispatch's start for %v did not reconcile the stream within %s, nor log a failure: %+v (%v)", overrides, reconcileWait, info, err)
+			t.Fatalf("Dispatch's start for %v did not reconcile the stream within %s, nor log a failure: %+v (%v), hooked events %d", overrides, reconcileWait, info, err, client.HookedConnectionEvents())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -96,12 +101,20 @@ func reconciledFor(boot bootConfig) func(natsgo.StreamConfig) bool {
 	}
 }
 
-// reconcileFailure is the error of the first `envoy nats reconnect hook failed` record the
-// Dispatch publisher logged in logs, JSON lines, and "" when it logged none.
+// reconcileFailure is the error of the first failed run of the reconnect hooks that the Dispatch
+// publisher logged in logs, JSON lines, and "" when it logged none. The bus reports such a run by
+// how long its hooks have been uncovered (internal/bus, bus.RepairGrace): under that grace the
+// WARN `envoy nats reconnect hook failed; it is retried`, at or past it the ERROR `envoy nats
+// reconnect hooks have not succeeded`. A refusal reaches the first of them, and both are read, so
+// that a refusal a slow start logs past the grace is read as well.
 func reconcileFailure(logs string) string {
 	for line := range strings.Lines(logs) {
 		var record map[string]any
-		if json.Unmarshal([]byte(line), &record) == nil && record["msg"] == "envoy nats reconnect hook failed" && record["name"] == "dispatch" {
+		if json.Unmarshal([]byte(line), &record) != nil || record["name"] != "dispatch" {
+			continue
+		}
+		switch record["msg"] {
+		case "envoy nats reconnect hook failed; it is retried", "envoy nats reconnect hooks have not succeeded":
 			return fmt.Sprint(record["error"])
 		}
 	}
@@ -133,14 +146,7 @@ func startDispatchNATS(t *testing.T, urls []string, overrides map[string]string)
 // the deployment's settings (ENVOY_NATS_REPLICAS=3 and the byte limit), and with both settings
 // unset, a replica count of 1 and no byte limit, which neither lowers the copies nor drops the limit.
 func TestADispatchStartKeepsAThreeCopyStreamsCopiesByteLimitAndIDAsItCorrectsTheStream(t *testing.T) {
-	for _, drift := range []struct {
-		name   string
-		change func(*natsgo.StreamConfig)
-	}{
-		{"a changed subject list", func(c *natsgo.StreamConfig) { c.Subjects = c.Subjects[:len(c.Subjects)-1] }},
-		{"a one-minute age", func(c *natsgo.StreamConfig) { c.MaxAge, c.Duplicates = time.Minute, time.Minute }},
-		{"no duplicate window", func(c *natsgo.StreamConfig) { c.Duplicates = 0 }},
-	} {
+	for _, drift := range bustest.StreamDrifts() {
 		for _, settings := range []struct {
 			name      string
 			overrides map[string]string
@@ -148,10 +154,10 @@ func TestADispatchStartKeepsAThreeCopyStreamsCopiesByteLimitAndIDAsItCorrectsThe
 			{"the deployment's settings", map[string]string{"ENVOY_NATS_REPLICAS": "3", "ENVOY_STREAM_MAX_BYTES": strconv.Itoa(bustest.StreamMaxBytes)}},
 			{"the settings unset", nil},
 		} {
-			t.Run(drift.name+"/"+settings.name, func(t *testing.T) {
+			t.Run(drift.Name+"/"+settings.name, func(t *testing.T) {
 				cluster := testnats.StartCluster(t, 3)
 				js := cluster.JetStream(t)
-				deployed := bustest.DeployedThreeCopyStream(drift.change)
+				deployed := bustest.DeployedThreeCopyStream(drift.Change)
 				if _, err := js.AddStream(&deployed); err != nil {
 					t.Fatalf("deploy the stream: %v", err)
 				}
@@ -203,41 +209,14 @@ func TestRedeliverWebhooksRaisesAnR1RedeliveryBucketToTheReplicaSetting(t *testi
 // the webhook redelivery bucket at one copy, and its next start creates and updates nothing.
 func TestADefaultDispatchStartOnASingleServerCreatesEverythingAtOneCopyAndTheNextWritesNothing(t *testing.T) {
 	_, url := testnats.Start(t)
-	writes := testnats.WatchStreamWrites(t, url)
-
-	if err := startDispatchNATS(t, []string{url}, nil); err != nil {
-		t.Fatalf("first start: %v", err)
-	}
 	streams := []string{bus.Stream, "KV_" + bus.WebhookRedeliveryBucket}
-	var created []string
-	for _, stream := range streams {
-		created = append(created, "$JS.API.STREAM.CREATE."+stream)
-	}
-	if got := writes.Take(t); !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(created))) {
-		t.Fatalf("the first start wrote %v, want a create of each of %v", got, streams)
-	}
-	conn := testnats.Connect(t, url)
-	t.Cleanup(conn.Close)
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
-	}
-	for _, stream := range streams {
-		info, err := js.StreamInfo(stream)
-		if err != nil {
-			t.Fatalf("read %s: %v", stream, err)
-		}
-		if info.Config.Replicas != 1 {
-			t.Errorf("%s replicas = %d, want 1", stream, info.Config.Replicas)
-		}
-	}
 
-	if err := startDispatchNATS(t, []string{url}, nil); err != nil {
-		t.Fatalf("second start: %v", err)
-	}
-	if got := writes.Take(t); len(got) != 0 {
-		t.Fatalf("the second start wrote %v, want nothing", got)
-	}
+	bustest.RequireFirstStartAtOneCopyAndNoSecondWrite(t, url, streams, func() {
+		t.Helper()
+		if err := startDispatchNATS(t, []string{url}, nil); err != nil {
+			t.Fatalf("start the Dispatch server's NATS work: %v", err)
+		}
+	})
 }
 
 // keeperWait bounds the wait for the Dispatch publisher's keeper to restore a lowered stream: its

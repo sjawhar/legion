@@ -902,10 +902,12 @@ func (p *settlementPass) commitVersion(ctx context.Context) (settleStep, settleO
 	p.published = make([]model.Event, 0, len(p.reconciliation.events)+1)
 	// Every update this settlement read is settled once it commits, so the row that left the
 	// settlement to a later load goes with that commit. It goes before the first event this
-	// settlement appends: a transaction marking this document owed as a copy (owedCopiesOf) holds
-	// its row while it waits for the events' commit-order lock, which this settlement would then be
-	// holding. The pending authors stay unless this settlement's version lists them (deleted
-	// below): a settlement that writes no version lists no one.
+	// settlement appends. A transaction marking this document owed as a copy (owedCopiesOf) holds
+	// its row until it commits, and this settlement then waits for it holding its owner row and
+	// room lock, which that transaction never takes; nor does it take what this settlement goes on
+	// to lock, its events locking only this document's owner row. The pending authors stay unless
+	// this settlement's version lists them (deleted below): a settlement that writes no version
+	// lists no one.
 	if err := clearSettlementPending(ctx, p.tx, room); err != nil {
 		return settleDone, p.abandon(err)
 	}

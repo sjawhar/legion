@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"flag"
 	"log"
+	"maps"
 	"math"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -244,5 +247,68 @@ func TestMetaRecordsAFailedPostgresVersionRead(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"postgres_version_error":`) {
 		t.Fatalf("meta.json lacks postgres_version_error:\n%s", b)
+	}
+}
+
+// TestMetaRecordsTheDispatchBuildOfEveryStep: a step's meta.json names the Dispatch binary it ran
+// (bin/envoy-dispatch.json), not only the checkout's commit, so a step run with
+// LOADTEST_DISPATCH_COMMIT names the Dispatch it measured. A synthetic step records it too.
+func TestMetaRecordsTheDispatchBuildOfEveryStep(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOADTEST_ROOT", root)
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const build = `{"dispatch_commit":"35efd326","dispatch_binary_sha256":"ab12","go_version":"go1.27.1","newest_migration":134}`
+	if err := os.WriteFile(filepath.Join(root, "bin", "envoy-dispatch.json"), []byte(build), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var logged bytes.Buffer
+	cfg := runConfig{buildCommit: "checkout99", boxBusyBefore: 0, ep: endpoints{pg: unreachablePG, pids: map[string]int{}}}
+	meta := collectMeta(context.Background(), cfg, log.New(&logged, "", 0))
+	if meta.BuildCommit != "checkout99" {
+		t.Fatalf("build_commit %q: want the checkout's commit", meta.BuildCommit)
+	}
+	if meta.DispatchCommit != "35efd326" || meta.DispatchBinarySHA256 != "ab12" {
+		t.Fatalf("dispatch_commit %q, dispatch_binary_sha256 %q: want the build record's", meta.DispatchCommit, meta.DispatchBinarySHA256)
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"dispatch_build":`) || !strings.Contains(string(b), `"go_version":"go1.27.1"`) {
+		t.Fatalf("meta.json lacks the whole build record:\n%s", b)
+	}
+	// No build record: the fields are empty and the log says so, and the step is not stopped.
+	t.Setenv("LOADTEST_ROOT", t.TempDir())
+	logged.Reset()
+	meta = collectMeta(context.Background(), cfg, log.New(&logged, "", 0))
+	if meta.DispatchCommit != "" || meta.DispatchBuild != nil || !strings.Contains(logged.String(), "no Dispatch build record") {
+		t.Fatalf("without the record: dispatch_commit %q, log %q", meta.DispatchCommit, logged.String())
+	}
+}
+
+// TestSummarizeRequestsCodesAndTolerated: a non-2xx answer is counted by status and error code,
+// and one its action expected (the CLI's own 404) is tolerated, not a failure.
+func TestSummarizeRequestsCodesAndTolerated(t *testing.T) {
+	read, edit := "GET /api/v1/projects/{project}/architecture-sources [issue-create]", "POST /api/v1/artifacts/{id}/edits [edit]"
+	s := summarizeRequests([]reqRec{
+		{route: read, status: 404, code: "NOT_FOUND", tolerated: true},
+		{route: edit, status: 200},
+		{route: edit, status: 400, code: "TARGET_SPANS_BLOCKS"},
+		{route: edit, status: 404, code: "TARGET_NOT_FOUND"},
+		{route: edit, status: 502},
+		{route: edit, transport: true},
+	}, 0, 0, 1)
+	r, e := s.Routes[read], s.Routes[edit]
+	if r.Failures != 0 || r.Tolerated != 1 || r.Codes["404 NOT_FOUND"] != 1 {
+		t.Fatalf("tolerated read: %+v", r)
+	}
+	want := map[string]int{"400 TARGET_SPANS_BLOCKS": 1, "404 TARGET_NOT_FOUND": 1, "502": 1}
+	if e.Failures != 4 || e.Tolerated != 0 || !maps.Equal(e.Codes, want) || s.OK2xx != 1 {
+		t.Fatalf("edit: %+v, ok_2xx %d", e, s.OK2xx)
+	}
+	if code := (callResult{status: 400, body: []byte(`{"error":"x","code":"INVALID_OP"}`)}).errorCode(); code != "INVALID_OP" {
+		t.Fatalf("errorCode %q", code)
 	}
 }

@@ -35,6 +35,8 @@ const (
 	LivePool = "live"
 	// SettlementsPool is the document settlements' pool (Pool.Settlements).
 	SettlementsPool = "settlements"
+	// HorizonPool is the event log's safe horizon's pool (Pool.Horizon).
+	HorizonPool = "horizon"
 	// RegistryPool is the server process registry's one connection (Pool.OpenRegistry).
 	RegistryPool = "registry"
 )
@@ -43,7 +45,7 @@ const (
 // once processes.Register has opened it (Pool.OpenRegistry).
 var poolNames = [...]string{
 	RequestsPool, RoomsPool, HealthPool, ListenPool, LeasesPool, OutboxPool,
-	BackgroundPool, LivePool, SettlementsPool, RegistryPool,
+	BackgroundPool, LivePool, SettlementsPool, HorizonPool, RegistryPool,
 }
 
 // applicationNamePrefix begins every pool's application_name: dispatch-<pool>, the one convention
@@ -61,9 +63,10 @@ const applicationNamePrefix = "dispatch-"
 // connection and makes one, PinConnection), so the request's own deadline, not these, bounds
 // their sum.
 const (
-	// requestAcquireBound is the request pool's, and the room loads' and live readers' too: a
-	// request a client is waiting on that has waited three seconds for a connection is better
-	// answered busy, so the client retries, than held for a connection that may never come free.
+	// requestAcquireBound is the request pool's, and the room loads', the live readers' and the
+	// event horizon's too: a request a client is waiting on that has waited three seconds for a
+	// connection - a page's whoami waits on the horizon's - is better answered busy, so the
+	// client retries, than held for a connection that may never come free.
 	requestAcquireBound = 3 * time.Second
 	// backgroundAcquireBound is the background loops' and the settlements': nobody is waiting on
 	// them, so they may wait far longer than a request, and a refused pass only runs at its next
@@ -88,7 +91,7 @@ const (
 // time, and hold at most its one connection, so their acquires never wait behind another caller.
 func defaultAcquireBound(name string) time.Duration {
 	switch name {
-	case RequestsPool, RoomsPool, LivePool:
+	case RequestsPool, RoomsPool, LivePool, HorizonPool:
 		return requestAcquireBound
 	case BackgroundPool, SettlementsPool:
 		return backgroundAcquireBound

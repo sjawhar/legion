@@ -201,8 +201,8 @@ func (s *Service) sendDueEditNotices(ctx context.Context) (int, error) {
 // transaction on pool, then publishes the event once it commits, and reports whether it sent one.
 // It takes the locks in the settlement's order: the document owner's (lockArtifactOwner), then the
 // notice row, which the settlement writes after its version (recordEditNotice), then the events'
-// own (events.Broker.Append, which takes the owner's lock again and the commit-order lock). No
-// statement here locks `for update`.
+// own (events.Broker.Append, which takes the owner's lock again). No statement here locks
+// `for update`.
 //
 // A document deleted since the unlocked read has taken its notice with it (on delete cascade), and
 // one whose issue has closed takes no more edits: either way nothing is sent, and a closed issue's

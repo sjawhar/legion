@@ -33,7 +33,8 @@ type CookieIdentity struct {
 	Sessions   auth.SessionStore
 	// Membership confirms, at least hourly, that the person a cookie names may still use Dispatch,
 	// and ends their session when the sign-in issuer no longer says so. It is nil only on the local
-	// dev sign-in server, whose people never signed in through an issuer.
+	// dev sign-in server, whose people never signed in through an issuer: a cookie server with no
+	// sign-in configured gets NoBrowserIdentity instead, never a CookieIdentity of its own.
 	Membership *Membership
 }
 
@@ -80,6 +81,17 @@ func (i HeaderIdentity) Login(r *http.Request) (string, error) {
 		return "", err
 	}
 	return email, nil
+}
+
+// NoBrowserIdentity is the identity of a cookie server with no sign-in configured: nobody can sign
+// in there, and a cookie minted while sign-in was on must not outlive that configuration, since
+// the key signing it is the deployment's and lives on. Every request that needs a person is
+// then 401 NO_IDENTITY and the agent-token API is all the server serves.
+type NoBrowserIdentity struct{}
+
+// Login always returns ErrNoIdentity: no request names a person on a server nobody signs in to.
+func (NoBrowserIdentity) Login(*http.Request) (string, error) {
+	return "", ErrNoIdentity
 }
 
 // signInUnavailableMessage is what WriteError answers, with the code SIGNIN_UNAVAILABLE, a request

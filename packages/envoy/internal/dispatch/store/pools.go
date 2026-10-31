@@ -28,7 +28,8 @@ type openedPool struct {
 
 // RawPool is a separate pool handed out whole, as the pgx pool it is: the rooms pool a document
 // load opens its own transaction on, the leases pool a maintenance pass holds its lease on for a
-// whole pass, the listen pool whose connection is hijacked, the registry's and the health probe's.
+// whole pass, the listen pool whose connection is hijacked, the horizon pool the event log's safe
+// horizon batches its observations on, the registry's and the health probe's.
 // Each needs what only a pgx pool gives, which is why these are not wrapped (Pool.wrapped) and why
 // their callers stand outside the nested-acquire guard: a separate pool cannot close the cycle the
 // guard prevents.
@@ -126,18 +127,19 @@ func (r *RawPool) Ping(ctx context.Context) error {
 // median. The ceiling is picked here rather than derived from the task's CPU allotment or read
 // out of the DSN another repository's URL builder writes.
 //
-// It is 48 of one connection budget of 87 (ConnectionsPerProcess) that every pool of a process
+// It is 48 of one connection budget of 89 (ConnectionsPerProcess) that every pool of a process
 // shares, partitioned rather than grown: requests 48, background 6 (Background), live 4 (Live),
 // settlements 4 (Settlements), rooms 4, health 1, the three permanent listeners (the listener
-// pool's one dial is one of them redialling), leases leasePoolSize (15), outbox 1 and the server
-// process registry's own 1 (registryPoolSize). The partition itself added nothing: it is the 87
-// the process opened before, the request pool having given up 16, which background, live,
-// settlements and the leases' two spare connections took. A write takes a connection per statement
-// one after another, and a read pins one for its whole length (PinConnection), so under load the
-// API holds every connection of this pool; the background loops, the live-update readers and the
-// settlements wait on pools of their own, so neither side can starve the other, and an acquire
-// here waits at most requestAcquireBound before it is refused with ErrPoolBusy rather than
-// queueing without end.
+// pool's one dial is one of them redialling), leases leasePoolSize (15), outbox 1, the event
+// horizon 2 (Horizon) and the server process registry's own 1 (registryPoolSize). The partition
+// itself added nothing: it is the 87 the process opened before, the request pool having given up
+// 16, which background, live, settlements and the leases' two spare connections took; the event
+// horizon's 2 are the only connections added since, and they came with the pool itself. A write
+// takes a connection per statement one after another, and a read pins one for its whole length
+// (PinConnection), so under load the API holds every connection of this pool; the background
+// loops, the live-update readers and the settlements wait on pools of their own, so neither side
+// can starve the other, and an acquire here waits at most requestAcquireBound before it is
+// refused with ErrPoolBusy rather than queueing without end.
 //
 // The database bounds the budget from above. Dispatch's database is the gcp:Dispatch component's
 // Cloud SQL Postgres instance, whose default max_connections follows its tier's memory
@@ -299,12 +301,13 @@ const registryPoolSize = 1
 const permanentListeners = 3
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres, the
-// budget of 87 sharedPoolSize describes: every pool's size, the registry's own pool
-// (processes.Register) among them, and one connection per permanent listener, which the listener
-// pool dials and hands off rather than holds (its one dial in flight is a permanent listener
-// redialling, so it is not counted twice).
+// budget of 89 sharedPoolSize describes: every pool's size, the registry's own pool
+// (processes.Register) and the event horizon's (Horizon) among them, and one connection per
+// permanent listener, which the listener pool dials and hands off rather than holds (its one dial
+// in flight is a permanent listener redialling, so it is not counted twice).
 const ConnectionsPerProcess = sharedPoolSize + backgroundPoolSize + livePoolSize + settlementsPoolSize +
-	roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + permanentListeners
+	roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + horizonPoolSize + registryPoolSize +
+	permanentListeners
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared
@@ -312,6 +315,31 @@ const ConnectionsPerProcess = sharedPoolSize + backgroundPoolSize + livePoolSize
 // it; on a pool of its own it waits for none of them, and holds no connection a request could use.
 func (p *Pool) Outbox() (*Pool, error) {
 	return p.wrapped(OutboxPool, outboxPoolSize)
+}
+
+// horizonPoolSize bounds the pool the event log's safe horizon (events.Horizon) works through. The
+// server keeps one Horizon, whose concurrent callers share the one observation in flight, so one
+// connection serves every observation. The other statements the Horizon runs share both
+// connections with it: the stall diagnosis and the write of the proven horizon (event_horizon),
+// which run after an observation has released its waiters, and the reads every GET /auth/whoami
+// and the relay's first start make (a mark, the oldest transaction that can write the event log,
+// the persisted horizon), each one statement.
+const horizonPoolSize = 2
+
+// Horizon is the pool the event log's safe horizon (events.Horizon) takes its observations, its
+// marks and the reads beside them, its stall diagnosis and its persist write through. Every
+// reader that pages the event log by a global id cursor - the event stream relay, the delivery
+// hub, a references read since a cursor - reads only up to what an observation has proven safe.
+// Under load the API's requests queue for the shared pool's connections, and an observation
+// queued behind them holds back every live reader of the event log; on a pool of its own it waits
+// for none of them, and holds no connection a request could use. Like the rooms pool it is handed
+// out raw and its callers stand outside the nested-acquire guard, because a separate pool cannot
+// close the cycle the guard prevents: none of those statements (each one batch or one row) asks
+// for a second connection while it holds one, and a page's whoami takes one while its request
+// holds nothing else. Its acquires are bounded at requestAcquireBound, since a page's load waits
+// on one, and an acquire that waits that bound out is refused with ErrPoolBusy (RawPool).
+func (p *Pool) Horizon() (*RawPool, error) {
+	return p.separate(HorizonPool, horizonPoolSize)
 }
 
 // backgroundPoolSize bounds the pool for work no request waits on: background loops such as the
