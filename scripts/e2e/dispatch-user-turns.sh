@@ -25,19 +25,17 @@
 # 1, the carded Send at its retry, and nothing else. Each check prints `== <name>`, what it
 # observed, and `ok <name>`; the first that fails ends the run non-zero, naming it.
 #
-# Run it as `bash scripts/e2e/dispatch-user-turns.sh` from a checkout, devbox only. The session's model
-# is Anthropic, on the route LEGION_E2E_MODEL_ROUTE names (`gateway`, the default, or `key-file`):
-# `gateway` goes through the Hawk model gateway on the operator's own hawk login
-# (lib/install-model-gateway.sh), so LEGION_E2E_MODEL_GATEWAY_URL is required and the keyring must be
-# unlocked; `key-file` reads the 0600 file LEGION_E2E_ANTHROPIC_KEY_FILE names on every call
-# (lib/install-key-file-model-route.sh), for a devbox with no Hawk gateway. DISPATCH_USER_TURNS_OMP
-# names another Oh My Pi (a mise tool spec such as github:sjawhar/oh-my-pi@<version>) in place of the
-# pinned one. DISPATCH_USER_TURNS_ONLY=spec-edit runs `session-registers` and the two spec-edit
-# checks alone, then ends: the spec-edit live check, which needs none of the others;
-# DISPATCH_USER_TURNS_ONLY=spec-edit-card stops after the first of them, the card's arrival.
+# Run it as `LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/dispatch-user-turns.sh` from
+# a checkout, devbox only: the session's model is Anthropic, keyed from that file, which holds a
+# plaintext Anthropic key and is read fresh on every call (lib/install-key-file-model-route.sh).
+# DISPATCH_USER_TURNS_OMP names another Oh My Pi (a mise tool spec such as
+# github:sjawhar/oh-my-pi@<version>) in place of the pinned one. DISPATCH_USER_TURNS_ONLY=spec-edit
+# runs `session-registers` and the two spec-edit checks alone, then ends: the spec-edit live check,
+# which needs none of the others; DISPATCH_USER_TURNS_ONLY=spec-edit-card stops after the first of
+# them, the card's arrival.
 # Everything the run creates is its own and goes on any exit: its scratch directory, the isolated
-# profile under the HOME it gives Oh My Pi (make_omp_home, lib/omp-home.sh), the key command a
-# key-file route writes, its tmux server, its listener and Dispatch, and its Postgres and NATS
+# profile under the HOME it gives Oh My Pi (make_omp_home, lib/omp-home.sh), the key command the
+# model route writes, its tmux server, its listener and Dispatch, and its Postgres and NATS
 # containers.
 # DISPATCH_USER_TURNS_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) keeps the
 # logs, the page's screenshots, the session transcript, the arguments the rig's extension command
@@ -48,6 +46,21 @@ set -euo pipefail
 unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE NATS_DAEMON_NKEY_SEED NATS_DAEMON_NKEY_SEED_FILE
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
+key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+[ -n "$key_file" ] || {
+  echo "dispatch user turns e2e: LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key" >&2
+  exit 1
+}
+# The installer's own checks, before any service starts, as Stage 4b and the Claude backend proof
+# make them at their start.
+{ [ -f "$key_file" ] && [ -r "$key_file" ]; } || {
+  echo "dispatch user turns e2e: LEGION_E2E_ANTHROPIC_KEY_FILE names $key_file, which is not a readable file" >&2
+  exit 1
+}
+[[ $(stat -L -c %a -- "$key_file") =~ ^[0-7]00$ ]] || {
+  echo "dispatch user turns e2e: LEGION_E2E_ANTHROPIC_KEY_FILE $key_file is readable by group or other; chmod 600 it" >&2
+  exit 1
+}
 work=$(mktemp -d "/tmp/legion-e2e-user-turns.$$.XXXXXXXX")
 evidence=${DISPATCH_USER_TURNS_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-user-turns-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/checks"
@@ -86,6 +99,9 @@ tm() { tmux -S "$work/tmux.sock" "$@"; }
 cleanup() {
   local p
   set +e
+  # First, before anything slower can hang: the model route's key command, which bakes in the key
+  # file's resolved path.
+  rm -rf "$work/model-key"
   tm capture-pane -p -t user >"$evidence/checks/session.pane" 2>/dev/null
   [ -z "$session_file" ] || cp "$session_file" "$evidence/session.jsonl" 2>/dev/null
   tm kill-server >/dev/null 2>&1
@@ -248,25 +264,11 @@ note "listener port $envoy_port; Dispatch port $dispatch_port"
 # proof is about.
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
 note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile"
-model_route=${LEGION_E2E_MODEL_ROUTE:-gateway}
-case "$model_route" in
-gateway)
-  bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" \
-    --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
-    fail "the session's model route through the Hawk model gateway could not be installed (the reason is above)"
-  ;;
-key-file)
-  [ -n "${LEGION_E2E_ANTHROPIC_KEY_FILE:-}" ] ||
-    fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
-  # The key command goes under $work, which cleanup removes on every exit; the call record, which
-  # holds no secret, goes with the evidence.
-  bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" \
-    --dest "$evidence/model-route" --key-dir "$work/model-key" --key-file "$LEGION_E2E_ANTHROPIC_KEY_FILE" >/dev/null ||
-    fail "the session's model route through the key file could not be installed (the reason is above)"
-  ;;
-*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
-esac
-note "model route $model_route"
+# The key command goes under $work, which cleanup removes on every exit; the call record, which
+# holds no secret, goes with the evidence.
+bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" \
+  --dest "$evidence/model-route" --key-dir "$work/model-key" --key-file "$key_file" >/dev/null ||
+  fail "the session's model route through the key file could not be installed (the reason is above)"
 only=${DISPATCH_USER_TURNS_ONLY:-}
 case "$only" in "" | spec-edit | spec-edit-card) ;; *) fail "DISPATCH_USER_TURNS_ONLY must be spec-edit, spec-edit-card or unset, not '$only'" ;; esac
 

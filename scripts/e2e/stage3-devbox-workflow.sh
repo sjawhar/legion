@@ -6,20 +6,15 @@
 # its lifecycle belongs to this run.
 #
 # Run it as `bash scripts/e2e/stage3-devbox-workflow.sh` with three required inputs:
-# LEGION_E2E_MODEL_ROUTE (`gateway`, `key-file` or `box-login`), SMOKE_UPSTREAM_NATS (the production
+# LEGION_E2E_MODEL_ROUTE (`key-file` or `box-login`), SMOKE_UPSTREAM_NATS (the production
 # Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name), and, depending on the
 # route:
-#   - `gateway`: LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint. It needs
-#     agent-tier secrets and the operator's own hawk login, with the keyring holding it unlocked:
-#     the agents' model is Anthropic through the Hawk model gateway
-#     (lib/install-model-gateway.sh), and no Anthropic key reaches a pane.
-#   - `key-file`: LEGION_E2E_ANTHROPIC_KEY_FILE, a 0600 file holding a plaintext Anthropic key, for
-#     a devbox with no Hawk gateway at all (lib/install-key-file-model-route.sh). No Anthropic key
-#     reaches a pane here either — only the key command, baked in at install time, ever reads the
-#     file.
+#   - `key-file`: LEGION_E2E_ANTHROPIC_KEY_FILE, a 0600 file holding a plaintext Anthropic key
+#     (lib/install-key-file-model-route.sh). No Anthropic key reaches a pane — only the key
+#     command, baked in at install time, ever reads the file. It needs agent-tier secrets.
 #   - `box-login`: nothing more. The operator's own stored Oh My Pi login, for a devbox whose
 #     operator lets Legion's test runs use it (lib/install-box-login-route.sh): the profile's
-#     agent.db is a symlink to the operator's, no key or gateway is involved, and nothing reads the
+#     agent.db is a symlink to the operator's, no key file is involved, and nothing reads the
 #     credential. The panes run the operator's own Oh My Pi build (its global mise pin, refused
 #     unless it carries the refresh-race fix) instead of .omp-pin, and one box-login proof runs at
 #     a time on the box (lib/box-login.sh); its teardown stops panes with SIGTERM and a grace before
@@ -46,12 +41,17 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 . "$root/scripts/e2e/lib/box-login.sh"
 model_route=${LEGION_E2E_MODEL_ROUTE:-}
 case "$model_route" in
-gateway | key-file | box-login) ;;
+key-file | box-login) ;;
 *)
-  echo "FAIL setup: LEGION_E2E_MODEL_ROUTE must be gateway, key-file or box-login, not '$model_route'" >&2
+  echo "FAIL setup: LEGION_E2E_MODEL_ROUTE must be key-file or box-login, not '$model_route'" >&2
   exit 1
   ;;
 esac
+# The key-file route's own input, checked here, before the run proves the role Apps against GitHub.
+if [ "$model_route" = key-file ] && [ -z "${LEGION_E2E_ANTHROPIC_KEY_FILE:-}" ]; then
+  echo "FAIL setup: LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key" >&2
+  exit 1
+fi
 # The daemon prefers LEGION_OMP_PATH to omp_invocation (packages/daemon/internal/omplaunch). The
 # daemon here runs without it (start_daemon), and under box-login a caller that sets it is refused
 # outright: a build named there could lack the refresh-race fix and still open the operator's
@@ -169,9 +169,9 @@ cleanup() {
   # command the trap interrupted, not the cleanup command that failed.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
   # First, before anything slower (the production audit, closing pull requests) can hang or be
-  # SIGKILLed mid-teardown: the key-file route's own key command, which bakes in --key-file's
-  # resolved path, must never survive this script on any exit, so it is never conditioned on how
-  # the rest of cleanup goes.
+  # SIGKILLed mid-teardown: the model route's key command, which bakes in --key-file's resolved
+  # path, must never survive this script on any exit, so it is never conditioned on how the rest
+  # of cleanup goes.
   rm -rf "$work/model-gateway-key" || true
   if [ -z "${ok:-}" ] && [ -z "$audited" ] && [ -n "$prod_baseline" ]; then
     printf 'production audit after failure:\n' >&2
@@ -200,7 +200,6 @@ cleanup() {
   docker rm -f -v "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
   close_unpassed_run_pull_requests
-  rm -rf "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
@@ -646,7 +645,6 @@ case "$until" in
   *) fail "STAGE3_UNTIL must be prerequisites or rework, not $until" ;;
 esac
 [ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
-[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 # The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never
 # a bare alias a resolver's search domain would complete. The value is never printed.
 upstream_nats=${SMOKE_UPSTREAM_NATS:-}
@@ -674,21 +672,14 @@ gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh ca
 mkdir -p "$evidence/logs" "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-# The model route, installed while this shell still holds the operator's HOME and XDG directories
-# (the gateway route's key command runs hawk-token under them; the key-file route's needs none of
-# it, but is installed the same way, here, for one setup step regardless of route). The gateway
-# route's first mint is its preflight: a locked keyring stops the run here, by name. The key-file
-# route's own preflight read stops the run here just as loudly if the file cannot be read. The key
-# command's log is evidence either way. The box-login route has no key command: it links the
-# profile to the operator's login database, names the operator's own Oh My Pi build (which the
-# panes then run instead of .omp-pin), and records both in $evidence/model-gateway/box-login.route.
+# The model route, installed while this shell still holds the operator's HOME and XDG directories.
+# The key-file route's preflight read stops the run here, by name, if the file cannot be read; the
+# key command's log is evidence. The box-login route has no key command: it links the profile to
+# the operator's login database, names the operator's own Oh My Pi build (which the panes then run
+# instead of .omp-pin), and records both in $evidence/model-gateway/box-login.route.
 key_command=
 box_pin=
 case "$model_route" in
-gateway)
-  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-    fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-  ;;
 key-file)
   key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
   [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
@@ -700,10 +691,9 @@ box-login)
     fail "the agents' model route on the operator's own Oh My Pi login could not be installed (the reason is above)"
   ;;
 esac
-# The call record (.log/.calls) always sits under $evidence/model-gateway, beside $key_command
-# itself for the gateway route; the key-file route's own $key_command lives under its own
-# --key-dir instead, under $work, which cleanup removes unconditionally, so the record is
-# addressed separately. The box-login route keeps no call record.
+# The call record (.log/.calls) sits under $evidence/model-gateway; the key-file route's own
+# $key_command lives under its own --key-dir, under $work, which cleanup removes unconditionally,
+# so the record is addressed separately. The box-login route keeps no call record.
 key_record=${key_command:+$evidence/model-gateway/$(basename "$key_command")}
 pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
 [ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"

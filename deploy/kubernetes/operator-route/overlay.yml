@@ -8,7 +8,7 @@
 # so enabledModels holds every session's own model, and any it falls back to, to anthropic, and each
 # provider a pod could reach without the gateway is disabled: Bedrock twice (a node's instance role
 # is its key), Google and the local servers Oh My Pi uses with no key, as
-# scripts/e2e/lib/install-model-gateway.sh does for the tmux proofs, and OpenAI. enabledModels names
+# scripts/e2e/lib/install-key-file-model-route.sh does for the tmux proofs, and OpenAI. enabledModels names
 # the standard models one by one rather than by a pattern, so no new session starts on one of
 # the -legion aliases models.yml keeps until the gateway retires them. Records merge key by key
 # across settings layers, so every role Legion's prompts reach is named: the shipped review, oracle

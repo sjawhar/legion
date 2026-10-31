@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Proves a tmux stage proof's agents reached the model only through its configured route: every
 # agent turn its OMP profile recorded, each subagent's included, was served by the anthropic
-# provider, the one lib/install-model-gateway.sh (the Hawk gateway) or
-# lib/install-key-file-model-route.sh (a local key file) routes and leaves enabled. Oh My Pi falls
+# provider, the one lib/install-key-file-model-route.sh routes and leaves enabled. Oh My Pi falls
 # back without a word: with its key command failing, a Go pane answered as
 # amazon-bedrock/us.anthropic.claude-opus-4-8 on the devbox's instance role, and a Stage 3 retro's
 # scout subagent ran on amazon-bedrock/openai.gpt-oss-120b. Here a turn on any other provider fails

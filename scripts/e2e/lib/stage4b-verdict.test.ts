@@ -191,9 +191,9 @@ tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= even
 negative_config_pod= negative_config_workspace= block_tree=
 operator=production namespace=legion capacity_subject=
 mkdir -p "$work" "$evidence/model-gateway"
-# The controller starved during the checkpoint: a blocked checkpoint's notes, which must not print,
-# would list it, and a failed checkpoint's do.
-printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:05Z 4242 /x controller timeout no-key >"$evidence/model-gateway/hawk-token.calls"
+# The controller got no key during the checkpoint: a blocked checkpoint's notes, which must not
+# print, would list it, and a failed checkpoint's do.
+printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:05Z 4242 /x controller failed no-key >"$evidence/model-gateway/anthropic-key.calls"
 exec 7>&1
 ${helperGuard}
 stop_tree() { :; }; stop_pid() { :; }; collect_transcripts() { :; }; record_pair() { :; }; op() { :; }
@@ -266,7 +266,7 @@ describe("stage 4b's verdict line", () => {
     expect(outside.stdout).not.toContain("model-gateway-unserved:");
   });
 
-  test("prints the notes for a checkpoint that failed itself, so the seeded starve is read", () => {
+  test("prints the notes for a checkpoint that failed itself, so the seeded failed call is read", () => {
     const failed = controllerRun("[]", "fail");
     expect(failed.code).toBe(1);
     expect(failed.stdout).toContain(

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Routes a named OMP profile's model turns to Anthropic on the operator's own Oh My Pi login, the
 # one the devbox's own sessions already use: the box-login alternative to
-# lib/install-model-gateway.sh's Hawk route and lib/install-key-file-model-route.sh's key file, for
-# a devbox whose operator lets Legion's test runs use that login. No key is minted, read or copied,
+# lib/install-key-file-model-route.sh's key file, for
+# a devbox whose operator lets Legion's test runs use that login. No key is read or copied,
 # and no model gateway is involved.
 #
 #   scripts/e2e/lib/install-box-login-route.sh --profile <name> --home <dir> --dest <dir> --operator-home <dir>
@@ -104,7 +104,7 @@ done
 [ -n "$have_operator_home" ] || refuse "--operator-home is required: the operator's real home, captured before HOME moved"
 
 # OMP reads an empty name or "default" as the profile every plain `omp` uses (the same rule as
-# install-model-gateway.sh and install-plugin-profile.sh).
+# install-key-file-model-route.sh and install-plugin-profile.sh).
 trimmed=${profile#"${profile%%[![:space:]]*}"}
 trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
 if [ -z "$trimmed" ] || [ "$trimmed" = default ]; then
@@ -174,7 +174,7 @@ cat >"$agent/config.yml" <<EOF
 # Written by scripts/e2e/lib/install-box-login-route.sh. The operator's own Oh My Pi login, through
 # agent.db (a symlink to the operator's database), is the one model route: no models.yml overrides
 # Anthropic's endpoint or key, so Oh My Pi uses the login stored there. Oh My Pi falls back from a
-# failing provider without a word (install-model-gateway.sh measured a pane answering from Bedrock
+# failing provider without a word (a pane was measured answering from Bedrock
 # on the devbox's instance role), so enabledModels holds every session's own model to anthropic and
 # every provider a pane could use without that login is disabled, as the key-file route does: Bedrock
 # twice (the instance role is its key), Google (Stage 2's provider-key path hands panes

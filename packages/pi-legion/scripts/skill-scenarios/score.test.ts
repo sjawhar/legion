@@ -6,7 +6,7 @@ import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
 import { checkouts, specWork } from "./score";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
-// profile's gateway key command runs past its budget) says nothing about the skill under test: the
+// profile's key command cannot read its key file) says nothing about the skill under test: the
 // score reports it as a rig error and leaves it out of the pass counts. An agent that got a turn and
 // then did nothing the scenario asks is a failure.
 

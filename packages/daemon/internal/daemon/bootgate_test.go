@@ -847,7 +847,8 @@ func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
 }
 
 // The tmux gate asks the load probe for the skills and task agents the daemon's role prompts name,
-// beside the plugin's own: legion-controller is loaded by roles/controller-root.md alone.
+// beside the plugin's own: legion-controller is loaded by roles/controller-root.md, a daemon role
+// prompt the plugin does not ship.
 func TestTheTmuxGateAsksForWhatTheRolePromptsName(t *testing.T) {
 	cfg := testConfig(t)
 	home := t.TempDir()

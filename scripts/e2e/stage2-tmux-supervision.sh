@@ -15,18 +15,15 @@
 # work directory survives a failure, because its logs are the evidence, and goes when the run passed.
 #
 # Inputs: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
-# PostgreSQL 18 on tmpfs. LEGION_E2E_MODEL_ROUTE (required, `gateway`, `key-file` or `box-login`)
-# picks how the agents reach Anthropic, independently of which devbox this runs on:
-#   - `gateway`: the operator's own hawk login, through the Hawk model gateway at
-#     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh); the
-#     operator's keyring must be unlocked, and no Anthropic key reaches a pane.
+# PostgreSQL 18 on tmpfs. LEGION_E2E_MODEL_ROUTE (required, `key-file` or `box-login`) picks how
+# the agents reach Anthropic, independently of which devbox this runs on:
 #   - `key-file`: LEGION_E2E_ANTHROPIC_KEY_FILE (required in this mode), a 0600 file holding a
 #     plaintext Anthropic key, read fresh by lib/install-key-file-model-route.sh's key command on
-#     every call; for a devbox with no Hawk gateway at all. No Anthropic key reaches a pane here
-#     either — only the key command, baked in at install time, ever reads the file.
+#     every call. No Anthropic key reaches a pane — only the key command, baked in at install time,
+#     ever reads the file.
 #   - `box-login`: the operator's own stored Oh My Pi login, for a devbox whose operator lets
 #     Legion's test runs use it (lib/install-box-login-route.sh): the profile's agent.db is a
-#     symlink to the operator's, no key or gateway is involved, and nothing reads the credential.
+#     symlink to the operator's, no key file is involved, and nothing reads the credential.
 #     The panes run the operator's own Oh My Pi build (its global mise pin, refused unless it
 #     carries the refresh-race fix) instead of .omp-pin, and one box-login proof runs at a time on
 #     the box (lib/box-login.sh); its teardown stops panes with SIGTERM and a grace before any
@@ -48,9 +45,9 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 . "$root/scripts/e2e/lib/box-login.sh"
 model_route=${LEGION_E2E_MODEL_ROUTE:-}
 case "$model_route" in
-gateway | key-file | box-login) ;;
+key-file | box-login) ;;
 *)
-  echo "FAIL setup: LEGION_E2E_MODEL_ROUTE must be gateway, key-file or box-login, not '$model_route'" >&2
+  echo "FAIL setup: LEGION_E2E_MODEL_ROUTE must be key-file or box-login, not '$model_route'" >&2
   exit 1
   ;;
 esac
@@ -190,7 +187,6 @@ cleanup() {
   stop_pid "$listener_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f -v "$nats_container" "$pg_container" >/dev/null 2>&1 || true
-  rm -rf "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
@@ -309,7 +305,6 @@ expect_refusal() {
 for tool in go docker jq curl python3 tmux bun mise socat secrets; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
-[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 mkdir -p "$state" "$work/xdg" "$work/tmux" "$work/stub"
 make_omp_home "$omp_home"
 # Every daemon of the run starts with the real tmux first on its PATH: the tmux runtime looks tmux
@@ -319,20 +314,13 @@ make_omp_home "$omp_home"
 real_tmux=$(mise which tmux) || fail "mise has no tmux"
 mkdir -p "$work/realbin"
 ln -sfn "$real_tmux" "$work/realbin/tmux"
-# The model route, installed while this shell still holds the operator's HOME and XDG directories
-# (the gateway route's key command runs hawk-token under them; the key-file route's needs none of
-# it, but is installed the same way, here, for one setup step regardless of route). The gateway
-# route's first mint is its preflight: a locked keyring stops the run here, by name. The key-file
-# route's own preflight read stops the run here just as loudly if the file cannot be read. The
+# The model route, installed while this shell still holds the operator's HOME and XDG directories.
+# The key-file route's preflight read stops the run here, by name, if the file cannot be read. The
 # box-login route has no key command: it links the profile to the operator's login database and
 # names the operator's own Oh My Pi build, which the panes then run instead of .omp-pin.
 key_command=
 box_pin=
 case "$model_route" in
-gateway)
-  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-    fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-  ;;
 key-file)
   key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
   [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
@@ -344,10 +332,10 @@ box-login)
     fail "the agents' model route on the operator's own Oh My Pi login could not be installed (the reason is above)"
   ;;
 esac
-# The call record (.log/.calls) always sits under $work/model-gateway, beside $key_command itself
-# for the gateway route; the key-file route's own $key_command lives under its own --key-dir
-# instead, which the run's cleanup removes unconditionally, so the record is addressed separately.
-# The box-login route keeps no call record: $work/model-gateway/box-login.route says what it used.
+# The call record (.log/.calls) sits under $work/model-gateway; the key-file route's own
+# $key_command lives under its own --key-dir, which the run's cleanup removes unconditionally, so
+# the record is addressed separately. The box-login route keeps no call record:
+# $work/model-gateway/box-login.route says what it used.
 key_record=${key_command:+$work/model-gateway/$(basename "$key_command")}
 export XDG_STATE_HOME=$work/xdg # the legions registry this run writes is its own
 export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
@@ -511,9 +499,10 @@ mv "$work/rubric.aside" "$work/pi-legion/dist/skills/thermonuclear-deep-review"
 pass
 
 begin gate-refuses-a-skill-only-a-role-prompt-loads
-# The gate also resolves the skills the daemon's role prompts load, beside the plugin's own: the
-# refusal of the plugin without legion-controller names roles/controller-root.md, which only a gate
-# that reads the daemon's own role prompts can name.
+# The gate also resolves the skills the daemon's role prompts load, beside the plugin's own:
+# legion-controller is loaded by roles/controller-root.md and, since the plugin's findings
+# reference names it, by dist/skills/legion-worker/references/findings.md; only a gate that reads
+# the daemon's own role prompts can name roles/controller-root.md among its loaders.
 mv "$work/pi-legion/dist/skills/legion-controller" "$work/controller-skill.aside"
 expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by dist/skills/legion-worker/references/findings.md, roles/controller-root.md)"
 mv "$work/controller-skill.aside" "$work/pi-legion/dist/skills/legion-controller"
@@ -825,8 +814,8 @@ for p in $chain_pids; do
     fail "pane process chain runs the dotfiles OMP wrapper: $(tr '\0' ' ' <"/proc/$p/cmdline")"
 done
 shim1=$(first_child "$pane1_pid")
-# LEGION-206 P1 holds with the gateway route: the pane's shell and its OMP keep the daemon's own XDG
-# directories and carry no session bus address (only the key command gets the operator's).
+# LEGION-206 P1: the pane's shell and its OMP keep the daemon's own XDG directories and carry no
+# session bus address.
 for p in "$pane1_pid" "$omp1"; do
   for name in XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME; do
     dir=$(env_of "$p" "$name")

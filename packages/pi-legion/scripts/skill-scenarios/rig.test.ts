@@ -17,8 +17,8 @@ import { scriptFunctions } from "../../../../scripts/e2e/lib/script-functions";
 // one minute.
 setDefaultTimeout(60_000);
 
-// rig.sh's install_model_route, run with the checkout's real installers: the route a label's
-// profile reaches Anthropic by, picked by LEGION_E2E_MODEL_ROUTE.
+// rig.sh's install_model_route, run with the checkout's real installer: the key-file route a
+// label's profile reaches Anthropic by.
 const root = path.resolve(import.meta.dir, "../../../..");
 const fn = scriptFunctions(path.join(import.meta.dir, "rig.sh"));
 const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-rig-"));
@@ -68,10 +68,9 @@ function route(dir: string, env: Record<string, string>, model = "") {
 }
 
 describe("install_model_route", () => {
-  test("key-file writes the profile's route, its key command under model-key and its record under key", () => {
+  test("writes the profile's route, its key command under model-key and its record under key", () => {
     const dir = profileDir();
     const { code, stderr } = route(dir, {
-      LEGION_E2E_MODEL_ROUTE: "key-file",
       LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o600),
     });
     expect({ code, stderr: code === 0 ? "" : stderr }).toEqual({ code: 0, stderr: "" });
@@ -86,9 +85,9 @@ describe("install_model_route", () => {
     expect(existsSync(path.join(dir, "key", "anthropic-key.log"))).toBe(true);
   });
 
-  test("key-file without LEGION_E2E_ANTHROPIC_KEY_FILE fails, naming the variable", () => {
+  test("without LEGION_E2E_ANTHROPIC_KEY_FILE fails, naming the variable", () => {
     const dir = profileDir();
-    const { code, stderr } = route(dir, { LEGION_E2E_MODEL_ROUTE: "key-file" });
+    const { code, stderr } = route(dir, {});
     expect(code).toBe(1);
     expect(stderr).toContain("LEGION_E2E_ANTHROPIC_KEY_FILE is unset");
     expect(existsSync(path.join(dir, "home/.omp/profiles/skills-test/agent/models.yml"))).toBe(
@@ -99,7 +98,6 @@ describe("install_model_route", () => {
   test("a key file others can read is refused, and no key command is left behind", () => {
     const dir = profileDir();
     const { code, stderr } = route(dir, {
-      LEGION_E2E_MODEL_ROUTE: "key-file",
       LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o644),
     });
     expect(code).not.toBe(0);
@@ -107,7 +105,7 @@ describe("install_model_route", () => {
     expect(existsSync(path.join(dir, "model-key"))).toBe(false);
   });
 
-  /** An operator's models.yml holding the gateway block the provider route names, and another. */
+  /** An operator's models.yml holding the provider block the provider route names, and another. */
   function providerFile(apiKey: string): string {
     const file = path.join(work, `models-${profiles}.yml`);
     writeFileSync(
@@ -215,11 +213,11 @@ describe("install_model_route", () => {
     );
   });
 
-  test("an unknown route fails, naming the three it takes", () => {
+  test("an unknown route fails, naming the two it takes", () => {
     const dir = profileDir();
     const { code, stderr } = route(dir, { LEGION_E2E_MODEL_ROUTE: "bedrock" });
     expect(code).toBe(1);
-    expect(stderr).toContain("it is gateway, key-file or provider");
+    expect(stderr).toContain("it is key-file or provider");
   });
 });
 
@@ -246,7 +244,6 @@ describe("a setup that fails after install_model_route", () => {
     return co;
   }
   const routeEnv = () => ({
-    LEGION_E2E_MODEL_ROUTE: "key-file",
     LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o600),
   });
 
@@ -292,6 +289,54 @@ describe("a setup that fails after install_model_route", () => {
     expect({ code: ok.code, stderr: ok.stderr }).toEqual({ code: 0, stderr: "" });
     expect(existsSync(path.join(kept, "profiles/probe/model-key/anthropic-key"))).toBe(true);
     expect(existsSync(path.join(kept, "profiles/probe/ready"))).toBe(true);
+  });
+
+  // Catches: cmd_profile holding the provider route to the key-file route's two inputs. A provider
+  // label reaches the model through the operator's own block, so it needs neither
+  // LEGION_E2E_ANTHROPIC_KEY_FILE nor an install-key-file-model-route.sh in its checkout.
+  test("cmd_profile builds a provider label with no key file and no key-file installer", () => {
+    const dir = freshDir("provider-work");
+    const co = checkout();
+    rmSync(path.join(co, "scripts/e2e/lib/install-key-file-model-route.sh"));
+    const models = path.join(dir, "operator-models.yml");
+    writeFileSync(
+      models,
+      [
+        "providers:",
+        "  box-gateway:",
+        "    baseUrl: http://gateway.internal.example:4000",
+        '    apiKey: "!cat /run/user/1000/box/gateway-key"',
+        "    api: anthropic-messages",
+        "",
+      ].join("\n")
+    );
+    const script = [
+      "set -euo pipefail",
+      ...[
+        "fail",
+        "label_dir",
+        "on_exit",
+        "drop_unready_keys",
+        "install_provider_route",
+        "install_model_route",
+        "cmd_profile",
+      ].map(fn),
+      "route_model_id=claude-opus-4-8",
+      "checkout_commit() { printf 'fixture parents=base\\n'; }",
+      'work=$1; cmd_profile probe "$2"',
+    ].join("\n");
+    const run = bash(script, [dir, co], {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER_FILE: models,
+      LEGION_E2E_MODEL_PROVIDER: "box-gateway",
+    });
+    expect({ code: run.code, stderr: run.stderr }).toEqual({ code: 0, stderr: "" });
+    const P = path.join(dir, "profiles/probe");
+    expect(existsSync(path.join(P, "model-key"))).toBe(false);
+    expect(existsSync(path.join(P, "ready"))).toBe(true);
+    expect(readFileSync(path.join(P, "built-from"), "utf8")).toContain(
+      "model box-gateway/claude-opus-4-8\n"
+    );
   });
 
   // Catches: a judge-profile build that fails at its second profile and keeps the first one's key
@@ -830,17 +875,18 @@ fi
   probe read-models cat "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml"
   key=$(sed -n 's/.*!exec \\(.*\\)"$/\\1/p' "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml" | head -1)
   probe key-command test -x "$key"
-  probe gateway-base-url grep -q 'baseUrl: https://gateway.internal.example/anthropic' "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml"
-  probe token-is-jwt bash -c '[[ "$("$1")" =~ ^eyJ[A-Za-z0-9_-]*\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$ ]]' - "$key"
+  echo "served $("$key" 2>/dev/null | od -An -tx1 | tr -d ' \\n')"
   probe dbus-set test -n "\${DBUS_SESSION_BUS_ADDRESS:-}"
   [ -z "\${SEEK:-}" ] || echo "seek $(find / \\( -path /proc -o -path /sys -o -path /dev \\) -prune -o -name 'leak-*' -print 2>/dev/null | head -1)"
 } >"$PWD/answer.json"
-sleep "\${SLEEP:-0}"
 echo judged
 exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
 `,
     { mode: 0o755 }
   );
+  // One key file for every judge here: the judge profiles' key command names the file it was built
+  // with, so a test that rewrites the file reaches every later judge.
+  const judgeKeyFile = keyFile(0o600);
   const judge = (
     kind: string,
     dir: string,
@@ -854,8 +900,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
         SKILL_SCENARIOS_WORK: work,
         SKILL_SCENARIOS_JUDGE_OMP: omp,
         SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${work}`,
-        LEGION_E2E_MODEL_ROUTE: "key-file",
-        LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o600),
+        LEGION_E2E_ANTHROPIC_KEY_FILE: judgeKeyFile,
         ...env,
       },
     });
@@ -902,6 +947,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
       "OMP_PROFILE=judge-ste",
     ]);
     expect(readFileSync(path.join(dir, "out.txt"), "utf8")).toBe("judged\nexit=0\n");
+    expect(existsSync(`${dir}.key`)).toBe(false);
     expect(readFileSync(path.join(dir, "judge-model.txt"), "utf8")).toBe(
       "model anthropic/claude-opus-4-8\nthinking high\n"
     );
@@ -933,8 +979,6 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
       "read-skill": "allowed",
       "read-models": "allowed",
       "key-command": "allowed",
-      "gateway-base-url": "denied",
-      "token-is-jwt": "denied",
       "dbus-set": "denied",
     });
     expect(existsSync(path.join(dir, "new.txt"))).toBe(false);
@@ -951,6 +995,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
     expect(recorded(dir, "env")).toContain("OMP_PROFILE=judge-bare");
     expect(recorded(dir, "probe")).toContain("read-skill denied");
     expect(readFileSync(path.join(dir, "out.txt"), "utf8")).toBe("judged\nexit=3\n");
+    expect(existsSync(`${dir}.key`)).toBe(false);
     expect(
       existsSync(path.join(work, "judge-profiles/bare/home/.omp/profiles/judge-bare/agent/skills"))
     ).toBe(false);
@@ -985,132 +1030,60 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
     }
   });
 
-  // The gateway route with the real installer and key command, and a stand-in hawk-token first on
-  // PATH that mints a JWT and counts each mint. The key command needs the operator's home and
-  // session bus, so it runs on the host; the container gets only the token it printed.
-  describe("on the gateway route", () => {
-    const gatewayWork = freshDir("judge-gateway-work");
-    mkdirSync(path.join(gatewayWork, "runs"), { recursive: true });
-    const fakeBin = freshDir("judge-gateway-bin");
-    const mints = path.join(gatewayWork, "mints.log");
-    writeFileSync(
-      path.join(fakeBin, "hawk-token"),
-      `#!/usr/bin/env bash
-printf '%s\\n' "$$" >>"$FAKE_MINT_LOG"
-payload=$(printf '{"exp":%s}' "$(($(date +%s) + 3600))" | base64 -w0 | tr '+/' '-_' | tr -d '=')
-printf 'eyJhbGciOiJub25lIn0.%s.c2ln\\n' "$payload"
-`,
-      { mode: 0o755 }
-    );
-    const gatewayJudge = (kind: string, dir: string, env: Record<string, string> = {}) =>
-      judge(kind, dir, "answer.json", {
-        PATH: `${fakeBin}:${childEnv.PATH}`,
-        SKILL_SCENARIOS_WORK: gatewayWork,
-        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${gatewayWork}`,
-        LEGION_E2E_MODEL_ROUTE: "gateway",
-        LEGION_E2E_MODEL_GATEWAY_URL: "https://gateway.internal.example/anthropic",
-        DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent/bus",
-        FAKE_MINT_LOG: mints,
-        ...env,
-      });
-    const mintCount = () =>
-      existsSync(mints) ? readFileSync(mints, "utf8").split("\n").filter(Boolean).length : 0;
-    function gatewayDir(): string {
-      const dir = path.join(gatewayWork, "judging", `job-${++jobs}`);
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(path.join(dir, "prompt.txt"), "Write answer.json.\n");
-      return dir;
-    }
+  /** The host key command of a built judge profile, and the key file it names. */
+  function judgeKey(kind: string): { command: string; file: string } {
+    const command = path.join(work, `judge-profiles/${kind}/model-key/anthropic-key`);
+    const line = readFileSync(command, "utf8")
+      .split("\n")
+      .find((l) => l.startsWith("key_file="));
+    const file = Bun.spawnSync(["bash", "-c", `${line}\nprintf %s "$key_file"`]).stdout.toString();
+    return { command, file };
+  }
 
-    // Catches: a gateway judge that cannot start in its container, one that gets the operator's
-    // home or session bus, one whose models.yml still names the host key command (which the
-    // container cannot run), one that mints more than once per judge run, a token the judge can
-    // read only by a path outside its mounts, and a token left on disk once the judge ends.
-    test("a gateway judge starts in the container on a token the host minted once, and the token file is gone after", () => {
-      // The first judge-omp call builds both profiles, and each install's preflight mints once.
-      // Count only a later call's mints: one judge run is one call of the key command.
-      expect(gatewayJudge("bare", gatewayDir()).exitCode).toBe(0);
-      const dir = gatewayDir();
-      const before = mintCount();
-      const result = gatewayJudge("ste", dir);
-      expect({ code: result.exitCode, stderr: result.stderr.toString() }).toEqual({
-        code: 0,
-        stderr: "",
-      });
-      expect(mintCount() - before).toBeLessThanOrEqual(1);
-      expect(recorded(dir, "env")).toEqual([
-        `PWD=${dir}`,
-        "HOME=/home/judge",
-        "OMP_PROFILE=judge-ste",
+  // Catches: a container key command that does not print the key, and one that keeps whitespace the
+  // host's key command drops, so a key file with a Windows line end or stray spaces sends the model
+  // a key with a carriage return or a space in it.
+  test("the container's key command prints the key, with every whitespace character dropped", () => {
+    const first = judgeDir();
+    expect(judge("ste", first).exitCode).toBe(0);
+    expect(recorded(first, "served")).toEqual([
+      Buffer.from("sk-ant-rig-test-0000000000000000\n").toString("hex"),
+    ]);
+    const { file } = judgeKey("ste");
+    const original = readFileSync(file);
+    try {
+      writeFileSync(file, " sk-ant-rig-test-padded\t\r\n");
+      const padded = judgeDir();
+      expect(judge("ste", padded).exitCode).toBe(0);
+      expect(recorded(padded, "served")).toEqual([
+        Buffer.from("sk-ant-rig-test-padded\n").toString("hex"),
       ]);
-      expect(Object.fromEntries(recorded(dir, "probe").map((line) => line.split(" ")))).toEqual({
-        "read-outside": "denied",
-        "read-home-ssh": "denied",
-        "list-work": "denied",
-        "read-own": "allowed",
-        "write-own-dir": "denied",
-        "write-sessions": "allowed",
-        "read-skill": "allowed",
-        "read-models": "allowed",
-        "key-command": "allowed",
-        "gateway-base-url": "allowed",
-        "token-is-jwt": "allowed",
-        "dbus-set": "denied",
-      });
-      expect(existsSync(`${dir}.key`)).toBe(false);
-      expect(readFileSync(path.join(dir, "answer.json"), "utf8")).not.toMatch(/eyJ[\w-]*\./);
-    });
+    } finally {
+      writeFileSync(file, original);
+    }
+  });
 
-    // Catches: a token directory or file that others can read while the judge runs. The stand-in
-    // omp sleeps 2 s, so a watcher sees the files while they exist.
-    test("the token file is the owner's alone while the judge runs", () => {
-      const dir = gatewayDir();
-      const seen = path.join(gatewayWork, `seen-mode-${jobs}`);
-      const watcher = Bun.spawn(
-        [
-          "bash",
-          "-c",
-          'for _ in $(seq 400); do [ -f "$1/token" ] && { stat -c %a "$1" "$1/token" >"$2"; exit 0; }; sleep 0.05; done',
-          "-",
-          `${dir}.key`,
-          seen,
-        ],
-        { stdout: "ignore", stderr: "ignore" }
-      );
-      const result = gatewayJudge("bare", dir, {
-        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${gatewayWork} SLEEP=2`,
-      });
-      watcher.kill();
-      expect(result.exitCode).toBe(0);
-      expect(readFileSync(seen, "utf8").split("\n").filter(Boolean)).toEqual(["700", "600"]);
-      expect(existsSync(`${dir}.key`)).toBe(false);
-    });
-
-    // Catches: a token file left behind when the judge fails, and a failed mint that starts the
-    // judge anyway.
-    test("removes the token file when the judge fails, and starts no judge when the key command fails", () => {
-      const dir = gatewayDir();
-      writeFileSync(path.join(dir, "exit-status"), "3\n");
-      expect(gatewayJudge("bare", dir).exitCode).toBe(3);
-      expect(existsSync(`${dir}.key`)).toBe(false);
-      const refused = gatewayDir();
-      const broken = freshDir("judge-gateway-broken");
-      writeFileSync(path.join(broken, "hawk-token"), "#!/usr/bin/env bash\nexit 1\n", {
-        mode: 0o755,
-      });
-      rmSync(path.join(gatewayWork, "judge-profiles/cache"), { recursive: true, force: true });
-      for (const kind of ["ste", "bare"])
-        rmSync(path.join(gatewayWork, `judge-profiles/${kind}/cache`), {
-          recursive: true,
-          force: true,
-        });
-      const result = gatewayJudge("ste", refused, { PATH: `${broken}:${childEnv.PATH}` });
+  // Catches: a judge-omp that starts a container when the profile's host key command is gone, or
+  // that leaves the judge's key directory behind when it refuses.
+  test("refuses a profile with no key command before docker runs, and leaves no key directory", () => {
+    // Builds the judge profiles when this test runs alone, so the refusal below is tested.
+    expect(judge("bare", judgeDir()).exitCode).toBe(0);
+    const { command } = judgeKey("bare");
+    const kept = `${command}.kept`;
+    cpSync(command, kept);
+    rmSync(command);
+    try {
+      const dir = judgeDir();
+      const result = judge("bare", dir);
       expect(result.exitCode).toBe(1);
-      expect(result.stderr.toString()).toContain(
-        "judge-omp: the gateway's key command gave no key"
-      );
-      expect(existsSync(path.join(refused, "answer.json"))).toBe(false);
-    });
+      expect(result.stderr.toString()).toContain("has no key command");
+      expect(existsSync(path.join(dir, "answer.json"))).toBe(false);
+      expect(existsSync(path.join(dir, "out.txt"))).toBe(false);
+      expect(existsSync(`${dir}.key`)).toBe(false);
+    } finally {
+      cpSync(kept, command);
+      rmSync(kept);
+    }
   });
 
   // Catches: a judge profile whose built-from records an empty commit line when the rig's root is
@@ -1137,7 +1110,6 @@ printf 'eyJhbGciOiJub25lIn0.%s.c2ln\\n' "$payload"
           USER: "rig",
           SKILL_SCENARIOS_WORK: rootWork,
           SKILL_SCENARIOS_JUDGE_OMP: omp,
-          LEGION_E2E_MODEL_ROUTE: "key-file",
           LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o600),
           GIT_CEILING_DIRECTORIES: path.dirname(top),
         },

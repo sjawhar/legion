@@ -6,7 +6,7 @@ import { expectNoMissingHelpers, nameMissingHelpers, scriptFunctions } from "./s
 
 // The 4b.13b acceptance's own soft and cleanup, taken from the script by name and run after the
 // ending each case names, with the teardown's processes, GitHub and production audit stubbed and a
-// merger starve seeded in the key command's record, so any notes call the trap makes prints.
+// merger's failed call seeded in the key command's record, so any notes call the trap makes prints.
 const script = join(import.meta.dir, "..", "stage3-4b13b-acceptance.sh");
 const fn = scriptFunctions(script);
 const helperGuard = nameMissingHelpers(script);
@@ -34,8 +34,8 @@ check=setup check_started=2026-09-30T11:00:00Z
 soft_failures="$evidence/soft-failures.txt"
 mkdir -p "$work" "$evidence/model-gateway"
 : >"$soft_failures"
-# The merger starved during merge-held and was never served again.
-printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:10Z 4242 /x merger/1 timeout no-key >"$evidence/model-gateway/hawk-token.calls"
+# The merger got no key during merge-held and was never served again.
+printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:10Z 4242 /x merger/1 failed no-key >"$evidence/model-gateway/anthropic-key.calls"
 stop_pid() { :; }; run_processes() { :; }; collect_transcripts() { :; }; github_cleanup() { :; }
 ${helperGuard}
 first_soft_check=

@@ -2864,9 +2864,7 @@ function median(values: number[]): number {
  *     and asks, and one run's answer can be another's;
  *   - it never finished: out.txt has no `exit=` line;
  *   - its agent got no model turn: it left no transcript, or one with no assistant message, as when
- *     the profile's gateway key command ran past its budget. The key command's own record of each
- *     call, which scripts/e2e/lib/model-gateway-unserved.sh reads, is a better signal this rig does
- *     not set up;
+ *     the profile's key command could not read its key file;
  *   - it compared the wrong text: a tool call of the run (its own or a subagent's) read a file under
  *     the other label's checkout, or a skill file (a path to skills/dispatch, skills/dispatch-first,
  *     skills/dispatch-writing-specs or skills/legion-worker) anywhere but `allowed`: its own run

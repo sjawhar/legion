@@ -107,7 +107,6 @@ test("a bun other than the pinned release is refused in prerequisites, naming th
       HOME: dir,
       PATH: bin,
       TMPDIR: scratch,
-      LEGION_E2E_MODEL_ROUTE: "key-file",
       LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile,
       LEGION_E2E_APP_KEY_RUNNER: "agent-secrets",
     },

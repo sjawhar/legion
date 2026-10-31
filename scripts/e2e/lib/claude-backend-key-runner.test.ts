@@ -98,7 +98,6 @@ test("with LEGION_E2E_APP_KEY_RUNNER set, the prerequisites never ask the box's 
       HOME: dir,
       PATH: bin,
       TMPDIR: scratch,
-      LEGION_E2E_MODEL_ROUTE: "key-file",
       LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile,
       LEGION_E2E_APP_KEY_RUNNER: "agent-secrets",
     },

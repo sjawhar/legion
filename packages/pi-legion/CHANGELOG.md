@@ -362,12 +362,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
     spec.
   - `rig.sh judge` runs ten judge prompts over each run, and `rig.sh score` scores the spec's
     outline, checks, refusals, plan, questions, quoting and self-naming.
-- `rig.sh profile` takes the key-file model route (`LEGION_E2E_MODEL_ROUTE=key-file` with
-  `LEGION_E2E_ANTHROPIC_KEY_FILE`). It refuses a work directory with a `.omp` in it or above it,
-  because Oh My Pi would load that directory's plugins and not the label's.
+- `rig.sh profile`, `judge` and `judge-omp` reach Anthropic only through an Anthropic key file
+  (`LEGION_E2E_ANTHROPIC_KEY_FILE`); the gateway route that needed a personal gateway login is
+  gone. `rig.sh profile` refuses a work directory with a `.omp` in it or above it, because Oh My
+  Pi would load that directory's plugins and not the label's.
 - `rig.sh judge-omp` runs each judge in a Docker container that sees only the judge's own
-  directory. On the gateway route, the gateway's key command runs on the host once for each judge,
-  and the container gets only its token, which is removed when the judge ends.
+  directory and reads the key file itself, mounted read-only.
 - The `legion-architect` skill this plugin ships says a project may import its architecture
   model from several source repositories: a root's `.dispatch/architecture/<id>.md` file goes in
   the branch of the source whose repository holds it, `parent` and `depends_on` name components of
