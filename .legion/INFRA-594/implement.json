@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-31T04:50:53Z",
+  "completed": "2026-10-31T06:45:00Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
@@ -203,6 +203,22 @@
       "observed": "-count=10 ok 254.5s; ./cmd/listener ok 626.3s; -race ok 674.7s no DATA RACE; serverchange ok 149.4s; session 10.6s, bus 333.2s ok; at f41a4d8c the serving-port, agent and consumer tests ok 144.5s",
       "headSha": "f41a4d8cb9c114731b82d64faaa0cf3b357ee7f9",
       "negativeControl": "the five production files restored from 0d71712b with the new tests kept: 'the attempt record is gone' and 'the session's entry is gone and it registers again' both FAIL 'never reached the port'"
+    },
+    {
+      "criterion": "Tester round 11: envoy-session-stall's 'bind: address already in use' (freePort's race) fixed; the tester's red test free-ports.test.ts (d8eecf87) passes",
+      "surface": "the real-stack harness (packages/envoy-client/test/envoy-stack.ts) under the envoy-session-stall lane's three commands",
+      "command": "bun test packages/envoy-client/src/__tests__/free-ports.test.ts; LEGION_E2E_ENVOY_STACK=1: (packages/envoy-client) bun test src; (packages/pi-envoy) bun test extensions/envoy.test.ts -t 'NATS path freezes'; (packages/claude-envoy) bun test tests/envoy-channel-stall.test.ts",
+      "observed": "free-ports 2 pass 0 fail (2,000 rounds distinct; each port bindable when handed back); envoy-client with the real stack 1336 pass 0 fail; pi-envoy stall 2 pass; claude-envoy stall 3 pass; claude-envoy suite 283 pass",
+      "headSha": "ce082506b077e61e45ac506aa286853b1d4b71da",
+      "negativeControl": "at a16c63d9 (before freePorts) the red test fails: envoy-stack exports no freePorts; the tester measured 1 repeated port in 2,000 one-at-a-time probes"
+    },
+    {
+      "criterion": "The tester's hold lock: a relay holding one serving-port session's message delays no other session's, and pushes the held one once the attempt record clears",
+      "surface": "listener binary, real nats-server, two serving-port consumer sessions",
+      "command": "cd packages/envoy && go test -count=3 -run TestARelayHoldDelaysOnlyThatSession ./cmd/listener",
+      "observed": "ok 9.6s",
+      "headSha": "ce082506b077e61e45ac506aa286853b1d4b71da",
+      "negativeControl": "tester's controls: one mutex around holdWhilePushedElsewhere fails it ('the other session's message ... never reached its port'); without attemptCache.Clear it fails ('the held message ... never reached the port')"
     }
   ],
   "filesChanged": [
@@ -228,7 +244,8 @@
     "Round 8: merge of main cc825086 (76da2c10: .github/workflows/ci.yaml, docs/site/.../dispatch/envoy.md, packages/envoy/AGENTS.md, cmd/listener/main.go, internal/bus/nats.go); packages/envoy/cmd/listener/interest_record_unreadable_test.go; scripts/e2e/envoy-session-delivery.sh, scripts/e2e/README.md",
     "Round 9: .github/e2e-scripts.json (envoy-session-delivery.sh under elsewhere, never hosted: it needs an issue pod and a model provider)",
     "Round 10: merge of main e4dc7c4f (9d83f1c1: internal/bus/nats.go, claude-envoy/tests/envoy-channel-stall.test.ts); packages/envoy/cmd/listener/{delivery,serve_port_workers,session_relay,role_lane}.go + session_relay_test.go, internal/session/{session,handler}.go, AGENTS.md, changelog; packages/envoy-client/src/consumer-delivery.ts + test; scripts/e2e/envoy-session-delivery.sh",
-    "Round 11: packages/envoy/cmd/listener/{session_relay,serve_port_workers,delivery}.go + session_relay_test.go, internal/session/{handler,session}.go, AGENTS.md (merged into main's one-sentence layout), changelog; merges c33189da (main 21b40359: AGENTS.md) and f41a4d8c (main d7e1daaa: scripts/e2e/README.md)"
+    "Round 11: packages/envoy/cmd/listener/{session_relay,serve_port_workers,delivery}.go + session_relay_test.go, internal/session/{handler,session}.go, AGENTS.md (merged into main's one-sentence layout), changelog; merges c33189da (main 21b40359: AGENTS.md) and f41a4d8c (main d7e1daaa: scripts/e2e/README.md)",
+    "Round 12: packages/envoy-client/test/envoy-stack.ts (freePorts); the tester's packages/envoy-client/src/__tests__/free-ports.test.ts (merged from d8eecf87) and packages/envoy/cmd/listener/session_relay_hold_test.go"
   ],
   "trickyParts": [
     "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",
@@ -252,7 +269,8 @@
     "Review round 2: envoy_sessions with an empty machine argument lists all sessions in both plugins (pi-envoy filtered to none before).",
     "Round 8: GET /v1/registry keeps depending on the role claim view (its answer carries roles); the test waits for the view. The CI failure did not reproduce in the pod, so its negative control is the reasoning, not a local red run.",
     "Round 10: session.Resolve takes the stored subject as well as the stored sequence, since a role forward's copy is stored on the holder's agent subject, not its role topic.",
-    "Round 11: the fan-out reports its own delivery-mode refusal of a session whose consumer relays the message as a skip with no record, since an attempt record there would hold the relay's copy for attemptCacheTTL; the relay publishes the one delivery_failed exception."
+    "Round 11: the fan-out reports its own delivery-mode refusal of a session whose consumer relays the message as a skip with no record, since an attempt record there would hold the relay's copy for attemptCacheTTL; the relay publishes the one delivery_failed exception.",
+    "Round 12: the tester's free-ports.test.ts had its two import lines reordered by biome check --write (bun:test before node:net), because the required lint check refuses the original order; no assertion or line of the test body changed."
   ],
   "openQuestions": []
 }
