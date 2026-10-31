@@ -702,7 +702,7 @@ func TestRenderTableAutolinkPreservesHref(t *testing.T) {
 }
 
 // Every mark the schema allows that the rendering does not write is an anchor, and no anchor may
-// change the markdown, whichever one a later schema adds: the loop reads markTypes, so a new
+// change the markdown, whichever one a later schema adds: the loop reads active.marks, so a new
 // invisible mark is covered here the day it exists.
 func TestNoUnrenderedSchemaMarkChangesTheMarkdown(t *testing.T) {
 	const head, marked, tail = "Use snake_", "case here. see [x]", "(y)"
@@ -713,7 +713,7 @@ func TestNoUnrenderedSchemaMarkChangesTheMarkdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for markType := range markTypes {
+	for markType := range active.marks {
 		if renderedMarkTypes[markType] {
 			continue
 		}

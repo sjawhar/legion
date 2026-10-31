@@ -43,6 +43,8 @@ interface FakeConnection extends DocumentConnection {
 
 export interface FakeDocumentRuntime {
   admit(readOnly: boolean): void;
+  /** What the page asked of each connection it opened, in order. */
+  callbacks: ConnectionCallbacks[];
   connections: FakeConnection[];
   editors: FakeEditor[];
   pending(state: PendingState): void;
@@ -54,21 +56,6 @@ export interface FakeDocumentRuntime {
   sync(): void;
   text: string;
 }
-
-const blockSchema = {
-  types: [
-    {
-      attributes: {
-        kind: { choices: ["note", "warning"], default: "note", kind: "enum" as const },
-        title: { default: "", kind: "string" as const },
-      },
-      content: "paragraph+" as const,
-      name: "callout",
-      render: "host" as const,
-    },
-  ],
-  version: 1,
-};
 
 export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentRuntime {
   const callbacks: ConnectionCallbacks[] = [];
@@ -180,6 +167,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         callback.onAdmission(readOnly);
       }
     },
+    callbacks,
     connections,
     editors,
     pending(state) {
@@ -190,7 +178,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     refuse() {
       callbacks.at(-1)?.onOutsideSchema();
     },
-    runtime: { blockSchema, createEditor, loadTransport: async () => connect },
+    runtime: { createEditor, loadTransport: async () => connect },
     status(state) {
       for (const callback of callbacks) {
         callback.onStatus(state);

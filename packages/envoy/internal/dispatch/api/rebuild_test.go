@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -48,8 +49,8 @@ func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.
 		t.Fatalf("bearer rebuild: status=%d body=%s, want 403 HUMAN_ONLY", bearer.Code, bearer.Body.String())
 	}
 	human := dispatchRequest(t, handler, http.MethodPost, path, map[string]any{}, "alice")
-	if human.Code != http.StatusConflict || !strings.Contains(human.Body.String(), `"code":"DOCUMENT_LOADS"`) {
-		t.Fatalf("healthy document rebuild: status=%d body=%s, want 409 DOCUMENT_LOADS", human.Code, human.Body.String())
+	if human.Code != http.StatusConflict || !strings.Contains(human.Body.String(), `"code":"DOCUMENT_LOADS"`) || !strings.Contains(human.Body.String(), "latest saved version ") || !strings.Contains(human.Body.String(), "Stop. Ask a person what to do with this document") || strings.Contains(human.Body.String(), "either") || strings.Contains(human.Body.String(), "replace") {
+		t.Fatalf("healthy document rebuild: status=%d body=%s, want 409 DOCUMENT_LOADS offering no repair and telling the caller to stop and ask a person", human.Code, human.Body.String())
 	}
 	var after int
 	if err := database.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifact.ID).Scan(&after); err != nil {
@@ -134,8 +135,8 @@ func TestAHistoryThatCannotLoadReadsAsDocumentUnloadable(t *testing.T) {
 	path := "/api/v1/artifacts/" + artifact.ID + "/text"
 	broken.failNextLoad(artifact.ID)
 	unloadable := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
-	if unloadable.Code != http.StatusConflict || !strings.Contains(unloadable.Body.String(), `"code":"DOCUMENT_UNLOADABLE"`) || !strings.Contains(unloadable.Body.String(), "rebuild it from its latest saved version") {
-		t.Fatalf("read a history that cannot load: status=%d body=%s, want 409 DOCUMENT_UNLOADABLE naming the rebuild", unloadable.Code, unloadable.Body.String())
+	if unloadable.Code != http.StatusConflict || !strings.Contains(unloadable.Body.String(), `"code":"DOCUMENT_UNLOADABLE"`) || !strings.Contains(unloadable.Body.String(), "discards every edit made after that version") || !strings.Contains(unloadable.Body.String(), "A person decides whether to rebuild the document") {
+		t.Fatalf("read a history that cannot load: status=%d body=%s, want 409 DOCUMENT_UNLOADABLE naming what a rebuild discards and that a person decides", unloadable.Code, unloadable.Body.String())
 	}
 	loads := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
 	if loads.Code != http.StatusOK || !strings.Contains(loads.Body.String(), `"markdown":"before\n"`) {
@@ -221,6 +222,58 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+supplied.ID+"/text", nil, "alice")
 	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":""`) {
 		t.Fatalf("read supplied empty rebuild: status=%d body=%s", text.Code, text.Body.String())
+	}
+}
+
+// A rebuild from the latest saved version reads markdown the request did not send, so the route
+// answers for what that version holds. A version holding an element this build does not know is
+// 409 DOC_NEWER_CONTENT, as every other route over the document answers, and not 400
+// INVALID_MARKDOWN. A version holding an element this build reads but may not create yet rebuilds:
+// the seed only puts back content the document stored.
+func TestARebuildFromTheLatestVersionAnswersForWhatThatVersionHolds(t *testing.T) {
+	restore, err := pmdoc.UseStagedBlockForTest("staged", 3)
+	if err != nil {
+		t.Fatalf("stage a typed block this build reads and may not create: %v", err)
+	}
+	t.Cleanup(restore)
+	handler, database, broken := newBrokenTestServer(t)
+	issue := createArtifactIssue(t, handler)
+	for _, c := range []struct {
+		name, version, code string
+		status              int
+	}{
+		{name: "newer content", version: "before\n\n:::" + docs.UnknownElementForTest + "{#newer-1}\nWritten by a newer build.\n:::\n", code: "DOC_NEWER_CONTENT", status: http.StatusConflict},
+		{name: "an element this build reads and cannot create", version: "before\n\n:::staged{#staged-1}\nBody.\n:::\n", status: http.StatusOK},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+				"name": strings.ReplaceAll(c.name, " ", "-") + ".md", "content": "before\n",
+			}, "alice")
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create document: status=%d body=%s", created.Code, created.Body.String())
+			}
+			artifact := decodeBody[struct {
+				Artifact model.Artifact `json:"artifact"`
+			}](t, created).Artifact
+			if _, err := database.Pool.Exec(context.Background(), `update artifact_versions set markdown = $2 where artifact_id = $1`, artifact.ID, c.version); err != nil {
+				t.Fatalf("store the latest version: %v", err)
+			}
+			broken.failNextLoad(artifact.ID)
+			rebuilt := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/rebuild", map[string]any{}, "alice")
+			if rebuilt.Code != c.status || (c.code != "" && !strings.Contains(rebuilt.Body.String(), `"code":"`+c.code+`"`)) {
+				t.Fatalf("rebuild from the latest version: status=%d body=%s, want %d %s", rebuilt.Code, rebuilt.Body.String(), c.status, c.code)
+			}
+			if c.status != http.StatusOK {
+				return
+			}
+			text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifact.ID+"/text", nil, "alice")
+			markdown := decodeBody[struct {
+				Markdown string `json:"markdown"`
+			}](t, text).Markdown
+			if text.Code != http.StatusOK || markdown != c.version {
+				t.Fatalf("read the rebuilt document: status=%d body=%s, want the version's %q", text.Code, text.Body.String(), c.version)
+			}
+		})
 	}
 }
 

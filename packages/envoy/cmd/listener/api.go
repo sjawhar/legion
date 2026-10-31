@@ -722,7 +722,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			sendToRole(ctx, w, record, d, item, role, arrived)
 			return
 		}
-		if bus.UsesCoreTransport(request.Topic) {
+		if d.client.UsesCoreTransport(request.Topic) {
 			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
 			defer cancel()
 			sendToTopic(ctx, w, record, d, item, arrived)

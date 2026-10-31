@@ -1,6 +1,6 @@
 kind: Changed
 body: |-
-    A document left open and idle keeps its connection through ygo v1.54.1-sami.1's awareness echo, as `@hocuspocus/server` does: an editor's browser gets its own presence renewal back, and a read-only page gets a small empty presence reply. Dispatch no longer writes keep-alive frames of its own into the document socket.
+    A document left open and idle keeps its connection through ygo v1.54.1-sami.2's awareness echo, as `@hocuspocus/server` does: an editor's browser gets its own presence renewal back, and a read-only page gets a small empty presence reply. Dispatch no longer writes keep-alive frames of its own into the document socket.
 time: 2026-10-29T21:50:00Z
 custom:
     Issue: INFRA-767

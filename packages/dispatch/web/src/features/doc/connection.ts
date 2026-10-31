@@ -64,7 +64,10 @@ export interface DocumentConnection {
 }
 
 export interface ConnectionCallbacks {
+  /** V, the schema version of the editor this connection serves: its manifest's `version`. */
   schemaVersion: number;
+  /** R, the highest `since` among the elements that editor may create (`schemaCreatable`). */
+  schemaCreatable: number;
   onAdmission(readOnly: boolean): void;
   /**
    * Fires when the server refuses the socket because the stored document is outside the Proof
@@ -150,10 +153,15 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         }
       }
     };
+    // The server decides admission from these when it accepts the socket. A server that predates
+    // `schema_creatable` ignores that parameter.
     const websocket = new HocuspocusProviderWebsocket({
       WebSocketPolyfill,
       connect: false,
-      parameters: { schema_version: callbacks.schemaVersion },
+      parameters: {
+        schema_creatable: callbacks.schemaCreatable,
+        schema_version: callbacks.schemaVersion,
+      },
       url: wsUrl(artifactId),
     });
     // Every admission's restore waits for its own socket's authentication and SyncStep2 alike,
@@ -215,6 +223,10 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       // Each document owns its socket. A transport's destroy closes this provider and then the
       // websocket itself, so its connection checker and reconnect attempt cannot outlive it.
       preserveConnection: false,
+      // The server decides admission again from the token when the provider authenticates, and
+      // that answer replaces the first. A server that predates `schema_creatable` compares the
+      // whole token with its own schema version, so the token stays the version alone: any other
+      // token would make every socket of that server read-only.
       token: String(callbacks.schemaVersion),
       websocketProvider: websocket,
     });

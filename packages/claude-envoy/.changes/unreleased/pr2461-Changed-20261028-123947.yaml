@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    The `dispatch` command (`dist/dispatch.js`) and the MCP server's Dispatch tools send a request
+    that a Dispatch process answered `404 NOT_FOUND` "no route for …" again after 1, 2 and 4 seconds;
+    after the last attempt they say the action is not offered yet because a release is in progress,
+    and to try again in one minute. The tool descriptions name `DOC_NEWER_CONTENT` among an ask's or
+    comment's `anchor_block_error` codes.
+time: 2026-10-28T12:39:47.84519903Z
+custom:
+    Issue: pr2461

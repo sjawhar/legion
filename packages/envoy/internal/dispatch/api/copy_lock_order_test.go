@@ -374,7 +374,17 @@ func (g *lockGraph) addFile(source moduleSource) {
 	pkg := source.file.Name.Name
 	for _, declared := range source.file.Decls {
 		decl, ok := declared.(*ast.FuncDecl)
-		if !ok || decl.Body == nil {
+		if !ok {
+			// A function literal a package-level declaration holds - a var a test swaps for
+			// one of its own, a function in a struct literal - is a body no declared function
+			// holds. Registering it here is what makes a call through that variable reach a
+			// body at all: addStored records the literal as what the variable holds, so
+			// without this the graph stores nothing for it and reads a call of it as reaching
+			// no function.
+			g.addLiterals(source, pkg, declared, "")
+			continue
+		}
+		if decl.Body == nil {
 			continue
 		}
 		object, ok := g.info.Defs[decl.Name].(*types.Func)
@@ -385,17 +395,26 @@ func (g *lockGraph) addFile(source moduleSource) {
 		g.add(fn)
 		g.named[fn.name] = fn
 		g.declared[object] = fn
-		ast.Inspect(decl.Body, func(node ast.Node) bool {
-			if lit, ok := node.(*ast.FuncLit); ok {
-				g.add(&lockFunction{
-					name: fmt.Sprintf("the function literal at %s in %s", g.line(source, lit), fn.name),
-					pkg:  pkg, body: lit.Body, source: source,
-				})
-				g.literals[lit] = g.functions[len(g.functions)-1]
-			}
-			return true
-		})
+		g.addLiterals(source, pkg, decl.Body, fn.name)
 	}
+}
+
+// addLiterals registers each function literal node holds as a function of its own, named by where
+// it stands and, when within names the declared function whose body node is, by that function.
+func (g *lockGraph) addLiterals(source moduleSource, pkg string, node ast.Node, within string) {
+	ast.Inspect(node, func(node ast.Node) bool {
+		lit, ok := node.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		name := fmt.Sprintf("the function literal at %s", g.line(source, lit))
+		if within != "" {
+			name += " in " + within
+		}
+		g.add(&lockFunction{name: name, pkg: pkg, body: lit.Body, source: source})
+		g.literals[lit] = g.functions[len(g.functions)-1]
+		return true
+	})
 }
 
 func (g *lockGraph) add(fn *lockFunction) {

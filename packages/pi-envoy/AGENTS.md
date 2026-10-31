@@ -781,8 +781,10 @@ unpinned.
 table the row, column, header and cells), and `dispatch read` prints it as `Position:` after the
 quote. When Dispatch could not read the document, the read carries `anchor_block_error` instead
 and `dispatch read` prints `Position: unavailable (<code>)`, the code the API answers that error
-with elsewhere (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA` or `INTERNAL`); the read itself, and
-`dispatch follow`, which reads the ask first, still succeed.
+with elsewhere (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA`, `DOC_NEWER_CONTENT`, `DOCUMENT_UNLOADABLE`
+or `INTERNAL`); the read itself, and `dispatch follow`, which reads the ask first, still succeed.
+`DOC_NEWER_CONTENT` is a document holding an element this Dispatch build cannot read, which a newer
+build wrote during a release: try again in one minute.
 
 `dispatch doc-edit` may retype an identified paragraph or typed block into any schema-declared typed block with
 the `--ops-json` entry `{ "op": "retype", block, type, attributes }`, delete or move a whole block by id with

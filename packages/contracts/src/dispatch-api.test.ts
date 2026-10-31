@@ -48,11 +48,15 @@ import {
   type MessageReplyInput,
   type MyAnswersResponse,
   type MyRepliesResponse,
+  NO_ROUTE_RETRY_DELAYS_MS,
   type ReferenceChangesPayload,
   type ReplyBlock,
   ReplyBlockSchema,
   retriesUnderKey,
+  retryNoRoute,
+  type Sleep,
   serviceSubjectLabel,
+  sleep,
   type UserStateUpdatedEventPayload,
   type UserThreadStateUpdatedEventPayload,
 } from "./dispatch-api";
@@ -1206,4 +1210,166 @@ test("a Kubernetes service subject renders as namespace/name, and anything else 
     "system:serviceaccount:legion:default:extra"
   );
   expect(serviceSubjectLabel("kubernetes-admin")).toBe("kubernetes-admin");
+});
+
+test("a client's wait ends when its timer fires", async () => {
+  await expect(sleep(0, new AbortController().signal)).resolves.toBeUndefined();
+});
+
+test("a client's wait rejects at once with the reason its request was aborted for", async () => {
+  const controller = new AbortController();
+  const reason = new Error("a newer read replaced this one");
+  const waiting = sleep(60_000, controller.signal);
+  controller.abort(reason);
+  await expect(waiting).rejects.toBe(reason);
+});
+
+test("a client's wait for a request already aborted rejects at once", async () => {
+  const reason = new Error("the caller gave up");
+  await expect(sleep(60_000, AbortSignal.abort(reason))).rejects.toBe(reason);
+});
+
+/** What a Dispatch process that has no route for the request answers, as a client recognises it:
+ *  each client has its own error class, and `retryNoRoute` knows none of them. */
+class NoRouteAnswer extends Error {}
+
+/** A wait that returns at once, recording each wait it was asked for and the signal it was given. */
+function recordedWait(): {
+  wait: Sleep;
+  waits: number[];
+  signals: (AbortSignal | null | undefined)[];
+} {
+  const waits: number[] = [];
+  const signals: (AbortSignal | null | undefined)[] = [];
+  return {
+    wait: async (ms, signal) => {
+      waits.push(ms);
+      signals.push(signal);
+    },
+    waits,
+    signals,
+  };
+}
+
+test("a no-route answer is attempted again, and the next answer resolves the call", async () => {
+  const answers: (NoRouteAnswer | string)[] = [
+    new NoRouteAnswer(),
+    new NoRouteAnswer(),
+    "the page",
+  ];
+  const recorded = recordedWait();
+  const { signal } = new AbortController();
+  let attempts = 0;
+
+  const answer = await retryNoRoute(
+    async () => {
+      attempts += 1;
+      const next = answers.shift();
+      if (next === undefined || next instanceof Error) throw next ?? new Error("no answer left");
+      return next;
+    },
+    (error) => error instanceof NoRouteAnswer,
+    { exhausted: () => new Error("the attempts were not exhausted"), signal, sleep: recorded.wait }
+  );
+
+  expect(answer).toBe("the page");
+  expect(attempts).toBe(3);
+  // Waits of 1 s and 2 s, each jittered by a quarter either way, each given the caller's signal.
+  expect(recorded.waits).toHaveLength(2);
+  for (const [index, base] of [1_000, 2_000].entries()) {
+    expect(recorded.waits[index]).toBeGreaterThanOrEqual(base * 0.75);
+    expect(recorded.waits[index]).toBeLessThanOrEqual(base * 1.25);
+  }
+  expect(recorded.signals).toEqual([signal, signal]);
+});
+
+test("an answer that is not a no-route is thrown on at once", async () => {
+  const failure = new Error("Dispatch refused the write");
+  const recorded = recordedWait();
+  let attempts = 0;
+
+  await expect(
+    retryNoRoute(
+      async () => {
+        attempts += 1;
+        throw failure;
+      },
+      (error) => error instanceof NoRouteAnswer,
+      { exhausted: () => new Error("the attempts were not exhausted"), sleep: recorded.wait }
+    )
+  ).rejects.toBe(failure);
+  expect(attempts).toBe(1);
+  expect(recorded.waits).toEqual([]);
+});
+
+test("every attempt answered with no route throws what the caller builds", async () => {
+  const rollingRelease = new Error("a new release of Dispatch is in progress");
+  const recorded = recordedWait();
+  let attempts = 0;
+
+  await expect(
+    retryNoRoute(
+      async () => {
+        attempts += 1;
+        throw new NoRouteAnswer();
+      },
+      (error) => error instanceof NoRouteAnswer,
+      { exhausted: () => rollingRelease, sleep: recorded.wait }
+    )
+  ).rejects.toBe(rollingRelease);
+  // One attempt more than the waits between them: waits of 1 s, 2 s and 4 s, each jittered.
+  expect(attempts).toBe(NO_ROUTE_RETRY_DELAYS_MS.length + 1);
+  expect([...NO_ROUTE_RETRY_DELAYS_MS]).toEqual([1_000, 2_000, 4_000]);
+  expect(recorded.waits).toHaveLength(NO_ROUTE_RETRY_DELAYS_MS.length);
+  for (const [index, base] of NO_ROUTE_RETRY_DELAYS_MS.entries()) {
+    expect(recorded.waits[index]).toBeGreaterThanOrEqual(base * 0.75);
+    expect(recorded.waits[index]).toBeLessThanOrEqual(base * 1.25);
+  }
+});
+
+test("a request aborted during a wait rejects at once with the abort, and is not attempted again", async () => {
+  const controller = new AbortController();
+  const reason = new Error("a newer read replaced this one");
+  let attempts = 0;
+
+  await expect(
+    retryNoRoute(
+      async () => {
+        attempts += 1;
+        throw new NoRouteAnswer();
+      },
+      (error) => error instanceof NoRouteAnswer,
+      {
+        exhausted: () => new Error("the attempts were not exhausted"),
+        signal: controller.signal,
+        // The shared wait, with the caller's abort arriving once the wait has begun.
+        sleep: (ms, signal) => {
+          const waiting = sleep(ms, signal);
+          controller.abort(reason);
+          return waiting;
+        },
+      }
+    )
+  ).rejects.toBe(reason);
+  expect(attempts).toBe(1);
+});
+
+test("a call with no wait of its own waits on a timer, which an aborted request rejects at once", async () => {
+  const reason = new Error("the caller gave up");
+  let attempts = 0;
+
+  await expect(
+    retryNoRoute(
+      async () => {
+        attempts += 1;
+        throw new NoRouteAnswer();
+      },
+      (error) => error instanceof NoRouteAnswer,
+      {
+        exhausted: () => new Error("the attempts were not exhausted"),
+        signal: AbortSignal.abort(reason),
+      }
+    )
+  ).rejects.toBe(reason);
+  expect(attempts).toBe(1);
 });

@@ -866,12 +866,20 @@ type dispatchOptions struct {
 	SettleDelay time.Duration
 	// Binary is the envoy-dispatch binary to run. Empty builds the command's own, unstamped
 	// (cmdtest.Build); a row whose processes serve given builds builds each once with
-	// cmdtest.BuildStamped and runs it here.
+	// cmdtest.BuildStamped and runs it here, and the two-build test names an earlier build's
+	// binary here (twobuild_test.go).
 	Binary string
+	// BindsItsPort has the process bind DISPATCH_PORT itself rather than serve on the socket the
+	// test holds: a build before DISPATCH_LISTEN_FD, as the two-build test's previous build can be.
+	// The test lets go of the port just before the start, so another program can take it first.
+	BindsItsPort bool
 	// Env overrides and adds to the rows below, by name: a row the caller names wins over the
 	// one here, and a name not here is added. It is how a test gives the process a GitHub App,
 	// a sign-in issuer or cookie identity without every other test growing those rows.
 	Env map[string]string
+	// WebDist is DISPATCH_WEB_DIST, the web app the process serves. Empty serves the process's own
+	// empty home, which is all a test that loads no page needs.
+	WebDist string
 	// OwnProcessGroup starts the process in a process group of its own, so a test can stop it
 	// with SIGSTOP and resume it without the stop reaching the test's own process group: a
 	// kernel that hangs up an orphaned process group holding a stopped process (gVisor does)
@@ -905,6 +913,10 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 	if binary == "" {
 		binary = cmdtest.Build(t, "envoy-dispatch")
 	}
+	webDist := options.WebDist
+	if webDist == "" {
+		webDist = home
+	}
 	cmd := exec.Command(binary)
 	held := cmdtest.HoldPort(t)
 	cmd.Dir = home
@@ -918,7 +930,7 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 		"DISPATCH_LISTEN_HOST":             "127.0.0.1",
 		"DISPATCH_PORT":                    strconv.Itoa(held.Port),
-		"DISPATCH_WEB_DIST":                home,
+		"DISPATCH_WEB_DIST":                webDist,
 		"DISPATCH_TEST_HOOKS":              "1",
 	}
 	if options.NATSURL == "" {
@@ -940,7 +952,11 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 	for name, value := range environment {
 		cmd.Env = append(cmd.Env, name+"="+value)
 	}
-	held.Pass(cmd, "DISPATCH_LISTEN_FD")
+	if options.BindsItsPort {
+		held.Release()
+	} else {
+		held.Pass(cmd, "DISPATCH_LISTEN_FD")
+	}
 	// Sorted, so a failure's process listing and a test's own log read the same whichever run
 	// printed them: Go's map iteration order is not.
 	slices.Sort(cmd.Env)

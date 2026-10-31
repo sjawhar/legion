@@ -123,12 +123,11 @@ func RecordExcerpts(ctx context.Context, q Queryer, fromID string, version int, 
 // StoredExcerpts is, by citing document, the excerpt stored on each mention of (toKind, toID) a
 // document writes; a mention with none stored, or one the reconciliation owes (excerpt_version
 // null), is absent. It cannot tell a set excerpt_version that is behind its document's latest
-// version: during the one rolling deploy that ships migration 0092, a version the binary it
-// replaces writes leaves the previous version's excerpt set, and that excerpt is served until
-// MarkStaleExcerpts marks it owed at the reconciliation's next tick, which starts within
-// docs.ReferenceExcerptReconcileInterval (five minutes) of the last one ending; the deploy's
-// overlap lies inside the hour after the new task starts, the only hour MarkStaleExcerpts runs.
-// It reads refs through refs_to alone.
+// version: two builds serve one database during a release, and a version a build that stores no
+// excerpt writes - the binary the deploy that ships migration 0092 replaces - leaves the previous
+// version's excerpt set. That excerpt is served until MarkStaleExcerpts marks it owed, which the
+// reconciliation does at each tick that follows a full docs.ReferenceExcerptReconcileInterval (five
+// minutes) wait, however long its process has run. It reads refs through refs_to alone.
 func StoredExcerpts(ctx context.Context, q Queryer, toKind, toID string) (map[string]model.GraphExcerpt, error) {
 	rows, err := q.Query(ctx, `
 		select from_id, coalesce(excerpt_block_id, ''), excerpt_text from refs
@@ -164,23 +163,38 @@ type ExcerptDrift struct {
 // driftedExcerptsQuery lists, in id order, the documents some of whose mentions hold no excerpt
 // version (excerpt_version is null), through the partial index refs_excerpt_drift, which holds
 // exactly those rows: once the reconciliation has caught up, the index is empty and the query reads
-// nothing else.
+// nothing else. It leaves out each document $2 names at the version $3 names beside it, while that
+// is still the document's latest version.
 const driftedExcerptsQuery = `
 	select d.from_id,
 	       (select coalesce(max(v.number), 0) from artifact_versions v where v.artifact_id = d.from_id::uuid)
 	from (
-		select distinct from_id from refs
-		where from_kind = 'artifact' and excerpt_version is null
-		order by from_id
+		select distinct r.from_id from refs r
+		where r.from_kind = 'artifact' and r.excerpt_version is null
+		  and not exists (
+		    select 1 from unnest($2::text[], $3::int[]) s(from_id, version)
+		    where s.from_id = r.from_id
+		      and s.version = (select coalesce(max(v.number), 0) from artifact_versions v where v.artifact_id = r.from_id::uuid)
+		  )
+		order by r.from_id
 		limit $1
 	) d
 	order by d.from_id`
 
 // DriftedExcerpts lists, in id order and at most limit, the documents some of whose mentions are
 // owed an excerpt: every mention indexed before migration 0092, each one rebuild-refs inserts, one
-// a version write could not cut (ClearExcerpts), and one MarkStaleExcerpts found behind.
-func DriftedExcerpts(ctx context.Context, q Queryer, limit int) ([]ExcerptDrift, error) {
-	rows, err := q.Query(ctx, driftedExcerptsQuery, limit)
+// a version write could not cut (ClearExcerpts), and one MarkStaleExcerpts found behind. It passes
+// over each document skip names while skip's version is still its latest, so a batch of documents
+// the caller cannot read at that version does not stand in front of the documents after it. A
+// later version lists the document again.
+func DriftedExcerpts(ctx context.Context, q Queryer, limit int, skip []ExcerptDrift) ([]ExcerptDrift, error) {
+	skippedIDs := make([]string, len(skip))
+	skippedVersions := make([]int32, len(skip))
+	for index, document := range skip {
+		skippedIDs[index] = document.FromID
+		skippedVersions[index] = int32(document.Version)
+	}
+	rows, err := q.Query(ctx, driftedExcerptsQuery, limit, skippedIDs, skippedVersions)
 	if err != nil {
 		return nil, fmt.Errorf("list drifted reference excerpts: %w", err)
 	}
@@ -214,11 +228,11 @@ func ClearExcerpts(ctx context.Context, q Execer, fromID string) error {
 
 // MarkStaleExcerpts marks owed every mention whose excerpt is older than its document's latest
 // version, and returns how many it marked. Every version write stores its own mentions' excerpts,
-// so only a version a binary predating migration 0092 wrote - the task a deploy replaces, while
-// both run - leaves one behind, and StoredExcerpts serves that older excerpt until this marks it,
-// at the reconciliation's next tick. No index supports it: it reads every artifact mention holding
-// an excerpt (7,537 rows on the 2026-10-10 production dump, 26 ms), so the reconciliation runs it
-// only in the hour after its process starts.
+// so only a version a build that stores none wrote - one predating migration 0092, while it serves
+// the same database - leaves one behind, and StoredExcerpts serves that older excerpt until this
+// marks it. No index supports it: it reads every artifact mention holding an excerpt (7,537 rows on
+// the 2026-10-10 production dump, 26 ms), so the reconciliation runs it once per interval tick,
+// never on the two-second steps it takes while a full batch says drift remains.
 func MarkStaleExcerpts(ctx context.Context, q Execer) (int64, error) {
 	tag, err := q.Exec(ctx, `
 		update refs r set excerpt_version = null

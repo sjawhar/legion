@@ -49,7 +49,7 @@ func redeliverTestLeases(t *testing.T) duty.Leases {
 	if err := (&store.Store{Pool: pool}).Migrate(ctx); err != nil {
 		t.Fatalf("migrate the lease pool's database: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `delete from duty_passes where lease = $1`, webhookRedeliveryLease); err != nil {
+	if _, err := pool.Exec(ctx, `delete from duty_passes where lease = $1 or starts_with(lease, $1 || '/')`, webhookRedeliveryLease); err != nil {
 		t.Fatalf("clear an earlier run's recorded sweep: %v", err)
 	}
 	leases, err := pool.Leases()

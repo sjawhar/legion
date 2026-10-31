@@ -451,6 +451,34 @@ func TestSearchNeverRanksAVectorOfAnotherIdentity(t *testing.T) {
 	}
 }
 
+// TestSearchOnAProcessWhoseEmbedderIsNotActiveAnswersItsTextMatches: a process whose embedder's
+// identity is not the active one (embedqueue's active identity) embeds the query with its own
+// identity, and every stored vector is the active identity's, so it answers its text matches only,
+// with no error and not degraded, as a deployment that changed its embedder does until it has
+// embedded again. A meaning-only match by another identity's vector, however close, is not a hit.
+func TestSearchOnAProcessWhoseEmbedderIsNotActiveAnswersItsTextMatches(t *testing.T) {
+	embedder := &fakeEmbedder{vectors: map[string][]float32{
+		"Astrolabe calibration guide": angledVector(0.3, 2),
+		"Celestial instrument upkeep": angledVector(0.95, 3),
+		"astrolabe":                   queryVector(),
+	}}
+	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
+	keyword := createInteractionIssue(t, handler, "INAC", "Astrolabe calibration guide", "Routine upkeep notes.")
+	createInteractionIssue(t, handler, "INAM", "Celestial instrument upkeep", "Routine upkeep notes.")
+	processAllPending(t, database, embedder)
+	if _, err := database.Pool.Exec(context.Background(), `update embeddings set model = 'azure:active.example/embed-v-4-0' where embedding is not null`); err != nil {
+		t.Fatalf("record every vector under the active identity: %v", err)
+	}
+
+	response := searchResponse(t, handler, "q=astrolabe")
+	if response.Degraded != "" {
+		t.Fatalf("Degraded = %q, want empty: the query embedded", response.Degraded)
+	}
+	if len(response.Results) != 1 || response.Results[0].ID != keyword.Key {
+		t.Fatalf("Results = %+v, want only the text match %q", response.Results, keyword.Key)
+	}
+}
+
 // recordingEmbedder is fakeEmbedder, also keeping every text it was asked to embed.
 type recordingEmbedder struct {
 	*fakeEmbedder

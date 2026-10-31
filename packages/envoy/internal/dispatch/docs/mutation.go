@@ -251,6 +251,9 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// The tree the operation starts from. One outside the Proof schema - the reader refuses it, or
 	// only the renderer does - is the document's own refusal (OutsideSchemaError), which every
 	// schema refusal this operation meets is then answered with, unless the operation repairs it.
+	// One holding an element this build does not know (NewerContentError) is refused here, as any
+	// other error is: no operation of this build repairs it, since a repair would delete what a
+	// newer build wrote.
 	// Its rendering is taken only when something needs it: a failure to classify, or the content
 	// comparison of a write that changed the fork. It may be known without rendering the fork
 	// (above), and is then picked up here, before mutate moves the fork it describes; only beside
@@ -388,20 +391,23 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 // transaction (writeVersionTx) as every applyLive operation does - on an anchored comment's root
 // that refresh is the first to see the comment's new row. Between those steps:
 //
-//   - It reads no tree before the write and renders none. applyLive reads and renders it to
-//     compare with what the write leaves - the content class (updateChangesMarkdown's measure),
-//     the ask blocks added (addedAskBlockIDs), the anchor marks gained - and here both are the
-//     same fragment: the update changes no content, adds no ask block, and credits actor with
-//     nothing (creditLiveWrite).
+//   - It reads no tree to compare the write against and renders none. applyLive reads and renders
+//     it to tell what the write leaves - the content class (updateChangesMarkdown's measure), the
+//     ask blocks added (addedAskBlockIDs), the anchor marks gained - and here both are the same
+//     fragment: the update changes no content, adds no ask block, and credits actor with nothing
+//     (creditLiveWrite).
 //   - The tree and rendering it records are the ones the transaction's last operation left on its
 //     write (liveWrite.rendering, taken through reuseRendering), when this operation's own forkLive
 //     kept them: forkLive drops them whenever the fork moves (buildFork, releaseFork), and so does
 //     a refused operation (abandon), so kept, they describe the fork's fragment exactly, and this
-//     write does not move it. Otherwise it reads and renders the fork once (readFork). A tree the
-//     reader or only the renderer refuses is then the document's OutsideSchemaError (treeOf,
-//     documentMarkdownWithOffsets), the one applyLive answers from the tree it started from
-//     (joinedSchemaError), which is this same fragment, and it comes before any growth refusal, as
-//     there.
+//     write does not move it. Otherwise it reads and renders the fork once (readFork), before the
+//     write rather than after it, which the unmoved fragment makes the same reading: that is where
+//     applyLive refuses a tree holding an element this build does not know (NewerContentError),
+//     before anything of the write, so both leave the fork alike. A tree the reader or only the
+//     renderer refuses is the document's OutsideSchemaError (treeOf, documentMarkdownWithOffsets),
+//     the one applyLive answers from the tree it started from (joinedSchemaError), which is this
+//     same fragment; applyLive answers it after its write, since a write can repair it, so this
+//     one does too, and it comes before any growth refusal, as there.
 //   - Of the growth weigh (refuseGrowth) only the margin bound applies (marginWatch). The anchor
 //     marks the weigh counts (anchorWatch) are on the unchanged tree, so they carry what they
 //     carried and their weigh never refuses - it walks every mark of the tree to say so
@@ -422,6 +428,26 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 		return err
 	}
 	defer op.abandon()
+	// The tree and rendering the record keeps, read before the write: the marks map it sets is
+	// outside the document's fragment, so the fork reads the same on either side of the write, and
+	// a tree this build cannot read is refused before the write moves the fork, where applyLive
+	// refuses it. A tree outside the Proof schema is held back to after the write, as applyLive
+	// holds it back: a write over such a tree can repair it, and a refused one leaves the write's
+	// fork released, not standing.
+	rendered, reused := s.reuseRendering(op.write, op.fork, "margin")
+	var outsideSchema error
+	if !reused {
+		rendered.tree, err = s.readFork(op.fork)
+		if err == nil {
+			rendered.markdown, rendered.offsets, err = documentMarkdownWithOffsets(rendered.tree)
+		}
+		if err != nil {
+			if !errors.Is(err, ErrDocOutsideSchema) {
+				return err
+			}
+			outsideSchema = err
+		}
+	}
 	margin, err := op.change(func() error {
 		marks := op.fork.GetMap(marksMapName)
 		op.fork.Transact(func(txn *crdt.Transaction) {
@@ -432,14 +458,8 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 	if err != nil {
 		return err
 	}
-	rendered, reused := s.reuseRendering(op.write, op.fork, "margin")
-	if !reused {
-		if rendered.tree, err = s.readFork(op.fork); err != nil {
-			return err
-		}
-		if rendered.markdown, rendered.offsets, err = documentMarkdownWithOffsets(rendered.tree); err != nil {
-			return err
-		}
+	if outsideSchema != nil {
+		return outsideSchema
 	}
 	if err := margin.refusal(); err != nil {
 		return err
@@ -562,6 +582,8 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		}
 		// A tree outside the Proof schema - one treeOf refuses, or one it reads that does not
 		// render - has no readable text to compare or reanchor against: this replacement repairs it.
+		// A tree holding an element this build does not know (ErrDocNewerContent) is refused, as
+		// applyLive refuses it before this runs, so no replacement deletes that element.
 		repairing := errors.Is(err, ErrDocOutsideSchema)
 		if err != nil && !repairing {
 			return err
@@ -1088,8 +1110,8 @@ func modelBlockPath(path pmdoc.BlockPath) model.BlockPath {
 	return out
 }
 
-// SnapshotVersion returns the current immutable version, adding an unnamed
-// version only when the live text has diverged since the previous one.
+// SnapshotVersion returns the current immutable version, adding an unnamed version only when the
+// live content has changed since the previous one.
 func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor model.Actor) (VersionResult, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -1104,6 +1126,18 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 		return VersionResult{}, err
 	}
 	if latest.markdown == rendered.markdown {
+		return VersionResult{Version: latest.Version}, nil
+	}
+	// Another build may have rendered the latest version: during a release two builds serve one
+	// database, and their renderers can write one document differently. As settlement does, a
+	// snapshot writes no version when no update since the latest one changed the content
+	// (contentChangedSinceVersion). An edit the room holds that its persistence has not stored yet
+	// is in no update row, so the latest version's markdown must also read as this rendering.
+	changed, err := contentChangedSinceVersion(ctx, tx, artifactID, latest.docUpdateVersion)
+	if err != nil {
+		return VersionResult{}, err
+	}
+	if !changed && readsAs(latest.markdown, rendered.markdown) {
 		return VersionResult{Version: latest.Version}, nil
 	}
 	capture.authors[actorKey(actor)] = actor
@@ -1125,6 +1159,17 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 		return VersionResult{}, err
 	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
+}
+
+// readsAs reports whether stored, a version's markdown that any build may have rendered, reads as
+// the document whose rendering is markdown: this build parses it and renders it as markdown.
+func readsAs(stored, markdown string) bool {
+	tree, err := pmdoc.ParseRendering(stored)
+	if err != nil {
+		return false
+	}
+	again, err := documentMarkdown(tree)
+	return err == nil && again == markdown
 }
 
 // prevalidateLiveOperations performs database-backed table-anchor checks

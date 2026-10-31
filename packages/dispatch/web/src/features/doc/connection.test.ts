@@ -152,6 +152,7 @@ async function withProvider(
       onSynced: () => {
         synced = true;
       },
+      schemaCreatable: 1,
       schemaVersion: 1,
     });
     await body({

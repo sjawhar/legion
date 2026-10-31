@@ -264,32 +264,43 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	return conn.Hijack(), nil
 }
 
-// leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
-// (duty.Exclusive). One connection per caller that can be inside Exclusive at the same moment is
-// the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
-// connection before it learns whether the lease is held, so a pass that skips because the other
-// process holds the lease holds a connection for that round trip too. Thirteen names are leased -
-// the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
-// the block-index reconciliation, the term-statistics refresh, the GitHub webhook redelivery
-// sweep, the architecture import, the delivery reconcile, the edit-notice sweep, the repair of
-// closed and reopened issues' asks (api.RunIssueAskRepair), one per delivery durable for the
-// consumers' reconciliation (delivery.consumerLease, a name each for delivery-events and
-// delivery-jobs) and the server process registry's prune (processes.RunPrune) - taken by thirteen
-// callers, since each delivery intake takes its own durable's name from a bind poll of its own,
-// so thirteen callers can be inside Exclusive at once. Thirteen connections are exactly those
-// thirteen: the headroom is zero, not one, and the next leased loop added here makes a fourteenth
-// caller that waits for a connection rather than failing, for as long as the longest pass then
-// holding one. They cannot come from the shared pool: a lease is held for the whole pass, which
-// is minutes for the compaction, and the shared pool's sharedPoolSize connections are what every
-// request reads through.
-const leasePoolSize = 13
+// leasePoolSize bounds the pool the once-overall leases (duty.Exclusive) and the delivery intakes'
+// holds (duty.Hold) are taken on. The requirement is one connection per caller that can be using
+// one at the same moment, and it is a caller and not a lease or a hold that needs one.
+//
+// Exclusive takes its connection before it learns whether the lease is held, so a pass that skips
+// because the other process holds the lease holds a connection for that round trip too. Thirteen
+// names are leased - the document compaction, the suggestion-outcome sweep, the reference-excerpt
+// reconciliation, the block-index reconciliation, the term-statistics refresh, the GitHub webhook
+// redelivery sweep, the architecture import, the delivery reconcile, the edit-notice sweep, the
+// repair of closed and reopened issues' asks (api.RunIssueAskRepair), one per delivery durable
+// for the intake's take-over (delivery.consumerLease, a name each for delivery-events and
+// delivery-jobs) and the server process registry's prune (processes.RunPrune) - by thirteen
+// callers, since each intake takes its own durable's name from its own goroutine, so thirteen
+// callers can be inside Exclusive at once.
+//
+// Each of the two intakes also holds its durable's hold, whose every statement is one statement
+// on a connection of this pool for that statement alone. Two can be in flight per intake at once:
+// the hold's renewal goroutine (duty.Hold's renew, every 5 s, each bounded by the renew interval),
+// and the intake's own goroutine (duty.HoldToken, duty.TryHold, SetToken, Release, one at a time),
+// whose SetToken runs inside the take-over and so needs a connection beside the one its lease is
+// held on. That is four more callers, seventeen in all.
+//
+// Seventeen connections are exactly those seventeen: the headroom is zero. A renewal that waited
+// for a connection behind a compaction pass, which holds its lease for minutes, would see its hold
+// reported lost at the loss deadline and the durable's delivery stop, so the next caller added
+// here - a leased loop, or another hold - takes a connection of its own in this count. They
+// cannot come from the shared pool: a lease is held for the whole pass, and the shared pool's
+// sharedPoolSize connections are what every request reads through.
+const leasePoolSize = 17
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
 // it lives on one connection for the length of the pass and dies with it; a connection of the
 // shared pool held that long would be one fewer for every request, and a pass that then read
 // through the shared pool - which is what a pass does - would be a caller holding two of its
-// connections (ErrNestedAcquire).
+// connections (ErrNestedAcquire). The delivery intakes take and renew their holds here too
+// (duty.Hold), so a renewal never waits behind a request for a shared connection.
 func (p *Pool) Leases() (*pgxpool.Pool, error) {
 	return p.separate(&p.leases, leasePoolSize, "loop leases")
 }

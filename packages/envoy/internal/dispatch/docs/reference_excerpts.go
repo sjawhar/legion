@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -97,13 +98,13 @@ func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, versi
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep
 // is the wait before the next tick while a full batch says drift remains,
 // ReferenceExcerptReconcileInterval the wait once a tick finds less than a batch, and
-// referenceExcerptStaleWindow how long after its start the reconciliation also looks for excerpts
-// a version older than this binary left behind (refs.MarkStaleExcerpts).
+// referenceExcerptSkipFor how long the reconciliation passes over a document holding an element
+// this build does not know, at the version it read (excerptSkips).
 const (
 	referenceExcerptBatch             = 20
 	referenceExcerptStep              = 2 * time.Second
 	ReferenceExcerptReconcileInterval = 5 * time.Minute
-	referenceExcerptStaleWindow       = time.Hour
+	referenceExcerptSkipFor           = 10 * time.Minute
 )
 
 // referenceExcerptLease names the lease one reconciliation tick runs under. The excerpts it
@@ -116,11 +117,13 @@ const referenceExcerptLease = "reference-excerpts"
 // are owed one (refs.DriftedExcerpts): every mention indexed before migration 0092, each one
 // rebuild-refs inserts, and each a version write could not cut. One batch per tick, at start, then
 // every referenceExcerptStep while a full batch says drift remains and every
-// ReferenceExcerptReconcileInterval once none does, until ctx ends. For the first
-// referenceExcerptStaleWindow after it starts, each tick first marks owed the excerpts a version
-// written by the binary a deploy replaces left behind, while both run; until a tick marks one,
-// GET /api/v1/references serves that older excerpt. A mention owed an excerpt is answered with
-// the document's name until this stores one.
+// ReferenceExcerptReconcileInterval once none does, until ctx ends. Each tick that follows a full
+// interval - the first one too - first marks owed the excerpts a version written by a build that
+// stores none left behind (refs.MarkStaleExcerpts): two builds serve one database during every
+// release, however long this process has run. Until a tick marks one, GET /api/v1/references
+// serves that older excerpt. The two-second steps do not mark: the marking reads every mention
+// holding an excerpt, and a step only continues the batches the last marking left owed. A mention
+// owed an excerpt is answered with the document's name until this stores one.
 //
 // The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
 // that pass returned, and so is the period each runs under: that wait, referenceExcerptStep while
@@ -133,18 +136,16 @@ const referenceExcerptLease = "reference-excerpts"
 // leased loop.
 func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
-	started := time.Now()
-	duty.RunLeasedAfterEachPass(ctx, leases, referenceExcerptLease, ReferenceExcerptReconcileInterval, func(ctx context.Context) time.Duration {
-		return s.reconcileExcerptTick(ctx, started)
+	duty.RunLeasedAfterEachPass(ctx, leases, referenceExcerptLease, ReferenceExcerptReconcileInterval, func(ctx context.Context, period time.Duration) time.Duration {
+		return s.reconcileExcerptTick(ctx, period == ReferenceExcerptReconcileInterval)
 	})
 }
 
-// reconcileExcerptTick is one tick of the reconciliation - the stale marking its first
-// referenceExcerptStaleWindow after started does, and one batch - and returns how long to wait
-// before the next: referenceExcerptStep while a full batch says drift remains, the interval once
-// none does.
-func (s *Service) reconcileExcerptTick(ctx context.Context, started time.Time) time.Duration {
-	if time.Since(started) < referenceExcerptStaleWindow {
+// reconcileExcerptTick is one tick of the reconciliation - the stale marking when markStale says
+// the tick follows a full interval, and one batch - and returns how long to wait before the next:
+// referenceExcerptStep while a full batch says drift remains, the interval once none does.
+func (s *Service) reconcileExcerptTick(ctx context.Context, markStale bool) time.Duration {
+	if markStale {
 		if marked, err := refs.MarkStaleExcerpts(ctx, s.store.Pool); err != nil && ctx.Err() == nil {
 			slog.Error("dispatch: mark stale reference excerpts", "error", err)
 		} else if marked > 0 {
@@ -171,12 +172,15 @@ func (s *Service) reconcileExcerptTick(ctx context.Context, started time.Time) t
 // caller sees it (TextWithBlocks), with no transaction or connection held, and stores its
 // mentions' excerpts at the version the drift named. A document whose stored history does not
 // load or whose tree is outside the schema has no block to show, so its mentions are stored with
-// none and keep the document's name until its next version. A document it cannot read or record
-// for any other reason is logged and skipped for this tick, its mentions left owed, so one
-// document never holds back the rest of its batch; documents counts the ones recorded, and full
-// reports a batch that was full.
+// none and keep the document's name until its next version. A document holding an element this
+// build does not know (ErrDocNewerContent) is one a newer build wrote while two builds serve one
+// database: its mentions stay owed, for a build that reads it, and this process passes over it at
+// that version for referenceExcerptSkipFor (excerptSkips), so the batches after it are read. A
+// document it cannot read or record for any other reason is logged and skipped for this tick, its
+// mentions left owed, so one document never holds back the rest of its batch; documents counts the
+// ones recorded, and full reports a batch that was full.
 func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int, full bool, err error) {
-	drifted, err := refs.DriftedExcerpts(ctx, s.store.Pool, referenceExcerptBatch)
+	drifted, err := refs.DriftedExcerpts(ctx, s.store.Pool, referenceExcerptBatch, s.excerptSkips.current(s.now()))
 	if err != nil {
 		return 0, false, err
 	}
@@ -186,6 +190,11 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 		switch {
 		case ctx.Err() != nil:
 			return documents, false, ctx.Err()
+		case errors.Is(err, ErrDocNewerContent):
+			slog.Warn("dispatch: reference excerpt reconciliation passed over a document holding an element this build cannot read; its mentions stay owed for a build that reads it",
+				"artifact", document.FromID, "version", document.Version, "error", err)
+			s.excerptSkips.skip(document, s.now())
+			continue
 		case errors.Is(err, ErrDocumentUnloadable), errors.Is(err, ErrDocOutsideSchema):
 			slog.Warn("dispatch: reference excerpt reconciliation cannot read the document; its mentions keep the document's name",
 				"artifact", document.FromID, "error", err)
@@ -196,6 +205,9 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 		default:
 			excerpts = refs.MentionExcerpts(markdown, blocks, text.ExtractAt(markdown, s.serverURL))
 		}
+		// The drift lists a skipped document again only at another version, which this build
+		// reads: the skip is over.
+		s.excerptSkips.forget(document.FromID)
 		// The reconciliation appends no event, so what it moved is named nowhere: until it stores
 		// an excerpt, the route answers a mention owed one with the document's name.
 		if _, err := refs.RecordExcerpts(ctx, s.store.Pool, document.FromID, document.Version, excerpts); err != nil {
@@ -209,4 +221,56 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 		documents++
 	}
 	return documents, len(drifted) == referenceExcerptBatch, nil
+}
+
+// excerptSkips is the documents this process's reconciliation passes over, each at the version it
+// found holding an element this build does not know, and since when. A newer build reads such a
+// document, and while two builds serve one database the newer one's reconciliation stores its
+// excerpts; without the skips a batch of them would stand at the front of the drift, which lists
+// documents in id order, and this process would read the same batch every tick. A skip ends when
+// the document has another version, which the drift then lists, or after referenceExcerptSkipFor,
+// so a release that has finished meets the document again. It is this process's own: a process
+// started since reads the document once and skips it too.
+type excerptSkips struct {
+	mu      sync.Mutex
+	entries map[string]excerptSkip
+}
+
+// excerptSkip is one skipped document's version and when the reconciliation skipped it.
+type excerptSkip struct {
+	version int
+	since   time.Time
+}
+
+// current is every skip younger than referenceExcerptSkipFor at now, each as the drift it passes
+// over; it drops the older ones.
+func (k *excerptSkips) current(now time.Time) []refs.ExcerptDrift {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	skipped := make([]refs.ExcerptDrift, 0, len(k.entries))
+	for fromID, entry := range k.entries {
+		if now.Sub(entry.since) >= referenceExcerptSkipFor {
+			delete(k.entries, fromID)
+			continue
+		}
+		skipped = append(skipped, refs.ExcerptDrift{FromID: fromID, Version: entry.version})
+	}
+	return skipped
+}
+
+// skip passes over document at its version from now on.
+func (k *excerptSkips) skip(document refs.ExcerptDrift, now time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.entries == nil {
+		k.entries = make(map[string]excerptSkip)
+	}
+	k.entries[document.FromID] = excerptSkip{version: document.Version, since: now}
+}
+
+// forget ends the skip of the document fromID, if there is one.
+func (k *excerptSkips) forget(fromID string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.entries, fromID)
 }

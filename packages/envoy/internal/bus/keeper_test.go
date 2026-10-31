@@ -159,7 +159,7 @@ func TestTheKeeperEndsTheMixedSettingsRaceAtThreeCopiesTheByteLimitAndTheID(t *t
 			t.Fatalf("the setting program's start left the stream at %+v (%v), want three copies, the byte limit and the id", info, err)
 		}
 	}}
-	if err := ensureStreamWithConfig(defaultStart, &defaults); err != nil {
+	if _, err := ensureStreamWithConfig(defaultStart, &defaults); err != nil {
 		t.Fatalf("the default program's start: %v", err)
 	}
 	if n := defaultStart.updates.Load(); n != 1 {
@@ -197,7 +197,7 @@ func TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway(t *test
 	limited := parseConnectOptions([]ConnectOption{WithStreamMaxBytes(keeperByteLimit)}).streamConfig()
 	newer := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	newer.Subjects = append(slices.Clone(streamSubjects), added)
-	if err := ensureStreamWithConfig(js, &limited); err != nil {
+	if _, err := ensureStreamWithConfig(js, &limited); err != nil {
 		t.Fatalf("the limited program's start: %v", err)
 	}
 	lowered := deployedStream(t, js).Config
@@ -207,7 +207,7 @@ func TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway(t *test
 	}
 
 	keeper := &interleavedJetStream{JetStreamContext: js, beforeUpdate: func() {
-		if err := ensureStreamWithConfig(js, &newer); err != nil {
+		if _, err := ensureStreamWithConfig(js, &newer); err != nil {
 			t.Fatalf("the newer release's start: %v", err)
 		}
 		if subjects := deployedStream(t, js).Config.Subjects; !slices.Contains(subjects, added) {
@@ -253,7 +253,7 @@ func TestTheKeeperNeverPutsBackARoleLaneAStartMovedOffTheStream(t *testing.T) {
 	defaults := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 
 	keeper := &interleavedJetStream{JetStreamContext: js, afterRead: func() {
-		if err := ensureStreamWithConfig(js, &defaults); err != nil {
+		if _, err := ensureStreamWithConfig(js, &defaults); err != nil {
 			t.Fatalf("the start that moves the role lanes off: %v", err)
 		}
 	}}
@@ -310,7 +310,7 @@ func TestTwoKeepersWithDifferentSubjectListsNeverSwitchTheStream(t *testing.T) {
 	beta := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	beta.Subjects = append(slices.Clone(streamSubjects), "notifications.beta.>")
 	beta.Subjects[slices.Index(beta.Subjects, "notifications.github.>")] = "notifications.github.pr.>"
-	if err := ensureStreamWithConfig(js, &alpha); err != nil {
+	if _, err := ensureStreamWithConfig(js, &alpha); err != nil {
 		t.Fatalf("the alpha release's start: %v", err)
 	}
 
@@ -414,7 +414,7 @@ func TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne(t *testi
 
 	counting := &countingJetStream{JetStreamContext: js}
 	cfg := parseConnectOptions(settings).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+	if _, err := ensureStreamWithConfig(counting, &cfg); err != nil {
 		t.Fatalf("start with the old limit: %v", err)
 	}
 	if writes := counting.written(); len(writes) != 0 {

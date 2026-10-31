@@ -34,7 +34,8 @@ import (
 // could name another session here exactly as it could on any other write; what makes a claim
 // trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model
 // chooses it, and that the request has no second parameter for claiming on someone's behalf.
-// The body is closed to unknown fields, so an invented one is refused rather than ignored.
+// A member the body does not declare is ignored, as on every route (decodeJSON), and an ignored
+// member claims nothing on anyone's behalf: the claimant still comes from the request's actor.
 //
 // The taking rule lives in claimBlockedBy alone: a claim whose session the Envoy listener
 // still lists as live belongs to that session until it releases it or a human forces it; a

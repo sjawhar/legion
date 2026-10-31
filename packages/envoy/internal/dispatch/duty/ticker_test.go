@@ -31,7 +31,7 @@ func TestRunLeasedAfterEachPassTicksAtStartAndThenAtTheWaitEachPassAsksFor(t *te
 	started := time.Now()
 	go func() {
 		defer close(done)
-		RunLeasedAfterEachPass(ctx, leases, "reference-excerpts", interval, func(ctx context.Context) time.Duration {
+		RunLeasedAfterEachPass(ctx, leases, "reference-excerpts", interval, func(ctx context.Context, _ time.Duration) time.Duration {
 			began := time.Now()
 			// A pass's own time, so a loop that ticks on a fixed cadence instead of after the
 			// pass shows here as a gap shorter than the step.

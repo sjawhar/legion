@@ -56,6 +56,7 @@ import {
   overCapMessage,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
+  type Sleep,
   serviceSubjectLabel,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -173,6 +174,9 @@ export interface ExecuteDispatchToolInput {
   readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
   readonly fetchImpl?: typeof fetch;
+  /** The wait before each new attempt of a request Dispatch answered with no route
+   *  (`DispatchClient`); a test passes one that returns at once. */
+  readonly sleep?: Sleep;
   /** How each write asks Dispatch again under its key (`DISPATCH_WRITE_RETRY` unless set). */
   readonly writeRetry?: DispatchWriteRetry;
   readonly exec?: ExecFn;
@@ -3183,7 +3187,11 @@ export async function executeDispatchTool(
   // A factory, not one instance: the constructor starts the request deadline, and the main
   // path resolves the origin (a subprocess) before it needs a client.
   const dispatchClient = (): DispatchClient =>
-    new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
+    new DispatchClient(configUrl, configToken, fetchImpl, {
+      signal: input.signal,
+      writeRetry: input.writeRetry,
+      sleep: input.sleep,
+    });
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");

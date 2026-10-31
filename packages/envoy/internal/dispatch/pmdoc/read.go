@@ -73,7 +73,7 @@ func readDocument(frag *crdt.YXmlFragment, readText textReader, copyAttrs bool) 
 	}
 	doc := &Node{Type: "doc", Children: children}
 	if err := doc.Validate(); err != nil {
-		return nil, err
+		return nil, unknownBeside(doc, err)
 	}
 	return doc, nil
 }
@@ -114,6 +114,11 @@ func readElement(e *crdt.YXmlElement, readText textReader, depth int, copyAttrs 
 			}
 		}
 		n.Attrs = treeAttrs(e.NodeName, attrs)
+	}
+	// A typed block an earlier build wrote may lack an attribute added since; it reads with the
+	// attribute's default, as the browser editor reads it.
+	if typ, typed := typedBlock(e.NodeName); typed {
+		n.Attrs = withWrittenDefaults(typ, n.Attrs)
 	}
 	children, err := readChildren(&e.YXmlFragment, readText, depth+1, copyAttrs)
 	if err != nil {
@@ -163,7 +168,7 @@ func deltaTextNode(insert any, attributes crdt.Attributes, copyAttrs bool) (*Nod
 }
 
 // readUnsharedText is text's nodes as readLiveText reads them, without ygo's ToDelta: it is
-// ToDelta's loop (crdt/ytext.go, YText.ToDelta, sjawhar/ygo v1.51.3-sami.4) with its state, the
+// ToDelta's loop (crdt/ytext.go, YText.ToDelta, sjawhar/ygo v1.54.1-sami.2) with its state, the
 // buffered run's text and attribute snapshot, attrsDirty and the live attribute set, emitting each
 // delta ToDelta would emit as its node (deltaTextNode) instead, in the same order, so the first
 // node refused is the one readLiveText refuses. It takes no lock: its caller holds the only

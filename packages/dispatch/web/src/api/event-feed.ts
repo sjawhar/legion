@@ -289,13 +289,10 @@ export function useEventFeed({
         // every event after the resume it was sent (`replay_complete`: a resume the log still
         // holds): those events refresh what they changed, as any other does. A resume above a
         // reset log's head says no such thing. TanStack matches every query when no filter is
-        // given. Nothing is excluded from the refresh: the one query that looks expensive,
-        // `["block-schema"]` with an infinite `staleTime`, resolves from a module-level
-        // per-session cache (`features/doc/schema.ts`), so its refetch issues no request. The
-        // refresh runs at the start itself, which follows a reopen `reconnectDelayMs`
-        // (`api/live-socket.ts`) already spreads after a dropped socket, so it waits no further:
-        // tabs a restart dropped together and Dispatch does not replay in full refresh spread as
-        // well.
+        // given. Nothing is excluded from the refresh. The refresh runs at the start itself, which
+        // follows a reopen `reconnectDelayMs` (`api/live-socket.ts`) already spreads after a
+        // dropped socket, so it waits no further: tabs a restart dropped together and Dispatch
+        // does not replay in full refresh spread as well.
         if (!replayComplete) {
           refreshEverything();
         }

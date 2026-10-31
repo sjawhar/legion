@@ -133,14 +133,20 @@ func (c *Client) awaitKeeper() {
 // already held them, in which case it sends nothing. A stream whose subjects capture the role lanes
 // it leaves to a start, sending nothing and returning an error when it needs anything: only a start
 // moves the role lanes off the stream, their consumers' filters first (migrateRoleLanesOffStream),
-// and a write of the list the keeper read could put them back after a start removed them. An update
-// whose answer never came succeeds when the stream, read again, needs nothing more, and one the
-// server refused as overlapping the stream itself is sent again until the stream needs nothing
-// more or its sends run out (updateStream).
+// and a write of the list the keeper read could put them back after a start removed them. A stream
+// stamped with a generation higher than streamConfigGeneration belongs to a newer build and is
+// left exactly as it is, as a start leaves it (ensureStreamWithConfig), so the two builds a
+// release runs at once never put their own settings back in turn. An update whose answer never
+// came succeeds when the stream, read again, needs nothing more, and one the server refused as
+// overlapping the stream itself is sent again until the stream needs nothing more or its sends
+// run out (updateStream).
 func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, error) {
 	info, err := js.StreamInfo(Stream)
 	if err != nil {
 		return nil, err
+	}
+	if MetadataGeneration(info.Config.Metadata, streamGenerationKey) > streamConfigGeneration {
+		return nil, nil
 	}
 	kept := keptStream(info, cfg)
 	if reflect.DeepEqual(kept, info.Config) {

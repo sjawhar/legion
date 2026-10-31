@@ -129,6 +129,68 @@ func TestRegisterRecordsTheProcessAsLive(t *testing.T) {
 	}
 }
 
+// liveProcess is id's row as Live reads it.
+func liveProcess(t *testing.T, database *store.Store, id string) Process {
+	t.Helper()
+	live, err := Live(context.Background(), database.Pool)
+	if err != nil {
+		t.Fatalf("read the live processes: %v", err)
+	}
+	for _, p := range live {
+		if p.ID == id {
+			return p
+		}
+	}
+	t.Fatalf("process %s is not live; live = %+v", id, live)
+	return Process{}
+}
+
+// The four fleet columns - the schema version and creatable version the process's documents
+// read and write, its embedder's identity and whether it stores files in a bucket - read back as
+// the process registered them, and again after a heartbeat writes a pruned row back.
+func TestTheFleetColumnsRoundTripThroughRegisterAndLive(t *testing.T) {
+	setInterval(t, &HeartbeatInterval, 50*time.Millisecond)
+	database := storetest.Open(t)
+	registration, err := Register(context.Background(), database.Pool, Instance{
+		Commit: "c1", DashboardBuild: "build-c1", SigningKeys: fingerprints(t, "K0"),
+		SchemaVersion: 3, SchemaCreatable: 2, EmbedderIdentity: "azure:example.openai.azure.com/embed", FileStore: true,
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	t.Cleanup(func() { _ = registration.Deregister(context.Background()) })
+	want := func(what string, got Process) {
+		t.Helper()
+		if got.SchemaVersion != 3 || got.SchemaCreatable != 2 || got.EmbedderIdentity != "azure:example.openai.azure.com/embed" ||
+			!got.FileStore || got.PredatesFleetColumns() {
+			t.Errorf("%s = %+v, want schema version 3, creatable 2, the Azure identity and a file store", what, got)
+		}
+	}
+	want("the registered row", liveProcess(t, database, registration.ID))
+
+	underRegistryLock(t, database, func(tx pgx.Tx) { prunedRow(t, tx, registration.ID) })
+	waitForLive(t, database, registration.ID, "a process whose row was pruned")
+	want("the row written again after a prune", liveProcess(t, database, registration.ID))
+}
+
+// A row written by a build that predates the fleet columns carries none of them, so each holds its
+// default: it reads as a process that predates them, with no schema numbers, no embedder identity
+// and no file store.
+func TestARowAtTheDefaultsPredatesTheFleetColumns(t *testing.T) {
+	database := storetest.Open(t)
+	var id string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into server_processes (instance, commit, dashboard_build, signing_keys)
+		values (gen_random_uuid(), 'c0', 'build-c0', $1)
+		returning instance::text`, fingerprints(t, "K0")).Scan(&id); err != nil {
+		t.Fatalf("insert a row as a build that predates the fleet columns writes it: %v", err)
+	}
+	got := liveProcess(t, database, id)
+	if !got.PredatesFleetColumns() || got.SchemaVersion != 0 || got.SchemaCreatable != 0 || got.EmbedderIdentity != "" || got.FileStore {
+		t.Errorf("a row at the defaults = %+v, want one that predates the fleet columns: 0, 0, no identity, no file store", got)
+	}
+}
+
 // Live is measured on the database's clock: a heartbeat 14 seconds before the database's now() is
 // live, one 16 seconds before it is not, whatever this process's clock says.
 func TestLiveCountsAHeartbeatWithinFifteenSecondsOfTheDatabaseClock(t *testing.T) {

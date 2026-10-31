@@ -203,6 +203,7 @@ func (s *server) routes() []apiRoute {
 			apiRoute{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket with 4001 (max age), as its age does.", s.rotateLiveSockets},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
+			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/newer-content", authAny, "Test hook: append an element no build knows, so the document holds newer content.", s.injectArtifactNewerContent},
 			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
 			apiRoute{http.MethodPost, "/api/v1/writes/_test/slow", authAny, "Test hook: {method, path, delay_ms} delays every keyed run of that method and path by delay_ms after its key is claimed, on the handler's own context; 0 disarms.", s.armSlowWrite},
 		)

@@ -23,7 +23,13 @@
 
 import { BLOCK_ID_DOM_ATTR, blockIdOf, blockIdPlugins } from './editor/schema/block-ids';
 import { withoutLeafMarks } from './editor/schema/leaf-marks';
-import { blockSchemaPlugins, type BlockSchema, type HostBlockRenderer } from './block-schema';
+import {
+  assertCreatable,
+  blockSchemaPlugins,
+  creatableDomParser,
+  type BlockSchema,
+  type HostBlockRenderer,
+} from './block-schema';
 import { createTypedBlockCommands, type TypedBlockCommands } from './typed-block-commands';
 import {
   Editor,
@@ -165,7 +171,8 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   view: EditorView;
   /** Serialize the current document to markdown via the configured serializer. */
   getMarkdown(): string;
-  /** Replace the current document with parsed markdown. */
+  /** Replace the current document with parsed markdown. An editable editor writes it, so it
+   *  throws for content the editor may not create yet; a read-only one only shows it. */
   setMarkdown(markdown: string): void;
   /** Top offset of each mark's first span relative to the library root. */
   markOffsets(): Map<string, number>;
@@ -289,6 +296,26 @@ function installSelfHealingParser(ctx: Ctx): void {
   });
 }
 
+/**
+ * Keeps what the editor's parsers write to what an editor of `blockSchema`'s version may create.
+ * A markdown parse through `parserCtx` (a text/plain paste, a suggestion's accept) throws for
+ * content that holds an element the editor may not create yet, as the parse throws for a
+ * directive the schema refuses. The schema's DOM parser, which `DOMParser.fromSchema` keeps in
+ * `schema.cached` and every HTML paste and drop reads with, no longer reads such a node or mark,
+ * so its content is kept without it. A document the editor reads (the collab sync, a node it
+ * already draws) passes through neither, so it keeps every element it holds.
+ */
+function installCreationGate(ctx: Ctx, blockSchema: BlockSchema): void {
+  const schema = ctx.get(schemaCtx);
+  schema.cached.domParser = creatableDomParser(schema, blockSchema);
+  const parse = ctx.get(parserCtx);
+  ctx.set(parserCtx, (markdown) => {
+    const doc = parse(markdown);
+    assertCreatable(blockSchema, doc.content);
+    return doc;
+  });
+}
+
 export async function createProofEditor(
   root: HTMLElement,
   opts: CreateProofEditorOptions,
@@ -387,6 +414,7 @@ export async function createProofEditor(
 
   editor.action((ctx) => {
     installSelfHealingParser(ctx);
+    if (opts.blockSchema) installCreationGate(ctx, opts.blockSchema);
     setDefaultMarkdownParser(ctx.get(parserCtx));
   });
 
@@ -458,6 +486,7 @@ export async function createProofEditor(
       // This parser is its own, so the shared parserCtx's rule is applied here too: no inline
       // leaf of an imported document carries a mark (./editor/schema/leaf-marks.ts).
       const parsed = withoutLeafMarks(importParser(markdown));
+      if (opts.blockSchema && !currentReadOnly) assertCreatable(opts.blockSchema, parsed.content);
       const { state } = view;
       view.dispatch(state.tr.replaceWith(0, state.doc.content.size, parsed.content));
     },

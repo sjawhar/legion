@@ -21,7 +21,9 @@ import { harnessSignIn } from "./harness-signin";
  *  without one cookie key (run-server.sh's DISPATCH_DEV_SIGNIN_SHARED_KEY) every page would sign
  *  its person out at the first request B answers. Under DISPATCH_E2E_SIGNIN=oidc
  *  (e2e/harness-signin.ts) the servers have no dev sign-in to check that with; there the one spec
- *  it runs signs a person in through the issuer and asks both processes who they are. */
+ *  it runs signs a person in through the issuer and asks both processes who they are. A B of a
+ *  previous release (`DISPATCH_E2E_BINARY_B`) takes the same check: that release signs with the
+ *  shared key too (e2e/harness-processes.ts). */
 export default async function preflight(): Promise<void> {
   const sentinel = { session_id: `e2e-preflight-${process.pid}`, title: "e2e preflight" };
   const { port, variable } = harnessPorts().fakeEnvoy;

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -63,6 +64,15 @@ func equivalenceFlows() []equivalenceFlow {
 			run: func(r *flowRun) error { return r.reply("A reply to the seeded comment.") },
 		})
 	}
+	// A mark no manifest of this build names is an element this build does not know, which a
+	// newer build serving the same database can have written: a write over it is refused as
+	// newer content, which no repair answers, not as a tree outside the schema.
+	flows = append(flows, equivalenceFlow{
+		name:    "a reply on a mark this build does not know",
+		corrupt: appendTextMark(crdt.Attributes{"unknown": map[string]any{}}),
+		wantErr: ErrDocNewerContent,
+		run:     func(r *flowRun) error { return r.reply("A reply to the seeded comment.") },
+	})
 	return flows
 }
 

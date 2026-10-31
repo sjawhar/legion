@@ -101,7 +101,7 @@ func (w *window) send(item contracts.Envelope) (func() error, error) {
 	if err := w.pin(); err != nil {
 		return nil, err
 	}
-	if UsesCoreTransport(item.Topic) {
+	if w.client.UsesCoreTransport(item.Topic) {
 		return w.sendCore(item, data)
 	}
 	return w.sendJetStream(item, data)

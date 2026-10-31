@@ -235,9 +235,13 @@ type Service struct {
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
 	// the mutation outside the document's lock and takes the lock for each transaction alone.
 	inServiceTransaction func(txn *crdt.Transaction)
-	// now is the clock the unrecorded-mark sweep ages marks by (sweepUnrecordedMarks).
-	now      func() time.Time
-	settleWG sync.WaitGroup
+	// now is the clock the unrecorded-mark sweep ages marks by (sweepUnrecordedMarks), and the
+	// one the reference-excerpt reconciliation ages its skipped documents by (excerptSkips).
+	now func() time.Time
+	// excerptSkips is the documents this process's reference-excerpt reconciliation passes over
+	// for now, each at the version it could not read (ReconcileReferenceExcerpts).
+	excerptSkips excerptSkips
+	settleWG     sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
 	// the store, so shutdown joins them before it closes.
 	evictWG sync.WaitGroup
@@ -272,6 +276,10 @@ type Service struct {
 	// preloads holds, per room, the durable state a document socket's admission check decoded
 	// (*preloadedDocument), for the room load that socket makes next (takePreload).
 	preloads sync.Map
+	// schemaAdmissions holds each document socket's schema admission, from authorize until the
+	// socket ends: the token's answer reads it (authorizeSchemaVersion), and so does the re-check
+	// that closes a socket the live fleet no longer admits (RunSchemaAdmission).
+	schemaAdmissions schemaAdmissions
 	// replicas holds, for each resident room document, a weak pointer to the replica its update
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
 	// keyed by a weak pointer to that document (keepReplica).
@@ -664,7 +672,7 @@ func New(deps Deps) *Service {
 
 	service.srv = newRoomServer(srv)
 	srv.Authorize = service.authorize
-	srv.OnTokenAuth = service.authorizeSchemaVersion
+	srv.OnTokenAuthContext = service.authorizeSchemaVersion
 	srv.OnInject = service.allowInject
 	srv.OnLoadDocument = service.onLoadDocument
 	srv.OnLastPeer = service.settleLastPeer
@@ -1310,6 +1318,25 @@ func (s *Service) followUpSettlement(room string, outcome settleOutcome) {
 	}
 }
 
+// skipUnreadableSettlement reports whether err stops a settlement at a document whose tree it cannot
+// read, and logs it: a tree outside the Proof schema, which a replacement from markdown repairs, or
+// an element this build does not know (ErrDocNewerContent), which a newer build wrote while two
+// builds serve one database - in the tree, or in the version a human approved, without which the
+// version write cannot tell whether his approval carries (carryApproval). The settlement writes no
+// version and records no failure, and the document stays unsettled for a later settlement - a
+// repair's, or one on a build that reads the element, which the log names.
+func skipUnreadableSettlement(room string, err error) bool {
+	switch {
+	case errors.Is(err, ErrDocNewerContent):
+		slog.Warn("dispatch: settle document holding an element this build cannot read; no version written; a build that reads the element writes it", "room", room, "error", err)
+	case errors.Is(err, ErrDocSchema):
+		slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+	default:
+		return false
+	}
+	return true
+}
+
 // settleRoomWithin settles room under parent and reports how the settlement ended (settleOutcome),
 // leaving what follows to its caller. A timer's settlement runs under no deadline; the one
 // Shutdown runs gets its drain budget. When parent ends first the settlement's database work is
@@ -1512,8 +1539,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// the generation.
 	read, credit, err := s.readSettlementTree(state, owed, durableLatest, doc, room, s.afterSettleAuthorsTake)
 	if err != nil {
-		if errors.Is(err, ErrDocSchema) {
-			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+		if skipUnreadableSettlement(room, err) {
 			return settleOutcome{}
 		}
 		return stoppedShort(err)
@@ -1575,8 +1601,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		})
 		keep(slot, update)
 		if err != nil {
-			if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
-				slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+			if len(slots) == 0 && skipUnreadableSettlement(room, err) {
 				return settleOutcome{}
 			}
 			return abandon(err)
@@ -1698,8 +1723,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		markdown, offsets, err = renderTreeWithOffsets(versioned)
 	}
 	if err != nil {
-		if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
-			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+		if len(slots) == 0 && skipUnreadableSettlement(room, err) {
 			return settleOutcome{}
 		}
 		return abandon(err)
@@ -1779,6 +1803,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			docUpdateVersion: &snapshotCursor,
 		})
 		if writeErr != nil {
+			// The version a human approved holds an element this build does not know: the version
+			// is left, unwritten, to a build that reads it, as a tree holding one is.
+			if len(slots) == 0 && errors.Is(writeErr, ErrDocNewerContent) && skipUnreadableSettlement(room, writeErr) {
+				return settleOutcome{}
+			}
 			return abandon(writeErr)
 		}
 		// The version lists the pending authors this settlement read, so its commit deletes them.

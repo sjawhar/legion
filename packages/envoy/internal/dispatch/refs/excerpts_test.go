@@ -2,6 +2,7 @@ package refs
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -35,7 +36,7 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	drifted, err := DriftedExcerpts(ctx, database.Pool, 20)
+	drifted, err := DriftedExcerpts(ctx, database.Pool, 20, nil)
 	if err != nil || len(drifted) != 1 || drifted[0] != (ExcerptDrift{FromID: document, Version: 1}) {
 		t.Fatalf("drift before recording = %#v, %v; want the document at version 1", drifted, err)
 	}
@@ -49,7 +50,7 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 	if want := []Target{{Kind: "issue", ID: "CORE-1"}}; !slices.Equal(moved, want) {
 		t.Fatalf("moved by the first record = %#v, want %#v", moved, want)
 	}
-	if drifted, err := DriftedExcerpts(ctx, database.Pool, 20); err != nil || len(drifted) != 0 {
+	if drifted, err := DriftedExcerpts(ctx, database.Pool, 20, nil); err != nil || len(drifted) != 0 {
 		t.Fatalf("drift after recording = %#v, %v; want none", drifted, err)
 	}
 	if stored, err := StoredExcerpts(ctx, database.Pool, "issue", "CORE-1"); err != nil || stored[document] != excerpt {
@@ -68,7 +69,7 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 	if _, err := conn.Exec(ctx, `set enable_seqscan = off`); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := conn.Query(ctx, "explain (costs off) "+strings.Replace(driftedExcerptsQuery, "$1", "20", 1))
+	rows, err := conn.Query(ctx, "explain (costs off) "+strings.NewReplacer("$1", "20", "$2", "'{}'", "$3", "'{}'").Replace(driftedExcerptsQuery))
 	if err != nil {
 		t.Fatalf("explain drift query: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 	if marked, err := MarkStaleExcerpts(ctx, database.Pool); err != nil || marked != 2 {
 		t.Fatalf("marked stale = %d, %v; want both mentions", marked, err)
 	}
-	if drifted, err := DriftedExcerpts(ctx, database.Pool, 20); err != nil || len(drifted) != 1 || drifted[0].Version != 2 {
+	if drifted, err := DriftedExcerpts(ctx, database.Pool, 20, nil); err != nil || len(drifted) != 1 || drifted[0].Version != 2 {
 		t.Fatalf("drift after an older binary's version = %#v, %v; want the document at version 2", drifted, err)
 	}
 	if stored, _ := StoredExcerpts(ctx, database.Pool, "issue", "CORE-1"); len(stored) != 0 {
@@ -103,6 +104,48 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 	}
 	if marked, err := MarkStaleExcerpts(ctx, database.Pool); err != nil || marked != 0 {
 		t.Fatalf("marking again = %d, %v; want none, owed rows are not stale", marked, err)
+	}
+}
+
+// The reconciliation passes over a document it found it cannot read at the version it read, so the
+// drift query lists the documents after that one in its place. Once the document has a later
+// version, the query lists it again.
+func TestTheDriftQueryPassesOverADocumentSkippedAtItsVersion(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createReferenceProject(t, tx, "CORE")
+	documents := make([]string, 2)
+	for index := range documents {
+		documents[index], _ = createReferenceArtifact(t, tx, "", "CORE", fmt.Sprintf("design-%d", index))
+		if _, err := tx.Exec(ctx, `insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, 1, 'v1', '[]')`, documents[index]); err != nil {
+			t.Fatalf("write version 1 of document %d: %v", index, err)
+		}
+		if _, err := replaceRefs(ctx, tx, "artifact", documents[index], text.Extract("see dispatch://CORE-1", "https://dispatch.example"), nil); err != nil {
+			t.Fatalf("index the mention of document %d: %v", index, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(documents)
+	first, second := documents[0], documents[1]
+
+	if drifted, err := DriftedExcerpts(ctx, database.Pool, 1, nil); err != nil || len(drifted) != 1 || drifted[0] != (ExcerptDrift{FromID: first, Version: 1}) {
+		t.Fatalf("drift = %#v, %v; want the first document at version 1", drifted, err)
+	}
+	skipped := []ExcerptDrift{{FromID: first, Version: 1}}
+	if drifted, err := DriftedExcerpts(ctx, database.Pool, 1, skipped); err != nil || len(drifted) != 1 || drifted[0] != (ExcerptDrift{FromID: second, Version: 1}) {
+		t.Fatalf("drift past the skipped document = %#v, %v; want the second document at version 1", drifted, err)
+	}
+	if _, err := database.Pool.Exec(ctx, `insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, 2, 'v2', '[]')`, first); err != nil {
+		t.Fatalf("write version 2 of the skipped document: %v", err)
+	}
+	if drifted, err := DriftedExcerpts(ctx, database.Pool, 1, skipped); err != nil || len(drifted) != 1 || drifted[0] != (ExcerptDrift{FromID: first, Version: 2}) {
+		t.Fatalf("drift after the skipped document's next version = %#v, %v; want it at version 2", drifted, err)
 	}
 }
 

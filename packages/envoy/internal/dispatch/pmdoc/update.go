@@ -12,8 +12,26 @@ import (
 )
 
 // Update writes want into frag with the same element and rich-text layout that
-// y-prosemirror's updateYFragment produces. Unchanged Yjs types are retained.
+// y-prosemirror's updateYFragment produces. Unchanged Yjs types are retained. It refuses a want
+// holding an element this build may not create yet that frag does not hold already
+// (refuseUncreatable).
 func Update(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node) error {
+	return update(txn, frag, want, func() *Node {
+		held, _ := readDocument(frag, readTextInTransaction, false)
+		return held
+	})
+}
+
+// UpdateHolding is Update for a write whose content the document holds already as held, not as
+// frag does: a rebuild seeds an empty fragment with its latest saved version's own tree, and an
+// element that version holds is not created by the seed, so refuseUncreatable refuses only an
+// element want holds and held does not.
+func UpdateHolding(txn *crdt.Transaction, frag *crdt.YXmlFragment, want, held *Node) error {
+	return update(txn, frag, want, func() *Node { return held })
+}
+
+// update is Update and UpdateHolding, with held the document the write starts from.
+func update(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node, held func() *Node) error {
 	if txn == nil || frag == nil || want == nil {
 		return fmt.Errorf("%w: Update requires transaction, fragment, and document", ErrSchema)
 	}
@@ -21,6 +39,9 @@ func Update(txn *crdt.Transaction, frag *crdt.YXmlFragment, want *Node) error {
 		return fmt.Errorf("%w: Update wants a doc, got %q", ErrSchema, want.Type)
 	}
 	if err := want.Validate(); err != nil {
+		return err
+	}
+	if err := refuseUncreatable(want.Children, held); err != nil {
 		return err
 	}
 	return updateChildren(txn, frag, want.Children)

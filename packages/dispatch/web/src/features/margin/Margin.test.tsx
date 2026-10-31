@@ -872,7 +872,7 @@ function RegisterBridge({ bridge }: { bridge: DocumentBridge }): ReactNode {
   return null;
 }
 
-/** What a remounted `ProofDocument` does (a new artifact or block schema): the old editor
+/** What a remounted `ProofDocument` does (a new artifact): the old editor
  *  unregisters and a fresh one registers, while the margin and its open composer stay. */
 function ReopenDocument({ bridge }: { bridge: DocumentBridge }): ReactNode {
   const { registerDocument } = useMargin();

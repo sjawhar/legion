@@ -2,7 +2,10 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -27,13 +30,16 @@ type RebuildReport struct {
 // its latest version and is refused unchanged.
 //
 // Every refusal comes before the first write: a room resident in this server, a history that
-// loads, a closed issue (for supplied markdown, which changes the document), and markdown that is
-// not a Proof document or drops an open ask block. Supplied markdown is caller text: it is parsed
-// as an upload is, and its rendering is weighed as a new document's is (SeedText). The latest
-// version is the server's own rendering of the document, read back as every stored rendering is
-// (pmdoc.ParseRendering), so a document whose version is past what one write may make - stored
-// before that bound, or grown past it by browser edits - still rebuilds. Supplied markdown that
-// differs from the latest version is a document change, so the same transaction writes its
+// loads, a closed issue (for supplied markdown, which changes the document), a latest version
+// holding an element this build does not know (ErrDocNewerContent, as every read of it answers),
+// and markdown that is not a Proof document or drops an open ask block. Supplied markdown is
+// caller text: it is parsed as an upload is, and its rendering is weighed as a new document's is
+// (SeedText). The latest version is the server's own rendering of the document, read back as
+// every stored rendering is (pmdoc.ParseRendering), so a document whose version is past what one
+// write may make - stored before that bound, or grown past it by browser edits - still rebuilds,
+// and so does one holding an element this build reads but may not create yet, which the seed puts
+// back rather than creates (encodeDocumentTreeHolding). Supplied markdown that differs from the
+// latest version is a document change, so the same transaction writes its
 // version, which moves the open approval request to it (writeVersionTx, MoveApprovalAsk); the
 // VersionResult is what the caller's artifact.version event names. A rebuild of a closed issue's
 // document from its latest version writes the close's ask states into the tree it seeds, as the
@@ -69,7 +75,11 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// (ErrRoomBehindHead): its settlement closes the room (reloadRoomBehindHead), and its
 	// browser's append fails it outright, and either way the reload reads the rebuilt document.
 	if s.srv.GetDoc(artifactID) != nil {
-		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
+		latest, err := savedVersionNumber(ctx, tx, artifactID)
+		if err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
+		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is open in this Dispatch process, or its last editor left it less than two minutes ago, so Dispatch refused the rebuild. A rebuild discards every edit made after saved version %d. Stop. Ask a person whether to rebuild the document after two minutes", ErrDocumentLive, artifactID, latest)
 	}
 	loaded, err := s.persistence.Load(ctx, artifactID)
 	if err != nil {
@@ -77,7 +87,11 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	}
 	validationErr := validateUpdate(loaded.Update)
 	if validationErr == nil {
-		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
+		latest, err := savedVersionNumber(ctx, tx, artifactID)
+		if err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
+		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w (document %s, latest saved version %d)", ErrDocumentLoads, artifactID, latest)
 	}
 	// The owner row before the room lock the write below takes, as every writer that takes both
 	// does (lockDocumentRoom). Held, it also keeps the open asks the replacement must keep, and
@@ -90,9 +104,23 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	var tree *pmdoc.Node
+	// stored is the latest version's own tree, as the version holds it, when the rebuild seeds from
+	// that version: the seed puts back what the version holds, so an element this build reads and
+	// may not create yet is held already, not created (pmdoc.UpdateHolding). It is nil for supplied
+	// markdown, which creates every element it holds.
+	var tree, stored *pmdoc.Node
 	if markdown == nil {
-		tree, err = uploadedInput(pmdoc.ParseRendering(latest.markdown))
+		// The version's markdown is the server's own, not the caller's, so an element this build
+		// does not know in it is newer content, as every read of the document answers it, not
+		// invalid markdown.
+		parsed, parseErr := pmdoc.ParseRendering(latest.markdown)
+		if newer := documentSchemaError(parseErr); errors.Is(newer, ErrDocNewerContent) {
+			return RebuildReport{}, VersionResult{}, newer
+		}
+		// uploadedInput copies parsed, so the close's states written into tree below leave
+		// stored as the version holds it.
+		tree, err = uploadedInput(parsed, parseErr)
+		stored = parsed
 	} else {
 		if !open {
 			return RebuildReport{}, VersionResult{}, ErrIssueClosed
@@ -137,7 +165,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 			return RebuildReport{}, VersionResult{}, err
 		}
 	}
-	seed, err := encodeDocumentTree(tree)
+	seed, err := encodeDocumentTreeHolding(tree, stored)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("seed rebuilt document tree: %w", err)
 	}
@@ -190,4 +218,16 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	}
 	report.SourceVersion = written.version.Number
 	return report, VersionResult{Version: written.version, Wrote: true, Changes: written.changes}, nil
+}
+
+// savedVersionNumber is the number of artifactID's latest saved version, which a refused rebuild
+// names: a rebuild discards every edit made after it.
+func savedVersionNumber(ctx context.Context, tx pgx.Tx, artifactID string) (int, error) {
+	var number int
+	if err := tx.QueryRow(ctx, `
+		select coalesce(max(number), 0) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&number); err != nil {
+		return 0, fmt.Errorf("read latest document version number: %w", err)
+	}
+	return number, nil
 }

@@ -1201,8 +1201,9 @@ export const dispatchToolSpecs = [
       "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
       "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " +
       "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +
-      "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " +
-      "needs a rebuild) or `INTERNAL`. " +
+      "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOC_NEWER_CONTENT` (this Dispatch " +
+      "build cannot read an element of the document; try again in one minute), `DOCUMENT_UNLOADABLE` (the " +
+      "document's stored history cannot load; a person decides whether to rebuild it) or `INTERNAL`. " +
       "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " +
       "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " +
       "when it has any (`Progress: none` otherwise). " +

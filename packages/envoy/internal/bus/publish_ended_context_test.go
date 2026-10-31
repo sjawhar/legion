@@ -40,15 +40,15 @@ func TestAPublishWithAnEndedContextSendsNothing(t *testing.T) {
 		{"a topic the stream captures", contracts.AgentSubject("ses_ended_context"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := UsesCoreTransport(tc.topic); got != tc.core {
-				t.Fatalf("UsesCoreTransport(%q) = %t, want %t: the case would not exercise the transport it names", tc.topic, got, tc.core)
-			}
 			uri := testnats.URL(t)
 			client, err := ConnectOwningStream([]string{uri})
 			if err != nil {
 				t.Fatalf("connect: %v", err)
 			}
 			t.Cleanup(client.Close)
+			if got := client.UsesCoreTransport(tc.topic); got != tc.core {
+				t.Fatalf("UsesCoreTransport(%q) = %t, want %t: the case would not exercise the transport it names", tc.topic, got, tc.core)
+			}
 			subscriber := testnats.Connect(t, uri)
 			t.Cleanup(subscriber.Close)
 			received, err := subscriber.SubscribeSync(tc.topic)

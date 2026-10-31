@@ -92,10 +92,11 @@ func RunLeased(ctx context.Context, leases Leases, name string, interval time.Du
 // RunLeasedAfterEachPass runs pass under the lease named name as RunLeased does, one Exclusive
 // call per tick until ctx ends, for a loop paced by its own passes: its first tick is at start,
 // and each next tick comes the wait its pass returned after that pass returned, not after the tick
-// before it was due. pass returns that wait, which must be positive: the interval, or a wait of
-// its own for a loop that speeds up while work remains, as the reference-excerpt and block-index
-// reconciliations step two seconds after a full batch. A tick whose pass did not run waits
-// interval, and a pass that shutdown cut short still returns its wait, which goes unused.
+// before it was due. pass is given the period of its tick, the span Exclusive gave it, and returns
+// that wait, which must be positive: the interval, or a wait of its own for a loop that speeds up
+// while work remains, as the reference-excerpt and block-index reconciliations step two seconds
+// after a full batch. A tick whose pass did not run waits interval, and a pass that shutdown cut
+// short still returns its wait, which goes unused.
 //
 // The period of a tick, the span Exclusive gives it, is the wait before it - interval for the
 // first - and its due time is the moment its timer fired, a timer armed once the tick before it
@@ -106,13 +107,13 @@ func RunLeased(ctx context.Context, leases Leases, name string, interval time.Du
 // delays the next tick by its own length, and a step is never cut short by the pass before it.
 //
 // ctx ending returns at once from a wait, and from a tick once its pass returns.
-func RunLeasedAfterEachPass(ctx context.Context, leases Leases, name string, interval time.Duration, pass func(context.Context) time.Duration) {
+func RunLeasedAfterEachPass(ctx context.Context, leases Leases, name string, interval time.Duration, pass func(context.Context, time.Duration) time.Duration) {
 	period := interval
 	due := time.Now()
 	for {
 		wait := interval
 		Exclusive(ctx, leases, name, due, period, func(ctx context.Context) {
-			wait = pass(ctx)
+			wait = pass(ctx, period)
 		})
 		period = wait
 		select {

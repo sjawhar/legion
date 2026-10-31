@@ -1,0 +1,19 @@
+kind: Added
+body: |-
+    `409 DOC_NEWER_CONTENT`: a stored document tree holding an element this Dispatch build does not
+    know (a node, mark or typed block its manifest does not name, an undeclared attribute or an
+    unlisted enum value), which a newer build wrote during a release. `/text`, `/blocks`,
+    `POST /edits` and `POST /versions` answer it with one message that names the element and says to
+    try again in one minute; the document socket closes with `4425`, which the provider reconnects
+    on. Nothing repairs such a document: a replacement from markdown, an upload over it and a rebuild
+    are refused and change nothing, settlement writes no version of it, and the dashboard shows "This
+    document holds content this version of Dispatch cannot show yet. It reloads in a minute." with no
+    upload or rebuild. The document schema manifest (`pmdoc/schema/blocks.json`,
+    `GET /api/v1/schema/blocks`) names the schema's nodes and marks beside its typed blocks, and every
+    element may carry `since` (the schema version from which a build reads it) and `creatable_since`
+    (from which a build creates it), both 1 when absent; the version stays 2. A write that would add
+    an element this build reads but may not create yet is refused, naming it, unless the document
+    holds it already.
+time: 2026-10-28T12:39:36.543494262Z
+custom:
+    Issue: pr2461

@@ -106,28 +106,32 @@ export function devSignInError(login: string, status: number, responseText: stri
 const sessionCookies = new Map<string, Promise<string>>();
 
 /** The session cookie the server issues `login` at its dev sign-in route, minted once per
- *  spelling of a login and kept until something revokes it: the generation the cookie names lives
- *  in `user_sessions`, which `resetDatabase` truncates (it calls `forgetSessions`), and a browser
- *  context's Sign out as the same login advances it. A sign-in that fails, by its answer or by
+ *  spelling of a login and process asked, and kept until something revokes it: the generation the
+ *  cookie names lives in `user_sessions`, which `resetDatabase` truncates (it calls
+ *  `forgetSessions`), and a browser context's Sign out as the same login advances it. With
+ *  `target` set the sign-in is pinned to that process, so every request a pinned call makes, its
+ *  sign-in included, is served by the process it names. A sign-in that fails, by its answer or by
  *  the request itself, is not kept, so the next call asks again. */
-function sessionCookie(login: string): Promise<string> {
-  const cached = sessionCookies.get(login);
+function sessionCookie(login: string, target?: DispatchProcess): Promise<string> {
+  const key = `${target ?? ""} ${login}`;
+  const cached = sessionCookies.get(key);
   if (cached !== undefined) {
     return cached;
   }
-  const cookie = fetch(new URL(devSignInPath(login), baseUrl), { redirect: "manual" }).then(
-    async (response) => {
-      const value = sessionCookieFrom(response);
-      if (response.status !== 302 || value === undefined) {
-        throw devSignInError(login, response.status, await response.text());
-      }
-      return value;
+  const cookie = fetch(new URL(devSignInPath(login), baseUrl), {
+    headers: target === undefined ? {} : pinnedTo(target),
+    redirect: "manual",
+  }).then(async (response) => {
+    const value = sessionCookieFrom(response);
+    if (response.status !== 302 || value === undefined) {
+      throw devSignInError(login, response.status, await response.text());
     }
-  );
-  sessionCookies.set(login, cookie);
+    return value;
+  });
+  sessionCookies.set(key, cookie);
   cookie.catch(() => {
-    if (sessionCookies.get(login) === cookie) {
-      sessionCookies.delete(login);
+    if (sessionCookies.get(key) === cookie) {
+      sessionCookies.delete(key);
     }
   });
   return cookie;
@@ -138,11 +142,14 @@ export function forgetSessions(): void {
   sessionCookies.clear();
 }
 
-/** Headers that make a plain fetch act as `login`: the session cookie, and the dashboard origin
- *  the server requires on every cookie-authenticated write (enforceCookieOrigin admits a write
- *  whose `Origin` is the dashboard's). */
-export async function userHeaders(login = "alice"): Promise<Record<string, string>> {
-  return { Cookie: await sessionCookie(login), Origin: dashboardOrigin };
+/** Headers that make a plain fetch act as `login`: the session cookie (signed by `target` when it
+ *  is given), and the dashboard origin the server requires on every cookie-authenticated write
+ *  (enforceCookieOrigin admits a write whose `Origin` is the dashboard's). */
+export async function userHeaders(
+  login = "alice",
+  target?: DispatchProcess
+): Promise<Record<string, string>> {
+  return { Cookie: await sessionCookie(login, target), Origin: dashboardOrigin };
 }
 
 async function request<T>(
@@ -163,7 +170,7 @@ async function request<T>(
   if (as === "agent") {
     headers.Authorization = `Bearer ${options.token ?? e2eAgentToken}`;
   } else {
-    Object.assign(headers, await userHeaders(options.login));
+    Object.assign(headers, await userHeaders(options.login, options.process));
   }
   if (options.idempotencyKey !== undefined) {
     headers["Idempotency-Key"] = options.idempotencyKey;
@@ -183,8 +190,11 @@ async function request<T>(
   return (response.status === 204 ? undefined : await response.json()) as T;
 }
 
-export function createProject(input: CreateProjectInput, login = "alice"): Promise<Project> {
-  return request<Project>("/api/v1/projects", "POST", input, { login });
+export function createProject(
+  input: CreateProjectInput,
+  options: ApiOptions = {}
+): Promise<Project> {
+  return request<Project>("/api/v1/projects", "POST", input, options);
 }
 
 /** Maps `repo` (`owner/name`) to a project, as the Settings page does; `default: true` makes it the

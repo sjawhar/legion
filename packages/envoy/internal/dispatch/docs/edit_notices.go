@@ -148,7 +148,7 @@ const dueEditNotice = `
 // notice still pending when a process stops is sent by the next sweep of any process.
 func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
-	duty.RunLeasedAfterEachPass(ctx, leases, editNoticeLease, editNoticeInterval, func(ctx context.Context) time.Duration {
+	duty.RunLeasedAfterEachPass(ctx, leases, editNoticeLease, editNoticeInterval, func(ctx context.Context, _ time.Duration) time.Duration {
 		sent, err := s.sendDueEditNotices(ctx)
 		if err != nil && ctx.Err() == nil {
 			slog.Error("dispatch: send edit notices", "error", err)

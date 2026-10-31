@@ -94,7 +94,8 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // client's receipt timeout. The document service settles the documents owed within
 // documentShutdownTimeout once those requests are done, or httpDrainBeforeDocuments after the
 // signal with some still running. waitBackground then waits for the delivery hub, every live
-// socket and the subscriptions they ran to finish their Lifetime-driven shutdown. The database pool
+// socket and the subscriptions they ran to finish their Lifetime-driven shutdown, and for the
+// delivery intakes to stop and release their holds through the pool. The database pool
 // closes once every request has answered and no connection of the shared or document-rooms pool is
 // in use. While the database answers, nothing but the runtime's kill bounds that wait, so a write
 // in flight commits and is answered if it finishes before the kill. Then deregister takes this

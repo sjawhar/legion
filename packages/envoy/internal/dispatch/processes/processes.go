@@ -13,9 +13,14 @@
 // beside a process that stays live: Register waits up to LiveWindow and one HeartbeatInterval for
 // the refusing process to stop heartbeating, so a process restarted after a kill, whose dead row
 // still counts as live for up to LiveWindow, starts once that row lapses.
+//
+// Each row also records what the decisions over the fleet read (migration 0151): the
+// document schema numbers the process reads and creates, which the document socket's admission
+// takes (docs.Service.authorize), its embedder's identity, and whether it stores files in a bucket.
 package processes
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -74,8 +79,8 @@ const pruneLease = "server-processes"
 // names the other process.
 var ErrKeySetMismatch = errors.New("this process's signing key set does not match a live server process's")
 
-// Instance is what a process registers: the build it serves and the keys it signs and verifies
-// with.
+// Instance is what a process registers: the build it serves, the keys it signs and verifies with,
+// and what the decisions over the fleet read (migration 0151).
 type Instance struct {
 	// Commit is the legion commit the binary was stamped with, "" for an unstamped build.
 	Commit string
@@ -84,6 +89,16 @@ type Instance struct {
 	// SigningKeys is the fingerprint of each key of the process's DISPATCH_SIGNING_KEY set
 	// (auth.SigningKeys.Fingerprints), the current key first. It holds at least that one.
 	SigningKeys []string
+	// SchemaVersion is the document manifest version the process reads (pmdoc.SchemaVersion),
+	// and SchemaCreatable the highest since among the elements it may create
+	// (pmdoc.SchemaCreatable).
+	SchemaVersion   int
+	SchemaCreatable int
+	// EmbedderIdentity is the identity of the process's embedder (embed.Embedder.Identity), ""
+	// when it has none.
+	EmbedderIdentity string
+	// FileStore is whether the process stores uploaded files in a bucket.
+	FileStore bool
 }
 
 // Process is one row of the registry.
@@ -96,7 +111,24 @@ type Process struct {
 	SigningKeys []string
 	StartedAt   time.Time
 	HeartbeatAt time.Time
+	// SchemaVersion, SchemaCreatable, EmbedderIdentity and FileStore are as the process
+	// registered them (Instance). A process of a build that predates these columns writes none of
+	// them, and its row holds each column's default: 0, 0, "" and null, which reads as false
+	// (PredatesFleetColumns).
+	SchemaVersion    int
+	SchemaCreatable  int
+	EmbedderIdentity string
+	FileStore        bool
 }
+
+// PredatesFleetColumns reports whether p is a process of a build that predates the columns migration
+// 0138 added, whose row holds their defaults: no build that registers them reads schema version 0.
+// A decision over the fleet leaves such a process out of the numbers it takes from the live rows,
+// as it leaves out a build that does not register at all.
+func (p Process) PredatesFleetColumns() bool { return p.SchemaVersion == 0 }
+
+// Build names the build p serves: "commit " and its commit, "unstamped" for an unstamped build.
+func (p Process) Build() string { return "commit " + cmp.Or(p.Commit, "unstamped") }
 
 // Querier is what Live reads through: the shared pool, or a transaction its caller already holds.
 type Querier interface {
@@ -106,7 +138,8 @@ type Querier interface {
 // selectLive reads every row whose heartbeat is within the live window of the database's now(),
 // the oldest process first.
 const selectLive = `
-	select instance::text, commit, dashboard_build, signing_keys, started_at, heartbeat_at
+	select instance::text, commit, dashboard_build, signing_keys, started_at, heartbeat_at,
+		schema_version, schema_creatable, embedder_identity, coalesce(file_store, false)
 	from server_processes
 	where heartbeat_at > now() - make_interval(secs => $1)
 	order by started_at, instance`
@@ -122,7 +155,8 @@ func Live(ctx context.Context, db Querier) ([]Process, error) {
 	var live []Process
 	for rows.Next() {
 		var p Process
-		if err := rows.Scan(&p.ID, &p.Commit, &p.DashboardBuild, &p.SigningKeys, &p.StartedAt, &p.HeartbeatAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Commit, &p.DashboardBuild, &p.SigningKeys, &p.StartedAt, &p.HeartbeatAt,
+			&p.SchemaVersion, &p.SchemaCreatable, &p.EmbedderIdentity, &p.FileStore); err != nil {
 			return nil, fmt.Errorf("read the live server processes: %w", err)
 		}
 		live = append(live, p)
@@ -131,6 +165,23 @@ func Live(ctx context.Context, db Querier) ([]Process, error) {
 		return nil, fmt.Errorf("read the live server processes: %w", err)
 	}
 	return live, nil
+}
+
+// Bucketless returns the live processes (Live) with no bucket: each one started without
+// DISPATCH_FILE_STORE_BUCKET, or of a build that predates the fleet columns (PredatesFleetColumns),
+// which registers no file_store and so reads as having none. The oldest comes first.
+func Bucketless(ctx context.Context, db Querier) ([]Process, error) {
+	live, err := Live(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	var bucketless []Process
+	for _, process := range live {
+		if !process.FileStore {
+			bucketless = append(bucketless, process)
+		}
+	}
+	return bucketless, nil
 }
 
 // Registration is this process's row in the registry, kept live by a heartbeat until Deregister.
@@ -276,10 +327,12 @@ func admit(ctx context.Context, tx pgx.Tx, id string, instance Instance) (refusa
 		}
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into server_processes (instance, commit, dashboard_build, signing_keys)
-		values ($1, $2, $3, $4)
+		insert into server_processes (instance, commit, dashboard_build, signing_keys,
+			schema_version, schema_creatable, embedder_identity, file_store)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
 		on conflict (instance) do update set heartbeat_at = now()`,
-		id, instance.Commit, instance.DashboardBuild, instance.SigningKeys); err != nil {
+		id, instance.Commit, instance.DashboardBuild, instance.SigningKeys,
+		instance.SchemaVersion, instance.SchemaCreatable, instance.EmbedderIdentity, instance.FileStore); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -306,11 +359,7 @@ func keySetsShared(peer Process, mine []string) error {
 
 // describe is how a refusal names the other process beyond its id: its build and its start.
 func describe(peer Process) string {
-	commit := peer.Commit
-	if commit == "" {
-		commit = "unstamped"
-	}
-	return fmt.Sprintf("commit %s, started %s", commit, peer.StartedAt.UTC().Format(time.RFC3339))
+	return fmt.Sprintf("%s, started %s", peer.Build(), peer.StartedAt.UTC().Format(time.RFC3339))
 }
 
 // heartbeat stamps the row's heartbeat_at every HeartbeatInterval until ctx ends. It runs for as

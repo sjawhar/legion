@@ -241,6 +241,45 @@ never a fixed number of milliseconds.
 DISPATCH_BENCH_DATABASE_URL=<copy> packages/envoy/scripts/search-latency-compare.sh <base-checkout> [rounds]
 ```
 
+## build-dispatch-build.sh
+
+Builds one Dispatch build from a commit of this repository into a directory, for the two-build
+test (`cmd/dispatch/twobuild_*_test.go`, `go test -tags twobuild`), which runs it beside this tree
+on one Postgres and one NATS, and for the browser suite's cross-build run
+(`packages/dispatch/e2e/cross-build.multiprocess.e2e.ts`), which drives one build's page against
+the other build's server. It extracts `git archive <commit>` into `<dir>/src`, so it makes no
+worktree or branch, and builds each part as that commit's own image build does:
+`bun install --frozen-lockfile`, the contracts' `gen:go` and `build`, `bun run build:web`, the
+commit's own `packages/envoy-client/scripts/build-dispatch-cli.sh`, and `go build ./cmd/dispatch`
+with `GOTOOLCHAIN=auto` and `-ldflags "-X main.buildCommit=<sha>"`.
+
+```bash
+packages/envoy/scripts/build-dispatch-build.sh --previous-release --out "$TMPDIR/dispatch-previous"
+packages/envoy/scripts/build-dispatch-build.sh --commit <sha|tag> --out <dir>
+```
+
+`--previous-release` builds the newest `legion-envoy-v*` tag that is an ancestor of
+`git merge-base HEAD origin/main`, so it needs `origin/main` and the tags fetched. `--commit HEAD`
+builds the current branch the same way. The script refuses a commit that is not an ancestor of
+`HEAD`, and a commit older than the release `legion-envoy-v20.1.0`, the oldest build either test
+can run as the earlier side: that release carries migration 0117, from which two builds share one
+database (`cmd/dispatch/README.md`, "Database migrations"), serves on a socket handed to it, which
+the browser harness holds for it, and knows the one dev sign-in cookie key that run gives both of
+its servers. `<dir>` must be absent or empty, or already
+hold a complete build of the same commit, which the script leaves as it is. It then holds
+`envoy-dispatch`, `web/` (the web app), `dispatch.js` (the `dispatch` command, run as
+`bun dispatch.js`), `pmdoc/testdata/corpus/`, `pmdoc/schema/blocks.json` and `text/testdata/` from
+the commit, and `COMMIT`, the full sha, written last. Point `DISPATCH_PREVIOUS_BUILD` at `<dir>` to
+run the two-build test.
+
+`--resolve` in place of `--out <dir>` builds nothing: it makes the same refusals and prints the full
+sha the script would build, which CI's `dispatch-two-builds` job (`.github/workflows/ci.yaml`) keys
+its cache of the build by before it builds.
+
+```bash
+packages/envoy/scripts/build-dispatch-build.sh --previous-release --resolve
+```
+
 ## Measuring the related-item check on a project's duplicates
 
 `related-recall.sh` copies one project's pairs of issues closed one into the other, and every other

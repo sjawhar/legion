@@ -64,7 +64,12 @@ import {
   IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_REPLAYED_HEADER,
   type IdempotencyLandedCode,
+  NO_ROUTE_MESSAGE_PREFIX,
+  NO_ROUTE_ROLLING_RELEASE_MESSAGE,
   retriesUnderKey,
+  retryNoRoute,
+  type Sleep,
+  sleep,
 } from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
@@ -214,16 +219,29 @@ function isJson(response: Response): boolean {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
 
-/** Whether `error` is a server's answer that it has no route for the request (`404 NOT_FOUND`,
- *  "no route for …"), as a server older than a route answers it; a `404 NOT_FOUND` for a
- *  resource the server does not know says "not found" instead. */
+/** Whether `error` is a Dispatch process's answer that it has no route for the request (`404
+ *  NOT_FOUND`, `NO_ROUTE_MESSAGE_PREFIX`), as a process older than a route answers it; a `404
+ *  NOT_FOUND` for a resource the server does not know says "not found" instead. */
 export function isNoRoute(error: unknown): boolean {
   return (
     error instanceof DispatchServiceError &&
     error.status === 404 &&
     error.code === "NOT_FOUND" &&
-    error.message.startsWith("no route for ")
+    error.message.startsWith(NO_ROUTE_MESSAGE_PREFIX)
   );
+}
+
+/**
+ * A request every attempt of which a Dispatch process answered with no route for it (`404
+ * NOT_FOUND`, "no route for …"). While a release rolls out, two builds of Dispatch answer, and
+ * the older one answers this way for a route only the newer one serves. A server older than a
+ * route answers it this way too, so a caller with an older route to fall back on catches this
+ * error and asks that route.
+ */
+export class DispatchNoRouteError extends DispatchServiceError {
+  constructor() {
+    super("NOT_FOUND", 404, NO_ROUTE_ROLLING_RELEASE_MESSAGE);
+  }
 }
 
 export interface ListIssuesOptions {
@@ -673,16 +691,31 @@ export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
+  readonly #sleep: Sleep;
+  readonly #retryNoRoute: boolean;
+  readonly writeRetry: DispatchWriteRetry;
 
   constructor(
     baseUrl: string,
     readonly token: string,
     readonly fetchImpl: typeof fetch = fetch,
-    signal?: AbortSignal,
-    readonly writeRetry: DispatchWriteRetry = DISPATCH_WRITE_RETRY
+    options: {
+      readonly signal?: AbortSignal | undefined;
+      readonly writeRetry?: DispatchWriteRetry | undefined;
+      readonly sleep?: Sleep | undefined;
+      /** Whether a request a Dispatch process answered with no route for it is asked again
+       *  (`#noRoute`), true by default. False runs each request once and throws that answer as it
+       *  came (a `DispatchServiceError` `isNoRoute` recognises), for a caller that has an answer
+       *  of its own to a missing route and wants it at once, rather than after the waits of
+       *  `NO_ROUTE_RETRY_DELAYS_MS`. */
+      readonly retryNoRoute?: boolean | undefined;
+    } = {}
   ) {
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
-    this.#signal = requestSignal(signal);
+    this.#signal = requestSignal(options.signal);
+    this.writeRetry = options.writeRetry ?? DISPATCH_WRITE_RETRY;
+    this.#sleep = options.sleep ?? sleep;
+    this.#retryNoRoute = options.retryNoRoute ?? true;
   }
 
   /**
@@ -953,15 +986,16 @@ export class DispatchClient {
    *  per repository, in the order the project added them; `[]` when it has none.
    *
    *  The plugin and the server ship separately, so a rollout mixes versions (#1522). A server
-   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"), so the client
-   *  asks its `GET /api/v1/projects/{key}/architecture-source` instead: `200 null` (or a pre-#1522
+   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"). Once every
+   *  attempt met no route (`DispatchNoRouteError`), the client asks its
+   *  `GET /api/v1/projects/{key}/architecture-source` instead: `200 null` (or a pre-#1522
    *  `404 SOURCE_NOT_FOUND`) is `[]`, and a row is that one source. Any other answer throws, so a
    *  project the server does not know (`404 NOT_FOUND`, "not found") is still an error. */
   async listArchitectureSources(project: string): Promise<ArchitectureSource[]> {
     try {
       return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
     } catch (error) {
-      if (!isNoRoute(error)) throw error;
+      if (!(error instanceof DispatchNoRouteError)) throw error;
     }
     try {
       const source: ArchitectureSource | null = await this.#json("GET", [
@@ -990,11 +1024,12 @@ export class DispatchClient {
    *  project has no source.
    *
    *  The plugin and the server ship separately, so a rollout mixes versions (#1522). A server
-   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"), so the client
-   *  asks its `POST /api/v1/projects/{key}/architecture-source/sync` instead, which imports that
-   *  server's one source, and returns the row as a one-element array. Any other answer of either
-   *  call throws as is, so that server's `404 SOURCE_NOT_FOUND` for a project with no source is
-   *  still an error. */
+   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"). Once every
+   *  attempt met no route (`DispatchNoRouteError`), the client asks its
+   *  `POST /api/v1/projects/{key}/architecture-source/sync` instead, which imports that server's
+   *  one source, and returns the row as a one-element array. Any other answer of either call
+   *  throws as is, so that server's `404 SOURCE_NOT_FOUND` for a project with no source is still
+   *  an error. */
   async syncArchitectureSources(project: string): Promise<ArchitectureSource[]> {
     try {
       return await this.#json("POST", [
@@ -1006,7 +1041,7 @@ export class DispatchClient {
         "sync",
       ]);
     } catch (error) {
-      if (!isNoRoute(error)) throw error;
+      if (!(error instanceof DispatchNoRouteError)) throw error;
     }
     const source: ArchitectureSource = await this.#json("POST", [
       "api",
@@ -1251,12 +1286,14 @@ export class DispatchClient {
    * answers a file with its bytes under its own MIME type, never a JSON envelope. */
   async fileVersion(id: string, version: number): Promise<ArtifactFileVersion> {
     const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
-    const response = await this.#send("GET", url, undefined, "*/*");
-    if (!response.ok) return this.#response<never>("GET", url, response);
-    return {
-      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
-      bytes: new Uint8Array(await response.arrayBuffer()),
-    };
+    return this.#noRoute(async () => {
+      const response = await this.#send("GET", url, undefined, "*/*");
+      if (!response.ok) return this.#response<never>("GET", url, response);
+      return {
+        mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+        bytes: new Uint8Array(await response.arrayBuffer()),
+      };
+    });
   }
 
   async artifactBlocks(id: string): Promise<ArtifactBlock[]> {
@@ -1393,15 +1430,41 @@ export class DispatchClient {
     key?: string
   ): Promise<{ readonly status: number; readonly payload: T }> {
     const url = this.#url(path, query);
-    const response = await this.#send(
-      method,
-      url,
-      body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" },
-      undefined,
-      signal,
-      key
-    );
-    return { status: response.status, payload: await this.#response<T>(method, url, response) };
+    return this.#noRoute(async () => {
+      const response = await this.#send(
+        method,
+        url,
+        body === undefined
+          ? undefined
+          : { content: JSON.stringify(body), type: "application/json" },
+        undefined,
+        signal,
+        key
+      );
+      return { status: response.status, payload: await this.#response<T>(method, url, response) };
+    }, signal);
+  }
+
+  /**
+   * `attempt`'s answer, with an answer of no route for the request (`404 NOT_FOUND`, "no route
+   * for …") sent again, as the same request, after each of `NO_ROUTE_RETRY_DELAYS_MS`: while a
+   * release rolls out, two builds of Dispatch answer, and the next attempt may reach the build
+   * that serves the route. No handler ran, so this is safe for every method; a write's repeat
+   * carries a key of its own (`#send`), as a first attempt does. After the last attempt it throws
+   * `DispatchNoRouteError`. An abort of the client's signal, or of the call's own `signal`, during
+   * a wait rejects at once with the abort's reason and sends nothing more.
+   *
+   * A client built with `retryNoRoute: false` runs `attempt` once instead and throws its answer
+   * of no route as it came (the `DispatchServiceError` `isNoRoute` recognises), so a caller with
+   * an answer of its own to a missing route — a back-off of its own — reaches it at once.
+   */
+  #noRoute<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!this.#retryNoRoute) return attempt();
+    return retryNoRoute(attempt, isNoRoute, {
+      exhausted: () => new DispatchNoRouteError(),
+      signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
+      sleep: this.#sleep,
+    });
   }
 
   /** An upload to an owner's artifact route: inline content as JSON, a file as multipart. */
@@ -1427,11 +1490,13 @@ export class DispatchClient {
     key?: string
   ): Promise<T> {
     const url = this.#url(path);
-    const encoded = new Response(form);
-    const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
-    const content = new Uint8Array(await encoded.arrayBuffer());
-    const response = await this.#send(method, url, { content, type }, undefined, undefined, key);
-    return this.#response<T>(method, url, response);
+    return this.#noRoute(async () => {
+      const encoded = new Response(form);
+      const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
+      const content = new Uint8Array(await encoded.arrayBuffer());
+      const response = await this.#send(method, url, { content, type }, undefined, undefined, key);
+      return this.#response<T>(method, url, response);
+    });
   }
 
   /**

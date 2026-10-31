@@ -34,7 +34,7 @@ export function sessionDispatchClient(
   return config === null
     ? undefined
     : {
-        client: new DispatchClient(config.url, config.token, fetch, signal),
+        client: new DispatchClient(config.url, config.token, fetch, { signal }),
         serverUrls: dispatchServerUrls(config),
       };
 }

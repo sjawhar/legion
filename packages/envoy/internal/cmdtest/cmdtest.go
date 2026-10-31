@@ -185,6 +185,13 @@ func (h *HeldPort) Pass(cmd *exec.Cmd, envName string) {
 	cmd.ExtraFiles = append(cmd.ExtraFiles, h.file)
 }
 
+// Release closes the held socket without handing it to a process, for a process that binds the
+// port itself: a build of envoy-dispatch before DISPATCH_LISTEN_FD. The port is free from this call
+// until that process binds it, so another program can take it in between.
+func (h *HeldPort) Release() {
+	_ = h.file.Close()
+}
+
 // LockedBuffer is a buffer a process's output, or a logger, writes from more than one goroutine
 // while a test reads it.
 type LockedBuffer struct {

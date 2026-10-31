@@ -9,9 +9,14 @@
  *    their dashboard origin (`DISPATCH_SERVER_URL`), which the dev sign-in host fence and the CSRF
  *    guard compare against.
  *  - A request carrying `X-Dispatch-E2E-Process: a|b` goes to that process; failing that, one
- *    carrying the cookie `dispatch-e2e-process=a|b` does, which pins every request of a browser
- *    context, websocket upgrades included. The header wins. Any other value of either is refused
- *    (400), never read as no pin. A pinned request takes no turn from the alternation.
+ *    carrying the cookie of its kind goes to the process it names: `dispatch-e2e-page=a|b` for a
+ *    page request (a navigation outside `/api/`, `/auth/` and `/ws/`, `/index.html`, `/assets/*`)
+ *    and `dispatch-e2e-api=a|b` for every other request (the API, its live socket and websockets,
+ *    `/auth`), so a browser context runs one process's page against the other's server; failing
+ *    that, one carrying the cookie `dispatch-e2e-process=a|b` does, which pins every request of a
+ *    browser context, websocket upgrades included. The header wins. Any other value of any of
+ *    them is refused (400), never read as no pin. A pinned request takes no turn from the
+ *    alternation.
  *  - An HTTP request whose path contains `/_test/` (a `DISPATCH_TEST_HOOKS` route: close every
  *    live socket, quiesce every document) goes to both processes whatever its pin, since each
  *    holds its own connections and rooms. The answer is A's, or the first non-2xx of A's and B's.
@@ -26,8 +31,10 @@
  *  file's values starts the listener. */
 import { harnessPorts } from "./harness-ports";
 import {
+  apiPinCookie,
   type DispatchProcess,
   dispatchProcesses,
+  pagePinCookie,
   processPinCookie,
   processPinHeader,
 } from "./harness-processes";
@@ -95,9 +102,22 @@ function isProcess(value: string): value is DispatchProcess {
   return (dispatchProcesses as readonly string[]).includes(value);
 }
 
+/** Whether `request` loads the page rather than talking to the server behind it: a navigation to
+ *  an app route, `index.html`, or one of the build's `/assets/`. */
+function isPageRequest(request: Request, pathname: string): boolean {
+  if (/^\/(api|auth|ws)\//.test(pathname)) return false;
+  return (
+    pathname === "/index.html" ||
+    pathname.startsWith("/assets/") ||
+    request.headers.get("sec-fetch-mode") === "navigate"
+  );
+}
+
 /** The process `request` is pinned to, undefined when it names none, or the refusal of a pin
- *  that names no process. */
-function pinOf(request: Request): DispatchProcess | undefined | Response {
+ *  that names no process: the header, else the cookie of the request's kind, else the context's
+ *  cookie. Every pin cookie is read, so one of the other kind that names no process is refused
+ *  too. */
+function pinOf(request: Request, pathname: string): DispatchProcess | undefined | Response {
   const refuse = (source: string, value: string) =>
     Response.json(
       {
@@ -108,13 +128,21 @@ function pinOf(request: Request): DispatchProcess | undefined | Response {
     );
   const header = request.headers.get(processPinHeader);
   if (header !== null) return isProcess(header) ? header : refuse(processPinHeader, header);
+  const cookies = new Map<string, DispatchProcess>();
   for (const pair of (request.headers.get("cookie") ?? "").split(";")) {
     const separator = pair.indexOf("=");
-    if (separator === -1 || pair.slice(0, separator).trim() !== processPinCookie) continue;
+    const name = separator === -1 ? "" : pair.slice(0, separator).trim();
+    if (![processPinCookie, pagePinCookie, apiPinCookie].includes(name) || cookies.has(name)) {
+      continue;
+    }
     const value = pair.slice(separator + 1).trim();
-    return isProcess(value) ? value : refuse(`cookie ${processPinCookie}`, value);
+    if (!isProcess(value)) return refuse(`cookie ${name}`, value);
+    cookies.set(name, value);
   }
-  return undefined;
+  return (
+    cookies.get(isPageRequest(request, pathname) ? pagePinCookie : apiPinCookie) ??
+    cookies.get(processPinCookie)
+  );
 }
 
 async function forward(
@@ -180,7 +208,7 @@ const listener = Bun.serve<RoundRobinSocket>({
   async fetch(request, server) {
     const { pathname } = new URL(request.url);
     if (pathname.includes("/_proxy/")) return answerOwn(request, pathname);
-    const pin = pinOf(request);
+    const pin = pinOf(request, pathname);
     if (pin instanceof Response) return pin;
     const websocket = isWebSocketUpgrade(request);
     const headers = forwardedHeaders(request.headers, websocket);

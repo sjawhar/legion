@@ -627,6 +627,7 @@ func parseQueryInt(query url.Values, field string, min, max int) (value int, pre
 // (anchorBlock).
 const (
 	codeDocSchema             = "DOC_SCHEMA"
+	codeDocNewerContent       = "DOC_NEWER_CONTENT"
 	codeDocServiceUnavailable = "DOC_SERVICE_UNAVAILABLE"
 	codeDocumentUnloadable    = "DOCUMENT_UNLOADABLE"
 	codeInternal              = "INTERNAL"
@@ -645,15 +646,20 @@ const (
 // evicted, and its retry meets the document itself.
 //
 // A stored history this request itself could not decode is DOCUMENT_UNLOADABLE, the state a
-// rebuild repairs. A tree outside the schema is DOC_SCHEMA, which both take only after the
-// branches that name the caller's own input or a block the document does not hold, so a refusal
-// whose reason the renderer gave (an ask block that cannot render) stays that refusal.
+// rebuild repairs. A tree holding an element this build does not know is DOC_NEWER_CONTENT: a
+// newer build wrote it while two builds serve one database, so the caller tries again later,
+// perhaps on that build, and no repair applies. A tree outside the schema is DOC_SCHEMA, which both
+// take only after the branches that name the caller's own input or a block the document does not
+// hold, so a refusal whose reason the renderer gave (an ask block that cannot render) stays that
+// refusal.
 func documentErrorCode(err error) string {
 	switch {
 	case errors.Is(err, docs.ErrServiceUnavailable):
 		return codeDocServiceUnavailable
 	case errors.Is(err, docs.ErrDocumentUnloadable):
 		return codeDocumentUnloadable
+	case errors.Is(err, docs.ErrDocNewerContent):
+		return codeDocNewerContent
 	case errors.Is(err, docs.ErrDocSchema):
 		return codeDocSchema
 	}
@@ -678,6 +684,16 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	case codeDocumentUnloadable:
 		writeError(w, documentCode, http.StatusConflict, docs.ErrDocumentUnloadable.Error())
 		slog.Warn("dispatch: API document history cannot load", "error", err)
+		return
+	case codeDocNewerContent:
+		// The message is the document's own (docs.NewerContentError), the same on every route.
+		var newer *docs.NewerContentError
+		message := docs.ErrDocNewerContent.Error()
+		if errors.As(err, &newer) {
+			message = newer.Error()
+		}
+		writeError(w, documentCode, http.StatusConflict, message)
+		slog.Warn("dispatch: API document holds an element this build cannot read", "error", err)
 		return
 	}
 	// The edit route's own ambiguity error names the operation and the quote; the bare pmdoc one
@@ -1059,32 +1075,69 @@ func (maxBytesDiscarder) Header() http.Header             { return nil }
 func (maxBytesDiscarder) Write(value []byte) (int, error) { return len(value), nil }
 func (maxBytesDiscarder) WriteHeader(int)                 {}
 
-// decodeJSON decodes r's body, one JSON value of at most maxJSONRequestBytes, into value, which
-// declares every member the body may carry. A string the body holds anywhere that carries U+0000
-// is refused, naming where it stands (unstorableJSON).
+// decodeJSON decodes r's body, one JSON value of at most maxJSONRequestBytes, into value. A member
+// value does not declare is ignored, because two builds of Dispatch serve one database while a
+// release rolls out, and a body a newer build's client sends can reach the older build. A member
+// whose loss would change what a request does therefore ships as a new route, never as a member.
+// The ignored top-level members are logged at debug with the route (logUndeclaredMembers); the
+// test hooks, which no other build calls, refuse them instead (decodeJSONTestHook, and
+// refuseUndeclaredMembers for a hook that reads its body itself). A string the body holds
+// anywhere that carries U+0000 is refused, naming where it stands (unstorableJSON).
 func decodeJSON(r *http.Request, value any) error {
+	body, err := readJSONBody(r, value)
+	if err != nil {
+		return err
+	}
+	logUndeclaredMembers(r, value, body)
+	return nil
+}
+
+// decodeJSONTestHook is decodeJSON for a route this tree alone calls: the test hooks, mounted only
+// under Deps.TestHooksEnabled. No page or command of another build reaches one, so a member the
+// hook does not declare is a mistake in the test that sent it, and is refused by name rather than
+// ignored.
+func decodeJSONTestHook(r *http.Request, value any) error {
+	body, err := readJSONBody(r, value)
+	if err != nil {
+		return err
+	}
+	return refuseUndeclaredMembers(value, body)
+}
+
+// refuseUndeclaredMembers is decodeJSONTestHook's refusal on its own, for a test hook that reads
+// its body itself and decodes it after: it answers the error naming the top-level members of body
+// that value's type does not declare, and nil when it declares them all.
+func refuseUndeclaredMembers(value any, body []byte) error {
+	if undeclared := undeclaredMembers(value, body); len(undeclared) > 0 {
+		return errorf(http.StatusBadRequest, "INVALID_JSON", "the hook does not take: %s", strings.Join(undeclared, ", "))
+	}
+	return nil
+}
+
+// readJSONBody decodes r's body into value and returns the bytes it read, for the caller to judge
+// the members value does not declare by.
+func readJSONBody(r *http.Request, value any) ([]byte, error) {
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || (contentType != "application/json" && !strings.HasSuffix(contentType, "+json")) {
-		return errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
+		return nil, errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
 	}
 	r.Body = http.MaxBytesReader(maxBytesDiscarder{}, r.Body, maxJSONRequestBytes)
 	var read bytes.Buffer
 	decoder := json.NewDecoder(io.TeeReader(r.Body, &read))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		var maxBytes *http.MaxBytesError
 		if errors.As(err, &maxBytes) {
-			return errJSONTooLarge
+			return nil, errJSONTooLarge
 		}
-		return errorf(http.StatusBadRequest, "INVALID_JSON", "invalid JSON body: %v", err)
+		return nil, errorf(http.StatusBadRequest, "INVALID_JSON", "invalid JSON body: %v", err)
 	}
 	if decoder.More() {
-		return errorf(http.StatusBadRequest, "INVALID_JSON", "request body must contain one JSON value")
+		return nil, errorf(http.StatusBadRequest, "INVALID_JSON", "request body must contain one JSON value")
 	}
 	if refusal := unstorableJSON("", read.Bytes()); refusal != nil {
-		return refusal
+		return nil, refusal
 	}
-	return nil
+	return read.Bytes(), nil
 }
 
 // WriteJSON writes body as the JSON response with the given status.

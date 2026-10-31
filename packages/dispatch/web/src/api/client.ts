@@ -8,6 +8,11 @@ import {
   IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_REPLAYED_HEADER,
   type IdempotencyLandedCode,
+  NO_ROUTE_MESSAGE_PREFIX,
+  NO_ROUTE_ROLLING_RELEASE_MESSAGE,
+  retryNoRoute,
+  type Sleep,
+  sleep,
 } from "@legion/contracts";
 
 import { reachable, routeOf, unreachable } from "./reachability";
@@ -31,7 +36,6 @@ import type {
   AskRead,
   AskSnooze,
   AuthenticatedUser,
-  BlockSchema,
   BroadcastCreated,
   BroadcastRead,
   BroadcastSummary,
@@ -342,11 +346,34 @@ export function isDocumentUnloadable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
 }
 
+// A stored document holding an element this Dispatch process's build cannot read: a newer build
+// wrote it while two builds serve one database during a release. It is not a repairable state, and
+// a replacement would delete the element. A later read can reach a build that reads it, so the read
+// is retried like any transient failure.
+export function isDocumentNewerContent(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "DOC_NEWER_CONTENT";
+}
+
+// Whether `error` is a Dispatch process's answer that it has no route for the request (`404
+// NOT_FOUND`, NO_ROUTE_MESSAGE_PREFIX). While a release rolls out, two builds of Dispatch answer
+// the page, and the older one answers this way for a route only the newer one serves. No handler
+// ran, so the request is safe to send again whatever its method. A `404 NOT_FOUND` for a resource
+// the server does not know says "not found" instead.
+export function isNoRoute(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 404 &&
+    error.code === "NOT_FOUND" &&
+    error.message.startsWith(NO_ROUTE_MESSAGE_PREFIX)
+  );
+}
+
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture
 // source, an unconfigured credential broker or delivery timeline, a stored document outside
 // Proof's schema, or a stored history that cannot load is definitive and retrying it changes
-// nothing; any other failure (dropped connection, a read past its deadline, 5xx) is worth a couple
-// of automatic attempts before surfacing a Retry affordance to the user.
+// nothing; any other failure (dropped connection, a read past its deadline, 5xx, a document
+// holding content this build cannot read yet) is worth a couple of automatic attempts before
+// surfacing a Retry affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
@@ -624,10 +651,12 @@ function watchBody(response: Response, arrived: () => void): Response {
 
 export class DispatchApiClient {
   /** `upload` is the transport of a multipart form; left out, it goes by `fetchImpl`, which
-   *  reports no upload progress, so an upload's deadline then runs from its send. */
+   *  reports no upload progress, so an upload's deadline then runs from its send. `wait` is how
+   *  a no-route retry waits (`answered`). */
   constructor(
     private readonly fetchImpl: FetchImplementation,
-    private readonly upload?: UploadImplementation
+    private readonly upload?: UploadImplementation,
+    private readonly wait: Sleep = sleep
   ) {}
 
   /** One request to Dispatch, answered with what `read` makes of its response. It is held to a
@@ -683,8 +712,14 @@ export class DispatchApiClient {
    *  does, the body of a refusal included; `uploaded` is told how much of an upload's body has gone
    *  up. Any answer of Dispatch's own - one below 500, which no gateway gives for a Dispatch that
    *  is down - says it can be reached on that route (`reachable`), which matters only once it
-   *  could not be. */
-  private async answered(
+   *  could not be.
+   *
+   *  A no-route answer is sent again after each of `NO_ROUTE_RETRY_DELAYS_MS`, with the same
+   *  `init`, so the same body: while a release rolls out, the next attempt may reach the build
+   *  that serves the route. After the last attempt it throws
+   *  `NO_ROUTE_ROLLING_RELEASE_MESSAGE`. An abort of `init.signal` during a wait - the caller's,
+   *  or the deadline's - rejects at once with the abort's reason and sends nothing more. */
+  private answered(
     path: string,
     init: RequestInit,
     arrived?: () => void,
@@ -695,23 +730,31 @@ export class DispatchApiClient {
       arrived?.();
       if (part !== undefined) uploaded?.(part.loaded, part.total);
     };
-    let answer: Response;
-    try {
-      answer =
-        sent.body instanceof FormData && this.upload !== undefined
-          ? await this.upload(path, sent, progress)
-          : await this.fetchImpl(path, sent);
-    } catch (error) {
-      // An abort is the deadline's or the caller's (`exchange`), never the network's.
-      if (init.signal?.aborted === true) throw error;
-      unreachable(routeOf(init.method, path));
-      throw new NetworkError(path, error);
-    }
-    if (answer.status < 500) reachable("answer", routeOf(init.method, path));
-    arrived?.();
-    const response = arrived === undefined ? answer : watchBody(answer, arrived);
-    if (!response.ok) throw await errorFrom(response);
-    return response;
+    const attempt = async (): Promise<Response> => {
+      let answer: Response;
+      try {
+        answer =
+          sent.body instanceof FormData && this.upload !== undefined
+            ? await this.upload(path, sent, progress)
+            : await this.fetchImpl(path, sent);
+      } catch (error) {
+        // An abort is the deadline's or the caller's (`exchange`), never the network's.
+        if (init.signal?.aborted === true) throw error;
+        unreachable(routeOf(init.method, path));
+        throw new NetworkError(path, error);
+      }
+      if (answer.status < 500) reachable("answer", routeOf(init.method, path));
+      arrived?.();
+      const response = arrived === undefined ? answer : watchBody(answer, arrived);
+      if (!response.ok) throw await errorFrom(response);
+      return response;
+    };
+    return retryNoRoute(attempt, isNoRoute, {
+      exhausted: () =>
+        new ApiError(404, { code: "NOT_FOUND", error: NO_ROUTE_ROLLING_RELEASE_MESSAGE }),
+      signal: init.signal,
+      sleep: this.wait,
+    });
   }
 
   /** The response itself, for a caller that reads its body: the deadline holds until the
@@ -795,10 +838,6 @@ export class DispatchApiClient {
 
   private remove<T>(path: string, bounds: WriteBounds): Promise<T> {
     return this.send<T>({ method: "DELETE", path }, bounds);
-  }
-
-  getBlockSchema(): Promise<BlockSchema> {
-    return this.json<BlockSchema>("/api/v1/schema/blocks");
   }
 
   listProjects(): Promise<Project[]> {
@@ -1520,11 +1559,12 @@ export class DispatchApiClient {
  *  of its own sends them through it unless it is given an `upload` too. */
 export function createApiClient(
   fetchImpl?: FetchImplementation,
-  upload?: UploadImplementation
+  upload?: UploadImplementation,
+  wait: Sleep = sleep
 ): DispatchApiClient {
   return fetchImpl === undefined
-    ? new DispatchApiClient((...args) => fetch(...args), upload ?? xhrUpload())
-    : new DispatchApiClient(fetchImpl, upload);
+    ? new DispatchApiClient((...args) => fetch(...args), upload ?? xhrUpload(), wait)
+    : new DispatchApiClient(fetchImpl, upload, wait);
 }
 
 export const api = createApiClient();
