@@ -4184,7 +4184,7 @@ nothing is substituted into it; a URL naming a user and no password whose host e
 absolute URL, no path — the broker's own address, the request object's `aud` and the launcher proof's `htu`), `BROKER_MACHINE_LOGIN_URL` (required, and unchanged by the approval page;
 absolute http(s) URL — Dispatch's `/credentials/machine` page, the device grant's `verification_uri`, where a person types a machine login's code), `BROKER_SIGNIN_ISSUER` / `BROKER_SIGNIN_CLIENT_ID` / `BROKER_SIGNIN_CLIENT_SECRET_FILE` / `BROKER_SIGNIN_DOMAIN` (all four required, `config.SignInSettings` in that order;
 the broker's own OpenID Connect client, through which a person signs in to the approval page, and the Workspace domain an ID token's `hd` must name beside a verified email.
-The issuer is an absolute `https` URL, or `http` only to a loopback host for a run on one machine, and its discovery document is read at each sign-in and at each client check, the first of which `cmd/broker` takes at startup; a read that fails stops neither the boot nor the machines the broker serves, so a provider outage never stops it serving them.
+The issuer is an absolute `https` URL, or `http` only to a loopback host for a run on one machine, and its discovery document is read at each client check, the first of which `cmd/broker` takes at startup, and for the page at the first sign-in each process serves, kept once a read succeeds (`oidc.CodeFlow`'s own discovery, which retries a failed read at most every 5 s); a read that fails stops neither the boot nor the machines the broker serves, so a provider outage never stops it serving them.
 The secret is read from the file at startup and trimmed, through the `_FILE` convention below; a bare `BROKER_SIGNIN_CLIENT_SECRET` is one of the removals `Load` refuses, so the secret is never in the environment.
 `parseSignIn` collects every missing one and refuses with all of them named, `the broker's approval page needs <the four>; missing <those unset>`, so a half-configured deployment learns the whole gap at once), `BROKER_SIGNIN_SESSION_SECONDS` (default 86400, min 1, max 86400;
 how long one sign-in lasts from the moment it is made, never extended — `broker end-sessions <login>` is what ends them sooner), `BROKER_API_ACCOUNTS` (optional;
@@ -4436,7 +4436,7 @@ given a record id it re-fetches the stored body, confirms it still reproduces it
 this proves provenance, not freshness), and requires exactly one terminal decision event, an `approved` one whose login is the record's approver (the broker writes at most one;
 `credential_request_decision`'s partial unique index holds it to that).
 It is called on every secret-value release (`requests.Machine.Values` and `reuseLiveGrant`, via `VerifyChain`) and on every launcher-credential authentication (`enroll.Service.AuthenticateLauncher`), so a grant or launcher-credential row with no approved record behind it releases nothing.
-The approval itself proves who approved, as Dispatch reported them:
+The approval itself proves who approved, as the broker's own sign-in reported them (a machine login's, as Dispatch reported them):
 there is no approval signature to re-check, so a principal that can write the broker's database can also write a passing record and event.
 That boundary is the database's own access control, as it already was for grant rows.
 
