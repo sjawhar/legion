@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"net/url"
 	"os"
@@ -162,32 +163,52 @@ func documentedClaims(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("read docs/kubernetes.md: %v", err)
 	}
-	lines := strings.Split(string(doc), "\n")
+	claims, err := claimListNames(string(doc))
+	if err != nil {
+		t.Fatalf("docs/kubernetes.md %v", err)
+	}
+	return claims
+}
+
+// claimListNames reads the claim names from the first bullet list under claimsDocHeading in doc, in
+// the list's order. The list may be tight or loose: its items may follow one another directly or be
+// separated by blank lines, as the guide's semantic-line-break layout writes every list, and a
+// wrapped item continues on the indented lines under it. The list ends at the first line that is
+// not one of those: a blank line ends it only when the next non-blank line is neither a bullet nor
+// an indented continuation, so a later list further down the section is never read as this one.
+func claimListNames(doc string) ([]string, error) {
+	lines := strings.Split(doc, "\n")
 	heading := slices.Index(lines, claimsDocHeading)
 	if heading < 0 {
-		t.Fatalf("docs/kubernetes.md has no line %q: the section holding the claim list was renamed, "+
+		return nil, fmt.Errorf("has no line %q: the section holding the claim list was renamed, "+
 			"and this check stops checking the moment it cannot find it", claimsDocHeading)
 	}
 
 	var claims []string
-	// The list is the section's first one: the prose lines between the heading and it are skipped,
-	// and the list runs to the first line that is none of a bullet, a wrapped bullet's indented
-	// continuation, and the blank line docs/kubernetes.md's own layout puts between two items
-	// (AGENTS.md, "Guides use semantic line breaks": "A blank line between list items"). Ending
-	// the list at the first blank line is what this did until that layout reached the file, and it
-	// then read a four-item list as one item and reported the three it could not see as claims the
-	// document had dropped.
+	// The list is the section's first one: the prose lines between the heading and it are skipped.
 	for i := heading + 1; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], " ")
-		if len(claims) > 0 && (line == "" || strings.HasPrefix(line, " ")) {
-			continue
+		if len(claims) > 0 {
+			if line == "" {
+				next := i + 1
+				for next < len(lines) && strings.TrimSpace(lines[next]) == "" {
+					next++
+				}
+				if next < len(lines) && (strings.HasPrefix(lines[next], "- ") || strings.HasPrefix(lines[next], " ")) {
+					continue
+				}
+				break
+			}
+			if strings.HasPrefix(line, " ") {
+				continue
+			}
 		}
 		if !strings.HasPrefix(line, "- ") {
 			if len(claims) > 0 {
 				break
 			}
 			if strings.HasPrefix(line, "#") {
-				t.Fatalf("docs/kubernetes.md reaches %q under %q with no bullet list between them: "+
+				return nil, fmt.Errorf("reaches %q under %q with no bullet list between them: "+
 					"the claims are no longer a list, and nothing is being held to them", line, claimsDocHeading)
 			}
 			continue
@@ -196,7 +217,7 @@ func documentedClaims(t *testing.T) []string {
 		inner, opened := strings.CutPrefix(bullet, "`")
 		name, rest, closed := strings.Cut(inner, "`")
 		if !opened || !closed || !strings.HasPrefix(rest, claimsDocSeparator) {
-			t.Fatalf("docs/kubernetes.md line %d of the claim list is %q, which does not open with a "+
+			return nil, fmt.Errorf("line %d of the claim list is %q, which does not open with a "+
 				"backticked claim name followed by %q: the list's shape is what tells this check "+
 				"which of a bullet's code spans is the claim it documents",
 				i+1, line, strings.TrimSpace(claimsDocSeparator))
@@ -207,8 +228,43 @@ func documentedClaims(t *testing.T) []string {
 	// An empty list is this check failing open: the heading is still there, the parse matched
 	// nothing, and every issued claim would then be reported against a list nobody is reading.
 	if len(claims) == 0 {
-		t.Fatalf("docs/kubernetes.md names no claim under %q: the bullet list the section promises "+
+		return nil, fmt.Errorf("names no claim under %q: the bullet list the section promises "+
 			"is gone or no longer a list, and nothing is being held to it", claimsDocHeading)
 	}
-	return claims
+	return claims, nil
+}
+
+// The claim list is read whether its items follow one another directly or stand apart with a blank
+// line between them, as the guide's one-sentence-per-line layout writes every list; an item wrapped
+// onto an indented line is still one item; and the list ends at the prose under it, so a later
+// list in the same section is never read as the claims.
+func TestClaimListNamesReadsTightAndBlankSeparatedLists(t *testing.T) {
+	const intro = claimsDocHeading + "\n\nAn issued token carries these claims and no others:\n\n"
+	const after = "\nThe subject token's own kind decides those claims.\n\n- `other` — a later list, not a claim.\n"
+	want := []string{"session", "person", "project_scope", "project"}
+	for _, shape := range []struct{ name, list string }{{
+		name: "tight",
+		list: "- `session` — the session.\n" +
+			"- `person` — the person.\n" +
+			"- `project_scope` — `named` or `person`, which says what `project` means.\n" +
+			"- `project` — the one project key.\n" +
+			"  A `person` token carries none.\n",
+	}, {
+		name: "blank-separated",
+		list: "- `session` — the session.\n\n" +
+			"- `person` — the person.\n\n" +
+			"- `project_scope` — `named` or `person`, which says what `project` means.\n\n" +
+			"- `project` — the one project key.\n" +
+			"  A `person` token carries none.\n",
+	}} {
+		t.Run(shape.name, func(t *testing.T) {
+			got, err := claimListNames(intro + shape.list + after)
+			if err != nil {
+				t.Fatalf("claimListNames: %v", err)
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("claimListNames read %v, want %v", got, want)
+			}
+		})
+	}
 }
