@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-909",
+  "completed": "2026-10-31T17:55:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Every one of the five proof entries in .legion/INFRA-909/implement.json was re-run independently at the pull request's head f181f7c0e54ead7f66c315b9bb9684d6476cc43b, not at the code commit 1bb11a03 the implementer recorded. (1) The job-list command reproduces exactly: [\"legion_build\",\"pi_envoy_build\",\"pi_legion_build\",\"publish\",\"worker_image\",\"worker_image_attest\",\"worker_image_release\"] here, and the same command on main@origin (77e9a9e1a988) still lists envoy_plugin_build. (2) The byte-identity diffs reproduce: changelog-fold.yaml and check-release-credentials.sh identical, release.yaml one added line (14a15, the kept trigger path), AGENTS.md one line (88c88, the typecheck list). (3) The merge-tree probe reproduces: one conflicted path, packages/envoy-plugin/package.json. (4) The A1 greps reproduce at the head SHA: one line in the two workflows, one in AGENTS.md. (5) check-ci-filters.sh, the one R3 check CI does not select on these paths, exits 0 here in 3m38s with the implementer's exact last line. One correction, not a failure: the implementer pinned A0 to #2599's head 677d6ee5b73c4bd9233df891823f36b85efc91e8, which has since moved to 35ea1346b99474abe89c2f28b96276f00985a8d0. A0 was re-run against that live head and still holds with the same two deliberate differences, so the proof's conclusion survives its stale reference."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "R1 / Goal, the whole of it: a push to main releases no @sjawhar/opencode-legion-envoy version and writes nothing under packages/envoy-plugin/. The job list alone does not prove the second half — a surviving publish step could still write that path — so this enumerates every write release.yaml can make.",
+      "surface": "The release job graph and its steps as GitHub Actions runs them on a push to main: every release-push.sh call that commits or pushes a package path, and every path under packages/envoy-plugin any step names.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -nE 'release-push\\.sh (push-main|tag) ' .github/workflows/release.yaml && grep -n 'packages/envoy-plugin' .github/workflows/release.yaml",
+      "observed": "Four write calls remain, all to the two Oh My Pi plugins: `tag packages/pi-envoy` (577), `push-main packages/pi-envoy` (608), `tag packages/pi-legion` (664), `push-main packages/pi-legion` (692). packages/envoy-plugin is named exactly once in the whole file, at line 15, the kept on.push.paths trigger entry — no version step, no npm publish, no `tag`, no `push-main`, no in-place rewrite. The two npm publishes left in the file (566, 653) hand over the pi-envoy and pi-legion tarballs and nothing else.",
+      "headSha": "f181f7c0e54ead7f66c315b9bb9684d6476cc43b",
+      "negativeControl": "The same two commands on main's own release.yaml (jj file show -r 'main@origin', 77e9a9e1a988) print six write calls, the extra two being `tag packages/envoy-plugin` (981) and `push-main packages/envoy-plugin` (1010), and twelve packages/envoy-plugin lines, among them the two in-place rewrites of packages/envoy-plugin/package.json at 957-958 and 358-359 that make the bump this issue exists to stop. The commands therefore discriminate, and the single line at this head is this change's doing."
+    },
+    {
+      "criterion": "R1, the surface R1 is actually about: GitHub Actions can still parse and schedule release.yaml and changelog-fold.yaml after 187 deleted lines — no `needs:` entry, `needs.<job>.outputs` read or job reference left pointing at the deleted envoy_plugin_build.",
+      "surface": "actionlint v1.7.7, which models GitHub Actions' own workflow schema, job-needs graph and expression contexts; it is the closest static reader of the file GitHub parses, the architect having ruled out a workflow_dispatch of release.yaml on this branch (it would start a ~45-minute worker_image build and the stream's standing rules forbid cancelling the run by hand).",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -shellcheck= -pyflakes= .github/workflows/release.yaml .github/workflows/changelog-fold.yaml",
+      "observed": "Three findings, all the repository's pre-existing `cache-mode: none` convention key (release.yaml 488 and 933, changelog-fold.yaml 146) and no other. The same command on main's two files reports the same three and nothing else (release.yaml 560 and 1090, changelog-fold.yaml 146), so this change adds no workflow error of any kind: no dangling needs, no undefined job, no broken expression. main's release.yaml with those same three lines released the plugin five times on 2026-10-31 up to v12.7.0, so GitHub accepts that key in practice.",
+      "headSha": "f181f7c0e54ead7f66c315b9bb9684d6476cc43b",
+      "negativeControl": "A scratch copy of this head's release.yaml under $TMPDIR with `envoy_plugin_build` added back to the publish job's needs list is refused: `release.yaml:471:3: job \"publish\" needs job \"envoy_plugin_build\" which does not exist in this workflow [job-needs]`. actionlint does catch exactly the failure this deletion could have left, so its silence at the real head is evidence."
+    },
+    {
+      "criterion": "R2: the changelog fold no longer folds packages/envoy-plugin. The grep proves the entry is gone from CHANGELOG_PACKAGES; this drives the program the workflow runs with that list and shows the behaviour change.",
+      "surface": "`.github/scripts/release-push.sh fold-plan $CHANGELOG_PACKAGES` — the exact command .github/workflows/changelog-fold.yaml:98 runs in its fold_build job — against a scratch git clone of this head under $TMPDIR carrying a planted fragment packages/envoy-plugin/.changes/unreleased/pr9999-Added-20261031-000000.yaml committed on the tip and a planted tag opencode-legion-envoy-v99.0.0 on that commit, so the fragment is foldable in principle. Nothing was written in the issue workspace.",
+      "command": "cd \"$TMPDIR/fold-probe\" && .github/scripts/release-push.sh fold-plan packages/pi-legion=pi-legion-v packages/pi-envoy=pi-envoy-v packages/envoy=legion-envoy-v packages/claude-envoy packages/contracts packages/envoy-client | grep -c envoy-plugin",
+      "observed": "0 envoy-plugin rows. The plan is the six other packages' seven rows (pi-legion 15.6.0 and 15.7.0, envoy 24.7.0 and 24.8.0 twice, claude-envoy and envoy-client under main@1f452fbea750) and the planted fragment appears in none of them. With this head's list, a fragment under packages/envoy-plugin is planned for no fold — which is also the orphan window the pull request body names and accepts.",
+      "headSha": "f181f7c0e54ead7f66c315b9bb9684d6476cc43b",
+      "negativeControl": "The identical command in the identical clone with main's own seven-package list (`… packages/envoy-plugin=opencode-legion-envoy-v …`, read from main@origin's changelog-fold.yaml) prints one envoy-plugin row: `packages/envoy-plugin\\t99.0.0\\t2026-10-31\\tpackages/envoy-plugin/.changes/unreleased/pr9999-Added-20261031-000000.yaml`. Same clone, same fragment, same tag, one word of input changed, opposite result."
+    },
+    {
+      "criterion": "The Summary's purpose: #2599 can make its forward merge with nothing to resolve in the files this change touches. A0 proves the bytes match #2599's head; this proves what the merge itself produces, and it is run against #2599's live head rather than the one the implementer pinned.",
+      "surface": "git's own three-way merge machinery, read-only — `git merge-tree --write-tree` writes no ref and touches no working copy — against sjawhar/legion#2599's current head 35ea1346b99474abe89c2f28b96276f00985a8d0 (fetched as refs/legion-test/pr2599), which has moved since the implementer recorded 677d6ee5.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && git merge-tree --write-tree --name-only f181f7c0e54ead7f66c315b9bb9684d6476cc43b 35ea1346b99474abe89c2f28b96276f00985a8d0 && for f in .github/workflows/release.yaml .github/workflows/changelog-fold.yaml .github/scripts/check-release-credentials.sh AGENTS.md; do diff <(git show 35ea1346:$f) <(git show <merged-tree>:$f); done",
+      "observed": "Merged tree f6cd70139fda68bdf58c3377982d79521cc9c2de. The conflicted-path list is exactly one path, packages/envoy-plugin/package.json (modify/delete: the v12.7.0 bump main already carries, deleted by #2599); release.yaml, changelog-fold.yaml, AGENTS.md and ci.yaml all report `Auto-merging`. All four of this change's files come out of the merged tree byte-identical to #2599's own versions — release.yaml included, the kept trigger line being removed by #2599's own deletion of it. So #2599's next forward merge resolves nothing in these four files. A0 was also re-run directly against 35ea1346 and still holds with the same two deliberate differences (release.yaml 14a15, AGENTS.md 88c88).",
+      "headSha": "f181f7c0e54ead7f66c315b9bb9684d6476cc43b",
+      "negativeControl": "Stated plainly rather than claimed: this probe does not discriminate. The same command and the same four diffs from main@origin (77e9a9e1a988) against 35ea1346 give the same single conflicted path and the same four byte-identical files, because git takes #2599's side wherever main changed nothing since the merge base. No pre-merge merge probe can show the difference; what this change removes is the *future* bump, and the evidence for that is the first proof above (main's release.yaml rewrites and pushes packages/envoy-plugin/package.json, this head's names no write of it) and acceptance A3 after the merge."
+    },
+    {
+      "criterion": "A break this change could have caused that no acceptance criterion and no repository check covers: deleting `packages/envoy-plugin/**` from release.yaml's on.push.paths must not leave any remaining build job's input untriggered, or a push to main changing that input would release nothing. check-ci-filters.sh does not cover release.yaml — it checks ci.yaml's filters and the one PUSH_WORKFLOWS workflow, docs-pages.yaml.",
+      "surface": "release.yaml's on.push.paths against the read list of every remaining build job — the words after `--` in PI_ENVOY_VERSION_ARGS, PI_LEGION_VERSION_ARGS and LEGION_VERSION_ARGS, which is what `release-push.sh version` reads to decide whether a package releases.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash \"$TMPDIR/trigger-cover.sh\" .github/workflows/release.yaml  (a throwaway script: yq reads on.push.paths and each *_VERSION_ARGS, then matches every read path against the trigger globs)",
+      "observed": "uncovered=0. Every one of the 24 distinct read paths is covered: packages/pi-envoy/, packages/pi-legion/, packages/pi-shared/, packages/envoy-client/, packages/contracts/, packages/daemon/ and its two prompt directories by their `**` entries, the twelve skills/ directories by skills/**, patches/ by patches/**, and the five named scripts and .github/go-release-targets.json by their own literal entries. No remaining build job reads anything under packages/envoy-plugin, so the deleted trigger entry orphans nothing.",
+      "headSha": "f181f7c0e54ead7f66c315b9bb9684d6476cc43b",
+      "negativeControl": "The same script on a scratch copy of this head's release.yaml with `packages/pi-envoy/**` deleted from on.push.paths reports `packages/pi-envoy/  UNCOVERED (PI_ENVOY_VERSION_ARGS)` and uncovered=1, so the probe does detect a trigger entry removed out from under a build job."
+    },
+    {
+      "criterion": "A2 / R3: the one R3 check CI does not select on these paths exits 0 at the head under test.",
+      "surface": "The check script itself, run in the issue workspace at this head. The other R3 checks are CI's work and were read on GitHub, never re-run here.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && .github/scripts/check-ci-filters.sh",
+      "observed": "exit 0 in 3m38s: `every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)`, with `ci-filters: 2700 files, 0 uncovered` and `docs-pages.yaml: on.push.paths equals filter docs (166 patterns)` above it. This matches the implementer's recorded output.",
+      "headSha": "f181f7c0e54ead7f66c315b9bb9684d6476cc43b",
+      "negativeControl": "The check's own coverage boundary is the control and it is why the probe above exists: its summary line counts one PUSH_WORKFLOWS workflow, docs-pages.yaml, so release.yaml's trigger is outside what it reads and a trigger entry deleted there would not have turned it red."
+    }
+  ],
+  "ciRead": {
+    "where": "GitHub, read at 2026-10-31T17:48:37Z, never re-run.",
+    "codeHead": "1bb11a03419c3df20289aeeeac023b5eb0099ee5",
+    "state": "Three workflow runs created at 2026-10-31T17:34:16Z and all still `queued` at the read: CI (41225170398), Fold Changelog Fragments (41225170479) and PR Title (41225170462). Their check runs report `changes`, `fold_build` and `pr-title`, each `queued` with no conclusion. A lane still running is read as running and is not waited for; a required check that settles red sends the issue back from testing on its own, and the reviewer reads the head's checks before it approves.",
+    "prHead": "f181f7c0e54ead7f66c315b9bb9684d6476cc43b carries no check run at all, which is correct: it is the implementer's handoff-only push, whose commit message ends with the skip-checks trailer, so GitHub started no workflow for it and the daemon carries the code head's verdict to it."
+  },
+  "observations": [
+    "Not a failure and not a behaviour: .legion/INFRA-909/implement.json records `completed: 2026-10-31T19:42:00Z`, about two hours ahead of the real write — the handoff commit f181f7c0 landed and the daemon moved the issue to testing at 2026-10-31T17:36:48Z. The field is prose in a file retro removes before the merge; it is reported to the architect and pins nothing.",
+    "sjawhar/legion#2599's head moved from 677d6ee5b73c4bd9233df891823f36b85efc91e8 (what implement.json pins) to 35ea1346b99474abe89c2f28b96276f00985a8d0 while this issue ran, and is still OPEN and CONFLICTING. A0 holds against the new head unchanged, so nothing is owed here, but a later round should re-read #2599's head rather than the pinned one."
+  ]
+}
