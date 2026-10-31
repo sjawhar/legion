@@ -479,11 +479,23 @@ test.skipIf(omp === undefined && !onActions)(
     expect(reminderTurn - waitingTurn).toBeGreaterThanOrEqual(1_400);
     // Nothing arrived from outside in between: in that gap the pane spoke only to the daemon,
     // for the reminder's own record check, and to the listener for its session registration.
-    const between = seen
-      .filter((request) => request.at > waitingTurn && request.at < reminderTurn)
-      .map((request) => request.path);
+    // The stand-in also serves as Dispatch, which holds the handoff record, so the session reads
+    // its people's answers before every model request (pi-envoy's answers line), the reminder's
+    // included. That read belongs to the reminder's turn, so it comes only once the wait is over.
+    const between = seen.filter((request) => request.at > waitingTurn && request.at < reminderTurn);
+    const answersRead = /^\/api\/v1\/agents\/[^/]+\/answers$/;
+    for (const request of between.filter(({ path }) => answersRead.test(path))) {
+      expect(request.at - waitingTurn).toBeGreaterThanOrEqual(1_400);
+    }
     expect(
-      between.filter((path) => path !== "/legion/v1/state" && path !== "/v1/interests/subscribe")
+      between
+        .map((request) => request.path)
+        .filter(
+          (path) =>
+            path !== "/legion/v1/state" &&
+            path !== "/v1/interests/subscribe" &&
+            !answersRead.test(path)
+        )
     ).toEqual([]);
     // What the worker is told once its wait is over: the reminding repeats, rather than this
     // being the last it hears until something arrives.
