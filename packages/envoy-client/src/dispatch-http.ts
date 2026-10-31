@@ -224,26 +224,22 @@ function answerPayload(response: Response, text: string): unknown {
   }
 }
 
-/** An answer whose body is read: the text, what it says, and the answer rebuilt around it. */
+/** An answer whose body is read: what it says, and the answer rebuilt around it. */
 interface ReadAnswer {
-  /** The body as text. */
-  readonly text: string;
-  /** That text as `answerPayload` reads it. */
+  /** The body text as `answerPayload` reads it. */
   readonly payload: unknown;
-  /** The answer rebuilt from `text`, since reading the body emptied the one that arrived. */
+  /** The answer rebuilt from the body text, since reading the body emptied the one that arrived. */
   readonly response: Response;
 }
 
 /**
- * Reads `response`'s body to its end, once, for every reading of it a caller needs: the text, the
- * payload `answerPayload` makes of it, and an answer that still holds the body for whoever reads
- * it next. The status must be one that carries a body, since `new Response` refuses one for a 204
- * or a 304.
+ * Reads `response`'s body to its end, once, for every reading of it a caller needs: the payload
+ * `answerPayload` makes of it, and an answer that still holds the body for whoever reads it next.
+ * The status must be one that carries a body, since `new Response` refuses one for a 204 or a 304.
  */
 async function readAnswer(response: Response): Promise<ReadAnswer> {
   const text = await response.text();
   return {
-    text,
     payload: answerPayload(response, text),
     response: new Response(text, {
       status: response.status,
@@ -320,7 +316,8 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
  */
 const RETRIES = 2;
 
-/** The wait when an answer to wait out carries no `Retry-After` in seconds, as Dispatch sends. */
+/** The wait when an answer to wait out asks for none: no `Retry-After`, one `retryAfterMs` cannot
+ *  read, or one that works out to no wait (`0`, or a date already past). Dispatch's own is `1`. */
 const DEFAULT_RETRY_AFTER_SECONDS = 1;
 
 /**
@@ -358,8 +355,8 @@ function refusalError(
  * document writer queue) was sent before the request ran, or with its key released, so any method
  * may repeat it. A `503 DATABASE_BUSY` (no database connection in time) or `503 REQUEST_TIMEOUT`
  * (the read deadline) can come after a write committed, so only a read (GET, HEAD) repeats it; a
- * write's retry is left to its idempotency key (`#keyedWrite`). Every other answer is the caller's
- * at once.
+ * POST's or PATCH's retry is left to its idempotency key (`#sendOnce`), and a PUT's or DELETE's,
+ * which has none, to its caller. Every other answer is the caller's at once.
  */
 function waitsOut(method: string, status: number, code: string | undefined): boolean {
   if (status === 429) return code === "OVERLOADED" || code === "EDIT_QUEUE_FULL";
@@ -1531,11 +1528,12 @@ export class DispatchClient {
    * The one request function: every call the client makes goes through here. It sends `method` to
    * `url` once (`#sendOnce`, which is where a write's own retries under its key happen), and asks
    * again while Dispatch's answer is one it says to wait out (`waitsOut`): after its `Retry-After`
-   * (whole seconds, else `DEFAULT_RETRY_AFTER_SECONDS`) plus up to `RETRY_JITTER_MS`, at most
-   * `RETRIES` times, and only when that wait ends before the client's deadline, so no retry starts
-   * past it. Giving up throws that refusal with advice naming the attempts and the wait; any other
-   * answer comes back as it is. `signal` aborts the call beside the client's own signal, a send and
-   * a wait between two sends alike.
+   * (`retryAfterMs`, whole seconds or an HTTP date, with `DEFAULT_RETRY_AFTER_SECONDS` standing in
+   * for a header that is missing, unreadable, or asks for no wait at all — `0`, or a date already
+   * past) plus up to `RETRY_JITTER_MS`, at most `RETRIES` times, and only when that wait ends
+   * before the client's deadline, so no retry starts past it. Giving up throws that refusal with
+   * advice naming the attempts and the wait; any other answer comes back as it is. `signal` aborts
+   * the call beside the client's own signal, a send and a wait between two sends alike.
    *
    * A write repeated here is a new intent and carries a key of its own: Dispatch answers
    * `429 OVERLOADED` before the keyed layer runs and releases the key behind a
