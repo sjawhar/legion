@@ -1,5 +1,12 @@
 # Changelog
 
+## [main@d7e1daaaaf70] - 2026-10-31
+
+### Added
+
+- `WriteAdvice.superseded_approval` (`{approved_version, version, approved_by}`): the approval a
+  document write superseded, set only on the write whose version replaced the approved one.
+
 ## [main@e65900f4438b] - 2026-10-30
 
 ### Added
