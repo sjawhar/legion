@@ -2,76 +2,63 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-369",
-  "completed": "2026-10-31T00:35:00Z",
-  "round": "the round after the review's thirteen findings, at code head dd2f17197c3ffbb053dd11d687ff57f8dde8f118",
+  "completed": "2026-10-31T03:20:00Z",
+  "round": "the round after the second review, at code head 1b769383daf41f9cace0e65e1e704a4745745fbc; this round ends in request_backward_move to implementing, not in a completion, because the pull request conflicts with main",
+  "outcome": "The real surface passes and I found no defect. The phase still goes back to implementing: GitHub reports the pull request CONFLICTING with main, so it computes no merge ref and has started no check on this head, and no verdict of mine can stand on a head CI never read. The tree's architect ruled the move and gave its reason, which this handoff's backwardMove field quotes.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran both of the implementer's commands on a Dispatch stack and database of my own in the issue's pod (the Go server on PostgreSQL 17 with pgvector, database dispatch_tester2, started with DATABASE_URL=postgres://postgres:…@127.0.0.1:55432/dispatch_tester2 bun run dispatch:local, serving on 127.0.0.1:59156 with the fake GitHub on 24924, the fake Envoy on 48354). The acceptance driver answered exit=0 PASS=171 FAIL=0 SKIP=0 and the browser spec 2 passed, the counts the implement handoff records. I then drove its reply-rule proof again myself, on all three reply routes rather than the two it recorded, and drove each of the other four review fixes on its own surface."
+    "how": "Re-ran both of the implementer's commands on a Dispatch stack and database of my own in the issue's pod (the Go server on PostgreSQL 17 with pgvector, database dispatch_tester3, started with DATABASE_URL=postgres://postgres:…@127.0.0.1:55432/dispatch_tester3 bun run dispatch:local, serving on 127.0.0.1:33088 with the fake GitHub on 18616): the acceptance driver answered exit=0 PASS=171 FAIL=0 SKIP=0 and both browser rows passed, the counts the implement handoff records. Its first proof entry also names two package typechecks; those are CI's lanes, so I read CI rather than running them, and CI has run nothing on this head at all (below)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review finding 1 (critical): a reply names a block of the item the request named, never of its thread's head.",
-      "surface": "The real Dispatch server in the issue's pod, over HTTP, on an ask whose first option is part b2 and a two-block comment under it whose second block is also b2.",
-      "command": "POST /api/v1/issues/<key>/comments with {reply_to: <that comment>, reply_to_block: \"b2\"}; the same route with {ask_id: <the ask>, reply_to_block: \"b2\"}; and POST /api/v1/comments/<the mentioning comment>/reply with {attempt: 1, reply_to_block: \"b2\"} as the mentioned session, the comment opened under the same ask",
-      "observed": "reply_to answers reply_block {node: comment/<c>#b2, text: \"The second block of this comment weighs Tuesday.\"}; ask_id answers {node: ask/<a>#b2, text: \"Monday — Ship at the start of the week.\"}; the delivery callback under the ask answers {node: comment/<c>#b2, text: \"Tell us tonight.\"}. One block id, three requests, each resolved against the item its own request named. ?to=<the ask's option b2>&kind=replies_to and ?to=<the comment's block b2>&kind=replies_to each list exactly one reply.",
-      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
-      "negativeControl": "reply_to + reply_to_block \"b3\" — a part the ask holds and the named comment does not — answered 400 {\"code\":\"INVALID_COMMENT\",\"error\":\"reply_to_block b3 is not a block of comment <id>\"}, and ask_id + \"b9\" answered the same naming the ask. reply_to and ask_id together, an ask id passed as reply_to, and either naming another issue's item each answered 400 INVALID_COMMENT naming the rule."
+      "criterion": "The acceptance lines of the issue, re-proven at this head after the second review round's refactors: A6, A11/R12, A15, R7, R10 and R11 for ask parts, and the reader-facing change.",
+      "surface": "A real Dispatch stack in the issue's pod — the Go server on PostgreSQL 17 with pgvector, the production SPA bundle and a real Chromium — driven through the real dispatch CLI, HTTP and the browser.",
+      "command": "DISPATCH_URL=http://127.0.0.1:33088 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=18616 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; then bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/ask-part-references.e2e.ts --reporter=list",
+      "observed": "exit=0, PASS=171 FAIL=0 SKIP=0; 2 passed (the reference opens the ask at that part, and the backlink panel names the ask rather than an artifact).",
+      "headSha": "74af24267b84a24d67020087e43426f0330b582c",
+      "negativeControl": "The driver's own R10 case: GET /api/v1/references?to=<ask>%23b-b9 answers 404 naming the part and the ask while #b-b2 answers 200 with that option's text."
     },
     {
-      "criterion": "Review finding 2 (important): a link written in an ask's part is listed from its ask, in the dashboard's Referenced by panel and in the CLI.",
-      "surface": "The production SPA bundle served by the real Go server in a real Chromium, and the real dispatch CLI.",
-      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/ask-part-references.e2e.ts --project=chromium --reporter=list; then a throwaway row of my own for a link written in an ask's QUESTION, the case the finding names; and dispatch read --issue <the cited issue>",
-      "observed": "The implementer's two rows: 2 passed. My own row: the cited issue's Referenced by panel reads \"Ask · CORE-2\" with the question's own text and holds no \"Artifact · \" group (panel text: \"Ask · CORE-2\\njust now\\n\\nDoes dispatch://CORE-1 settle it?\\n\\nAttached document · CORE-1\\njust now\\n\\nspec.md\"). The CLI prints \"- mentions ask dispatch://KEY/ask/<id> block b1 (…)\" where the finding reported \"block dispatch://KEY/ask/<id>#b-b1\".",
-      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
-      "negativeControl": "The row asserts no \"Artifact · \" group is present, which is the finding's symptom verbatim; the implementer records the same row red against a build of the branch point, where the panel renders the edge as \"Artifact · CORE-2\" in plain text. I removed my own throwaway row from the tree after the run."
+      "criterion": "The refactor of this round: askPartLinks, one fragment the issue closure and the document's own incoming read share, keeps both consumers and the ask's own refs row (review findings 3 and 9).",
+      "surface": "The same running Dispatch, over HTTP and through dispatch read --issue.",
+      "command": "GET /api/v1/artifacts/<document>/references, GET /api/v1/references?to=<document> and dispatch read --issue <the asking issue>, for a document cited from an option alone, then from a person's answer alone, then from a question alone, then from a question and an option together",
+      "observed": "Option alone: the document read answers referenced_by [{\"kind\":\"ask\",\"id\":\"ede7acdf-…\",\"excerpt\":\"The question names nothing.\"}], the closure prints \"CORE/r3doc-… · depth 1 via ask ede7acdf-…\", and the graph read lists mentions ask/ede7acdf-…#b2. Answer alone: both the document read and the closure list the ask. Question alone: the document read still lists the ask, so the ask-level arm survived the refactor. Question and an option together: the ask is listed once, and two asks citing the same document are listed once each.",
+      "headSha": "74af24267b84a24d67020087e43426f0330b582c",
+      "negativeControl": "Dropping the one citing option empties all three together — referenced_by [], the closure \"- none\", the graph read [] — so each read follows the live part rather than a row left behind."
     },
     {
-      "criterion": "Review finding 3 (important): a document's own incoming references list an ask that cites it from an option or from its answer.",
-      "surface": "The same running Dispatch, over HTTP, on the route the document page reads.",
-      "command": "GET /api/v1/artifacts/<document>/references for a document named only inside one option of one ask, with GET /api/v1/references?to=<the document> as the control",
-      "observed": "referenced_by lists [{\"kind\":\"ask\",\"id\":\"63a14de2-…\",\"issue_key\":\"CORE-5\",\"project\":\"CORE\",\"excerpt\":\"Only the option cites it.\"}] — the ask, once, where the finding reported it absent; the graph read lists the part's own edge, mentions ask/63a14de2-…#b2, as before.",
-      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
-      "negativeControl": "The same route on the same document before the ask existed answered referenced_by [], so the row follows the citation rather than the document; and the ask is listed once rather than once per citing part."
+      "criterion": "The refactor of this round: AskPartIDs, the one owner of the matching of stored parts to an ask's options and answer (review finding 10), still answers by identity and not by position.",
+      "surface": "The same running Dispatch, over HTTP, with the ask row moved under the index by a direct SQL update — what a stale index or an older build leaves.",
+      "command": "update asks set options = … directly in PostgreSQL, then GET /api/v1/asks/<id>; and an ask whose two options render to the same part text",
+      "observed": "Two options swapped under the index keep their own ids (Beta b3, Alpha b2), so an id follows the text; a row grown by one gives the new option id null; a shrunk row keeps the survivor's b3. Two options whose rendered text is identical have equal text_sha256 in ask_blocks (c824ca3cbe for both) and still take b2 and b3, each reference reading its own part.",
+      "headSha": "74af24267b84a24d67020087e43426f0330b582c",
+      "negativeControl": "The swap is the control: a matcher that fell back to position would answer Beta b2 and Alpha b3, the defect the second review found, and it answers Beta b3 and Alpha b2."
     },
     {
-      "criterion": "Review finding 4 (important): part ids are matched to options and to the answer by what identifies the part, so an index behind its row and an older event payload carry no wrong ids.",
-      "surface": "The same running Dispatch, over HTTP, with the ask row moved under the index by a direct SQL update (what a stale index or an older build leaves).",
-      "command": "update asks set options = … / jsonb_set(answer,'{text}',…) directly in PostgreSQL, then GET /api/v1/asks/<id>; and GET /api/v1/issues/<key>/events after an edit that replaced both options",
-      "observed": "An option no stored part stands for carries id null (Gamma null, Beta keeps b3). Two options swapped under the index keep their own ids — Beta b3, Alpha b2 — so an id follows the text and not the position. A row that grows gives the new option none; one that shrinks keeps the survivor's. An answer rewritten under the index carries none. On the events route the ask.opened payload of an ask whose two options were later replaced carries id null for both, while ask.edited carries the current b2 and b3.",
-      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
-      "negativeControl": "The swap is the control for position matching: a matcher that fell back to position would answer Beta b2 and Alpha b3, the finding's defect, and it answers Beta b3 and Alpha b2."
+      "criterion": "Review finding 3 of this round (important): the five published texts give the reply rule the code keeps.",
+      "surface": "The route index the running server serves, and the texts in the tree a client reads.",
+      "command": "GET /api/v1 against the running server, read for POST /api/v1/issues/{key}/comments; then packages/contracts/src/dispatch-api.ts, packages/envoy/cmd/dispatch/AGENTS.md and packages/envoy/.changes/unreleased/pr2546-ask-parts.yaml",
+      "observed": "The served description reads \"A reply names the comment it answers in reply_to, and one block of it in reply_to_block; with ask_id in place of reply_to, reply_to_block names one part of that ask.\" CreateCommentInput.reply_to_block says the block is \"a block of the comment reply_to names, checked against that comment before reply_to climbs to its thread's head, in an ask's thread as anywhere else, or, with ask_id, a part of that ask\"; Comment.reply_block says the same; AGENTS.md's route row and the changelog fragment carry the same rule.",
+      "headSha": "74af24267b84a24d67020087e43426f0330b582c",
+      "negativeControl": "The old rule is the control: no served or committed text now says a reply in an ask's thread names a part of the ask, which is what a client following the stale text would have sent."
     },
     {
-      "criterion": "Review finding 5 (important): the part's heading does not depend on a request that can fail the whole read.",
-      "surface": "The real dispatch CLI against the same server.",
-      "command": "dispatch read --ref 'dispatch://KEY/ask/<id>#b-b1' and '#b-b2' on a clean ask, and the same on an ask whose index is behind its row",
-      "observed": "A clean ask prints \"Question b1 of ask <id> (changed in revision 1):\" and \"Option b2 of ask <id> (changed in revision 1):\". Where the index is behind the row the heading degrades to \"Part b1 of ask <id>\", the conservative answer, since the read cannot then prove which part the question is. The ask read is now advisory — client.getAsk(...).catch(() => undefined) at dispatch-execute.ts:4703 — so a failure of it leaves the part under \"Part\" and the rest of the read unchanged.",
-      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
-      "negativeControl": "The stale-index ask is the control: it is the state in which the client may not claim \"Question\", and it does not."
-    },
-    {
-      "criterion": "The pull request's Contract change census: every entry a person invokes, driven through its real surface.",
-      "surface": "The same running Dispatch, over HTTP.",
-      "command": "GET /api/v1/references?to=<the dashboard URL of the ask with #b-b2, #b-b9 and no fragment>; the same for dispatch://KEY/ask/<id>#b-b2 and #b-b9; GET /api/v1/asks/<id> against the answer of PATCH /api/v1/asks/<id>; and a create and a PATCH that send an option id back",
-      "observed": "(1) the dashboard URL with #b-b2 answers 200 with node ask/<id>#b2 text \"Alpha\", #b-b9 answers 404 {\"code\":\"NOT_FOUND\",\"error\":\"no part \\\"b9\\\" in ask <id>\"}, and with no fragment the ask itself; (2) dispatch://KEY/ask/<id>#b-b2 answers 200 with the option's text and #b-b9 the same 404; (3) the reply rule of proof 1 above; (4) a read carries revision 1 and each option's id, a PATCH answer carries revision null and every option id null, and an id a writer sends back is emptied — {\"label\":\"Gamma\",\"id\":\"b2\"} was stored as the server's own b3, and a create sending {\"label\":\"X\",\"id\":\"b7\"} stored b2.",
-      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
-      "negativeControl": "Entry 1's own refusal is the control: the same URL shape that answered the ask on main answers 404 by name when the fragment is not a part, which is what R10 requires."
-    },
-    {
-      "criterion": "The acceptance lines of the issue, re-proven at this head: A6, A11/R12, A15, R7, R10 and R11 for ask parts, with the identity-hash boundaries the review's fix introduces.",
-      "surface": "The real Dispatch stack in the issue's pod, through the real dispatch CLI and HTTP, and a real Chromium.",
-      "command": "DISPATCH_URL=http://127.0.0.1:59156 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=24924 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh, then boundary probes by hand",
-      "observed": "exit=0, PASS=171 FAIL=0 SKIP=0. Boundaries: two options whose rendered part text is identical (equal text_sha256 in ask_blocks) still take b2 and b3, each reference reading its own part, and rewording one leaves the other's id; an answer whose rendered text equals an option's is a part of its own (option b2, answer b4), the type salt holding.",
-      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
-      "negativeControl": "The driver's own R10 case: GET /api/v1/references?to=<ask>%23b-b9 answers 404 naming the part while #b-b2 answers 200 with that option's text."
+      "criterion": "Review finding 6 of this round (minor): the reply_to_ask hint suggests a value the next refusal accepts.",
+      "surface": "The real dispatch CLI against the running server.",
+      "command": "dispatch comment --ref 'dispatch://KEY/ask/<id>#b-b3@v2' --body x, then the value it hints run through dispatch comment --issue KEY --reply-to-ask <that value>",
+      "observed": "The hint reads \"reply under it with reply_to_ask dispatch://CORE-3/ask/550688d0-…#b-b3 and issue CORE-3\" — the pin stripped — and that value answers \"Replied on ask 550688d0-… (comment e04dde9d-…; ask now waiting on human)\".",
+      "headSha": "74af24267b84a24d67020087e43426f0330b582c",
+      "negativeControl": "The pinned form is still refused by replyBlockProblem — \"reply_to_ask …#b-b3@v2 names revision 2 of the block, but a reply answers the block whatever its text becomes: drop @v2\" — which is the value the hint used to print."
     }
   ],
-  "ci": "Read on GitHub at the code head dd2f17197c3ffbb053dd11d687ff57f8dde8f118: PR Title run 41148680941 success; CI run 41147479424 still queued when this handoff was written (lint, test, envoy-go, dispatch, contracts, envoy-client, docs and the rest queued; changes success). Every static lane is therefore read as running, not green and not red. Nothing of CI was re-run here and no CI result is carried into this handoff for a later step to trust. One fact the reviewer should carry forward rather than take from me: CI at the PREVIOUS code head 1b191490e1bac353d4f78330f3b9d74c03d198b0 (run 41128293217) settled failure on pi-legion and claude-envoy, two packages this pull request does not change; whether that repeats at this head is for the reviewer's own read of the head's checks.",
-  "notDriven": [
-    "Review finding 7 (minor, the answer part's hash carries its answerer): the scenario needs a second person replacing the first person's answer, and POST /api/v1/asks/{id}/answer refuses that with 403 {\"code\":\"NOT_ANSWERER\",\"error\":\"only the person who gave the current answer may change it\"}, so it is reachable only through the wording-restore and approval-carry paths. The change is in refs/ask_blocks.go and its lock is that package's own Go tests, which CI runs.",
-    "Review finding 8 (minor, restoreWordings indexes at the statement's own time): it runs in the server's boot pass (\"dispatch: restored decided asks' wordings restored=0 copies=0\" on this stack, nothing to restore), and no API write reaches it. Its lock is docs/decided_wording.go's own Go test."
-  ],
+  "ci": "Read on GitHub: the pull request is CONFLICTING with main (mergeable CONFLICTING, mergeStateStatus DIRTY, read at 03:00Z), so GitHub computes no merge ref and runs no workflow on it. GET /repos/sjawhar/legion/commits/<sha>/check-runs answers an empty list both at the code head 1b769383daf41f9cace0e65e1e704a4745745fbc and at the branch head 74af24267b84a24d67020087e43426f0330b582c, and the newest run on the branch is at 5775f9cf, the previous review's handoff commit. No static lane — lint, types, the unit and integration suites — is green or red at this head, and the two typecheck lanes the previous CI reported red (pi-legion, claude-envoy) have therefore not been read by CI since the fix. Nothing of CI was re-run here.",
+  "backwardMove": {
+    "to": "implementing",
+    "why": "The tree's architect ruled it on 2026-10-31 after reading the conflict, and I confirmed the conflict myself before acting on it.",
+    "reason": "sjawhar/legion#2546 conflicts with main. Merge main forward (a merge commit, never a rebase). If INFRA-562's #2387 has merged by then, it holds 0150-0152, so renumber this branch's migrations after main's highest at the push. Post the fingerprints, change nothing else.",
+    "testerNote": "No defect of mine is added to that reason: this round's real-surface verification passed in full. After the merge, compute the unchanged-diff fingerprint at 74af24267b84a24d67020087e43426f0330b582c and at the new head; equal means the bare gates alone, and the E2E (tester) line takes the new SHA with the forward-merge re-check note."
+  },
   "findings": []
 }
