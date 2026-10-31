@@ -621,10 +621,11 @@ test.skipIf(skip)(
   120_000
 );
 
-// The host folds an aside that reaches it after the run's last step (here: during the run's
-// automatic compaction) into the context with no turn while an interrupt since the last user
-// prompt is still in effect, which a card-started run does not end. Under every-card-a-steer the
-// card started a turn there; pi-envoy's wake gives it one.
+// An aside that reaches the host after the run's last step (here: during the run's automatic
+// compaction), while an interrupt since the last user prompt is still in effect, which a
+// card-started run does not end. Oh My Pi 18.12.2-sami.20261026 folds it into the context with no
+// turn, and pi-envoy's wake gives it one; from v18.12.2-sami.20261027 the host starts that turn
+// for the card's `triggerTurn` itself. Either way the card gets one turn.
 test.skipIf(skip)(
   "a card that lands during a run's automatic compaction, in a session interrupted earlier, gets a turn",
   async () => {
@@ -662,14 +663,15 @@ test.skipIf(skip)(
     summary.reply([text("The conversation so far.")]);
 
     // A compaction can make more than one summary call (a split turn's prefix is summarised on
-    // its own); each is answered as it comes, and the first other request is the wake's turn.
-    let woken = await session.nextTurn("the turn the folded card's wake started");
+    // its own); each is answered as it comes, and the first other request is the card's turn.
+    let woken = await session.nextTurn("the turn the folded card got");
     while (isSummarization(woken.request)) {
       woken.reply([text("The conversation so far.")]);
-      woken = await session.nextTurn("the turn the folded card's wake started");
+      woken = await session.nextTurn("the turn the folded card got");
     }
     expect(conversation(woken.request)).toContain(late);
-    expect(lastMessage(woken.request)).toMatch(WAKE_TEXT);
+    const startedBy = lastMessage(woken.request);
+    expect(WAKE_TEXT.test(startedBy) || startedBy.includes(late)).toBe(true);
     // The card-started run ended with a continuation still owed: the late aside.
     const agentEndsSince = (from: number): object[] =>
       session.frames.slice(from).filter((frame) => "type" in frame && frame.type === "agent_end");
@@ -711,6 +713,50 @@ test.skipIf(skip)(
     expect(lastMessage(turn.request)).toContain(card);
     turn.reply([text("Read the card.")]);
     await probe(session, turn.index + 1);
+  },
+  120_000
+);
+
+// Several cards that reach an idle session together. pi-envoy reads `isIdle` when it hands each
+// card, and the host checks `isStreaming` only after its own awaits, so the first card starts the
+// run and the rest find the session streaming. A card handed as a steer then joins the host's one
+// steering queue, which the agent loop releases one message per step: the rest of the cards would
+// reach the model one step at a time. As asides, every one is taken at the run's next step. The
+// contract checked: every card reaches the model by the run's second request, each once, in the
+// order it was sent, and the session file holds each once.
+test.skipIf(skip)(
+  "cards that reach an idle session together are all read by the second step, each once, in order",
+  async () => {
+    const session = await startSession();
+    // The first idle card of a session that got none while it started is a startup card, which
+    // its wake reads; the burst comes after the startup phase.
+    const first = await session.card("f0");
+    const woken = await session.nextTurn("the turn the first idle card's wake started");
+    expect(conversation(woken.request)).toContain(first);
+    woken.reply([text("Read the first card.")]);
+    await session.settled();
+
+    const labels = ["f1", "f2", "f3", "f4", "f5", "f6"];
+    // Every request goes out before any receipt is awaited, in this order on one connection.
+    const cards = await Promise.all(labels.map((label) => session.card(label)));
+    const started = await session.nextTurn("the turn the burst started");
+    // A tool the host runs to its end, so the run takes another step.
+    started.reply([call("read", { path: "." })]);
+    const next = await session.nextTurn("the run's second model request");
+
+    const messages = conversation(next.request);
+    let previous = -1;
+    for (const card of cards) {
+      expect(messages.split(card)).toHaveLength(2);
+      expect(messages.indexOf(card)).toBeGreaterThan(previous);
+      previous = messages.indexOf(card);
+    }
+    next.reply([text("Read the burst.")]);
+    await probe(session, next.index + 1);
+    const entries = await session.cardEntries();
+    for (const card of cards) {
+      expect(entries.filter((entry) => entry.includes(card))).toHaveLength(1);
+    }
   },
   120_000
 );

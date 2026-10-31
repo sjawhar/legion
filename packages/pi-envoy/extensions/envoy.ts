@@ -149,6 +149,7 @@ import {
   type AgentStreamSettingsState,
   modelReference,
 } from "../src/agent-stream";
+import { CardAges } from "../src/card-age";
 import { CardWake } from "../src/card-wake";
 import { transcriptPictures, withDeliveredPictures } from "../src/delivery-pictures";
 import { withDispatchFirst } from "../src/dispatch-first";
@@ -1144,12 +1145,17 @@ export default function envoyExtension(pi: PiApi): void {
     isOwnSession: (session) => sessionOpen(session),
   });
 
+  // When each card reached this session, which every model request shows beside its send time
+  // (`../src/card-age`): a card's `message_end` fixes it.
+  const cardAges = new CardAges({ now: () => Date.now() });
+
   // A card's message: its `details` name the frame (`replayLedgerIdentity`), which the host keeps
   // on the message it writes, beside the wake's card marker. An `inert` card is a steer that starts
   // no turn on an idle host; a turn streaming when it is handed takes it and runs another model
   // turn for it, so `UnwrittenFrames` hands an inert card only to a settled host (`hostSettled`).
-  // Every other card goes as the wake says (`CardWake.deliveryFor`), which records a startup card
-  // before the host has it; a targeted Aside stays an aside.
+  // Every other card goes as the wake says (`CardWake.deliveryFor`): an aside with `triggerTurn`,
+  // never a steer, so no card waits in the steering queue a person's typed message uses; the wake
+  // records a startup card, which goes as a follow-up, before the host has it.
   const handCard = (
     content: string | readonly ContentBlock[],
     deliverAs: CardDelivery,
@@ -1246,7 +1252,7 @@ export default function envoyExtension(pi: PiApi): void {
   const showReplayCard = (
     content: string,
     envelope: unknown,
-    deliverAs: CardDelivery = "steer"
+    deliverAs: CardDelivery = "card"
   ): "shown" | "queued" => {
     const parsed = ClaimIdentitySchema.safeParse(envelope);
     const identity = parsed.success ? parsed.data : undefined;
@@ -1548,7 +1554,7 @@ export default function envoyExtension(pi: PiApi): void {
             // the card goes, and why, is the wake's (`handCard`, `../src/card-wake`).
             unwritten.sendCard(
               card.content,
-              rendered.delivery?.mode === "aside" ? "aside" : "steer",
+              rendered.delivery?.mode === "aside" ? "aside" : "card",
               identity,
               claim
             );
@@ -1852,7 +1858,7 @@ export default function envoyExtension(pi: PiApi): void {
               showReplayCard(
                 envoyNoticeText(failureNoticeFields(notice)),
                 notice.envelope,
-                btwEvents.has(notice.eventId) ? "inert" : "steer"
+                btwEvents.has(notice.eventId) ? "inert" : "card"
               ),
             failureNoticeFailed: (notice, error) => {
               logger.warn("envoy: a message this session was not shown could not be reported", {
@@ -2092,12 +2098,14 @@ export default function envoyExtension(pi: PiApi): void {
   });
 
   // The host writes a message to the transcript as it ends it: a card or a person's turn handed to
-  // it, idle or taken by a turn after it streamed, is shown from here on (`UnwrittenFrames`). A
-  // card the host appended also arms the wake's check (`../src/card-wake`).
+  // it, idle or taken by a turn after it streamed, is shown from here on (`UnwrittenFrames`), and a
+  // card's write is when it reached this session (`../src/card-age`). A card the host appended
+  // also arms the wake's check (`../src/card-wake`).
   pi.on("message_end", async (event, context) => {
     const { message } = event;
     if (!shuttingDown) cardWake.messageEnd(message, context);
     recordAgentStreamMessage(message, false);
+    cardAges.written(message);
     await unwritten.written(message);
   });
   // The host asks whether any extension handles `session_before_compact`, which turns its
@@ -3410,18 +3418,25 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
-  if (atStart.dispatch.enabled) {
-    // Every session that reaches Dispatch, Legion panes and `task` subagents included, carries
-    // the dispatch-first skill on every request at the head, where its bytes never change, and
-    // on every request of its main loop what people wrote to it at the tail, where a change in
-    // the list re-reads no cached prefix. The host runs this handler on its side turns, its
-    // handoff prompt and a remote compaction's conversions too; `withSessionAnswers` leaves the
-    // list off those. Oh My Pi hands this handler no abort signal: it races the handler against
-    // the run's own and drops what an aborted handler returns, and the read it shares goes on to
-    // fill the cache.
+  if (atStart.dispatch.enabled || inbound) {
+    // Every card in a request says when this session got it, beside when it was sent
+    // (`../src/card-age`), so a reader whose inbox ran behind does not take a late card's stamp
+    // for the present time. Every session that reaches Dispatch, Legion panes and `task` subagents
+    // included, also carries the dispatch-first skill on every request at the head, where its
+    // bytes never change, and on every request of its main loop what people wrote to it at the
+    // tail, where a change in the list re-reads no cached prefix. The host runs this handler on
+    // its side turns, its handoff prompt and a remote compaction's conversions too;
+    // `withSessionAnswers` leaves the list off those. Oh My Pi hands this handler no abort signal:
+    // it races the handler against the run's own and drops what an aborted handler returns, and
+    // the read it shares goes on to fill the cache.
     pi.on("context", async (event, context) => {
-      const withSkill = withDispatchFirst(event.messages, DISPATCH_FIRST_CONTEXT);
-      const messages = await withSessionAnswers(withSkill ?? event.messages, {
+      const aged = cardAges.annotate(
+        event.messages,
+        () => context.sessionManager.getBranch?.() ?? []
+      );
+      if (!atStart.dispatch.enabled) return aged === undefined ? undefined : { messages: aged };
+      const withSkill = withDispatchFirst(aged ?? event.messages, DISPATCH_FIRST_CONTEXT);
+      const messages = await withSessionAnswers(withSkill ?? aged ?? event.messages, {
         branch: () => context.sessionManager.getBranch?.() ?? [],
         session: context.sessionManager,
         // Read off the live `AgentSession` (18.12.2), whose getters the declared host surface
@@ -3441,7 +3456,7 @@ export default function envoyExtension(pi: PiApi): void {
         },
         read: () => sessionAnswersText(context),
       });
-      const result = messages ?? withSkill;
+      const result = messages ?? withSkill ?? aged;
       return result === undefined ? undefined : { messages: result };
     });
   }

@@ -10851,7 +10851,7 @@ console.log(JSON.stringify(args));
     ]);
   });
 
-  test("delivers a targeted Steer card as an aside while a turn runs and an Aside always as one", async () => {
+  test("delivers a targeted Steer card and an Aside each as an aside, a turn running or not", async () => {
     let idle = false;
     const { agent, delivered, fixture } = await bootDirectSession("targeted-modes", {
       idle: () => idle,
@@ -10869,7 +10869,7 @@ console.log(JSON.stringify(args));
       { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "aside", triggerTurn: true },
-      { deliverAs: "steer", triggerTurn: true },
+      { deliverAs: "aside", triggerTurn: true },
     ]);
   });
 
@@ -11127,10 +11127,11 @@ console.log(JSON.stringify(args));
       ).toEqual(Array(3).fill({ deliverAs: "aside", triggerTurn: true }));
     });
 
-    // An idle session has no steering queue to wait in. The host starts a turn for a steer with
-    // `triggerTurn` after an interrupt (an Esc, or the RPC `abort` a Legion daemon sends) and in
-    // plan mode too, where an idle aside folds into the context with no turn.
-    test("leaves a card that reaches an idle session a steer that starts a turn", async () => {
+    // An idle session starts a turn for an aside with `triggerTurn`, after an interrupt (an Esc,
+    // or the RPC `abort` a Legion daemon sends) and in plan mode too, unless the person interrupts
+    // after the send; a steer would join the steering queue a person's message waits in whenever
+    // the host turned busy before it checked.
+    test("sends a card that reaches an idle session as an aside that starts a turn", async () => {
       const { agent, delivered, sends } = await bootDirectSession("idle-card-starts-a-turn", {
         idle: () => true,
         sendUserInput: async () => ({ handled: "prompt" }),
@@ -11141,14 +11142,14 @@ console.log(JSON.stringify(args));
 
       expect(sends).toHaveLength(1);
       expect(String(sends[0]?.content)).toContain("wake up");
-      expect(sends[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      expect(sends[0]?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
     });
 
     // The Legion entry names its controller's session in the start-turn mark from its
     // `session_start` until the start turn runs (`../src/card-wake`): an idle card there, in any
     // mode, is a follow-up that starts no turn, so the start message keeps the first turn. A mark
     // naming another session (a `task` subagent's) changes nothing.
-    test("sends a card that reaches an idle session the start-turn mark names as a follow-up that starts no turn, and leaves it a steer under another session's mark", async () => {
+    test("sends a card that reaches an idle session the start-turn mark names as a follow-up that starts no turn, and leaves it an aside under another session's mark", async () => {
       const { agent, delivered, sends } = await bootDirectSession("idle-card-start-turn", {
         idle: () => true,
       });
@@ -11162,7 +11163,7 @@ console.log(JSON.stringify(args));
       iface.startupTurn = { session: "ses_task_subagent", sentAt: undefined };
       agent.push(forwardedRoleEnvelope("legion-controller", "other mark", "other-mark-card"));
       await delivered(2);
-      expect(sends[1]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      expect(sends[1]?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
     });
 
     // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
@@ -15200,18 +15201,17 @@ console.log(JSON.stringify(args));
     ).toHaveLength(1);
   });
 
-  // A context without `isIdle` cannot say no turn runs, and the wake for a folded card needs it, so
-  // its cards stay steers with `triggerTurn`: an aside there could fold into the context with no
-  // turn after an interrupt or in plan mode, where a steer starts one.
-  test("delivers an inbound card as a steer on a host that reports no idle state", async () => {
-    const { agent, delivered, fixture } = await bootDirectSession("deliver-as-steer");
+  // A context without `isIdle` cannot say whether a turn runs; its cards are asides with
+  // `triggerTurn` as every other host's are, which an idle host starts a turn for.
+  test("delivers an inbound card as an aside on a host that reports no idle state", async () => {
+    const { agent, delivered, fixture } = await bootDirectSession("deliver-as-aside");
 
-    agent.push(forwardedRoleEnvelope("legion-controller", "steer me in", "steer"));
+    agent.push(forwardedRoleEnvelope("legion-controller", "aside me in", "aside"));
     await delivered(1);
 
     expect(fixture.deliveries.length).toBe(1);
-    expect(fixture.deliveries[0]?.content).toContain("steer me in");
-    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(fixture.deliveries[0]?.content).toContain("aside me in");
+    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
   });
 
   test("acknowledges an agent-subject request before any Dispatch call or the injection", async () => {
@@ -16255,6 +16255,57 @@ describe("messages missed while the subscription was down", () => {
           message.includes("messages published while its connection is down are not recovered")
         )
       ).toHaveLength(1);
+    });
+  });
+
+  // A session behind on its inbox read a card stamped five hours earlier, took the stamp for the
+  // present time, and told other sessions that the machines' clocks were slow. Each model request
+  // now shows when the card reached the session beside when it was sent (`../src/card-age`).
+  describe("the time a card reached the session", () => {
+    test("a card the host writes hours after its send shows every model request when it was delivered and how long it waited", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("card-age-late", model);
+      const sentAt = Date.now() - (5 * 3_600_000 + 30_000);
+      const frame = JSON.stringify({
+        event_id: "evt-card-age-late",
+        source: "agent",
+        source_event_id: "source-card-age-late",
+        source_session: "ses_peer",
+        topic: session.agentSubject,
+        dedupe_key: "agent.ses_peer.card-age-late",
+        issued_at: sentAt,
+        payload_summary: "Its log reports the time from date -u.",
+        trace_id: "trace-card-age-late",
+      });
+
+      // The turn streams, so the host holds the card until the turn takes it.
+      session.live(session.agentSubject).push(frame);
+      await until(() => session.cards("evt-card-age-late").length > 0, "the live card");
+      await session.take();
+      const [card] = session.cards("evt-card-age-late");
+      if (card === undefined) throw new Error("the card was not handed");
+      const written = {
+        role: "custom",
+        customType: card.customType,
+        content: card.content,
+        display: true,
+        details: card.details,
+        timestamp: sentAt,
+      };
+      const context = sessionContext("ses_replay");
+      const contextHandler = session.fixture.handlers.get("context");
+      if (contextHandler === undefined) throw new Error("no context handler was registered");
+      const first = JSON.stringify(await contextHandler({ messages: [written] }, context));
+      const second = JSON.stringify(await contextHandler({ messages: [written] }, context));
+
+      expect(first).toMatch(/\\n {2}delivered: \\"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\\"\\n/);
+      expect(first).toContain(
+        'waited: \\"5 h 0 min between at and delivered; at is when it was sent, not the present time\\"'
+      );
+      // The same bytes in every request, so the provider's prompt cache reads them again.
+      expect(second).toBe(first);
+      // The card the host keeps is the one it was handed.
+      expect(card.content).not.toContain("delivered:");
     });
   });
 

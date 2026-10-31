@@ -11,6 +11,7 @@ envoy:
   to: you (ses_example_recipient)
   from: 01a0bbbb-cccc-7ddd-eeee-0123456789ab (Reviewer)
   at: "2026-09-07T04:41:12Z"
+  delivered: "2026-09-07T04:41:13Z"
   id: agent-message-2
   by: "2026-09-07T05:00:00Z"
   urgency: high
@@ -35,10 +36,12 @@ envoy:
 
 - `to`: the local inbox that receives this delivery.
 - `from`: the sending session's self-asserted id, with its session title in parentheses when the envelope carries one. Attribution and a direct-reply target, not an authenticated identity.
-- `at`: the envelope timestamp; judge freshness by it.
+- `at`: when the sender sent it, by the sender's clock. It is not the present time: a delivery read late carries an old `at`.
+- `delivered`: when this session got the delivery. An Oh My Pi session shows it in every model request, beside `at`.
+- `waited`: present when `delivered` is 15 minutes or more after `at`: how long the delivery waited, in words. An old `at` on a late delivery says the delivery waited, not that a clock is wrong.
 - `id`: the delivery id; pass it as `in_reply_to` when you reply.
 - `by`: the expiry deadline, when the sender set one.
-- `urgency`: the sender's priority: `low`, `med`, `high` or `blocking`.
+- `urgency`: how soon the sender asks you to act: `low`, `med`, `high` or `blocking`. It is for you to read only: it does not change when a delivery reaches you, or its place among others.
 - `expects_reply`: `none`, `optional` or `required`.
 - `re`: the delivery this one replies to. A Dispatch frame names it as a `dispatch://` ref: the ask (`dispatch://KEY/ask/<id>`, or `dispatch://PROJECT/artifact/<slug>/ask/<id>` for a document ask) or the message (`dispatch://KEY/message/<id>`), never the quoted text. On an ask, `dispatch.question` holds the start of the question's text; `dispatch read` gives the whole.
 - `supersedes`: an earlier delivery this one replaces; act on this one in its place.
