@@ -27,12 +27,13 @@ type testAdviceAsk struct {
 }
 
 type testWriteAdvice struct {
-	IssueStatus             string          `json:"issue_status"`
-	SessionWritesSinceHuman int             `json:"session_writes_since_human"`
-	YourOpenAsks            []testAdviceAsk `json:"your_open_asks"`
-	DecisionBlocks          *int            `json:"decision_blocks"`
-	DecisionBlocksAdded     *int            `json:"decision_blocks_added"`
-	LegionManagedStatus     *bool           `json:"legion_managed_status"`
+	IssueStatus             string              `json:"issue_status"`
+	SessionWritesSinceHuman int                 `json:"session_writes_since_human"`
+	YourOpenAsks            []testAdviceAsk     `json:"your_open_asks"`
+	DecisionBlocks          *int                `json:"decision_blocks"`
+	DecisionBlocksAdded     *int                `json:"decision_blocks_added"`
+	SupersededApproval      *supersededApproval `json:"superseded_approval"`
+	LegionManagedStatus     *bool               `json:"legion_managed_status"`
 	UnparsedOpeners         *struct {
 		Count    int      `json:"count"`
 		Examples []string `json:"examples"`

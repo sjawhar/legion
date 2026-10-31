@@ -28,12 +28,18 @@ const copyHeapMeasurement = "DISPATCH_MEASURE_COPY_HEAP"
 // keystrokeRunStates are the states of a room that took a run of a million keystrokes, each its
 // own item, after the first paragraph of a small document, and of the same room once three
 // one-character frames each named a run item as its left origin and the run item a third of a
-// million later as its right origin: a decode of the second scans a million distinct items, each
-// with its own scan mark, the heaviest shape a decode re-scans.
+// million later as its right origin: a decode of the second scans 1,000,002 distinct items, each
+// with its own scan mark, the whole of roomScanTotal, the heaviest shape a decode re-scans.
+//
+// The run is six keystrokes past a million so that those three frames carry the whole total
+// themselves. Under sjawhar/ygo v1.51.3-sami.7 the seed document's own decode counted four scans,
+// and a run of 1,000,000 reached the total with them; under v1.54.1-sami.1 that decode counts
+// none, measured as the unscanned state's re-scan in
+// TestACopyOfARoomAtTheScanTotalCostsACopyOfItsStateAndAboutASecondOfScans.
 func keystrokeRunStates(t *testing.T) (keystrokes, scanned []byte) {
 	t.Helper()
 	const runner, scanner crdt.ClientID = 1_000, 4_000_000
-	const run = 1_000_000
+	const run = 1_000_006
 	tree, err := pmdoc.Parse("# Title\n\nOne paragraph of ordinary prose.\n")
 	if err != nil {
 		t.Fatal(err)

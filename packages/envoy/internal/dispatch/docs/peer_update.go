@@ -195,9 +195,9 @@ const frameRecheck = heaviestHandoffBound / 64
 
 // jsonReencodeGrowth is the most a byte of JSON content can grow to once ygo writes it into the
 // room's state again. ygo keeps a JSON item's, a format's and an embed's values decoded and encodes
-// each again as JSON text with encoding/json (fmtValToJSON, sjawhar/ygo v1.51.3-sami.7,
-// crdt/update.go:436-453 and :1367-1388). A JSON item whose values read only as lib0 Any, as ygo
-// up to 1.51.0 wrote them (decodeContent's wireJSON case, :1087-1118), grows the most: each false,
+// each again as JSON text with encoding/json (fmtValToJSON, sjawhar/ygo v1.54.1-sami.1,
+// crdt/update.go:488-500 and :1563-1574). A JSON item whose values read only as lib0 Any, as ygo
+// up to 1.51.0 wrote them (decodeContent's wireJSON case, :1231-1263), grows the most: each false,
 // one byte, is written as the five of false with its length prefix, six bytes a byte. A JSON text
 // grows less: encoding/json writes a number below 10^21 in full, so the four bytes of 1e20, five
 // with their length prefix, become the twenty-one of 100000000000000000000, twenty-two with
@@ -205,8 +205,8 @@ const frameRecheck = heaviestHandoffBound / 64
 const jsonReencodeGrowth = 6
 
 // maxMessageBytes is the most one websocket message a browser sends may carry, ygo's
-// Server.MaxMessageBytes, whose own default is 64 MiB (sjawhar/ygo v1.51.3-sami.7,
-// provider/websocket/server.go:1020-1028). It is a floor against a client that is not the editor at
+// Server.MaxMessageBytes, whose own default is 64 MiB (sjawhar/ygo v1.54.1-sami.1,
+// provider/websocket/server.go:150-157). It is a floor against a client that is not the editor at
 // all, never the bound on a document: the bound is weighPeerUpdate's, which walks a frame without
 // decoding it (walkUpdate) and refuses an oversized one before anything decodes it, so a frame at
 // this floor that the hook refuses costs the pod the frame itself and nothing proportional to the
@@ -228,7 +228,8 @@ const maxMessageBytes = 54 << 20
 
 // weighPeerUpdate is ygo's Server.OnPeerUpdate: the room hands it every update and whole-state
 // message a read-write browser sends, with the apply that would put it in the room, and a read-only
-// browser never reaches it (sjawhar/ygo v1.51.3-sami.7, provider/websocket/peer_update.go:68-110).
+// browser never reaches it (sjawhar/ygo v1.54.1-sami.1, provider/websocket/peer_update.go:84-151,
+// provider/websocket/peer.go:263-270).
 // An update it does not apply is neither stored nor relayed to the room's other browsers, and the
 // *websocket.PeerClose it refuses with closes that one browser with that code and reason.
 //
@@ -236,12 +237,18 @@ const maxMessageBytes = 54 << 20
 // refuses - bytes ygo's decoder would refuse, or content the Proof editor never sends: a
 // subdocument, a root other than the fragment and the margin - is answered, unless the walk
 // reached a client group of the history a rebuild replaced before it refused (below), with the
-// walk's error and never applied, so ygo answers that browser SyncStatus(0), integrates nothing and
-// leaves it connected (provider/websocket/peer.go:247-263). The apply is not what answers such a
-// frame: though a room's bounded document takes a failed apply back out whole (newRoomScans), ygo
-// would first decode and integrate every struct before the bad byte, at the cost the walk is there
-// to keep off the peer's read loop, and the room would have to be left to refuse what the editor
-// never sends.
+// walk's error and never applied, so ygo integrates nothing of it and closes that browser with
+// 4205 "Reset Connection", the close it gives every hook error that refused an update before the
+// apply ran (sjawhar/ygo v1.54.1-sami.1, provider/websocket/peer_update.go:38-52,
+// provider/websocket/server.go:137-142). Under v1.51.3-sami.7 the browser was answered
+// SyncStatus(0) and left connected; upstream reearth/ygo#304 was merged in the later form, which
+// closes it, and a hook can keep a refused browser connected only by letting the room's own apply
+// refuse the update. The provider reconnects at once and sends the frame again, and the walk
+// refuses it again: only a client that is not the Proof editor sends one of these, which is what
+// the walk is there to tell apart. The apply is not what answers such a frame either: though a
+// room's bounded document takes a failed apply back out whole (newRoomScans), ygo would first
+// decode and integrate every struct before the bad byte, at the cost the walk is there to keep off
+// the peer's read loop, and the room would have to be left to refuse what the editor never sends.
 //
 // While the room's last measured rendering plus the update's own bytes stay under
 // pmdoc.MaxDocumentBytes, the bytes admit the update. At or over it, the update is admitted only
@@ -329,9 +336,13 @@ const maxMessageBytes = 54 << 20
 // reconnect. Any other error the apply returns - one that would park structs or delete ranges past
 // the room's pending cap (MaxPendingItems, which the room holds from the end of its load,
 // TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad) - is returned as it is, so ygo answers that
-// browser SyncStatus(0) and leaves it connected, exactly as a room without this hook does. The
-// struct total refuses such an update first: it counts each parked struct and parked delete range
-// splitsAStructCanCause times within maxUpdateItems, the cap itself.
+// browser SyncStatus(0) and leaves it connected, exactly as a room without this hook does: the
+// apply ran, which is what keeps a refused browser connected where a refusal before the apply
+// closes it (provider/websocket/peer_update.go:136-151). The pending cap refuses such an update
+// before the apply scans or changes anything, so it costs the room neither charge nor scans
+// (TestAPendingCapRefusalCostsTheRoomNeitherChargeNorScans). The struct total refuses such an
+// update first: it counts each parked struct and parked delete range splitsAStructCanCause times
+// within maxUpdateItems, the cap itself.
 func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
 	replica := s.liveReplica(info.Doc)
 	charge := replica.roomCharge()
@@ -568,7 +579,7 @@ type peerWeighing struct {
 // what a browser holding a history at the decode cap needs: its whole-state message, the history
 // with an edit made since, is past the cap, and the walk refuses it at the header of the group
 // that passes it; when the browser's own client sorts before the history's (ygo writes groups by
-// ascending client, sjawhar/ygo v1.51.3-sami.7, crdt/update.go:251; Yjs by descending, yjs 13.6.32
+// ascending client, sjawhar/ygo v1.54.1-sami.1, crdt/update.go:386; Yjs by descending, yjs 13.6.32
 // src/utils/encoding.js:99), and a history one client wrote is one group, no struct of the history
 // is read before that refusal, and only the header shows it. Every rule the walk refuses a
 // history's handoff by - its count, its content, its delete set - comes at that header or after
@@ -652,9 +663,9 @@ func (w *peerWeighing) walkedDelete(client, clock, length uint64) {
 // splitsAStructCanCause is the most structs integrating one struct can add to a store beyond
 // itself, and the most applying one delete range can: each splits at most the item it starts in
 // and the item it ends in (an item's integrate splits the items holding its origin and its right
-// origin, sjawhar/ygo v1.51.3-sami.7, crdt/update.go:718-720 and crdt/item.go:83-106, through
-// crdt/store.go:91-140; a delete range splits the items at its two ends,
-// crdt/delete_set.go:171-172).
+// origin, sjawhar/ygo v1.54.1-sami.1, crdt/update.go:928-935 and crdt/item.go:98-110, through
+// crdt/store.go:136-185; a delete range splits the items at its two ends,
+// crdt/delete_set.go:199-201).
 const splitsAStructCanCause = 2
 
 // added is what the walked update can add to the room's struct total: each new struct with the
@@ -745,8 +756,8 @@ func unrenderedBytes(walked updateStruct) uint64 {
 }
 
 // frameBytes is what walked, a struct past the room's state, can add to the room's frame total:
-// to the whole-state frame (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.51.3-sami.7,
-// crdt/update.go:96-101 and :231-271, and encodeItem, :285-424), now and through whatever happens
+// to the whole-state frame (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.54.1-sami.1,
+// crdt/update.go:94-98 and :236-258, and encodeItem, :461-588), now and through whatever happens
 // to it later -
 //
 //   - its own bytes in the update (updateStruct.size), with what ygo's writing of its content
@@ -916,7 +927,7 @@ const structTotalRecheck = maxUpdateItems / 64
 //
 // The total is an exact count plus what the hook admitted since it. The count walks the room's
 // encoded state (countRoomStructs), which carries parked structs and parked delete ranges
-// (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.51.3-sami.7, crdt/update.go:123-145). It is taken at
+// (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.54.1-sami.1, crdt/update.go:236-258). It is taken at
 // the room's load, beside the load's rendering (keepReplica), with each count the service's
 // measurer makes of the room (elementMeasurer.count), and by the hook to confirm a total near or
 // past the cap. What the hook admits after it is each update's addition (peerWeighing.added): its
@@ -1055,7 +1066,7 @@ func retiredClientsOf(doc *crdt.Doc) map[crdt.ClientID]uint64 {
 
 // retiredClock reads a retired client's clock as ygo decodes the int64 a rebuild wrote: lib0 Any
 // writes an integer within 32 bits as a varint, which decodes as an int64, and a larger one within
-// 2^53 as a float64 (sjawhar/ygo v1.51.3-sami.7, encoding/encoder.go:283-299,
+// 2^53 as a float64 (sjawhar/ygo v1.54.1-sami.1, encoding/encoder.go:283-299,
 // internal/anycodec/decoder.go:276-296). A clock of zero retires nothing.
 func retiredClock(value any) (uint64, bool) {
 	switch value := value.(type) {
@@ -1408,8 +1419,8 @@ func structTotalOf(tally updateTally, err error, pending crdt.PendingStats) uint
 }
 
 // errApplyTooHeavy is the hook's answer to an update whose apply alone is estimated to allocate
-// more than applyTooHeavyBytes: no turn could hold it, even alone. It is never applied. ygo answers
-// the browser SyncStatus(0) and leaves it connected, as it answers a walk's refusal.
+// more than applyTooHeavyBytes: no turn could hold it, even alone. It is never applied, so ygo
+// closes the browser with 4205 "Reset Connection", as it closes one whose frame the walk refuses.
 var errApplyTooHeavy = errors.New("the update is heavier to apply than the pod can hold")
 
 // goMemoryLimitBytes is the Go runtime's soft memory limit on the production pod: 90 per cent of
@@ -1439,8 +1450,8 @@ const heapAboveTheReserve = goMemoryLimitBytes - roomBudgetBytes - documentReadB
 // It is not in the spec: it is the plan's departure 8, large applies taking turns, weighed by each
 // apply's estimate rather than counted in slots. Every browser's first sync hands over its whole
 // state, and ygo's apply decodes every struct of it, and every value of each, before decodeAndPark
-// drops what the room already holds (sjawhar/ygo v1.51.3-sami.7, crdt/update.go:630-652, the
-// values at :1174-1188), so fifty browsers reconnecting at once to rooms of heavy documents would
+// drops what the room already holds (sjawhar/ygo v1.54.1-sami.1, crdt/update.go:807-942, the
+// values at :1222-1263), so fifty browsers reconnecting at once to rooms of heavy documents would
 // otherwise decode fifty handoffs at the same moment. A count of slots sized for the heaviest
 // handoff could not bound an update the editor never sends, whose apply allocates in proportion
 // to the values it carries whatever the room holds: 25,165,779 bytes of null values in one struct

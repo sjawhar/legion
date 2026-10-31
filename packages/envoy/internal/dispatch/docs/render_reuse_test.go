@@ -219,8 +219,9 @@ func describeRendering(markdown *string) string {
 	return fmt.Sprintf("%d bytes", len(*markdown))
 }
 
-// take moves the shadow through what log has logged since its last drain, rendering after each
-// update. The caller holds sh.mu.
+// take moves the shadow through what log has logged since its last drain - each update and then
+// what its transaction parked, as the replica takes them (renderedReplica.observe) - rendering
+// after each update. The caller holds sh.mu.
 func (room *shadowRoom) take(sh *renderShadow, log *crdt.UpdateLog) {
 	base, updates := log.Drain()
 	if base != nil {
@@ -237,6 +238,11 @@ func (room *shadowRoom) take(sh *renderShadow, log *crdt.UpdateLog) {
 		}
 		if err := crdt.ApplyUpdateV1(room.doc, logged.Update, nil); err != nil {
 			sh.failf("the shadow could not apply a logged update: %v", err)
+		}
+		if logged.Parked != nil {
+			if err := crdt.ApplyUpdateV1(room.doc, logged.Parked, nil); err != nil {
+				sh.failf("the shadow could not apply what a logged update parked: %v", err)
+			}
 		}
 		markdown, _, _ := shadowRender(room.doc)
 		changed := markdown == nil || room.markdown == nil || *markdown != *room.markdown

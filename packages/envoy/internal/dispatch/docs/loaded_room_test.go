@@ -1,9 +1,13 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,4 +290,75 @@ func TestAPreloadNoLoadWillTakeGivesUpItsCopy(t *testing.T) {
 
 	defer service.leavePreload(artifactID, resident)()
 	requireGivenUp(resident, "when it was left for a resident room")
+}
+
+// A browser's update that parks behind a gap in its own clocks leaves the replica holding what the
+// room holds: the log records each committed transaction's update and what it parked beside it,
+// and the replica applies both in turn (renderedReplica.observe, crdt.LoggedUpdate). The parked
+// struct renders nothing while it waits, so the room's rendering and the replica's are the same
+// through the gap and after the update that fills it, and the replica parks exactly what the room
+// parks: a replica that took the update alone would hold neither the parked struct nor, until the
+// gap was filled, the room's state.
+func TestAPeerUpdateThatParksBehindAGapLeavesTheReplicaHoldingWhatTheRoomHolds(t *testing.T) {
+	service, live, _ := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
+	rendering, err := renderDocument(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(decoded, crdt.EncodeStateAsUpdateV1(live, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	log := live.OpenUpdateLog()
+	t.Cleanup(log.Close)
+	replica := service.keepReplica(live, log, &rendering, decoded)
+
+	// Two of one browser's transactions, the second built on the first, sent out of order: the
+	// room is given the second alone, whose struct names the first's as its origin.
+	browser, text := peerDocument(t, live)
+	browser.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "first ", nil) })
+	filling := crdt.EncodeStateAsUpdateV1(browser, live.StateVector())
+	held := browser.StateVector()
+	browser.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "second ", nil) })
+	parking := crdt.EncodeStateAsUpdateV1(browser, held)
+
+	requireReplicaHoldsTheRoom := func(when string) {
+		t.Helper()
+		replica.observe("room", nil)
+		room, err := renderDocument(live)
+		if err != nil {
+			t.Fatalf("%s: render the room: %v", when, err)
+		}
+		if replica.markdown == nil || *replica.markdown != room {
+			t.Fatalf("%s: the replica renders %s, want the room's %q", when, describeRendering(replica.markdown), room)
+		}
+		roomPending, replicaPending := live.PendingStats(), replica.doc.PendingStats()
+		if roomPending.Items != replicaPending.Items || roomPending.DeleteRanges != replicaPending.DeleteRanges ||
+			!slices.Equal(roomPending.MissingFor, replicaPending.MissingFor) {
+			t.Fatalf("%s: the replica parks %+v, want the room's %+v", when, replicaPending, roomPending)
+		}
+		if !bytes.Equal(crdt.EncodeStateAsUpdateV1(replica.doc, nil), crdt.EncodeStateAsUpdateV1(live, nil)) {
+			t.Fatalf("%s: the replica's state is not the room's", when)
+		}
+	}
+
+	if err := crdt.ApplyUpdateV1(live, parking, nil); err != nil {
+		t.Fatalf("the room refused the later update: %v", err)
+	}
+	if parked := live.PendingStats(); parked.Items == 0 {
+		t.Fatalf("the room parked %+v, want the update behind the gap in the browser's clocks parked", parked)
+	}
+	requireReplicaHoldsTheRoom("with the browser's second update parked behind the gap")
+
+	if err := crdt.ApplyUpdateV1(live, filling, nil); err != nil {
+		t.Fatalf("the room refused the update filling the gap: %v", err)
+	}
+	if parked := live.PendingStats(); parked.Items != 0 {
+		t.Fatalf("the room still parks %+v once the gap is filled", parked)
+	}
+	requireReplicaHoldsTheRoom("once the update filling the gap is in")
+	if want := "# second first Title\n"; !strings.Contains(*replica.markdown, want) {
+		t.Fatalf("the replica renders %q, want it to hold %q", *replica.markdown, want)
+	}
+	runtime.KeepAlive(replica)
 }

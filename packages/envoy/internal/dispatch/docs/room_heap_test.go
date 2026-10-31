@@ -28,11 +28,12 @@ import (
 //
 // Both are weighed against the room's rendering, the markdown its stored version holds. A byte of
 // markdown is not what the heap follows, though: what it follows is the elements that markdown
-// makes, about 470 bytes of heap for each one for each copy at 524 KiB and at 1 MiB, and 578 at 51
-// KiB, where what a document holds whatever its size is a larger share of the whole. So the same
-// bytes in a denser shape cost more, and the 120 bytes a byte the figure above states were measured
-// on a shape four times denser than this one: the live benchmarks' own document
-// (benchmarkLiveDocument), 0.28 elements a byte, which weighs 130 bytes of heap a byte at 51 KiB
+// makes, about 500 bytes of heap for each one for each copy at 524 KiB and at 1 MiB (501 and 510
+// read and edited, 493 and 502), and 605 and 616 at 51 KiB, where what a document holds whatever
+// its size is a larger share of the whole. So the same bytes in a denser shape cost more, and the
+// 120 bytes a byte the figure above states were measured on a shape four times denser than this
+// one: the live benchmarks' own document (benchmarkLiveDocument), 0.28 elements a byte, which
+// weighed 130 bytes of heap a byte at 51 KiB under sjawhar/ygo v1.51.3-sami.7
 // - the figure reproduced - and which no room could hold at 524 KiB or at 1 MiB, since a
 // document may hold pmdoc.MaxDocumentElements and that shape passes them at about 490 KiB. The
 // shape here (residentRoomMarkdown) is that one with longer paragraphs, 0.055 elements a byte,
@@ -242,16 +243,18 @@ const typedRoomHeapMeasurement = "DISPATCH_MEASURE_TYPED_ROOM_HEAP"
 // (updateStruct.content) - two bytes for a keystroke, 4,098 for a paste - at both copies, and
 // nothing for the delete set each update carries, which the room holds.
 //
-// Measured on 2026-10-30, in a process of its own that peaked at 249 MiB resident: a mebibyte of
-// prose, 1,048,359 bytes of markdown making 57,600 elements, loaded and given its 2,010 updates in
-// 6 m 16 s. The typed room renders 1,091,319 bytes, still 57,600 elements, from 79,720 structs,
-// and holds 55,591,872 bytes of heap at both copies, 1,937,504 more than the same room loaded and
-// not typed into (53,654,368); dropping it frees 55,581,272, 10,600 bytes from that reading. It is
-// charged 58,424,320 bytes: its count's 54,144,000 beside a structure part of 4,280,320, which is
-// what its updates are priced at, 1.051 times the heap it holds. The reading of 2026-10-29, taken
-// before the cross-check, when the state and updates could be freed between the readings, read
-// the typed room at 52,347,472 bytes and its charge at 1.116 times that. At the price the
-// structure part charged a split before bytesOfHeapASplit, the heaviest kind's, the same room was
+// Measured on 2026-10-30 under sjawhar/ygo v1.54.1-sami.1, in a process of its own that peaked at
+// 229 MiB resident: a mebibyte of prose, 1,048,359 bytes of markdown making 57,600 elements,
+// loaded and given its 2,010 updates in 7 m 46 s. The typed room renders 1,091,319 bytes, still
+// 57,600 elements, from 79,720 structs, and holds 58,734,632 bytes of heap at both copies,
+// 1,931,048 more than the same room loaded and not typed into (56,803,584); dropping it frees
+// 58,730,568, 4,064 bytes from that reading. It is charged 62,000,920 bytes: its count's
+// 57,600,000 beside a structure part of 4,400,920, which is what its updates are priced at, 1.056
+// times the heap it holds. The same run under sjawhar/ygo v1.51.3-sami.7 read the typed room at
+// 55,591,872 bytes and charged it 58,424,320, 1.051 times that, and the reading of 2026-10-29,
+// taken before this test cross-checked its heap, when the state and updates could be freed
+// between the readings, read 52,347,472 bytes and a charge of 1.116 times it. At the price the
+// structure part charged a split before bytesOfHeapASplit, the heaviest kind's, that run was
 // charged 61,801,120 bytes, 1.179 times that reading's heap, which is what that price was
 // measured again for.
 func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing.T) {

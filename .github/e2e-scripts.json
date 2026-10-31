@@ -1,0 +1,128 @@
+{
+  "comment": [
+    "Every entry point under scripts/e2e/, in one of two lists, read by .github/workflows/e2e.yaml.",
+    "`hosted` is the set a GitHub-hosted runner can run: each row says what the job must give that",
+    "script, and `why_hosted` is a note on why a hosted runner can run it, read by no job. `elsewhere`",
+    "is every other script, each with the `needs` its own header states; e2e.yaml refuses one by",
+    "name with that text, and the refusal is a failed job. Both lists together must name every",
+    "scripts/e2e/*.sh of the tree, and e2e.yaml's select job fails when one is missing or extra.",
+    "`apt` is what the job installs for that script alone, `bun` whether it needs bun and this",
+    "repository's node_modules, `evidence_variable` the environment variable the script reads for",
+    "its evidence directory (empty where it takes none and keeps its work directory instead), and",
+    "`timeout_minutes` the job's limit, measured from the script's header with headroom."
+  ],
+  "hosted": [
+    {
+      "script": "child-adoption.sh",
+      "go_version_file": "packages/daemon/go.mod",
+      "apt": [],
+      "bun": false,
+      "evidence_variable": "CHILD_ADOPTION_EVIDENCE_DIR",
+      "timeout_minutes": 25,
+      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/child-adoption.sh; CI's service satisfies it, and this script starts none",
+      "jj": true
+    },
+    {
+      "script": "dispatch-claimant-delivery.sh",
+      "go_version_file": "packages/envoy/go.mod",
+      "apt": ["postgresql-client"],
+      "bun": true,
+      "evidence_variable": "",
+      "timeout_minutes": 25,
+      "why_hosted": "DATABASE_URL is required and must name a loopback host; its prerequisite loop takes go, bun, curl, psql and openssl, and it starts no container",
+      "jj": false
+    },
+    {
+      "script": "merged-root-waits.sh",
+      "go_version_file": "packages/daemon/go.mod",
+      "apt": [],
+      "bun": false,
+      "evidence_variable": "MERGED_ROOT_WAITS_EVIDENCE_DIR",
+      "timeout_minutes": 25,
+      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/merged-root-waits.sh; CI's service satisfies it, and this script starts none",
+      "jj": true
+    },
+    {
+      "script": "no-required-checks.sh",
+      "go_version_file": "packages/daemon/go.mod",
+      "apt": [],
+      "bun": false,
+      "evidence_variable": "NO_REQUIRED_CHECKS_EVIDENCE_DIR",
+      "timeout_minutes": 30,
+      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/no-required-checks.sh; the proof waits for three reads of what each base requires, so a run takes about seven minutes",
+      "jj": true
+    },
+    {
+      "script": "stage1-skeleton.sh",
+      "go_version_file": "packages/daemon/go.mod",
+      "apt": ["tmux"],
+      "bun": false,
+      "evidence_variable": "",
+      "timeout_minutes": 20,
+      "why_hosted": "The daemon refuses to start without tmux on PATH, and CI's tmux is the runner's apt binary; with LEGION_E2E_PG_DSN set the script starts no container of its own, which is how ci.yaml's test job already runs it",
+      "jj": false
+    }
+  ],
+  "elsewhere": [
+    {
+      "script": "burstable-kind.sh",
+      "needs": "a throwaway kind cluster with gVisor on an amd64 Linux host, with docker, go, kubectl, curl, zstd, a tar that supports --zstd and kind, and a worker image by digest (LEGION_E2E_IMAGE)"
+    },
+    {
+      "script": "claude-backend-sandbox.sh",
+      "needs": "a real cluster (LEGION_E2E_RUNTIME_CONTEXT and a worker image by digest), a devbox daemon, a real Claude Code and Oh My Pi on a model route, and the smoke repository"
+    },
+    {
+      "script": "claude-backend-tmux.sh",
+      "needs": "a devbox: tmux, a real Claude Code and Oh My Pi on a model route (LEGION_E2E_MODEL_ROUTE, with a gateway or a key file), and the smoke repository"
+    },
+    {
+      "script": "controller-start-tmux.sh",
+      "needs": "a devbox: tmux, the pinned Oh My Pi through mise, and its own Postgres and NATS containers, which it fetches from a registry outside this repository's own package (sjawhar/legion#2512)"
+    },
+    {
+      "script": "controller-sweep-kind.sh",
+      "needs": "a throwaway kind cluster with gVisor on an amd64 Linux host, with docker, go, kubectl, curl, zstd, a tar that supports --zstd and kind, and a worker image by digest (LEGION_E2E_IMAGE)"
+    },
+    {
+      "script": "dispatch-session-settings.sh",
+      "needs": "a model provider key of its own for each of its two models, ANTHROPIC_API_KEY and OPENAI_API_KEY, which this repository holds as no secret and will not: Sami answered that no API key goes into sjawhar/legion, and that a smoke test which calls a model runs in the deployment repository on workload identity federation (sjawhar/legion#2512)"
+    },
+    {
+      "script": "dispatch-user-turns.sh",
+      "needs": "a devbox: tmux, the pinned Oh My Pi on a model route (LEGION_E2E_MODEL_ROUTE), a Chromium that Playwright drives, and its own Postgres and NATS containers"
+    },
+    {
+      "script": "multi-repo-acceptance.sh",
+      "needs": "a live multi-repository run on the production cluster: it is the operator's acceptance observer, reads that run's daemon, Dispatch, GitHub and kubectl, and starts nothing of its own"
+    },
+    {
+      "script": "share-volumes-kind.sh",
+      "needs": "a throwaway kind cluster with gVisor on an amd64 Linux host, an NFS server in that cluster, with docker, go, kubectl, curl, zstd, a tar that supports --zstd and kind, and a worker image by digest (LEGION_E2E_IMAGE)"
+    },
+    {
+      "script": "stage2-tmux-supervision.sh",
+      "needs": "a devbox: tmux, a real Oh My Pi on a model route (LEGION_E2E_MODEL_ROUTE), docker, and the secret store's GEMINI_API_KEY_TESTS"
+    },
+    {
+      "script": "stage3-4b13b-acceptance.sh",
+      "needs": "a devbox, run from the operator's own Oh My Pi session: LEGION_E2E_MODEL_GATEWAY_URL, SMOKE_UPSTREAM_NATS, a running Postgres container (ACCEPT_PG_CONTAINER, ACCEPT_PG_PORT), a nats-server (ACCEPT_NATS_BIN), and the proof human's gh"
+    },
+    {
+      "script": "stage3-devbox-workflow.sh",
+      "needs": "a devbox, run from the operator's own Oh My Pi session: a model route (LEGION_E2E_MODEL_ROUTE), SMOKE_UPSTREAM_NATS, Legion's two role Apps, and the proof human's gh"
+    },
+    {
+      "script": "stage4a-sandbox-runtime.sh",
+      "needs": "a real cluster from the devbox: LEGION_E2E_PLATFORM, LEGION_E2E_POD_REACHABILITY and LEGION_E2E_MODEL_ROUTE, the daemon's restricted identity, and a worker image by digest"
+    },
+    {
+      "script": "stage4b-sandbox-tree.sh",
+      "needs": "the production cluster from the devbox, against production Dispatch, the production Envoy listener and production NATS, with real agents in the smoke repository"
+    },
+    {
+      "script": "verifiers-staging-token.sh",
+      "needs": "a projected service-account token the staging EKS cluster minted, and its own Postgres and NATS containers"
+    }
+  ]
+}

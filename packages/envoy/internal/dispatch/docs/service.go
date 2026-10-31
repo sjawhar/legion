@@ -102,9 +102,6 @@ type Service struct {
 	unrecordedMarkTTL time.Duration
 	// editNoticeQuiet is Deps.EditNoticeQuiet, with its default applied.
 	editNoticeQuiet time.Duration
-	// keepAlive is how often a document socket's peer is sent a keep-alive (keepalive.go):
-	// documentKeepAlive, which a test shortens.
-	keepAlive time.Duration
 	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
@@ -647,7 +644,6 @@ func New(deps Deps) *Service {
 		agentTokens:       deps.AgentTokens,
 		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:            settle,
-		keepAlive:         documentKeepAlive,
 		markWait:          markWait,
 		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),
@@ -1843,10 +1839,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	// Every update this settlement read is settled once it commits, so the row that left the
 	// settlement to a later load goes with that commit. It goes before the first event this
-	// settlement appends: a transaction marking this document owed as a copy (owedCopiesOf) holds
-	// its row while it waits for the events' commit-order lock, which this settlement would then be
-	// holding. The pending authors stay unless this settlement's version lists them (deleted
-	// below): a settlement that writes no version lists no one.
+	// settlement appends. A transaction marking this document owed as a copy (owedCopiesOf) holds
+	// its row until it commits, and this settlement then waits for it holding its owner row and
+	// room lock, which that transaction never takes; nor does it take what this settlement goes on
+	// to lock, its events locking only this document's owner row. The pending authors stay unless
+	// this settlement's version lists them (deleted below): a settlement that writes no version
+	// lists no one.
 	if err := clearSettlementPending(ctx, tx, room); err != nil {
 		return abandon(err)
 	}

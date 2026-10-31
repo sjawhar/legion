@@ -146,7 +146,7 @@ const scanGap = 500
 
 // The client of the person whose update is measured is the higher one in each fixture: a client
 // that loses the tie-break against an item at the same place stops its scan there
-// (sjawhar/ygo v1.51.3-sami.7, crdt/item.go:160-169), and one that wins scans on past every item at
+// (sjawhar/ygo v1.54.1-sami.1, crdt/item.go:170-179), and one that wins scans on past every item at
 // that place, which is the order whose count the room's scan total has to hold.
 const (
 	scanFirstClient  crdt.ClientID = 1_001
@@ -159,8 +159,8 @@ const tangledTypist crdt.ClientID = 5
 // tangledRoom is chargedPeerRoom's room, its document bounded by its scan budget (newRoomScans),
 // after a browser of client tangledTypist typed typed characters onto the end of its paragraph, one
 // keystroke an update through the hook. Each keystroke stays an item of its own in the room, since
-// ygo merges a run of typed characters only within one transaction (sjawhar/ygo v1.51.3-sami.7,
-// crdt/transaction.go:191).
+// ygo merges a run of typed characters only within one transaction (sjawhar/ygo v1.54.1-sami.1,
+// crdt/transaction.go:242-247).
 func tangledRoom(t *testing.T, typed int) (*Service, *crdt.Doc, *renderedReplica, *roomCharge) {
 	t.Helper()
 	service, room, replica, charge := chargedPeerRoom(t)
@@ -215,7 +215,7 @@ func tangledFrame(t *testing.T, room *crdt.Doc, typed int) []byte {
 
 // scanningFrame is client's frame of items 1-character strings, each naming origin as its left
 // origin and no right origin, so the scan of each passes every item after origin in its list
-// (sjawhar/ygo v1.51.3-sami.7, crdt/item.go:151-191) up to one of client's own.
+// (sjawhar/ygo v1.54.1-sami.1, crdt/item.go:152-200) up to one of client's own.
 func scanningFrame(client crdt.ClientID, origin crdt.ID, items int) []byte {
 	f := newV1Frame(1).group(items, uint64(client), 0)
 	for range items {
@@ -267,7 +267,7 @@ func requireRoomAsItWas(t *testing.T, before, after roomPicture) {
 }
 
 // An update the room's bounded document refuses leaves no trace in the room's bookkeeping but what
-// its scans cost, as it leaves none in the document (sjawhar/ygo v1.51.3-sami.7,
+// its scans cost, as it leaves none in the document (sjawhar/ygo v1.54.1-sami.1,
 // crdt/apply_rollback.go:9-21): a frame whose scans pass its allowance, which every other rule of
 // the hook admits and an unbounded copy of the room applies, is refused with 4413 DOC_TOO_TANGLED,
 // and the room's document, the budget's used bytes, the room's structure part, its struct total and
@@ -331,6 +331,66 @@ func TestAnIntegrateScanRefusalLeavesTheRoomsChargeAndTotalAsTheyWere(t *testing
 	requireRoomAsItWas(t, before, pictureRoom(service, room, replica, charge))
 	if scannedAfter, _ = replica.scans.figures(); scannedAfter != scannedBefore {
 		t.Errorf("an apply that scanned nothing left the room's scan total at %d, want the %d it was", scannedAfter, scannedBefore)
+	}
+	runtime.KeepAlive(replica)
+}
+
+// A pending cap refuses a browser's update before the apply begins: ygo reads the update against
+// the cap before it starts the journal or asks the document's scan budget (sjawhar/ygo
+// v1.54.1-sami.1, crdt/update.go:743-760, crdt/apply_rollback.go:140-157), so the refusal reports
+// no scans at all, and the room's scan total neither takes any for it nor has any to give back.
+// The hook returns the error as it is, so ygo answers that browser SyncStatus(0) and leaves it
+// connected (weighPeerUpdate), and the room's charge, its structure part, its struct total and its
+// recorded delete ranges are as they were: nothing of the update was booked, so nothing is
+// refunded either.
+//
+// Only ygo's apply can make this refusal: the struct total counts each parked delete range
+// splitsAStructCanCause times within maxUpdateItems and refuses a frame that would pass the room's
+// own cap of maxUpdateItems first (TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad), so the
+// room here is given a cap as small as the frames this test sends.
+func TestAPendingCapRefusalCostsTheRoomNeitherChargeNorScans(t *testing.T) {
+	const parked = 4
+	// What ygo answers, which the hook's accounting rests on.
+	asked := 0
+	bounded := newDocumentCopy(crdt.WithClientID(1))
+	bounded.SetMaxPendingItems(parked)
+	bounded.SetIntegrateScanBudget(func(any) int {
+		asked++
+		return perFrameScanCeiling
+	})
+	if err := crdt.ApplyUpdateV1(bounded, deleteRangesFrom(11, parked), nil); err != nil {
+		t.Fatalf("the document refused %d parked delete ranges, its whole cap: %v", parked, err)
+	}
+	if asked != 1 {
+		t.Fatalf("the admitted apply asked the budget %d times, want once", asked)
+	}
+	err := crdt.ApplyUpdateV1(bounded, deleteRangesFrom(12, 1), nil)
+	var refused *crdt.RefusedUpdateError
+	if !errors.As(err, &refused) || !errors.Is(err, crdt.ErrInvalidUpdate) || errors.Is(err, crdt.ErrIntegrateScanBudget) {
+		t.Fatalf("the cap refused one range past it with %v, want a RefusedUpdateError wrapping ErrInvalidUpdate", err)
+	}
+	if refused.Scanned != 0 || asked != 1 {
+		t.Fatalf("the refusal reports %d items scanned, and the budget was asked %d times in all, want none and the admitted apply's one",
+			refused.Scanned, asked)
+	}
+
+	// And the same refusal through the hook, in a room the budget charges.
+	service, room, replica, charge := chargedPeerRoom(t)
+	room.SetMaxPendingItems(parked)
+	if err, called := weighInto(service, room, deleteRangesFrom(11, parked)); err != nil || !called {
+		t.Fatalf("the hook answered a frame parking the room's whole cap %v (applied %t), want it admitted", err, called)
+	}
+	before := pictureRoom(service, room, replica, charge)
+	scannedBefore, leftBefore := replica.scans.figures()
+	err, called := weighInto(service, room, deleteRangesFrom(12, 1))
+	var closed *websocket.PeerClose
+	if !called || errors.As(err, &closed) || !errors.Is(err, crdt.ErrInvalidUpdate) {
+		t.Fatalf("the hook answered %v (applied %t), want the apply's own error, which closes nothing", err, called)
+	}
+	requireRoomAsItWas(t, before, pictureRoom(service, room, replica, charge))
+	if scannedAfter, leftAfter := replica.scans.figures(); scannedAfter != scannedBefore || leftAfter != leftBefore {
+		t.Errorf("the refusal left the room's scan total at %d with %d left, want the %d and %d it was",
+			scannedAfter, leftAfter, scannedBefore, leftBefore)
 	}
 	runtime.KeepAlive(replica)
 }

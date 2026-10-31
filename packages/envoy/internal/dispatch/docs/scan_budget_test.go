@@ -49,7 +49,7 @@ const longSessionPlaceCharacters = 1_000
 // do. Each keystroke is one update the room takes as it is made, and each browser sees the other's
 // keystrokes between 5 and 20 updates late, drawn afresh at each keystroke. The client of the
 // second browser is the higher, so its items scan on past the first's at the same place
-// (sjawhar/ygo v1.51.3-sami.7, crdt/item.go:160-169).
+// (sjawhar/ygo v1.54.1-sami.1, crdt/item.go:170-179).
 //
 // Each place is driven in documents of its own, fresh from seed, and handed to take as one place's
 // updates in the order its room takes them. A conflict scan passes only the items between an
@@ -104,9 +104,10 @@ func anHonestLongSession(t *testing.T, seed []byte, take func(place int, update 
 // document of its own, fresh from the seed (anHonestLongSession says why the sum is the session's).
 // It logs what the session's states re-scan past the seed's own re-scan, the count a reload starts
 // the room's total at (roomScans.rescanned), beside what the rooms' applies scanned. Set
-// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 28 s here. Run on 2026-10-28: 97,600 updates at 38
-// places scanned 42,401 items, at most 9 in one, re-scanning as 42,611; fifteen times 42,401 is
-// 636,015, within the 1,000,000 of roomScanTotal.
+// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 26 s here. Run on 2026-10-30: 97,600 updates at 38
+// places scanned 42,401 items, at most 9 in one, re-scanning as 42,587; fifteen times 42,401 is
+// 636,015, within the 1,000,000 of roomScanTotal. It read the same scans and the same ceiling on
+// 2026-10-28 under sjawhar/ygo v1.51.3-sami.7, re-scanning as 42,611.
 func TestTheRoomScanTotalHoldsFifteenHonestLongSessions(t *testing.T) {
 	if os.Getenv(scanMeasurement) == "" {
 		t.Skip("set " + scanMeasurement + "=1 to run the long session's measurement")
@@ -166,11 +167,12 @@ func TestTheRoomScanTotalHoldsFifteenHonestLongSessions(t *testing.T) {
 // rewrote whole until the decode cap refused a write (agentRewrittenState), and of the long-edited
 // 5 KiB document typed on until its state reached the decode cap (longEditedAtCapState) is each at
 // most half of roomScanTotal, so each leaves people at least half the total to edit it with. Set
-// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 198 s here with the store, the agent's rewrites 189 s
-// of them. Run on 2026-10-28: the heaviest document's 5,360,879-byte state re-scans 49,156 items,
-// the long-edited one's 14,427,285-byte state 10, and the agent-rewritten document's
-// 12,630,814-byte state, 28 whole rewrites, 475,136, the most, each within half the 1,000,000
-// total, 500,000.
+// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 159 s here with the store, the agent's rewrites 150 s
+// of them. Run on 2026-10-30: the heaviest document's 5,360,879-byte state, the long-edited one's
+// 14,427,285-byte state and the agent-rewritten document's 12,630,814-byte state, 28 whole
+// rewrites, re-scan no item at all, each far within half the 1,000,000 total, 500,000. On
+// 2026-10-28, under sjawhar/ygo v1.51.3-sami.7, the same three states re-scanned 49,156, 10 and
+// 475,136 items; the figure this test holds to is the half, not the reading.
 func TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed(t *testing.T) {
 	if os.Getenv(scanMeasurement) == "" {
 		t.Skip("set " + scanMeasurement + "=1 to run the heavy documents' re-scans")
@@ -209,15 +211,15 @@ func TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed(t *testing.T) {
 
 // A copy of a room at its scan total costs a copy of the same state with nothing to scan and about
 // a second of scans more, the architect's rule for the total: the run of a million keystrokes and
-// the same run once three frames scanned it whole (keystrokeRunStates), whose state re-scans a
-// million distinct items, the whole of roomScanTotal, each decoded as a room's load decodes its
+// the same run once three frames scanned it whole (keystrokeRunStates), whose state re-scans
+// 1,000,002 distinct items, the whole of roomScanTotal, each decoded as a room's load decodes its
 // stored state (decodeStoredState) at GOMAXPROCS=1 (measureLoad). The scanned copy takes at most
 // 1.5 s more than the unscanned one, and allocates at most twice bytesOfAScanMark more for each
 // item its scans pass, which is what ygo keeps a mark for (crdt/item.go:126-158). Set
-// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 11 s here. Run on 2026-10-28: the scanned copy re-scanned
-// 1,000,000 items in 2.219 s, allocating 457,822,248 bytes with a peak of 434,319,528 above the
-// heap before it; the unscanned one, 4 items, 1.464 s, 383,011,168 and 354,183,752: 0.755 s and
-// 74,811,080 bytes more, 74.8 bytes a scan.
+// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 11 s here. Run on 2026-10-30: the scanned copy
+// re-scanned 1,000,002 items in 2.217 s, allocating 456,926,192 bytes with a peak of 433,741,040
+// above the heap before it; the unscanned one, no item, 1.419 s, 382,005,224 and 353,177,568:
+// 0.798 s and 74,920,968 bytes more, 74.9 bytes a scan.
 func TestACopyOfARoomAtTheScanTotalCostsACopyOfItsStateAndAboutASecondOfScans(t *testing.T) {
 	if os.Getenv(scanMeasurement) == "" {
 		t.Skip("set " + scanMeasurement + "=1 to run the copy measurement")
@@ -261,7 +263,7 @@ func TestACopyOfARoomAtTheScanTotalCostsACopyOfItsStateAndAboutASecondOfScans(t 
 // chainedRun applies to doc count one-character items of client, each after the one before and
 // the first after after, each in a remote transaction of its own, as a room takes each of a
 // person's keystrokes: ygo merges a run of characters only within one transaction (sjawhar/ygo
-// v1.51.3-sami.7, crdt/transaction.go:191), so each stays an item of its own, and a scan from the
+// v1.54.1-sami.1, crdt/transaction.go:242-247), so each stays an item of its own, and a scan from the
 // run's first item passes count-1 distinct items. doc must have no observer yet, which would pay
 // for every transaction.
 func chainedRun(tb testing.TB, doc *crdt.Doc, after crdt.ID, client crdt.ClientID, count int) {
@@ -298,7 +300,7 @@ func lastCharacter(tb testing.TB, doc *crdt.Doc) crdt.ID {
 // browser's, perFrameScanCeiling. One frame scans a run of 400,000 distinct items once; the other a
 // run of 2,000 items two hundred times. lock-ms is the time from the apply's start to the room's
 // first update observer, which ygo runs once the transaction has released the document's lock
-// (sjawhar/ygo v1.51.3-sami.7, crdt/doc.go:794-799); ns/scan and the bytes a scanned item adds,
+// (sjawhar/ygo v1.54.1-sami.1, crdt/doc.go:805-813); ns/scan and the bytes a scanned item adds,
 // against a frame of one item that scans nothing, are the per-item costs perFrameScanCeiling and
 // bytesOfAScanMark quote. Run it with -benchtime=1x: each iteration builds its room afresh, a
 // keystroke at a time.

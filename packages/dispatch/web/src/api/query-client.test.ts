@@ -2,7 +2,7 @@ import { expect, jest, spyOn, test } from "bun:test";
 import { QueryObserver } from "@tanstack/react-query";
 
 import { ApiError, createApiClient, isRetryableQueryError } from "./client";
-import { DispatchQueryClient, queryRetryDelay } from "./query-client";
+import { DispatchQueryClient, queryRetry, queryRetryDelay } from "./query-client";
 
 /**
  * A server for one read whose every request is answered by the test: `answer()` lands the oldest
@@ -177,4 +177,22 @@ test("a read refused with a Retry-After longer than a minute still retries withi
       expect(wait).toBeLessThanOrEqual(60_000);
     }
   }
+});
+
+test("the sign-in check's EVENT_HEAD_UNAVAILABLE is asked again without limit, every other 503 twice", () => {
+  // EVENT_HEAD_UNAVAILABLE ends on its own once the event write holding it does; a failed read of
+  // Dispatch's database (EVENT_HEAD_READ_FAILED) may not, so it ends at the page's error and Retry.
+  const unproven = new ApiError(503, { code: "EVENT_HEAD_UNAVAILABLE", error: "ask again" });
+  const readFailed = new ApiError(503, { code: "EVENT_HEAD_READ_FAILED", error: "unreadable" });
+  for (const failures of [0, 2, 3, 50]) {
+    expect(queryRetry(failures, unproven)).toBe(true);
+  }
+  for (const refusal of [readFailed, new ApiError(503, { error: "service unavailable" })]) {
+    expect(queryRetry(0, refusal)).toBe(true);
+    expect(queryRetry(1, refusal)).toBe(true);
+    expect(queryRetry(2, refusal)).toBe(false);
+  }
+  expect(queryRetryDelay(0, unproven)).toBe(500);
+  expect(queryRetryDelay(4, unproven)).toBe(5_000);
+  expect(queryRetryDelay(4, readFailed)).toBe(500);
 });

@@ -63,7 +63,7 @@ const (
 	podGoMemoryLimitMargin = 128 << 20
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
-	// roomBudgetBytes (room_budget.go:42), bytesOfHeapAnElement (:56), roomCopies (:594),
+	// roomBudgetBytes (room_budget.go:41), bytesOfHeapAnElement (:61), roomCopies (:614),
 	// maxPeerInsertAtTheBound (peer_update.go:110), maxPeerByteCreep (:115) and maxMessageBytes
 	// (:227). No drive takes a mirror on trust. The server names its budget and what each refused
 	// document needs in the line it logs for a refusal (refuseOverRoomBudget), and the budget
@@ -72,7 +72,7 @@ const (
 	// insert allowance is refused, and a frame of exactly the message floor reaches the room's
 	// hook while one byte more does not.
 	roomBudgetBytesForTest         = 2 << 30
-	bytesOfHeapAnElementForTest    = 470
+	bytesOfHeapAnElementForTest    = 500
 	roomCopiesForTest              = 2
 	maxPeerInsertAtTheBoundForTest = 8 << 10
 	maxPeerByteCreepForTest        = 64 << 10
@@ -99,40 +99,40 @@ const (
 	roomCountIntervalForTest = 15 * time.Second
 
 	// bytesOfHeapAStructHeldForTest mirrors bytesOfHeapAStructHeld
-	// (internal/dispatch/docs/room_budget.go:80), the heap one copy of a room holds for each struct
+	// (internal/dispatch/docs/room_budget.go:85), the heap one copy of a room holds for each struct
 	// of its state, measured (TestAResidentRoomsHeapPerStructOfItsState); bytesOfHeapAStructForTest
-	// mirrors bytesOfHeapAStruct (:154), what the structure part charges each struct an update adds,
-	// bytesOfHeapASplitForTest bytesOfHeapASplit (:181), what it charges each split that struct can
+	// mirrors bytesOfHeapAStruct (:168), what the structure part charges each struct an update adds,
+	// bytesOfHeapASplitForTest bytesOfHeapASplit (:201), what it charges each split that struct can
 	// cause, splitsAStructCanCauseForTest splitsAStructCanCause
-	// (peer_update.go:658), and bytesOfHeapAByteOfTextForTest bytesOfHeapAByteOfText
-	// (room_budget.go:190), what it charges each byte of text an update's struct carries as the
-	// walk reads it, its length prefix included (unrenderedContentHeap, peer_update.go:703-719).
+	// (peer_update.go:669), and bytesOfHeapAByteOfTextForTest bytesOfHeapAByteOfText
+	// (room_budget.go:210), what it charges each byte of text an update's struct carries as the
+	// walk reads it, its length prefix included (unrenderedContentHeap, peer_update.go:714-730).
 	// TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd weighs a room's growth against them; a
 	// wrong mirror moves only how much growth it asks for, and its log line prints each figure
 	// beside the server's own. TestTheRoomBudgetDoesNotOverchargeTypingAndPasting prices each
 	// typed room's structure part from them, and fails once the budget charges a room more.
 	bytesOfHeapAStructHeldForTest = 170
-	bytesOfHeapAStructForTest     = 620
+	bytesOfHeapAStructForTest     = 650
 	bytesOfHeapASplitForTest      = 200
 	splitsAStructCanCauseForTest  = 2
 	bytesOfHeapAByteOfTextForTest = 2
 
 	// pressureReserveBytesForTest mirrors pressureReserveBytes
-	// (internal/dispatch/docs/room_budget.go:232), how far past its limit the deletes admitted while
+	// (internal/dispatch/docs/room_budget.go:252), how far past its limit the deletes admitted while
 	// the budget is full may take its charges. TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks
 	// fails unless the charges its shrinks leave are within it; a wrong mirror moves only that
 	// check, beside which it logs the server's own figures.
 	pressureReserveBytesForTest = 256 << 20
 
 	// bytesOfHeapAByteAtTheDensestForTest mirrors bytesOfHeapAByteAtTheDensest
-	// (internal/dispatch/docs/room_budget.go:135), what a room is charged at each copy for a byte of
+	// (internal/dispatch/docs/room_budget.go:140), what a room is charged at each copy for a byte of
 	// content its transactions add until its next count. With bytesOfHeapAStructForTest,
 	// bytesOfHeapASplitForTest and splitsAStructCanCauseForTest it prices the most a keystroke adds
 	// to its room's charge (keystrokeChargeForTest), from which
 	// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory leaves the room its person
 	// types in what all of their keystrokes could add, so no keystroke is refused for the budget; a
 	// wrong mirror moves only that room, beside which it logs the budget's arithmetic.
-	bytesOfHeapAByteAtTheDensestForTest = 1_058
+	bytesOfHeapAByteAtTheDensestForTest = 1_126
 	// keystrokeChargeForTest is the most one keystroke, a one-character insert, adds to its room's
 	// charge: its struct and the two splits it can cause in the structure part, and its byte of
 	// content at the densest price at both copies, none of it re-based by a count.
@@ -140,7 +140,7 @@ const (
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
-// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:229-448): an update that would
+// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:229-459): an update that would
 // take a document past the bound is refused with 4413 and DOC_TOO_LARGE, and the document is kept;
 // small updates carry a document over the bound only by the creep they are allowed; a document at
 // or over the bound can be opened, handed back whole, edited and shortened; an edit under it
@@ -421,7 +421,7 @@ func TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas(t *testing.T) {
 // reloaded room's total starts at what its stored state re-scans, which is what the first room had
 // come to, short of the scans of the refusal, which the store never held. Each frame's client is
 // above the one before it, so a decode of the stored state, which takes each client's structs in
-// the order of their clients (sjawhar/ygo v1.51.3-sami.7, crdt/update.go:251), integrates the
+// the order of their clients (sjawhar/ygo v1.54.1-sami.1, crdt/update.go:386), integrates the
 // frames in the order the room applied them.
 func TestTheRoomScanTotalSurvivesAReloadOverARealSocket(t *testing.T) {
 	memory := newMemoryHarness(t)
@@ -547,7 +547,7 @@ const (
 	tangledChainClient = 1_000
 	// tangledScanClient is the client of scanFrame's items, above every client of the chain, so
 	// each of its items wins the tie-break against each item of the chain and scans on past it
-	// (sjawhar/ygo v1.51.3-sami.7, crdt/item.go:160-169).
+	// (sjawhar/ygo v1.54.1-sami.1, crdt/item.go:170-179).
 	tangledScanClient = 4_000_000
 	// scanFramePadding is the bytes of the string scanFrame opens with: its 256 KiB take the
 	// frame's own share of its apply-heap estimate past the 2 MiB under which the room does not
@@ -599,7 +599,7 @@ func chainFrame(t *testing.T, state []byte) []byte {
 // scanFrame is a frame of client's: a string of scanFramePadding bytes after the chain's last item,
 // where nothing follows it to scan, and then items one-character strings, each naming the first
 // item chainFrame chained as its left origin and no right origin, so each scans the chain from
-// there to its end (sjawhar/ygo v1.51.3-sami.7, crdt/item.go:151-191).
+// there to its end (sjawhar/ygo v1.54.1-sami.1, crdt/item.go:152-200).
 func scanFrame(client crdt.ClientID, items int) []byte {
 	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
 		encoder.WriteVarUint(1)
@@ -882,10 +882,22 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // holds adds nothing to its charge (deletedRuns) and each room's second copy was charged before
 // the edit made it.
 //
-// What the fifty wait for is that bound. Measured on 2026-10-29 over four runs on a
-// three-processor sandbox, the server at the pod's Go memory limit and the collector at the
-// runtime's own ratio, the only one Dispatch runs at: 39 admitted and 11 refused every time, the
-// last refusal 16.1 to 20.5 s after the burst began and the last admission 1m12s to 1m23s, none
+// What the fifty wait for is that bound. Measured on 2026-10-30 on this two-processor pod, the
+// server at the pod's Go memory limit and the collector at the runtime's own ratio, the only one
+// Dispatch runs at, with bytesOfHeapAnElement at 500: a mebibyte of prose reserves 57,600,000
+// bytes at both copies and the 2,147,483,648-byte budget holds 37 such rooms. One after another,
+// the first refusal came with 37 rooms held by browsers that stayed, once the five whose browsers
+// went were closed for it, and so did the last; the peak a pod's kernel would charge was 3,661
+// MiB and the runtime held 3,786,700,472 bytes of the 3,865,470,566 its limit bounds, VmRSS 3,697
+// MiB. Fifty at once, 37 handed their state back and edited, the slowest answered after
+// 1m20.717s, 13 were refused at admission, the slowest after 10.506s, and none was answered 503;
+// the burst logged 120 grants of the copy bound, none holding all of it, the longest wait 40.501 s
+// and the longest hold 4.951 s; it charged 3,720 MiB and held 3,845,441,208 bytes, VmRSS 3,783
+// MiB, the whole drive in 336 s.
+//
+// Measured on 2026-10-29 over four runs on a three-processor sandbox, with the element price at
+// 470, where the same budget held 39 such rooms: 39 admitted and 11 refused every time, the last
+// refusal 16.1 to 20.5 s after the burst began and the last admission 1m12s to 1m23s, none
 // answered 503. In the run read line by line, the counts, 93,811,288 bytes each, asked for 7.1 s
 // of a wholly full bound between them; the decodes of the rooms' loads, 144,268,320 each, asked
 // for 42.8 s, two at a time in the 393,705,336-byte bound, which was 76.9% full over the burst and
@@ -894,7 +906,7 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // hold grew from 4.5 s to 8.1 s and the last admission came at 2m3.5s. A browser of this burst is
 // answered no sooner than the loads before it can decode, whatever the counts do.
 //
-// Those runs' peaks, 3,717 to 3,802 MiB, were read as VmRSS, which on this sandbox counts the
+// Those runs' peaks, 3,717 to 3,802 MiB, were read as VmRSS, which on that sandbox counts the
 // pages the runtime has released as well (peakResident). Read as a pod's kernel would charge it
 // and against the Go memory limit, both from the server's own trace (requireUnderThePod), the
 // run of 2026-10-29 charged 3,616 MiB with the browsers coming one after another and 3,727 MiB
@@ -1189,33 +1201,39 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 //
 // The arithmetic is the server's prices, mirrored. A typed room is charged its count - the
 // heaviest of its elements', rendered bytes' and structs' prices at both copies (copyHeap,
-// internal/dispatch/docs/room_budget.go:615-625), for prose its elements' - beside its structure
-// part (roomCharge, :318-362): each update's struct at bytesOfHeapAStruct with the two splits its
+// internal/dispatch/docs/room_budget.go:635-645), for prose its elements' - beside its structure
+// part (roomCharge, :338-382): each update's struct at bytesOfHeapAStruct with the two splits its
 // integration can cause at bytesOfHeapASplit, and its text as the walk reads it, its length prefix
 // included, at bytesOfHeapAByteOfText, all at both copies (peerWeighing.structureHeap,
-// peer_update.go:683-686): 2,048 bytes a keystroke and 18,432 for the paste, 428,032 a room. An
+// peer_update.go:694-697): 2,108 bytes a keystroke and 18,492 for the paste, 440,092 a room. An
 // admission reserves the stored version's count, which is what the room's load charges until its
 // browser types. Rooms are typed into two at a time, the server's two processors' worth, each pair
 // admitted one after the other before either types, so the second of a pair is admitted beside the
 // first's load alone; the arithmetic follows the drive room by room.
 //
-// The budget is not the server's real one: the drive sets it to 448 MiB through the test-only hook
+// The budget is not the server's real one: the drive sets it to 480 MiB through the test-only hook
 // (setRoomBudget) as soon as the server is up, and builds only the copies that budget needs. That
 // figure is a round number of mebibytes inside the window in which the arithmetic below admits
 // exactly eight rooms, four whole pairs, and refuses the ninth. A mebibyte of prose reserves
-// 54,144,000 bytes (57,600 elements at both copies) and a room typed as this one types is charged
-// 54,572,032, so the window runs from 435,720,192 bytes - what the eighth admission is weighed
+// 57,600,000 bytes (57,600 elements at both copies) and a room typed as this one types is charged
+// 58,040,092, so the window runs from 463,440,552 bytes - what the eighth admission is weighed
 // against, three pairs charged whole beside the seventh room's reservation and the eighth's - to
-// one byte under 490,720,256, what the ninth is weighed against and is refused at; 448 MiB is
-// 469,762,048. Run so on 2026-10-29 the drive passed in 485, 503, 717, 561 and 543 s, the 717
-// beside five other containers on this sandbox: the first refusal came at room 9, the
+// one byte under 521,920,736, what the ninth is weighed against and is refused at; 480 MiB is
+// 503,316,480. At the element price of 470 and the struct price of 620 that window ran from
+// 435,720,192 to one byte under 490,720,256 and the drive set 448 MiB, 469,762,048, which the
+// prices of 2026-10-30 leave 5,441,312 bytes of headroom over the eight charged rooms - too little
+// for the content a pair's typing holds between two counts, and the server refused a keystroke in
+// the seventh room rather than the ninth admission. Run at 448 MiB on 2026-10-29 the drive passed
+// in 485, 503, 717, 561 and 543 s, the 717
+// beside five other containers on that sandbox: the first refusal came at room 9, the
 // arithmetic's, the largest structure part the budget read as it closed the eight rooms was the
-// 428,032 bytes their updates are priced at, and in the 543-second run the server charged
+// 428,032 bytes their updates were priced at then, and in the 543-second run the server charged
 // 1,524 MiB of a pod's memory, of 1,525 MiB of VmRSS, and held 1,556,343,672 bytes of what its
 // 3,865,470,566-byte Go limit bounds, 2.1 GiB under it; the 1,490 to 1,518 MiB the earlier runs
 // recorded were read before or without that second reading (requireUnderThePod), the older of
 // them as VmRSS alone, which on this sandbox counts the pages the runtime has released as well
-// (peakResident). The same drive against the real 2 GiB budget is 39 rooms: it passed in 2,511 s on
+// (peakResident). The same drive against the real 2 GiB budget was 39 rooms at the element price
+// of 470, and is 37 at 500: it passed in 2,511 s on
 // this sandbox on 2026-10-29, 41 m 2 s of that from its first admission
 // to the refusal, where CI runs each shard of the memory suite under a 40-minute deadline
 // (.github/workflows/ci.yaml, the dispatch-memory job). What the full budget costs in memory is
@@ -1240,12 +1258,12 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 // alone on this sandbox, 0.47 s an update, 1 m 42 s to 2 m 9 s in the run of 2026-10-29 that took
 // 561 s, and 1 m 59 s to 2 m 53 s beside five other containers. A collector held to a tighter
 // ratio costs this drive dearly and buys its eight rooms nothing, since what they charge,
-// 436,576,256 bytes, leaves the Go memory limit room for a whole cycle of the runtime's own:
+// 464,320,736 bytes, leaves the Go memory limit room for a whole cycle of the runtime's own:
 // pinned at a seventh of the live heap at boot, the same pair took 4 m 52 s, 1.45 s an update,
 // the drive 2,072 s rather than 503, and its sweep then closed seven of its eight rooms inside
 // the wait closesOf gives them rather than all eight.
 func TestTheRoomBudgetDoesNotOverchargeTypingAndPasting(t *testing.T) {
-	const keystrokes, runs, pasteBytes, together, budget = 200, 10, 4 << 10, 2, 448 << 20
+	const keystrokes, runs, pasteBytes, together, budget = 200, 10, 4 << 10, 2, 480 << 20
 	building := time.Now()
 	memory := newMemoryHarness(t)
 	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
@@ -1703,7 +1721,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	const growers, markID, unheldMarkID, commentMark = 4, "memory-unrecorded-mark", "memory-unrecorded-mark-unheld", "proofComment"
 	// A hundred shrinks are one browser's four cuts of fifty bytes each, sent to twenty-five
 	// documents in the order it made them: ygo's update observer encodes a transaction's structs
-	// beside the document's whole delete set (sjawhar/ygo v1.51.3-sami.7, crdt/doc.go:597-612), so
+	// beside the document's whole delete set (sjawhar/ygo v1.54.1-sami.1, crdt/doc.go:591-595), so
 	// each carries the deletes of the cuts before it too, which a document that has taken them
 	// holds.
 	const shrunk, cutsEach, cutBytes = 25, 4, 50
@@ -2251,13 +2269,28 @@ func TestABrowserCannotPushADocumentPastTheDecodeCap(t *testing.T) {
 	}
 }
 
-// An update the walk refuses is not applied, over a real document socket of a real server: the
-// room answers it SyncStatus(0), keeps the browser connected, and its state vector and state are
-// what they were, for a frame of valid GC structs ending in one bad byte, which ygo's own apply
-// would integrate in part before it failed (sjawhar/ygo v1.51.3-sami.7, crdt/update.go:104-110),
-// for a subdocument and for a struct under a root the Proof editor never writes
-// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:235-244). The stored document,
-// once settled, holds none of them.
+// resetConnectionCloseCode and resetConnectionCloseReason are what ygo closes a browser with
+// whose update Server.OnPeerUpdate refused before the apply ran, matching Hocuspocus's
+// CloseEvents.ResetConnection (sjawhar/ygo v1.54.1-sami.1, provider/websocket/server.go:137-142).
+// Dispatch names no such close of its own: its own refusals carry the contracts' codes.
+const (
+	resetConnectionCloseCode   = 4205
+	resetConnectionCloseReason = "Reset Connection"
+)
+
+// An update the walk refuses is not applied, over a real document socket of a real server: ygo
+// closes the browser that sent it with 4205 "Reset Connection" and the room's state vector and
+// state are what they were, for a frame of valid GC structs ending in one bad byte, which ygo's
+// own apply would integrate in part before it failed (sjawhar/ygo v1.54.1-sami.1,
+// crdt/update.go:810-935), for a subdocument and for a struct under a root the Proof editor never
+// writes (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:235-251). Only that
+// browser is closed: another reading the room goes on reading it. The stored document, once
+// settled, holds none of them.
+//
+// Under sjawhar/ygo v1.51.3-sami.7 the room answered such a frame SyncStatus(0) and kept the
+// browser connected. Upstream reearth/ygo#304 was merged in the form that closes a browser whose
+// update the hook refused before the apply ran, and a hook cannot keep it connected
+// (provider/websocket/peer_update.go:38-52, :136-151).
 func TestAnUpdateTheWalkerRefusesIsNotApplied(t *testing.T) {
 	const client = gcFloodClient
 	memory := newMemoryHarness(t)
@@ -2268,9 +2301,11 @@ func TestAnUpdateTheWalkerRefusesIsNotApplied(t *testing.T) {
 	}
 	memory.waitForSettlement(t, stored)
 	room := stored.artifactID
-	sending := server.openBrowser(t, room)
-	t.Cleanup(sending.leave)
-	before := sending.state(t)
+	// The walk's refusal closes the browser that sent the frame, so each row sends from a browser
+	// of its own and this one only reads.
+	reader := server.openBrowser(t, room)
+	t.Cleanup(reader.leave)
+	before := reader.state(t)
 	vector := newBrowserDocument(t, before).doc.StateVector()
 	badByte := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
 		encoder.WriteVarUint(1)
@@ -2325,15 +2360,18 @@ func TestAnUpdateTheWalkerRefusesIsNotApplied(t *testing.T) {
 		// A string (content reference 4) under a root named t.
 		{"a struct under an unknown root", rooted(4, "t", "", func(encoder *encoding.Encoder) { encoder.WriteVarString("hi") })},
 	} {
+		sending := server.openBrowser(t, room)
 		applied, closed, err := sending.send(sending.updateFrame(row.update))
 		t.Logf("%s, %d bytes: applied %v, closed %v, %v", row.name, len(row.update), applied, closed, err)
-		if err != nil || applied || closed != nil {
-			t.Fatalf("%s: applied %v, closed %v, %v; want SyncStatus(0) and the socket open", row.name, applied, closed, err)
+		if err != nil || applied || closed == nil || closed.Code != resetConnectionCloseCode || closed.Text != resetConnectionCloseReason {
+			t.Fatalf("%s: applied %v, closed %v, %v; want the frame refused and that browser closed %d %q",
+				row.name, applied, closed, err, resetConnectionCloseCode, resetConnectionCloseReason)
 		}
-		if err := sending.ping(); err != nil {
-			t.Fatalf("%s: the socket no longer answers: %v", row.name, err)
+		sending.leave()
+		if err := reader.ping(); err != nil {
+			t.Fatalf("%s: the room closed the browser that only reads it: %v", row.name, err)
 		}
-		after := sending.state(t)
+		after := reader.state(t)
 		if got := newBrowserDocument(t, after).doc.StateVector(); !maps.Equal(got, vector) || !bytes.Equal(after, before) {
 			t.Fatalf("%s: the room's state vector is %v and its state %d bytes, want %v and the %d bytes it held", row.name, got, len(after), vector, len(before))
 		}
@@ -3674,7 +3712,8 @@ func budgetCloses(t *testing.T, server *memoryServer) []budgetClose {
 // the patience below has passed: ten seconds and one for each room wanted, since a sweep closes
 // the rooms one at a time and each close flushes a room's updates to the store and compacts them
 // before the room's charge leaves (evictRoom) - the thirty-nine rooms of a mebibyte
-// TestTheRoomBudgetDoesNotOverchargeTypingAndPasting leaves took 25 s to close here on 2026-10-29,
+// TestTheRoomBudgetDoesNotOverchargeTypingAndPasting left at the element price of 470 took 25 s to
+// close here on 2026-10-29,
 // where sixteen had closed within the ten. A sweep logs a close once its eviction returns, after
 // the budget has taken the room's charge back and any admission waiting on it has gone on, and the
 // line reaches the test through the pipe the server's output is copied through. A caller wanting

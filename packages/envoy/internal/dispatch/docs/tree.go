@@ -288,7 +288,7 @@ func renderDocumentForUpdate(doc *crdt.Doc) (string, *pmdoc.Node, error) {
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
 // every peer update and service write holds while it applies, so the copy is never a tree half
 // way through a write - which a direct walk of a resident room's live tree can read, since the
-// walk takes no lock (sjawhar/ygo v1.51.3-sami.7, crdt/yxml.go:353-369) - and nothing writes the
+// walk takes no lock (sjawhar/ygo v1.54.1-sami.1, crdt/yxml.go:353-368) - and nothing writes the
 // copy.
 func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	snapshot := newDocumentCopy()
@@ -310,8 +310,8 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's
 // reads walk (readLive). ygo fires the observer after the transaction has released the document's
-// lock (sjawhar/ygo v1.51.3-sami.7, crdt/doc.go:794-799, transactInternal), and a walk of the live
-// tree takes no lock (crdt/yxml.go:353-369), so a render or read of the live tree can walk it while
+// lock (sjawhar/ygo v1.54.1-sami.1, crdt/doc.go:805-813, transactInternal), and a walk of the live
+// tree takes no lock (crdt/yxml.go:353-368), so a render or read of the live tree can walk it while
 // another transaction writes it: a torn walk reads a healthy document as one outside the schema,
 // logs a false WARN and counts the update as a content change. Only a holder of mu writes or walks
 // the replica.
@@ -649,13 +649,16 @@ func (r *renderedReplica) lockForUpdate() {
 
 // observe is the update observer's turn with the replica: it waits for mu (lockForUpdate), drains
 // the room's update log, and moves the replica through each update the log hands over, in commit
-// order, classifying each as it takes it (changedBy). It calls classify, when given, with each
-// update, whether that update changed the room's rendered markdown, and the ask blocks it left
-// (observedAsks) when it did - nil otherwise, and valid only during the call - still holding mu,
-// so the room's own record of what each update introduced moves forward in commit order. The
-// observer is the one holder of mu that waits for it, and the one that drains the log: every
-// committed update is charged to the room budget (chargeAdded) and classified exactly once, by
-// whichever observer reaches the log first.
+// order, classifying each as it takes it (changedBy). Each is applied as the log records it: the
+// update its observers were handed, and then what that transaction parked, which the room holds
+// and a later commit integrates, so the replica stands where the room stands after each commit
+// (sjawhar/ygo v1.54.1-sami.1, crdt/update_log.go:9-22, :62-70). It calls classify, when given,
+// with each update, whether that update changed the room's rendered markdown, and the ask blocks
+// it left (observedAsks) when it did - nil otherwise, and valid only during the call - still
+// holding mu, so the room's own record of what each update introduced moves forward in commit
+// order. The observer is the one holder of mu that waits for it, and the one that drains the log:
+// every committed update is charged to the room budget (chargeAdded) and classified exactly once,
+// by whichever observer reaches the log first.
 func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedUpdate, changed bool, asks *observedAsks)) {
 	r.lockForUpdate()
 	defer r.mu.Unlock()
@@ -665,7 +668,8 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 	// copy holds already (keepReplica), so only a replica holding no document starts from a base:
 	// the fresh one a recover asked for, or the first one where the load handed it no copy. The log
 	// records that first base all the same, an encode of the room under its lock at its first
-	// commit (sjawhar/ygo v1.51.3-sami.7, crdt/update_log.go:50-56), which this drops undecoded.
+	// commit, parked structs and deletions included (sjawhar/ygo v1.54.1-sami.1,
+	// crdt/update_log.go:62-70), which this drops undecoded.
 	if base != nil && r.doc == nil {
 		r.start(room, base)
 	}
@@ -678,6 +682,13 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 			slog.Error("dispatch: apply a committed update to the document's rendered copy", "room", room, "error", err)
 			r.recover(room, updates[i:], classify)
 			return
+		}
+		if update.Parked != nil {
+			if err := crdt.ApplyUpdateV1(r.doc, update.Parked, nil); err != nil {
+				slog.Error("dispatch: apply what a committed update parked to the document's rendered copy", "room", room, "error", err)
+				r.recover(room, updates[i:], classify)
+				return
+			}
 		}
 		published, rendering := r.consumed(update)
 		changed, asks := r.changedBy(room, published, rendering)

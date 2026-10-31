@@ -285,8 +285,13 @@ func TestTheUpdateWalkRefusesWhatYgoRefuses(t *testing.T) {
 	}
 }
 
-// What the editor never sends is refused from a browser and only from a browser: ygo applies each
-// to a fresh room without error, and a walk of a room's own state counts it.
+// What the editor never sends is refused from a browser and only from a browser: a walk of a
+// room's own state counts it, and ygo applies it to a fresh room without error, except the two
+// clocks past what a JavaScript client can write. Those ygo's own clock bound refuses since
+// sjawhar/ygo v1.54.1-sami.1 (reearth/ygo#356, which refuses a clock past 2^53-1 and a client past
+// 2^55-1 at every decode): the walk refuses them on the peer's read loop before any decode, where
+// ygo's refusal comes from the apply, and from a room, which it does not hold to the editor's
+// rules, the walk counts them as the room's own history.
 func TestTheUpdateWalkRefusesWhatTheEditorNeverSends(t *testing.T) {
 	array := newDocumentCopy(crdt.WithClientID(3))
 	list := array.GetArray("a")
@@ -299,15 +304,18 @@ func TestTheUpdateWalkRefusesWhatTheEditorNeverSends(t *testing.T) {
 	for _, row := range []struct {
 		name   string
 		update []byte
+		// ygoTakes is whether ygo's own apply takes the update, so the refusal is the walk's
+		// alone. False only for a clock ygo's bound refuses as well.
+		ygoTakes bool
 	}{
-		{"another root", newV1Frame(1).group(1, 5, 0).rooted(4, "t", "").str("hi").noDeletes()},
-		{"a subdocument", newV1Frame(1).group(1, 5, 0).rooted(9, marksMapName, "sub").str("guid").any(map[string]any{"autoLoad": false}).noDeletes()},
-		{"a move", move},
-		{"binary content in the margin", newV1Frame(1).group(1, 5, 0).rooted(byte(structBinary), marksMapName, "bin").str("\x00\x01\xff").noDeletes()},
-		{"an embed in the fragment", newV1Frame(1).group(1, 5, 0).rooted(byte(structEmbed), fragmentName, "").str(`{"image":"x.png"}`).noDeletes()},
-		{"a struct ending past 2^53", newV1Frame(1).group(1, 5, maxEditorClock).gc(1).noDeletes()},
-		{"a delete range ending past 2^53", append(append([]byte{0, 1, 5, 1}, varuint(maxEditorClock)...), 1)},
-		{"a byte after the delete set", append(slices.Clone(keystroke), 0)},
+		{"another root", newV1Frame(1).group(1, 5, 0).rooted(4, "t", "").str("hi").noDeletes(), true},
+		{"a subdocument", newV1Frame(1).group(1, 5, 0).rooted(9, marksMapName, "sub").str("guid").any(map[string]any{"autoLoad": false}).noDeletes(), true},
+		{"a move", move, true},
+		{"binary content in the margin", newV1Frame(1).group(1, 5, 0).rooted(byte(structBinary), marksMapName, "bin").str("\x00\x01\xff").noDeletes(), true},
+		{"an embed in the fragment", newV1Frame(1).group(1, 5, 0).rooted(byte(structEmbed), fragmentName, "").str(`{"image":"x.png"}`).noDeletes(), true},
+		{"a struct ending past 2^53", newV1Frame(1).group(1, 5, maxEditorClock).gc(1).noDeletes(), false},
+		{"a delete range ending past 2^53", append(append([]byte{0, 1, 5, 1}, varuint(maxEditorClock)...), 1), false},
+		{"a byte after the delete set", append(slices.Clone(keystroke), 0), true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if _, err := walkUpdate(row.update, fromPeer, nil); !errors.Is(err, errUpdateNotFromEditor) {
@@ -316,8 +324,12 @@ func TestTheUpdateWalkRefusesWhatTheEditorNeverSends(t *testing.T) {
 			if _, err := walkUpdate(row.update, fromRoom, nil); err != nil {
 				t.Fatalf("a walk of a room's state refused it: %v", err)
 			}
-			if err := crdt.ApplyUpdateV1(newDocumentCopy(), row.update, nil); err != nil {
+			err := crdt.ApplyUpdateV1(newDocumentCopy(), row.update, nil)
+			if row.ygoTakes && err != nil {
 				t.Fatalf("ygo refused it (%v), so it is no refusal of the editor's", err)
+			}
+			if !row.ygoTakes && err == nil {
+				t.Fatal("ygo took a clock its own bound refuses, so this row no longer pins that bound")
 			}
 		})
 	}
