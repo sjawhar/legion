@@ -3,6 +3,20 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [15.5.0] - 2026-10-31
+
+### Added
+
+- `legion-worker`'s reference table sends a phase worker to `skill://outside-message` before its
+  text reaches a person outside the company: a comment, issue or pull request on a repository the
+  company does not own, an email, or a message to another project's maintainers.
+
+## [15.4.2] - 2026-10-31
+
+### Changed
+
+- legion-architect: a child issue is a separately deliverable change (its own pull request or deploy); a fresh red team checks every proposed child before it is filed or released, and the root proves its acceptance in its own last round instead of an integration child.
+
 ## [15.3.1] - 2026-10-30
 
 ### Fixed
