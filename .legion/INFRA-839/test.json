@@ -2,102 +2,100 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-839",
-  "completed": "2026-10-31T07:40:00Z",
-  "round": 3,
-  "verdict": "fail",
-  "codeHead": "2d7167658086e378d2b08ce81f9f742f0b7b8bf3",
-  "prHead": "1f67f02266346c5c061d6388f958f03b383c4661",
+  "completed": "2026-10-31T10:05:00Z",
+  "round": 4,
+  "verdict": "pass",
+  "codeHead": "db64c79daa3860604ddac05c833be00ea1d07e63",
+  "prHead": "2ea9b6ed9f5186865098fb88e26dc3d2f956e946",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's own e2e-local.sh at this head: exit 0, `unclaimed-role window: kept message 202f1f308418e8cc80975454bd45396d reached the fake session exactly once, carrying kept_at`, `lapsed-claim window: kept message 1343d023ac560b583ec385aef0568e89 reached the fake session exactly once, carrying kept_at`, `keep-false control: … answered 404, nothing was stored`. out/e2e: unheld 202 unclaimed, lapsed 202 holder_lapsed, held 200 no kept field, keep:false 404. Each of the eleven review fixes' tests was then independently shown to pin its fix (table below), and every acceptance line re-driven on the tester's own stack."
+    "how": "Re-ran e2e-local.sh at this head: exit 0, `unclaimed-role window: kept message 73a01d42dd346b1d1e2a78b5bee23741 reached the fake session exactly once, carrying kept_at`, `lapsed-claim window: kept message ff8c2ceee77769c761f39e5973c1bc18 …`, `keep-false control: … answered 404, nothing was stored`, both PASS lines. Round 3's blocking finding is fixed and the fix is pinned both ways: my own red test passes unmodified at this head and still fails at the old head 2d716765, and the claim-forward-confirm step and the claim window were each reverted in a scratch clone to show which tests they hold up."
   },
-  "blockingFinding": {
-    "what": "A kept copy whose drain claimed it (advanced the role's cursor past it) but never forwarded it is lost: no later drain offers it, and its sender was answered 202 kept. This breaks the tree's rule that a 202 kept message is never lost and the worst case is a duplicate the holder drops by its key. It is the cost the implementer's own handoff states for finding 2's fix ('a drain that dies between its claim and its forward loses that one copy'), raised to a blocking finding by INFRA-514's architect on 2026-10-31.",
-    "evidence": "Red test TestAKeptCopyItsDrainNeverForwardedStillReachesTheRolesHolder, pushed to legion/INFRA-839-wip at f84cd3600e66 (packages/envoy/cmd/listener/role_keep_loss_test.go). It keeps one copy for an unheld role, runs a drain whose forwardRole returns an error (the deterministic stand-in for a death between the claim and the forward, which is a cursor write and a core-NATS forward apart — a few ms — and which no timed kill reproduced live, see proof[kill]), then runs a replacement drain for the same holder and asserts the copy still reaches it. At code head 2d7167658086 it fails: `role_keep_loss_test.go:65: the kept copy under envoy.role.forward.kept-claimed-then-lost-00 reached no holder after the drain that claimed it ended before forwarding it; the replacement drain handed over []`. The defect is wider than a crash: claimKeptRoleCopy (role_keep.go:305) advances the cursor before forwardKeptRoleMessage (role_keep.go:345), and any forward failure other than bus.ErrReceiptTimeout returns from drainKeptRole with the cursor already past the copy, so a transient bus/receipt error loses the copy with no crash at all.",
-    "remedy": "The architect settled claim, forward, confirm: the cursor body gains a field {kept, claiming}; a drain compare-and-swaps to {kept:k, claiming:s} before forwarding copy s, forwards, then compare-and-swaps to {kept:s, claiming:0}; a drain that reads claiming>kept re-forwards that copy under its stable id before going on, so a death yields a duplicate the holder drops rather than a loss. Not forward-first, which would reintroduce finding 2 (two drains, two holders)."
+  "round3BlockingFindingClosed": {
+    "finding": "A kept copy its drain claimed but never forwarded was lost (round 3).",
+    "fixAtThisHead": "claim, forward, confirm: the cursor body is {kept, claiming}; a drain writes {kept, claiming: s} before forwarding copy s and {kept: s, claiming: 0} after; a failed forward releases the claim at once (releaseRoleKeepClaim); a claim younger than roleKeepClaimWindow (60 s) is left to the drain holding it, an older one is taken over.",
+    "myRedTest": "TestAKeptCopyItsDrainNeverForwardedStillReachesTheRolesHolder, which I wrote and pushed to legion/INFRA-839-wip at f84cd3600e66, is now in the tree at packages/envoy/cmd/listener/role_keep_loss_test.go BYTE-IDENTICAL to what I pushed (diff against my own copy is empty). It PASSES at this head and FAILS at the old head 2d716765 with the same assertion as in round 3: `role_keep_loss_test.go:65: the kept copy under envoy.role.forward.kept-claimed-then-lost-00 reached no holder after the drain that claimed it ended before forwarding it; the replacement drain handed over []`. Measured by copying the file unchanged onto a scratch clone of 2d716765."
   },
-  "pinVerification": {
-    "how": "In a scratch clone at 2d7167658086, each of review round 1's eleven fixes was reverted one at a time (whole-file from the pre-change tree 3c2517b63a79 where it compiled, else the smallest hand edit) and its named test re-run; every test passed at head, failed with its fix reverted, and passed again after restore. No test still passed with its fix reverted.",
+  "mutationChecks": {
+    "how": "Scratch clone at db64c79daa38; each change reverted on its own and the five drain tests re-run; the tree restored between mutations.",
     "results": [
-      {"finding": 1, "test": "TestADrainSpendsItsBudgetOnForwardsRatherThanOnExpiredCopies", "revert": "loop bound scanned<roleKeepScanMax -> scanned<roleKeepDrainMax", "failure": "the drain forwarded [], want every copy still inside the keep window: [envoy.role.forward.kept-budget-22 … -28]", "verdict": "pins"},
-      {"finding": 2, "test": "TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder", "revert": "deleted the per-copy claimKeptRoleCopy; cursor written once at end", "failure": "the kept copy under envoy.role.forward.kept-two-drains-00 reached [ses_kept_drain_second ses_kept_drain_first]; a kept copy reaches exactly one holder", "verdict": "pins"},
-      {"finding": 3, "test": "TestAKeptRoleMessageCarriesTheSenderThePublishStamped + TestTheDrainJudgesAKeptCopyByTheRulesEveryForwardPathApplies", "revert": "moved senderStamp back after resolveRoleHolder; deleted keptRoleForwardAllowed gate", "failure": "the kept copy's sender is <nil>; and the drain forwarded the copy 1 times, want none (both subtests)", "verdict": "pins"},
-      {"finding": 4, "test": "TestAPublishToARoleNoClaimCanNameIsRefusedAndKeepsNothing", "revert": "dropped the isValidRole(role) gate on keeping", "failure": "publish to a role no claim can name: status 202", "verdict": "pins"},
-      {"finding": 5, "test": "TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep", "revert": "deleted drainAfterKeep from keepRoleLaneMessage", "failure": "the copy kept for ses_kept_under_claim, which held the role already, reached it in no 20 seconds", "verdict": "pins"},
-      {"finding": 6, "test": "TestTheRoleLaneKeepsNothingForAClaimTheRestartGraceRetained", "revert": "roleHolderLapsed returns true unconditionally", "failure": "read delivery exception: nats: timeout (the lane kept instead of excepting)", "verdict": "pins"},
-      {"finding": 7, "test": "phase-reminder.test.ts 'a kept answer is not the architect being told'", "revert": "(a) whole-file pre-change; (b) deleted only the kept-answer branch", "failure": "(a) expect(published[0]?.keep).toBe(false) received undefined; (b) reported: true where false wanted", "verdict": "pins (both the keep:false flag and the kept-answer retry)"},
-      {"finding": 8, "test": "TestAPublishToTheListenersKeptLaneIsRefused", "revert": "deleted the KeptTopicPrefix refusal in publishHandler", "failure": "publish to notifications.envoy.kept.role.kept-lane-guard: status 200 (and the cursor subject)", "verdict": "pins"}
+      {
+        "mutation": "Confirm step removed: the claim write becomes the final cursor write ({Kept: stored.Sequence} in place of {Kept: kept, Claiming: stored.Sequence}) and the release on a failed forward goes with it — the round-3 ordering.",
+        "failed": ["TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain", "TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCopy", "TestAKeptCopyItsDrainNeverForwardedStillReachesTheRolesHolder"],
+        "passed": ["TestAClaimNoDrainReleasedHoldsTheLaneUntilItsWindowHasPassed", "TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder"],
+        "verdict": "the confirm step is pinned by all three loss tests, mine included"
+      },
+      {
+        "mutation": "Claim window removed: the early return `if cursor.Claiming != 0 && now().Sub(written) < roleKeepClaimWindow` disabled, so a drain never leaves the lane to the drain holding a claim.",
+        "failed": ["TestAClaimNoDrainReleasedHoldsTheLaneUntilItsWindowHasPassed", "TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder"],
+        "passed": ["the three loss tests"],
+        "verdict": "the claim window is pinned by the two concurrency tests; the two halves of the design are held by disjoint tests, which is what tells them apart"
+      }
     ],
-    "note": "Findings 8-10 of the review (three structural refactors) carry no behaviour of their own and are held by the suites, which pass; not separately reverted. The census (finding 11) is a PR-body change, read directly."
+    "atHead": "All five pass unmutated: TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain, TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCopy, TestAClaimNoDrainReleasedHoldsTheLaneUntilItsWindowHasPassed, TestAKeptCopyItsDrainNeverForwardedStillReachesTheRolesHolder, TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder (ok github.com/sjawhar/envoy/cmd/listener 0.718s)."
   },
   "proof": [
     {
-      "criterion": "Two listeners draining one role at once hand each kept copy to exactly one holder (review finding 2, on the real stack).",
-      "surface": "Two real envoy-listener processes built from this head on one real NATS server, each with a session of its own; six copies kept for one unheld role, then both sessions claim it at once.",
-      "command": "bash $TMPDIR/tester/multi.sh (section A)",
-      "observed": "All six copies reached exactly one holder (A or B), none reached both, none reached neither: 'exactly once: 6, never: 0, more than once: 0'.",
-      "headSha": "2d7167658086e378d2b08ce81f9f742f0b7b8bf3",
-      "negativeControl": "The unit test TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder, independently shown to fail when the per-copy claim is reverted (pinVerification finding 2)."
+      "criterion": "A SIGKILLed drain loses no kept copy: after the 60 s claim window a later claim takes the abandoned claim over and every copy reaches a holder exactly once.",
+      "surface": "Two real envoy-listener processes built from this head on one real NATS server, each with a real session process; twelve copies kept for an unheld role, listener A claims, A is SIGKILLed the moment its claim returns, with its drain still running.",
+      "command": "bash $TMPDIR/tester/multi2.sh (section B)",
+      "observed": "A was killed having logged 6 forwards, so it died with a copy claimed and unforwarded. A claim on listener B one second later delivered 0 of 12 — the claim was younger than roleKeepClaimWindow and B left the lane to it, which is the design. After waiting the 60 s window out, two further claims on B delivered the rest: exactly once 12 of 12, never 0, more than once 0. No loss and no duplicate across a hard kill.",
+      "headSha": "db64c79daa3860604ddac05c833be00ea1d07e63",
+      "negativeControl": "The same scenario at the old head is the round-3 failure, and the deterministic form of it is my red test, which fails at 2d716765 and passes here; removing the confirm step at this head makes all three loss tests fail (mutationChecks)."
     },
     {
-      "criterion": "A keep landing while a claim is being written reaches that holder (review finding 5).",
-      "surface": "One real listener; ten role topics, each with a publish and a claim fired concurrently, and twelve more with the publish started first and the claim ~4ms later.",
-      "command": "bash $TMPDIR/tester/multi.sh (section C); bash $TMPDIR/tester/probe.sh listener-new head (section F)",
-      "observed": "Every one of the 22 raced messages reached the session that claimed the role, exactly once. In these live races the publish's first holder resolution won and answered 200 (delivered live) rather than 202; the branch where the keep wins the race and drainAfterKeep delivers is pinned deterministically by TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep (pinVerification finding 5), which fails in 20s without drainAfterKeep.",
-      "headSha": "2d7167658086e378d2b08ce81f9f742f0b7b8bf3",
-      "negativeControl": "Reverting drainAfterKeep makes the unit test wait out 20s and fail; the live races that landed as 200 are the control that the holder is reached whichever path wins."
+      "criterion": "Two listeners draining one role at once hand each kept copy to exactly one holder.",
+      "surface": "The same two real listeners and two real sessions; six copies kept, both sessions claim the role at once.",
+      "command": "bash $TMPDIR/tester/multi2.sh (section A)",
+      "observed": "exactly once 6, never 0, more than once 0.",
+      "headSha": "db64c79daa3860604ddac05c833be00ea1d07e63",
+      "negativeControl": "Removing the claim window makes TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder fail (mutationChecks)."
     },
     {
-      "criterion": "A role token no claim can match answers 404 and keeps nothing (review finding 4).",
-      "surface": "One real listener, the publish route over HTTP.",
-      "command": "bash $TMPDIR/tester/multi.sh (section D)",
-      "observed": "An uppercase token 'legion-infra-INFRA-839-architect' answered 404 {\"error\":\"no holder for role …\",\"reason\":\"unclaimed\"}; a valid lowercase token with keep:false answered 404.",
-      "headSha": "2d7167658086e378d2b08ce81f9f742f0b7b8bf3",
-      "negativeControl": "The unit test TestAPublishToARoleNoClaimCanNameIsRefusedAndKeepsNothing, shown to answer 202 when the isValidRole gate is reverted (pinVerification finding 4)."
+      "criterion": "24 sessions claiming one role at once answer only 200 or 409 — the 500 I reported out of scope in round 3 is gone.",
+      "surface": "24 real registered sessions, half on each of two real listeners, all issuing POST /v1/roles/set for one role concurrently.",
+      "command": "bash $TMPDIR/tester/multi2.sh (section C)",
+      "observed": "claim statuses: 24 x 200. No 500 and no other status.",
+      "headSha": "db64c79daa3860604ddac05c833be00ea1d07e63",
+      "negativeControl": "The same probe measured 9 of 24 non-200 (500s) on the base 0d71712bd594 and 11 of 24 on the round-3 head in round 3's run, so this is the fix and not a quieter machine: hard claims now write unconditionally."
     },
     {
-      "criterion": "kill: a listener killed mid-drain. Does every kept copy still reach a holder?",
-      "surface": "Two real listeners; twelve copies kept for an unheld role, A claims and begins its drain, A is SIGKILLed after its first forward line, B then claims and drains.",
-      "command": "bash $TMPDIR/tester/multi.sh (section B)",
-      "observed": "All twelve reached a holder; the timed kill did not land in the loss window. The window is a cursor write and a core-NATS forward apart (a few ms), so a timed kill does not reproduce it reliably — which is why the loss is pinned by the deterministic red test on legion/INFRA-839-wip (blockingFinding) rather than by this kill, exactly as the architect and implementer anticipated.",
-      "headSha": "2d7167658086e378d2b08ce81f9f742f0b7b8bf3",
-      "negativeControl": "The red test fails the copy's forward at the same point a crash would strike and shows the copy lost; this live kill is the complement that shows a timed kill alone is not a reliable probe."
+      "criterion": "Round 3's acceptance lines once more at this head: both kept windows and the held role; order and exactly-once with kept_at; a second claim forwards nothing; one count per role-lane publish; keep:false and an unmatchable token both 404.",
+      "surface": "e2e-local.sh (the implementer's rig) and the tester's own one-listener rig; the publish route over HTTP for the tokens.",
+      "command": "bash packages/envoy/scripts/e2e-local.sh ; bash $TMPDIR/tester/accept.sh ; bash $TMPDIR/tester/multi2.sh (section D)",
+      "observed": "e2e-local exit 0 with both windows exactly once carrying kept_at, held role 200 with no kept field, keep-false 404. accept.sh: three kept messages at prompt lines 1,2,3 in publish order each once; each forward carries kept_at and the stored copy none; a second claim added nothing (3 -> 3); one core-NATS role publish moved envoy_messages_received_total{topic_prefix=\"notifications.role\"} by 1 with one `listener received` line, the kept copy adding no second record, the claim forwarding it once; keep:false 404. Tokens: uppercase `legion-infra-INFRA-839-architect` -> 404, keep:false -> 404.",
+      "headSha": "db64c79daa3860604ddac05c833be00ea1d07e63",
+      "negativeControl": "e2e-local's own keep-false control (404, nothing stored, claimant handed nothing) and accept.sh's second-claim-forwards-nothing assertion."
     },
     {
-      "criterion": "Round 2's acceptance lines once more at this head: order and exactly-once over three kept messages, each forward carrying kept_at and the stored copy none; a second claim forwards nothing; both kept windows and a held role; one count per role-lane publish; keep:false -> 404.",
-      "surface": "e2e-local.sh (the implementer's rig) plus the tester's own one-listener rig.",
-      "command": "bash packages/envoy/scripts/e2e-local.sh ; bash $TMPDIR/tester/accept.sh",
-      "observed": "e2e-local exit 0 with both windows exactly once carrying kept_at, held role 200 no kept field, keep-false 404. accept.sh: three kept messages delivered at prompt lines 1,2,3 in publish order each once; each forward carries kept_at and the stored copy none; a second claim added nothing (3->3); one core-NATS role publish moved envoy_messages_received_total{topic_prefix=\"notifications.role\"} by 1 with one 'listener received' line, the kept copy adding no second record and the claim forwarding it once; keep:false 404.",
-      "headSha": "2d7167658086e378d2b08ce81f9f742f0b7b8bf3",
-      "negativeControl": "e2e-local's own keep-false control (404, nothing stored) and accept.sh's second-claim-forwards-nothing assertion."
-    },
-    {
-      "criterion": "The over-window drop (acceptance 2) at this head.",
-      "surface": "A shortened-window build of this head (roleKeepWindow = 3s) on a real listener.",
-      "command": "bash $TMPDIR/tester/rest.sh (section G)",
-      "observed": "The kept copy was not forwarded after the window; envoy_role_kept_expired_total 0 -> 1; one 'listener dropped a kept role message older than the keep window' line, age 8.088384577s.",
-      "headSha": "2d7167658086e378d2b08ce81f9f742f0b7b8bf3",
-      "negativeControl": "The same binary forwards copies kept inside the window, so the drop is the age not the build (established in prior rounds; drop pinned by TestAKeptRoleMessageOlderThanTheKeepWindowIsDroppedAndTheCursorMovesPastIt)."
-    },
-    {
-      "criterion": "Acceptance 1's rollback clause at the new base, and acceptance 3 (daemon publisher, client, and the recorded cross-release window).",
-      "surface": "A previous-release listener built from the base 0d71712bd594; the daemon's own notify.HTTPPublisher built from this head and from the base; the real @legion/envoy-client.",
-      "command": "bash $TMPDIR/tester/rest.sh (sections H, I)",
-      "observed": "The previous-release listener started on the new stream state (envoy-listener ready), left notifications.envoy.kept.> in place, answered an unheld role 404, and both kept messages still reached the next holder after the new listener returned (2 of 2). This head's daemon publisher: 404 + errors.Is(err, ErrNoHolder)=true, kept lane empty. The real client: a kept publish is a success with kept=true/keptReason=unclaimed, rendered 'published <id>; kept for the role: …', keep:false throws, the delivery card shows kept_at.",
-      "headSha": "2d7167658086e378d2b08ce81f9f742f0b7b8bf3",
-      "negativeControl": "The previous-release daemon publisher (no keep field) got 202 Accepted with errors.Is(err, ErrNoHolder)=false and the message was kept on notifications.envoy.kept.role.t-daemon-old — the window the recorded release order (Legion binary first) closes, which this head's publisher leaves empty."
+      "criterion": "The over-window drop, the previous-release rollback, and acceptance 3 (daemon publisher, real client, recorded cross-release window) at this head.",
+      "surface": "A shortened-window build of this head (roleKeepWindow = 3 s); a previous-release listener built from the base 0d71712bd594; the daemon's own notify.HTTPPublisher built from this head and from the base; the real @legion/envoy-client.",
+      "command": "bash $TMPDIR/tester/rest.sh",
+      "observed": "Drop: not forwarded, envoy_role_kept_expired_total 0 -> 1, one drop line at age 8.193302233s. Rollback: the previous-release listener started on the new stream state (envoy-listener ready), left notifications.envoy.kept.> in place, answered an unheld role 404, and both kept messages reached the next holder after the new listener returned (2 of 2). Acceptance 3: this head's daemon publisher got 404 with errors.Is(err, ErrNoHolder)=true and the kept lane stayed empty; the real client read a kept answer as success (kept=true, keptReason=unclaimed), rendered `published <id>; kept for the role: …`, threw on keep:false, and the delivery card carries kept_at.",
+      "headSha": "db64c79daa3860604ddac05c833be00ea1d07e63",
+      "negativeControl": "The previous-release daemon publisher (no keep field) got 202 Accepted with errors.Is(err, ErrNoHolder)=false and the message was kept on notifications.envoy.kept.role.t-daemon-old — the cross-release window the recorded release order (Legion binary first) closes, which this head's publisher leaves empty."
     }
   ],
-  "observationsOutOfScope": [
+  "findings": [
     {
-      "what": "Two sessions claiming one role at the same moment on two different listeners: one of the two POST /v1/roles/set calls answers 500.",
-      "evidence": "Measured on the head build (11 of 24 claims non-200) and on the base build 0d71712bd594 (9 of 24 non-200): bash $TMPDIR/tester/probe.sh listener-base base and listener-new head, section E. It reproduces identically on the base, so it is a pre-existing race in the role-claim route, not this change's. Not a kept-lane defect and outside this issue; reported to the architect for a separate finding."
+      "severity": "process, for the architect",
+      "what": "The whole production fix of this round was authored by the REVIEW App, not the implement App.",
+      "evidence": "jj log -r eb34676a9c40 reads author 343353696+legion-reviewer[bot]@users.noreply.github.com for `fix(envoy): the kept lane's drain confirms a copy only once it is forwarded, and a hard role claim is last-claim-wins rather than a 500`, 8 files changed, 747 insertions: packages/envoy/cmd/listener/role_keep.go (+297/-119), internal/store/kv.go, delivery.go, and four test files, among them my own role_keep_loss_test.go carried over from legion/INFRA-839-wip. Every other code commit of this issue is authored by 343353655+legion-implementer[bot]. It was not this session: my only commits are the red test on the wip branch (f84cd360) and my handoffs.",
+      "why it matters": "skill://legion-worker has the reviewer fix prose-only findings itself and send code or behaviour back to the implementer. A reviewer that authored this fix would be approving its own code, so the approval that follows is not independent, and the merge gate's review round would not mean what it says. The code itself is correct and proven above — this is about who may author it and who may then approve it, which is the architect's to settle before the next review round."
+    },
+    {
+      "severity": "observation, closed",
+      "what": "Round 3's out-of-scope concurrent-claim 500 is fixed at this head.",
+      "evidence": "24 of 24 concurrent hard claims answer 200 (proof above), where the base measured 9 of 24 non-200. The fix (hard claims write unconditionally, soft claims keep the conditional write and its 409) rides in the same commit eb34676a9c40 and is covered by packages/envoy/cmd/listener/role_claim_race_test.go and internal/store/kv_test.go."
     }
   ],
   "ci": {
-    "state": "No CI lane has run on any round-3 commit.",
-    "evidence": "gh run list --commit <sha> returns 0 runs for a70a061a03c9, ed0d30a267e4, 4958a413c57a, 2d7167658086 and 1f67f0226634; check-runs empty at the code head 2d7167658086 and the PR head 1f67f0226634. The PR head 1f67f0226634 is a handoff-only commit carrying skip-checks:true, so GitHub starts no run for it, and the code head 2d7167658086 was never pushed as a standalone tip, so it never got its own run; the daemon has no code-head verdict to carry to the handoff commit. The last CI to run was round 2's head 4f6e9985b979 (run 41163858951, CI, completed success), which is not this round's code. The base legion/INFRA-594 requires no check. Every lane is therefore unread at the code head: lint, typecheck, test, envoy-go, envoy-go-race, pi-envoy, claude-envoy, listener-server-change, docs, changes, pr-title. The next implementing round must push the fixed code head so CI runs on it.",
-    "unreadLanes": ["lint", "typecheck", "test", "envoy-go", "envoy-go-race", "pi-envoy", "claude-envoy", "listener-server-change", "docs", "changes", "pr-title"]
+    "state": "Run 41188931937 (CI, pull_request, head db64c79daa38) exists and is QUEUED: its `changes` job is queued and no job has started, read twice over 22 minutes (09:36Z and 09:58Z). No lane has reported a conclusion at the code head.",
+    "unreadLanes": ["lint", "typecheck", "test", "envoy-go", "envoy-go-race", "pi-envoy", "claude-envoy", "listener-server-change", "docs", "changes", "pr-title"],
+    "note": "The two `pr-title` runs reading `cancelled` (41188931836, 41189082759) are that workflow's own concurrency superseding older runs as the pull-request body was edited; the newest (41189092081) is queued. The PR head 2ea9b6ed is handoff-only with skip-checks:true, so the daemon carries the code head's verdict to it once CI settles. A lane still running is read as running and never waited for; the reviewer reads CI at the head it reviews. Round 3's complaint that no run existed at all is answered: this round's code head was pushed as its own tip and has a run."
   },
-  "redTestBranch": "legion/INFRA-839-wip at f84cd3600e66 (packages/envoy/cmd/listener/role_keep_loss_test.go)"
+  "memory": {
+    "caps": "Every Go run of this round used -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, one package at a time, and no parallel subagent ran go test.",
+    "sampledPeak": "3.93 GiB of 19, from 10 samples of /sys/fs/cgroup/memory/memory.usage_in_bytes taken 2 s apart beside the five-test drain run, the watcher stopped by its exact pid. A sampled peak is a floor: a spike shorter than 2 s is missed."
+  }
 }
