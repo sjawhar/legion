@@ -80,21 +80,20 @@ func (f schemaFleet) admits(page schemaPage, documentSince int) bool {
 	return page.valid && page.creatable <= min(f.minVersion, f.maxCreatable) && page.version >= max(f.maxCreatable, documentSince)
 }
 
-// schemaAdmissionKey is what ygo's OnTokenAuth knows of a socket: its room, and the token, which
-// is the schema_version its page presented.
+// schemaAdmissionKey is the token a socket's page presents: its room, and the schema_version it
+// sent on its query, which is what its provider sends as the Hocuspocus token.
 type schemaAdmissionKey struct {
 	room, token string
 }
 
 // schemaAdmission is one document socket's admission: what its page presented, the documentSince
-// it was admitted against, and whether it was admitted writable. answered is set once its token
-// had its answer, and revoked once a re-check has closed its socket (revokeUnless).
+// it was admitted against, and whether it was admitted writable. revoked is set once a re-check
+// has closed its socket (revokeUnless).
 type schemaAdmission struct {
 	key           schemaAdmissionKey
 	page          schemaPage
 	documentSince int
 	writable      bool
-	answered      bool
 	revoked       bool
 	conn          *admittedConn
 }
@@ -102,119 +101,64 @@ type schemaAdmission struct {
 // schemaAdmissions is the admission of every document socket this process serves, from authorize
 // until ServeHTTP returns. Its zero value is ready to use.
 //
-// Every waiting socket of one key - admitted, its token not yet answered - holds one decision
-// (admit), so a token's answer is that decision, whichever of them sent it. A socket a re-check
-// revoked waits on with them until its own ServeHTTP removes it (revokeUnless): its token may
-// still be on its way, and a token that found its socket's entry gone would take the answer of
-// another socket of the key, which would then be read-only for as long as it stays open. It waits
-// behind every other entry of the key: a token takes a revoked entry's answer only when no other
-// entry waits (answer), since an entry a revoked one answered for would be left waiting in just
-// that way.
+// It holds what the re-check needs and nothing else: the live admissions, among which it closes
+// every writable socket the fleet no longer admits (revokeUnless). A token's answer is the
+// admission of the socket that sent it, which that socket's own upgrade request carries
+// (authorizeSchemaVersion), so no socket here stands in for another: two sockets of one room
+// presenting one schema_version are admitted apart and answered apart, in whatever order their
+// tokens arrive, and a socket a re-check revoked answers nobody.
 type schemaAdmissions struct {
 	mu      sync.Mutex
-	sockets map[schemaAdmissionKey][]*schemaAdmission
+	sockets map[*schemaAdmission]struct{}
 }
 
-// admit records a, unless a socket of a's key still waiting for its token's answer was admitted
-// otherwise: then it records nothing and returns false, and the socket is refused. The two are one
-// token, and the answer must be the one each was admitted with. A revoked socket still waiting for
-// its answer is one of them, so the reconnect of a revoked writable socket, which is read-only
-// now, is refused while that socket's entry waits: admitted beside it, its own token could take
-// the writable answer that entry holds and write what the fleet no longer admits. The provider
-// retries the refused socket, and the first socket's token is answered within its first round
-// trip; a revoked socket's entry goes as its ServeHTTP returns, which the revoke's close brings
-// on.
-func (a *schemaAdmissions) admit(admission *schemaAdmission) bool {
+// admit records admission, until its socket ends (remove). It refuses nothing: a socket's own
+// decision is what its token is answered with, so a second socket of one room presenting the same
+// schema_version is admitted beside the first however the two were decided.
+func (a *schemaAdmissions) admit(admission *schemaAdmission) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, waiting := range a.sockets[admission.key] {
-		if !waiting.answered && waiting.writable != admission.writable {
-			return false
-		}
-	}
 	if a.sockets == nil {
-		a.sockets = make(map[schemaAdmissionKey][]*schemaAdmission)
+		a.sockets = make(map[*schemaAdmission]struct{})
 	}
-	a.sockets[admission.key] = append(a.sockets[admission.key], admission)
-	return true
+	a.sockets[admission] = struct{}{}
 }
 
-// answer is the decision of the first socket of key still waiting for its token's answer that no
-// re-check has revoked, which it marks answered. A revoked socket's entry answers only when no
-// other entry of the key waits, and when none waits at all the answer is false (read-only). Every
-// waiting entry of a key holds one decision, so which of them answers changes no answer; what it
-// changes is which entry is left waiting. A revoked entry that answered in a live socket's place
-// would leave that socket's own entry waiting for the life of its socket - the revoked socket's
-// ServeHTTP removes its entry, and no second token of the key comes to answer the entry left
-// behind - and admit refuses every read-only socket of the key, the revoked page's own read-only
-// reconnect among them, for as long as that entry waits.
-func (a *schemaAdmissions) answer(key schemaAdmissionKey) bool {
+// writable is the answer to a token that key names, sent by the socket admission belongs to: that
+// socket was admitted writable, no re-check has revoked it, and key is the token its own page
+// presented. A token naming another schema_version than its socket presented is read-only, as is
+// a revoked socket's token, which reaches here when the socket's read loop read it before the
+// revoke's past read deadline stopped its reads and its connection closed.
+func (a *schemaAdmissions) writable(admission *schemaAdmission, key schemaAdmissionKey) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	var revoked *schemaAdmission
-	for _, waiting := range a.sockets[key] {
-		if waiting.answered {
-			continue
-		}
-		if !waiting.revoked {
-			waiting.answered = true
-			return waiting.writable
-		}
-		if revoked == nil {
-			revoked = waiting
-		}
-	}
-	if revoked == nil {
-		return false
-	}
-	revoked.answered = true
-	return revoked.writable
+	return admission.writable && !admission.revoked && admission.key == key
 }
 
-// remove forgets admission, once its socket has ended or a re-check has closed it. Removing one
-// already forgotten does nothing.
+// remove forgets admission, once its socket has ended. Removing one already forgotten does
+// nothing.
 func (a *schemaAdmissions) remove(admission *schemaAdmission) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.removeLocked(admission)
-}
-
-func (a *schemaAdmissions) removeLocked(admission *schemaAdmission) {
-	sockets := a.sockets[admission.key]
-	for index, candidate := range sockets {
-		if candidate == admission {
-			sockets = append(sockets[:index], sockets[index+1:]...)
-			break
-		}
-	}
-	if len(sockets) == 0 {
-		delete(a.sockets, admission.key)
-	} else {
-		a.sockets[admission.key] = sockets
-	}
+	delete(a.sockets, admission)
 }
 
 // revokeUnless closes every writable socket that fleet no longer admits: its read loop ends, and
-// its connection closes with schemaRevokedCloseCode (admittedConn). A socket whose token had its
-// answer is forgotten here; one still waiting for its answer keeps its place in its key's list,
-// marked revoked, until ServeHTTP removes it (schemaAdmissions). A socket already revoked is left
-// as it is: its connection is closing. It returns the sockets it closed.
+// its connection closes with schemaRevokedCloseCode (admittedConn). A revoked socket's admission
+// stays until its own ServeHTTP removes it, read-only from here on: a token of its own still on
+// its way is answered read-only (writable), and no other socket's token reads it. A socket
+// already revoked is left as it is: its connection is closing. It returns the sockets it closed.
 func (a *schemaAdmissions) revokeUnless(fleet schemaFleet) []*schemaAdmission {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var revoked []*schemaAdmission
-	for _, sockets := range a.sockets {
-		for _, admission := range sockets {
-			if admission.writable && !admission.revoked && !fleet.admits(admission.page, admission.documentSince) {
-				revoked = append(revoked, admission)
-			}
+	for admission := range a.sockets {
+		if admission.writable && !admission.revoked && !fleet.admits(admission.page, admission.documentSince) {
+			revoked = append(revoked, admission)
 		}
 	}
 	for _, admission := range revoked {
 		admission.revoked = true
-		if admission.answered {
-			a.removeLocked(admission)
-		}
 		if admission.conn != nil {
 			admission.conn.revoke()
 		}
