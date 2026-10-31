@@ -2,26 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-31T18:20:00Z",
-  "round": "forward merge of main's #2592 after approval",
+  "previousHandoff": "5b597d6af1e7c1a4e0dd9362c2788c2fa347783e",
+  "round": "retro's finding: the connected flag's install race",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "f08b5cc2c5d0d5d65dc705bdaec6cf5cbd63a521",
-  "answersReview": "4ff1a30c8ccd6d393261fbfcf86977bfc9b846ac",
+  "codeHead": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
   "proof": [
     {
-      "criterion": "The merge keeps #2592's client-instance rule and every behaviour of this PR",
-      "surface": "real envoy-listener binaries under the rendered grant; the listener and session suites; internal/bus under -race; ci.yaml router check; GitHub",
-      "command": "go test -tags multiprocess -count=1 -timeout 40m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; go test ./internal/session/...; CGO_ENABLED=1 go test -race ./internal/bus/; .github/scripts/check-ci-filters.sh; gh api repos/sjawhar/legion/pulls/2404",
-      "observed": "multiprocess ok 742.321s (packet-dropping row slowest 11.948 s; hung-rewatch-hook row slowest 12.18 s); listener ok 867.470s; session ok; bus race ok 359.595s; 29 gates; mergeable true. https://github.com/sjawhar/legion/pull/2404#issuecomment-6546887881",
-      "headSha": "f08b5cc2c5d0d5d65dc705bdaec6cf5cbd63a521",
-      "negativeControl": "before the merge GitHub read the PR conflicting in api.go, registry.go, registry_test.go and the architecture document"
+      "criterion": "The connected flag follows the installed connection's last event in any order of event and install, the two raced interleavings included",
+      "surface": "internal/bus client with a real nats.go connection whose server has stopped, events delivered through the install's test hook",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestTheConnectedFlagFollowsTheInstalledConnectionsLastEventInAnyOrder|TestALateEventOfAReplacedConnectionLeavesTheFlagToItsReplacement' -v ./internal/bus/",
+      "observed": "all seven rows and the replaced-connection test pass",
+      "headSha": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
+      "negativeControl": "a6ebeefc's nats.go with the hook placed between settleConnected's read and its clear: 'the install (dialed up true) and events [false true], the client reads connected false, want true' and 'the install (dialed up false) and events [true], ... reads connected false, want true'"
+    },
+    {
+      "criterion": "No regression in the take-over and the bus",
+      "surface": "real envoy-listener binaries under the rendered grant; the listener suite; internal/bus with -race",
+      "command": "go test -tags multiprocess -count=3 -run '^(TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s|TestTwoPodsReceiveConnectionLostWhileItsReconnectHooksHangHandsOverWithin15s)$' ./cmd/listener; untagged ./cmd/listener; go test ./internal/bus/... and -race",
+      "observed": "packet-dropping 3 of 3, slowest 11.948/11.966/11.949 s; hung hooks 3 of 3, slowest 12.147/12.154/13.063 s; listener ok 997.823s; bus ok 350.082s, race ok 375.765s. https://github.com/sjawhar/legion/pull/2404#issuecomment-6549929928",
+      "headSha": "3c1ab0d386a1fcc6a2c5e26cdfa23743e80b63fa",
+      "negativeControl": "the interleaving test above fails against the old code"
     }
   ],
   "filesChanged": [
-    "f08b5cc2: merge of main: cmd/listener/api.go (roleSetHandler: #2592's bucket read of the instance id with this branch's Amend), internal/session/registry.go (ClientInstanceID beside the preserved unknown fields; DeleteIfInstance through decodeSessionEntry), registry_test.go, .dispatch/architecture/envoy-listener.md, api_pods_test.go and pods_address_test.go (roleSetHandler's new logger argument; a cross-pod claim row)"
-  ],
-  "trickyParts": [
-    "#2592's client instance id is the client's, kept in the shared session bucket, so a take-over changes nothing about it."
+    "internal/bus/nats.go: connFlagMu, installedConn and connUp under it; noteConnection records every connection's last event and moves the flag for the installed one; markConnected(nc, dialedUp) sets the flag from that record; settleConnected deleted; afterInstall test hook",
+    "internal/bus/connected_flag_test.go (new)",
+    "cmd/listener/README.md, packages/envoy/AGENTS.md: the events are the flag's only source"
   ],
   "deviations": [],
   "openQuestions": [],
