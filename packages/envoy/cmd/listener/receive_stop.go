@@ -19,6 +19,9 @@ func (r *durableReceiver) end(ctx context.Context) {
 	t := r.term
 	r.term = nil
 	r.state = receiveStandby
+	// No term is being served from here, so the receive signal reads up again as a standby's
+	// does, whatever becomes of this term's subscription below (durableReceiver.receiveUp).
+	r.subscribed.Store(nil)
 	r.mu.Unlock()
 	switch {
 	case ctx.Err() == nil:

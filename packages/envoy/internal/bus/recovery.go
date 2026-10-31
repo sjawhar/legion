@@ -11,9 +11,19 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// onDisconnect is wired as the DisconnectedErrCB callback: nats.go has lost nc and reconnects it
+// in place from here, forever (options). The client answers Connected false until that reconnect
+// (onReconnect), without reading the connection itself, which is the whole point of the flag:
+// nats.go holds nc's own lock across each reconnect dial and its connect init, so a reader of
+// nats.Conn.Status() waits out a dial to a route that drops its packets.
+func (c *Client) onDisconnect(nc *nats.Conn) {
+	c.connectionEvent(nc, false)
+}
+
 // onClosed is wired as the ClosedCB callback. It launches recovery in a
 // background goroutine so the NATS library callback returns immediately.
-func (c *Client) onClosed() {
+func (c *Client) onClosed(nc *nats.Conn) {
+	c.connectionEvent(nc, false)
 	go c.recover()
 }
 
@@ -41,6 +51,9 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		c.closeStopped(nc)
 		return
 	}
+	// nats.go has the connection back, so the client is connected again (onDisconnect), before
+	// anything here restores what hung off it.
+	c.connectionEvent(nc, true)
 	// nc is the connection already in c.Conn, reconnected in place, and the JetStream context taken
 	// from it keeps working, so neither field is reassigned here. The reconnect is a connection
 	// event, so the hooks are due. A callback nats.go delivers late for a connection the client has

@@ -11,7 +11,12 @@ body: |-
     settles for the full ack wait beside the lost connection's subscription, so every message
     reaches its session in publish order, about thirteen seconds after the cut. A connection back
     inside the three seconds keeps the lease and its term, and no pod takes the lease, at a
-    standby poll or after a lapse, while its own receive connection is down.
+    standby poll or after a lapse, while its own receive connection is down. The signal the lease
+    reads loads two atomics - a connected flag the bus client's own connection events keep, and
+    the connection the receive loop recorded for its subscription - and touches neither the
+    connection it judges nor the receive loop's lock, so the hand-over keeps its bound even when
+    the route to the server drops the pod's packets, which leaves each of nats.go's reconnect
+    dials hanging with that connection's lock held.
 time: 2026-10-30T23:30:00.000000000Z
 custom:
     Issue: pr2404

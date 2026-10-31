@@ -68,11 +68,22 @@ Renewing is not the whole of holding. The lease renews on a NATS connection of i
 (`envoy-listener <instance>`), so the one can be up while the other is down. The receive loop
 gives the lease one signal for that (`durableReceiver.receiveUp`, `lease.SetReceiveSignal`),
 the same state that makes `/healthz` 503 on the active pod: the main client's connection is
-connected, and a term that is receiving holds a subscription that is valid on that connection. A
+connected, and a term that is receiving holds a subscription on that connection. A
 pod still preparing - reading the durable, waiting out a binding, settling before it has
 subscribed - counts as receiving, as `/healthz` counts it a standby rather than an inactive
 subscription. The lease judges that signal once a round, for the holder's release and the
 standby's take alike ("Take-over" below).
+
+The signal loads two atomics and reads nothing else: the client's own connected flag
+(`bus.Client.Connected`, which its connection's disconnect, reconnect and close callbacks keep)
+and the connection the loop recorded for the term's subscription when it made it
+(`receiveSubscription`). It must, because the connection it judges is the one that is down:
+nats.go holds a connection's own lock across each reconnect dial and its connect init, for the
+connect timeout at a time when the route to the server drops packets rather than refusing them,
+so a signal that read `nats.Conn.Status()`, or took the receive loop's lock, which that loop
+holds across its own subscribes, would stall the lease's renewals along with the release it owes.
+A subscription nats.go ends while its connection stays up is not read there; the self-health
+monitor's durable probe finds that one and resubscribes (`durableReceiver.probe`).
 
 The durable's ack wait is 6 s (`consumerAckWait`). The holder sends `InProgress` every 2 s for
 every message it has received and not settled, queued or in hand, so a message waits out the ack
@@ -191,7 +202,11 @@ wait only once the pod holding it has died or lost the lease.
   holds its full 7 s cap, and no clean-hand-back mark vouches for a release no hand-over went
   through. The receive loop ends the term as it ends any lost lease - it drops the subscription
   and leaves what it queued to come back at its ack wait - since nothing can be NAKed over a
-  connection that is down. A message published as the connection was cut reaches its session
+  connection that is down. A route that drops the pod's packets rather than refusing them leaves
+  nats.go's reconnect dials hanging, each holding the connection's own lock for the connect
+  timeout, and costs the hand-over nothing: the signal the lease reads touches neither that
+  connection nor the receive loop's lock (above). A message published as the connection was cut
+  reaches its session
   about 13 s later (3 s detection, the 3 s bound, a standby poll and the 7 s hold), inside the
   15 s a hard take-over is bounded at. No pod takes the lease while its own receive connection is
   down - not an absent record, not a released one, not an expired one, and a holder that has

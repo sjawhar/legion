@@ -224,10 +224,7 @@ func TestTheHolderReceivesOnAConnectionTheBusReplaced(t *testing.T) {
 	closed.Close()
 	waitFor(t, 30*time.Second, "the subscription to move onto the replacement connection", func() bool {
 		report := rig.receiver.report()
-		rig.receiver.mu.Lock()
-		moved := rig.receiver.conn != closed
-		rig.receiver.mu.Unlock()
-		return moved && report.State == receiveActive && report.SubscriptionValid
+		return rig.receiver.conn.Load() != closed && report.State == receiveActive && report.SubscriptionValid
 	})
 	publisher := testnats.Connect(t, uri)
 	t.Cleanup(publisher.Close)

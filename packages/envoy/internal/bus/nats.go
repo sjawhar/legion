@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -303,6 +304,24 @@ type Client struct {
 	// first time (onConnect), and false for every other client.
 	awaitingConnection bool
 
+	// connMu orders the writes of live and connected alone: a connection event's state is never
+	// overwritten by an older one that way. It is held for those two stores and nothing else,
+	// never across a call on a nats.Conn and never while another lock of this client is taken -
+	// the adoption inside ensureConnWithContext takes it under mu, never the other way round - so
+	// a writer waits on it for no more than two stores and no reader waits on it at all.
+	connMu sync.Mutex
+	// live is the connection Connected answers for, the one the constructor or
+	// ensureConnWithContext last installed (adopt), and connected what nats.go last reported of it
+	// (connectionEvent, from onDisconnect, onReconnect and onClosed). Connected reads these two
+	// atomics and nothing else:
+	// nats.go holds a connection's own lock across each reconnect dial and its connect init, for
+	// the connect timeout at a time while a route that drops packets leaves the dial hanging, so a
+	// Connected that read nats.Conn.Status() would wait that out - and cmd/listener's delivery
+	// lease reads it from the loop that must release the machine's lease while that very
+	// connection hangs (lease.SetReceiveSignal).
+	live      atomic.Pointer[nats.Conn]
+	connected atomic.Bool
+
 	// recovery state
 	recovering int32
 	stopCh     chan struct{}
@@ -348,7 +367,7 @@ func Dial(name string, urls []string, environment func(string) (string, bool), o
 	}
 	settings := opts.connectionSettings(credential)
 	dial := func(first nats.Option) (*nats.Conn, error) {
-		return connect(name, urls, allOf(settings, first), dialer, nil, nil, nil, opts.reconnectErrClock)
+		return connect(name, urls, allOf(settings, first), dialer, connCallbacks{}, opts.reconnectErrClock)
 	}
 	if opts.background {
 		return connectFirstInBackground(name, urls, opts.reconnectErrClock, dial, nil, nil)
@@ -418,7 +437,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	}
 	stream := opts.streamConfig()
 	dial := func(first nats.Option) (*nats.Conn, error) {
-		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.connectionCallbacks(), c.reconnectErrClock)
 	}
 	if opts.background {
 		c.awaitingConnection = true
@@ -433,6 +452,10 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		// pinned nats.go (v1.50.0) it cannot fail: JetStream with these options returns no error, and
 		// there is no stream to reconcile here. The stop guards a nats.go whose JetStream can.
 		install := func(nc *nats.Conn) error {
+			// nats.go has not connected this one yet, so the client is not connected either until
+			// its ConnectedCB (onConnect), which connectFirstInBackground holds until this
+			// returns.
+			c.adopt(nc, false)
 			if err := c.install(nc, nil); err != nil {
 				c.stop()
 				return err
@@ -448,6 +471,9 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	if err != nil {
 		return nil, err
 	}
+	// The dial returns a connection that has connected, and the adoption comes before the
+	// reconcile below, which is a round trip: a connection event of nc's counts from here.
+	c.adopt(nc, true)
 	var owned *nats.StreamConfig
 	if ownsStream {
 		owned = &stream
@@ -527,11 +553,58 @@ func (c *Client) JS() nats.JetStreamContext {
 	return c.js
 }
 
-// Connected reports whether the client currently has a live NATS connection.
+// connectionCallbacks are the client's handlers for the events of every connection it dials
+// (options).
+func (c *Client) connectionCallbacks() connCallbacks {
+	return connCallbacks{
+		disconnected: c.onDisconnect,
+		reconnected:  c.onReconnect,
+		closed:       c.onClosed,
+		asyncErr:     c.onAsyncError,
+	}
+}
+
+// adopt records nc as the connection Connected answers for, with connected as the state the dial
+// that returned nc left it in: from here nc's own connection events move the flag
+// (connectionEvent). An event nats.go delivered for nc before this - a connection dropped between
+// its dial and its adoption - is not counted, and the reconnect that follows it puts the flag
+// right.
+func (c *Client) adopt(nc *nats.Conn, connected bool) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	c.live.Store(nc)
+	c.connected.Store(connected)
+}
+
+// connectionEvent records what nats.go reported of nc: connected for a reconnect or a first
+// connection, not connected for a drop or a close. An event of a connection the client has
+// replaced, discarded or ended changes nothing, since the client answers for another one.
+func (c *Client) connectionEvent(nc *nats.Conn, connected bool) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	if c.live.Load() == nc {
+		c.connected.Store(connected)
+	}
+}
+
+// ended records the end of the client's connection (Close, Drain): it is closed, or draining and
+// closed after that, and the client is stopped, so nothing reconnects or replaces it. Connected
+// answers false from here rather than from the close event nats.go delivers afterwards, and no
+// later event of that connection changes it.
+func (c *Client) ended() {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	c.live.Store(nil)
+	c.connected.Store(false)
+}
+
+// Connected reports whether the client currently has a live NATS connection. It reads the flag
+// the client's own connection events keep (connectionEvent) and never the connection's state, so
+// it answers at once while nats.go holds that connection's lock across a reconnect dial that
+// hangs: cmd/listener's delivery lease judges its receiving by this, from a loop that must go on
+// renewing and release the record while the connection it judges is stuck (lease.receiveDown).
 func (c *Client) Connected() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
+	return c.connected.Load()
 }
 
 // HookedConnectionEvents is how many connection events this client's reconnect hooks have run to
@@ -866,6 +939,9 @@ func (c *Client) Close() {
 	}
 	c.subscriptionsMu.Unlock()
 	c.stop()
+	// Nothing serves on this client again, so it answers Connected false from here rather than
+	// from the close event below, which nats.go delivers on a goroutine of its own (ended).
+	c.ended()
 	c.mu.Lock()
 	if c.Conn != nil {
 		c.Conn.Close()
@@ -910,6 +986,10 @@ func (c *Client) Drain(timeout time.Duration) error {
 	c.mu.Unlock()
 	defer c.awaitKeeper()
 	defer conn.Close()
+	// The drain below, the close deferred above and a close that lands while nats.go drains all
+	// end this client's connection, and the client is stopped, so nothing reconnects it:
+	// Connected answers false once Drain returns rather than once nats.go delivers the close.
+	defer c.ended()
 	if conn.IsReconnecting() {
 		return fmt.Errorf("drain NATS: %w", nats.ErrConnectionReconnecting)
 	}
@@ -1052,7 +1132,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.connectionCallbacks(), c.reconnectErrClock)
 		if err != nil {
 			return err
 		}
@@ -1086,6 +1166,9 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		}
 		c.Conn = nc
 		c.js = js
+		// The replacement has connected, and only the connection the client installs is the one
+		// Connected answers for: the one discarded above never becomes it.
+		c.adopt(nc, true)
 		c.markHooksDueLocked()
 		c.mu.Unlock()
 		return nil

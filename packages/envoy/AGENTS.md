@@ -2801,7 +2801,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
 - The delivery lease renews on a NATS connection of its own (`envoy-listener-lease <instance>`) while the durable is received on the pod's main client (`envoy-listener <instance>`), so renewing says nothing about receiving:
   a holder whose main connection alone was lost renewed for as long as its lease connection was up, answered `/healthz` 503 `subscription inactive` and delivered nothing, and no standby took over until the self-health monitor killed the pod.
   The receive loop gives the lease one signal for that state, the same one that makes the 503 (`durableReceiver.receiveUp`, `lease.SetReceiveSignal`):
-  the main client is connected, and a term that is receiving holds a subscription valid on that connection;
+  the main client is connected, and a term that is receiving holds a subscription on that connection;
   a pod preparing the durable, waiting out a binding or settling before it has subscribed counts as receiving, as `/healthz` counts it a standby.
   The lease judges it once a round, for the holder and the standby alike (`lease.receiveDown`, called from `step`).
   A holder whose signal has been down for `leaseReceiveLost` (3 s:
@@ -2811,6 +2811,14 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   No pod takes the lease while its own receive connection is down - no absent, released or expired record, and no resume after a lapse - so the cut pod does not take back what it released and stands by again once the connection is up;
   a release the bucket does not take keeps the hold, leaving the record to expire as it did before this bound.
   `TestTwoPodsReceiveConnectionLostHandsOverWithin15s` and `TestTwoPodsReceiveConnectionBackInsideTheBoundKeepsTheLease` (build tag `multiprocess`) cut one of a pod's two connections by the client name in its CONNECT frame (`mpLaneRelay`, `cmd/listener/multiprocess_harness_test.go`).
+
+- The receive signal loads two atomics and reads nothing else, because the connection it judges is the one that is down:
+  nats.go holds a connection's own lock across each reconnect dial and its connect init, for the connect timeout at a time when a route drops the pod's packets rather than refusing them, so a signal that read `nats.Conn.Status()`, or took the receive loop's lock, which `durableReceiver.begin` and `resubscribe` hold across a subscribe, would stall the lease loop's renewals along with the release it owes.
+  The client answers from a flag its own connection's disconnect, reconnect and close callbacks keep (`bus.Client.Connected`, `connectionEvent`, set for each connection the client adopts), and the term's half is the connection the loop recorded when it subscribed (`receiveSubscription`, stored by `begin` and `resubscribe` and cleared when the term ends).
+  A subscription nats.go ends while its connection stays up is not read there, where the signal once read `nats.Subscription.IsValid`:
+  the self-health monitor's durable probe finds that one (`durableReceiver.probe`, `errDurableUnbound`) and its rebuild resubscribes.
+  `TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s` (build tag `multiprocess`) cuts the pod's receive connection and holds every connection it opens after that before its first byte (`mpLaneRelay.blackholeNew`), so its reconnect dials hang;
+  `TestTheReceiveSignalAnswersWhileTheConnectionsReconnectDialHangs` and `TestTheReceiveSignalAnswersWhileTheReceiveLoopHoldsItsLock` (`cmd/listener/receive_signal_test.go`) bound one read of the signal at 100 ms through both of those waits.
 
 - An agent delivery (`notifications.agent.<session>`) reads the session it pushes to from the session bucket itself, bounded by `deliverySessionReadTimeout` (2 s), and tells the three causes of an unplaced attempt apart:
   no record at all (`session.ErrNoSessionRecord`, logged and labelled `no_session_record`), a record naming nothing to push to (`session.ErrNoPushTarget`, `no_push_target`), and a push that failed (`session.ReasonPushFailed`, `push_failed`:
