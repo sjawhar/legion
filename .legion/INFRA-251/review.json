@@ -2,31 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-251",
-  "completed": "2026-10-30T12:31:06Z",
+  "completed": "2026-10-31T02:42:46Z",
   "decision": "changes_requested",
-  "round": "architect-scoped round: does the kept-decision property model cover every real transition, and does every person's decision reach the controller once and the current architect once, none lost; plus the release rule, the tester's red test, and review 5705826477's findings",
-  "reviewedHead": "the handoff push above 9e4d55828e5f (code head 78400b187821)",
+  "round": "architect-scoped round: every person's decision reaches the architect it is owed to and the controller, never lost (told twice is the lesser fault); the model reaches every transition the daemon makes; RootHears leaves main's resume paths unchanged",
+  "reviewedHead": "the handoff push above 549ed8132a1a (code head 5541a2468c69)",
   "critical": 0,
-  "important": 4,
-  "minor": 1,
+  "important": 3,
+  "minor": 0,
   "accepted": [
-    "Review 5705826477's five findings are fixed: keepStaleApproval keeps the pair on a nil gate under an armed gate (admit.go:965-980); claimed_by stops a catch-up naming what a queued start names; DeliveredRows stops a retried start re-sending after its delivery retired; parkDecision logs one line per outcome and the verdict jq matches; TestOnlyADeliveredStartForgetsTheDecisionsItNamed fails without the start's forget.",
-    "The release rule (HandOverKept) and the tester's red test hold: a stale start's release reaches the running architect once.",
-    "RootHears leaves main's resume paths unchanged: ResumeAwaitedRoot's two paths, fresh admission and re-admission all hold a slot when their task is sent (root_hears_main_paths_test.go:474).",
-    "The model's declared exclusions hold: a retired claim keeps its pending task (retire writes the claim only); a death mid-turn re-sends the same delivery; nothing is kept for an awaiting_person root."
+    "Review 5712285709's four findings and its comment are fixed: DropCatchUps keeps a catch-up under a live lease (the 30 s lease is renewed every 10 s, so a lapse mid-publish is a double telling, never a loss); asksRoot keeps a held root task from askFirst and foreign-turn confirmation; the superseded receipt timeout hands over through supersededKept; an orphan carrying its run takes its subtree's kept rows (MoveKeptDecisions) and its held ones (ReKeepDeliveredDecisions); the KeptToldSource comment names the Published key.",
+    "RootHears/asksRoot leave main's resume paths effectively unchanged: ResumeAwaitedRoot and a fresh start carry no Kept, so rootTask returns them unchanged, and after a restart the shim's delivery-id dedupe (shimwire/dedupe.go) answers a re-send of the same id without a second prompt.",
+    "currentRootTask retires nothing it should send: an approval pair alone is kept in the rewritten text, and '{}' maps to no Kept."
   ],
   "keyFindings": [
-    {"severity": "important", "file": "packages/daemon/internal/record/store.go:1593", "description": "A catch-up dropped while it is publishing tells its decisions twice. DropCatchUps deletes a leased catch-up that has no kept-told mark yet; the FK frees its claims and the same transaction's new catch-up claims them; the first publish then succeeds and forgets only rows it still claims, and the second catch-up tells them again. The model runs rows one at a time, so it never interleaves a publish with a ready or a settlement."},
-    {"severity": "important", "file": "packages/daemon/internal/supervise/delivery.go:199", "description": "After a restart, a held start task (RootHears false, never sent) on a Ready/Idle claim is confirmed by askFirst when the agent is streaming, or by turnStarted's inFlight on a foreign turn, then retired at the turn's end. Its decisions were forgotten when the claim queued it, so they are lost. The model's fake conn never streams and its turn step fires only for an acknowledged task."},
-    {"severity": "important", "file": "packages/daemon/internal/admit/admit.go:918", "description": "Decisions kept on a child are stored under the child's root (record/parked_decision.go:96). The orphan hand-over carries the child's gate and pull request but not those rows, so the child's new tree's architect never hears them. The model has no hand-over transition."},
-    {"severity": "important", "file": "packages/daemon/internal/daemon/notice_exceptions.go:207", "description": "A catch-up whose receipt timed out and that a newer catch-up has superseded is not re-held, and its row finishes, so the deletion releases its claims. Nothing hands them over, though the architect hears and no ready is coming, so the decisions wait for an unrelated relaunch. deliverNotice's superseded branch hands over (outbox.go:705-716); this one should too."},
-    {"severity": "minor", "file": "packages/daemon/internal/record/parked_decision.go:136", "description": "KeptToldSource's comment says the mark goes under the catch-up's own row key. toldKept marks under the Published key, which a re-held copy shares with its original, and DropCatchUps' SQL computes that key. Fix the comment."}
+    {"severity": "important", "file": "packages/daemon/internal/admit/admit.go:866", "description": "readmit moves and re-keeps a child's subtree decisions only when orphan := carry && !IsTreeRoot. A hand-over or orphan without its run (an Admitted child a blocker holds, which linger hands over; a parked child a person sets todo) still sets stored.Tree = stored.Key. Its rows stay under the old root, and rootTask then drops its marks from the old root's held task with nothing re-kept, so the decision is lost. linger's handedOverSubtrees counts that child and logs Info 'goes to the child' instead of the Warn, so the change removes its own alarm. Move on every tree change (oldTree != stored.Key), whatever carry is."},
+    {"severity": "important", "file": "packages/daemon/internal/record/parked_decision.go:102", "description": "A root waiting for its slot keeps a person's decision under its own key (RelayKept), and the controller is not told. If admission then adopts that queued root into a live tree (workflow/adopt.go Engine.Adopt, through adoptQueuedRoots or release_children), its tree changes and no start or catch-up ever names the row. Both the architect and the controller miss the decision. Adopt must move those rows to the tree's root and, when that root hears, queue a catch-up as HandOverKept does."},
+    {"severity": "important", "file": "packages/daemon/internal/admit/admit.go:989", "description": "subtree walks every descendant in the old tree, but linger hands over every unfinished member, grandchildren included, each into a tree of its own. If child C's re-admission runs before grandchild G's, C takes G's rows and G's own architect never hears them. The outcome depends on event order. Stop the walk at a descendant that holds its own hand-over fence, with one shared walk for admit.subtree and linger.handedOverSubtrees so the close's Warn/Info split stays true."}
   ],
   "notFindings": [
-    "Code-quality's point that the model's decide() keeps on the claim-level rule (nobodyHears=true) while the ask path uses root.Lingers() is not a fault. The model's states are a superset: they are the outbox path's keep. The ask path's keep rule is pinned by the admit tests.",
-    "Three readings of 'who hears' (outbox claim-level, ask path linger-only, ArchitectHears for the hold and hand-over) differ only for a running tree whose architect claim ended. That tree is not parked, which is outside this issue's scope. The ArchitectHears comment overstates it as the only reading.",
-    "A held g1 task sent in g2 names the stale approval pair kept at g1. The architect requests approval of what Dispatch shows, and register_gate takes the newer of the caller's and Dispatch's version, so nothing is lost or told twice.",
-    "kept_decision_property_test.go is a new 1,236-line test file, and settleKept's gave flag is redundant with DeliveredRows. These are maintainability items, not faults."
+    "The duplicated newer-wins upsert in MoveKeptDecisions and AddParkedDecision, and parked_decision_test.go passing 1,000 lines, are maintainability items, not faults.",
+    "implement.json's propertyModelGaps text is stale (a child's decision kept under its root; nothing retires a claim). It is a handoff record, not shipped code; the round's fix should update it."
   ],
-  "ci": "At code head 78400b18, read 2026-10-30T12:03Z: lint, typecheck and test were queued (CI run at 78400b18); pr-title success. A request for changes does not wait on CI."
+  "modelGaps": "The property model has one root and one child that always carries its run. It has no hand-over without the run, no orphan made by a person's todo, no grandchild hand-over, no adoption and no tree close, which is why it reached none of the three findings.",
+  "ci": "At code head 5541a246, read 2026-10-31T02:24Z: typecheck, ci-images, docs/build and pr-title success; lint and test in progress; the package jobs queued. A request for changes does not wait on CI."
 }
