@@ -301,7 +301,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 //     lock (planRepairs, repairPlan).
 //   - A tree whose repairs match the plan has them written into the room, appended and committed
 //     with the rows and events their reconciliation wrote, and no version (commitRepairs).
-//   - Otherwise the pass writes the version from the pre-rendered output (commitVersion).
+//   - Otherwise the pass writes the version from the pre-rendered output (commitVersion): a tree
+//     that needs no repair, and one whose repairs the plan's decision all dropped, which leaves
+//     every block as this pass found it (applyAnswers).
 //
 // Each pass but the last leaves the rest to the next, which reads the document again.
 func (s *settlement) settlePass(parent context.Context) (settleStep, settleOutcome) {
@@ -342,18 +344,27 @@ func (s *settlement) settlePass(parent context.Context) (settleStep, settleOutco
 		// holds the stamp's pending row.
 		return pass.commitStamp(ctx)
 	}
-	reconciliation, err := s.service.reconcileAskBlocks(ctx, tx, s.room, owner, pass.read, pass.credit)
+	pass.reconciliation, err = s.service.reconcileAskBlocks(ctx, tx, s.room, owner, pass.read, pass.credit)
 	if err != nil {
 		return settleDone, pass.abandon(err)
 	}
-	pass.reconciliation = reconciliation
 	if s.service.afterSettleReconcile != nil {
 		s.service.afterSettleReconcile(s.room)
 	}
-	if len(reconciliation.repairs) > 0 {
+	if len(pass.reconciliation.repairs) > 0 {
 		if ended, step, outcome := pass.planRepairs(ctx); ended {
 			return step, outcome
 		}
+	}
+	// The repairs as the plan's decision leaves them (applyAnswers): a decision that withholds an
+	// answer the document has no room for drops every repair that then changes nothing, since
+	// withholding leaves the block exactly as this pass found it - the shape an earlier pass's own
+	// repair wrote into the room. A reconciliation left with no repair has nothing to write, so
+	// the document is versioned here. Written into the room instead, those repairs would change
+	// nothing, which commitRepairs reads as the document having moved under them, and the
+	// settlement would plan the same withheld answers again until its pass bound, leaving the
+	// document owed for good.
+	if len(pass.reconciliation.repairs) > 0 {
 		return pass.commitRepairs(ctx)
 	}
 	return pass.commitVersion(ctx)
@@ -785,7 +796,8 @@ func (p *settlementPass) commitRepairs(ctx context.Context) (settleStep, settleO
 	}
 	// Repairs that found nothing to write found the document moved under them: a browser
 	// removed or changed the block a repair was for. The rollback leaves the document as the
-	// browser left it, and the next pass reads it again.
+	// browser left it, and the next pass reads it again. A pass whose repairs were all dropped
+	// writes no repairs at all and never reaches here (settlePass): nothing moved under it.
 	if len(p.slots) == 0 {
 		return settleMoved, settleOutcome{}
 	}
@@ -874,8 +886,10 @@ func (p *settlementPass) commitVersion(ctx context.Context) (settleStep, settleO
 	s.unlockState(room, state)
 
 	// The version takes the rendering this pass made of read before its transaction. Only a
-	// recorded repair changes read in place (settlementReconciliation.repair, repairAsk), and a pass
-	// that reconciled any repairs has ended above, so read is the tree that rendering was made of.
+	// recorded repair changes read in place (settlementReconciliation.repair, repairAsk); a pass
+	// that holds one has ended above, and one whose repairs the plan's decision dropped put every
+	// block it changed back as it found it (applyAnswers), so read is the tree that rendering was
+	// made of.
 	if s.beforeSettleVersion != nil {
 		s.beforeSettleVersion(room, p.read)
 	}

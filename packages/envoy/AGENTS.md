@@ -224,7 +224,8 @@ A tree that lacks block ids has them stamped in the room (`EnsureBlockIDs`) and 
 A tree whose ask blocks need repairs (the server-owned attributes of each ask block it reconciled) is rolled back and the repairs planned with no lock held - their answers weighed and the repaired tree rendered (`repairPlan`);
 the next pass, when it reconciles the same tree, writes them into the room and commits them with the ask rows and events their reconciliation wrote, in a transaction of their own that writes no version.
 The pass after that versions the repaired document, rendered outside the lock as every version is.
-Only a pass with nothing to stamp or repair writes the version, from the output it rendered before its transaction.
+A pass whose plan withholds answers the document has no room for drops every repair that then changes nothing (`applyAnswers`), since withholding leaves the block as the pass found it - the shape its own earlier repair wrote into the room - and a pass left with no repair versions the document there and then rather than writing nothing into the room, which would read as the document moving and leave it owed until the pass bound (INFRA-592).
+Only a pass with nothing to stamp and no repair left writes the version, from the output it rendered before its transaction.
 Each repair is read and written in one Yjs transaction, which holds the document's lock, so it is computed against the document as it stands:
 the tree settlement reconciled was read before its database work, and writing that tree would revert an edit a peer made since (LEGION-479).
 Each repair's update is held from the room's own persistence by a suppression slot of its own (`applySuppressed`;
@@ -232,7 +233,7 @@ ygo's persistence worker is handed each update on its own), and every path relea
 A repair reports whether its transaction wrote anything;
 one that wrote nothing still committed that transaction, and ygo hands the worker an update for it too (the document's delete set), so its slot is finished with that update and the worker takes it rather than storing it.
 The repaired document's version comes from the next pass's own copy of the live tree, so a peer's edit made since the repairs' read is in that version too.
-Only a recorded repair changes a pass's copy in place, and a pass that reconciled any repairs writes no version, so the version is the copy its rendering was made of.
+Only a recorded repair changes a pass's copy in place, and a pass that holds any repair writes no version - one whose repairs the plan's decision dropped put every block it changed back as it found it - so the version is the copy its rendering was made of.
 The settlement tests (`settlement_read_invariant_test.go`, `settlement_render_once_test.go`) check, for each pass they drive that reaches its version, that the copy is unchanged since the pass took it.
 A document's pending authors are in one of two places:
 F, the room's local in-flight credits (`roomState.inflight`), or R, the durable `doc_pending_authors` rows from migration `0084`.
