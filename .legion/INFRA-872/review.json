@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-872",
+  "completed": "2026-10-31T02:22:00Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "66e10d6bbd5060d18f9fc61bc298a29e22644be7",
+  "critical": 0,
+  "important": 3,
+  "minor": 7,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/infra/README.md", "description": "No migration step for a consumer that declared its own tailscale.Service svc:<hostname> under the old tailnetService contract. The provider's Create is VIPServices().CreateOrUpdate (terraform-provider-tailscale v0.29.2 resource_service.go:124), so the component adopts the live Service; when the consumer then removes its own declaration, Pulumi deletes it after the creates and the Delete removes the Service the component just adopted (resource_service.go:188-196). The README and the changelog fragment must say: drop it from the consumer's state first (pulumi state delete <urn>, or retainOnDelete for the apply that removes it), never let Pulumi delete it."},
+    {"severity": "important", "file": "PR body", "description": "Not proven / risk bullet says tailscale.NewService fails on the first apply when svc:<hostname> already exists. False: Create is an upsert, so an existing Service is taken over and its comment, ports and tags are overwritten. Same claim in implement.json openQuestions. The go.mod bullet's cause is also wrong: the seven indirect modules are reached through this module's own core tests importing envoy's internal/testnats and internal/dispatch/store (go mod why), not the envoy module's test dependencies."},
+    {"severity": "important", "file": "packages/envoy/infra/gcp/dispatch_test.go", "description": "The Construct assertion that the front-door Deployment and Serve ConfigMap wait for the Tailscale Service was deleted and not replaced; no test asserts the tailscale provider requirement (refused without it on the front door, not required in the sandbox) or the Service's own inputs (Name svc:<hostname>, Ports tcp:443, Tags, Protect following deletionProtection)."},
+    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "Lines 1390-1396 and 699-702 say grants on the front door's tags do not cover the Service's address, while the Service now carries those same tags; step 1's 'without one of the two' warning is false for this release and 'as a source' is meaningless."},
+    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "Protect rationale (line 484-485, README:561) says the consumer has no way to unprotect a protected child; pulumi state unprotect does. The real reason is that the consumer's program has no option that reaches it."},
+    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_kube.go", "description": "Lines 348-368: one-key special case plus an []any/labels/outputStrings path whose error branch cannot run; one typed StringArray join gives the same bytes for one key."},
+    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_construct_test.go", "description": "Line 159: require.Equal over the instance's whole dependency list pins unrelated siblings; assert the consumer's URN is absent."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/multiprocess_test.go", "description": "TestAStagedKeyRotationThatSkipsTheAddApplyIsRefusedAtBoot runs the same refusal path as the first row of TestAProcessWhoseKeySetALivePeerDoesNotShareRefusesToStart (~25 s per run)."},
+    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_construct_test.go", "description": "Stale counts: 'nine' inputs of the two groups at dispatch_construct_test.go:569,577 and dispatch_cluster_only_test.go:114; the groups now hold eight."},
+    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/INFRA-797-dispatch-sandbox-mode.yaml", "description": "Unreleased fragment still lists tailnetService in the tailnet group and will publish beside its removal; it and the other unreleased fragments named for a Dispatch key break the root AGENTS.md fragment rule."}
+  ],
+  "architectQuestions": {
+    "goModDrift": "Verified: go mod tidy on main's own packages/envoy/infra/go.mod (GOWORK=off, base 4ca6415a) adds exactly the seven modules; the other go.mod moves (pulumi sdk 3.268.0, go-crypto 1.5.2, go-git/go-billy beta.1, sha1cd 0.7.0, cpuid dropped) follow from pulumi-tailscale v0.29.2 requiring pulumi sdk v3.268.0 (go mod graph); the head go.mod and go.sum are tidy.",
+    "serviceTags": "The component creates a new Service resource; no known consumer declares one (theorem-labs/agent-infra dispatch/ pins envoy-infra 2.9.1). Tags equal to the node tags are accepted as the design; the README must state their grant effect correctly.",
+    "removedInputThroughConstruct": "Not a defect: a Go consumer fails to compile, and Pulumi YAML refuses a property the schema lacks (pulumi-yaml pkg/pulumiyaml/analyser.go, NonExistentFieldFormatter in isAssignable). Only a raw gRPC Construct is silent."
+  },
+  "declined": [
+    "Hoisting dependsOnInput into a shared package: plan D7 decided the per-package copy.",
+    "Dropping the ConfigMap->Service and Deployment->instance edges as transitive: the acceptance names the Deployment->instance edge, and the ConfigMap edge costs nothing."
+  ],
+  "ci": "At code head 66e10d6b the CI run 41156098319 is still queued (lint, test, envoy-infra-go queued; typecheck skipped); not waited for, since this round requests changes."
+}
