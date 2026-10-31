@@ -445,6 +445,26 @@ type healthAnswer struct {
 // deadline, so a stall in JetStream alone, which the flush's core PING does not see, fails the
 // container health check inside the budget, as the 10 s JetStream wait it replaces failed it by
 // running past the check's timeout. A check that answered with a failure keeps its answer.
+//
+// The role claim view is reported too, below every 503 check and as a 200 "degraded" naming it
+// (store.Registry.RoleViewErr, read in okAnswer): until its watcher's first scan has delivered
+// every claim the view answers no read, so GET /v1/sessions and GET /v1/registry/<session_id>
+// answer 503 while every other check here passes, and the report reads the very state those
+// routes read. Every pod of a machine serves those routes, the lease holder and each standby
+// alike (openV1Routes), so the active pod's 200 and a standby's each carry it. It is read there
+// so that it hides nothing: every check that can answer 503 has passed by then, so a degraded
+// view never takes the place of a fault that does not repair itself. A KV ping or durable info
+// read that answered with a transient failure is reported before it, as its own 200 "degraded"
+// carrying only status and error (dependencyHealth), and returns before the checks after it. The
+// role claim view's degraded answer instead carries the healthy body's own fields, so a reader
+// loses no counter while the view fills, and it stands beside the other reports a 200 carries - a
+// standby's failing takeover, an active pod's durable lag that could not be read, the KV watch
+// rebuild stall, which is named after it - rather than in place of any of them. Degraded and not
+// unhealthy, because that view fills itself through its watcher's own rescan and a 503 would take
+// a serving listener out of a load balancer for a state that repairs itself: a readiness check
+// runs curl -f or -sf against /healthz, which a 200 passes. For the same reason the view is no
+// part of Ping or WatchErr, whose terminal failures the self-health monitor self-terminates the
+// listener over: a restart completes no scan that keeps timing out.
 func healthzHandler(deps *atomic.Pointer[listenerDeps], verifier *apiVerifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), healthzDeadline)
@@ -535,7 +555,7 @@ func listenerHealth(ctx context.Context, d *listenerDeps, verifier *apiVerifier)
 			}
 			response["status"] = "degraded"
 		}
-		return okAnswer(response, d.client)
+		return okAnswer(response, d)
 	}
 	response["role"] = "active"
 	if !report.SubscriptionValid {
@@ -560,7 +580,7 @@ func listenerHealth(ctx context.Context, d *listenerDeps, verifier *apiVerifier)
 		response["num_pending"] = consumerInfo.NumPending
 		response["num_ack_pending"] = consumerInfo.NumAckPending
 	}
-	return okAnswer(response, d.client)
+	return okAnswer(response, d)
 }
 
 // healthzBudget bounds the bus checks of one /healthz answer.
@@ -588,25 +608,37 @@ func dependencyHealth(dependency string, err error, terminal bool) healthAnswer 
 	}
 	return healthAnswer{statusCode, map[string]interface{}{
 		"status": status,
-		"error":  dependency + " unavailable: " + err.Error(),
+		"error":  dependencyUnavailable(dependency, err),
 	}}
 }
 
-// okAnswer is /healthz's 200 answer over response, and the last thing the endpoint decides. A
-// rewatch of the KV caches that keeps failing after a reconnect ends no watcher and clears no
-// cache, so every other check answers while the caches follow buckets they no longer watch
-// (INFRA-743); this reads the client's HookStall for exactly that. A stall that has reached
-// bus.RepairGrace makes the answer "degraded" and names the "KV watch rebuild" in "error", and a
-// shorter one is reported nowhere: the bus runs the hooks again within seconds of a failure
-// (internal/bus/recovery.go, recoverUntilHealthy), so a rebuild under the bound is being repaired
-// and a listener would otherwise read as degraded over every reconnect. Only the 200 answers come
-// through here, below every 503 check, so a stall never stands in for a worse fault. A report the
-// pod already carries - a standby's failing takeover, an active pod's durable lag that could not
-// be read - keeps its place and the stall is named after it: both faults are this same 200
-// "degraded", and an operator reading the answer wants the whole of what is wrong, not whichever
-// half the endpoint found last.
-func okAnswer(response map[string]interface{}, client *bus.Client) healthAnswer {
-	stall, hookErr := client.HookStall()
+// okAnswer is /healthz's 200 answer over response, and the last thing the endpoint decides. Only
+// the 200 answers come through here, below every 503 check, so neither report it adds ever stands
+// in for a worse fault.
+//
+// It reads the role claim view first (store.Registry.RoleViewErr): until that view answers, the
+// two routes that report a session's roles - GET /v1/sessions and GET /v1/registry/<session_id> -
+// answer 503 while every other check passes, and every pod of a machine serves them, so an active
+// pod's answer and a standby's each carry it.
+//
+// Then the rewatch: a rewatch of the KV caches that keeps failing after a reconnect ends no
+// watcher and clears no cache, so every other check answers while the caches follow buckets they
+// no longer watch (INFRA-743); this reads the client's HookStall for exactly that. A stall that
+// has reached bus.RepairGrace names the "KV watch rebuild", and a shorter one is reported
+// nowhere: the bus runs the hooks again within seconds of a failure (internal/bus/recovery.go,
+// recoverUntilHealthy), so a rebuild under the bound is being repaired and a listener would
+// otherwise read as degraded over every reconnect.
+//
+// Each report makes the answer "degraded" and is carried beside, not instead of, one the pod
+// already has - a standby's failing takeover, an active pod's durable lag that could not be read,
+// the role claim view - in the order they are read here (carryReport): every one of them is this
+// same 200 "degraded", and an operator reading the answer wants the whole of what is wrong, not
+// whichever part the endpoint found last.
+func okAnswer(response map[string]interface{}, d *listenerDeps) healthAnswer {
+	if err := d.registry.RoleViewErr(); err != nil {
+		carryReport(response, "role claim view", err)
+	}
+	stall, hookErr := d.client.HookStall()
 	if stall < bus.RepairGrace {
 		return healthAnswer{http.StatusOK, response}
 	}
@@ -617,13 +649,25 @@ func okAnswer(response map[string]interface{}, client *bus.Client) healthAnswer 
 		// is the whole of it.
 		rebuild = fmt.Errorf("%w (%w)", hookErr, rebuild)
 	}
-	reported := "KV watch rebuild unavailable: " + rebuild.Error()
+	carryReport(response, "KV watch rebuild", rebuild)
+	return healthAnswer{http.StatusOK, response}
+}
+
+// carryReport adds a dependency's failure to a 200 /healthz answer: the answer is "degraded", and
+// a report it already carries keeps its place, with this one named after it.
+func carryReport(response map[string]interface{}, dependency string, err error) {
+	reported := dependencyUnavailable(dependency, err)
 	if carried, ok := response["error"].(string); ok {
 		reported = carried + "; " + reported
 	}
 	response["status"] = "degraded"
 	response["error"] = reported
-	return healthAnswer{http.StatusOK, response}
+}
+
+// dependencyUnavailable is the `error` field a /healthz answer gives for a dependency, so the
+// degraded answer that keeps the healthy body's fields reads exactly as dependencyHealth's does.
+func dependencyUnavailable(dependency string, err error) string {
+	return dependency + " unavailable: " + err.Error()
 }
 
 // webhookRoute is one configured webhook path and the handler it serves over the only
@@ -1202,17 +1246,26 @@ func main() {
 		return store.Open(conn, registryOptions...)
 	})
 
-	// Wait for the interest cache to finish its initial scan of existing KV
-	// entries before we start accepting NATS messages. Without this gate, real
-	// events that arrive in the warm-up window get "no matching interests"
-	// even when the durable KV entry has subscribers.
+	// Wait for both of the registry's views before accepting NATS messages or HTTP requests.
+	// Without this gate, real events that arrive in the warm-up window get "no matching interests"
+	// even when the durable KV entry has subscribers, and the two routes that report a session's
+	// roles - GET /v1/sessions and GET /v1/registry/<session_id> - answer a live client the
+	// bus-unavailable 503 while the bus is healthy, because the role claim view refuses every read
+	// until its watcher has delivered every claim. So the gate waits for that view to be complete,
+	// not merely ready: a first scan nats.go's idle timer ended releases readiness, and the
+	// watcher's rescan ends this wait.
 	//
-	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds.
-	// If the watcher fails to start, signalReady() unblocks startup and the
-	// health endpoint exposes the unavailable registry while NATS recovers.
+	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds. The wait also
+	// ends before that bound with the role claim watcher's terminal error - a first start that
+	// failed, a bucket recreated under it, the watcher's own end - or its stop, none of which the
+	// watcher completes a scan after.
+	// A warm-up that does not complete still serves, fail open: the warn below names the cache and
+	// carries the cause, whichever of those it was, the registry keeps answering from whatever it
+	// holds, and /healthz reports the role claim view as degraded and the buckets themselves while
+	// NATS recovers.
 	cacheReadyCtx, cacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := registry.WaitForCacheReady(cacheReadyCtx); err != nil {
-		logger.Warn("interest or role claim cache warm-up timed out; serving with possibly empty cache",
+		logger.Warn("interest or role claim cache warm-up did not complete; serving with possibly empty cache",
 			slog.String("error", err.Error()))
 	}
 	cacheReadyCancel()
