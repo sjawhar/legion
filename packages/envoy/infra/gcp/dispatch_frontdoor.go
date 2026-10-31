@@ -546,7 +546,7 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 		if service != want {
 			return "", fmt.Errorf("%s: tailnetService must be %s, the Tailscale Service the front door hosts, as Tailscale's API names it (not echoed)", dispatch, want)
 		}
-		return tailnetServeHTTPS(s.hostname, s.tailnetDNSName, "http://"+clusterLocal(s.hostname, s.namespace)+":8766"), nil
+		return tailnetServeHTTPS(s.hostname, s.tailnetDNSName, s.clusterURL()), nil
 	}).(pulumi.StringOutput)
 	serve, err := corev1.NewConfigMap(ctx, serveName, &corev1.ConfigMapArgs{Metadata: metadata(serveName), Data: pulumi.StringMap{"serve.json": serveJSON}}, child...)
 	if err != nil {

@@ -1,5 +1,43 @@
 # Changelog
 
+## [main@d7e1daaaaf70] - 2026-10-31
+
+### Added
+
+- `WriteAdvice.superseded_approval` (`{approved_version, version, approved_by}`): the approval a
+  document write superseded, set only on the write whose version replaced the approved one.
+
+## [main@e65900f4438b] - 2026-10-30
+
+### Added
+
+- `dispatch_answers` (`dispatch answers`), with no arguments: every answer and comment a person
+  wrote to this session in the last 72 hours, newest first, in full, the command the per-request
+  list names when it leaves older items out.
+- `SessionAnswer` and `SessionAnswersResponse`, the body of
+  `GET /api/v1/agents/{session_id}/answers` (`{session_id, since, total, items}`): each item is an
+  ask's current answer, a comment or a message a person wrote that Dispatch delivered to the
+  session, with its `relation` (one of `SESSION_ANSWER_RELATIONS`), time, author, full text, an
+  answer's choices and whether it replaced an earlier one, the ask it answers, its owner, its
+  `dispatch://` reference and its deep link; mirrored in Go as `model.SessionAnswer` and
+  `model.SessionAnswersResponse`.
+- `PublishedDispatchEvent` declares the event as Dispatch's outbox publishes it to NATS: the
+  event the API serves, plus the optional `quiet` the payload now carries. `quiet` is whether the
+  event carries nothing for a reader following its owner topic - a delivery receipt, an anchor
+  refresh, settings or per-viewer bookkeeping, a targeted message its session already had, an ask
+  edit that only moved a version, or a version nobody named - and it is what such a reader skips
+  on. `notify`, beside it, answers whether to wake the issue's route, claimant and authors, so an
+  agent's own event is not a wake. It is optional because a frame published before Dispatch
+  stated the field carries none, and a reader judges that frame by `notify` instead. The API's
+  own event shape is unchanged and carries no `quiet`.
+
+### Changed
+
+- `GithubPushSubject` cuts a ref segment that would make the subject longer than 4,032 bytes
+  (`SUBJECT_MAX_BYTES`, the bus's limit) and ends it in `~` and 16 hex digits of the whole ref's
+  SHA-256, so NATS stores a push whatever its ref's length and two refs keep two subjects. The
+  daemon API state schema (contract 43) gains `consumers` and `repositories.withoutWebhookApp`.
+
 ## [main@49e23926228d] - 2026-10-30
 
 ### Added

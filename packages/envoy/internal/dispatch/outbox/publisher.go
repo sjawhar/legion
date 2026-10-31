@@ -99,7 +99,9 @@ var errMentionPending = errors.New("a mention's delivery is still undecided")
 // Publisher is the NATS publication boundary used by the Dispatch outbox.
 type Publisher interface {
 	// Window starts one batch's sends: each is sent without waiting for NATS's answer, all on one
-	// connection and in the order they were made, or not at all (bus.Client.Window).
+	// connection and in the order they were made, or not at all (bus.Client.Window). A send the
+	// window has to make again leaves after the window's later sends, and a copy it sends without
+	// its id is stored by the stream as a message of its own.
 	Window() bus.Sender
 }
 
@@ -249,11 +251,13 @@ type routing struct {
 // envelope is sent to each of its destinations, in id order and each event's destinations in
 // turn, before any answer is waited for, so a batch costs one NATS round trip rather than one per
 // destination, and NATS takes the envelopes in the order they were sent: on the stream, on the role
-// lanes and on each issue's subject, a batch's events arrive in id order. Then every answer is
-// read, and what the batch came to is written in one statement (recordBatch). An event is marked
-// published only once NATS accepted each of its destinations; one that failed is backed off, so
-// the events queued behind it are not stuck behind it; and one that held a session's copy back for
-// a mention still being sent (errMentionPending) is deferred, its other destinations recorded.
+// lanes and on each issue's subject, a batch's events arrive in id order. A send the window has to
+// make again is the exception: it leaves after the window's later sends (bus.Client.Window). Then
+// every answer is read, and what the batch came to is written in one statement (recordBatch). An
+// event is marked published only once NATS accepted each of its destinations; one that failed is
+// backed off, so the events queued behind it are not stuck behind it; and one that held a
+// session's copy back for a mention still being sent (errMentionPending) is deferred, its other
+// destinations recorded.
 //
 // A failure of the connection rather than the envelope (bus.ErrUnavailable: no connection, one
 // lost or reconnected mid-batch, no answer at all) is no fault of its event. The window sends
@@ -261,11 +265,12 @@ type routing struct {
 // NATS is a prefix of it: no event after the first send that met the lost connection is sent, and
 // every event that met the failure, or was not sent, is released rather than backed off, so the
 // next scan sends them again in id order, and the stream's MsgId drops the copies of those that
-// had landed. An event backed off instead would reach its issue's subject after the later events
-// of that issue, which the Legion daemon then drops as stale by their sequence. The guarantee
-// covers a failed connection only: an answer that times out, or no responders, on a connection
-// still current stops no later send, so the released event can land after a later event of its
-// issue that NATS did store.
+// had landed, except a copy the window sent again without its id, which the stream stored as a
+// message of its own. An event backed off instead would reach its issue's subject after the later
+// events of that issue, which the Legion daemon then drops as stale by their sequence. The
+// guarantee covers a failed connection only: an answer that times out, or no responders, on a
+// connection still current stops no later send, so the released event can land after a later
+// event of its issue that NATS did store.
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	pending, blocked, err := scanPendingEvents(ctx, deps)
 	if err != nil {

@@ -1,5 +1,22 @@
 # Changelog
 
+## [12.5.0] - 2026-10-31
+
+### Changed
+
+- The packaged `dispatch` and `dispatch-writing-specs` skills tell a session to write each ask
+  or comment id whole in a reference, taking it from `dispatch read`'s `Ask id:` or from the
+  page URL, because the command accepts a prefix while a person's link does not. The
+  `dispatch` skill said an ask or comment id could be an 8-hex prefix, and a reference built
+  from one opens nothing for the person who clicks it. No code changed; the prepack copies all
+  of `skills/`.
+
+## [12.0.1] - 2026-10-30
+
+### Changed
+
+- `dispatch-first`, which an OpenCode session reads as an instruction file, says that a result a person asked for is like a blocker: a document or artifact notifies nobody, so the document that holds the result ends with an ask block asking their next step, else a `dispatch ask`. Its rule that each ask and message stands alone is gone, since `dispatch-writing-specs` carries it where an ask is written.
+
 ## [9.8.0] - 2026-10-28
 
 ### Added
