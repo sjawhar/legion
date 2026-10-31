@@ -131,10 +131,11 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 
 // sendPending sends the pending delivery if everything a send needs is true now: the claim is
 // ready or idle, the delivery is neither confirmed nor already on its way, the issue is still in
-// the phase the task was queued for, and the claim's connection is registered. A missing connection is not a
-// failure — the shim's next hello sends it. A delivery an earlier daemon may have sent is sent
-// again only after the agent says it is not already in a turn; if it is, that turn is taken as the
-// delivery's.
+// the phase the task was queued for, the claim's connection is registered, and — for a task that
+// adopts the working copy the issue's roles share (adopts) — no other claim of the issue is in a
+// turn. A missing connection is not a failure — the shim's next hello sends it. A delivery an
+// earlier daemon may have sent is sent again only after the agent says it is not already in a
+// turn; if it is, that turn is taken as the delivery's.
 func (m *Machine) sendPending(ctx context.Context) error {
 	// A claim holding a suspension is handed nothing (holdSuspension).
 	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
@@ -186,6 +187,26 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	}
 	if !holds {
 		return nil
+	}
+	// Every role of an issue works one jj workspace, so a task that adopts its working copy adopts
+	// it for all of them: an adoption run while another role is in a turn moves that role's worker
+	// onto a fresh commit mid-write, and the work it goes on to do lands authored by this role —
+	// a review App's adoption took the implementer's next commit that way (dispatch://INFRA-714).
+	// The task waits for that turn instead. Nothing is written and nothing moves: the delivery is
+	// left exactly as it was, and the hold is decided again, from the claims as they stand then,
+	// at the next trigger — the turn's end elsewhere on the issue, which the daemon posts here
+	// (IssueTurnEnded), the sweep's observation, the shim's hello, this claim's own ready. That is
+	// what keeps the task from being stranded by a turn that never ends: a claim whose process
+	// died, that was suspended, or whose issue closed is not in a turn any more, so the next
+	// trigger sends the task. It cannot be sent twice either, because every one of those triggers
+	// comes back through here, where a delivery already on its way (m.send), one waiting for its
+	// turn (TimerTurn), and a confirmed one each stop the send.
+	if m.adopts(*p) {
+		if other, inTurn := m.issueInTurn(); inTurn {
+			m.log.Info("supervise: a claim of this issue is in a turn; the phase task waits rather than adopt the working copy they share",
+				"delivery", p.ID, "issue", m.claim.Issue, "inTurn", other)
+			return nil
+		}
 	}
 	m.startSend(conn, *p)
 	return nil
@@ -271,9 +292,12 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) (streaming, 
 
 // startSend runs one prompt on its own goroutine and posts its outcome back to the machine. The
 // task is marked as put to the agent before the goroutine starts (Delivery.Prompted), whatever
-// the agent then answers: from here on, a prompt of it has gone out.
+// the agent then answers: from here on, a prompt of it has gone out. Whether the send adopts the
+// working copy first is decided here, under the machine's lock, so the goroutine acts on the
+// claim the hold in sendPending was decided against.
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
+	adopting := m.adopts(d)
 	prompt := d.message(m.claim.LastDeathCause)
 	if p := m.claim.Pending; p != nil && p.ID == d.ID {
 		p.Prompted = true
@@ -284,7 +308,10 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	}
 	m.goroutines++
 	go func() {
-		err := m.adopt(role, loc)
+		var err error
+		if adopting {
+			err = m.adopt(role, loc)
+		}
 		if err == nil {
 			sending, cancel := context.WithTimeout(m.ctx, m.deps.Timeouts.RPC)
 			err = conn.Prompt(sending, d.ID, prompt)
@@ -304,13 +331,35 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	}()
 }
 
-// adopt hands the working copy the role's App identity before every task reaches the agent, so
-// the task's commits are authored by the bot. A failure keeps the task from being sent. The
-// controller works no checkout, so it adopts nothing.
-func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
-	if m.deps.Identity == nil || role == claim.RoleController {
-		return nil
+// adopts is whether sending d hands the claim's working copy the role's App identity first
+// (adopt): a task of an issue phase, which is the work this role commits for. Every other prompt
+// adopts nothing — a message another role sent, a notice, a reminder, an operator's own task, the
+// controller's start — because the role is not about to commit for a phase, and the working copy
+// is the issue's rather than this claim's: an adoption made for a prompt that writes no phase
+// commit only takes the workspace from whichever role is working in it (dispatch://INFRA-714). A
+// daemon with no GitHub Apps (Deps.Identity nil) adopts nothing at all, and neither does the
+// project's controller, which works no checkout.
+func (m *Machine) adopts(d Delivery) bool {
+	return m.deps.Identity != nil && m.claim.Role != claim.RoleController && d.Phase != ""
+}
+
+// issueInTurn names another claim of this claim's issue whose agent is in a turn now, when there
+// is one. The answer is the state those claims' machines keep (Deps.IssueInTurn reads
+// StateWorking, which a turn's start sets and its end clears) rather than a second record of who
+// is in a turn kept beside them: the machines' own state is the only account that moves with
+// everything that ends a turn — the agent's own end of it, a process found dead, a suspension, a
+// close — where a record of turn times would have to be told of each of those again.
+func (m *Machine) issueInTurn() (claim.Token, bool) {
+	if m.deps.IssueInTurn == nil || m.claim.Issue == "" {
+		return "", false
 	}
+	return m.deps.IssueInTurn(m.claim.Issue, m.claim.Token)
+}
+
+// adopt hands the working copy the role's App identity before a phase task reaches the agent, so
+// the task's commits are authored by the bot. A failure keeps the task from being sent. Who
+// adopts, and when, is adopts and sendPending's hold.
+func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 	if loc == nil {
 		return fmt.Errorf("adopt the working copy of %s: the claim has no locator", m.claim.Token)
 	}

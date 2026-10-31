@@ -224,9 +224,9 @@ type ClaimView struct {
 func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) }
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
-// StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, StalePlugin, and the nine requests. The transition table has a row or a
-// named ignore for every one of them in every state.
+// StreamHello, StreamTurnStart, StreamTurnEnd, IssueTurnEnded, StreamClosed, StreamLateRefusal,
+// PromptAcked, PromptRefused, Timer, StalePlugin, and the nine requests. The transition table has
+// a row or a named ignore for every one of them in every state.
 type Event interface{ isEvent() }
 
 // Store is the persistence a machine writes through. A claim and its pending delivery are
@@ -314,9 +314,19 @@ type Deps struct {
 	// deploys with no broker: no identity is kept, and nothing is enrolled or revoked.
 	Secrets Enroller
 	// Identity is the git identity a role's commits carry on issue: its App's bot, minted for the
-	// owner of the repository the issue works. Every delivery hands it to the agent's working copy
-	// before the task. nil, for a daemon with no workflow or no GitHub Apps, adopts nothing.
+	// owner of the repository the issue works. A phase task hands it to the agent's working copy
+	// before the task (adopts). nil, for a daemon with no workflow or no GitHub Apps, adopts
+	// nothing.
 	Identity func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, error)
+	// IssueInTurn names a claim of issue other than except whose agent is in a turn now, and
+	// reports whether there is one. The roles of an issue work one jj workspace, so the adoption a
+	// phase task makes of its working copy is not a private act: one run while another role is in
+	// a turn moves that role's worker onto a commit of this role's (dispatch://INFRA-714), and a
+	// task that would adopt waits instead (sendPending). The daemon answers it from the state its
+	// machines publish — a claim is StateWorking from its turn's start to its turn's end — which
+	// is read without waiting on any decision in flight (Machine.View). nil holds no delivery
+	// back.
+	IssueInTurn func(issue string, except claim.Token) (claim.Token, bool)
 	// PhaseHolds says whether issue is still in phase p on run generation: the workflow enqueues a
 	// task for the phase and run its issue was in, and the outbox refuses to start a role for a
 	// phase the issue has left (daemon/outbox.go), so a delivery queued before the phase or the run
@@ -1531,6 +1541,8 @@ func claimOf(ev Event) claim.Token {
 	case StreamTurnStart:
 		return ev.Claim
 	case StreamTurnEnd:
+		return ev.Claim
+	case IssueTurnEnded:
 		return ev.Claim
 	case StreamClosed:
 		return ev.Claim

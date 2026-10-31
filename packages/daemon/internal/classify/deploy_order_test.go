@@ -26,12 +26,16 @@ import (
 // They are not the digests of the release before, and cannot be: that release's judgement carried
 // the fix-attempt accounting a CI result moved an issue by, which moves nothing now
 // (dispatch://INFRA-714/spec R1), and its histories carried reads of what the base branch
-// requires, which this release has no fact for. What they fence is this release against itself: a
-// daemon running ahead of its listener judges as recorded here, so a later change that moves that
-// judgement is seen rather than deployed.
+// requires, which this release has no fact for. The run fuzz's two digests moved again when the
+// settlements of the heads a handoff-only push links began to merge instead of replacing one
+// another (SettlementFor): that fuzz settles several such heads, so a settlement of one of them
+// now leaves the runs of the others standing, where it used to start the fence afresh. The move
+// fuzz's four are unchanged, since it settles one head. What they fence is this release against
+// itself: a daemon running ahead of its listener judges as recorded here, so a later change that
+// moves that judgement is seen rather than deployed.
 var noMoveNamedDigests = map[string]string{
-	"run-1":          "0ca494f9d8018789ecc8d4d7c1f10edf75d83508f33c11b94a017b603466b970",
-	"run-7":          "28fd7425ff2707816b2be99fb9cbe2e7a8d440b9b380cffb66006500c6fe75e2",
+	"run-1":          "0ba72527ad5380956c543ae5d2db5ef16c01199b0a20e59fdcd21e4d21045c54",
+	"run-7":          "bd167d665a73c670587c2e3779127b9e9a238b71a5dc54ff5bc81d6218ae1473",
 	"move-1-random":  "ac7efab1a791ef8e9b87e204a72575a6bfd715c55ef708936a59e793c9ed2a6e",
 	"move-1-bounded": "ef9fa20996e1fa085bd46d5a75a57a351ae0a972d2d1ef96350181c348196135",
 	"move-7-random":  "a241f44556a1816e342e5e268357a2e1cf543c57faf147fd70bbfa4fb99ae633",
@@ -43,8 +47,8 @@ var noMoveNamedDigests = map[string]string{
 // sender either way - and the move fuzz's are not: there the sender is what tells two pushes of
 // the same two heads apart.
 var noSenderNamedDigests = map[string]string{
-	"run-1":          "0ca494f9d8018789ecc8d4d7c1f10edf75d83508f33c11b94a017b603466b970",
-	"run-7":          "28fd7425ff2707816b2be99fb9cbe2e7a8d440b9b380cffb66006500c6fe75e2",
+	"run-1":          "0ba72527ad5380956c543ae5d2db5ef16c01199b0a20e59fdcd21e4d21045c54",
+	"run-7":          "bd167d665a73c670587c2e3779127b9e9a238b71a5dc54ff5bc81d6218ae1473",
 	"move-1-random":  "947d057f0a566e8a653e139d064884013d9b78eeffdbd0bb8343fd7d350c384b",
 	"move-1-bounded": "82b1143b7850f419e6ddbfb145909b56a73a32fdaf6c31d2bb5266e4271b0de5",
 	"move-7-random":  "068f61fd1eee983be9a93101569145eb16d981e80972e440fe965f9d3f070b68",
