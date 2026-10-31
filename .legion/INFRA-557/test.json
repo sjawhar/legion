@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-557",
+  "completed": "2026-10-31T14:05:00Z",
+  "round": 20,
+  "testedHead": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+  "handoffHead": "ca7de7a3499fa952188e792cd96dbd7872f63c64",
+  "scope": "Review round 13's fixes in 581c5f4b. The receive signal compares the term against the bus client's installed connection (ConnectedConn). The reconnect work runs on a goroutine of the client's, so a disconnect no longer waits behind the hooks. Also the four minor changes: README and changelog worst case 14.5 s, the never-installed clear removed, lease.go standDown with owesAckWait and no dead guard, and connectCallbacks.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I re-ran each of the implementer's proofs. (1) TestAReplacedConnectionBehindAFailingHookReadsDownAndReleasesTheLease and TestConnectedReadsDownAtACutWhileTheReconnectHooksRun fail against 9c247139 ('reads up 50ms after the client replaced the connection'; 'still reads connected 1.003s after the link was cut while its reconnect hooks run') and pass 3 of 3 at 581c5f4b. For the listener test the 9c247139 tree needed a one-line ConnectedConn accessor, added to the control tree only. (2) The packet-dropping row passes 7 of 7 at 581c5f4b, slowest 12.005 s. (3) Multiprocess ok 737.232s (33 PASS, my new row included); internal/bus -race ok 366.090s; untagged ./cmd/listener ok 875.169s."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A holder whose receive connection is cut while its reconnect hooks still run (the KV rewatch hook hanging and failing) releases the lease, and a standby delivers within the 15 s hard bound (review round 13, defect 2, on real processes).",
+      "surface": "two real envoy-listener processes signed in as the machine's nkey user under the rendered grant, on a real nats-server. pod-a's receive connection runs through the lane relay, which drops '$JS.API.STREAM.INFO.KV_envoy_roles' requests on it. That connection is cut until pod-a notices and then healed, so nats.go reconnects in place. One second later it is cut again with every new dial held (a route that drops packets). The row checks that the hooks had not failed when the second cut landed and had failed by its end.",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=7 -timeout 40m -run '^TestTwoPodsReceiveConnectionLostWhileItsReconnectHooksHangHandsOverWithin15s$' -v ./cmd/listener",
+      "observed": "7 of 7 PASS. pod-b took the lease 6.189-7.089 s after the second cut; in the 7-run batch the slowest message per run was 12.182, 12.448, 13.091, 12.208, 12.184, 13.055 and 12.175 s; a single run before the batch gave 12.162 s. Every message arrives once, and the messages after the second cut arrive in publish order.",
+      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+      "negativeControl": "The same row on 9c247139, -count=3: FAIL 3 of 3, '34 of 173', '34 of 173' and '43 of 181 messages reached their session later than 15s', slowest 18.2-19.1 s. There the disconnect waits behind the hanging hooks on nats.go's callback goroutine."
+    },
+    {
+      "criterion": "On a route that drops packets, the round-18 row, unchanged, still hands over within 15 s.",
+      "surface": "two real envoy-listener processes; pod-a's receive connection cut and its new dials held (mpLaneRelay.blackholeNew).",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=7 -run '^TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s$' -v ./cmd/listener",
+      "observed": "7 of 7 PASS; slowest message per run 12.005, 11.95, 11.955, 11.944, 11.953, 11.971 and 11.952 s.",
+      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+      "negativeControl": "Round 19: on 7494c07d, before 6828bbb3, it fails 2 of 2 ('pod-a never released the lease…'; '11 of 151 messages … later than 15s')."
+    },
+    {
+      "criterion": "No regression: SIGKILL take-overs, the refused-reconnect row and the reconnect-inside-the-bound row, every multiprocess row, internal/bus under -race, and the listener suite.",
+      "surface": "real listener binaries (multiprocess); the package suites.",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; CGO_ENABLED=1 go test -race -count=1 ./internal/bus/...; DISPATCH_TEST_DATABASE_URL=<private Postgres 17 + pgvector on the issue volume> go test -count=1 ./cmd/listener",
+      "observed": "Multiprocess: 33 PASS, ok 737.232s, including TestTwoPodsReceiveConnectionLostHandsOverWithin15s, ...BackInsideTheBoundKeepsTheLease, ...LostToADroppingRoute... and ...WhileItsReconnectHooksHang..., and the SIGKILL rows; in TestTwoPodsSIGKILLHandsOverInOrderWithin15s all 31 messages arrive within 15 s and in order, slowest 6.19 s. Bus -race: ok 366.090s. Listener: ok 875.169s.",
+      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+      "negativeControl": "The two new unit tests fail against 9c247139: 'the client still reads connected 1.003s after the link was cut while its reconnect hooks run, want the cut read within 1s'; 'the receive signal reads up 50ms after the client replaced the connection the term is subscribed on'."
+    }
+  ],
+  "observations": [
+    "Fingerprint against 9c247139: one code commit (581c5f4b) and no merge of main. It touches only internal/bus (connect.go, nats.go, recovery.go, export_test.go, the new connected_cut_during_hooks_test.go, drain_test.go and five call-site test updates), cmd/listener (receive.go, lease.go, receive_signal_test.go, receive_test.go), README.md, AGENTS.md and the changie fragment. The round-18 row's code is unchanged.",
+    "The new row is committed in its own test commit above the code head, with mpLaneRelay.dropRequests and a frame-aware forward in the harness. That push carries test files, so it has no skip-checks line, and CI runs again at the new head.",
+    "The new row's slowest message, 13.09 s, leaves about 1.9 s of margin under 15 s. The take-over came at about 6.2 s in 5 runs and about 7.1 s in 2 runs, which fits the holder reading the signal once a renewal, as the 14.5 s worst case in the docs says.",
+    "Required checks at 581c5f4b, read 13:58Z: CI run 41204652777 has changes success and lint, typecheck, test, listener-multiprocess and 26 other lanes queued; ci-ok has no check run yet. pr-title succeeded in run 41204721295, and three earlier runs were cancelled. Not green when read."
+  ],
+  "evidence": "https://github.com/sjawhar/legion/pull/2404#issuecomment-6544324561",
+  "notes": "The control tree is in $TMPDIR/r20, not committed. The private Postgres in $TMPDIR/pg was stopped after the run."
+}

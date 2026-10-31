@@ -24,15 +24,14 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// During a rolling deploy the replacement listener cannot bind its durable consumer until the task
-// it replaces lets go of it, which takes the old task's deregistration and shutdown; the load
-// balancer and the private DNS name already send the replacement traffic by then. Neither a webhook
-// nor /v1 reads the durable, so the replacement serves both, and runs its role lane, while it waits:
+// During the first roll onto the delivery lease, the durable's push binding is a pre-lease build's
+// (nats.Bind) until that build stops, so the new pod that takes the lease waits it out; the load
+// balancer and the private DNS name already send the new pod traffic by then. Neither a webhook nor
+// /v1 reads the durable, so the new pod serves both, and runs its role lane, while it waits:
 // GitHub does not redeliver a refused delivery on its own, and a refused /v1 call is a failed
-// Dispatch delivery or a lost publish. /healthz stays 200 "starting" until the durable binds: a
-// healthy answer there would let ECS take the replacement for ready before it fans anything out,
-// and a 503 would keep ECS from ever stopping the task that holds the durable.
-func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
+// Dispatch delivery or a lost publish. /healthz answers it 200 healthy as a standby that is
+// waiting to receive, and active once the old build lets go.
+func TestTheV1APIIsServedWhileAPreLeaseBuildHoldsTheDurable(t *testing.T) {
 	const (
 		machineID = "v1-bind-window"
 		secret    = "bind-window-secret"
@@ -51,7 +50,7 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), machineID,
 		"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_SECRET="+secret, "ENVOY_REVIEWER_APP_ID=1")
-	listener.WaitForOutput(t, "subscribe failed, retrying")
+	listener.WaitForOutput(t, "durable is push-bound by a subscriber without the lease; waiting for its binding to end")
 
 	body := []byte(`{"ref":"refs/heads/main","after":"` + strings.Repeat("b", 40) + `","before":"` + strings.Repeat("a", 40) + `",` +
 		`"pusher":{"name":"example-author"},"sender":{"login":"example-author","type":"User"},` +
@@ -125,29 +124,128 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		t.Fatalf("the role holder received no forward while another task holds the durable:\n%s", listener.Output.String())
 	}
 
-	// Negative control: the replacement is neither healthy nor unhealthy while it waits. Healthy
-	// would let ECS stop the old task before this one fans anything out; a 503 would never let ECS
-	// stop it at all, and the container health check (curl -sf) would kill this one.
+	// The waiting pod is ready, a degraded standby until it receives: it holds the lease and
+	// delivers nothing, which is no healthy answer, but a 503 would have the runtime kill it while
+	// the old build still holds the durable.
 	status, answer = do(t, mustRequest(t, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/healthz"))
-	if status != http.StatusOK || !strings.Contains(answer, `"status":"starting"`) {
-		t.Fatalf("/healthz while another task holds the durable: status %d %q, want 200 starting", status, answer)
+	var health map[string]any
+	_ = json.Unmarshal([]byte(answer), &health)
+	if status != http.StatusOK || health["status"] != "degraded" || health["role"] != "standby" || health["receive"] != receiveAwaitingBinding.String() {
+		t.Fatalf("/healthz while the old build holds the durable: status %d %q, want 200 degraded, a standby waiting for the binding", status, answer)
 	}
 
-	// The old task exits, which releases its binding.
+	// The old build exits, which releases its binding.
 	old.Close()
 	listener.waitHealthy(t)
-	listener.WaitForOutput(t, "durable bound")
+	listener.WaitForOutput(t, "durable receiving")
 }
 
-// Both tasks of one machine id run during a rolling deploy, and the replacement's role lane opens
-// before its durable binds, so both subscribe notifications.role.> at once. They are one core-NATS
-// queue group (envoy-listener-<machine id>), and NATS hands each message to one member of a group,
-// so a role message published on the lane reaches its holder once whichever task takes it: no
-// publish is forwarded by both. A re-publish under the same dedupe key can land on the other task,
-// whose dedupe cache has not seen it, and is forwarded again; the holder's pump drops that copy by
-// its dedupe key, as it drops the copy each other machine's listener forwards today. The messages
-// go straight onto the lane, as an operator's or an earlier listener's do: the publish route
-// forwards a role message itself.
+// A listener started before its NATS answers waits for it, however long that takes: the process
+// stays up past the ten connect tries that once ended the start, /healthz answers 503 "starting"
+// and /v1 503 "service starting" meanwhile, and once NATS answers the listener is ready, 200 as
+// the machine's active pod, within 10 s. A second pod of the machine started then is ready too,
+// 200 as the standby naming the first.
+func TestAListenerStartedBeforeItsNATSWaitsForItThenServes(t *testing.T) {
+	server, uri := testnats.Start(t)
+	server.Stop(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	listener := startListenerProcess(t, binary, uri, "box-late", "ENVOY_INSTANCE_ID=pod-late")
+	// The first retry comes after the connect's own ten tries, where the start used to exit.
+	listener.WaitForOutput(t, "NATS connect failed; retrying")
+	for until := time.Now().Add(3 * time.Second); time.Now().Before(until); time.Sleep(250 * time.Millisecond) {
+		if status, body := callListener(t, listener.port, http.MethodGet, "/healthz", ""); status != http.StatusServiceUnavailable || !strings.Contains(body, `"status":"starting"`) {
+			t.Fatalf("/healthz while NATS is away = %d %s, want 503 starting", status, body)
+		}
+	}
+	if status, body := callListener(t, listener.port, http.MethodGet, "/v1/sessions", ""); status != http.StatusServiceUnavailable || !strings.Contains(body, "service starting") {
+		t.Fatalf("/v1 while NATS is away = %d %s, want 503 service starting", status, body)
+	}
+	select {
+	case <-listener.Exited:
+		t.Fatalf("the listener exited while NATS was away:\n%s", listener.Output.String())
+	default:
+	}
+
+	server.Start(t)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status, body := callListener(t, listener.port, http.MethodGet, "/healthz", "")
+		var health map[string]any
+		_ = json.Unmarshal([]byte(body), &health)
+		if status == http.StatusOK && health["status"] == "healthy" && health["role"] == "active" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("/healthz 10 s after NATS answered = %d %s, want 200 healthy and active:\n%s", status, body, listener.Output.String())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	standby := startListenerProcess(t, binary, uri, "box-late", "ENVOY_INSTANCE_ID=pod-standby")
+	standby.waitStandby(t, "pod-late")
+	status, body := callListener(t, standby.port, http.MethodGet, "/healthz", "")
+	var health map[string]any
+	_ = json.Unmarshal([]byte(body), &health)
+	if status != http.StatusOK || health["role"] != "standby" || health["active_instance"] != "pod-late" {
+		t.Fatalf("the standby's /healthz = %d %s, want 200, role standby, active_instance pod-late", status, body)
+	}
+}
+
+// A SIGTERM while the start waits for NATS ends the process at once: the start installs its own
+// handler only once it serves /v1, so until then the signal's default action ends it.
+func TestASIGTERMEndsAListenerWaitingForItsNATS(t *testing.T) {
+	server, uri := testnats.Start(t)
+	server.Stop(t)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "box-signalled")
+	listener.WaitForOutput(t, "envoy-listener listening")
+	if status, body := callListener(t, listener.port, http.MethodGet, "/healthz", ""); status != http.StatusServiceUnavailable || !strings.Contains(body, `"status":"starting"`) {
+		t.Fatalf("/healthz while NATS is away = %d %s, want 503 starting", status, body)
+	}
+	listener.Terminate(t)
+	select {
+	case <-listener.Exited:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the listener was still running 3 s after SIGTERM:\n%s", listener.Output.String())
+	}
+}
+
+// bucketDeniedConfig is a NATS server whose one nkey user may publish to anything but KV bucket
+// bucket: the grant of a hub that does not grant the bucket to its listeners.
+func bucketDeniedConfig(user, bucket string) string {
+	return "jetstream {}\nauthorization {\n  users = [ { nkey: " + strconv.Quote(user) + ", permissions: { publish: { allow: [\">\"], deny: [" +
+		strconv.Quote("$JS.API.STREAM.*."+"KV_"+bucket) + ", " +
+		strconv.Quote("$JS.API.CONSUMER.*."+"KV_"+bucket+".>") + ", " +
+		strconv.Quote("$KV."+bucket+".>") + "] } } } ]\n}\n"
+}
+
+// A store bucket the listener's NATS user may not use is no connection error to wait out: the
+// start ends, exit 1, with one ERROR naming the bucket and the grant that lacks it. (The listener
+// state bucket is the exception: without it the listener delivers without a lease.)
+func TestAListenerWhoseGrantRefusesAStoreBucketExitsNamingIt(t *testing.T) {
+	seed, public := testnats.User(t)
+	_, uri := testnats.StartConfig(t, bucketDeniedConfig(public, bus.SessionBucket), []string{"-js"}, false)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "box-refused", "NATS_NKEY_SEED="+seed)
+	listener.WaitExit(t, "a start whose grant refuses "+bus.SessionBucket)
+	if code := listener.Cmd.ProcessState.ExitCode(); code != 1 {
+		t.Fatalf("the listener exited %d, want 1:\n%s", code, listener.Output.String())
+	}
+	refused := func(record map[string]any) bool {
+		return record["level"] == "ERROR" && record["bucket"] == bus.SessionBucket && record["grant"] == listenerGrant
+	}
+	if got := countRecords(listener, "NATS refused KV bucket "+bus.SessionBucket+": the listener's NATS user lacks the grant for it", refused); got != 1 {
+		t.Fatalf("the listener logged the refused bucket %d times at ERROR, want once:\n%s", got, listener.Output.String())
+	}
+}
+
+// Every pod of one machine id runs the role lane, the active pod and each standby alike, so both
+// subscribe notifications.role.> at once. They are one core-NATS queue group
+// (envoy-listener-<machine id>), and NATS hands each message to one member of a group, so a role
+// message published on the lane reaches its holder once whichever pod takes it: no publish is
+// forwarded by both. A re-publish under the same dedupe key that lands on the other pod finds the
+// forward recorded in the delivery ledger both pods share and is skipped; a copy that does reach
+// the holder is dropped by its pump by its dedupe key, as it drops the copy each other machine's
+// listener forwards. The messages go straight onto the lane, as an operator's or an earlier
+// listener's do: the publish route forwards a role message itself.
 func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T) {
 	const (
 		machineID = "two-tasks"
@@ -162,10 +260,10 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	t.Cleanup(client.Close)
 	binary := cmdtest.Build(t, "envoy-listener")
 	uri := client.Conn.ConnectedUrl()
-	old := startListenerProcess(t, binary, uri, machineID)
+	old := startListenerProcess(t, binary, uri, machineID, "ENVOY_INSTANCE_ID=task-old")
 	old.waitHealthy(t)
-	replacement := startListenerProcess(t, binary, uri, machineID)
-	replacement.WaitForOutput(t, "subscribe failed, retrying")
+	replacement := startListenerProcess(t, binary, uri, machineID, "ENVOY_INSTANCE_ID=task-new")
+	replacement.waitStandby(t, "task-old")
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("old task:\n%s\nreplacement:\n%s", old.Output.String(), replacement.Output.String())
@@ -226,7 +324,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	}
 	// NATS spreads a group's messages over its members; all 64 on one has probability 2^-63.
 	if byOld == 0 || byReplacement == 0 {
-		t.Fatalf("the old task forwarded %d and the replacement %d of %d: the replacement's role lane is not a member of the machine's queue group before its durable binds", byOld, byReplacement, messages)
+		t.Fatalf("the active pod forwarded %d and the standby %d of %d: the standby's role lane is not a member of the machine's queue group", byOld, byReplacement, messages)
 	}
 
 	// A re-publish under one dedupe key: either the task that forwarded the first copy skips it,
@@ -265,7 +363,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	old.Terminate(t)
 	old.WaitExit(t, "SIGTERM")
 	replacement.waitHealthy(t)
-	replacement.WaitForOutput(t, "durable bound")
+	replacement.WaitForOutput(t, "durable receiving")
 }
 
 // receiveAsSession stands in for session sessionID's agent pump on its agent subject: it answers
@@ -536,48 +634,26 @@ func do(t *testing.T, request *http.Request) (int, string) {
 }
 
 // Two packages the listener calls into log two different ways, and both are load-bearing.
-// internal/store's and internal/kvwatch's lines exist for the SRE to query a restart (the role
-// restore and every cache's warm-up cost), so they go through the listener's own handler and
+// internal/kvwatch's lines, which internal/store's and internal/session's caches log through the
+// logger the listener hands them, exist for the SRE to query a restart (every cache's warm-up
+// cost), so they go through the listener's own handler and
 // arrive as JSON records with this machine's id. internal/bus's lines, and the stdlib log
 // package's, must stay in Go's text format: the deployed CloudWatch metric filters for publish
 // failures, webhook refusals and dropped stream subjects are space-delimited patterns anchored on
 // that format's date and time prefix (defined in the deployment repository's listener infrastructure), so
 // routing them into the JSON handler with slog.SetDefault stops three alarms without failing
-// anything. This test holds both halves, so reintroducing that SetDefault reds it. The listener
-// mounts the GitHub route, so all three caches warm up.
+// anything. This test holds both halves, so reintroducing that SetDefault reds it. Both halves
+// also name the process (ENVOY_INSTANCE_ID): the JSON records in an instance field, the bus's text
+// lines in their client name, with no word between the date and time and the message, since the
+// text filters match by position. The listener mounts the GitHub route, so all three caches warm up.
 func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	const machineID = "logger-split"
+	const instance = "logger-split-pod"
 	server, uri := testnats.Start(t)
-	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect bus: %v", err)
-	}
-	registry, err := store.Open(client.Conn, store.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("open the registry: %v", err)
-	}
-	if _, err := registry.SetRole("ses_"+machineID, machineID, "role-"+machineID, false); err != nil {
-		t.Fatalf("claim a role for the restart to restore: %v", err)
-	}
-	registry.StopWatch()
-	client.Close()
-
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID, githubWebhookEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID,
+		append([]string{"ENVOY_INSTANCE_ID=" + instance}, githubWebhookEnv...)...)
 	listener.waitHealthy(t)
 
-	restored := listenerJSONRecord(t, listener, "restored role claims")
-	if restored == nil {
-		t.Fatalf("internal/store's role-restore line is not a JSON record in the listener's output:\n%s", listener.Output.String())
-	}
-	if restored["machine_id"] != machineID {
-		t.Fatalf("the role-restore record's machine_id = %v, want %q; a query keyed on it cannot find this restart", restored["machine_id"], machineID)
-	}
-	if _, ok := restored["restored"].(float64); !ok {
-		t.Fatalf("the role-restore record has no numeric restored field: %v", restored)
-	}
-	if _, ok := restored["delete_markers"].(float64); !ok {
-		t.Fatalf("the role-restore record has no numeric delete_markers field: %v", restored)
-	}
 	// Every cache's warm-up line, which names what a restart spent before it served. The CI
 	// cache's readiness is not on the healthy path, so its line can arrive just after.
 	for _, cache := range []string{"interest registry", "session registry", "cistore"} {
@@ -590,8 +666,8 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 		if warmUp == nil {
 			t.Fatalf("internal/kvwatch's %q line is not a JSON record in the listener's output:\n%s", msg, listener.Output.String())
 		}
-		if warmUp["machine_id"] != machineID {
-			t.Fatalf("the %q record's machine_id = %v, want %q", msg, warmUp["machine_id"], machineID)
+		if warmUp["machine_id"] != machineID || warmUp["instance"] != instance {
+			t.Fatalf("the %q record's machine_id, instance = %v, %v, want %q, %q", msg, warmUp["machine_id"], warmUp["instance"], machineID, instance)
 		}
 	}
 
@@ -608,6 +684,12 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 			t.Fatalf("no disconnect line in Go's text format after the server stopped:\n%s", listener.Output.String())
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+	// The text line keeps its shape (date, time, then the message), since the deployed filters are
+	// positional; the process is named there by its NATS client name.
+	instanceLine := regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} INFO envoy nats disconnected name="envoy-listener ` + instance + `"`)
+	if !instanceLine.MatchString(listener.Output.String()) {
+		t.Fatalf("internal/bus's disconnect line is not date, time, message, or does not name the client envoy-listener %s:\n%s", instance, listener.Output.String())
 	}
 }
 

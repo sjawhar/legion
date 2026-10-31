@@ -114,26 +114,132 @@ func TestStartingGateLogsEachRefusedRequest(t *testing.T) {
 	}
 }
 
-func TestHealthz_Starting_Returns200WithJSON(t *testing.T) {
+// /healthz answers 503 "starting" until main publishes the listener's dependencies, and on a
+// listener configured with an OIDC issuer until the issuer's discovery has succeeded, so a
+// readiness probe sends a pod no traffic before it can serve.
+func TestHealthzAnswersStartingUntilTheListenerIsReady(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deps     *listenerDeps
+		verifier *apiVerifier
+	}{
+		{name: "dependencies not published"},
+		{name: "OIDC discovery not succeeded", deps: &listenerDeps{}, verifier: newAPIVerifier("https://oidc.eks.example/id/CLUSTER", "envoy")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var state atomic.Pointer[listenerDeps]
+			state.Store(tc.deps)
+			rr := httptest.NewRecorder()
+			healthzHandler(&state, tc.verifier).ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d", rr.Code)
+			}
+			if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+				t.Fatalf("expected Content-Type application/json, got %q", ct)
+			}
+			var body map[string]string
+			if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode JSON: %v", err)
+			}
+			if body["status"] != "starting" {
+				t.Fatalf("expected status 'starting', got %q", body["status"])
+			}
+		})
+	}
+}
+
+// serveHealthz serves one /healthz request over state, on a listener with no OIDC issuer, and
+// returns its status and body.
+func serveHealthz(state *atomic.Pointer[listenerDeps]) (int, map[string]any) {
+	recorder := httptest.NewRecorder()
+	healthzHandler(state, nil).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	var body map[string]any
+	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+	return recorder.Code, body
+}
+
+// subscribeRoleLane subscribes client's role lane as main does, so /healthz over client finds it.
+func subscribeRoleLane(t *testing.T, client *bus.Client) {
+	t.Helper()
+	if _, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", func(*natsgo.Msg) {}, bus.ListenerQueue("healthz")); err != nil {
+		t.Fatalf("subscribe the role lane: %v", err)
+	}
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the role lane: %v", err)
+	}
+}
+
+// The role lane is a core subscription every pod holds, active and standby alike, so /healthz
+// answers 503 while the client holds no valid one: role messages for this machine then reach no
+// pod of it.
+func TestHealthzAnswersUnhealthyWithoutTheRoleLane(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
-	handler := healthzHandler(&state)
+	state.Store(&listenerDeps{client: setupPublishTestClient(t)})
+	if code, body := serveHealthz(&state); code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || body["error"] != "role subscription inactive" {
+		t.Fatalf("/healthz without the role lane = %d %v, want 503 unhealthy with error \"role subscription inactive\"", code, body)
+	}
+}
 
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
+// hangingCache is a cache whose WatchErr does not answer until the test ends, and then reports
+// nothing. /healthz reads WatchErr in process before any bus check, outside healthzBudget, so only
+// healthzDeadline bounds it; a Ping that hangs is answered by healthzBudget's 3 s instead
+// (TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget).
+type hangingCache struct{ released <-chan struct{} }
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
+func (hangingCache) Rewatch(*natsgo.Conn) error { return nil }
+func (c hangingCache) WatchErr() error {
+	<-c.released
+	return nil
+}
+func (hangingCache) Ping() error              { return nil }
+func (hangingCache) StopWatch()               {}
+func (hangingCache) EndWatch(context.Context) {}
+
+// /healthz answers within healthzDeadline (5 s) whatever a dependency does: a check that has not
+// answered by then, one healthzBudget does not bound among them, makes the answer 503, so a
+// readiness probe never times out on it.
+func TestHealthzAnswers503WhenADependencyHangsPastTheDeadline(t *testing.T) {
+	client := setupPublishTestClient(t)
+	subscribeRoleLane(t, client)
+	released := make(chan struct{})
+	t.Cleanup(func() { close(released) })
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, caches: []listenerCache{{name: "hanging", cache: hangingCache{released}}}})
+	started := time.Now()
+	code, body := serveHealthz(&state)
+	elapsed := time.Since(started)
+	if code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || !strings.Contains(fmt.Sprint(body["error"]), "within 5s") {
+		t.Fatalf("/healthz over a hanging dependency = %d %v, want 503 unhealthy naming the 5s deadline", code, body)
 	}
-	ct := rr.Header().Get("Content-Type")
-	if ct != "application/json" {
-		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	if elapsed < healthzDeadline-100*time.Millisecond || elapsed > healthzDeadline+time.Second {
+		t.Fatalf("/healthz over a hanging dependency answered after %s, want about %s", elapsed, healthzDeadline)
 	}
-	var body map[string]string
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
-		t.Fatalf("failed to decode JSON: %v", err)
-	}
-	if body["status"] != "starting" {
-		t.Fatalf("expected status 'starting', got %q", body["status"])
+}
+
+// The start retries what a later attempt can get past, NATS not answering or not ready yet, and
+// ends on anything else: a refused credential or a configuration the connect refuses before it
+// dials would fail every attempt the same way.
+func TestTheStartRetriesOnlyNATSConnectionErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		retry bool
+	}{
+		{name: "connection closed during the handshake", err: io.EOF, retry: true},
+		{name: "no server answered", err: natsgo.ErrNoServers, retry: true},
+		{name: "a request timed out", err: fmt.Errorf("open bucket: %w", natsgo.ErrTimeout), retry: true},
+		{name: "a JetStream request ran out of time", err: context.DeadlineExceeded, retry: true},
+		{name: "no responders", err: natsgo.ErrNoResponders, retry: true},
+		{name: "JetStream temporarily unavailable", err: &natsgo.APIError{Code: http.StatusServiceUnavailable, ErrorCode: 10008, Description: "JetStream system temporarily unavailable"}, retry: true},
+		{name: "a refused credential", err: natsgo.ErrAuthorization},
+		{name: "a remote NATS refused", err: fmt.Errorf("%w: nats.example.test", bus.ErrRemoteNATS)},
+		{name: "a JetStream refusal", err: &natsgo.APIError{Code: http.StatusBadRequest, ErrorCode: 10058, Description: "stream name already in use"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := natsConnectionError(tc.err); got != tc.retry {
+				t.Fatalf("natsConnectionError(%v) = %t, want %t", tc.err, got, tc.retry)
+			}
+		})
 	}
 }
 
@@ -148,17 +254,12 @@ func TestDependencyHealthStatus(t *testing.T) {
 		{name: "terminal watcher", terminal: true, statusCode: http.StatusServiceUnavailable, status: "unhealthy"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rr := httptest.NewRecorder()
-			writeDependencyHealth(rr, "session kv", errors.New("probe failed"), tc.terminal)
-			if rr.Code != tc.statusCode {
-				t.Fatalf("status code = %d, want %d", rr.Code, tc.statusCode)
+			answer := dependencyHealth("session kv", errors.New("probe failed"), tc.terminal)
+			if answer.code != tc.statusCode {
+				t.Fatalf("status code = %d, want %d", answer.code, tc.statusCode)
 			}
-			var body map[string]string
-			if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
-				t.Fatalf("decode response: %v", err)
-			}
-			if body["status"] != tc.status {
-				t.Fatalf("status = %q, want %q", body["status"], tc.status)
+			if answer.body["status"] != tc.status {
+				t.Fatalf("status = %q, want %q", answer.body["status"], tc.status)
 			}
 		})
 	}
@@ -169,15 +270,15 @@ func TestFullMux_StartingState(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthzHandler(&state))
+	mux.HandleFunc("/healthz", healthzHandler(&state, nil))
 
 	mux.Handle("/v1/", newStartingGate("v1", logging.NewWithWriter("test", io.Discard)))
 
-	t.Run("healthz returns 200 starting", func(t *testing.T) {
+	t.Run("healthz returns 503 starting", func(t *testing.T) {
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
-		if rr.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d", rr.Code)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d", rr.Code)
 		}
 	})
 
@@ -1985,191 +2086,78 @@ func TestIdempotencyKey_BackwardsCompat(t *testing.T) {
 	}
 }
 
+// A pod that stops leaves the durable and its cursor, and the next pod to receive resumes from it:
+// the messages published while no pod received are delivered, and the one acked before is not.
 func TestDurableConsumerRestart(t *testing.T) {
-	publisher, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("failed to connect publisher bus: %v", err)
-	}
-	t.Cleanup(publisher.Close)
-	firstListener, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("failed to connect first listener bus: %v", err)
-	}
-	t.Cleanup(firstListener.Close)
-
-	consumer := "listener-durable-restart-test"
-	_ = publisher.JS().DeleteConsumer(bus.Stream, consumer)
-
-	var (
-		mu        sync.Mutex
-		delivered []string
-	)
-	handler := func(msg *natsgo.Msg) {
-		var item contracts.Envelope
-		if err := json.Unmarshal(msg.Data, &item); err != nil {
-			t.Errorf("failed to decode envelope: %v", err)
-			_ = msg.Ack()
-			return
-		}
-		mu.Lock()
-		delivered = append(delivered, item.EventID)
-		mu.Unlock()
-		_ = msg.Ack()
-	}
-
-	_, err = startListenerSubscription(firstListener, consumer, handler)
-	if err != nil {
-		t.Fatalf("first subscribe failed: %v", err)
-	}
-	freshInfo, err := publisher.JS().ConsumerInfo(bus.Stream, consumer)
+	uri := testnats.URL(t)
+	const machineID = "durable-restart"
+	handle, received := recordingHandler()
+	first := startReceiverRig(t, uri, machineID, "pod-first", handle, testReceiveTiming(), testLeaseTiming())
+	first.awaitState(t, receiveActive, 10*time.Second)
+	freshInfo, err := first.client.JS().ConsumerInfo(bus.Stream, first.consumer)
 	if err != nil {
 		t.Fatalf("read fresh consumer: %v", err)
 	}
 	if freshInfo.Config.InactiveThreshold != consumerInactiveThreshold {
 		t.Fatalf("fresh consumer inactive threshold = %v, want %v", freshInfo.Config.InactiveThreshold, consumerInactiveThreshold)
 	}
-
-	first := contracts.Envelope{
-		EventID:        "evt-restart-1",
-		Source:         "test",
-		SourceEventID:  "src-restart-1",
-		Topic:          "notifications.github.acme.widgets.restart",
-		DedupeKey:      "dedupe-restart-1",
-		IssuedAt:       contracts.NowMillis(),
-		PayloadSummary: "first",
-		TraceID:        "trace-restart-1",
-	}
-	if err := publisher.Publish(first); err != nil {
-		t.Fatalf("publish first failed: %v", err)
+	publishDurable(t, first.client, "first")
+	if message := awaitReceived(t, received, 5*time.Second, "the first pod"); message.data != "first" {
+		t.Fatalf("the first pod received %q", message.data)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		count := len(delivered)
-		mu.Unlock()
-		if count == 1 {
-			break
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	first.receiver.Stop(ctx)
+	waitFor(t, 5*time.Second, "the durable to read unbound after the first pod stopped", func() bool {
+		info, err := first.client.JS().ConsumerInfo(bus.Stream, first.consumer)
+		return err == nil && !info.PushBound
+	})
+	publishDurable(t, first.client, "second")
+	publishDurable(t, first.client, "third")
+
+	startReceiverRig(t, uri, machineID, "pod-second", handle, testReceiveTiming(), testLeaseTiming())
+	for _, want := range []string{"second", "third"} {
+		message := awaitReceived(t, received, 10*time.Second, "the second pod")
+		if message.data != want || message.delivered != 1 {
+			t.Fatalf("the second pod received %q as delivery %d, want %q delivered once", message.data, message.delivered, want)
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
-	mu.Lock()
-	firstCount := len(delivered)
-	mu.Unlock()
-	if firstCount != 1 {
-		t.Fatalf("expected first delivery before restart, got %d", firstCount)
-	}
-
-	firstListener.Close()
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		info, infoErr := publisher.JS().ConsumerInfo(bus.Stream, consumer)
-		if infoErr == nil && !info.PushBound {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	info, infoErr := publisher.JS().ConsumerInfo(bus.Stream, consumer)
-	if infoErr != nil || info.PushBound {
-		t.Fatalf("durable consumer remained push-bound after listener close: info=%+v error=%v", info, infoErr)
-	}
-
-	second := contracts.Envelope{
-		EventID:        "evt-restart-2",
-		Source:         "test",
-		SourceEventID:  "src-restart-2",
-		Topic:          "notifications.github.acme.widgets.restart",
-		DedupeKey:      "dedupe-restart-2",
-		IssuedAt:       contracts.NowMillis(),
-		PayloadSummary: "second",
-		TraceID:        "trace-restart-2",
-	}
-	third := contracts.Envelope{
-		EventID:        "evt-restart-3",
-		Source:         "test",
-		SourceEventID:  "src-restart-3",
-		Topic:          "notifications.github.acme.widgets.restart",
-		DedupeKey:      "dedupe-restart-3",
-		IssuedAt:       contracts.NowMillis(),
-		PayloadSummary: "third",
-		TraceID:        "trace-restart-3",
-	}
-	if err := publisher.Publish(second); err != nil {
-		t.Fatalf("publish second failed: %v", err)
-	}
-	if err := publisher.Publish(third); err != nil {
-		t.Fatalf("publish third failed: %v", err)
-	}
-
-	secondListener, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("failed to connect second listener bus: %v", err)
-	}
-	t.Cleanup(secondListener.Close)
-
-	resub, err := startListenerSubscription(secondListener, consumer, handler)
-	if err != nil {
-		t.Fatalf("second subscribe failed: %v", err)
-	}
-	defer resub.Unsubscribe()
-
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		count := len(delivered)
-		mu.Unlock()
-		if count == 3 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	mu.Lock()
-	got := append([]string(nil), delivered...)
-	mu.Unlock()
-	if len(got) != 3 {
-		t.Fatalf("expected durable consumer to resume pending messages after restart, got %d deliveries: %v", len(got), got)
-	}
+	noneReceived(t, received, time.Second, "after the second pod resumed")
 }
 
-// TestDurableConsumerSurvivesUnsubscribe pins server ownership of the listener
-// durable: nats.go deletes consumers the library itself created on
-// Unsubscribe()/Drain(), and the bus reconnect recovery unsubscribes the old
-// subscription before re-subscribing. A fresh consumer must therefore be
-// created server-side and bound, so that unsubscribe never resets the cursor.
+// TestDurableConsumerSurvivesUnsubscribe pins server ownership of the listener durable: nats.go
+// deletes consumers the library itself created on Unsubscribe()/Drain(), so the durable is
+// created server-side and the receive loop subscribes to its deliver subject, and a receive loop
+// that ends its subscription leaves the durable, cursor and all, for the next to resume.
 func TestDurableConsumerSurvivesUnsubscribe(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	handle, _ := recordingHandler()
+	rig := startReceiverRig(t, testnats.URL(t), "survives-unsubscribe", "pod-a", handle, testReceiveTiming(), testLeaseTiming())
+	rig.awaitState(t, receiveActive, 10*time.Second)
+	created, err := rig.client.JS().ConsumerInfo(bus.Stream, rig.consumer)
 	if err != nil {
-		t.Fatalf("connect bus: %v", err)
+		t.Fatalf("consumer info: %v", err)
 	}
-	t.Cleanup(client.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rig.receiver.Stop(ctx)
 
-	consumer := "listener-survives-unsubscribe"
-	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
-	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
-
-	sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	info, err := rig.client.JS().ConsumerInfo(bus.Stream, rig.consumer)
 	if err != nil {
-		t.Fatalf("subscribe failed: %v", err)
+		t.Fatalf("consumer was deleted when its subscription ended: %v", err)
 	}
-	if err := sub.Unsubscribe(); err != nil {
-		t.Fatalf("unsubscribe failed: %v", err)
+	if !info.Created.Equal(created.Created) || info.Config.InactiveThreshold != consumerInactiveThreshold {
+		t.Fatalf("consumer after the unsubscribe: created %s, inactive threshold %v; want the one created at %s with %v",
+			info.Created, info.Config.InactiveThreshold, created.Created, consumerInactiveThreshold)
 	}
-	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	// The next receive loop resumes it rather than recreating it.
+	again, err := ensureListenerDurable(ctx, rig.client, rig.consumer)
 	if err != nil {
-		t.Fatalf("consumer was deleted by unsubscribe of its own subscription: %v", err)
+		t.Fatalf("read the durable again: %v", err)
 	}
-	if info.Config.InactiveThreshold != consumerInactiveThreshold {
-		t.Fatalf("consumer inactive threshold = %v, want %v", info.Config.InactiveThreshold, consumerInactiveThreshold)
+	if !again.Created.Equal(created.Created) {
+		t.Fatalf("the durable was recreated at %s, want the one created at %s", again.Created, created.Created)
 	}
-
-	// The consumer must be rebindable after the unsubscribe, resuming rather
-	// than recreating.
-	resub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err != nil {
-		t.Fatalf("rebind after unsubscribe failed: %v", err)
-	}
-	_ = resub.Unsubscribe()
 }
 
 // A durable carrying a setting the listener's consumer policy fixes and NATS cannot change in place
@@ -2203,7 +2191,7 @@ func TestASettingNATSCannotChangeOnTheListenerDurableIsRefused(t *testing.T) {
 			_ = client.JS().DeleteConsumer(bus.Stream, consumer)
 			t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
 			config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
-			applyListenerConsumerPolicy(&config, bus.StreamSubjects())
+			applyListenerConsumerPolicy(&config)
 			config.AckWait = 30 * time.Second
 			tc.apply(&config)
 			created, err := client.JS().AddConsumer(bus.Stream, &config)
@@ -2211,10 +2199,12 @@ func TestASettingNATSCannotChangeOnTheListenerDurableIsRefused(t *testing.T) {
 				t.Fatalf("add a durable with a %v the policy forbids: %v", tc.settings, err)
 			}
 
-			sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+			_, err = ensureListenerDurable(context.Background(), client, consumer)
 			if err == nil {
-				_ = sub.Unsubscribe()
-				t.Fatalf("the listener bound a durable whose %v the policy forbids", tc.settings)
+				t.Fatalf("the listener took a durable whose %v the policy forbids", tc.settings)
+			}
+			if !errors.Is(err, errListenerDurableRefused) {
+				t.Fatalf("refusal = %v, want errListenerDurableRefused", err)
 			}
 			if !strings.Contains(err.Error(), consumer) {
 				t.Fatalf("refusal = %q, want it to name the consumer", err)
@@ -2238,18 +2228,17 @@ func TestASettingNATSCannotChangeOnTheListenerDurableIsRefused(t *testing.T) {
 	}
 }
 
-// No retry can bind a refused durable, so the listener exits at once instead of retrying the bind.
-// While a listener starts, /healthz answers 200 "starting", so a rolling deploy that waited out a
-// retry, or the interest and session cache warm-ups (30 s each), would take the replacement for
-// healthy and stop the task it replaces. The refusal therefore comes right after the NATS connect:
-// on a NATS that holds no KV bucket yet, a refused listener exits without having opened one, the CI
-// bucket included, which a listener mounting the GitHub route opens first.
+// No retry can receive from a refused durable, so the listener exits at once instead of starting.
+// The refusal comes right after the NATS connect, before the interest and session cache warm-ups
+// (30 s each): on a NATS that holds no KV bucket yet, a refused listener exits without having
+// opened one, the CI bucket, which a listener mounting the GitHub route opens first, and the
+// listener state bucket included.
 func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
 	consumer := "listener-refused-durable-startup"
 	config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
-	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
+	applyListenerConsumerPolicy(&config)
 	config.Heartbeat = 5 * time.Second
 	if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
 		t.Fatalf("add a durable with a heartbeat: %v", err)
@@ -2261,7 +2250,7 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 	if code := listener.Cmd.ProcessState.ExitCode(); code != 1 {
 		t.Fatalf("exit code = %d, want 1:\n%s", code, output.String())
 	}
-	if strings.Contains(output.String(), "subscribe failed, retrying") {
+	if strings.Contains(output.String(), "durable consumer read failed; retrying") {
 		t.Fatalf("the listener retried a refused durable:\n%s", output.String())
 	}
 	if !strings.Contains(output.String(), consumer) || !strings.Contains(output.String(), "heartbeat") {
@@ -2270,136 +2259,76 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 	if strings.Contains(output.String(), "envoy-listener /v1 open") {
 		t.Fatalf("the listener opened /v1 before it refused the durable:\n%s", output.String())
 	}
-	for _, bucket := range []string{bus.InterestBucket, bus.SessionBucket, bus.CIStateBucket} {
+	for _, bucket := range []string{bus.InterestBucket, bus.SessionBucket, bus.CIStateBucket, bus.ListenerStateBucket} {
 		if _, err := client.JS().KeyValue(bucket); !errors.Is(err, natsgo.ErrBucketNotFound) {
 			t.Fatalf("KV bucket %s after the refused start: %v, want not found: the refusal came after the cache warm-ups", bucket, err)
 		}
 	}
 }
 
-// A self-health rebuild that recreates a lost durable consumer replaces the listener's
-// subscription rather than adding one beside it. The subscription bound to the lost consumer's
-// deliver inbox can never deliver again; left subscribed, each rebuild adds one more SUB the
-// connection carries until the process exits.
+// A self-health rebuild that finds the holder's durable consumer lost recreates it and moves the
+// holder's subscription onto the new consumer's deliver inbox rather than adding one beside it.
+// The subscription on the lost consumer's inbox can never deliver again; left subscribed, each
+// rebuild adds one more SUB the connection carries until the process exits.
 func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect bus: %v", err)
-	}
-	t.Cleanup(client.Close)
-	consumer := "listener-rebuild-replaces-subscription"
-	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
-	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
-
-	var deliveries atomic.Int32
-	handler := func(msg *natsgo.Msg) {
-		deliveries.Add(1)
-		_ = msg.Ack()
-	}
-	if _, err := startListenerSubscription(client, consumer, handler); err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	subscriptions := client.Conn.NumSubscriptions()
-	durableProbe := func() error {
-		_, err := client.JS().ConsumerInfo(bus.Stream, consumer)
-		return err
-	}
+	handle, received := recordingHandler()
+	rig := startReceiverRig(t, testnats.URL(t), "rebuild-replaces-subscription", "pod-a", handle, testReceiveTiming(), testLeaseTiming())
+	rig.awaitState(t, receiveActive, 10*time.Second)
+	subscriptions := rig.client.Conn.NumSubscriptions()
+	ctx := context.Background()
+	probe := func() error { return rig.receiver.probe(ctx) }
 	for rebuild := 1; rebuild <= 2; rebuild++ {
-		if err := client.JS().DeleteConsumer(bus.Stream, consumer); err != nil {
+		if err := rig.client.JS().DeleteConsumer(bus.Stream, rig.consumer); err != nil {
 			t.Fatalf("rebuild %d: lose the durable consumer: %v", rebuild, err)
 		}
-		if err := rebuildListenerDependencies(context.Background(), client, nil, durableProbe, consumer, handler); err != nil {
+		if err := probe(); !errors.Is(err, natsgo.ErrConsumerNotFound) {
+			t.Fatalf("rebuild %d: the probe of a lost durable: %v, want nats.ErrConsumerNotFound", rebuild, err)
+		}
+		if err := rebuildListenerDependencies(ctx, rig.client, nil, probe, rig.receiver.resubscribe); err != nil {
 			t.Fatalf("rebuild %d: %v", rebuild, err)
 		}
-		if got := client.Conn.NumSubscriptions(); got != subscriptions {
+		if got := rig.client.Conn.NumSubscriptions(); got != subscriptions {
 			t.Fatalf("rebuild %d: the connection carries %d subscriptions, want the %d it had before any rebuild", rebuild, got, subscriptions)
 		}
+		if err := probe(); err != nil {
+			t.Fatalf("rebuild %d: the probe after the rebuild: %v", rebuild, err)
+		}
 	}
 
-	if _, err := client.JS().Publish("notifications.github.acme.widgets.push.branch.main", []byte(`{}`)); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for deliveries.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the rebuilt subscription never delivered")
-		}
-		time.Sleep(10 * time.Millisecond)
+	publishDurable(t, rig.client, "after the rebuilds")
+	if message := awaitReceived(t, received, 5*time.Second, "the rebuilt subscription"); message.data != "after the rebuilds" {
+		t.Fatalf("the rebuilt subscription delivered %q", message.data)
 	}
 }
 
-// TestBoundDurableConsumerIsNotStolen pins the rolling-deploy contract: a
-// second listener attaching to a consumer that is still push-bound by a live
-// listener must be rejected, not delete the consumer to steal the binding —
-// stealing resets the durable cursor and replays the full retention window.
-func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
-	first, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect first bus: %v", err)
-	}
-	t.Cleanup(first.Close)
-
-	consumer := "listener-not-stolen"
-	_ = first.JS().DeleteConsumer(bus.Stream, consumer)
-
-	firstSub, err := startListenerSubscription(first, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err != nil {
-		t.Fatalf("first subscribe failed: %v", err)
-	}
-	t.Cleanup(func() { _ = firstSub.Unsubscribe(); _ = first.JS().DeleteConsumer(bus.Stream, consumer) })
-	// Subscribe returns before the server has processed the SUB, and the consumer is push-bound
-	// only once it has; the property under test is about a consumer that is already bound.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		info, err := first.JS().ConsumerInfo(bus.Stream, consumer)
-		if err == nil && info.PushBound {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the first listener's consumer never became push-bound: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	second, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect second bus: %v", err)
-	}
-	t.Cleanup(second.Close)
-
-	_, err = startListenerSubscription(second, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err == nil {
-		t.Fatal("second listener bound a consumer that was already push-bound")
-	}
-	// A bind race is retried at startup until the old listener lets go; a refusal would make every
-	// replacement in a rolling deploy exit while the task it replaces still holds the binding.
-	if errors.Is(err, errListenerDurableRefused) {
-		t.Fatalf("a bind race was classified as a refusal, so startup would exit instead of retrying: %v", err)
-	}
-	info, err := first.JS().ConsumerInfo(bus.Stream, consumer)
-	if err != nil {
-		t.Fatalf("consumer disappeared after rejected second bind: %v", err)
-	}
-	if !info.PushBound {
-		t.Fatalf("first listener lost its binding after rejected second bind: %+v", info)
-	}
-}
-
-// durableHeldElsewhere creates consumer as a listener creates it and binds it from a client of its
-// own on uri, as the task a rolling deploy replaces holds the durable, and waits until the server
-// shows it push-bound. Closing the returned client is that task's exit.
+// durableHeldElsewhere creates consumer as a listener build from before the delivery lease created
+// it (its policy filtered on its build's stream subjects and waited 60 s for an ack) and binds it
+// from a client of its own on uri with nats.Bind, as that build holds the durable, and waits until
+// the server shows it push-bound. Closing the returned client is that build's exit.
 func durableHeldElsewhere(t *testing.T, uri, consumer string) (*bus.Client, *natsgo.Subscription) {
 	t.Helper()
 	old, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
-		t.Fatalf("connect the old task: %v", err)
+		t.Fatalf("connect the old build: %v", err)
 	}
 	t.Cleanup(old.Close)
-	holder, err := startListenerSubscription(old, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err != nil {
-		t.Fatalf("bind the durable as the old task: %v", err)
+	if _, err := old.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
+		Durable:           consumer,
+		DeliverSubject:    natsgo.NewInbox(),
+		FilterSubjects:    bus.StreamSubjects(),
+		AckPolicy:         natsgo.AckExplicitPolicy,
+		AckWait:           60 * time.Second,
+		MaxAckPending:     consumerMaxAckPending,
+		MaxDeliver:        consumerMaxDeliver,
+		InactiveThreshold: consumerInactiveThreshold,
+	}); err != nil {
+		t.Fatalf("create the durable as the old build: %v", err)
 	}
-	waitFor(t, 5*time.Second, "the old task's durable to become push-bound", func() bool {
+	holder, err := old.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck())
+	if err != nil {
+		t.Fatalf("bind the durable as the old build: %v", err)
+	}
+	waitFor(t, 5*time.Second, "the old build's durable to become push-bound", func() bool {
 		info, err := old.JS().ConsumerInfo(bus.Stream, consumer)
 		return err == nil && info.PushBound
 	})
@@ -2418,174 +2347,21 @@ func waitFor(t *testing.T, timeout time.Duration, desc string, cond func() bool)
 	}
 }
 
-// bindOutcome is what a bindListenerDurable run in a goroutine returned, and when.
-type bindOutcome struct {
-	bind durableBind
-	err  error
-	at   time.Time
-}
-
-// The replacement polls the durable while the old task holds it, so it binds within one interval of
-// the old task's exit rather than at the end of a backoff that grows with each attempt.
-func TestBindListenerDurableBindsWithinOneIntervalOfRelease(t *testing.T) {
-	uri := testnats.URL(t)
-	const consumer = "listener-bind-on-release"
-	old, _ := durableHeldElsewhere(t, uri, consumer)
-	replacement, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect the replacement: %v", err)
-	}
-	t.Cleanup(replacement.Close)
-
-	done := make(chan bindOutcome, 1)
-	go func() {
-		bind, err := bindListenerDurable(context.Background(), replacement, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() },
-			logging.NewWithWriter("test", io.Discard), 50*time.Millisecond, 10*time.Second)
-		done <- bindOutcome{bind, err, time.Now()}
-	}()
-	time.Sleep(300 * time.Millisecond)
-	select {
-	case outcome := <-done:
-		t.Fatalf("the replacement returned while the old task held the durable: %+v", outcome)
-	default:
-	}
-	released := time.Now()
-	old.Close()
-	select {
-	case outcome := <-done:
-		if outcome.err != nil {
-			t.Fatalf("bind after the old task's exit: %v", outcome.err)
-		}
-		if after := outcome.at.Sub(released); after > 500*time.Millisecond {
-			t.Fatalf("the replacement bound %s after the old task's exit, want within 500 ms at a 50 ms interval", after)
-		}
-		if outcome.bind.attempts < 2 {
-			t.Fatalf("the bind took %d attempts, want the refused ones before the release counted too", outcome.bind.attempts)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the replacement never bound the released durable")
-	}
-	if !replacement.SubOK() {
-		t.Fatal("SubOK is false after the bind")
-	}
-}
-
-// A durable still held at the deadline ends the bind with the exhaustion sentinel, carrying the
-// bind's own refusal, and the holder keeps its binding: the bind never deletes the durable to take
-// it (TestBoundDurableConsumerIsNotStolen).
-func TestBindListenerDurableGivesUpAtTheDeadline(t *testing.T) {
-	uri := testnats.URL(t)
-	const consumer = "listener-bind-deadline"
-	old, holder := durableHeldElsewhere(t, uri, consumer)
-	replacement, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect the replacement: %v", err)
-	}
-	t.Cleanup(replacement.Close)
-
-	bind, err := bindListenerDurable(context.Background(), replacement, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() },
-		logging.NewWithWriter("test", io.Discard), 50*time.Millisecond, 200*time.Millisecond)
-	if !errors.Is(err, errListenerDurableBindExhausted) {
-		t.Fatalf("bind against a durable held past the deadline: %v, want errListenerDurableBindExhausted", err)
-	}
-	if !strings.Contains(err.Error(), "consumer is already bound to a subscription") {
-		t.Fatalf("the exhaustion %q does not carry the bind's own refusal", err)
-	}
-	if bind.attempts < 2 || bind.waited < 200*time.Millisecond {
-		t.Fatalf("the bind gave up after %d attempts in %s, want several over the 200 ms deadline", bind.attempts, bind.waited)
-	}
-	if !holder.IsValid() {
-		t.Fatal("the old task's subscription is gone")
-	}
-	info, err := old.JS().ConsumerInfo(bus.Stream, consumer)
-	if err != nil || !info.PushBound {
-		t.Fatalf("the old task's durable after the replacement gave up: %+v %v, want still push-bound", info, err)
-	}
-	if replacement.SubOK() {
-		t.Fatal("SubOK reports a durable the replacement never bound")
-	}
-}
-
-// A signal during the wait ends the bind at once, without waiting for the next attempt, so the
-// listener's ordered shutdown starts while ECS's stop timeout still runs.
-func TestBindListenerDurableStopsWhenTheContextEnds(t *testing.T) {
-	uri := testnats.URL(t)
-	const consumer = "listener-bind-cancelled"
-	durableHeldElsewhere(t, uri, consumer)
-	replacement, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect the replacement: %v", err)
-	}
-	t.Cleanup(replacement.Close)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan bindOutcome, 1)
-	go func() {
-		bind, err := bindListenerDurable(ctx, replacement, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() },
-			logging.NewWithWriter("test", io.Discard), 2*time.Second, 10*time.Second)
-		done <- bindOutcome{bind, err, time.Now()}
-	}()
-	time.Sleep(120 * time.Millisecond)
-	cancelled := time.Now()
-	cancel()
-	select {
-	case outcome := <-done:
-		if !errors.Is(outcome.err, context.Canceled) {
-			t.Fatalf("bind after the context ended: %v, want context.Canceled", outcome.err)
-		}
-		if after := outcome.at.Sub(cancelled); after > 500*time.Millisecond {
-			t.Fatalf("the bind returned %s after the context ended, want at once rather than at its next 2 s attempt", after)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the bind never returned after the context ended")
-	}
-}
-
-// A durable no retry can bind ends the bind at the first attempt with the refusal, which main exits
-// on at once, never with the exhaustion that waits out the deadline.
-func TestBindListenerDurablePassesARefusalThrough(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect bus: %v", err)
-	}
-	t.Cleanup(client.Close)
-	const consumer = "listener-bind-refused"
-	config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
-	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
-	config.Heartbeat = 5 * time.Second
-	if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
-		t.Fatalf("add a durable with a heartbeat: %v", err)
-	}
-
-	bind, err := bindListenerDurable(context.Background(), client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() },
-		logging.NewWithWriter("test", io.Discard), 50*time.Millisecond, 10*time.Second)
-	if !errors.Is(err, errListenerDurableRefused) || errors.Is(err, errListenerDurableBindExhausted) {
-		t.Fatalf("bind of a refused durable: %v, want errListenerDurableRefused alone", err)
-	}
-	if bind.attempts != 1 {
-		t.Fatalf("the bind made %d attempts at a refused durable, want 1", bind.attempts)
-	}
-}
-
-// A listener waiting out the task that holds its durable already serves /v1 and its role lane from
-// the interest, session and role stores, which its reconnect hook moves onto each new connection.
-// When nats.go gives up on the connection and the bus dials a replacement during that wait, the
-// durable's bind is still refused there, and the stores must move all the same: left on the closed
-// connection, every role lookup fails with "nats: connection closed", so the role lane reports
-// each role message it takes as delivery_failed until the durable binds.
-func TestTheStoresFollowAConnectionReplacedWhileTheDurableIsHeld(t *testing.T) {
+// A standby serves /v1 and its role lane from the interest, session and role stores, which its
+// reconnect hook moves onto each new connection. When nats.go gives up on the connection and the
+// bus dials a replacement, the stores must move all the same: left on the closed connection, every
+// role lookup fails with "nats: connection closed", so the role lane reports each role message it
+// takes as delivery_failed.
+func TestTheStoresFollowAConnectionReplacedOnAStandby(t *testing.T) {
 	uri := testnats.URL(t)
 	const (
-		machineID = "replaced-during-bind"
-		holderID  = "ses_replaced_during_bind"
-		role      = "replaced-during-bind-role"
+		machineID = "replaced-on-standby"
+		holderID  = "ses_replaced_on_standby"
+		role      = "replaced-on-standby-role"
 	)
-	consumer := "listener-" + machineID
-	durableHeldElsewhere(t, uri, consumer)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
-		t.Fatalf("connect the replacement: %v", err)
+		t.Fatalf("connect the standby: %v", err)
 	}
 	t.Cleanup(client.Close)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
@@ -2601,9 +2377,6 @@ func TestTheStoresFollowAConnectionReplacedWhileTheDurableIsHeld(t *testing.T) {
 	if _, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", func(*natsgo.Msg) {}, "envoy-listener-"+machineID); err != nil {
 		t.Fatalf("open the role lane: %v", err)
 	}
-	if _, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() }); err == nil {
-		t.Fatal("bound a durable the old task holds")
-	}
 	if _, err := registry.SetRole(holderID, machineID, role, false); err != nil {
 		t.Fatalf("claim %s: %v", role, err)
 	}
@@ -2613,12 +2386,13 @@ func TestTheStoresFollowAConnectionReplacedWhileTheDurableIsHeld(t *testing.T) {
 		holder, err := registry.RoleHolder(role)
 		return err == nil && holder == holderID
 	})
-	if client.SubOK() {
-		t.Fatal("SubOK reports the durable bound while the old task holds it")
-	}
 }
 
-func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
+// A durable an older listener created (a filter, no inactive threshold, a long ack wait) is taken
+// over in place: the holder corrects it to the consumer policy, whose filter is every subject, and
+// receives from it, and the role lane beside it works as ever. An update that cleared the filter
+// would leave the durable delivering nothing on nats-server 2.10.
+func TestTheHolderMigratesALegacyDurableConsumer(t *testing.T) {
 	_, uri := testnats.Start(t)
 	legacyConn := testnats.Connect(t, uri)
 	legacyJS, err := legacyConn.JetStream()
@@ -2635,9 +2409,9 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create legacy stream: %v", err)
 	}
-	const consumer = "listener-migration"
+	const machineID = "migration"
 	legacySub, err := legacyJS.Subscribe("notifications.>", func(*natsgo.Msg) {},
-		natsgo.Durable(consumer),
+		natsgo.Durable(bus.ListenerDurable(machineID)),
 		natsgo.DeliverNew(),
 		natsgo.AckExplicit(),
 		natsgo.ManualAck(),
@@ -2648,51 +2422,37 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	_ = legacySub
 	legacyConn.Close()
 
-	client, err := bus.ConnectOwningStream([]string{uri})
-	if err != nil {
-		t.Fatalf("boot migrated listener bus: %v", err)
-	}
-	t.Cleanup(client.Close)
-	durableReceived := make(chan struct{}, 1)
-	durableSub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) {
-		durableReceived <- struct{}{}
-		_ = msg.Ack()
-	})
-	if err != nil {
-		t.Fatalf("boot migrated durable consumer: %v", err)
-	}
-	t.Cleanup(func() { _ = durableSub.Unsubscribe() })
-	consumerInfo, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	handle, received := recordingHandler()
+	rig := startReceiverRig(t, uri, machineID, "pod-a", handle, testReceiveTiming(), testLeaseTiming())
+	rig.awaitState(t, receiveActive, 10*time.Second)
+	consumerInfo, err := rig.client.JS().ConsumerInfo(bus.Stream, rig.consumer)
 	if err != nil {
 		t.Fatalf("read migrated consumer: %v", err)
 	}
-	if consumerInfo.Config.FilterSubject != "" || len(consumerInfo.Config.FilterSubjects) != len(bus.StreamSubjects()) {
-		t.Fatalf("migrated consumer filters = %#v", consumerInfo.Config)
+	if consumerInfo.Config.FilterSubject != consumerFilterAll || len(consumerInfo.Config.FilterSubjects) != 0 {
+		t.Fatalf("migrated consumer filters = %#v, want %q alone", consumerInfo.Config, consumerFilterAll)
 	}
-	if consumerInfo.Config.InactiveThreshold != consumerInactiveThreshold {
-		t.Fatalf("migrated consumer inactive threshold = %v, want %v", consumerInfo.Config.InactiveThreshold, consumerInactiveThreshold)
+	if consumerInfo.Config.InactiveThreshold != consumerInactiveThreshold || consumerInfo.Config.AckWait != consumerAckWait {
+		t.Fatalf("migrated consumer inactive threshold %v, ack wait %v; want %v and %v",
+			consumerInfo.Config.InactiveThreshold, consumerInfo.Config.AckWait, consumerInactiveThreshold, consumerAckWait)
 	}
 
 	roleReceived := make(chan struct{}, 1)
-	roleSub, err := client.SubscribeCore("notifications.role.migration", func(*natsgo.Msg) {
+	roleSub, err := rig.client.SubscribeCore("notifications.role.migration", func(*natsgo.Msg) {
 		roleReceived <- struct{}{}
 	}, "envoy-listener-test-machine")
 	if err != nil {
 		t.Fatalf("boot migrated role lane: %v", err)
 	}
 	t.Cleanup(func() { _ = roleSub.Unsubscribe() })
-	if err := client.Conn.Flush(); err != nil {
+	if err := rig.client.Conn.Flush(); err != nil {
 		t.Fatalf("flush migrated listener subscriptions: %v", err)
 	}
-	if _, err := client.JS().Publish("notifications.github.acme.widgets.migration", []byte("durable")); err != nil {
-		t.Fatalf("publish durable migration message: %v", err)
+	publishDurable(t, rig.client, "durable")
+	if message := awaitReceived(t, received, 5*time.Second, "the migrated durable"); message.data != "durable" {
+		t.Fatalf("migrated durable delivered %q", message.data)
 	}
-	select {
-	case <-durableReceived:
-	case <-time.After(5 * time.Second):
-		t.Fatal("migrated durable listener did not receive a non-role message")
-	}
-	if err := client.Publish(contracts.Envelope{
+	if err := rig.client.Publish(contracts.Envelope{
 		EventID:        "evt-listener-migration-role",
 		Source:         "agent",
 		SourceEventID:  "source-listener-migration-role",
@@ -2893,7 +2653,7 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 	assertDeliveryException(t, probe, item, "delivery_failed")
 
 	if got := forwards.Load(); got != 2 {
-		t.Fatalf("forward attempts = %d, want 2: a failed forward must clear the attempt cache", got)
+		t.Fatalf("forward attempts = %d, want 2: a failed forward must clear its ledger attempt", got)
 	}
 	if logs := harness.logs.String(); strings.Contains(logs, "receipt_timeout") || !strings.Contains(logs, `"msg":"listener role forward failed"`) {
 		t.Fatalf("a forward publish error must log as a failed forward, never as a receipt timeout:\n%s", logs)
@@ -2952,7 +2712,7 @@ func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *t
 }
 
 // TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedelivery proves the
-// dedupe/attempt-cache check runs BEFORE the capability guard: a duplicate of an envelope
+// delivery-ledger check runs BEFORE the capability guard: a duplicate of an envelope
 // already forwarded successfully must be dropped by the existing dedupe skip -- zero forwards,
 // zero exceptions -- even if the holder's advertised capabilities have since changed, rather
 // than being re-evaluated against the holder's current capabilities and misreported as a fresh
@@ -3114,7 +2874,7 @@ func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *te
 				sub, err = harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
 			} else {
 				consumer := "listener-no-holder-" + id.New()
-				sub, err = startListenerSubscription(harness.client, consumer, harness.handler)
+				sub, err = subscribeListenerDurable(harness.client, consumer, harness.handler)
 			}
 			if err != nil {
 				t.Fatalf("start listener subscription: %v", err)
@@ -3373,7 +3133,7 @@ func TestListenerDeliveryHandler_FanoutRechecksCapabilitiesAtDelivery(t *testing
 		t.Fatalf("flush exception probe: %v", err)
 	}
 
-	handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+	handler(context.Background(), &natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
 	if err := harness.client.Conn.Flush(); err != nil {
 		t.Fatalf("flush capability refusal: %v", err)
 	}
@@ -3643,10 +3403,6 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
-	dedupeCache := dedupe.New(10 * time.Minute)
-	attemptCache := dedupe.New(5 * time.Minute)
-	t.Cleanup(dedupeCache.Stop)
-	t.Cleanup(attemptCache.Stop)
 	deliverer := session.Deliverer{
 		MachineID:    "test-machine",
 		RequestLimit: 5 * time.Second,
@@ -3668,8 +3424,7 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		sessions:          sessions,
 		machineID:         "test-machine",
 		deliverer:         &deliverer,
-		dedupeCache:       dedupeCache,
-		attemptCache:      attemptCache,
+		ledger:            testDeliveryLedger(t, client.Conn, "test-machine", "boot-test"),
 		logger:            logging.NewWithWriter("test", logs),
 		messagesReceived:  met.NewCounter("test_messages_received", "test"),
 		messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
@@ -3679,16 +3434,48 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		// the harness's two handlers share this one as main.go's do.
 		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
+	durable := jetStreamDeliveryHandler(deliveryConfig)
 	return listenerDeliveryHarness{
 		client:      client,
 		registry:    registry,
 		sessions:    sessions,
 		metrics:     met,
-		handler:     jetStreamDeliveryHandler(deliveryConfig),
+		handler:     func(msg *natsgo.Msg) { durable(context.Background(), msg) },
 		coreHandler: coreNATSDeliveryHandler(deliveryConfig),
 		logs:        logs,
 		config:      deliveryConfig,
 	}
+}
+
+// testDeliveryLedger opens the listener state bucket on conn as main does and returns machineID's
+// shared delivery ledger as the process boot would hold it, with main's takeover age for a 5 s
+// request limit.
+func testDeliveryLedger(t *testing.T, conn *natsgo.Conn, machineID, boot string) *dedupe.KV {
+	t.Helper()
+	kv, err := openListenerState(conn, 1, listenerStateRequestWait)
+	if err != nil {
+		t.Fatalf("open the listener state bucket: %v", err)
+	}
+	return dedupe.NewKV(kv, dedupe.KVConfig{
+		Durable:       bus.ListenerDurable(machineID),
+		Boot:          boot,
+		TakeoverAfter: 5*time.Second + ledgerTakeoverMargin,
+	})
+}
+
+// startListenerSubscription creates or corrects the machine's durable consumer as the receive loop
+// does (ensureListenerDurable) and subscribes handler to the deliver subject the server holds for
+// it, for the tests that drive the durable without a lease and without a receive loop.
+func startListenerSubscription(client *bus.Client, consumer string, handler natsgo.MsgHandler) (*natsgo.Subscription, error) {
+	info, err := ensureListenerDurable(context.Background(), client, consumer)
+	if err != nil {
+		return nil, err
+	}
+	subscription, err := client.Conn.Subscribe(info.Config.DeliverSubject, handler)
+	if err != nil {
+		return nil, err
+	}
+	return subscription, client.Conn.Flush()
 }
 
 func (h listenerDeliveryHarness) registerTarget(t *testing.T, sessionID, topic string) {
@@ -4773,7 +4560,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 		},
 		client.Connected,
 		func() error {
-			return rebuildListenerDependencies(context.Background(), client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil)
+			return rebuildListenerDependencies(context.Background(), client, []listenerCache{{name: "interest", cache: registry}}, nil, nil)
 		},
 	)
 
@@ -4801,11 +4588,8 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 // watcher's error as a transient KV failure and /healthz answers 200 degraded over a frozen cache.
 func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 	client := setupTestNATS(t)
-	sub, err := startListenerSubscription(client, "listener-healthz-interest", func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err != nil {
-		t.Fatalf("bind the durable: %v", err)
-	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	rig := startReceiverRig(t, client.Conn.ConnectedUrl(), "healthz-interest", "pod-a", func(_ context.Context, msg *natsgo.Msg) { _ = msg.Ack() }, testReceiveTiming(), testLeaseTiming())
+	rig.awaitState(t, receiveActive, 10*time.Second)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
@@ -4824,15 +4608,10 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 	if err := sessions.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for session cache: %v", err)
 	}
+	subscribeRoleLane(t, client)
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, consumer: "listener-healthz-interest"})
-	get := func() (int, map[string]any) {
-		recorder := httptest.NewRecorder()
-		healthzHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-		var body map[string]any
-		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
-		return recorder.Code, body
-	}
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver})
+	get := func() (int, map[string]any) { return serveHealthz(&state) }
 	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 		t.Fatalf("before the watcher ends: /healthz = %d %v, want 200 healthy", code, body)
 	}
@@ -4844,19 +4623,17 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 	}
 }
 
-// healthzWithLiveLane is a listener's /healthz over a bound durable and both registries, as main
-// publishes them once the durable binds, with the live topics lane on when lane is set: a client of
-// its own subscribed as main's openLiveTopics subscribes it. It returns the live client and the
-// subscription it holds (nil without the lane) and a get() that serves one /healthz request.
-func healthzWithLiveLane(t *testing.T, consumer string, lane bool) (*bus.Client, *natsgo.Subscription, func() (int, map[string]any)) {
+// healthzWithLiveLane is a listener's /healthz over machineID's receiving durable and both
+// registries, as main publishes them once the receive loop has started, with the live topics lane
+// on when lane is set: a client of its own subscribed as main's openLiveTopics subscribes it. It
+// returns the live client and the subscription it holds (nil without the lane) and a get() that
+// serves one /healthz request.
+func healthzWithLiveLane(t *testing.T, machineID string, lane bool) (*bus.Client, *natsgo.Subscription, func() (int, map[string]any)) {
 	t.Helper()
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
-	durable, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err != nil {
-		t.Fatalf("bind the durable: %v", err)
-	}
-	t.Cleanup(func() { _ = durable.Unsubscribe() })
+	rig := startReceiverRig(t, client.Conn.ConnectedUrl(), machineID, "pod-a", func(_ context.Context, msg *natsgo.Msg) { _ = msg.Ack() }, testReceiveTiming(), testLeaseTiming())
+	rig.awaitState(t, receiveActive, 10*time.Second)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
@@ -4875,7 +4652,8 @@ func healthzWithLiveLane(t *testing.T, consumer string, lane bool) (*bus.Client,
 	if err := sessions.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for session cache: %v", err)
 	}
-	deps := &listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, consumer: consumer}
+	subscribeRoleLane(t, client)
+	deps := &listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver}
 	var live *bus.Client
 	var liveSub *natsgo.Subscription
 	if lane {
@@ -4894,13 +4672,7 @@ func healthzWithLiveLane(t *testing.T, consumer string, lane bool) (*bus.Client,
 	}
 	var state atomic.Pointer[listenerDeps]
 	state.Store(deps)
-	return live, liveSub, func() (int, map[string]any) {
-		recorder := httptest.NewRecorder()
-		healthzHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-		var body map[string]any
-		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
-		return recorder.Code, body
-	}
+	return live, liveSub, func() (int, map[string]any) { return serveHealthz(&state) }
 }
 
 // /healthz says whether the live topics lane is on: "not_applicable" when ENVOY_SUBSCRIBE_ALL_TOPICS
@@ -4915,7 +4687,7 @@ func TestHealthzNamesTheLiveTopicsLane(t *testing.T) {
 		{name: "on", lane: true, want: "subscribed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, get := healthzWithLiveLane(t, "listener-healthz-live-"+tc.name, tc.lane)
+			_, _, get := healthzWithLiveLane(t, "healthz-live-"+tc.name, tc.lane)
 			if code, body := get(); code != http.StatusOK || body["status"] != "healthy" || body["live_topics"] != tc.want {
 				t.Fatalf("/healthz = %d %v, want 200 healthy with live_topics %q", code, body, tc.want)
 			}
@@ -4939,7 +4711,7 @@ func TestHealthzAnswersUnhealthyWithoutTheLiveSubscription(t *testing.T) {
 		{name: "connection closed", lose: func(_ *testing.T, live *bus.Client, _ *natsgo.Subscription) { live.Close() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			live, sub, get := healthzWithLiveLane(t, "listener-healthz-live-lost", true)
+			live, sub, get := healthzWithLiveLane(t, "healthz-live-lost", true)
 			if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 				t.Fatalf("before the live lane is lost: /healthz = %d %v, want 200 healthy", code, body)
 			}
@@ -4974,9 +4746,10 @@ func consumerCreates(t *testing.T, conn *natsgo.Conn, consumer string) *atomic.I
 }
 
 // The drift correction writes a durable only when the policy would change it: a new durable is
-// created once and a healthy one is left alone on every later start, and a durable drifted in a
-// setting NATS can update is corrected once and then left alone. A correction that updated on
-// every start would pass every other test, while every listener start rewrote its durable.
+// created once and a healthy one is left alone on every later acquisition of the lease, and a
+// durable drifted in a setting NATS can update is corrected once and then left alone. A correction
+// that updated on every acquisition would pass every other test, while every take-over rewrote the
+// durable.
 func TestTheDriftCorrectionWritesADurableOnlyWhenThePolicyChangesIt(t *testing.T) {
 	uri := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
@@ -4989,12 +4762,8 @@ func TestTheDriftCorrectionWritesADurableOnlyWhenThePolicyChangesIt(t *testing.T
 
 	bind := func(consumer string) {
 		t.Helper()
-		sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-		if err != nil {
-			t.Fatalf("startListenerSubscription(%s): %v", consumer, err)
-		}
-		if err := sub.Unsubscribe(); err != nil {
-			t.Fatalf("unsubscribe %s: %v", consumer, err)
+		if _, err := ensureListenerDurable(context.Background(), client, consumer); err != nil {
+			t.Fatalf("ensureListenerDurable(%s): %v", consumer, err)
 		}
 	}
 	settle := func(creates *atomic.Int32, want int32, what string) {
@@ -5023,7 +4792,7 @@ func TestTheDriftCorrectionWritesADurableOnlyWhenThePolicyChangesIt(t *testing.T
 	_ = client.JS().DeleteConsumer(bus.Stream, drifted)
 	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, drifted) })
 	config := natsgo.ConsumerConfig{Durable: drifted, DeliverSubject: natsgo.NewInbox()}
-	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
+	applyListenerConsumerPolicy(&config)
 	config.AckWait = 30 * time.Second
 	config.MaxDeliver = 5
 	if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,11 +17,12 @@ const silentCutBound = 5 * time.Second
 
 // disconnectedUnderName reports whether output holds internal/bus's dropped-connection line for
 // the client named name. The listener leaves internal/bus on the default logger, which writes the
-// name as a `name=envoy` field, so the field is matched whole: "envoy" is a prefix of
-// "envoy-live-topics".
+// name as a `name=...` field, and each client's name carries the pod's instance after a space,
+// which slog's text handler quotes, so the field is matched whole: "envoy-listener <instance>" is
+// a prefix of "envoy-listener-lease <instance>", the delivery lease's own connection.
 func disconnectedUnderName(output, name string) bool {
 	for line := range strings.SplitSeq(output, "\n") {
-		if strings.Contains(line, "envoy nats disconnected") && slices.Contains(strings.Fields(line), "name="+name) {
+		if strings.Contains(line, "envoy nats disconnected") && strings.Contains(line, ` name="`+name+`"`) {
 			return true
 		}
 	}
@@ -39,22 +39,24 @@ func disconnectedUnderName(output, name string) bool {
 // cut within seconds whether or not those two call sites carry the option, and would prove
 // nothing.
 func TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds(t *testing.T) {
+	const instance = "silent-cut-pod"
 	server, uri := testnats.Start(t)
 	// The live topics lane opens only under ENVOY_SUBSCRIBE_ALL_TOPICS (liveLaneEnv), and it opens
 	// before the listener reports itself healthy, so waitHealthy means both clients have connected.
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "silent-cut", liveLaneEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "silent-cut",
+		append([]string{"ENVOY_INSTANCE_ID=" + instance}, liveLaneEnv...)...)
 	listener.waitHealthy(t)
 
-	freezeUntilBothClientsReportTheCut(t, server, listener)
+	freezeUntilBothClientsReportTheCut(t, server, listener, instance)
 }
 
-// freezeUntilBothClientsReportTheCut freezes the hub under a healthy listener and returns once
-// each of the listener's two clients has logged the dropped connection, within silentCutBound. It
-// fails the test naming every client whose line is missing, with what the listener logged. It
-// returns the thaw, which the caller runs itself when it needs the traffic back, and a reader of
-// everything the listener logged from the freeze on: a line from the listener's start, or from
-// before the cut, could otherwise stand in for one the cut caused.
-func freezeUntilBothClientsReportTheCut(t *testing.T, server *testnats.Server, listener *listenerProcess) (thaw func(), output func() string) {
+// freezeUntilBothClientsReportTheCut freezes the hub under a healthy listener running as instance
+// and returns once each of the listener's two clients has logged the dropped connection, within
+// silentCutBound. It fails the test naming every client whose line is missing, with what the
+// listener logged. It returns the thaw, which the caller runs itself when it needs the traffic
+// back, and a reader of everything the listener logged from the freeze on: a line from the
+// listener's start, or from before the cut, could otherwise stand in for one the cut caused.
+func freezeUntilBothClientsReportTheCut(t *testing.T, server *testnats.Server, listener *listenerProcess, instance string) (thaw func(), output func() string) {
 	t.Helper()
 	logged := len(listener.Output.String())
 	output = func() string { return listener.Output.String()[logged:] }
@@ -64,7 +66,7 @@ func freezeUntilBothClientsReportTheCut(t *testing.T, server *testnats.Server, l
 	t.Cleanup(thaw)
 	cut := time.Now()
 
-	names := []string{"envoy", liveTopicsClientName}
+	names := []string{"envoy-listener " + instance, liveTopicsClientName + " " + instance}
 	reported := make(map[string]time.Duration, len(names))
 	for {
 		for _, name := range names {

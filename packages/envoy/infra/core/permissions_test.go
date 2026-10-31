@@ -14,8 +14,10 @@ import (
 // listenerPublish is the listener's publish grant for example-host-a, written out by hand from
 // Envoy's names as they stand: every notification topic (the stream's subjects, the role lanes,
 // every exception lane and any ad-hoc topic), the stream (its stored-message get the read
-// /v1/replay makes) and its durable, then each bucket in turn, then the interest bucket's purge.
-// TestSessionPermissions's exact list holds none of it: no session gets the replay read.
+// /v1/replay makes) and its durable, then each bucket in turn, the listener state bucket's writes
+// only to the machine's own lease and ledger and to the last-seen records, then the interest
+// bucket's purge. TestSessionPermissions's exact list holds none of it: no session gets the replay
+// read.
 var listenerPublish = []string{
 	"notifications.>",
 	"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
@@ -62,6 +64,18 @@ var listenerPublish = []string{
 	"$JS.API.CONSUMER.CREATE.KV_envoy_ci_state.>",
 	"$JS.API.CONSUMER.DELETE.KV_envoy_ci_state.>",
 	"$JS.FC.KV_envoy_ci_state.>",
+	"$JS.API.STREAM.INFO.KV_envoy_listener",
+	"$JS.API.STREAM.CREATE.KV_envoy_listener",
+	"$JS.API.STREAM.UPDATE.KV_envoy_listener",
+	"$JS.API.DIRECT.GET.KV_envoy_listener.>",
+	"$JS.API.STREAM.MSG.GET.KV_envoy_listener",
+	"$KV.envoy_listener.lease.listener-example-host-a",
+	"$KV.envoy_listener.handback.listener-example-host-a.>",
+	"$KV.envoy_listener.delivery.listener-example-host-a.>",
+	"$KV.envoy_listener.seen.>",
+	"$JS.API.CONSUMER.CREATE.KV_envoy_listener.>",
+	"$JS.API.CONSUMER.DELETE.KV_envoy_listener.>",
+	"$JS.FC.KV_envoy_listener.>",
 	"$JS.API.STREAM.PURGE.KV_envoy_interests",
 }
 
@@ -72,11 +86,15 @@ func TestListenerPermissions(t *testing.T) {
 	}, core.ListenerPermissions("example-host-a"))
 }
 
-// A space in the machine id is a hyphen in the durable and the queue, as the listener names them.
+// A space in the machine id is a hyphen in the durable, the queue and the listener state keys, as
+// the listener names them.
 func TestListenerPermissionsNameTheDurableAndQueueOfAMachineIDWithASpace(t *testing.T) {
 	p := core.ListenerPermissions("example host")
 	require.Contains(t, p.Publish.Allow, "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host")
 	require.Contains(t, p.Publish.Allow, "$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-host.>")
+	require.Contains(t, p.Publish.Allow, "$KV.envoy_listener.lease.listener-example-host")
+	require.Contains(t, p.Publish.Allow, "$KV.envoy_listener.handback.listener-example-host.>")
+	require.Contains(t, p.Publish.Allow, "$KV.envoy_listener.delivery.listener-example-host.>")
 	require.Contains(t, p.Subscribe.Allow, "notifications.role.> envoy-listener-example-host")
 }
 

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-557",
+  "completed": "2026-10-31T10:27:00Z",
+  "round": 13,
+  "scope": "The round-12 lease-release change (580089b5), the atomics fix (6828bbb3), the merges of main (6c38d745, ff705a78, 9c247139), and CI (architect, 02:26Z and 10:06Z). A new finding counts only if it is a correctness defect these commits introduce; under the 17:02Z rule any other finding noticed is a required change in the same review.",
+  "reviewedHead": "9c2471397600f57efa702c1859cfe390e3b499b8",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 4,
+  "ci": "At 9c247139 (CI run 41187851497) lint and typecheck success, test and 26 other check runs queued, ci-ok not yet listed at 10:26Z; PR Title run 41187912742 failed in its checkout step (git exit 128), not on the PR's text.",
+  "thermonuclear": "deep-review: CHANGES at 9c247139 (two defects introduced by 6828bbb3, each reproduced by a throwaway test under $TMPDIR/r13); code-quality: APPROVE at 9c247139 with three cleanups; merge audit: 6c38d745, ff705a78 and 9c247139 faithful. The reviewer checked both defects in the code.",
+  "items": {
+    "580089b5 release on a lost receive connection": "holds: a holder down for the bound releases with no mark and owing the ack wait, a reconnect inside it keeps the lease, a pod that is down takes none; rows TestTwoPodsReceiveConnectionLostHandsOverWithin15s, ...BackInsideTheBoundKeepsTheLease, ...LostToADroppingRouteReleasesTheLeaseWithin15s (tester 7 of 7, slowest 12.03 s)",
+    "6828bbb3 no nats.go lock on the lease path": "holds for the lock (Connected and receiveUp load atomics; rows show both answer within 100 ms where the old reads took 4.9 s), but the new signal loses what the old one saw (keyFindings[0], [1])",
+    "flag counts only the installed connection": "holds for connect-before-install (installedConn gate); see keyFindings[0] for the receiver's own copy of the connection",
+    "merges": "faithful: 6c38d745's /healthz keeps main's role-view check in okAnswer after every 503, ci.yaml keeps main's delivery split and this branch's filters and ci-ok entries; ff705a78 keeps the branch's AGENTS.md text in main's new layout; 9c247139 only scripts/e2e/README.md"
+  },
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/cmd/listener/receive.go:426", "description": "receiveUp compares the term's subscription connection with clientConn, which only the receiver's reconnect hook updates, and runReconnectHooks stops at the first failing hook (internal/bus/recovery.go), with the KV rewatch hook registered before receiver.reconnected (main.go:1314, 1472). When nats.go closes the connection and recovery installs a new one, Connected() reads true; if the rewatch keeps failing, clientConn and subscribed.conn both still name the closed connection, so the signal reads up and the holder keeps renewing with no subscription, without bound, while /healthz answers 503 'subscription inactive'. Before 6828bbb3 the signal checked sub.IsValid() and released after the bound. Compare with the client's current connection read without a lock (the connectedConn atomic)."},
+    {"severity": "important", "file": "packages/envoy/internal/bus/connect.go:290", "description": "The connected flag is set first in ReconnectedCB, which then runs onReconnect (restoreSubscriptions and the reconnect hooks, real requests) on nats.go's single async-callback goroutine; a disconnect that happens meanwhile has its DisconnectedErrCB queued behind it, so Connected() and receiveUp read up until the hooks give up. The deep review reproduced Connected() reading true 12.19 s after a cut during a hook, against the 3 s bound: on a flapping route the take-over goes past 15 s. Before 6828bbb3 Connected() read the live status. Keep the flag's updates off that queue (run the reconnect work on the client's own goroutine, or take the status from nc.StatusChanged with its drop caveats)."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/README.md:205", "description": "'about 13 s later' leaves out up to 1 s before the lease's step first reads the signal down: about 3 + 1 + 3 + 0.5 + 7 = 14.5 s plus subscribe and delivery; the changelog fragment says the same."},
+    {"severity": "minor", "file": "packages/envoy/internal/bus/nats.go:1146", "description": "noteConnection(nc, false) on a dialed-but-never-installed connection can change nothing (connectedConn only ever holds an installed connection); delete it and the field doc's sentence that lists it."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/lease.go:623", "description": "releaseReceiveLost: the !held guard cannot be true (step read held in the same goroutine), its tail repeats giveUp's (one standDown helper), and releasedRecordLocked(true) passes lapsed=true for a term that has not lapsed; name the parameter for what it forces."},
+    {"severity": "minor", "file": "packages/envoy/internal/bus/connect.go:235", "description": "A fourth optional callback joins three positional parameter lists (options, connect, connectWithContext) with seven nil call-site edits; one callbacks struct."}
+  ]
+}

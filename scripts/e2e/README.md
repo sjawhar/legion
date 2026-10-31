@@ -3092,7 +3092,7 @@ Two notes on what the script had to learn about its own surface:
 - Postgres readiness is probed **over TCP** (`pg_isready -h 127.0.0.1`).
   The container entrypoint's bootstrap phase answers on the unix socket while nothing listens on 5432 yet, and a client that connects in that window is reset by the peer.
 
-- The listener answers `/healthz` 200 with `{"status":"starting"}` before NATS is up, and every `/v1` route is 503 until then, so the wait is for the healthy status and not for the port.
+- The listener answers `/healthz` 503 with `{"status":"starting"}` until NATS is up, its caches are warm and its OIDC issuer's discovery has succeeded, and every `/v1` route is 503 until then, so the wait is for the healthy status and not for the port.
 
 - The "never prints a token" assertions are written `grep -q … && fail`, not `! grep -q …`:
   `set -e` ignores a negated pipeline (shellcheck SC2251), so the negated form could never fail the run.

@@ -18,7 +18,6 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
-	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -142,27 +141,22 @@ func (r *subjectStallRelay) close() {
 // is /healthz on the same rig before the stall: 200 healthy.
 func TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget(t *testing.T) {
 	for _, stall := range []struct {
-		name     string
-		prefixes []string
-		want     string
+		name      string
+		machineID string
+		prefixes  []string
+		want      string
 	}{
-		{"every JetStream request", []string{"$JS.", "$KV."}, "interest KV unavailable: context deadline exceeded"},
-		{"the durable consumer's info read", []string{"$JS.API.CONSUMER.INFO."}, "durable consumer unavailable: context deadline exceeded"},
+		{"every JetStream request", "box-stall-all", []string{"$JS.", "$KV."}, "interest KV unavailable: context deadline exceeded"},
+		{"the durable consumer's info read", "box-stall-info", []string{"$JS.API.CONSUMER.INFO."}, "durable consumer unavailable: context deadline exceeded"},
 	} {
 		t.Run(stall.name, func(t *testing.T) {
 			t.Parallel()
 			relay := startSubjectStallRelay(t, testnats.URL(t))
-			client, err := bus.ConnectOwningStream([]string{relay.relayed}, bus.WithReplicas(1))
-			if err != nil {
-				t.Fatalf("connect the listener's bus through the relay: %v", err)
-			}
-			t.Cleanup(client.Close)
-			const consumer = "listener-healthz-jetstream-stall"
-			durable, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-			if err != nil {
-				t.Fatalf("bind the durable: %v", err)
-			}
-			t.Cleanup(func() { _ = durable.Unsubscribe() })
+			// The pod receiving the durable, through the relay: its bus client, its lease's bucket
+			// connection and its receive loop, which binds the durable as the lease holder.
+			rig := startReceiverRig(t, relay.relayed, stall.machineID, "pod-a", func(_ context.Context, msg *natsgo.Msg) { _ = msg.Ack() }, testReceiveTiming(), testLeaseTiming())
+			rig.awaitState(t, receiveActive, 10*time.Second)
+			client := rig.client
 			registry, err := store.Open(client.Conn, store.WithReplicas(1))
 			if err != nil {
 				t.Fatalf("open the interest registry: %v", err)
@@ -181,12 +175,13 @@ func TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget(t *testing.
 			if err := sessions.WaitForCacheReady(ready); err != nil {
 				t.Fatalf("wait for the session cache: %v", err)
 			}
+			subscribeRoleLane(t, client)
 			var deps atomic.Pointer[listenerDeps]
-			deps.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), consumer: consumer})
+			deps.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), receiver: rig.receiver})
 			get := func() (int, map[string]any, time.Duration) {
 				recorder := httptest.NewRecorder()
 				started := time.Now()
-				healthzHandler(&deps).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+				healthzHandler(&deps, nil).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 				elapsed := time.Since(started)
 				var body map[string]any
 				_ = json.Unmarshal(recorder.Body.Bytes(), &body)

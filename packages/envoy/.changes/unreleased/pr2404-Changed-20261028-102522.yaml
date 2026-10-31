@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    A port registration records `accepted_host`, the host name of the listener pod that accepted it
+    (`ENVOY_POD_HOSTNAME` overrides it). A pod that would dial a pod-local address (a loopback
+    `ENVOY_HOST_BRIDGE`, or the `host.docker.internal` fallback) for a session another pod accepted
+    sends nothing and reports `delivery_failed`, logging `address not reachable from this listener
+    pod`, and does not retry it.
+time: 2026-10-28T10:25:22.370943756Z
+custom:
+    Issue: pr2404

@@ -48,35 +48,67 @@ func EnsureKeyValue(js nats.JetStreamContext, config *nats.KeyValueConfig) (KeyV
 }
 
 // raiseReplicas raises the stream of the existing bucket to replicas copies when it has fewer, and
-// returns the copies it had then, 0 when it left the bucket alone. The update writes back the
-// stream's deployed configuration with only its replicas changed, so the bucket's TTL, history,
-// discard policy, direct get, rollup, delete settings, metadata and the rest stay as they are. A
-// bucket with as many copies or more is left alone, and one copy needs no read: every stream has at
-// least one. As for the stream (ensureStreamWithConfig), two starts raising at once each write the
-// deployment's one count. A raise whose answer never came succeeds when the stream, read again,
-// has the copies, and one the server refused as overlapping the bucket's own stream is sent again
-// until the stream has them or its sends run out (updateStream). Its error names the bucket's
-// stream and, for a refused raise, the setting (refusedSettings):
-// `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: ...`, so the keeper's line says which bucket
-// it could not raise.
+// returns the copies it had then, 0 when it left the bucket alone. A bucket with as many copies or
+// more is left alone, and one copy needs no read: every stream has at least one. The read, the
+// comparison and the update are raiseBucketSetting's, so only the copies change, and a refused
+// raise names the setting (refusedSettings): `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3:
+// ...`, so the keeper's line says which bucket it could not raise.
 func raiseReplicas(js nats.JetStreamContext, bucket string, replicas int) (int, error) {
 	if replicas <= 1 {
 		return 0, nil
 	}
+	deployed, raised, err := raiseBucketSetting(js, bucket, "",
+		func(config *nats.StreamConfig) bool { return config.Replicas >= replicas },
+		func(config *nats.StreamConfig) { config.Replicas = replicas })
+	if err != nil || !raised {
+		return 0, err
+	}
+	return deployed.Replicas, nil
+}
+
+// RaiseMaxAge raises the stream of the existing bucket to keep a key's latest value for age when
+// it keeps it for less. A bucket EnsureKeyValue creates is created with the age in its config;
+// this is for one an earlier build created with a shorter one, since a create that finds the
+// bucket there changes nothing. A bucket that keeps values as long or longer is left alone, and
+// so is one that keeps them forever, which JetStream writes as a MaxAge of 0: an operator's
+// longer age stands, unlimited included. The read, the comparison and the update are
+// raiseBucketSetting's, so only the age changes and its error names the bucket's stream: `raise
+// KV_envoy_listener's max age: ...`.
+func RaiseMaxAge(js nats.JetStreamContext, bucket string, age time.Duration) error {
+	_, _, err := raiseBucketSetting(js, bucket, "'s max age",
+		func(config *nats.StreamConfig) bool { return config.MaxAge == 0 || config.MaxAge >= age },
+		func(config *nats.StreamConfig) { config.MaxAge = age })
+	return err
+}
+
+// raiseBucketSetting raises one setting of the stream behind the existing bucket: it reads the
+// stream's deployed configuration, leaves the bucket alone when enough reports that configuration
+// already holds what the caller wants, and otherwise writes that configuration back with raise's
+// one change applied, so the bucket's other settings - its copies, age, history, discard policy,
+// direct get, rollup, delete settings, metadata and the rest - stay as they are. It returns the
+// configuration it read and whether it wrote. As for the stream (ensureStreamWithConfig), two
+// starts raising at once each write the deployment's one value. A raise whose answer never came
+// succeeds when the stream, read again, holds what enough asks for, and one the server refused as
+// overlapping the bucket's own stream is sent again until the stream holds it or its sends run out
+// (updateStream). Its error
+// names the bucket's stream, and after it what of the stream the raise is (of, empty for the
+// stream itself); a refused raise names the deployment setting whose value it changes
+// (refusedSettings).
+func raiseBucketSetting(js nats.JetStreamContext, bucket, of string, enough func(*nats.StreamConfig) bool, raise func(*nats.StreamConfig)) (nats.StreamConfig, bool, error) {
 	stream := "KV_" + bucket
 	info, err := js.StreamInfo(stream)
 	if err != nil {
-		return 0, fmt.Errorf("raise %s: %w", stream, err)
+		return nats.StreamConfig{}, false, fmt.Errorf("raise %s%s: %w", stream, of, err)
 	}
-	if info.Config.Replicas >= replicas {
-		return 0, nil
+	if enough(&info.Config) {
+		return info.Config, false, nil
 	}
 	raised := info.Config
-	raised.Replicas = replicas
-	if err := updateStream(js, &raised, func(again *nats.StreamInfo) bool { return again.Config.Replicas >= replicas }); err != nil {
-		return 0, fmt.Errorf("raise %s: %w", stream, refusedSettings(err, &info.Config, &raised))
+	raise(&raised)
+	if err := updateStream(js, &raised, func(again *nats.StreamInfo) bool { return enough(&again.Config) }); err != nil {
+		return info.Config, false, fmt.Errorf("raise %s%s: %w", stream, of, refusedSettings(err, &info.Config, &raised))
 	}
-	return info.Config.Replicas, nil
+	return info.Config, true, nil
 }
 
 // OpenKeyValue opens the existing KV bucket named bucket and creates nothing, as a rebuild does. It

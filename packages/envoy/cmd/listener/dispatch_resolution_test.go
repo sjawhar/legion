@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/cmdtest"
-	"github.com/sjawhar/envoy/internal/dedupe"
 	dispatchapi "github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -102,16 +101,13 @@ func listenerRigLogger(t *testing.T, name string) *logging.Logger {
 	return logging.NewWithWriter("test", lines)
 }
 
-// startListenerDelivery runs the listener's own delivery loop over d: the durable JetStream
-// subscription main binds, with a real HTTP deliverer. A frame Dispatch publishes through
+// startListenerDelivery runs the listener's own delivery loop over d: the durable's receive loop
+// main starts, holding the lease, with a real HTTP deliverer. A frame Dispatch publishes through
 // /v1/messages/send is then pushed to the session's endpoint exactly as the listener pushes it,
 // so a delivery is observed where the agent would receive it rather than in a log line.
 func startListenerDelivery(t *testing.T, d *listenerDeps) {
 	t.Helper()
-	dedupeCache := dedupe.New(10 * time.Minute)
-	attemptCache := dedupe.New(5 * time.Minute)
-	t.Cleanup(dedupeCache.Stop)
-	t.Cleanup(attemptCache.Stop)
+	machineID := "dispatch-" + id.New()
 	met := metrics.New()
 	config := listenerDeliveryHandlerConfig{
 		client:      d.client,
@@ -127,8 +123,7 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 			// sessions field and hands it to DeliverWithResultForEntry, so the deliverer holds
 			// no registry of its own (INFRA-141).
 		},
-		dedupeCache:       dedupeCache,
-		attemptCache:      attemptCache,
+		ledger:            testDeliveryLedger(t, d.client.Conn, machineID, "boot-pod-a"),
 		logger:            listenerRigLogger(t, "delivery listener"),
 		messagesReceived:  met.NewCounter("rig_messages_received", "test"),
 		messagesDelivered: met.NewCounter("rig_messages_delivered", "test"),
@@ -142,12 +137,8 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		// delivery rather than the retry policy (INFRA-141).
 		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
-	subscription, err := startListenerSubscription(
-		d.client, "listener-dispatch-"+id.New(), jetStreamDeliveryHandler(config))
-	if err != nil {
-		t.Fatalf("bind the listener's durable consumer: %v", err)
-	}
-	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	rig := startReceiverRig(t, d.client.Conn.ConnectedUrl(), machineID, "pod-a", jetStreamDeliveryHandler(config), testReceiveTiming(), testLeaseTiming())
+	rig.awaitState(t, receiveActive, 10*time.Second)
 }
 
 // migratedDispatchDatabase opens an empty Postgres database of this test's own, carries every

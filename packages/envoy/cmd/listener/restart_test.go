@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -55,7 +56,7 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 		server.Stop(t)
 		server.Start(t)
 		deadline := time.Now().Add(30 * time.Second)
-		for strings.Count(listener.Output.String(), "envoy nats reconnected") < restart {
+		for mainClientReconnects(listener.Output.String()) < restart {
 			if time.Now().After(deadline) {
 				t.Fatalf("restart %d: the listener never reconnected:\n%s", restart, listener.Output.String())
 			}
@@ -109,6 +110,16 @@ func interestWarmUp(t *testing.T, p *listenerProcess, n int) map[string]any {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// mainClientReconnectLine matches the reconnect line of the listener's main NATS client alone:
+// named `envoy` before INFRA-557 and `envoy-listener <instance>` since, while the lease's own
+// connection (`envoy-listener-lease <instance>`) and the live lane's log the same message.
+var mainClientReconnectLine = regexp.MustCompile(`envoy nats reconnected name=(envoy |"envoy-listener )`)
+
+// mainClientReconnects counts the main client's reconnect lines in a listener's output.
+func mainClientReconnects(output string) int {
+	return len(mainClientReconnectLine.FindAllStringIndex(output, -1))
 }
 
 // listsInterest reports whether the listener's GET /v1/interests/, which answers from its cache,

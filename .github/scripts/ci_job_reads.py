@@ -343,10 +343,12 @@ done"""
 SCHEMA_STEP = "The envoy-infra plugin's schema carries the version it was built with"
 SCHEMA_SCRIPT = ('go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra && '
                  """pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'""")
-# The soak's `-run` is not a flag the simple form reduces, and it moves no closure: the whole
-# cmd/listener package compiles under the serverchange tag, whichever test the run selects.
+# Neither listener run's `-run` is a flag the simple form reduces, and neither moves a closure:
+# the whole cmd/listener package compiles under its tag, whichever tests the run selects.
 SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
+LISTENER_MP_STEP = "Two-process and two-build tests of the listener"
+LISTENER_MP_SCRIPT = "go test -tags multiprocess -count=1 -timeout 20m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener"
 
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
@@ -684,6 +686,13 @@ GATES = [
         step_run("dispatch-multiprocess", "Two-process tests of the Dispatch server",
                  "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch", ENVOY, ["./cmd/dispatch"], tags="multiprocess"),
     ], reads=setup_go("dispatch-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
+
+    gate("listener_multiprocess", "listener-multiprocess", exact=[
+        pinned_step("listener-multiprocess", LISTENER_MP_STEP, ENVOY, LISTENER_MP_SCRIPT, [
+            (ENVOY, ["./cmd/listener"], "go test -tags multiprocess ./cmd/listener", {"tags": "multiprocess"}),
+            (ENVOY, ["./cmd/listener"], "cmdtest.Build of the listener under the envoy_twobuild tag", {"tags": "envoy_twobuild", "mode": "build"}),
+        ]),
+    ], reads=setup_go("listener-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("listener_server_change", "listener-server-change", exact=[
         pinned_step("listener-server-change", SOAK_STEP, ENVOY, SOAK_SCRIPT, [

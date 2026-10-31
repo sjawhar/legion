@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -109,15 +111,18 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 	}
 }
 
-// A replacement that waits out the old task's durable serves /v1 while it waits, so a SIGTERM there
-// (a circuit-breaker rollback, a second deploy) is an ordered shutdown like any other: HTTP drains,
-// NATS drains, nothing on the path is an error, and the durable the old task holds is left alone.
-func TestASIGTERMWhileAnotherTaskHoldsTheDurableIsAnOrderedShutdown(t *testing.T) {
-	const machineID = "sigterm-during-bind"
-	old, holder := durableHeldElsewhere(t, testnats.URL(t), "listener-"+machineID)
+// A standby serves /v1 while another pod holds the lease, so a SIGTERM there (a circuit-breaker
+// rollback, a second deploy) is an ordered shutdown like any other: HTTP drains, NATS drains,
+// nothing on the path is an error, and the active pod's lease and subscription are left alone.
+func TestASIGTERMOnAStandbyIsAnOrderedShutdown(t *testing.T) {
+	const machineID = "sigterm-standby"
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	active := startListenerProcess(t, binary, uri, machineID, "ENVOY_INSTANCE_ID=pod-active")
+	active.waitHealthy(t)
 
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), old.Conn.ConnectedUrl(), machineID)
-	listener.WaitForOutput(t, "subscribe failed, retrying")
+	listener := startListenerProcess(t, binary, uri, machineID, "ENVOY_INSTANCE_ID=pod-standby")
+	listener.waitStandby(t, "pod-active")
 	listener.Terminate(t)
 	listener.WaitExit(t, "SIGTERM")
 	output := listener.Output.String()
@@ -131,11 +136,11 @@ func TestASIGTERMWhileAnotherTaskHoldsTheDurableIsAnOrderedShutdown(t *testing.T
 	}
 	for line := range strings.SplitSeq(output, "\n") {
 		if errorLine.MatchString(line) {
-			t.Fatalf("a SIGTERM during the durable's bind wait logged an error: %s", line)
+			t.Fatalf("a SIGTERM on a standby logged an error: %s", line)
 		}
 	}
-	if !holder.IsValid() {
-		t.Fatal("the old task's subscription to the durable is gone after the replacement's shutdown")
+	if role := active.health(t)["role"]; role != "active" {
+		t.Fatalf("the active pod's role after the standby stopped: %v, want active", role)
 	}
 }
 
@@ -389,38 +394,86 @@ func postListener(t *testing.T, port int, path, body string) {
 	}
 }
 
-// waitHealthy waits up to 30 s for the listener to log that it listens on its own loopback port,
-// then up to 30 s more for /healthz there to report "healthy", and kills the listener and fails
-// the test when it never does. The socket the listener inherited is not readiness: the kernel
-// queues connections on it from before the process starts, so a request there waits rather than
-// fails until the process serves, and only its listening line says it does. Each request has a
-// timeout, so one that waits on a socket nothing serves cannot outlast the deadline. /healthz
-// answers 200 with "starting" from the moment the listener serves, before NATS connects and
-// before the listener installs its SIGTERM handler, and a SIGTERM in that window kills the
+// health reads the listener's /healthz body, whatever its status. The request has a timeout, so one
+// that waits on a socket nothing serves cannot outlast its caller's deadline.
+func (p *listenerProcess) health(t *testing.T) map[string]any {
+	t.Helper()
+	client := &http.Client{Timeout: 5 * time.Second}
+	response, err := client.Get("http://127.0.0.1:" + strconv.Itoa(p.port) + "/healthz")
+	if err != nil {
+		return nil
+	}
+	defer response.Body.Close()
+	var health map[string]any
+	if json.NewDecoder(response.Body).Decode(&health) != nil {
+		return nil
+	}
+	return health
+}
+
+// waitHealth waits up to 30 s for the listener to log that it listens on its own loopback port,
+// then up to 30 s more for /healthz there to report "healthy" with every field of want, and kills
+// the listener and fails the test when it never does. The socket the listener inherited is not
+// readiness: the kernel queues connections on it from before the process starts, so a request
+// there waits rather than fails until the process serves, and only its listening line says it
+// does. /healthz answers 503 "starting" from the moment the listener serves until it is ready,
+// which it is only after it installs its SIGTERM handler, and a SIGTERM before that kills the
 // process without an ordered shutdown.
-func (p *listenerProcess) waitHealthy(t *testing.T) {
+func (p *listenerProcess) waitHealth(t *testing.T, what string, want map[string]any) {
 	t.Helper()
 	if addr, own := listeningAddr(t, p.Process), "127.0.0.1:"+strconv.Itoa(p.port); addr != own {
 		_ = p.Cmd.Process.Kill()
 		t.Fatalf("the listener logged that it listens on %s, not on its own %s:\n%s", addr, own, p.Output.String())
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	url := "http://127.0.0.1:" + strconv.Itoa(p.port) + "/healthz"
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		response, err := client.Get(url)
-		if err == nil {
-			var health struct {
-				Status string `json:"status"`
-			}
-			decodeErr := json.NewDecoder(response.Body).Decode(&health)
-			_ = response.Body.Close()
-			if decodeErr == nil && health.Status == "healthy" {
-				return
-			}
+		health := p.health(t)
+		matches := health["status"] == "healthy"
+		for field, value := range want {
+			matches = matches && health[field] == value
+		}
+		if matches {
+			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	_ = p.Cmd.Process.Kill()
-	t.Fatalf("the listener never became healthy:\n%s", p.Output.String())
+	t.Fatalf("the listener never became %s:\n%s", what, p.Output.String())
+}
+
+// waitHealthy waits for the listener to be healthy and the machine's active pod: it holds the
+// lease and receives the durable.
+func (p *listenerProcess) waitHealthy(t *testing.T) {
+	t.Helper()
+	p.waitHealth(t, "healthy and active", map[string]any{"role": "active"})
+}
+
+// waitStandby waits for the listener to be healthy as a standby of the pod named activeInstance.
+func (p *listenerProcess) waitStandby(t *testing.T, activeInstance string) {
+	t.Helper()
+	p.waitHealth(t, "a healthy standby of "+activeInstance, map[string]any{"role": "standby", "active_instance": activeInstance})
+}
+
+// A shutdown's wait on a loop that is stopping reads the loop before the context (awaitDone):
+// every such wait runs with a context the stop can have run out of, and a select over the two
+// ready channels together would pick either, so half of those waits would report work undone
+// that was done - a lease left unreleased for a standby to wait out as an expired one
+// (lease.Release), a hand-back reported unfinished (durableReceiver.Stop), a warning about loops
+// that had returned (waitLoops, shutdownListener). A context that ended with the loop still
+// running is its error.
+func TestAwaitDoneReadsTheLoopBeforeTheContext(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Both channels are ready at every call, so a select over the two would take the context's
+	// branch about half the time; 100 runs make that certain.
+	for run := range 100 {
+		if err := awaitDone(ended, done); err != nil {
+			t.Fatalf("wait %d on a loop that had returned with an ended context: %v, want it counted done", run+1, err)
+		}
+	}
+	if err := awaitDone(ended, make(chan struct{})); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait on a loop still running with an ended context = %v, want the context's error", err)
+	}
 }

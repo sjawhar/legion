@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +19,7 @@ func newTestRegistry(ttl time.Duration) *SessionRegistry {
 		ttl:            ttl,
 		cache:          map[string]cachedSession{},
 		cacheRevisions: map[string]uint64{},
-		lastSeen:       map[string]lastSeenSession{},
+		seenLocal:      map[string]int64{},
 	}
 }
 
@@ -72,11 +73,12 @@ func waitForCacheSize(t *testing.T, r *SessionRegistry, want int) {
 	waitUntil(t, func() bool { return r.CacheSize() == want })
 }
 
-// lastSeenHeld reports whether the registry still holds a lastSeen record for id, expired or not.
+// lastSeenHeld reports whether the registry still holds a per-process last-seen record for id,
+// past its retention or not.
 func lastSeenHeld(r *SessionRegistry, id string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, ok := r.lastSeen[id]
+	_, ok := r.seenLocal[id]
 	return ok
 }
 
@@ -135,7 +137,7 @@ func TestRegistryReadsRaceWatchedWritesAndExpiry(t *testing.T) {
 						t.Errorf("Get(%s).Port = %d, want %d", id, entry.Port, i+1)
 						return
 					}
-					_ = r.LastSeen(id)
+					_ = r.LastSeen(context.Background(), id)
 				}
 				entries, err := r.List()
 				if err != nil || len(entries) > len(ids) {
@@ -156,7 +158,7 @@ func TestRegistryReadsRaceWatchedWritesAndExpiry(t *testing.T) {
 	waitUntil(t, func() bool {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		return len(r.cache) == 0 && len(r.lastSeen) == 0 && len(r.cacheRevisions) == 0
+		return len(r.cache) == 0 && len(r.seenLocal) == 0 && len(r.cacheRevisions) == 0
 	})
 	if live := r.LiveCount(); live != 0 {
 		t.Fatalf("LiveCount after every deadline = %d, want 0", live)
@@ -194,8 +196,8 @@ func TestExpiryKeepsAnEntryRewrittenBetweenItsDeadlineAndItsCallback(t *testing.
 	if size := r.CacheSize(); size != 1 {
 		t.Fatalf("cache size = %d, want 1", size)
 	}
-	if seen := r.LastSeen(id); seen != 0 || lastSeenHeld(r, id) {
-		t.Fatalf("LastSeen(%s) = %d (record held %v), want no record for a live session", id, seen, lastSeenHeld(r, id))
+	if seen := r.LastSeen(context.Background(), id); seen != fresh.UpdatedAt {
+		t.Fatalf("LastSeen(%s) = %d, want the rewritten registration's %d: the session is live", id, seen, fresh.UpdatedAt)
 	}
 }
 
@@ -223,8 +225,8 @@ func TestRevisionFenceLeavesWithLastSeenAndAStaleReplayStaysAbsent(t *testing.T)
 		_, ok := fence(r, id)
 		return !ok
 	})
-	if lastSeenHeld(r, id) || r.LastSeen(id) != 0 {
-		t.Fatalf("lastSeen record held %v, LastSeen %d, after the fence left; want neither", lastSeenHeld(r, id), r.LastSeen(id))
+	if lastSeenHeld(r, id) || r.LastSeen(context.Background(), id) != 0 {
+		t.Fatalf("lastSeen record held %v, LastSeen %d, after the fence left; want neither", lastSeenHeld(r, id), r.LastSeen(context.Background(), id))
 	}
 
 	r.applyWatched(stale)
@@ -234,7 +236,7 @@ func TestRevisionFenceLeavesWithLastSeenAndAStaleReplayStaysAbsent(t *testing.T)
 	if live, size := r.LiveCount(), r.CacheSize(); live != 0 || size != 0 {
 		t.Fatalf("LiveCount %d, CacheSize %d after a stale replay; want 0 and 0", live, size)
 	}
-	if seen := r.LastSeen(id); seen != 0 {
+	if seen := r.LastSeen(context.Background(), id); seen != 0 {
 		t.Fatalf("LastSeen(%s) after a stale replay = %d, want 0", id, seen)
 	}
 	if revision, ok := fence(r, id); ok {
@@ -264,7 +266,7 @@ func TestRevisionFencesStayBoundedAsSessionsComeAndGo(t *testing.T) {
 	waitUntil(t, func() bool {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		return len(r.cache) == 0 && len(r.lastSeen) == 0 && len(r.cacheRevisions) == 0 &&
+		return len(r.cache) == 0 && len(r.seenLocal) == 0 && len(r.cacheRevisions) == 0 &&
 			len(r.expiries) == 0 && len(r.expiryIndex) == 0
 	})
 }
@@ -290,7 +292,7 @@ func TestNonPositiveTTLNeverRemovesOrSchedules(t *testing.T) {
 			if revision, ok := fence(r, "ses_deleted"); !ok || revision != 3 {
 				t.Fatalf("fence for ses_deleted = %d (held %v), want 3", revision, ok)
 			}
-			if seen := r.LastSeen("ses_deleted"); seen != 0 {
+			if seen := r.LastSeen(context.Background(), "ses_deleted"); seen != 0 {
 				t.Fatalf("LastSeen(ses_deleted) = %d, want 0 with no TTL", seen)
 			}
 			r.mu.RLock()
@@ -326,7 +328,7 @@ func TestLastSeenRetentionKeepsTheRecordAndFenceThatLong(t *testing.T) {
 	// Several TTLs after both left, well inside the retention.
 	time.Sleep(4 * ttl)
 	for _, id := range []string{"ses_expired", "ses_deleted"} {
-		if got := r.LastSeen(id); got != heartbeat {
+		if got := r.LastSeen(context.Background(), id); got != heartbeat {
 			t.Fatalf("LastSeen(%s) %s after it left = %d, want its heartbeat %d", id, time.Since(created), got, heartbeat)
 		}
 	}
@@ -337,20 +339,20 @@ func TestLastSeenRetentionKeepsTheRecordAndFenceThatLong(t *testing.T) {
 	if _, err := r.Get("ses_deleted"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("Get(ses_deleted) after a replay the fence holds off = %v, want ErrKeyNotFound", err)
 	}
-	if got := r.LastSeen("ses_deleted"); got != heartbeat {
+	if got := r.LastSeen(context.Background(), "ses_deleted"); got != heartbeat {
 		t.Fatalf("LastSeen(ses_deleted) after a replay the fence holds off = %d, want %d", got, heartbeat)
 	}
 
 	waitUntil(t, func() bool {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		return len(r.lastSeen) == 0 && len(r.cacheRevisions) == 0 && len(r.expiries) == 0
+		return len(r.seenLocal) == 0 && len(r.cacheRevisions) == 0 && len(r.expiries) == 0
 	})
 	if gone := time.Since(deleted); gone < retention {
 		t.Fatalf("records and fences left %s after ses_deleted was removed, before the retention %s", gone, retention)
 	}
 	for _, id := range []string{"ses_expired", "ses_deleted"} {
-		if got := r.LastSeen(id); got != 0 {
+		if got := r.LastSeen(context.Background(), id); got != 0 {
 			t.Fatalf("LastSeen(%s) after the retention = %d, want 0", id, got)
 		}
 	}
@@ -369,7 +371,7 @@ func TestLastSeenRetentionShorterThanTheTTLKeepsOneTTL(t *testing.T) {
 
 	// Many retentions later, well inside one TTL.
 	time.Sleep(50 * time.Millisecond)
-	if got := r.LastSeen("ses_deleted"); got != now.UnixMilli() {
+	if got := r.LastSeen(context.Background(), "ses_deleted"); got != now.UnixMilli() {
 		t.Fatalf("LastSeen(ses_deleted) %s after it left = %d, want its heartbeat %d", time.Since(deleted), got, now.UnixMilli())
 	}
 	if revision, ok := fence(r, "ses_deleted"); !ok || revision != 2 {

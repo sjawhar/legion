@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-557",
+  "completed": "2026-10-31T14:30:00Z",
+  "round": "review round 13",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
+  "codeHead": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+  "answersReview": "efcb9c02318ca74b762dc558495f6fe331e97907",
+  "proof": [
+    {
+      "criterion": "A replaced connection whose receiver hook never ran reads down; the holder releases within the bound and takes no lease back",
+      "surface": "in-process receiver and lease on a real nats-server, main's hook order with a failing rewatch ahead of the receiver's hook",
+      "command": "cd packages/envoy && go test -count=1 -run '^TestAReplacedConnectionBehindAFailingHookReadsDownAndReleasesTheLease$' ./cmd/listener/",
+      "observed": "pass: receiveUp false after the replacement, release within leaseReceiveLost + a round, no lease and no up signal afterwards",
+      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+      "negativeControl": "at 9c247139 the signal read up after the replacement; with the clientConn check removed the row fails at receive_signal_test.go:241 ('reads its receive signal up (true)')"
+    },
+    {
+      "criterion": "A cut during slow reconnect hooks reads Connected() false within 1 s",
+      "surface": "internal/bus client on a real nats-server, a hook that blocks, the link cut",
+      "command": "cd packages/envoy && go test -count=1 -run TestConnectedReadsDownAtACutWhileTheReconnectHooksRun ./internal/bus/",
+      "observed": "the cut read 6 ms after it, with the hooks still running",
+      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+      "negativeControl": "at 9c247139: 'the client still reads connected 1.005s after the link was cut while its reconnect hooks run'"
+    },
+    {
+      "criterion": "The tester's packet-dropping row and no regression",
+      "surface": "real envoy-listener binaries under the rendered grant; listener suites; internal/bus with -race",
+      "command": "go test -tags multiprocess -count=7 -run '^TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s$' ./cmd/listener; go test -tags multiprocess -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; go test ./internal/bus/... and -race",
+      "observed": "7 of 7, slowest 11.952/11.951/11.949/11.947/11.939/11.964/11.939 s; multiprocess ok 709.502s; listener ok 850.274s; race lease/receive ok 298.857s; bus ok 346.560s, race ok 360.114s",
+      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+      "negativeControl": "the two rows above fail at 9c247139"
+    }
+  ],
+  "filesChanged": [
+    "581c5f4b: internal/bus/connect.go (connectCallbacks struct), nats.go (ConnectedConn; the never-installed clear removed), recovery.go (queueReconnect, countConnectionEvent, workThroughReconnects), export_test.go, connected_cut_during_hooks_test.go (new), drain_test.go and five call-site test updates; cmd/listener/receive.go (receiveUp on ConnectedConn and clientConn), lease.go (standDown, owesAckWait, no dead guard), receive_signal_test.go, receive_test.go; README.md, AGENTS.md, changie fragment (14.5 s worst case)"
+  ],
+  "trickyParts": [
+    "The reconnect work runs on a client-owned serialized runner; the flag still moves only on nats.go's dispatcher, which keeps sets and clears in nats.go's order."
+  ],
+  "deviations": [
+    "Defect 2 uses the dispatcher's own ordering instead of per-connection generations (the architect allowed a simpler design that meets both conditions); the reason is in the thread reply."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": []
+}

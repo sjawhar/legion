@@ -202,15 +202,21 @@ func writeJSONError(w http.ResponseWriter, status int, message string, expected 
 // take whole, or a session id or role whose KV key would make a subject too long (bus.ErrTooLarge),
 // is a 413, and any other refusal, a topic or key NATS does not accept in a subject
 // (bus.ErrInvalidSubject) or a key outside nats.go's key alphabet (bus.ErrInvalidKey: `ses:bad`), a
-// 400. Any other failure is status with message. It returns the status it wrote: a caller that
-// also records the answer (requestRecord, request_record.go) reads this one classification back
-// instead of repeating it, so no record can disagree with the response that was sent.
+// 400. A registration or interest write that lost its compare-and-set to other listeners' writes on
+// every attempt (session.ErrWriteConflict, store.ErrWriteConflict) wrote nothing and is a 503 with
+// Retry-After, whatever status the caller names. Any other failure is status with message. It
+// returns the status it wrote: a caller that also records the answer (requestRecord,
+// request_record.go) reads this one classification back instead of repeating it, so no record can
+// disagree with the response that was sent.
 func writeNATSError(w http.ResponseWriter, err error, status int, message string) int {
 	switch {
 	case errors.Is(err, bus.ErrTooLarge):
 		status, message = http.StatusRequestEntityTooLarge, err.Error()
 	case errors.Is(err, bus.ErrRefused):
 		status, message = http.StatusBadRequest, err.Error()
+	case errors.Is(err, session.ErrWriteConflict), errors.Is(err, store.ErrWriteConflict):
+		w.Header().Set("Retry-After", "1")
+		status, message = http.StatusServiceUnavailable, err.Error()
 	}
 	writeJSONError(w, status, message)
 	return status
@@ -289,11 +295,13 @@ func writeBusUnavailable(w http.ResponseWriter, err error) int {
 
 // storeAnswered reports whether err, from the store work of a /v1 route that writes, done within
 // ctx, is the store's own answer: a key NATS refuses (bus.ErrRefused), no key (nats.ErrKeyNotFound),
-// a record this build cannot decode (store.ErrMalformedInterest, store.ErrMalformedRoleClaim), or a
-// conditional write or delete another writer's change beat (nats.ErrKeyExists). Every other error
-// did not answer, whatever it names, and so does any error once ctx has ended. An errors.Join of
-// failures (store.Registry.SetRoleWithPrevious joins a lost claim with its holder read and its
-// rollback) answered only when every part of it did.
+// a record this build cannot decode (store.ErrMalformedInterest, store.ErrMalformedRoleClaim), a
+// conditional write or delete another writer's change beat (nats.ErrKeyExists), or a registration or
+// interest write that lost its compare-and-set on every attempt (session.ErrWriteConflict,
+// store.ErrWriteConflict), which writeNATSError answers as its own 503. Every other error did not
+// answer, whatever it names, and so does any error once ctx has ended. An errors.Join of failures
+// (store.Registry.SetRoleWithPrevious joins a lost claim with its holder read and its rollback)
+// answered only when every part of it did.
 func storeAnswered(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
@@ -319,13 +327,14 @@ func storeAnswer(err error) bool {
 		}
 	}
 	return errors.Is(err, bus.ErrRefused) || errors.Is(err, nats.ErrKeyNotFound) || errors.Is(err, nats.ErrKeyExists) ||
-		errors.Is(err, store.ErrMalformedInterest) || errors.Is(err, store.ErrMalformedRoleClaim)
+		errors.Is(err, store.ErrMalformedInterest) || errors.Is(err, store.ErrMalformedRoleClaim) ||
+		errors.Is(err, session.ErrWriteConflict) || errors.Is(err, store.ErrWriteConflict)
 }
 
 // writeStoreError answers err from a write route's store work done within ctx: a store answer
 // (storeAnswered) as status naming err, as the route always answered it (a refused key still the
-// 413 or 400 writeNATSError gives it), and anything else as the bus-unavailable 503 with
-// Retry-After: 1 (writeBusUnavailable).
+// 413 or 400 writeNATSError gives it, a lost compare-and-set its 503 with Retry-After), and anything
+// else as the bus-unavailable 503 with Retry-After: 1 (writeBusUnavailable).
 func writeStoreError(ctx context.Context, w http.ResponseWriter, err error, status int) {
 	if storeAnswered(ctx, err) {
 		writeNATSError(w, err, status, err.Error())
@@ -458,7 +467,9 @@ type forwardVerdict struct {
 // holds the role (an echo, never forwarded back), seen reports the holder already took this dedupe
 // key (a repeat), and the holder cannot take the payload's delivery mode (deliveryModeVerdict). The
 // role lane (roleTopicDelivery) and the publish route (roleSend.settledBeforeForward) both judge by
-// it, each with the record it trusts as seen, so both refuse and skip the same messages. Guarding
+// it, so both refuse and skip the same messages; the publish route passes its own record of what
+// the holder took as seen, the role lane a seen that answers no, since the delivery ledger reports
+// its repeats (ledgerAttempt) and it applies the mode verdict only after that check. Guarding
 // after the dedupe check keeps a delivered repeat from being judged by the holder's current
 // capabilities, which can have changed since the original forward and would misreport a delivered
 // message as failed — a false signal the Legion daemon treats as cause to probe and potentially
@@ -967,31 +978,42 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 }
 
 // interestRow is one persisted interest as GET /v1/interests/ and GET /v1/interests/<session_id>
-// answer it: the stored record plus LastSeen, the session's last heartbeat (Unix ms) as this
-// listener's session cache knows it, omitted when unknown. The record's own UpdatedAt can lag that
-// heartbeat by up to store.InterestRefreshAge, since an unchanged row is rewritten only that often.
+// answer it: the stored record plus LastSeen, the session's last heartbeat (Unix ms), omitted when
+// unknown. While the session is live it is the live entry's UpdatedAt, and once it has lapsed the
+// session's `seen.` record in the listener state bucket, which every pod of the fleet answers
+// alike (interestRowFor). The record's own UpdatedAt can lag that heartbeat by up to
+// store.InterestRefreshAge, since an unchanged row is rewritten only that often.
 type interestRow struct {
 	store.Interest
 	LastSeen int64 `json:"last_seen,omitempty"`
 }
 
 // interestRowFor answers item with its session's last heartbeat: the live entry's UpdatedAt while
-// the session is live, else the final heartbeat the cache still retains for it
-// (session.SessionRegistry.LastSeen), else none. A listener restart empties those records, so a
-// session that died before it reads as unknown.
-func interestRowFor(sessions *session.SessionRegistry, item store.Interest) interestRow {
+// the session is live, else the final heartbeat still reported for it
+// (session.SessionRegistry.LastSeen), else none. That heartbeat is the session's `seen.` record in
+// the listener state bucket, the one every pod of the fleet answers from, read within ctx: the
+// route passes its request's own budget, so a bucket that does not answer costs that budget once
+// for the whole answer and leaves the rows it could not read without a last heartbeat. A listener
+// without that bucket keeps the records in process, so one that restarted since the session died
+// reads it as unknown.
+func interestRowFor(ctx context.Context, sessions *session.SessionRegistry, item store.Interest) interestRow {
 	row := interestRow{Interest: item}
 	if entry, err := sessions.Get(item.SessionID); err == nil {
 		row.LastSeen = entry.UpdatedAt
 	} else {
-		row.LastSeen = sessions.LastSeen(item.SessionID)
+		row.LastSeen = sessions.LastSeen(ctx, item.SessionID)
 	}
 	return row
 }
 
 // adminInterestsHandler lists, reads and removes persisted interests. Each row a GET answers
-// carries its session's last heartbeat (interestRowFor). GET /v1/interests/<session_id>
-// reads within sendRequestBudget of the request's own context: a cache miss is read through to the
+// carries its session's last heartbeat (interestRowFor), read from the listener state bucket for
+// a session that has lapsed. GET /v1/interests/ answers from the interest cache and reads those
+// heartbeats within sendRequestBudget of the request's own context, the one budget for the whole
+// list: a bucket that stopped answering leaves the rows it could not read without a last
+// heartbeat rather than holding the answer open a read per row.
+// GET /v1/interests/<session_id> reads within sendRequestBudget of the request's own context: a
+// cache miss is read through to the
 // bucket, the bucket's word that the key is absent is a 404, a record this build cannot decode is
 // the 500 writeInterestRecordUnreadable writes, and a read that did not answer is the
 // bus-unavailable 503 with Retry-After: 1 (a key NATS refuses is still the 413 or 400
@@ -1006,10 +1028,12 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 				writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
+			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+			defer cancel()
 			items := registry.List()
 			rows := make([]interestRow, 0, len(items))
 			for _, item := range items {
-				rows = append(rows, interestRowFor(sessions, item))
+				rows = append(rows, interestRowFor(ctx, sessions, item))
 			}
 			writeJSON(w, http.StatusOK, rows)
 			return
@@ -1034,7 +1058,7 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 				writeBusUnavailable(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, interestRowFor(sessions, item))
+			writeJSON(w, http.StatusOK, interestRowFor(ctx, sessions, item))
 		case http.MethodDelete:
 			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 			defer cancel()
@@ -1097,18 +1121,29 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		entry, err := d.sessions.Get(body.SessionID)
-		if errors.Is(err, nats.ErrKeyNotFound) {
+		// The claimant's registration is read through liveSessionEntry, so one another listener
+		// wrote a moment ago, in the bucket and not yet in this listener's cache, is found. It is
+		// rewritten as self-subscribed through this listener by Amend, which applies that change to
+		// what the bucket holds when this listener's copy is stale, so the newer port or host another
+		// listener stored is kept.
+		entry, err := liveSessionEntry(ctx, d.sessions, body.SessionID, roleHolderReadTimeout, registered)
+		switch {
+		case errors.Is(err, bus.ErrRefused):
+			// Refresh reports a refused key as a missing one too, so this test comes first:
+			// writeStoreError answers it as the 413 or 400 it is.
+			writeStoreError(ctx, w, err, http.StatusBadRequest)
+			return
+		case errors.Is(err, nats.ErrKeyNotFound):
 			writeJSONError(w, http.StatusNotFound, "session is not registered")
 			return
-		}
-		if err != nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "read session registration: "+err.Error())
+		case err != nil:
+			writeStoreError(ctx, w, fmt.Errorf("read session registration: %w", err), http.StatusServiceUnavailable)
 			return
 		}
-		entry.MachineID = machineID
-		entry.SelfSubscribed = true
-		if err := d.sessions.PutWithin(ctx, body.SessionID, entry); err != nil {
+		if err := d.sessions.Amend(ctx, body.SessionID, entry, func(entry *session.SessionEntry) {
+			entry.MachineID = machineID
+			entry.SelfSubscribed = true
+		}); err != nil {
 			writeStoreError(ctx, w, fmt.Errorf("refresh role claimant registration: %w", err), http.StatusServiceUnavailable)
 			return
 		}
@@ -1400,7 +1435,15 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			return
 		}
 		if body.Port > 0 || body.SelfSubscribed {
-			if err := d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
+			entry := sessionEntryFromSubscribe(body, machineID)
+			if body.Port > 0 {
+				// This pod accepted the registration, so it names itself: a delivery address local
+				// to a pod (a loopback bridge, host.docker.internal) reaches the session only from
+				// the pod the session can reach, and session.Deliverer refuses it on any other pod.
+				// A heartbeat accepted by another pod re-stamps it with that pod's name.
+				entry.AcceptedHost = d.podHostname
+			}
+			if err := d.sessions.PutWithin(ctx, body.SessionID, entry); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 				writeStoreError(ctx, w, fmt.Errorf("session registry unavailable: %w", err), http.StatusServiceUnavailable)
 				return

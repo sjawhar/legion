@@ -1,0 +1,73 @@
+kind: Changed
+body: |-
+    `envoy-listener` runs as an active pod and standbys for any machine id: any number of
+    listeners may run with one `ENVOY_MACHINE_ID`, and only the holder of the machine's delivery
+    lease, the key `lease.listener-<machine id>` in the new KV bucket `envoy_listener` (created at
+    `ENVOY_NATS_REPLICAS`, 20 minute `MaxAge`), receives its durable consumer. The holder renews the
+    lease every second by compare-and-set and subscribes to the durable's deliver subject with a core
+    subscription of its own, never `nats.Bind`, handling a message only while it holds the lease; a
+    standby polls every 500 ms and takes an unreleased lease once it has not changed for 5 s, a
+    released one at once. Every pod serves `/v1`, the webhooks and the role lane; the interest and
+    role-claim reapers, the interest marker collector and the CI summary loop run on the holder
+    alone. A standby waits for as long as the active pod runs and never exits for it. A graceful
+    stop now ends receiving first and then stops HTTP: the holder-only loops stop, the handler
+    takes no more messages, the message in hand gets 3 s before its prompt is cancelled, every
+    message not handled is NAKed with a 2 s delay in stream order, and the lease is marked released
+    and `unsettled`, so a standby takes it at its next poll and settles (below), delivering about 2
+    to 3 s after the stop and keeping each session's order. The stopping pod keeps its subscription
+    until the lease record says the next holder is `receiving` (3 s at most after the NAKs, and
+    1.25 s after its release at least, the floor that holds the deliver subject while a standby
+    subscribes: a stop whose
+    flush and release both run to their bounds takes 12.25 s rather than the 11 s a stop takes
+    otherwise, and its 10 s budget bounds none of that: it is how long the shutdown waits for the
+    stop. Past it the shutdown goes on to the HTTP stop with no time left, then to the NATS drains
+    and the listener's own exit: the drain of its NATS connection ends a hand-back still lingering
+    or draining, and the exit ends a mark write still in flight; the next holder then settles at its
+    7 s cap),
+    handing back what still reaches it, since nats-server loses a message whose
+    first delivery is still queued when a push consumer's last subscriber goes. Once it has
+    drained, a stop whose hand-over went through every step - its own release wrote the record,
+    its term had no lost node's push binding open, the message in hand's handler returned, its
+    linger read another holder `receiving`, and the server confirmed the drain - writes a
+    clean-hand-back mark, the new key
+    `handback.<durable>.<the revision it released>` in `envoy_listener` (JSON: `instance`, `boot`,
+    `revision`; the bucket's 20 minute `MaxAge` removes it). A pod that takes the lease over a
+    holder that was killed or lost its node subscribes at once and holds what it
+    receives until every message the durable has outstanding is in its hands (its `NumAckPending`
+    no more than what it holds, read every 250 ms, capped at one ack wait and a second, 7 s, after
+    it subscribed), then delivers it in stream order, so a session's events stay in order there
+    too: messages arrive about 5 to 6 s after the dead holder's last renewal when nothing was
+    outstanding and about 12 to 13 s after it otherwise; a NAK-delayed retry stays outstanding,
+    holds the hold to its cap and arrives after it. After a graceful stop the hold ends at the
+    2 s hand-back delay and a second, 3 s, instead - but only once the mark for the lease revision
+    the term replaced is there, read every settle poll inside the hold rather than at the
+    subscribe, since the mark lands after this pod is receiving. No mark, an unreadable mark or a
+    stop that fell short of any step leaves the 7 s cap standing. The lease
+    record carries
+    `stale_binding` (its holder subscribed beside a lingering push binding; a term taken from a
+    hand-back candidate clears it again when the mark arrives, which says that binding was the
+    stopping pod's own linger), `unsettled` (its
+    term's hold had not ended, kept by a release, or its holder handed messages back on a graceful
+    stop, or its renewals had lapsed when it was stopped), `ack_wait_owed` (the ack wait the
+    releasing term still owed: every term that must settle owes one from its acquiring write until
+    its own settle hold ends, so a stop, a lapse, a
+    give-up or a stop before the term ever subscribed hands the debt on, and a release the lease's
+    loop outlasts records it for the release that lands after the linger has let go) and
+    `receiving` (its
+    holder's subscription is up), and a pod that takes a
+    released record carrying `stale_binding` or `unsettled` settles the same way, ending its hold
+    at 3 s only for a record carrying `unsettled` without `ack_wait_owed` and without
+    `stale_binding` whose mark is there, and at 7 s
+    otherwise. A holder that
+    takes an absent record, or a released one with neither flag, and finds the durable push-bound
+    by a listener build from before the lease waits for that binding to end and subscribes within
+    a second of it; past 135 s it logs `lease holder cannot deliver from the durable` at ERROR,
+    again every 5 minutes, and never exits for it. A holder whose reads, writes or subscribes of
+    the durable fail for 135 s logs the same line at ERROR with the failure as `reason` and gives
+    the lease up to a standby, taking it back two standby polls later when no other pod has;
+    `/healthz` answers 200 `degraded` while such failures last, naming the failure, and 503
+    `unhealthy` past 135 s on a listener without a lease, which keeps retrying.
+    `packages/envoy/cmd/listener/README.md` describes the run model.
+time: 2026-10-28T10:24:27.185064233Z
+custom:
+    Issue: pr2404

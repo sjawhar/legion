@@ -1,0 +1,20 @@
+kind: Changed
+body: |-
+    A listener's pods share their delivery state through `envoy_listener`, so a pod that takes over,
+    or a standby answering `/v1`, answers as the active pod would. The delivery ledger
+    (`internal/dedupe`, `delivery.<durable>.<hash>.<session>` keys) replaces the per-process attempt
+    and dedupe caches on the durable, role and live lanes: a pair another pod delivered is not
+    prompted again; an attempt by a former lease holder (`former_boots` in the lease record) is
+    taken over at once, so a hard take-over keeps each session's order; one a pod that still holds
+    or renews a lease, or a live pod's role or live lane, attempted less than 35 s ago is retried
+    later; and an older one is taken over. A ledger that cannot be read NAKs the durable message for
+    a retry, and the role and live lanes deliver without it, logging `delivery ledger unavailable`.
+    A session's last-seen time is kept in `seen.<session>` records, which every pod answers a
+    lapsed session's `last_seen` out of alone, for the session TTL and the interest reaper's
+    allowance past the last write (the bucket's `MaxAge` is sized past that window), and a role
+    claim's grace counts
+    from the machine's service start (`service_since` in the lease record) rather than each
+    process's start, so every pod answers a lapsed holder alike.
+time: 2026-10-28T10:25:04.166819217Z
+custom:
+    Issue: pr2404

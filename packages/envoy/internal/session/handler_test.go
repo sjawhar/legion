@@ -1,6 +1,7 @@
 package session_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -218,5 +219,39 @@ func TestHandleAgentMessage_RehomedSessionStaysWithItsStoredInterest(t *testing.
 	}
 	if want := "http://example-host-b:4096/session/ses_target/prompt_async"; len(requests) != 1 || requests[0] != want {
 		t.Fatalf("requested %q, want exactly [%q]", requests, want)
+	}
+}
+
+// A session whose address is local to this pod and whose registration another pod accepted cannot
+// be reached from this pod on any attempt, so on both paths the handler reports the failure
+// (ErrAddressNotReachable) without a request and without asking for a retry: the registry path
+// does not mistake it for a session found nowhere.
+func TestHandleAgentMessage_AddressNotReachableFromThisPodIsAFailureNotRetried(t *testing.T) {
+	for name, interest := range map[string]*store.Interest{
+		"interest path": {SessionID: "ses_target", Dir: "/test", MachineID: "box-a"},
+		"registry path": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var requests []string
+			sessions, deliverer := newKVDeliverer(t)
+			deliverer.MachineID = "box-a"
+			deliverer.PodHost = "pod-b"
+			deliverer.HTTPClient = reachableClient(&requests)
+			if err := sessions.Put("ses_target", session.SessionEntry{Port: 4096, MachineID: "box-a", AcceptedHost: "pod-a", Dir: "/test"}); err != nil {
+				t.Fatalf("failed to register session: %v", err)
+			}
+
+			result := session.HandleAgentMessage(
+				newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
+				"ses_target", "box-a", interest, resolvedEntry(t, sessions, "ses_target"), &deliverer,
+			)
+
+			if !errors.Is(result.Err, session.ErrAddressNotReachable) || result.Delivered || result.OwnedElsewhere || result.ShouldNAK {
+				t.Fatalf("result = %+v, want the address refused, with no delivery and no NAK", result)
+			}
+			if len(requests) != 0 {
+				t.Fatalf("requested %q, want no request", requests)
+			}
+		})
 	}
 }

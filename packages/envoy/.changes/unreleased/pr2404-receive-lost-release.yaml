@@ -1,0 +1,25 @@
+kind: Fixed
+body: |-
+    An envoy-listener that holds its machine's delivery lease now gives the lease up when it stops
+    receiving, rather than renewing a lease it delivers nothing from. The lease renews on a NATS
+    connection of its own, so a pod whose main connection alone was lost - the one the machine's
+    durable is received on - went on renewing while it answered /healthz 503 "subscription
+    inactive", and no standby took over until the pod's self-health monitor killed it ten minutes
+    on. A holder whose receive connection has been down for three seconds now stops renewing and
+    releases the record with the WARN "listener lease released: the receive connection is down",
+    naming how long it was down; the standby takes the released record at its next poll and
+    settles for the full ack wait beside the lost connection's subscription, so every message
+    reaches its session in publish order, about fourteen and a half seconds after the cut at
+    worst - up to three seconds before the cut is declared, up to a second before the holder's
+    next round reads the signal, the three-second bound, the standby's half-second poll and its
+    seven-second settle hold, plus the subscribe and the delivery - inside the fifteen seconds a
+    hard take-over is bounded at. A connection back
+    inside the three seconds keeps the lease and its term, and no pod takes the lease, at a
+    standby poll or after a lapse, while its own receive connection is down. That holds whatever
+    the lost route does to the pod's reconnects: a route that drops its packets rather than
+    refusing them leaves every reconnect dial hanging for the five-second connect timeout, with
+    the NATS client library's connection lock held throughout, and the lease reads this pod's
+    receiving without waiting for any of it.
+time: 2026-10-30T23:30:00.000000000Z
+custom:
+    Issue: pr2404

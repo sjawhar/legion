@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,7 +12,6 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // hookStallClock is the clock the test's bus client reads for the time-based parts of its
@@ -38,19 +38,25 @@ func (c *hookStallClock) Advance(d time.Duration) {
 // own rewatch failure reads, so the answer is checked against the text an operator would see.
 var errHookStallRewatch = errors.New("rewatch interest cache: watch role claims KV bucket: context deadline exceeded")
 
-// failReconnectHooks makes every later run of client's reconnect hooks fail and reconnects it in
-// place, waiting until the bus has recorded the failed run. The hook stands for the listener's own
-// rewatch of its caches, failing however often it is run, as a rewatch whose bucket read never
-// answers does.
-func failReconnectHooks(t *testing.T, client *bus.Client) {
+// failReconnectHooks makes every later run of the pod's reconnect hooks fail and reconnects its
+// bus client in place, waiting until the bus has recorded the failed run. The hook stands for the
+// listener's own rewatch of its caches, failing however often it is run, as a rewatch whose bucket
+// read never answers does. The reconnect also leaves the pod's durable subscription on the old
+// connection until its receive loop rebuilds it, which is a 503 of its own, so this waits for the
+// pod to receive again and leaves the stall as the only thing wrong with it.
+func failReconnectHooks(t *testing.T, rig *receiverRig) {
 	t.Helper()
-	client.AddReconnectHook(func(*natsgo.Conn) error { return errHookStallRewatch })
-	if err := client.Conn.ForceReconnect(); err != nil {
+	rig.client.AddReconnectHook(func(*natsgo.Conn) error { return errHookStallRewatch })
+	if err := rig.client.Conn.ForceReconnect(); err != nil {
 		t.Fatalf("reconnect in place: %v", err)
 	}
 	waitFor(t, 30*time.Second, "the failed run of the reconnect hooks to be recorded", func() bool {
-		_, hookErr := client.HookStall()
+		_, hookErr := rig.client.HookStall()
 		return hookErr != nil
+	})
+	waitFor(t, 30*time.Second, "the pod to receive its durable again", func() bool {
+		report := rig.receiver.report()
+		return report.State == receiveActive && report.SubscriptionValid
 	})
 }
 
@@ -67,9 +73,9 @@ func failReconnectHooks(t *testing.T, client *bus.Client) {
 // the grace: the bus runs the hooks again within seconds, so that must stay 200 healthy rather
 // than report every reconnect. The other is a whole grace of clock before any reconnect, below.
 func TestHealthzAnswersAHookStallPastTheRepairGrace(t *testing.T) {
-	client, clock, get := hookStallFixture(t, "listener-healthz-hook-stall")
-	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
-		t.Fatalf("/healthz before any reconnect = %d %v, want 200 healthy", code, body)
+	rig, clock, get := hookStallFixture(t, "hook-stall")
+	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" || body["role"] != "active" {
+		t.Fatalf("/healthz before any reconnect = %d %v, want 200 healthy, role active", code, body)
 	}
 
 	// A whole grace of clock with no connection event leaves the stall at zero: it begins at an
@@ -78,22 +84,22 @@ func TestHealthzAnswersAHookStallPastTheRepairGrace(t *testing.T) {
 	// every listener answer degraded a minute after it started, with nothing wrong and no
 	// reconnect anywhere, and every other test in the tree would stay green.
 	clock.Advance(bus.RepairGrace)
-	if stall, hookErr := client.HookStall(); stall != 0 || hookErr != nil {
+	if stall, hookErr := rig.client.HookStall(); stall != 0 || hookErr != nil {
 		t.Fatalf("HookStall a whole bus.RepairGrace after the first connection = %v %v, want 0 and no error", stall, hookErr)
 	}
 	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 		t.Fatalf("/healthz a whole bus.RepairGrace after the first connection = %d %v, want 200 healthy", code, body)
 	}
 
-	failReconnectHooks(t, client)
+	failReconnectHooks(t, rig)
 	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 		t.Fatalf("/healthz with the rebuild failing under bus.RepairGrace = %d %v, want 200 healthy", code, body)
 	}
 
 	clock.Advance(bus.RepairGrace)
 	code, body := get()
-	if code != http.StatusOK || body["status"] != "degraded" {
-		t.Fatalf("/healthz a whole bus.RepairGrace into the stall = %d %v, want 200 degraded", code, body)
+	if code != http.StatusOK || body["status"] != "degraded" || body["role"] != "active" {
+		t.Fatalf("/healthz a whole bus.RepairGrace into the stall = %d %v, want 200 degraded, role active", code, body)
 	}
 	reported := fmt.Sprint(body["error"])
 	if !strings.Contains(reported, "KV watch rebuild") || !strings.Contains(reported, errHookStallRewatch.Error()) {
@@ -102,22 +108,17 @@ func TestHealthzAnswersAHookStallPastTheRepairGrace(t *testing.T) {
 	t.Logf("/healthz a whole bus.RepairGrace into the stall: %d %s", code, reported)
 }
 
-// hookStallFixture is the listener a hook stall is tested against, on the package's shared NATS
-// server: a bus client whose reconnect reporting reads the clock the test moves, and over it the
-// listener setupUnboundDurableFixture builds. It returns the client, that clock and a get() serving
-// one /healthz request, which is every piece the tests in this file share.
-func hookStallFixture(t *testing.T, consumer string) (*bus.Client, *hookStallClock, func() (int, map[string]any)) {
+// hookStallFixture is the pod a hook stall is tested against, on the package's shared NATS
+// server: machineID's lease holder, built by setupUnboundDurableFixture over a bus client whose
+// reconnect reporting reads the clock the test moves. It returns the rig, that clock and a get()
+// serving one /healthz request, which is every piece the tests in this file share.
+func hookStallFixture(t *testing.T, machineID string) (*receiverRig, *hookStallClock, func() (int, map[string]any)) {
 	t.Helper()
 	clock := &hookStallClock{now: time.Now()}
-	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)},
-		bus.WithReplicas(1),
+	rig, get := setupUnboundDurableFixture(t, machineID,
+		func(_ context.Context, msg *natsgo.Msg) { _ = msg.Ack() },
 		bus.WithReconnectErrClock(clock.Now))
-	if err != nil {
-		t.Fatalf("connect the listener's bus: %v", err)
-	}
-	t.Cleanup(client.Close)
-	get := setupUnboundDurableFixture(t, client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	return client, clock, get
+	return rig, clock, get
 }
 
 // A stall past bus.RepairGrace is the last thing /healthz decides, below every 503 check, so a
@@ -128,16 +129,15 @@ func hookStallFixture(t *testing.T, consumer string) (*bus.Client, *hookStallClo
 // the stall deciding first and reporting such a listener as merely degraded, which every probe that
 // reads /healthz then leaves in service (INFRA-743).
 func TestHealthzReportsARecreatedDurableThroughAHookStall(t *testing.T) {
-	consumer := "listener-healthz-hook-stall-unbound"
-	client, clock, get := hookStallFixture(t, consumer)
+	rig, clock, get := hookStallFixture(t, "hook-stall-unbound")
 
-	failReconnectHooks(t, client)
+	failReconnectHooks(t, rig)
 	clock.Advance(bus.RepairGrace)
 	if code, body := get(); code != http.StatusOK || body["status"] != "degraded" {
 		t.Fatalf("/healthz a whole bus.RepairGrace into the stall, durable still bound = %d %v, want 200 degraded", code, body)
 	}
 
-	recreateListenerDurable(t, client, consumer)
+	recreateListenerDurable(t, rig.client, rig.consumer)
 
 	code, body := get()
 	want := "durable consumer unavailable: " + errDurableUnbound.Error()

@@ -43,6 +43,14 @@ const inboxes = nats.InboxPrefix + ">"
 //     the calls nats.go's KV makes and the raise a start sends (bucketPermissions): the bucket's
 //     stream info, create and update, direct and stream message gets, writes to its keys, its
 //     watchers' consumer create and delete, and their flow-control replies;
+//   - the same calls for the listener state bucket, whose writes are the machine's own keys
+//     alone: its delivery lease (bus.ListenerLeaseKey), the clean-hand-back marks of its stopping
+//     pods (bus.ListenerHandBackPrefix) and its delivery ledger (bus.ListenerLedgerPrefix), so one
+//     machine's user cannot take or clear another machine's lease or ledger, or vouch for another
+//     machine's hand-over, beside every session's last-seen record (bus.LastSeenPrefix), which is
+//     read across machines and so stays fleet-wide. A listener whose grant lacks this bucket does
+//     not exit: it logs an ERROR naming the bucket and delivers without a lease, receiving from
+//     its durable only while no other subscriber holds it;
 //   - the purge of the interest bucket, which its delete-marker collection sends.
 //
 // Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
@@ -62,6 +70,13 @@ func ListenerPermissions(machineID string) Permissions {
 	for _, bucket := range bus.ListenerBuckets() {
 		publish = append(publish, bucketPermissions(bucket)...)
 	}
+	publish = append(publish, bucketPermissions(bus.ListenerStateBucket,
+		bus.ListenerLeaseKey(machineID),
+		bus.ListenerHandBackPrefix(durable)+">",
+		bus.ListenerLedgerPrefix(durable)+">",
+		// Every session's last-seen record, not only the ones this machine wrote: the key is
+		// fleet-wide, for the reason bus.LastSeenPrefix's doc gives.
+		bus.LastSeenPrefix+">")...)
 	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
 	return Permissions{
 		Publish:   Rules{Allow: publish},
@@ -70,25 +85,33 @@ func ListenerPermissions(machineID string) Permissions {
 }
 
 // bucketPermissions are the calls nats.go's KV makes on one bucket, in the order the grants list
-// them: ListenerPermissions lists them for each of bus.ListenerBuckets, DispatchPermissions for the
-// redelivery bucket. Beside them is the update of the bucket's stream: a start, and the program's
-// keeper every 30 seconds after it, raises a bucket found with fewer copies than the deployment's
-// replica count (bus.ReplicasEnvVar) with a stream update (bus.EnsureKeyValue,
+// them: ListenerPermissions lists them for each of bus.ListenerBuckets and for the listener state
+// bucket, DispatchPermissions for the redelivery bucket. keys are the key patterns the writes may
+// reach, every key when none is given. Beside them is the update of the bucket's stream: a start,
+// and the program's keeper every 30 seconds after it, raises a bucket found with fewer copies than
+// the deployment's replica count (bus.ReplicasEnvVar) with a stream update (bus.EnsureKeyValue,
 // bus.WithKeptBuckets). Without that grant the raise times out and the start stops naming the
 // bucket.
-func bucketPermissions(bucket string) []string {
+func bucketPermissions(bucket string, keys ...string) []string {
 	stream := kvStream + bucket
-	return []string{
+	if len(keys) == 0 {
+		keys = []string{">"}
+	}
+	rules := []string{
 		jsAPI + "STREAM.INFO." + stream,
 		jsAPI + "STREAM.CREATE." + stream,
 		jsAPI + "STREAM.UPDATE." + stream,
 		jsAPI + "DIRECT.GET." + stream + ".>",
 		jsAPI + "STREAM.MSG.GET." + stream,
-		kvSubjects + bucket + ".>",
-		jsAPI + "CONSUMER.CREATE." + stream + ".>",
-		jsAPI + "CONSUMER.DELETE." + stream + ".>",
-		jsFlow + stream + ".>",
 	}
+	for _, key := range keys {
+		rules = append(rules, kvSubjects+bucket+"."+key)
+	}
+	return append(rules,
+		jsAPI+"CONSUMER.CREATE."+stream+".>",
+		jsAPI+"CONSUMER.DELETE."+stream+".>",
+		jsFlow+stream+".>",
+	)
 }
 
 // DispatchDurables are the fixed durable consumers of the stream that Dispatch's grant lets it

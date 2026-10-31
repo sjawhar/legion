@@ -734,6 +734,143 @@ func TestDeliver_SessionAddress(t *testing.T) {
 	}
 }
 
+// Every pod of a machine computes one address for a session (hostFor reads only the registration
+// and the pod's bridge), and two of hostFor's answers are local to the pod that dials them: a
+// loopback bridge, and the host.docker.internal fallback. Such an address reaches the session only
+// from the pod that accepted its registration (SessionEntry.AcceptedHost), so any other pod refuses
+// it with ErrAddressNotReachable and requests nothing, instead of prompting whatever listens on its
+// own loopback. A registration without AcceptedHost (an older build's), the accepting pod itself
+// (host networking shares one host name), and any address that is not pod-local are delivered.
+func TestDeliver_PodLocalAddressOfASessionAnotherPodAccepted(t *testing.T) {
+	sessions, deliverer := newKVDeliverer(t)
+	deliverer.MachineID = "box-a"
+
+	tests := []struct {
+		name     string
+		bridge   string
+		podHost  string
+		entry    session.SessionEntry
+		want     string
+		refusing bool
+	}{
+		{
+			name:     "a loopback bridge on a pod that did not accept the registration is refused",
+			bridge:   "127.0.0.1",
+			podHost:  "pod-b",
+			entry:    session.SessionEntry{MachineID: "box-a", Host: "example-host", AcceptedHost: "pod-a"},
+			refusing: true,
+		},
+		{
+			name:     "a localhost bridge on a pod that did not accept the registration is refused",
+			bridge:   "localhost",
+			podHost:  "pod-b",
+			entry:    session.SessionEntry{MachineID: "box-a", AcceptedHost: "pod-a"},
+			refusing: true,
+		},
+		{
+			name:     "an IPv6 loopback bridge on a pod that did not accept the registration is refused",
+			bridge:   "::1",
+			podHost:  "pod-b",
+			entry:    session.SessionEntry{MachineID: "box-a", AcceptedHost: "pod-a"},
+			refusing: true,
+		},
+		{
+			name:     "the host.docker.internal fallback on a pod that did not accept the registration is refused",
+			podHost:  "pod-b",
+			entry:    session.SessionEntry{MachineID: "box-a", AcceptedHost: "pod-a"},
+			refusing: true,
+		},
+		{
+			name:    "a loopback bridge on the pod that accepted the registration is delivered",
+			bridge:  "127.0.0.1",
+			podHost: "pod-a",
+			entry:   session.SessionEntry{MachineID: "box-a", AcceptedHost: "pod-a"},
+			want:    "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:    "host names compare without letter case",
+			bridge:  "127.0.0.1",
+			podHost: "Pod-A",
+			entry:   session.SessionEntry{MachineID: "box-a", AcceptedHost: "pod-a"},
+			want:    "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:    "the host.docker.internal fallback on the pod that accepted the registration is delivered",
+			podHost: "pod-a",
+			entry:   session.SessionEntry{MachineID: "box-a", AcceptedHost: "pod-a"},
+			want:    "http://host.docker.internal:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:    "a registration an older build wrote, with no accepting pod, is delivered as before",
+			bridge:  "127.0.0.1",
+			podHost: "pod-b",
+			entry:   session.SessionEntry{MachineID: "box-a"},
+			want:    "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:   "a pod that does not know its own host name delivers as before",
+			bridge: "127.0.0.1",
+			entry:  session.SessionEntry{MachineID: "box-a", AcceptedHost: "pod-a"},
+			want:   "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:    "a bridge that is not loopback reaches the machine from every pod",
+			bridge:  "10.0.0.5",
+			podHost: "pod-b",
+			entry:   session.SessionEntry{MachineID: "box-a", AcceptedHost: "pod-a"},
+			want:    "http://10.0.0.5:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:    "a bridge naming the docker host is not the fallback and reaches the machine from every pod",
+			bridge:  "host.docker.internal",
+			podHost: "pod-b",
+			entry:   session.SessionEntry{MachineID: "box-a", AcceptedHost: "pod-a"},
+			want:    "http://host.docker.internal:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:    "a recorded host reaches the session from every pod",
+			podHost: "pod-b",
+			entry:   session.SessionEntry{MachineID: "box-a", Host: "example-host", AcceptedHost: "pod-a"},
+			want:    "http://example-host:4096/session/ses_target/prompt_async",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests []string
+			deliverer.HostBridge = tt.bridge
+			deliverer.PodHost = tt.podHost
+			deliverer.HTTPClient = reachableClient(&requests)
+			entry := tt.entry
+			entry.Port = 4096
+			entry.Dir = "/test"
+			if err := sessions.Put("ses_target", entry); err != nil {
+				t.Fatalf("failed to register session: %v", err)
+			}
+
+			_, err := deliverer.DeliverWithResultForEntry(
+				newTestEnvelope("agent", "notifications.agent.ses_target", "test message"),
+				store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "box-a"},
+				resolvedEntry(t, sessions, "ses_target"),
+			)
+			if tt.refusing {
+				if !errors.Is(err, session.ErrAddressNotReachable) {
+					t.Fatalf("Deliver() = %v, want %v", err, session.ErrAddressNotReachable)
+				}
+				if len(requests) != 0 {
+					t.Fatalf("requested %q, want no request", requests)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Deliver() = %v, want nil", err)
+			}
+			if len(requests) != 1 || requests[0] != tt.want {
+				t.Fatalf("requested %q, want exactly [%q]", requests, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidHost(t *testing.T) {
 	tests := []struct {
 		host string
