@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-909",
+  "completed": "2026-10-31T19:40:39Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "reviewedCodeHead": "1bb11a03419c3df20289aeeeac023b5eb0099ee5",
+  "ciRead": "Required set on main (rulesets): ci-ok, pr-title; branch protection lists none. CI head (newest pull_request run) 1bb11a03419c: ci-ok completed success, pr-title completed success (CI run 41225170398 success: changes, test, lint, pi-legion, pi-shared; Fold Changelog Fragments 41225170479 success; PR Title 41225170462 success). Compare 1bb11a03...c3a5fc27: 2 files, handoffsOnly true.",
+  "checks": [
+    "Diff read in full against the spec's R1-R3: envoy_plugin_build job, ENVOY_PLUGIN_VERSION_ARGS, the seven envoy-plugin publish steps, the needs entry, the setup-node if clause and the packages/envoy-plugin/** trigger are gone; packages/envoy-plugin/package.json trigger kept (release.yaml:15); CHANGELOG_PACKAGES six packages (changelog-fold.yaml:65-68); AGENTS.md:539 six packages; check-release-credentials.sh:8 three build jobs.",
+    "A0 re-run against sjawhar/legion#2599's live head 35ea1346b994 at the PR head c3a5fc27: changelog-fold.yaml and check-release-credentials.sh identical; release.yaml only 14a15 (kept trigger); AGENTS.md only 88c88 (typecheck list). git merge-tree conflicted list is exactly packages/envoy-plugin/package.json.",
+    "main moved to bb27e1ee950d since the base 151d2d7996d0 and touched none of the four files nor packages/envoy-plugin/; the opencode-legion-envoy-v* tag set still hashes to the baseline 19bf1206… with newest v12.7.0.",
+    "Repository grep at head: no envoy_plugin_build, ENVOY_PLUGIN_VERSION_ARGS, envoy-plugin-tarball or opencode-legion-envoy-v outside .legion/ and dated docs/solutions notes.",
+    "Thermonuclear pair at c3a5fc27 (code 1bb11a03): deep review no findings (needs/outputs/steps references all resolve; check-release-credentials.sh, check-image-trigger-paths.sh, check-plugin-names.sh and skills-partition.test.ts exit 0); code quality no findings (every count in prose matches the remaining jobs; no wording change possible without re-creating the #2599 conflict).",
+    "Review threads: 0 on GitHub. PR body: Look at first and Not proven / risk written; Thermo line records the pair."
+  ],
+  "security": "secret: the deleted envoy-plugin Push tag and Push version bump steps held DEPLOY_KEY; the key now reaches only release.yaml:588, :606, :672, :690 and :809, publish permissions unchanged (:483-486) — narrowed only. supply-chain: no action, dependency or image added; only uses of already-pinned upload/download-artifact removed. agent-def: AGENTS.md:539 changes one package list and gives no instruction that could steer a reviewer.",
+  "fastFollow": "none"
+}
