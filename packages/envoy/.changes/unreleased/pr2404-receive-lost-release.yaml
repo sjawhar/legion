@@ -11,7 +11,11 @@ body: |-
     settles for the full ack wait beside the lost connection's subscription, so every message
     reaches its session in publish order, about thirteen seconds after the cut. A connection back
     inside the three seconds keeps the lease and its term, and no pod takes the lease, at a
-    standby poll or after a lapse, while its own receive connection is down.
+    standby poll or after a lapse, while its own receive connection is down. That holds whatever
+    the lost route does to the pod's reconnects: a route that drops its packets rather than
+    refusing them leaves every reconnect dial hanging for the five-second connect timeout, with
+    the NATS client library's connection lock held throughout, and the lease reads this pod's
+    receiving without waiting for any of it.
 time: 2026-10-30T23:30:00.000000000Z
 custom:
     Issue: pr2404

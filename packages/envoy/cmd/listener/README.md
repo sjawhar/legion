@@ -74,6 +74,16 @@ subscribed - counts as receiving, as `/healthz` counts it a standby rather than 
 subscription. The lease judges that signal once a round, for the holder's release and the
 standby's take alike ("Take-over" below).
 
+The signal loads atomics and waits for nothing. The lease reads it from the loop that renews the
+record, so it may wait on no lock a call into nats.go can hold: nats.go holds its connection's
+lock across every reconnect dial and the connect init after it, which a route that drops the
+pod's packets leaves hanging for the 5 s connect timeout, and the receive loop's own lock is held
+across the subscribe that waits for that same lock. The receive loop keeps the two atomics
+current from what it already learns - the bus client's connection events and each term's
+subscribe and end - and the bus client keeps its connected flag the same way, from its
+connection's connect, reconnect, disconnect and close callbacks (`bus.Client.Connected`), so no
+caller of it waits on a connection either.
+
 The durable's ack wait is 6 s (`consumerAckWait`). The holder sends `InProgress` every 2 s for
 every message it has received and not settled, queued or in hand, so a message waits out the ack
 wait only once the pod holding it has died or lost the lease.
@@ -200,6 +210,11 @@ wait only once the pod holding it has died or lost the lease.
   keeps the hold: nothing was handed over, so the pod goes on as a holder whose bucket calls fail,
   its renewals lapse, a standby takes its record once it expires, and it tries the release again
   at its next turn.
+  That holds whatever the lost route does to the pod's reconnects. A route that drops its
+  packets rather than refusing them leaves every reconnect dial hanging for the connect timeout,
+  with nats.go's connection lock held throughout, so the lease would read the signal only
+  between dials: it reads atomics instead ("The delivery lease" above), and the release lands on
+  its own bound.
 
 The lines to read are `listener lease acquired` (with `from`: `absent`, `released` or `expired`,
 and `settle`, `stale_binding`, `hand_back` - the term is a hand-back candidate - and `replaced`,

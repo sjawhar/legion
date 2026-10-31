@@ -19,6 +19,9 @@ func (r *durableReceiver) end(ctx context.Context) {
 	t := r.term
 	r.term = nil
 	r.state = receiveStandby
+	// No term is receiving from here, whatever this one's end does with its subscription, so the
+	// lease's signal reads this pod's connection alone again (durableReceiver.receiveUp).
+	r.subscribed.Store(nil)
 	r.mu.Unlock()
 	switch {
 	case ctx.Err() == nil:

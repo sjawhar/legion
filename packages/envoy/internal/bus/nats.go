@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -303,6 +304,29 @@ type Client struct {
 	// first time (onConnect), and false for every other client.
 	awaitingConnection bool
 
+	// connectedConn is the connection the client serves with while it is connected, and nil while
+	// it is not. It is outside mu, and outside nats.go's own connection lock, so Connected
+	// answers without waiting on either: nats.go holds its connection's lock across every
+	// reconnect dial and the connect init after it, which a route that drops the process's
+	// packets leaves hanging for the connect timeout, and nats.Conn.Status waits for that lock.
+	// cmd/listener's delivery lease reads this from the loop that renews the machine's lease
+	// record (lease.SetReceiveSignal), so a read that waits stalls the renewals with it.
+	//
+	// The connection's own callbacks keep it (noteConnection, the state callback of options): a
+	// connect or a reconnect stores the connection, and a disconnect or a close clears it, each
+	// clearing only its own connection, so a callback nats.go delivers late for a connection the
+	// client has since replaced cannot clear the replacement. A connect counts only once the
+	// client has installed that connection (installedConn): install and ensureConnWithContext make
+	// it c.Conn, then set the flag themselves (markConnected), since nats.go reports the connect of
+	// a connection the client dialled before either has run, and then clear it if it is not
+	// connected (settleConnected), so a drop around the install never leaves it reading connected.
+	// A connection the client dialled and did not install is cleared where it is let go
+	// (ensureConnWithContext), since it is closed with its callbacks taken off.
+	connectedConn atomic.Pointer[nats.Conn]
+	// installedConn is the connection the client last made c.Conn, read by the connection
+	// callbacks without c.mu (noteConnection).
+	installedConn atomic.Pointer[nats.Conn]
+
 	// recovery state
 	recovering int32
 	stopCh     chan struct{}
@@ -348,7 +372,7 @@ func Dial(name string, urls []string, environment func(string) (string, bool), o
 	}
 	settings := opts.connectionSettings(credential)
 	dial := func(first nats.Option) (*nats.Conn, error) {
-		return connect(name, urls, allOf(settings, first), dialer, nil, nil, nil, opts.reconnectErrClock)
+		return connect(name, urls, allOf(settings, first), dialer, nil, nil, nil, nil, opts.reconnectErrClock)
 	}
 	if opts.background {
 		return connectFirstInBackground(name, urls, opts.reconnectErrClock, dial, nil, nil)
@@ -418,7 +442,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	}
 	stream := opts.streamConfig()
 	dial := func(first nats.Option) (*nats.Conn, error) {
-		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.noteConnection, c.reconnectErrClock)
 	}
 	if opts.background {
 		c.awaitingConnection = true
@@ -481,10 +505,12 @@ func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
 	}
 	c.mu.Lock()
 	c.Conn, c.js = nc, js
+	c.markConnected(nc)
 	// install runs only from the constructor, before any connection is c.Conn, so nothing has
 	// been recorded (recordPublishDenial records only for c.Conn) and this clear finds it empty.
 	c.clearPublishDenials()
 	c.mu.Unlock()
+	c.settleConnected(nc)
 	return nil
 }
 
@@ -527,11 +553,40 @@ func (c *Client) JS() nats.JetStreamContext {
 	return c.js
 }
 
-// Connected reports whether the client currently has a live NATS connection.
+// Connected reports whether the client currently has a live NATS connection. It reads the flag
+// the connection's events keep (connectedConn, noteConnection) rather than the connection
+// itself, so it waits neither on the client's lock nor on nats.go's, which a reconnect dial that
+// hangs holds for the connect timeout at a time.
 func (c *Client) Connected() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
+	return c.connectedConn.Load() != nil
+}
+
+// noteConnection is how a connection's own events move the client's connected flag: nc connected
+// or reconnected (connected set), or nc disconnected or closed. A connect counts only for the
+// connection the client has installed (installedConn): nats.go reports the connect of a
+// connection the client dialled before the client has made it c.Conn, and a flag set then would
+// read connected while c.Conn still names the connection before it; the install sets the flag
+// itself (markConnected). A report of a connection the client has since replaced clears nothing,
+// since the clear takes only its own connection out, and a late report of one that connected
+// cannot land after its replacement's: nats.go runs a connection's callbacks in order on one
+// goroutine of that connection's, the client dials a replacement only for a connection that is
+// closed, and the close is the last event of one.
+func (c *Client) noteConnection(nc *nats.Conn, connected bool) {
+	if connected {
+		if c.installedConn.Load() == nc {
+			c.connectedConn.Store(nc)
+		}
+		return
+	}
+	c.connectedConn.CompareAndSwap(nc, nil)
+}
+
+// markConnected records nc as the connection the client has installed and sets the connected
+// flag to it, after c.Conn names it, so a reader that sees the flag sees c.Conn too. The caller
+// holds c.mu and runs settleConnected once it has let go of c.mu.
+func (c *Client) markConnected(nc *nats.Conn) {
+	c.installedConn.Store(nc)
+	c.connectedConn.Store(nc)
 }
 
 // HookedConnectionEvents is how many connection events this client's reconnect hooks have run to
@@ -868,6 +923,9 @@ func (c *Client) Close() {
 	c.stop()
 	c.mu.Lock()
 	if c.Conn != nil {
+		// The close reports itself (noteConnection), but only once nats.go has run its callback:
+		// a read right after this call answers that the client has no connection either way.
+		c.noteConnection(c.Conn, false)
 		c.Conn.Close()
 	}
 	c.mu.Unlock()
@@ -906,6 +964,9 @@ func (c *Client) Drain(timeout time.Duration) error {
 	c.mu.Lock()
 	c.stop()
 	conn := c.Conn
+	// A draining connection is no connection to serve with, as it read before this flag
+	// (nats.Conn.Status reads DRAINING_SUBS, never CONNECTED).
+	c.noteConnection(conn, false)
 	c.drainedReconnects = conn.Stats().Reconnects
 	c.mu.Unlock()
 	defer c.awaitKeeper()
@@ -1052,7 +1113,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.noteConnection, c.reconnectErrClock)
 		if err != nil {
 			return err
 		}
@@ -1080,15 +1141,35 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			c.mu.Unlock()
 			nc.SetClosedHandler(nil)
 			nc.SetDisconnectErrHandler(nil)
+			// Its connect counted for nothing, since it was never installed (noteConnection);
+			// the clear below changes nothing unless an earlier install named it.
+			c.noteConnection(nc, false)
 			nc.Close()
 			slog.Info("envoy nats discarded a second replacement connection", slog.String("name", c.name))
 			continue
 		}
 		c.Conn = nc
 		c.js = js
+		c.markConnected(nc)
 		c.markHooksDueLocked()
 		c.mu.Unlock()
+		c.settleConnected(nc)
 		return nil
+	}
+}
+
+// settleConnected finishes installing nc as the connection the connected flag names. The install
+// stores nc first and reads nc's state only then, outside c.mu (a dial that hangs holds nats.go's
+// connection lock, and no caller of c.mu may wait that long): a drop after the store clears the
+// flag through nc's own disconnect callback, and a drop before it is caught by this read. The
+// other order could read nc connected, see its disconnect callback clear nothing yet, and then
+// store it, leaving the flag connected while nc's reconnect dials hang. What this order can still
+// get wrong is a reconnect landing between the read and the clear, which reads disconnected until
+// nc's next event: a pod that then lets its lease go settles its successor for the ack wait, which
+// is safe.
+func (c *Client) settleConnected(nc *nats.Conn) {
+	if !nc.IsConnected() {
+		c.connectedConn.CompareAndSwap(nc, nil)
 	}
 }
 

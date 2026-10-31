@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -285,6 +286,17 @@ type durableReceiver struct {
 
 	// reconnects signals that the client's connection came back or was replaced (reconnected).
 	reconnects chan struct{}
+	// clientConn is the main client's connection as the receive loop last heard of it: the one
+	// the constructor was handed, and the one each reconnect hook reports (reconnected). It is
+	// an atomic because the lease's signal reads it (receiveUp) and must take no lock a call
+	// into nats.go can hold: nats.go holds its connection's lock across a reconnect dial that a
+	// route dropping this pod's packets leaves hanging, and durableReceiver.begin holds r.mu
+	// across the subscribe that waits for it.
+	clientConn atomic.Pointer[nats.Conn]
+	// subscribed is the term being served as the signal reads it, nil while no term is receiving
+	// (termSubscription). The receive loop stores it whole: a term's successful subscribe
+	// (begin, resubscribe), a resubscribe that left the term without one, and the term's end.
+	subscribed atomic.Pointer[termSubscription]
 	// awaitedBinding is set, by the receive loop alone, while the term it serves has waited out a
 	// push binding and not yet subscribed, and cleared at the start of every term that is not this
 	// pod's own resumed one (serve), so it says only this: the term this one resumes was waiting
@@ -297,7 +309,6 @@ type durableReceiver struct {
 	awaitedBinding bool
 
 	mu    sync.Mutex
-	conn  *nats.Conn
 	state receiveState
 	term  *receiveTerm
 	stop  context.CancelFunc
@@ -311,11 +322,12 @@ type durableReceiver struct {
 }
 
 func newDurableReceiver(options durableReceiverOptions) *durableReceiver {
-	return &durableReceiver{
+	r := &durableReceiver{
 		durableReceiverOptions: options,
 		reconnects:             make(chan struct{}, 1),
-		conn:                   options.client.Conn,
 	}
+	r.clientConn.Store(options.client.Conn)
+	return r
 }
 
 // Start runs the receive loop until Stop. Start is called once; the lease, when there is one, is
@@ -362,11 +374,11 @@ func (r *durableReceiver) Stop(ctx context.Context) {
 
 // reconnected is the client's reconnect hook: conn is the client's connection after a reconnect
 // in place or a replacement, which the receive loop moves the subscription onto when it is no
-// longer valid there. It never fails, so it never holds up the client's recovery.
+// longer valid there. It never fails, so it never holds up the client's recovery, and it takes
+// no lock of the receive loop's, so a hook that lands while a subscribe is in flight waits for
+// nothing (clientConn).
 func (r *durableReceiver) reconnected(conn *nats.Conn) error {
-	r.mu.Lock()
-	r.conn = conn
-	r.mu.Unlock()
+	r.clientConn.Store(conn)
 	select {
 	case r.reconnects <- struct{}{}:
 	default:
@@ -379,25 +391,39 @@ func (r *durableReceiver) holding() bool {
 	return r.lease == nil || r.lease.Holding()
 }
 
+// termSubscription is the term being served as the lease's signal reads it: conn is the
+// connection its subscription was made on, and nil when the term holds none at all, which a
+// resubscribe that failed leaves. It is stored whole, under one atomic, so a reader takes no
+// lock for it (durableReceiver.subscribed).
+type termSubscription struct {
+	conn *nats.Conn
+}
+
 // receiveUp is the signal the delivery lease judges this pod's receiving by
 // (lease.SetReceiveSignal): the lease holder releases the record once it has been down for
-// leaseReceiveLost, and no pod takes the record while it is down. It is what makes /healthz 503
-// on the active pod, read here rather than there: the client's connection is not connected, or
-// the term is receiving and its subscription is no longer valid on that connection, which a
-// connection the client replaced leaves until the resubscribe (report, repair). A holder that is
-// still preparing - reading the durable, waiting out a pre-lease build's binding, settling
-// before it has subscribed - is receiving as far as this goes, as /healthz counts it a standby
-// rather than an inactive subscription: its connection is up and its term is on its way.
+// leaseReceiveLost, and no pod takes the record while it is down. It is the state /healthz
+// reports as an inactive subscription on the active pod, read here rather than there: the
+// client's connection is not connected, or the term is receiving and its subscription is no
+// longer valid on that connection, which a connection the client replaced leaves until the
+// resubscribe (report, repair). A holder that is still preparing - reading the durable, waiting
+// out a pre-lease build's binding, settling before it has subscribed - is receiving as far as
+// this goes, as /healthz counts it a standby rather than an inactive subscription: its
+// connection is up and its term is on its way.
+//
+// It loads atomics and nothing else. The lease reads it from its own loop, the one that renews
+// the record and releases it when this pod stops receiving, so it may wait on no lock a call
+// into nats.go can hold: nats.go holds its connection's lock across every reconnect dial and the
+// connect init after it, which a route that drops this pod's packets leaves hanging for the
+// connect timeout, and durableReceiver.begin holds the receive loop's lock across the subscribe
+// that waits for that same lock. The receive loop keeps both atomics current from what it
+// already learns: the client's reconnect hook (reconnected) and each term's subscribe and end
+// (begin, resubscribe, end).
 func (r *durableReceiver) receiveUp() bool {
 	if !r.client.Connected() {
 		return false
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.state != receiveActive || r.term == nil {
-		return true
-	}
-	return r.term.sub != nil && r.term.sub.IsValid() && r.term.conn == r.conn
+	subscribed := r.subscribed.Load()
+	return subscribed == nil || (subscribed.conn != nil && subscribed.conn == r.clientConn.Load())
 }
 
 func (r *durableReceiver) setState(state receiveState) {
@@ -412,7 +438,7 @@ func (r *durableReceiver) report() receiveReport {
 	report := receiveReport{State: r.state, NoLease: r.lease == nil}
 	if t := r.term; t != nil {
 		report.Subject = t.subject
-		report.SubscriptionValid = t.sub != nil && t.sub.IsValid() && t.conn == r.conn
+		report.SubscriptionValid = t.sub != nil && t.sub.IsValid() && t.conn == r.clientConn.Load()
 	}
 	if !r.failingSince.IsZero() {
 		report.Failing = time.Since(r.failingSince)
@@ -804,7 +830,7 @@ func (r *durableReceiver) begin(subject string, hold time.Duration, term uint64)
 	}
 	t.handling, t.cancel = context.WithCancel(context.Background())
 	r.mu.Lock()
-	conn := r.conn
+	conn := r.clientConn.Load()
 	sub, err := conn.Subscribe(subject, t.intake)
 	if err != nil {
 		r.mu.Unlock()
@@ -813,6 +839,7 @@ func (r *durableReceiver) begin(subject string, hold time.Duration, term uint64)
 	}
 	t.sub, t.conn = sub, conn
 	r.term, r.state = t, receiveActive
+	r.subscribed.Store(&termSubscription{conn: conn})
 	r.mu.Unlock()
 	// The server counts the subscription once it has read it; a flush that fails, while the
 	// connection is down, leaves it to nats.go to send again on the reconnect, and the term is
@@ -831,7 +858,7 @@ func (r *durableReceiver) begin(subject string, hold time.Duration, term uint64)
 func (r *durableReceiver) repair(ctx context.Context) {
 	r.mu.Lock()
 	t := r.term
-	stale := t != nil && (t.sub == nil || !t.sub.IsValid() || t.conn != r.conn)
+	stale := t != nil && (t.sub == nil || !t.sub.IsValid() || t.conn != r.clientConn.Load())
 	r.mu.Unlock()
 	if !stale {
 		return
@@ -865,14 +892,16 @@ func (r *durableReceiver) resubscribe(ctx context.Context) error {
 	if t.sub != nil {
 		_ = t.sub.Unsubscribe()
 	}
-	conn := r.conn
+	conn := r.clientConn.Load()
 	sub, err := conn.Subscribe(subject, t.intake)
 	if err != nil {
 		t.sub = nil
+		r.subscribed.Store(&termSubscription{})
 		r.mu.Unlock()
 		return fmt.Errorf("subscribe to the durable's deliver subject: %w", err)
 	}
 	t.sub, t.conn, t.subject = sub, conn, subject
+	r.subscribed.Store(&termSubscription{conn: conn})
 	r.mu.Unlock()
 	if r.lease != nil {
 		r.lease.SetDeliverSubject(subject)
