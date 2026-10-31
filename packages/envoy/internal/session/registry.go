@@ -63,6 +63,7 @@ type SessionRegistryOption func(*sessionRegistryOpts)
 type sessionRegistryOpts struct {
 	replicas          int
 	ttl               time.Duration
+	maxAge            time.Duration
 	liveWindow        time.Duration
 	goneHorizon       time.Duration
 	lastSeenRetention time.Duration
@@ -76,6 +77,15 @@ func WithSessionReplicas(n int) SessionRegistryOption {
 
 func WithSessionTTL(d time.Duration) SessionRegistryOption {
 	return func(o *sessionRegistryOpts) { o.ttl = d }
+}
+
+// WithSessionMaxAge sets the maximum age the registry writes on the session bucket, at open and on
+// every pass of its reaper (bus.SetKeyValueMaxAge, ParseSessionMaxAge). The default, and any
+// non-positive value, writes none and leaves the bucket's own age exactly as it is. It is not the
+// TTL the registry expires a cached row by: that is always the age the bucket really carries,
+// read back after this one is written (SetTTL).
+func WithSessionMaxAge(d time.Duration) SessionRegistryOption {
+	return func(o *sessionRegistryOpts) { o.maxAge = d }
 }
 
 // WithLastSeenRetention sets how long after a session leaves the cache LastSeen still answers its
@@ -157,6 +167,13 @@ type SessionRegistry struct {
 	// lastSeenRetention is WithLastSeenRetention's value; zero, as in a registry built from a
 	// struct literal, means one TTL (retention).
 	lastSeenRetention time.Duration
+	// js is the JetStream context the bucket was opened through, which the maximum age is written
+	// through (applyMaxAge), and maxAge is WithSessionMaxAge's value, zero when the deployment
+	// sets none and the bucket's own age stands. Both are fixed when the registry is opened, and
+	// a registry built from a struct literal, which only a test does, has neither and writes no
+	// age.
+	js     nats.JetStreamContext
+	maxAge time.Duration
 
 	mu sync.RWMutex
 	// ttl is the bucket's MaxAge, the lifetime of a row's local expiry and of a last-seen record,
@@ -213,6 +230,13 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 	if err != nil {
 		return nil, err
 	}
+	// The deployment's maximum age is written before the bucket's own is read, so the TTL below is
+	// the age the bucket carries from here on. A bucket created by an older build at the 5-minute
+	// default is raised here, and a record then stands past the gone horizon instead of being
+	// dropped while its session is only unresponsive.
+	if _, err := bus.SetKeyValueMaxAge(js, bus.SessionBucket, opts.maxAge); err != nil {
+		return nil, err
+	}
 	// Expire against the bucket's real MaxAge, not the hardcoded default. If the
 	// envoy_sessions bucket was created with a different TTL (an older build, a
 	// config change), expiring against opts.ttl would either hide live sessions
@@ -230,6 +254,8 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		liveWindow:        opts.liveWindow,
 		goneHorizon:       opts.goneHorizon,
 		lastSeenRetention: opts.lastSeenRetention,
+		js:                js,
+		maxAge:            opts.maxAge,
 		ttl:               ttl,
 		lastSeen:          map[string]lastSeenSession{},
 		log:               opts.log,
@@ -450,6 +476,49 @@ func (r *SessionRegistry) windows() (live, horizon time.Duration) {
 func (r *SessionRegistry) stateOf(entry SessionEntry, now time.Time) State {
 	live, horizon := r.windows()
 	return StateOf(entry, now, live, horizon)
+}
+
+// Windows is the live window and the gone horizon this registry judges a record's age against,
+// for a caller that must measure a session's age by the same windows: the listener's role-claim
+// reaper gives a restored claim's holder one live window to register again, since that is how
+// long a registration keeps a session live here.
+func (r *SessionRegistry) Windows() (live, horizon time.Duration) {
+	return r.windows()
+}
+
+// EntryState is entry's state on this registry's windows, as of now, for a caller holding a
+// record this registry's cache did not answer for: a read of the bucket the copy did not take
+// (Refresh). A caller naming a session asks Lookup, which reads the record and judges it
+// together.
+func (r *SessionRegistry) EntryState(entry SessionEntry) State {
+	return r.stateOf(entry, r.now())
+}
+
+// applyMaxAge writes the deployment's maximum age on the bucket when it has one (WithSessionMaxAge)
+// and then adopts the age the bucket really carries, so a raise or a rollback another process made
+// reaches this registry within one call and with no restart (SetTTL). The write is skipped on a
+// registry built from a struct literal, which has no JetStream context, and on one whose
+// deployment sets no age, which leaves the bucket's own standing.
+//
+// It adopts only a positive age, as the open-time read does: a status read that reports none is
+// as likely a bucket this build did not create as one that truly keeps its records for good, and
+// turning local expiry off on that word would keep every row of a recreated bucket for the life
+// of the process.
+func (r *SessionRegistry) applyMaxAge() error {
+	if r.js != nil && r.maxAge > 0 {
+		if _, err := bus.SetKeyValueMaxAge(r.js, bus.SessionBucket, r.maxAge); err != nil {
+			return err
+		}
+	}
+	kv, _ := r.watcher.Handle()
+	status, err := kv.Status()
+	if err != nil {
+		return fmt.Errorf("read the %s bucket's maximum age: %w", bus.SessionBucket, err)
+	}
+	if ttl := status.TTL(); ttl > 0 && ttl != r.TTL() {
+		r.SetTTL(ttl)
+	}
+	return nil
 }
 
 // retention is how long after a session leaves the cache its lastSeen record is kept:

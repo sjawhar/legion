@@ -68,6 +68,23 @@ func (r *Registry) NewCounter(name, help string) *Counter {
 
 // Inc increments the counter for the given label set by 1.
 func (c *Counter) Inc(labels ...[2]string) {
+	c.Add(1, labels...)
+}
+
+// Add advances the counter for the given label set by delta, for a caller that counts a batch it
+// has already tallied - the messages one session's reaped record had stored for it - rather than
+// taking the series lock once per unit. A counter only ever rises, so a negative delta is
+// dropped: a series that went backwards would make every rate computed over it meaningless, and
+// there is no value to answer with instead.
+//
+// A nil counter counts nothing rather than panicking, so a struct field a caller leaves unset -
+// every listener test that builds a handler config by hand - still runs the code under test. A
+// deployed binary registers every counter it names at start, in one place (cmd/listener/main.go),
+// so no deployed path can be the one that leaves one unset.
+func (c *Counter) Add(delta int64, labels ...[2]string) {
+	if c == nil || delta <= 0 {
+		return
+	}
 	key := labelKey(labels)
 	c.mu.Lock()
 	e, ok := c.series[key]
@@ -76,7 +93,7 @@ func (c *Counter) Inc(labels ...[2]string) {
 		c.series[key] = e
 	}
 	c.mu.Unlock()
-	e.value.Add(1)
+	e.value.Add(delta)
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/listenfd"
@@ -22,6 +23,10 @@ type Service struct {
 	// StreamMaxBytes is ENVOY_STREAM_MAX_BYTES (bus.ParseStreamMaxBytes): the stream's byte limit,
 	// or 0 when unset, which sets none and keeps a deployed one.
 	StreamMaxBytes int64
+	// SessionMaxAge is ENVOY_SESSION_MAX_AGE (bus.ParseSessionMaxAge): how long the session
+	// bucket keeps a registration record, or 0 when unset, which leaves the deployed bucket's own
+	// maximum age alone. The listener applies it at open and on every pass of its session reaper.
+	SessionMaxAge time.Duration
 	// ListenHost and Port are the address the listener serves on: the inherited socket's own
 	// address with ENVOY_LISTEN_FD, else the one main binds, from ENVOY_LISTEN_HOST (127.0.0.1 when
 	// unset) and PORT (Load's default when unset). The API auth fence judges ListenHost, so what it
@@ -99,6 +104,10 @@ func Load(defaultPort int) (Service, error) {
 	if err != nil {
 		return Service{}, err
 	}
+	sessionMaxAge, err := bus.ParseSessionMaxAge(os.Getenv(bus.SessionMaxAgeEnvVar))
+	if err != nil {
+		return Service{}, err
+	}
 	allowedHosts, err := parseAllowedHosts(os.Getenv("ENVOY_ALLOWED_HOSTS"))
 	if err != nil {
 		return Service{}, err
@@ -113,6 +122,7 @@ func Load(defaultPort int) (Service, error) {
 		NATSURLs:           urls,
 		NATSReplicas:       replicas,
 		StreamMaxBytes:     streamMaxBytes,
+		SessionMaxAge:      sessionMaxAge,
 		ListenHost:         listenHost,
 		Port:               port,
 		ListenSocket:       listenSocket,

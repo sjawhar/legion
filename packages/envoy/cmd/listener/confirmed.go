@@ -116,17 +116,22 @@ const (
 	sendNotConfirmed sendOutcome = "not_confirmed"
 	// sendPublishFailed is an ad-hoc topic send whose own publish did not reach NATS.
 	sendPublishFailed sendOutcome = "publish_failed"
+	// sendUnresponsive is a recipient of an ad-hoc topic send that is past the live window: the
+	// message was published on the topic and is stored for it, and nothing was forwarded, since a
+	// session that answers nothing answers no receipt either. It is a skip and not a failure, so
+	// it neither makes the send a 504 nor is named undelivered.
+	sendUnresponsive sendOutcome = "unresponsive"
 )
 
 // deliveryStatus is the label the role lane gives the same outcome, which the route counts under
 // messagesDelivered and logs as delivery_status, so the route's counts and lines read as the
-// lane's: an unclaimed role is skipped, and every outcome that is neither taken, skipped nor a
-// receipt timeout is failed.
+// lane's: an unclaimed role and an unresponsive recipient are skipped, and every outcome that is
+// neither taken, skipped nor a receipt timeout is failed.
 func (o sendOutcome) deliveryStatus() string {
 	switch o {
 	case sendDelivered, sendDedupe, sendSkipped, sendReceiptTimeout:
 		return string(o)
-	case sendUnclaimed:
+	case sendUnclaimed, sendUnresponsive:
 		return string(sendSkipped)
 	default:
 		return string(sendFailed)
@@ -228,15 +233,12 @@ func (s *roleSend) noHolder(result roleHolderResult) {
 }
 
 // unresolved answers a first resolution of the holder that did not resolve, as GET
-// /v1/roles/<role> answers it: a claim that moved under the resolution (errRoleHolderChanged) is
-// the 503 that names the race, a claim record no read can decode (store.ErrMalformedRoleClaim) the
-// 500 that names it, and any other failure - a read that did not answer within its cap or
+// /v1/roles/<role> answers it: a claim record no read can decode (store.ErrMalformedRoleClaim) is
+// the 500 that names it, and any other failure - a read that did not answer within its cap or
 // sendRequestBudget among them - the bus-unavailable 503, or the 413 or 400 a refused key gets.
 // Each is recorded under its own outcome.
 func (s *roleSend) unresolved(err error) {
 	switch {
-	case errors.Is(err, errRoleHolderChanged):
-		s.record.refuseRoleHolderChanged(s.w, s.role)
 	case errors.Is(err, store.ErrMalformedRoleClaim):
 		s.record.refuseRoleClaimUnreadable(s.w, s.role, err)
 	default:
@@ -307,25 +309,24 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 }
 
 // sendToRole delivers a role message through the publish route, answering through record. The
-// first resolution reads the holder as an HTTP lookup does (resolveRoleHolder with registered),
-// within sendRequestBudget of arrived as GET /v1/roles/<role> reads it, and gives its answers: 404
-// unclaimed or holder_lapsed, and for a resolution that failed the lookup's 503 or 500 (unresolved),
-// so a holder that exists but has not heartbeated lately gets attempts rather than a 404. The first
-// attempt forwards to that holder when its session entry passes role delivery's freshness test
-// (laneHolderFresh), without reading the claim again; every other attempt resolves the holder
-// again by role delivery's rule (resolveRoleHolder with laneHolderFresh), so a holder that
-// relaunched under a new session between attempts gets the next one. On those attempts an
-// unclaimed role, or a lapsed holder whose claim was released or already absent, is answered 404 as
-// the first resolution answers it; a lapsed holder whose claim was retained, a read that failed and
-// a claim that churned fail that attempt only. Each attempt forwards the same envelope, under the
-// role forward's dedupe key, with a receipt window of what is left of the send, at most
-// roleReceiptTimeout. Every forward carries the same Nats-Msg-Id (bus.Client.RequestCoreTo), so the
-// stream, which captures agent subjects, keeps one copy however many attempts there are. Every read
-// takes ctx, the send's window, so none outlasts it: a send whose window ends is answered 504.
+// first resolution reads the holder as an HTTP lookup does (resolveRoleHolder with sessionIsLive),
+// within sendRequestBudget of arrived as GET /v1/roles/<role> reads it, and gives that route's
+// answers: 404 unclaimed or holder_lapsed, and for a resolution that failed the lookup's 503 or
+// 500 (unresolved). The first attempt forwards to that holder without reading the claim again;
+// every other attempt resolves the holder again, so a holder that relaunched under a new session
+// between attempts gets the next one. On those attempts an unclaimed role is answered 404 as the
+// first resolution answers it, since the claim itself is gone; a holder that stopped answering
+// keeps its claim and fails that attempt only, as a read that failed does, so a holder that comes
+// back inside the window still gets the message. Each attempt forwards the same envelope, under
+// the role forward's dedupe key, with a receipt window of what is left of the send, at most
+// roleReceiptTimeout. Every forward carries the same Nats-Msg-Id (bus.Client.RequestCoreTo), so
+// the stream, which captures agent subjects, keeps one copy however many attempts there are.
+// Every read takes ctx, the send's window, so none outlasts it: a send whose window ends is
+// answered 504.
 func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
 	send := &roleSend{w: w, record: record, d: d, item: item, role: role, arrived: arrived}
 	firstCtx, cancelFirst := context.WithDeadline(ctx, arrived.Add(sendRequestBudget))
-	first, err := resolveRoleHolder(firstCtx, d.registry, d.sessions, role, registered)
+	first, err := resolveRoleHolder(firstCtx, d.registry, d.sessions, role, sessionIsLive)
 	cancelFirst()
 	if err != nil {
 		send.unresolved(err)
@@ -346,8 +347,8 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 	var lastForward error
 	resolved := first
 	for pass := 0; ; pass++ {
-		if pass > 0 || !laneHolderFresh(first.entry) {
-			resolved, err = resolveRoleHolder(ctx, d.registry, d.sessions, role, laneHolderFresh)
+		if pass > 0 || !sessionIsLive(first.holderState) {
+			resolved, err = resolveRoleHolder(ctx, d.registry, d.sessions, role, sessionIsLive)
 			if err != nil && ctx.Err() != nil {
 				// The window ended under the resolution: what it read says nothing more.
 				break
@@ -360,9 +361,6 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 		case err != nil:
 			// Retried below, as every resolution not answered here is.
 		case resolved.state == roleHolderUnclaimed:
-			send.noHolder(resolved)
-			return
-		case resolved.state == roleHolderLapsed && resolved.claimRelease != store.ExpiredRoleClaimRetained:
 			send.noHolder(resolved)
 			return
 		case resolved.state == roleHolderLive:
@@ -402,16 +400,18 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 
 // topicRecipients lists the sessions an ad-hoc topic send confirms the message with: every session
 // whose registered interests match the topic on any machine (store.Registry.MatchAll), whose
-// session entry is live and self-subscribed, other than the sender. A self-subscribed session holds
-// its own NATS connection and answers a receipt on its agent subject; a session served on a port
-// does not, and keeps the live lane's delivery.
+// session record is not gone and that is self-subscribed, other than the sender. A self-subscribed
+// session holds its own NATS connection and answers a receipt on its agent subject; a session
+// served on a port does not, and keeps the live lane's delivery. A session past the live window is
+// listed here and skipped by confirmTopicRecipient, so the skip is counted and logged once per
+// send rather than hidden in this filter.
 func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
 	var recipients []string
 	for _, interest := range d.registry.MatchAll(item.Topic) {
 		if interest.SessionID == item.SourceSession {
 			continue
 		}
-		if entry, err := d.sessions.Get(interest.SessionID); err == nil && entry.SelfSubscribed {
+		if entry, state := d.sessions.Lookup(interest.SessionID); state != session.Gone && entry.SelfSubscribed {
 			recipients = append(recipients, interest.SessionID)
 		}
 	}
@@ -420,11 +420,17 @@ func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
 
 // confirmTopicRecipient forwards item, unchanged, to sessionID's agent subject until its receipt
 // arrives or ctx ends, by a role send's retry rule, and reports how the recipient ended: delivered,
-// dedupe (it had confirmed this key through the route already), receipt_timeout or delivery_failed.
-// The recipient is checked live and self-subscribed before each attempt, and one that confirmed the
-// key already is not sent it again. A forward refused however often it is sent (forwardRefused)
-// ends this recipient alone as delivery_failed: the envelope itself already passed the topic's
-// publish, so the refusal is the recipient's subject or the grant's, not the sender's input.
+// dedupe (it had confirmed this key through the route already), unresponsive, receipt_timeout or
+// delivery_failed. The recipient's state and self-subscription are read before each attempt, and
+// one that confirmed the key already is not sent it again. A forward refused however often it is
+// sent (forwardRefused) ends this recipient alone as delivery_failed: the envelope itself already
+// passed the topic's publish, so the refusal is the recipient's subject or the grant's, not the
+// sender's input.
+//
+// A recipient past the live window is skipped before any forward: it answers no receipt, so
+// forwarding to it would spend the rest of the send's window waiting for one. The message is
+// already published on the topic and stored for it, and it reads back what it missed when it
+// returns (POST /v1/replay), so the skip is a status of its own and not a delivery failure.
 //
 // Only a receipt that arrived through the route counts, which is why it reads the route's own
 // record (listenerDeps.confirmed) and not the delivery handlers' cache: with the live topics lane
@@ -436,7 +442,14 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 		if d.confirmed.Seen(item.DedupeKey, sessionID) {
 			return sendDedupe
 		}
-		if entry, err := d.sessions.Get(sessionID); err == nil && entry.SelfSubscribed {
+		entry, state := d.sessions.Lookup(sessionID)
+		if state == session.Unresponsive {
+			d.delivery.fanoutUnresponsiveSkips.Inc()
+			d.delivery.logger.DeliveryLog(slog.LevelInfo, "listener publish topic skipped an unresponsive session", sessionID, item.Topic, item.EventID, sendUnresponsive.deliveryStatus(),
+				slog.String("reason", string(sendUnresponsive)), slog.Int64("last_seen", entry.UpdatedAt))
+			return sendUnresponsive
+		}
+		if state == session.Live && entry.SelfSubscribed {
 			window := receiptWindow(ctx)
 			if window <= 0 {
 				break
@@ -536,6 +549,10 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, record *requestReco
 		switch outcome {
 		case sendDelivered, sendDedupe:
 			delivered = append(delivered, recipients[i])
+		case sendUnresponsive:
+			// Skipped, so neither delivered nor undelivered: the send is not held open, and not
+			// answered 504, for a session that stopped answering while its message waits in the
+			// stream for it.
 		default:
 			undelivered = append(undelivered, undeliveredRecipient{SessionID: recipients[i], Reason: outcome})
 		}

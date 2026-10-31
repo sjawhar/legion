@@ -57,7 +57,12 @@ type listenerDeliveryHandlerConfig struct {
 	messagesReceived  *metrics.Counter
 	messagesDelivered *metrics.Counter
 	messagesNAKed     *metrics.Counter
-	deliveryDuration  *metrics.Histogram
+	// fanoutUnresponsiveSkips counts the topic fan-outs this listener skipped because the session
+	// that registered the interest is past the live window (fanoutDelivery), and the ad-hoc topic
+	// sends it skipped for the same reason (confirmTopicRecipient). A skip is not a failed
+	// delivery: it says how much of a box's fan-out is going to sessions that have stalled.
+	fanoutUnresponsiveSkips *metrics.Counter
+	deliveryDuration        *metrics.Histogram
 	// unplaceableRetryWindow is how long an agent delivery this listener cannot place is held
 	// in the stream and redelivered before it is given up with a record of its own
 	// (agentSubjectDelivery). main.go reads it from ENVOY_UNPLACEABLE_RETRY_WINDOW, defaulting
@@ -326,26 +331,15 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 	}
 }
 
-// laneHolderFresh is role delivery's liveness test of a holder's session entry, which
-// resolveRoleHolder applies for the role lane and the publish route's attempts: the entry
-// heartbeated within session.ClaimStaleAfter as of now, read at each test, so the cached entry and
-// the entry read again from the bucket are each judged at the moment they are checked. The plugin
-// heartbeats every 90 seconds (DEFAULT_HEARTBEAT_MS, packages/envoy-client/src/envoy-settings.ts),
-// so three missed heartbeats means the claiming process is very likely gone.
-func laneHolderFresh(entry session.SessionEntry) bool {
-	now := time.Now().UnixMilli()
-	return entry.UpdatedAt > 0 && now-entry.UpdatedAt < int64(session.ClaimStaleAfter/time.Millisecond)
-}
-
-// resolveCoreRoleHolder resolves the current live holder for a role-lane delivery by role
-// delivery's rule (resolveRoleHolder with laneHolderFresh), applying the terminal
-// no_holder/delivery_failed outcome itself and reporting ok=false when there is nobody to deliver
-// to. An unclaimed role is no_holder; a lapsed holder and every failed read are delivery_failed,
-// each under a log line that names which it was. Role delivery answers no caller, so it resolves
-// under context.Background(): the holder's session read keeps roleHolderReadTimeout
-// (roleHolderSession's bound) as its own cap.
+// resolveCoreRoleHolder resolves the current live holder for a role-lane delivery
+// (resolveRoleHolder with sessionIsLive), applying the terminal no_holder/delivery_failed outcome
+// itself and reporting ok=false when there is nobody to deliver to. An unclaimed role is
+// no_holder; a holder that is not answering and every failed read are delivery_failed, each under
+// a log line that names which it was. Role delivery answers no caller, so it resolves under
+// context.Background(): the holder's session read keeps roleHolderReadTimeout (roleHolderSession's
+// bound) as its own cap.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
-	resolved, err := resolveRoleHolder(context.Background(), cfg.registry, cfg.sessions, role, laneHolderFresh)
+	resolved, err := resolveRoleHolder(context.Background(), cfg.registry, cfg.sessions, role, sessionIsLive)
 	sessionID := resolved.holder
 	// Every error resolveRoleHolder returns is a *roleHolderFailure naming the read that failed.
 	// One that is not would still be a read that failed, so it is logged as the claim read with
@@ -387,30 +381,14 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			},
 			exceptionReason: "delivery_failed",
 		})
-	case roleHolderSessionRead:
+	default:
+		// roleHolderSessionRead: the holder's record could not be read, so nothing is known about
+		// its state and nothing is taken from it.
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
 			log: func(logger *logging.Logger) {
 				logger.Error("listener role holder session lookup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", failure.cause.Error()))
-			},
-			exceptionReason: "delivery_failed",
-		})
-	case roleHolderRelease:
-		applyDeliveryOutcome(cfg, item, deliveryOutcome{
-			sessionID:    sessionID,
-			metricStatus: "failed",
-			log: func(logger *logging.Logger) {
-				logger.Error("listener expired role claim cleanup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", failure.cause.Error()))
-			},
-			exceptionReason: "delivery_failed",
-		})
-	default:
-		// roleHolderChurn, whose cause is errRoleHolderChanged: its own line says so.
-		applyDeliveryOutcome(cfg, item, deliveryOutcome{
-			metricStatus: "failed",
-			log: func(logger *logging.Logger) {
-				logger.Error("listener role holder churned past resolution bound", slog.String("role", role))
 			},
 			exceptionReason: "delivery_failed",
 		})
@@ -595,7 +573,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	// reaches the retry decision only as ReasonNoSessionRecord, which already holds the retry
 	// open (session.HandleAgentMessage: the registry path reports that reason, and the interest
 	// path NAKs with an error, which never reaches that branch).
-	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, registered)
+	entry, _, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, notGone)
 	var entryPtr *session.SessionEntry
 	if entryErr == nil {
 		entryPtr = &entry
@@ -717,8 +695,26 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			})
 			continue
 		}
-		targetEntry, targetErr := cfg.sessions.Get(interest.SessionID)
-		targetLive := targetErr == nil
+		targetEntry, targetState := cfg.sessions.Lookup(interest.SessionID)
+		if targetState == session.Unresponsive {
+			// A session past the live window is answering nothing: its port, if it has one, does
+			// not take a push, and if it receives on its own subscription this listener was never
+			// going to push to it anyway. Either way nothing here failed - the message stays in
+			// the stream for the session to read back (POST /v1/replay) and its record, its
+			// claims and its interests all stand - so this is a skip with a status of its own and
+			// not a delivery failure, which would publish an exception and NAK the message for a
+			// session that is simply slow.
+			cfg.fanoutUnresponsiveSkips.Inc()
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    interest.SessionID,
+				metricStatus: "unresponsive",
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelInfo, "listener skip unresponsive session", interest.SessionID, item.Topic, item.EventID, "unresponsive", slog.Int64("last_seen", targetEntry.UpdatedAt))
+				},
+			})
+			continue
+		}
+		targetLive := targetState == session.Live
 		var target *session.SessionEntry
 		if targetLive {
 			target = &targetEntry

@@ -63,6 +63,11 @@ type listenerDeps struct {
 	// there, so envoy-client's retry of a send does not forward again to one the first attempt
 	// confirmed, and no one is counted as confirming a message without having sent its receipt.
 	confirmed *dedupe.Cache
+	// sendsToUnresponsive counts the sends POST /v1/messages/send took for a recipient past the
+	// live window and stored for it (sendHandler). It is how a box's operator sees that a growing
+	// share of its traffic is going to sessions that have stopped answering, before any of them
+	// reaches the gone horizon.
+	sendsToUnresponsive *metrics.Counter
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -100,14 +105,16 @@ func listenerCaches(registry *store.Registry, sessions *session.SessionRegistry,
 	return caches
 }
 
-// sessionMayBeLive is the reapers' liveness check: a session is gone only when the session bucket
-// itself says so (roleHolderSession: a cache hit, or else a read of the session's own key), so a
-// reaper takes nothing from a session another listener registered a moment ago, nor from one the
-// session cache does not hold because it has not read its bucket yet or is reading it again. It
-// answers false only on that word; its error is a read that did not answer, on which the reaper
-// keeps what it would have removed for its next cycle.
+// sessionMayBeLive is the reapers' test of a session: it answers false only for a session that is
+// gone (session.Gone), and the session bucket itself is what says so (roleHolderSession: a record
+// the cache holds, or else a read of the session's own key). So a reaper takes nothing from a
+// session that has merely stopped answering - its interests and its role claims stand for the
+// whole gone horizon - nor from one another listener registered a moment ago, nor from one the
+// session cache does not hold because it has not read its bucket yet or is reading it again. Its
+// error is a read that did not answer, on which the reaper keeps what it would have removed for
+// its next cycle.
 func sessionMayBeLive(sessions *session.SessionRegistry, sessionID string) (bool, error) {
-	_, err := roleHolderSession(sessions, sessionID, registered)
+	_, _, err := roleHolderSession(sessions, sessionID, notGone)
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return false, nil
 	}
@@ -123,6 +130,13 @@ func roleHolderMayBeLive(logger *logging.Logger, sessions *session.SessionRegist
 	}
 	return live
 }
+
+// defaultSessionReapInterval is how often the session reaper runs when ENVOY_SESSION_REAP_INTERVAL
+// names no other period: the cadence of every other KV loop this listener keeps. A record is
+// deleted within one period of reaching the gone horizon, and the bucket's maximum age is
+// settled once per period, so a raise made elsewhere reaches this listener that soon
+// (session.ReapSessions).
+const defaultSessionReapInterval = 5 * time.Minute
 
 // envDuration reads a duration an operator may override through the environment: an unset or
 // empty value leaves fallback standing, and so does one time.ParseDuration refuses, after a
@@ -417,6 +431,12 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 		"session_cache_ready": sessions.CacheReady(),
 		"session_cache_size":  sessions.CacheSize(),
 		"session_watch_error": watchError,
+		// The maximum age in use: the age the session bucket really carries, which the registry
+		// reads back after it writes the deployment's own (ENVOY_SESSION_MAX_AGE) and again on
+		// every pass of the session reaper. With the setting unset it is the registry's default,
+		// so the field is always present once the registry is open, and an operator can see from
+		// here whether a record stands long enough for the gone horizon to be reached.
+		"session_max_age": sessions.TTL().String(),
 	}
 }
 
@@ -824,6 +844,15 @@ func main() {
 	messagesReceived := met.NewCounter("envoy_messages_received_total", "Total messages received by the listener")
 	messagesDelivered := met.NewCounter("envoy_messages_delivered_total", "Total message delivery attempts")
 	messagesNAKed := met.NewCounter("envoy_messages_naked_total", "Total messages NAK'd for retry")
+	// What a box under load does to its sessions, counted where it happens: the records the
+	// session reaper took away and the messages they still had stored, the sends this listener
+	// took for a session that had stopped answering, and the fan-outs it skipped for one. A box
+	// whose sessions keep stalling shows as skips and unresponsive sends long before a record
+	// reaches the horizon.
+	sessionsReaped := met.NewCounter("envoy_sessions_reaped_total", "Session records deleted at the gone horizon with no clean stop")
+	sessionStoredAfterLastSeen := met.NewCounter("envoy_session_messages_stored_after_last_seen_total", "Messages the stream held for a reaped session, stored after its last registration; not a count of unread messages, since the listener keeps no read receipt")
+	sendsToUnresponsive := met.NewCounter("envoy_sends_unresponsive_total", "Sends accepted and stored for a recipient past the live window")
+	fanoutUnresponsiveSkips := met.NewCounter("envoy_fanout_unresponsive_skipped_total", "Topic deliveries skipped because the subscribed session is past the live window")
 	deliveryDuration := met.NewHistogram("envoy_delivery_duration_seconds", "Duration of message delivery attempts", metrics.DefaultBuckets)
 	// The CI summary loop runs only beside the GitHub webhook route (Phase 6b2), so only a listener
 	// that mounts it carries the gauge the loop sets.
@@ -950,21 +979,37 @@ func main() {
 	// so /v1/interests/ can report the session's real last heartbeat (the row's updated_at lags it
 	// by up to store.InterestRefreshAge) for every row it still lists. The allowance is the
 	// reaper's own (store.Registry.Reap), so the two cannot drift apart.
+	// The windows every reader of the registry judges a record's age against. Each defaults to
+	// the compiled constant, which .github/scripts/check-heartbeat-margin.sh reads to prove that
+	// three registration refreshes fit inside the live window; a deployment that moves one moves
+	// what this listener runs with and nothing else.
+	sessionLiveWindow := envDuration(logger, "ENVOY_SESSION_LIVE_WINDOW", session.LiveWindow)
+	sessionGoneHorizon := envDuration(logger, "ENVOY_SESSION_GONE_HORIZON", session.GoneHorizon)
+	sessionReapInterval := envDuration(logger, "ENVOY_SESSION_REAP_INTERVAL", defaultSessionReapInterval)
 	sessions, err := session.OpenSessionRegistry(
 		client.Conn,
 		session.WithSessionReplicas(cfg.NATSReplicas),
 		session.WithSessionLogger(logger.Slog()),
 		session.WithLastSeenRetention(store.InterestReapAllowance(store.InterestReapGrace)),
+		session.WithSessionMaxAge(cfg.SessionMaxAge),
+		session.WithSessionLiveWindow(sessionLiveWindow),
+		session.WithSessionGoneHorizon(sessionGoneHorizon),
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// The margin between a client's registration refresh and this lifetime can only be checked
-	// against the defaults in the source, while the live value is whatever MaxAge the existing
-	// bucket was created with. Say it at boot so an operator can read the value in force.
+	// against the defaults in the source, while the live value is whatever MaxAge the bucket
+	// carries once ENVOY_SESSION_MAX_AGE has been applied to it. Say it at boot, with the windows
+	// beside it, so an operator can read the values in force: a maximum age below the gone
+	// horizon drops a stalled session's record before the horizon can be reached, and the horizon
+	// then means nothing.
 	logger.Info("session record lifetime resolved; a session record is dropped this long after its last write",
-		slog.String("ttl", sessions.TTL().String()))
+		slog.String("ttl", sessions.TTL().String()),
+		slog.String("live_window", sessionLiveWindow.String()),
+		slog.String("gone_horizon", sessionGoneHorizon.String()),
+		slog.String("reap_interval", sessionReapInterval.String()))
 
 	// Wait for the session cache to finish its initial scan before we accept
 	// traffic, mirroring the interest-cache gate above. Bounded at 30s: a healthy
@@ -1030,6 +1075,8 @@ func main() {
 		messagesNAKed:     messagesNAKed,
 		deliveryDuration:  deliveryDuration,
 
+		fanoutUnresponsiveSkips: fanoutUnresponsiveSkips,
+
 		unplaceableRetryWindow: unplaceableRetryWindow,
 		// One deferral set for the life of the process, shared by construction by the three
 		// handlers built from this one value below - the role lane's, the durable's and the one
@@ -1091,6 +1138,8 @@ func main() {
 		streamName: bus.Stream,
 		delivery:   &deliveryConfig,
 		confirmed:  dedupe.New(10 * time.Minute),
+
+		sendsToUnresponsive: sendsToUnresponsive,
 	}
 	openV1Routes(v1Gate, ready, &v1Deps, cfg.MachineID, logger, listeningAt)
 
@@ -1129,14 +1178,27 @@ func main() {
 	logger.Info("envoy-listener ready (NATS connected)")
 
 	// Phase 6b: Start interest reaper for stale KV cleanup.
-	// Cross-references envoy_sessions (5-min TTL) with envoy_interests (permanent)
-	// to prune orphaned interests from dead sessions. Each of these loops lists a bucket through
+	// Cross-references envoy_sessions with envoy_interests (permanent) to prune orphaned
+	// interests from dead sessions. Each of these loops lists a bucket through
 	// watchers whose consumers nats.go creates and deletes, so the shutdown stops them and waits for
 	// a pass in flight before it drains NATS (kvLoopsDone).
+	//
+	// A restored role claim's holder gets one live window to register again, not one bucket
+	// maximum age: the window is what makes a session live to every other reader, and with a
+	// maximum age raised past the gone horizon the age would hold a dead holder's claim for an
+	// hour after the reaper had already found it gone.
+	sessionLive, _ := sessions.Windows()
 	kvLoopsCtx, kvLoopsCancel := context.WithCancel(context.Background())
 	kvLoopsDone := []<-chan struct{}{
 		registry.StartReaper(kvLoopsCtx, func(sessionID string) (bool, error) { return sessionMayBeLive(sessions, sessionID) }, 5*time.Minute, store.InterestReapGrace),
-		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessions.TTL()),
+		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessionLive),
+		// The session reaper is the one loop that deletes a session's record, and the one place
+		// the bucket's maximum age is settled while the listener runs (session.ReapSessions).
+		sessions.StartSessionReaper(kvLoopsCtx, sessionReapInterval, session.SessionReaper{
+			Client:              client,
+			Reaped:              sessionsReaped,
+			StoredAfterLastSeen: sessionStoredAfterLastSeen,
+		}),
 	}
 
 	// Phase 6b1: Collect the interest bucket's delete markers, which the reaper above leaves one of
