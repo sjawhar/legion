@@ -534,8 +534,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     // Not followed (the agent subject always is), stored before its topic was followed, or
     // already written: answered done, and the resume point passes it.
     const since = followedAt(frame.subject);
-    const unfollowed =
-      since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS;
+    const unfollowed = since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS;
     const identity = unfollowed ? undefined : parseIdentity(frame.data);
     if (unfollowed || alreadyWritten(identity)) {
       send(frame.reply, "done");

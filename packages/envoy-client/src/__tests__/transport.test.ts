@@ -192,7 +192,10 @@ describe("EnvoyClient", () => {
     );
     // A consumer answer missing the subject the relay arrives on is unreadable too.
     expect(() =>
-      parseSubscribeAnswer({ ...interest, delivery: { mode: "consumer", stream_id: "s", gap: false } })
+      parseSubscribeAnswer({
+        ...interest,
+        delivery: { mode: "consumer", stream_id: "s", gap: false },
+      })
     ).toThrow(/answered delivery mode consumer/);
   });
 

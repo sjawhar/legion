@@ -303,10 +303,7 @@ export function createDeliveryLedger(options: DeliveryLedgerOptions): DeliveryLe
 
   // A notice written settles the frame for good, here and after a restart; one the host queued is
   // the host's to record once written.
-  const showFailureNotice = async (
-    notice: FailureNotice,
-    alive: () => boolean
-  ): Promise<void> => {
+  const showFailureNotice = async (notice: FailureNotice, alive: () => boolean): Promise<void> => {
     let queued: boolean;
     try {
       queued = (await host.showFailureNotice(notice)) === "queued";

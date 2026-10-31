@@ -306,7 +306,6 @@ export type PublishResult = {
   readonly holder?: string;
 };
 
-
 export class EnvoyApiError extends Error {
   readonly name = "EnvoyApiError";
   readonly expected: readonly string[] | undefined;

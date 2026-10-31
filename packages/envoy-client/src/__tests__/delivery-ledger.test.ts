@@ -104,9 +104,7 @@ describe("the frames a session was shown", () => {
       dedupe_key: "dispatch:delivery:7",
     });
 
-    expect(
-      ledger.delivered({ source: "dispatch", dedupe_key: "dispatch:delivery:7" })
-    ).toBe(true);
+    expect(ledger.delivered({ source: "dispatch", dedupe_key: "dispatch:delivery:7" })).toBe(true);
     expect(host.writes.at(-1)?.delivered).toEqual([
       { event_id: "evt-1", dedupe_key: "dispatch:delivery:7", at: T0 },
     ]);
