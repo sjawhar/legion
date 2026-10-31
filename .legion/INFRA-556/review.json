@@ -2,28 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-556",
-  "completed": "2026-10-31T04:07:29Z",
-  "round": 5,
+  "completed": "2026-10-31T07:29:38Z",
+  "round": 6,
   "decision": "changes_requested",
-  "reviewedCodeHead": "b9bbf075daa7181779d8d542ec36b55dae33562e",
+  "reviewedCodeHead": "106f21e595b76710ad85fb58bb13b8d704981cd7",
   "critical": 0,
-  "important": 1,
+  "important": 2,
   "minor": 3,
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Round-4 defect 2 is narrowed, not closed. touched reads aw.GetStates() (:710) and then aw.Meta() (:715) under separate read locks, so a return landing between them passes the 'back' check and raises the removal to the live clock c+1 (window 1). And a removal built at tombstone clock c can be recorded after the return's own record (local[X]=c+1, batch[X]=nil); record (:328-338) then deletes local[X] and overwrites batch[X] with the removal at c, which other processes accept (window 2). TestAReaderInTheRoomAgainKeepsItsStateThoughARemovalRacesItsReturn brings the reader back before touched reads anything, so it covers neither window. Fix: read Meta before GetStates (or refuse a raise from a live state), and in record drop a removal whose clock is below the clock local holds; add a test hook after touched's reads that lands the return in each window, failing first."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_limit.go", "description": "frameHeader takes the mask bit as a raw byte and each masked caller appends the key itself (awareness_limit.go:319, :392-393; keepalive.go:54 passes 0); take the key as a parameter and set the bit only with a key; its comment (keepalive.go:285-286) omits pass."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/stored_head.go", "description": "The file comment (:14-21) does not list roomBehindHead (:167) and recordPublishedLoss (:229), moved in by 88f5b001."},
-    {"severity": "minor", "file": "PR body", "description": "Size stale (127 files, +15823/-4429 at b9bbf075); E2E (implementer) says '88f5b001's parent a3bda21a', which is 4f2e3319's parent."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Window 2 is still open: record's drop test (:347) assumes the clock local holds only rises, but record writes every non-removal entry's clock unconditionally (:356). answer (:642-647) records clocks it read by EncodeUpdate earlier, and touched's Meta reads (:737-739) can record late too, so a stale entry lowers local[X] from the return's c+1 back to c (and puts the old state in the batch). A removal at c then passes `c < c` false, deletes local[X] and replaces the batch entry; the other processes, still holding c, accept a null at an equal clock and drop a reader who is in the room."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Regression from the new drop test: when a purge frees the tombstone before the snapshot, the removal stands at local[X] read when touched began (:731), which can be behind a heartbeat recorded meanwhile; record then drops it (c < c+1) although the client is gone, resolve drops the client's nil entry because it is not live, and nothing is sent, so its cursor stays on the other processes until the 30 s expiry. Before e2a61748 that removal went out at c and was accepted."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay_test.go", "description": "The window-1 test (:352-418) runs its return from beforeAwarenessRemovalRead, before the single snapshot; at round-5 code that place was before GetStates, which already saw alice live, so the test passes with the bug (the tester's negative control moved the hook between the reads by hand). A return cannot land inside one locked EncodeUpdate; delete the test and the beforeAwarenessRemovalRead hook, or make it exercise a real window. The three window tests copy one body (:294-350, :363-417, :429-487); :278-289 still explains the race through Meta; :358 ends with a stray 'with'."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Comment errors: :221-222 'holds nothing older' should be 'holds no later clock'; :690-691 'what neither read sees' is wrong, the second read (Meta) saw the return's clock."},
+    {"severity": "minor", "file": "PR body", "description": "Size line was +16064/-4462; at 106f21e5 it is 127 files, +16031/-4429. The reviewer corrected it in the body (no push)."}
   ],
   "verified": [
-    "Round-4 defect 1 closed: startFromRead(doc, epoch) refuses when the epoch changed (tree.go:621-625), the epoch is read before snapshotDocument (tree.go:733), recover draws a new epoch under mu (:654); TestAReadStartsNoReplicaBehindACommitARecoverTookAway fails at a3bda21a and passes at head.",
-    "Round-4 items 3-9 done: livewrite.go 950 lines, appendGateRow gone, one awareness test encoder, one frameHeader, fragment fixed, twelve loops, SetIssueClosed text gone, census 4 and Rollout lines fixed.",
-    "Merge with main 8a72cf79 keeps both sides; migrations 0150-0152 follow main's 0149; dispatchConnectionsPerPod 91 = main 89 + 2; the dropped README notes for 0150-0152 follow main's new rule (README.md:751-752: a migration describes itself in its .up.sql header), and the three headers do.",
-    "No new Dispatch key in the diff, title, body or round-5 commit messages."
+    "Window 1 closed: touched decides each removal from one aw.EncodeUpdate snapshot (ygo RLock, awareness.go:458-482); a live state skips the removal.",
+    "Lock order: touched releases r.mu before aw.Meta and EncodeUpdate; record takes r.mu only; no new nesting with ygo's awareness lock.",
+    "106f21e5: frameHeader(opcode, final, length, key) writes the same bytes for all callers (c.key[:] is never nil; keepAliveFrame passes nil); stored_head.go comment names roomBehindHead and recordPublishedLoss.",
+    "Window-2 test (:429-487) places the return between touched and record through beforeAwarenessRecord and fails at dd63d61b; hooks are nil-checked and set only by tests."
   ],
+  "threads": {"accepted": ["PRRT_kwDORFy7ds6yNoxd", "PRRT_kwDORFy7ds6yNoxh", "PRRT_kwDORFy7ds6yNoxi"], "stands": ["PRRT_kwDORFy7ds6yKplk", "PRRT_kwDORFy7ds6yNoxf"]},
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at b9bbf075 (defect 2 windows 1 and 2; its README finding withdrawn: main's README rule moves migration notes into the .up.sql header)",
-    "codeQuality": "Verdict: CHANGES at b9bbf075 (2 Minor; found window 1 independently)"
+    "deepReview": "Verdict: CHANGES at 106f21e5 (window 2 still open through a late lower-clock record; new lost removal after a purge)",
+    "codeQuality": "Verdict: CHANGES at 106f21e5 (window-1 test is vacuous; triplicated test body; two comment errors)"
   },
-  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head b9bbf075: lint success, pr-title success, typecheck skipped, test queued; ci-ok not posted. compare b9bbf075...5f5cced7 handoffsOnly true (2 files)."
+  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head 106f21e5, run 41173430936 (CI, attempt 1) still running at 07:22Z: lint success, test success, typecheck skipped; pr-title success (runs 41173481304, 41173517285); ci-ok not posted; no job failed. compare 106f21e5...0154d80a handoffsOnly true (2 files)."
 }
