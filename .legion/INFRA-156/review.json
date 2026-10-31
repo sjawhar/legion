@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-156",
+  "completed": "2026-10-31T04:40:00Z",
+  "decision": "approved",
+  "round": "14 (confirmation after the merge onto d7e1daaa: #2474's guide reflow)",
+  "headReviewed": "c2baf6e8d5e25377a1971929ede2db3863cf8b7d",
+  "codeHead": "340fc02b3a90",
+  "previousReview": "5719826212 (APPROVE at 48d684d3)",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "fingerprint": "00fee600336cc67f... (48d684d3) -> 843d32dbeb93f230... (c2baf6e8). The line-level fingerprint changed only in packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md, because #2474 reflowed both guides to one sentence per line. Compared word for word against each base (e018f1d3, d7e1daaa), the PR's edits are identical: 12 in AGENTS.md and 9 in README.md, same words. No other file's PR hunk changed; no dist/ or legion/ change.",
+  "ci": "Not waited for, on the architect's explicit fast path.",
+  "migrations": "Checked just before confirming: main's highest is 0149_event_horizon; 0150_block_pointer_links is free. GitHub reports MERGEABLE.",
+  "threads": "20, all resolved.",
+  "keyFindings": []
+}
