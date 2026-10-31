@@ -32,7 +32,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/tests/*.test.ts` | The suites that came with those files |
 | `src/directive-factories.ts` | `factoryName`, `factoryLabel` and `factoryAttributes`, copied from micromark-extension-directive 4.0.0 (`lib/factory-name.js`, `lib/factory-label.js` and `lib/factory-attributes.js`), which does not export them: `src/directive-container.ts` tokenizes a `:::` opener's name, label and attributes with them. They are kept whole, the `disallowEol` branches for `false` that neither call takes included (INFRA-581) |
 
-Eighteen files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Nineteen files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
@@ -45,6 +45,7 @@ not reach them:
 | `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark`, over text and inline atoms such as an image alike (LEGION-363); it is also biome-checked |
 | `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
+| `src/block-pointers.ts` | A typed block's `block[]` attribute (INFRA-156): `parseBlockPointers` reads a value as markdown and a pasted block write it, with `@legion/contracts`' `parseBlockPointerValue`, and refuses one with the reason its `blockPointerValueProblem` gives (the server's twin is tested against the same table, `DISPATCH_BLOCK_POINTER_VALUES`); `findBlock` finds the first block of a document holding an id, for it and the typed-block commands; `blockPointerRefusal`, given the block a command replaces or changes, refuses a pointer the command introduces to a block of the editor's own document (`documentRef`) whose type the attribute's `targets` do not allow. Its messages follow the server's wording (pmdoc `ParseBlockPointerValue`, `CheckBlockPointers`), quoting a value with `JSON.stringify` where Go uses `%q` and with no `block pointer refused:` prefix on a type refusal; it is also biome-checked |
 | `src/typed-block-drawing.ts` | The typed-block drawing both parse modes share: `markdownSource`, a file's text without one leading U+FEFF, which micromark drops before it counts the offsets the tree carries; the content-rule fit check, which maps each child to the node its `parseMarkdown.match` accepts (a mark node's children in its place) and calls `NodeType.createAndFill`, since Milkdown drops a node whose content breaks its rule, with all its text, without throwing; `drawDirective`, a directive drawn in place as a paragraph of its opening line, its content formatted (the label paragraph dropped) and a paragraph of its closing fence when the source closes it; and `remarkDecideTypedBlocks`, the transformer whose innermost-first walk keeps a container directive typed only when the caller accepts it and its processed content fits. `remarkUnfitTypedBlocks` (the headless engine's default mode) accepts every directive `remarkTypedBlocks` let through, so an ask holding a heading is drawn as its lines instead of vanishing (INFRA-565); it is also biome-checked |
 | `src/read-only-directives.ts` | `remarkReadOnlyDirectives`, the headless engine's read-only stand-in for `remarkTypedBlocks`, built on `remarkDecideTypedBlocks`: a container directive the block schema refuses (or any, with no schema) is drawn in place, and the paragraph-line directive refusals are not applied, so a body only shown to a reader formats around a block Dispatch does not know instead of falling back whole to its raw source (INFRA-529). An accepted typed block whose content would break its content rule is drawn the same way. A typed block kept typed loses every attribute the block schema marks `server`, after the schema accepts it, so each reads at its schema default and a body's forged `:::ask{state="answered" …}` reads as an open decision (INFRA-612). The live editor makes the same drawing decision, through the shared `acceptedTypedBlock`, as `liveTypedBlocksRemarkPlugin` (reading the editor's schema the first time it parses, registered after the mark plugins): a paste or `setMarkdown` (a past version's view) draws a directive the block schema refuses as its literal lines rather than throwing, where a throw in a paste let the browser insert the plain text with its lines joined; it keeps the `server` attributes, which a past version must show and settlement writes from the ask's row (sjawhar/legion#2433); it is also biome-checked |
 | `src/ask-content.ts` | `relaxAskContentCheck(schema)`, which replaces the `ask` node's `validContent` so a built ask may hold any non-empty run of the children of the schema's `block` group, the blocks the document service accepts in it. The non-typed ones are listed in `packages/envoy/internal/dispatch/pmdoc/schema/block-node-types.json`, which pmdoc's `isBlockNodeType` embeds and this package's drift test reads, so the two sides cannot drift. y-prosemirror builds each node through `createChecked` and deletes from the shared document one it refuses, so an ask two collaborators' concurrent edits left off its `paragraph+ bullet_list?` rule (two lists, a paragraph after its list) lost its text in every editor and on the server (sjawhar/legion#2433). Content matching keeps the rule, so local edits, input rules, pastes and markdown parses still hold to it. `brokenAskInputGuards`, view props `src/lib.ts` installs with `view.setProps(brokenAskInputGuards)`: inside an ask that breaks its rule, an input whose edit throws - a key command (Enter twice to leave a list, Backspace joining a list item into the question or over a selection across blocks), text input over a selection, a drop, a cut, or a `beforeinput` insertion or deletion over a selection across blocks - is declined, with no edit and the default prevented, instead of escaping as a page error while the browser applies its own edit (a `beforeinput` whose own edit does not throw is applied as ProseMirror's edit in place of the browser's); an input method that starts composing over such a selection has the selection collapsed to its start first, so the composed text lands there and nothing is deleted. `keepUnselectedAskBlocks`, a plugin `src/lib.ts` registers with `.use(keepUnselectedAskBlocks)`, refuses a local edit inside such an ask that deletes any character or other leaf (an image, a hard break, a divider that is itself the block) of a child block the selection does not touch - never a pure insertion, and never an undo or redo of the person's own edit (prosemirror-history's transactions pass, as y-prosemirror's do) - which an edit the browser makes itself (`document.execCommand`, as writing extensions use) and ProseMirror reads back from the DOM would otherwise do; the DOM observer then redraws the page from the kept state; it is also biome-checked |
@@ -56,7 +57,7 @@ not reach them:
 | `src/nested-links.ts` | `remarkHoistNestedLinks` and the `$remark` plugin that registers it: a `link` holding a `link` is rewritten into siblings, the inner link beside the runs around it and each run wrapped in a copy of the outer link's `url` and `title`, so `[a <https://u.test> b](u)` reads as `a ` under the label's link, the autolink's text under its own, and ` b` under the label's again. The only markdown that nests the two is an autolink inside a link label, since CommonMark forbids an inline link there, and `@milkdown/transformer` cannot read that label as written: it holds one flat mark set, so the link mark runner's `closeMark` on the inner autolink removes the `link` type outright (`removeFromSet`) and every later run of the label was left with no link at all, where Go's reader gives it the label's link again (`packages/envoy/internal/dispatch/pmdoc/parse.go`). The hoisted spelling is the tree Go's renderer writes for itself (`[a ](u)<https://u.test>[ b](u)`), so both readers agree rather than meeting at a third reading. It is registered at every parse seam - the explicit chain in `src/lib-headless.ts` and, through `remarkCtx`, `src/lib.ts`'s shared `parserCtx` and its `setMarkdown` - and changes no output, since a unified transformer runs on `runSync` at parse and never on `stringify` |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Twenty-three kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Twenty-four kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -122,12 +123,28 @@ at the top and each JSDoc `@import` an `import type` (INFRA-581); `src/lib.ts` i
 `mermaidCodeBlockPlugin` from `./mermaid-code-block-view` in place of upstream's
 `mermaidDiagramsPlugin` and taking the host's `drawMermaid` option (typed `MermaidDrawer`,
 imported from `./mermaid-svg`) for it, and `src/lib.css` dropping its `.proof-mermaid-svg` rules,
-which that view's shadow-root sheet carries (INFRA-532); and annotations, casts and assertions
+which that view's shadow-root sheet carries (INFRA-532); the `block[]` attribute kind (INFRA-156), which reads,
+writes and checks its values through `./block-pointers` — in `src/block-schema.ts`,
+`BlockAttributeKind` gaining `block[]`, `BlockAttributeSchema` gaining `targets`,
+`validateBlockSchema` refusing `targets` on any other kind as the server does, `parseAttribute`'s
+`block[]` case calling `parseBlockPointers` and `attributeText`, its one conditional expression
+written as statements, joining the pointers with one space; in `src/typed-block-commands.ts`,
+`TypedBlockCommandContext.documentRef`, `validateValue`'s `block[]` case calling `@legion/contracts`'
+`blockPointersProblem`, `findBlock` moved to `./block-pointers` (which returns the first holder of
+a repeated id, as the server reads one), and `insert`, `retype` and `setAttributes` building their
+transaction first and handing it, with the block it replaces or changes, to `dispatchUnlessRefused`,
+which throws `blockPointerRefusal`'s refusal before dispatching it, so a refused command leaves the
+document unchanged; `blockPointerRefusal` treats that block's pointers as already held only when its
+type is unchanged, so a pointer the old type held under the same name meets the new type's targets; in `src/lib.ts`,
+`CreateProofEditorOptions.documentRef` passed to `createTypedBlockCommands`; and in
+`src/tests/block-schema.test.ts`, the imports of `DISPATCH_BLOCK_POINTER_VALUES`, `EditorState`
+and `createTypedBlockCommands` and the suite's four cases for it;
+and annotations, casts and assertions
 that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table but `src/directive-factories.ts`
-has that counterpart, and the only lines that differ should be the twenty-three kinds.
+has that counterpart, and the only lines that differ should be the twenty-four kinds.
 `src/directive-factories.ts`'s counterparts are those three files of micromark-extension-directive
 4.0.0 (`node_modules/.bun/micromark-extension-directive@4.0.0` at the repository root, or the
 package's npm tarball); each function there differs from its source by the join and the type
@@ -235,8 +252,17 @@ against the source stays readable. `assist` matters as much as the other two: it
 `organizeImports` is a safe fix, so one `biome check --write` or an editor with organize-on-save
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
-`src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
+`src/block-pointers.ts`, `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
 `src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`, `src/read-only-directives.ts`, `src/typed-block-drawing.ts`, `src/ask-content.ts`, `src/mermaid-svg.ts`, `src/mermaid-render.ts`, `src/mermaid-code-block-view.ts`,
 `src/directive-container.ts`,
 `src/tests/harness.ts` — follow the
-repo's conventions and are checked.
+repo's conventions and are checked: each is excluded by name from the first override of the root
+`biome.json`, the one that turns Biome off over the copy, and a new file of legion's own joins that
+list.
+
+The package depends on `@legion/contracts` (`workspace:*`), served from source like this package,
+for what the editor shares with the document service: `src/block-pointers.ts` and
+`src/typed-block-commands.ts` decide a `block[]` value and give the reason one is refused with its
+`parseBlockPointerValue`, `blockPointerValueProblem`, `blockPointersProblem` and `parseCanonicalBlockReference`, and
+`src/tests/block-schema.test.ts` runs its `DISPATCH_BLOCK_POINTER_VALUES` table. The package's
+consumers, `packages/dispatch` and the pmdoc fixture generator, are workspaces that resolve it.

@@ -6882,6 +6882,40 @@ describe("executeDispatchTool", () => {
       expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
     });
 
+    // The renderer writes an id the `#` shortcut cannot hold as `id="…"`, its `&` as `&amp;`
+    // (pmdoc.TypedBlockIDAttribute): the opener is found by that spelling.
+    const quotedOpening = (written: string, block: string, state: string) =>
+      `:::ask{id="${written}" urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
+
+    test('refuses over open blocks whose ids are written id="…"', async () => {
+      const { outcome, posts } = await requestOver(
+        ["a b", "R&D"],
+        [quotedOpening("a b", "a b", "open"), quotedOpening("R&amp;D", "R&D", "open")],
+        [blockAsk("a b", "open"), blockAsk("R&D", "open")]
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n").slice(1, 3)).toEqual([
+        '- "Question of a b?" (block a b, ask ask-a b)',
+        '- "Question of R&D?" (block R&D, ask ask-R&D)',
+      ]);
+      expect(posts).toEqual([]);
+    });
+
+    test('requests approval once blocks whose ids are written id="…" are answered or resolved', async () => {
+      const { outcome, posts } = await requestOver(
+        ["a b", "R&D"],
+        [quotedOpening("a b", "a b", "answered"), quotedOpening("R&amp;D", "R&D", "resolved")],
+        [blockAsk("a b", "answered"), blockAsk("R&D", "resolved")]
+      );
+
+      expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
+    });
+
     test("a copy whose source was answered after it settled refuses nothing once settlement has shown the answer", async () => {
       // Answering the source settles its copies again (SettleCopiesOf), so the copy's latest
       // version carries the answer and the copy is no open block.

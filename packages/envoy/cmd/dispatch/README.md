@@ -1042,6 +1042,13 @@ An anchor whose artifact id is not a lower-case document id is left out of the i
 The release before it never reads the index and serves beside it unchanged, except that its sweep still drops the mark of an ask holding both columns (no such row is written today), and rolling Dispatch back past `0148` is an image rollback alone:
 the index is left for the next release that reads it.
 
+Migration `0150_block_pointer_links` gives `block_refs` a nullable `to_types text[]`, the types a typed block's `block[]` pointer may point at (null:
+any), creates the function `block_ref_listed(to_types, to_id)`, true when `to_types` is null or no current `document_blocks` row of the target has a type outside it, and re-states `graph_edges` with `0142`'s arms, its `block_refs` arm listing a row only while `block_ref_listed` holds (`packages/envoy/AGENTS.md`, the typed block rules).
+The column is added with no default, so no row is rewritten, and the previous release, which neither reads nor writes it, keeps writing rows that hold null and so are listed as before.
+The column takes `block_refs` `ACCESS EXCLUSIVE` and the view `graph_edges` `ACCESS EXCLUSIVE` for the migration's short transaction, so a block index write and a reference read wait behind it.
+It refuses and rewrites no row; its census answers `0`.
+No shipped block type declares a `block[]` attribute, so no pointer row exists for a build that does not know one to drop.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
 On success it backfills each artifact's project and generated `ref_key`.
@@ -1200,6 +1207,8 @@ An argument `envoy-dispatch` does not know is refused with exit 2, never served,
 
 Mentions (`dispatch://` references and same-origin dashboard URLs) in document versions, ask questions, comment bodies, and issue messages are indexed into `refs` on every write;
 migration `0032_refs_provenance` gives each edge a `kind`, `created_at`, and `source_seq` (the `events.id` that introduced it), and creates the `graph_edges` view, which unions those mentions with the structural relations already stored on the node tables (`child_of`, `attached_to`, `anchored_to`, `owned_by`, `replies_to`, `followed_by`).
+The name of a typed block's `block[]` attribute is an edge kind too:
+each block the attribute points at is an edge of that kind from the typed block (migration `0150`, Database migrations above).
 `GET /api/v1/references?to=<ref>` lists everything that points at a node and `?from=<ref>` everything it points to, cross-project.
 A row whose other end is a node kind the running build does not know (a newer build's, read during a rolling deploy) is left out of every list and every count that build serves (`nodeLoaders`, `refs/graph.go`, names the kinds it knows).
 The migration refuses to run when an ask or comment anchor carries a non-uuid `artifact_id`.
@@ -1221,6 +1230,8 @@ a document's own read also lists the links at its blocks, each edge naming its b
 A block reference pinned to a version of its document, `#b-<id>@v<N>` with N at most 9223372036854775807, reads the block as that version held it:
 the node's `pin` carries the block's text at `N` and says whether the block is `unchanged`, `changed` or `removed` since.
 `GET /api/v1/block-links?from=<document>&to=<document>` lists the links from the blocks of one document to the blocks of another.
+A typed block's `block[]` attribute holds canonical block references joined by one space, and its `targets` limit the types of the blocks it points at (`packages/envoy/AGENTS.md`, the typed block rules):
+an agent's or API write introducing a pointer to an existing block of another type is refused, a browser's write never is, and every block-aware read lists a pointer's edge only while its target has an allowed type, so retyping the target hides or shows it.
 Text stored before the release, and text an earlier build writes during the roll, is indexed by the server's block-index reconciliation (lease `block-index`), with no command run.
 
 A comment and a message are blocks too (migrations `0142`-`0144`; `packages/envoy/AGENTS.md`, "References form one graph").
@@ -1897,11 +1908,14 @@ Each item below names a path with its method and identity, then its purpose.
 
   Edges of one node in the reference graph, newest first and cross-project:
   exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference, read whatever its length (`text.ParseRef`);
-  `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded).
+  `kind` filters a csv of edge kinds, the structural ones and the name of each `block[]` attribute the block schema declares;
+  `since=<events.id>` keeps mentions introduced after it (structural edges excluded).
   The answer is `{node, edges}`, the node read and its edges.
   Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`.
   The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)).
-  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document), and one a block of a comment or issue message holds from that block (`node.kind` `block`, id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`, `node.parent` the comment or message);
+  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
+  a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
+  and a mention a block of a comment or issue message holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`, `node.parent` the comment or message);
   a document's, comment's or message's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read is listed once, under that block.
   A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
   pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
@@ -1916,7 +1930,7 @@ Each item below names a path with its method and identity, then its purpose.
   one document may be both), each reference read whatever its length:
   `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first;
   `from`, `to` and every link's two blocks carry the six facts of every node ([Reference graph](#reference-graph)).
-  A link is listed only while both blocks are current blocks of their documents.
+  A link is listed only while both blocks are current blocks of their documents, and a typed block's `block[]` pointer only while its target has a type the attribute allows.
   `400 INVALID_REFERENCE` when either is not a document reference; `404 NOT_FOUND` for a document that does not exist.
 
 - `/api/v1/issues` (POST; cookie, trusted header, or bearer)
@@ -2444,6 +2458,9 @@ Each item below names a status and code, then its meaning.
   deeper content is refused naming the line.
   An accepted suggestion whose blocks nest within those bounds but land deep enough that the document would nest past one is `INVALID_OP` on `replace_with`, naming how many blocks, or typed blocks, the result nests.
   Malformed edit replacements report `INVALID_OP`.
+  A typed block's `block[]` value that is not canonical block references joined by exactly one space is refused naming the attribute and the value, as any attribute value the schema refuses is.
+  A write introducing a `block[]` pointer to an existing block whose type the attribute's `targets` do not allow is refused naming the typed block, the attribute, the reference, the target's type and the allowed types, on every route but `POST /edits`, which answers it `INVALID_OP` on `attributes`;
+  a browser's edit is never refused for a pointer.
   An upload that moves an open anchor's quote where that anchor cannot stand - an ask's quote into a code block, or any open ask's, comment's or suggestion's quote into the front matter - and leaves no copy where it can is refused naming the anchor, its quote and where the text landed:
   move the text out, or resolve the anchor first.
   A copy there beside the original is taken, and the anchor stays on the original.

@@ -1056,7 +1056,7 @@ Mentions (`dispatch://` refs and same-origin dashboard URLs in a document versio
 All of them reconcile through the unexported `replaceRefs` rather than rewrite:
 an edge that survives keeps its `created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right after the source's event is appended, in the same transaction).
 Structural relations stay in the columns that own them and the `graph_edges` view (migration 0032) unions both into one typed edge relation:
-`mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_links`), `attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by` (project-document asks/comments), `replies_to` (comment and message threads), `followed_by` (`ask_followers`), since migration 0121 a block's `mentions` (`block_refs`) and its `part_of` edge to its document (`document_blocks`), and since migration 0142 the same two for a block of a comment or message (`comment_block_refs` and `message_block_refs`, `comment_blocks` and `message_blocks`) and a reply's `replies_to` edge to the block it names (`replies_to_block`).
+`mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_links`), `attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by` (project-document asks/comments), `replies_to` (comment and message threads), `followed_by` (`ask_followers`), since migration 0121 a block's `mentions` (`block_refs`) and its `part_of` edge to its document (`document_blocks`), since migration 0142 the same two for a block of a comment or message (`comment_block_refs` and `message_block_refs`, `comment_blocks` and `message_blocks`) and a reply's `replies_to` edge to the block it names (`replies_to_block`), and since migration 0150 a typed block's `block[]` attribute makes `block_refs` edges of a kind named by the attribute (below the typed block rules).
 An issue may wait only on issues in its own project through `blocked_by`.
 For cycle checks an issue has two halves:
 it starts after its `blocked_by` targets are done and after its parent starts, and it is done after it starts and after its children are done.
@@ -1099,7 +1099,7 @@ A mention starts at the innermost block holding its start: a list item's paragra
 A new pair takes the version and its time, and `refs.Stamp` gives it the version event's id;
 on a document's first indexing, a pair takes the `created_at` and `source_seq` of the document's own `refs` row for that target when there is one.
 
-The document keeps its own `refs` rows, which the closure and the older `GET /api/v1/artifacts/{id}/references` read, but a document's mention that one of its blocks holds with the same kind and target is listed and counted from that block alone (`heldByABlock`, in `refs.Edges` and `refs.BacklinkCounts`), so a node is counted once for each block citing it and each link shows once, where its block holds it.
+The document keeps its own `refs` rows, which the closure and the older `GET /api/v1/artifacts/{id}/references` read, but a document's mention of a target that one of its blocks holds a link of any kind to, listed or not, is listed and counted from that block alone (`heldByABlock`, in `refs.Edges` and `refs.BacklinkCounts`), so a node is counted once for each block link to it and each link shows once, where its block holds it.
 A document's own read (`?to=` or `?from=` a document reference) also lists the edges at its current blocks, each naming that block as the edge's `block`;
 its `part_of` edges are left out unless `?kind=` names them.
 A link to a block counts only while its block is a current `document_blocks` row:
@@ -1116,7 +1116,7 @@ Its `state` is `unchanged` or `changed` by comparing that text with the current 
 An unpinned reference to a block no current version holds is `404 NOT_FOUND` `no block "<id>" in <document ref>`, and a pin to a version the document lacks, to one with no record of its blocks, or to one that did not hold the block is `404 NOT_FOUND` saying which (`blockReferenceNode`, `api/references.go`).
 Versions are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 2147483647 without a query as a version the document lacks:
 `404 NOT_FOUND` `no version <N> of <document ref>`.
-`GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from blocks of one document to blocks of another, or of the same one, while both blocks are current.
+`GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from blocks of one document to blocks of another, or of the same one, while both blocks are current, and a typed block's pointer only while its target has a type the pointer allows (`block_ref_listed`, below the typed block rules).
 
 A comment and a message are collections of blocks too (migrations 0142-0144, `itemblocks`, `refs/item_blocks.go`).
 `itemblocks.Split` reads a body as the document parser reads a document (`pmdoc.ParseWithSourceStarts`) and cuts it at its top-level blocks, each block the body's own text from the start of the line where it starts to where the next one starts, less the spaces, tabs and line endings that end it, so its stored text, its excerpt and its identity are what its author wrote, never the canonical rendering.
@@ -1354,7 +1354,14 @@ Spacing refusals (`browserListSpacing`) come before the walk, and inline ones, s
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`.
 The embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and the fixture generator reads that checked-in file.
 A typed block is CommonMark generic-directive syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of colons.
-Both parsers close it at a line of at least as many colons as the opener, indented less than four columns past where its lines start, whatever block inside it the line would otherwise continue - a paragraph, a list item or a fenced code block - so the renderer escapes a lone `:::` in text written within that reach of a typed block fenced with three colons, and at a typed block's own prefix whatever its fence, and writes three colons, or one more than the longest such line inside the typed block (`closingColons`):
+The renderer writes the id so that both parsers read it back as the tree holds it, whatever id a browser set (`pmdoc.TypedBlockIDAttribute`):
+`#block-id` when the browser editor's parser reads all of it as that shortcut and it holds no `&` - no space, tab or line ending, `#`, `.` or `}`, which end the shortcut, and no `"`, `'`, `<`, `=`, `>` or backtick, which make the editor read the line as no directive - and `id="…"` otherwise, its `&`, `"`, line feeds and carriage returns written as character references (`a b` is written `id="a b"`, `q:1` `#q:1`);
+a U+0000 is written U+FFFD, as markdown reads it.
+Both parsers read either form, `id="…"` with its character references decoded and no backslash escape.
+Go refuses what the browser editor would read another way or not at all:
+a shortcut holding `&`, which it decodes, or ending at `#`, `.` or `}`, an id written twice, an `id` with no value or an empty one, and a `blockId` attribute.
+A block schema declares no attribute named `id` or `blockId`.
+Both parsers close a typed block at a line of at least as many colons as the opener, indented less than four columns past where its lines start, whatever block inside it the line would otherwise continue - a paragraph, a list item or a fenced code block - so the renderer escapes a lone `:::` in text written within that reach of a typed block fenced with three colons, and at a typed block's own prefix whatever its fence, and writes three colons, or one more than the longest such line inside the typed block (`closingColons`):
 a nested typed block's fence, or a line of code, measured in the written line's columns - the width of the list markers and `> ` around it, and a tab advancing to the next multiple of four from the column it stands at.
 A callout nested directly in a callout is written `::::callout{…}` … `::::`, as the browser editor writes it.
 There is no whitespace between `name` and `{`;
@@ -1579,9 +1586,57 @@ no markdown makes such an href, so no write is refused.
 An `&` that opens none, as in `&foo;` or `AT&T`, is written as it is.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional attribute.
+An attribute's kind is `string`, `bool`, `enum`, `string[]`, `block[]`, `actor` or `timestamp` (`validateAttributeSchema`).
 Parsing mints an omitted id, while live document reads and writes validate each node against its schema content rule.
 Schema changes are additive: add a type, add a defaulted attribute, add an enum choice, or widen a content rule.
 Tightening content, removing or renaming a type or attribute, or requiring a new attribute requires a document migration and version bump.
+
+A `block[]` attribute points at blocks; no shipped type declares one.
+Its value is the empty string (no pointers) or canonical block references joined by exactly one space, none leading or trailing, no other whitespace and none repeated (`pmdoc.ParseBlockPointerValue`, and the renderer joins them with one space);
+anything else is refused, never normalised.
+A canonical reference is one `text.FormatBlockRef` writes back byte for byte (`text.CanonicalBlockRef`):
+`dispatch://<ISSUE>/spec#b-<id>` for a block of an issue's primary document, `dispatch://<ISSUE or PROJECT>/artifact/<slug>#b-<id>` for one of any other document (a project's document whose slug is `spec` included), the id as `text.EncodeBlockID` writes it, optionally pinned `@v<N>`;
+so lower-case or needless percent-encoding, an issue's `artifact/spec` and anything trailing the reference are refused.
+A block of a comment or a message (`text.Ref.Item`) is refused with a reason of its own:
+the attribute points only at blocks of documents, whose types its targets limit.
+Go and `@legion/contracts`' `parseBlockPointerValue` are both tested against `DISPATCH_BLOCK_POINTER_VALUES`, whose Go copy is `pmdoc/testdata/block-pointer-values.json`.
+The attribute's name is the kind of the edges it makes:
+it matches `^[a-z][a-z0-9_]*$` and is none of `model.GraphEdgeKinds`, and two types declaring one name make one edge kind (`pmdoc.LinkKinds`, which `GET /api/v1/references?kind=` accepts beside the structural kinds; any other name is `400 INVALID_KIND`).
+Its `targets`, which no other kind may carry, limit the types of the blocks it points at, each a type the schema declares or a built-in block the link graph holds (`builtInBlockNode`:
+not a list item or a table's row or cell); absent or empty, it points at any block.
+Its default is absent or `[]`.
+
+Three rules enforce `targets`.
+An agent's or API write is refused when a pointer it introduces names an existing block of a type the attribute does not allow (`pmdoc.CheckBlockPointers`, called by `docs.refuseBlockPointers` from `applyLive`, `SeedText`, and `RebuildDocument` given markdown):
+a pointer is introduced when the tree before the write holds no pointer with the same typed block id, typed block type, attribute and reference (a new pointer, a changed value, or a block retyped into a type declaring the attribute, whatever the type before declared under that name), and every pointer is when there is no such tree (a new document, a repair of a tree outside the schema, a rebuild whose latest version does not read back).
+`refs.BlockTypes` reads each target's type as the block index will hold it:
+a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.IndexBlocks` takes it), any other from its current `document_blocks` rows (one query for all of a write's introduced pointers), and a target no block holds is accepted.
+The refusal is `400 INVALID_OP` on `attributes` on the edit route and `400 INVALID_MARKDOWN` on every other;
+a pointer the write leaves unchanged is never refused.
+A browser's write and the block-index reconciliation are never refused, and store the pointer as any other.
+Every block-aware read lists a pointer's edge only while its target has an allowed type:
+each `block_refs` row a pointer writes carries the attribute's targets as `to_types` (null:
+no limit), and the `graph_edges` block arm, `readEdgeRows`' document `?from=` arm and `refs.BlockLinks` list a row only while `block_ref_listed(to_types, to_id)` holds, true when no current `document_blocks` row of the target has a type outside `to_types` (migration 0150).
+Retyping a target hides or shows the edge with no rewrite of the citing document, a pinned pointer is limited by its target's current type, and the index refreshes `to_types` on every row it keeps, so a change of an attribute's targets reaches a document's rows at its next index (a version write, or `rebuild-refs`).
+The editor's typed-block commands refuse what they can see:
+a value that is not canonical, and a pointer to a block of their own document of a disallowed type (`packages/proof-editor/AGENTS.md`).
+
+A pointer is written in its typed block's opening line, so the extraction also finds it as a mention that typed block holds.
+`refs.IndexBlocks` writes one edge of the attribute's kind per typed block, attribute and target, and keeps the typed block's own `mentions` edge to a target only while the block holds more references to it than its pointers do (a string attribute citing it too, say).
+Prose in the typed block's children is held by those children, so a pointer and a prose citation of one target are two edges.
+A pointer whose typed block is no graph node writes no row.
+A typed block repeating the id of a typed block before it in document order holds no pointer (`pmdoc.BlockPointers`), and `refs.IndexBlocks` writes a pointer only from the id's node, the first holder of the id that the render gives an offset, when that node is the typed block holding it (its type):
+a later typed holder's values are neither edges, nor charged against the first holder's mentions.
+Only typed ids count in `BlockPointers` because only they are written in the markdown, each so that it reads back as the tree holds it (`pmdoc.TypedBlockIDAttribute`;
+a U+0000 is written U+FFFD, and `BlockPointers` lists the id so), and so are the same in the tree a version write indexes and in the markdown the reconciliation reads back (a paragraph's id is not written there): both paths write the same rows.
+A list item or table cell before a typed block has no offset and is never the node, so the typed block keeps its pointers.
+The type check does not make the paths agree;
+it keeps a typed block's pointers off a first holder of its id that is not typed (a paragraph, a heading), from which both paths would otherwise write the same wrong edge.
+The refusal checks `BlockPointers`' pointers, so a pointer a write introduces on a later holder of a typed id is never judged, and the index writes no edge for it while it repeats the id;
+settlement's `EnsureBlockIDs` then gives that block a fresh id, and its pointer becomes an edge it was never refused for, while the readers still hide a disallowed target (`block_ref_listed`).
+That needs a repeat the live document already carries, since a write cannot make one (`RepeatedBlockID`).
+`heldByABlock` hides the citing document's own `mentions` edge behind a block row of any kind, listed or not, so that edge never shows beside or in place of a pointer's.
+The document-level reads that never looked at blocks - `GET /api/v1/artifacts/{id}/references` (`refs.ReferencedBy`, `refs.Outgoing`) and the issue references closure (`refs.Closure`) - keep listing the citing document as a `mentions` of every target, allowed type or not, since the value is a reference in the document's text.
 
 An ask block whose id no ask of its document indexes is a copy when another document of the same owner (the same issue, or for a project document the same project's other documents) holds an ask under that id that asks, or once asked (its `ask.opened` and `ask.edited` events), exactly what the block asks - its question, options, `multiple` and urgency, which a copy carries unchanged (`copiedAskSources`, `docs/copied_asks.go`):
 a record copy of a spec uploaded beside it carries its blocks under their ids.
@@ -2184,7 +2239,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `GET /api/v1/projects/{key}/architecture` (`api/architecture_tree.go`, authAny, `404 SOURCE_NOT_FOUND`) computes the counting rule once:
   every project issue's effective set joined to the component containment closure (recursive over `components.parent`, depth-capped), one row per (issue, component) with the strongest way it qualified (`direct` > `inherited` > `contained` with `via`), aggregated in Go into `done`/`total` (distinct issues, icebox and closed included) and `own_*` (those naming the component itself), plus the `unassigned` (no row anywhere), `not_architectural` (a `none` row, own or inherited), and `retired_links` (non-empty `unknown`) lists and `totals` (`components_without_work` counts non-external components with `total == 0`).
   `graph_edges` gains the `affects` arm (`issue` → `component` per explicit member, `created_at` the row's `updated_at`;
-  inherited attachments are not edges), `refs.Kinds` learns `part_of`/`depends_on`/`affects`, `refs.resolveNodes` loads `component` nodes from the current model (a retired id resolves to nothing and its edges are omitted), and `text.Extract` parses `dispatch://<PROJECT>/component/<id>` so a mention of a component is an ordinary `mentions` edge.
+  inherited attachments are not edges), `model.GraphEdgeKinds`, the structural edge kinds, holds `part_of`/`depends_on`/`affects`, `refs.resolveNodes` loads `component` nodes from the current model (a retired id resolves to nothing and its edges are omitted), and `text.Extract` parses `dispatch://<PROJECT>/component/<id>` so a mention of a component is an ordinary `mentions` edge.
 
 - Per-user agent state is its own tables and route pair, not a key in `GET /api/v1/me/state` (that map is keyed by issue).
   `PUT /api/v1/me/agents/{session_id}/state` (human-only) takes `{cleared_before?, read_through?, read_replies?}` (the first two RFC3339;
