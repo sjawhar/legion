@@ -340,9 +340,13 @@ reloaded. From a checkout of this repository with `bun install` run,
 exits 1 when it advertises extended CONNECT, 0 when it does not or speaks no HTTP/2, and 2 when it
 gets no answer. Run it after any change to the proxy.
 
-An open document keeps a second WebSocket, `GET /ws/doc/<id>`, for as long as it is open. Dispatch
-writes to each socket at least every 15 seconds however quiet the page is, so a proxy whose idle
-timeout is longer than 15 seconds never closes either one.
+An open document keeps a second WebSocket, `GET /ws/doc/<id>`, for as long as it is open. Each
+socket carries a message while the page is quiet: Dispatch writes a heartbeat to `/ws/live` every
+15 seconds, and on `/ws/doc` the page's document provider renews its presence every 15 to 18
+seconds, which ygo sends back to it. A page connected read-only gets an empty presence reply
+instead: a closed issue's document, and also a page on an open issue whose `schema_version` no
+longer matches the server's, such as a tab left open across an upgrade. A proxy whose idle timeout
+is longer than about 20 seconds therefore never closes either one.
 
 ## Running more than one copy
 
