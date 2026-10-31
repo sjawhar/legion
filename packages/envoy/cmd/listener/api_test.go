@@ -2886,10 +2886,10 @@ func TestInterestSubscribeStoresOnlyTopicsThatCannotReachAnotherSessionsInbox(t 
 
 // Every private stream subject is left out of a registration, not only the agent subjects: a
 // failed-delivery lane carries the undelivered message's payload and the session it was for (the
-// session's own lane included), and the Legion controller lane is heard through the controller
-// role and never registered, so neither is stored, nor is a wildcard reaching them
-// (notifications.envoy.>). A GitHub topic, a team topic and the session's own agent subject are
-// stored, and the answer stays 200.
+// session's own lane included), and a Legion controller notice lane is for the session holding
+// that project's controller role, which this one does not, so neither is stored, nor is a
+// wildcard reaching them (notifications.envoy.>). A GitHub topic, a team topic and the session's
+// own agent subject are stored, and the answer stays 200.
 func TestInterestSubscribeLeavesOutEveryPrivateStreamSubject(t *testing.T) {
 	rig := newInterestRig(t)
 	own := contracts.AgentSubject(interestSession)
@@ -2924,6 +2924,97 @@ func TestInterestSubscribeLeavesOutEveryPrivateStreamSubject(t *testing.T) {
 	}
 	if !slices.Equal(notRegistered, refused) {
 		t.Fatalf("warnings = %q, want exactly %v named as not registered", answer.Warnings, refused)
+	}
+}
+
+// The controller notice lane of the project whose controller role a session holds is the one
+// private stream subject its registration stores: a Legion controller receives those notices from
+// its own consumer, whose filter is built from the stored topics, and no longer from a core
+// subscription of its own (INFRA-771). The lane is answered, stored and routed by the listener's
+// fan-out (Registry.Match), with the issue topic the session also follows.
+func TestInterestSubscribeStoresTheControllerLaneOfTheRoleTheSessionHolds(t *testing.T) {
+	rig := newInterestRig(t)
+	own := contracts.AgentSubject(interestSession)
+	const (
+		role = "legion-ACME-controller"
+		lane = "notifications.legion.ACME.controller"
+	)
+	claimRoles(t, rig.deps.registry, interestSession, role)
+	awaitRoles(t, rig.deps.registry, interestSession, role)
+
+	answer := subscribeInterest(t, rig.mux, []string{lane, interestIssueTopic})
+
+	want := []string{own, interestIssueTopic, lane, contracts.RoleTopicPrefix + role}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	for _, warning := range answer.Warnings {
+		if strings.HasPrefix(warning, lane+" was not registered") {
+			t.Fatalf("warnings = %q, want the lane of the role the session holds registered", answer.Warnings)
+		}
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	if !slices.ContainsFunc(rig.deps.registry.Match("test-machine", lane), func(item store.Interest) bool { return item.SessionID == interestSession }) {
+		t.Fatalf("Match(%s) misses %s: the stored lane must reach its controller", lane, interestSession)
+	}
+}
+
+// A controller's registration is held to its own project and to that one lane: another project's
+// controller notice lane, another session's agent subject, a failed-delivery lane and a wildcard
+// over the family are left out of it with the warning each other session gets, since the stored
+// topics are the filter of a consumer that would otherwise hand this controller another project's
+// notices or another session's messages.
+func TestInterestSubscribeLeavesAControllerEveryPrivateSubjectButItsOwnLane(t *testing.T) {
+	rig := newInterestRig(t)
+	own, other := contracts.AgentSubject(interestSession), contracts.AgentSubject("ses_other")
+	const (
+		role = "legion-ACME-controller"
+		lane = "notifications.legion.ACME.controller"
+	)
+	claimRoles(t, rig.deps.registry, interestSession, role)
+	awaitRoles(t, rig.deps.registry, interestSession, role)
+	refused := []string{
+		"notifications.legion.OTHER.controller",
+		"notifications.legion.>",
+		"notifications.legion.*.controller",
+		other,
+		bus.ExceptionTopicPrefix + own,
+	}
+
+	answer := subscribeInterest(t, rig.mux, append([]string{lane}, refused...))
+
+	want := []string{own, lane, contracts.RoleTopicPrefix + role}
+	if !slices.Equal(answer.Topics, want) {
+		t.Fatalf("answered topics = %v, want %v", answer.Topics, want)
+	}
+	notRegistered := make([]string, 0, len(refused))
+	for _, warning := range answer.Warnings {
+		if topic, _, found := strings.Cut(warning, " was not registered"); found {
+			notRegistered = append(notRegistered, topic)
+		}
+	}
+	if !slices.Equal(notRegistered, refused) {
+		t.Fatalf("warnings = %q, want exactly %v named as not registered", answer.Warnings, refused)
+	}
+	stored, err := rig.deps.registry.Get(context.Background(), interestSession)
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
+	}
+	// The fan-out is asked for the literal subjects a message can be published on; the two
+	// wildcards above are topics a registration names, never subjects.
+	for _, subject := range []string{"notifications.legion.OTHER.controller", other, bus.ExceptionTopicPrefix + own} {
+		if matched := rig.deps.registry.Match("test-machine", subject); len(matched) != 0 {
+			t.Fatalf("Match(%s) = %v, want no session", subject, matched)
+		}
 	}
 }
 

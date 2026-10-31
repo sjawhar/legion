@@ -412,11 +412,16 @@ func (l *sessionLocks) lock(sessionID string) (unlock func()) {
 }
 
 // sessionConsumerFilter is the subjects sessionID's consumer filters on: its agent subject and
-// every one of topics the stream stores (bus.StreamCaptures), a team topic among them. A topic
-// the stream does not store reaches the session on no path of its own: a role lane reaches its
-// holder as a forward on the holder's agent subject, and a topic an earlier build's row still
-// names, which /v1/interests/subscribe refuses now, reaches nothing. SessionConsumers reduces the
-// list to filters that do not overlap.
+// every one of topics the stream stores (bus.StreamCaptures), a team topic among them. A Legion
+// controller's notice lane (notifications.legion.<project>.controller) is one of those topics
+// while the session holds that project's controller role, and this filter is the whole of how it
+// now reaches the controller: the lane's live core subscription, which handed the session only
+// what was published while it was subscribed, went with the rest of the core receive path
+// (INFRA-771), so a notice published while the controller was away is delivered from the stream
+// when it returns. A topic the stream does not store reaches the session on no path of its own: a
+// role lane reaches its holder as a forward on the holder's agent subject, and a topic an earlier
+// build's row still names, which /v1/interests/subscribe refuses now, reaches nothing.
+// SessionConsumers reduces the list to filters that do not overlap.
 //
 // A topic the server would refuse as a filter subject (bus.CheckFilterSubject: an empty token, as
 // in a GitHub topic that spells a repository name with a dot, or a `>` before the last token) is

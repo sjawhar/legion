@@ -1551,6 +1551,27 @@ func claimRoles(t *testing.T, registry *store.Registry, sessionID string, roles 
 	}
 }
 
+// awaitRoles waits until the registry's role claim view names sessionID as the holder of each
+// role, which is the view every route reads (store.Registry.RolesHeldBy): claimRoles writes the
+// claims, and the view follows the bucket's watch a moment later. A test whose route reads a
+// session's roles - a registration naming a Legion controller notice lane - waits here after
+// claiming.
+func awaitRoles(t *testing.T, registry *store.Registry, sessionID string, roles ...string) {
+	t.Helper()
+	waitFor(t, 10*time.Second, "the role claim view to name "+sessionID+" as the holder of "+strings.Join(roles, ", "), func() bool {
+		held, err := registry.RolesHeldBy(sessionID)
+		if err != nil {
+			return false
+		}
+		for _, role := range roles {
+			if !slices.Contains(held, role) {
+				return false
+			}
+		}
+		return true
+	})
+}
+
 // waitForRegistry runs over a test's registry the gate the listener's own start runs
 // (store.Registry.WaitForCacheReady): the interest cache is waited for as ready, and the role
 // claim view as complete, not merely ready. After it returns, Match sees every existing

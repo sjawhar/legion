@@ -201,13 +201,17 @@ func DispatchPermissions(machineID string) Permissions {
 // subject (contracts.AgentStreamControlSubject). A session subscribes to no notification topic:
 // it receives what its consumer delivers, on that one subject, and nothing else.
 //
-// What this set does not solve: a Legion controller session subscribes over core NATS to its
-// project's notice lane, notifications.legion.<project>.controller (the daemon's
-// notify.ControllerTopic), which this set refuses, so that lane needs a home of its own before a
-// deployment hands a session this grant, which is why dispatch://INFRA-778 applies it and nothing
-// here does. Every session on a shared user holds the same set, so the relay subject carries *
-// and one session can read another's relay frames until the per-session credentials of
-// dispatch://INFRA-840.
+// A Legion controller session needs nothing added for its project's notice lane
+// (notifications.legion.<project>.controller, the daemon's notify.ControllerTopic): it registers
+// that lane as an interest while it holds the project's controller role
+// (bus.ReachesPrivateStreamSubject), and the listener's relay hands it the notices on the relay
+// subject above, as it hands it every other message. No session subscribes to the lane itself,
+// which this set rightly refuses.
+//
+// What this set does not solve: every session on a shared user holds the same set, so the relay
+// subject carries * and one session can read another's relay frames until the per-session
+// credentials of dispatch://INFRA-840. dispatch://INFRA-778 is what hands a deployment's sessions
+// this grant; nothing here does.
 func SessionPermissions() Permissions {
 	return Permissions{
 		Publish:   Rules{Allow: []string{inboxes, contracts.AgentStreamFramesSubject("*")}},

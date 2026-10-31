@@ -1389,22 +1389,48 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
-		// A topic reaching a private stream subject (another session's inbox, a failed-delivery
-		// lane, the Legion controller lane; bus.ReachesPrivateStreamSubject) is left out and named in
-		// a warning, the rest of the registration stored: the topics stored here drive the
-		// listener's fan-out to serve-port sessions (`store.Registry.Match`) and the filters of
-		// the session's own consumer (`sessionConsumerFilter`), and such a topic would hand this
-		// session messages meant for another session or for the controller's role holder. A
-		// registration naming one is not refused whole, since a released pi-envoy registers every
-		// subject it has open, a fork parent's agent subject and any topic its envoy_subscribe took
-		// included. The registry drops such a topic from the stored row too
-		// (`store.Registry.Upsert`), so a row an earlier build stored with one is cleaned by this
-		// registration.
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
+		// The roles this session holds decide one topic of the registration: its own project's
+		// controller notice lane (notifications.legion.<project>.controller, the daemon's
+		// notify.ControllerTopic), which its holder registers because a Legion controller
+		// receives that lane from its own consumer now and from no core subscription of its own
+		// (INFRA-771). The view is read only when a registration names such a lane, so no other
+		// registration is refused while it cannot answer (store.ErrRoleViewNotReady), and one
+		// that does is refused the bus-unavailable 503 rather than stored without the lane: the
+		// stored topics are the consumer's filter, and a notice published while the lane is out
+		// of it reaches the controller on no later path.
+		var roles []string
+		if slices.ContainsFunc(body.Topics, func(topic string) bool {
+			_, lane := bus.ControllerNoticeRole(topic)
+			return lane
+		}) {
+			held, err := d.registry.RolesHeldBy(body.SessionID)
+			if err != nil {
+				logger.Warn("listener read of the session's roles failed",
+					slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
+				writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
+				return
+			}
+			roles = held
+		}
+		// A topic reaching a private stream subject that is not this session's (another session's
+		// inbox, a failed-delivery lane, another project's controller notice lane;
+		// bus.ReachesPrivateStreamSubject) is left out and named in a warning, the rest of the
+		// registration stored: the topics stored here drive the listener's fan-out to serve-port
+		// sessions (`store.Registry.Match`) and the filters of the session's own consumer
+		// (`sessionConsumerFilter`), and such a topic would hand this session messages meant for
+		// another session or for another project's controller. A registration naming one is not
+		// refused whole, since a released pi-envoy registers every subject it has open, a fork
+		// parent's agent subject and any topic its envoy_subscribe took included. The registry
+		// drops such a topic from the stored row too (`store.Registry.Upsert`), so a row an
+		// earlier build stored with one, and the lane of a session that has since lost the
+		// controller role, are cleaned by this registration.
 		warnings := make([]string, 0)
 		topics := make([]string, 0, len(body.Topics)+1)
 		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
-			if bus.ReachesPrivateStreamSubject(body.SessionID, topic) {
-				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or the Legion controller lane), and of those a session registers only its own agent subject, %s",
+			if bus.ReachesPrivateStreamSubject(body.SessionID, topic, roles) {
+				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or a Legion controller notice lane), and of those a session registers only its own agent subject, %s, and the notice lane of a project whose controller role it holds",
 					topic, contracts.AgentSubject(body.SessionID)))
 				continue
 			}
@@ -1428,8 +1454,6 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			logger.Warn("listener subscribe refused topics reaching private stream subjects",
 				slog.String("session_id", body.SessionID), slog.Any("refused", warnings))
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
-		defer cancel()
 		// The session's consumer is filtered on the topics its interest row will hold, so the
 		// write's own merge is computed here, before the write: store.Registry.UpsertWithin adds
 		// these topics to the row it holds and drops every topic reaching a private stream subject
@@ -1444,7 +1468,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeStoreError(ctx, w, err, http.StatusServiceUnavailable)
 			return
 		}
-		topics = store.MergedTopics(body.SessionID, stored, topics)
+		topics = store.MergedTopics(body.SessionID, roles, stored, topics)
 		// The delivery decision comes before both writes: a session is delivered to through its
 		// own consumer alone, so a registration this listener cannot give one is refused and must
 		// leave no interest row and no session entry behind - the row would make the listener

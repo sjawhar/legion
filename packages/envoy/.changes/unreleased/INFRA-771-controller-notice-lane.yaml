@@ -1,0 +1,17 @@
+kind: Changed
+body: |-
+  A Legion controller's notice lane now reaches it from its own session consumer.
+  `POST /v1/interests/subscribe` stores `notifications.legion.<project>.controller` for the session
+  whose role claims name it as `legion-<project>-controller`'s holder
+  (`bus.ControllerNoticeRole`, which pairs the lane with its role token from the one project token
+  the lane names), so the lane is in the row the fan-out reads and in the filter of the session's
+  own consumer, and a notice published while the controller was away is delivered when it
+  registers again. Every other private stream subject is left out as before, a controller's
+  registration included: another session's agent subject, any failed-delivery lane, another
+  project's controller lane and every wildcard over the family, each named in `warnings` with the
+  rest of the registration stored. The lane also leaves the stored row at the next write once the
+  session no longer holds the role (`store.Registry.Upsert`, `/v1/interests/unsubscribe`), and a
+  registration that names a lane is answered the bus-unavailable 503 while the role claim view
+  cannot say who holds it, rather than stored without the lane. Before this, the lane reached a
+  controller only over a plain core NATS subscription its plugin opened, which INFRA-771 removes
+  (INFRA-771).

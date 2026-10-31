@@ -189,7 +189,7 @@ func TestMergeForUpsert_SuccessfulGetMergesTopics(t *testing.T) {
 	}
 	item := Interest{SessionID: "ses_x", MachineID: "m1", Dir: "/workspace"}
 
-	result, err := mergeForUpsert(cur, nil, item, []string{"topic.c"}, 42)
+	result, err := mergeForUpsert(cur, nil, item, []string{"topic.c"}, 42, nil)
 	if err != nil {
 		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestMergeForUpsert_ErrKeyNotFoundCreatesNewEntry(t *testing.T) {
 		Dir:       "/workspace",
 	}
 
-	result, err := mergeForUpsert(Interest{}, natsgo.ErrKeyNotFound, item, []string{"topic.fresh"}, 100)
+	result, err := mergeForUpsert(Interest{}, natsgo.ErrKeyNotFound, item, []string{"topic.fresh"}, 100, nil)
 	if err != nil {
 		t.Fatalf("ErrKeyNotFound must be treated as new entry, not propagated: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestMergeForUpsert_TransientErrorRefusesToWrite(t *testing.T) {
 		Dir:       "/workspace",
 	}
 
-	_, err := mergeForUpsert(Interest{}, transient, item, []string{"topic.heartbeat"}, 99)
+	_, err := mergeForUpsert(Interest{}, transient, item, []string{"topic.heartbeat"}, 99, nil)
 	if err == nil {
 		t.Fatal("transient KV error MUST be returned, not silently swallowed")
 	}
@@ -261,7 +261,7 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 	// listener config and matches cur, but heartbeat body sends only agent topic.
 	item := Interest{SessionID: "ses_x", MachineID: "example-host-mx", Dir: "/home/ubuntu/example-repo/rl-eval/default"}
 
-	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x"}, 200)
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x"}, 200, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -286,8 +286,11 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 
 // A row stored before the listener refused topics reaching a private stream subject keeps them
 // until the session's next registration, which drops them: another session's agent subject, a
-// failed-delivery lane wildcard, a Legion controller lane and notifications.> go, while the
-// session's own agent subject, the issue topic it followed and the topic it registers now stay.
+// failed-delivery lane wildcard, a controller notice lane of a project whose controller role the
+// session does not hold and notifications.> go, while the session's own agent subject, the issue
+// topic it followed and the topic it registers now stay. The lane stays for the session whose
+// claims name that project's controller role, since the row is the filter of the consumer those
+// notices now reach it through.
 func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testing.T) {
 	cur := Interest{
 		SessionID: "ses_x",
@@ -302,14 +305,25 @@ func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testin
 		},
 	}
 	item := Interest{SessionID: "ses_x", MachineID: "m1"}
+	registered := []string{"notifications.agent.ses_x", "notifications.github.acme.widgets.pr.7.>"}
+	kept := []string{"notifications.agent.ses_x", "notifications.dispatch.issue.KEY-1.>", "notifications.github.acme.widgets.pr.7.>"}
 
-	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x", "notifications.github.acme.widgets.pr.7.>"}, 7)
-	if err != nil {
-		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
-	}
-	want := []string{"notifications.agent.ses_x", "notifications.dispatch.issue.KEY-1.>", "notifications.github.acme.widgets.pr.7.>"}
-	if !slices.Equal(result.Topics, want) {
-		t.Fatalf("merged topics = %v, want %v", result.Topics, want)
+	for name, tc := range map[string]struct {
+		roles []string
+		want  []string
+	}{
+		"no role":                  {want: kept},
+		"another project's":        {roles: []string{"legion-OTHER-controller"}, want: kept},
+		"the project's controller": {roles: []string{"legion-ACME-controller"}, want: append(slices.Clone(kept), "notifications.legion.ACME.controller")},
+	} {
+		result, err := mergeForUpsert(cur, nil, item, registered, 7, tc.roles)
+		if err != nil {
+			t.Fatalf("%s: mergeForUpsert returned unexpected error: %v", name, err)
+		}
+		want := slices.Sorted(slices.Values(tc.want))
+		if !slices.Equal(result.Topics, want) {
+			t.Fatalf("%s: merged topics = %v, want %v", name, result.Topics, want)
+		}
 	}
 }
 

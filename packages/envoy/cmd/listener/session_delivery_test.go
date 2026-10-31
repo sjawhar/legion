@@ -251,6 +251,40 @@ func TestSessionConsumerFollowAddedBySecondRegistrationIsInTheFilterWhenItAnswer
 	rig.awaitPending(t, sessionID, 1)
 }
 
+// A Legion controller's notices reach it through its own consumer: the registration of the
+// session holding legion-<project>-controller carries notifications.legion.<project>.controller
+// into the consumer's filter, so a notice published while the controller was away between
+// registrations is pending for it when it comes back, and another project's lane is not. Until
+// INFRA-771 that lane reached the session as a live core subscription alone, which handed it
+// nothing published while it was gone.
+func TestSessionConsumerFiltersOnTheControllerNoticeLaneOfTheRoleItHolds(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	const (
+		sessionID = "ses_controller"
+		role      = "legion-ACME-controller"
+		lane      = "notifications.legion.ACME.controller"
+	)
+	claimRoles(t, rig.harness.registry, sessionID, role)
+	awaitRoles(t, rig.harness.registry, sessionID, role)
+	registration := `{"session_id":"ses_controller","self_subscribed":true,
+		"topics":["notifications.legion.ACME.controller"],"delivery":{"consumer":true,"epoch":"e"}}`
+	rig.subscribe(t, registration)
+
+	want := []string{contracts.AgentSubject(sessionID), lane}
+	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
+		t.Fatalf("consumer filters %v, want %v: the lane the controller registered must be in them", got, want)
+	}
+
+	// The controller is away; a notice and another project's are published; it registers again.
+	rig.store(t, lane)
+	rig.store(t, "notifications.legion.OTHER.controller")
+	answer := rig.subscribe(t, registration)
+	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
+		t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
+	}
+	rig.awaitPending(t, sessionID, 1)
+}
+
 func TestSessionConsumerOverlappingFollowsAreAccepted(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	const sessionID = "ses_overlap"

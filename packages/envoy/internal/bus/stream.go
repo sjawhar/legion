@@ -153,10 +153,10 @@ var streamSubjects = []string{
 
 // privateStreamSubjects are the subjects of streamSubjects a topic under which ever carries one
 // agent session's private payload, read from the code that publishes it. A session may register
-// no interest reaching one but its own agent subject (ReachesPrivateStreamSubject, which
-// POST /v1/interests/subscribe applies), since a registered interest is any topic a caller names
-// and the stored topics drive both the listener's fan-out and the session's own consumer filter.
-// Every other stream subject is deliberately absent, which
+// no interest reaching one but its own agent subject and its own project's controller notice lane
+// (ReachesPrivateStreamSubject, which POST /v1/interests/subscribe applies), since a registered
+// interest is any topic a caller names and the stored topics drive both the listener's fan-out and
+// the session's own consumer filter. Every other stream subject is deliberately absent, which
 // TestEveryStreamSubjectIsClassifiedForInterestRegistration names one by one, so a new stream
 // subject carrying a session's payload cannot be added without listing it here.
 var privateStreamSubjects = []string{
@@ -164,7 +164,8 @@ var privateStreamSubjects = []string{
 	// message sent to one session (contracts.AgentSubject).
 	contracts.AgentTopicPrefix + ">",
 	// The Legion daemon's notices for one project's controller (daemon notify.ControllerTopic),
-	// which its role holder hears through the role and never registers.
+	// which only the session holding that project's controller role may register
+	// (ControllerNoticeRole), and no other session may.
 	"notifications.legion.>",
 	// A failed delivery's report, carrying the undelivered message's payload and the session it
 	// was for (cmd/listener publishDeliveryException); a session's own lane included.
@@ -174,16 +175,52 @@ var privateStreamSubjects = []string{
 	ExceptionTopicPrefix + "notifications.team.>",
 }
 
+// LegionNoticeTopicPrefix opens every Legion daemon notice subject (LEGION_NOTICE_TOPIC_PREFIX,
+// packages/contracts/src/subject.ts).
+const LegionNoticeTopicPrefix = "notifications.legion."
+
+// controllerNoticeSuffix ends the one subject of that family naming a controller rather than an
+// issue (legionControllerNoticeSubject in packages/contracts, notify.ControllerTopic in the Go
+// daemon, which lists what it carries).
+const controllerNoticeSuffix = ".controller"
+
+// ControllerNoticeRole reports the Legion role token whose holder topic's notices are for, and
+// whether topic is a controller notice lane at all: project <p>'s lane is
+// notifications.legion.<p>.controller and its role token is legion-<p>-controller (controllerToken,
+// packages/contracts/src/legion-roles.ts). Both are read here from the one project token the lane
+// names, so no caller builds the pair a second time. Only a literal lane names a role: a wildcard
+// token, an empty project, a longer subject, and the issue notices of the same family
+// (notifications.legion.<p>.<issue key>) name none.
+func ControllerNoticeRole(topic string) (string, bool) {
+	project, found := strings.CutPrefix(topic, LegionNoticeTopicPrefix)
+	if !found {
+		return "", false
+	}
+	project, found = strings.CutSuffix(project, controllerNoticeSuffix)
+	if !found || project == "" || strings.ContainsAny(project, ".*>") {
+		return "", false
+	}
+	return "legion-" + project + "-controller", true
+}
+
 // ReachesPrivateStreamSubject reports whether a topic sessionID registers as an interest reaches a
-// private stream subject (privateStreamSubjects) other than sessionID's own agent subject: it
-// overlaps one under NATS wildcard rules (subjectsOverlap), so another session's inbox, a
-// failed-delivery lane (a session's own included), the Legion controller lane, and wildcards
-// reaching any of them (notifications.>, notifications.*.<x>, notifications.envoy.>) count, and it
-// is not sessionID's own agent subject as one literal subject. A session id holding `*` or `>`
-// makes a wildcard of its "own" agent subject, which is no session's alone and counts too.
-func ReachesPrivateStreamSubject(sessionID, topic string) bool {
+// private stream subject (privateStreamSubjects) that is not its own: it overlaps one under NATS
+// wildcard rules (subjectsOverlap), so another session's inbox, a failed-delivery lane (a session's
+// own included), another project's controller notice lane, and wildcards reaching any of them
+// (notifications.>, notifications.*.<x>, notifications.envoy.>) count. Two literal subjects are a
+// session's own: its agent subject, and the controller notice lane of a project whose controller
+// role roles names (ControllerNoticeRole), which its holder registers because a session receives
+// what its own consumer delivers and nothing else, the lane's core subscription having gone with
+// the rest of that receive path (INFRA-771). roles is what the session holds, as the role claims
+// say (store.Registry.RolesHeldBy), so a session that lost the role loses the lane at its next
+// registration. A session id holding `*` or `>` makes a wildcard of its "own" agent subject, which
+// is no session's alone and counts too.
+func ReachesPrivateStreamSubject(sessionID, topic string, roles []string) bool {
 	if !slices.ContainsFunc(privateStreamSubjects, func(private string) bool { return subjectsOverlap(topic, private) }) {
 		return false
+	}
+	if role, lane := ControllerNoticeRole(topic); lane {
+		return !slices.Contains(roles, role)
 	}
 	return topic != contracts.AgentSubject(sessionID) || strings.ContainsAny(sessionID, "*>")
 }

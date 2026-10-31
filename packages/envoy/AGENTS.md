@@ -3133,13 +3133,17 @@ Each item below names an endpoint and its method, then its contract, and an item
   It is the whole registration, unlike a private-subject topic below, because no live caller names one
   — a census of production on 2026-10-30 read all 596 interest rows and found every uncaptured non-role topic in use to be a `notifications.team.*` topic, which this build stores.
   A topic reaching a private stream subject (`bus.privateStreamSubjects`:
-  each session's inbox `notifications.agent.>`, the failed-delivery lane `notifications.envoy.exceptions.notifications.agent.>`, the Legion controller lane `notifications.legion.>`) other than the session's own literal `notifications.agent.<id>` — another session's agent subject, any failed-delivery lane (its own included), a controller lane, or a wildcard overlapping one (`notifications.agent.*`, `notifications.envoy.>`, `notifications.>`, `notifications.*.<x>`;
-  `bus.ReachesPrivateStreamSubject`) — is not stored, since the stored topics drive both the fan-out to serve-port sessions and the filter of the session's own consumer, and such a topic would hand the session messages meant for another session or for the controller's role holder:
+  each session's inbox `notifications.agent.>`, the failed-delivery lane `notifications.envoy.exceptions.notifications.agent.>`, the Legion controller notice lane `notifications.legion.>`) that is not the session's own — another session's agent subject, any failed-delivery lane (its own included), the controller notice lane of a project whose controller role the session does not hold, or a wildcard overlapping one (`notifications.agent.*`, `notifications.envoy.>`, `notifications.>`, `notifications.*.<x>`;
+  `bus.ReachesPrivateStreamSubject`) — is not stored, since the stored topics drive both the fan-out to serve-port sessions and the filter of the session's own consumer, and such a topic would hand the session messages meant for another session or for another project's controller:
   the rest of the registration is stored, the answer stays 200, and `warnings` names each topic left out (`<topic> was not registered: …`).
+  Two literal subjects are a session's own: its `notifications.agent.<id>`, and `notifications.legion.<project>.controller` while the role claims name it as `legion-<project>-controller`'s holder (`bus.ControllerNoticeRole` pairs the lane with that token from the one project token the lane names, so neither is built twice;
+  `store.Registry.RolesHeldBy` says who holds it).
+  Its holder registers that lane because a Legion controller receives those notices from its own consumer, the lane's core subscription having gone with the rest of the core receive path;
+  a registration naming a lane is answered the bus-unavailable 503 while that view cannot answer, rather than stored without the lane, and a registration naming none reads no view at all.
   That one is not refused whole because a released pi-envoy registers every subject it has open, a fork parent's agent subject and any topic its `envoy_subscribe` took included.
   A row an earlier build stored with such a topic is cleaned at the session's next registration:
   the registry drops every such topic from the merged row, not only from the incoming topics (`store.Registry.Upsert`, which `/v1/roles/set` writes through too;
-  `/v1/interests/unsubscribe` drops them from the row it rewrites as well), so `Match` stops fanning those messages out to the session after its next heartbeat.
+  `/v1/interests/unsubscribe` drops them from the row it rewrites as well), so `Match` stops fanning those messages out to the session after its next heartbeat, and so does the lane of a session that has since lost the controller role.
 
 - The stored subscription keeps the `machine_id` of the listener the session first subscribed through, and a later registration through another listener changes only the session entry's:
   the subscription's says which listener fans a topic out to the session (`store.Registry.Match`).
