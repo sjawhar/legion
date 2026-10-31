@@ -2074,15 +2074,30 @@ func TestIdenticalViewsShareOneRecompute(t *testing.T) {
 	rig := newHubRig(t, nil)
 	seedHubSettings(t, rig.database)
 	upsertPR(t, rig.database, hubPR(1, rig.clock.Now().Add(-30*time.Hour)))
+	// A measures view starts the generation and holds it open while the timeline views measured
+	// here subscribe after it: the relay's feed, taken on a goroutine of the generation's own,
+	// marks every view it finds dirty when it arrives (applyFeed), and that recompute belongs to
+	// none of what this measures.
+	warm := newFakeLiveConn()
+	rig.hub.Subscribe(warm, subscribeFrame("m", presetView(deliveryLiveMeasures, 28, "")))
+	warm.snapshot(t, 5*time.Second, "m")
+	rig.settle(t)
 	first, second := newFakeLiveConn(), newFakeLiveConn()
 	start := rig.mark()
 	rig.hub.Subscribe(first, subscribeFrame("a", presetView(deliveryLiveTimeline, 7, "author=octocat&repo=acme/widgets")))
 	first.snapshot(t, 5*time.Second, "a")
+	first.freshness(t, time.Second, "the verdict the running generation already knows")
 	// The same view, its query's parameters in another order.
 	rig.hub.Subscribe(second, subscribeFrame("b", presetView(deliveryLiveTimeline, 7, "repo=acme%2Fwidgets&author=octocat")))
 	second.snapshot(t, 5*time.Second, "b")
 	second.freshness(t, time.Second, "the verdict the first view's read set, after the second's snapshot")
-	if n := rig.count(start, recomputeBegin("")); n != 1 {
+	timeline := func(cause string) func(deliveryHubNote) bool {
+		begin := recomputeBegin(cause)
+		return func(note deliveryHubNote) bool {
+			return begin(note) && strings.HasPrefix(note.view, deliveryLiveTimeline)
+		}
+	}
+	if n := rig.count(start, timeline("")); n != 1 {
 		t.Fatalf("recomputes for two identical views = %d, want 1", n)
 	}
 
@@ -2090,7 +2105,7 @@ func TestIdenticalViewsShareOneRecompute(t *testing.T) {
 	upsertPR(t, rig.database, hubPR(2, rig.clock.Now().Add(-time.Hour)))
 	first.delta(t, 3*time.Second, "a")
 	second.delta(t, 3*time.Second, "b")
-	if n := rig.count(merged, recomputeBegin(deliveryCauseChange)); n != 1 {
+	if n := rig.count(merged, timeline(deliveryCauseChange)); n != 1 {
 		t.Fatalf("recomputes for one merge both views show = %d, want 1", n)
 	}
 }

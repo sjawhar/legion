@@ -327,11 +327,20 @@ func (m *mentionSender) keepClaims() {
 // claim this sender last took. A send the lanes have handed out is not in the snapshot, and the
 // statement moves only a row that still carries the claim this sender wrote, so a refresh can
 // never move the claim a starting send has just taken out from under that send's settle.
+//
+// The statement runs without the lock, so for its length a row carries a newer claim than the map
+// records. That gap is safe: the row's claim only moves forward, so the delivery sweep, which
+// reads committed rows past a lease, sees it live sooner, never later, and the lane's bound send
+// accepts any claim at or past the one it carries (model.DeliveryClaimMineSQL). Its result is
+// recorded only for a key whose claim the map still holds as the snapshot took it, so a claim
+// written meanwhile - a keyed repeat's (queueLocked) - is never set back.
 func (m *mentionSender) refreshHeldClaims(ctx context.Context) {
 	m.mu.Lock()
 	queued := make([]mentionClaim, 0, len(m.claims))
+	snapshot := make(map[mentionKey]time.Time, len(m.claims))
 	for key, claimed := range m.claims {
 		queued = append(queued, mentionClaim{key: key, claimedAt: claimed})
+		snapshot[key] = claimed
 	}
 	m.mu.Unlock()
 	if len(queued) == 0 {
@@ -346,7 +355,7 @@ func (m *mentionSender) refreshHeldClaims(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, claim := range refreshed {
-		if _, waiting := m.claims[claim.key]; waiting {
+		if held, waiting := m.claims[claim.key]; waiting && held.Equal(snapshot[claim.key]) {
 			m.claims[claim.key] = claim.claimedAt
 		}
 	}

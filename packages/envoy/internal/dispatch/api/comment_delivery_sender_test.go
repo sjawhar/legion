@@ -932,8 +932,8 @@ func withMentionClaimRefresh(t *testing.T, served *server, period time.Duration)
 
 // ageQueuedClaims moves every claim the sender holds on a send that has not started back by by,
 // on the attempt row and in the sender's own record together: what a lane held that long leaves
-// behind when nothing writes those claims again. It fails the test when a row no longer carries
-// the claim its sender holds, since the two are meant to agree.
+// behind when nothing writes those claims again. It holds the sender's lock throughout, so no
+// refresh records anything until every row and its record agree again.
 func ageQueuedClaims(t *testing.T, database *store.Store, sender *mentionSender, by time.Duration) {
 	t.Helper()
 	sender.mu.Lock()
@@ -941,18 +941,17 @@ func ageQueuedClaims(t *testing.T, database *store.Store, sender *mentionSender,
 	if len(sender.claims) == 0 {
 		t.Fatal("the mention sender holds no queued send whose claim could age")
 	}
-	for key, claimed := range sender.claims {
-		aged := claimed.Add(-by)
-		tag, err := database.Pool.Exec(context.Background(), `
-			update comment_deliveries set claimed_at = $4
-			where comment_id = $1 and target = $2 and attempt = $3 and claimed_at = $5
-		`, key.comment, key.target, key.attempt, aged, claimed)
-		if err != nil {
+	for key := range sender.claims {
+		// A refresh whose statement ran but whose result is not recorded yet leaves the row newer
+		// than the map (refreshHeldClaims), so the claim aged is the one the row carries, and the
+		// map is set to it: that refresh then finds the map changed and records nothing over it.
+		var aged time.Time
+		if err := database.Pool.QueryRow(context.Background(), `
+			update comment_deliveries set claimed_at = claimed_at - make_interval(secs => $4)
+			where comment_id = $1 and target = $2 and attempt = $3 and state = 'pending' and claimed_at is not null
+			returning claimed_at
+		`, key.comment, key.target, key.attempt, by.Seconds()).Scan(&aged); err != nil {
 			t.Fatalf("age the claim on the queued attempt of %s for %s: %v", key.comment, key.target, err)
-		}
-		if tag.RowsAffected() != 1 {
-			t.Fatalf("the queued attempt of %s for %s does not carry the claim its sender holds",
-				key.comment, key.target)
 		}
 		sender.claims[key] = aged
 	}
