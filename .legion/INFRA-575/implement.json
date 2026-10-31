@@ -2,43 +2,81 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-575",
-  "completed": "2026-10-31T00:30:00Z",
-  "round": 4,
-  "answersTestFailures": [
-    "The only failure of .legion/INFRA-575/test.json round 3: no GitHub Actions run existed for round 3's commits, so what CI said about this pull request was still round 2's red `docs / build`. The cause was this role's push, not the change: round 3's docs commit de8b7ea3 and its handoff commit 6ad7ca1f reached origin in one push whose head ends `skip-checks: true`, and GitHub starts no workflow run for such a head. No code or documentation changed this round; the fix is the push."
-  ],
+  "completed": "2026-10-31T03:05:00Z",
+  "round": 5,
+  "answersReview": "Review 5720252758 at ee131f72, changes requested: five correctness defects and thirteen maintainability findings, all eighteen threads answered and resolved, plus the bun.lock revert the review asked for. Code head a395dc20852a1a8c25d8ee64a0131a0ba639724f.",
   "proof": [
     {
-      "criterion": "A GitHub Actions run exists for the head the reviewer reads, so CI judges this pull request's current code - the docs fix of round 3 included.",
-      "surface": "GitHub Actions on sjawhar/legion, at this round's head.",
-      "command": "gh api 'repos/sjawhar/legion/actions/runs?head_sha=<this head>' --jq .total_count, and gh pr checks 2549 --repo sjawhar/legion",
-      "observed": "After the push, GitHub created two runs for this head: CI 41150173180 (https://github.com/sjawhar/legion/actions/runs/41150173180) and PR Title 41150173121, both queued when read. Before the push: `actions/runs?head_sha=de8b7ea325de\u2026` -> total_count 0, `?head_sha=6ad7ca1f\u2026` -> 0, `commits/6ad7ca1f\u2026/check-suites` -> 0, and the newest run on this branch was 41128214713 at the round-2 code head 93c4ab64, whose `docs / build` failed. I did not wait for the run: the daemon reads CI itself.",
-      "headSha": "95aeef96812ac12e2130614791d96b4e00939f65",
-      "negativeControl": "Round 2 is the control that the trailer is what stopped the run, not the branch or the repository: its code head 93c4ab64 was pushed alone, before its trailered handoff 232b6c25, and CI ran (run 41128214713, every lane but `docs / build` green). Round 3 changed only the shape of the push and the run disappeared."
+      "criterion": "Defect 1: with the reading pane on, Enter on a list control (a row's owner link, Later (n), the bulk bar, a filter) is that control's, not a jump into the selected question's answer box.",
+      "surface": "The Inbox at pane width, rendered with its real keymap, where the reviewer's own probe found the defect.",
+      "command": "cd packages/dispatch && bun test web/src/features/inbox/Inbox.test.tsx -t \"Enter is the link's or the button's\"",
+      "observed": "Green: the focused link and the focused filter button each receive Enter (fireEvent.keyDown answers true, the default not prevented) and keep the focus, and a row's own Enter still reaches the answer box.",
+      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
+      "negativeControl": "With the old `when` restored (`paneShown ? !focusInPane() && …`) the row fails: `expect(fireEvent.keyDown(link, { key: \"Enter\" })).toBe(true)` receives false, which is the keymap having taken the key and called preventDefault."
     },
     {
-      "criterion": "The documentation lane's own work passes at this head, which is what the run has to confirm.",
-      "surface": "The documentation media harness and the Astro site build, run here as the `docs` job runs them.",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web, then DATABASE_URL=<this role's docs lane> bun docs/site/media/shots.ts, then cd docs/site && bun run build",
-      "observed": "Round 3's run of exactly these commands at this same code: every shot of both sets taken, no failure, exit 0; `43 page(s) built`, `All internal links are valid.`; biome over docs/ clean; check-private-names clean. Nothing of the tree changed since, so the lane's inputs are byte for byte what passed.",
-      "headSha": "de8b7ea325de4f10a18aa134eba6ca61900452a4",
-      "negativeControl": "At the round-2 head the same command failed `4 shot(s) failed` with `getByRole('article', { name: 'Urgency: Blocking' })` not found, which is the failure round 3 fixed."
+      "criterion": "Defect 2: in a document with several open decision blocks, 1-9 and Enter act on the selected block, not on the first open block in document order.",
+      "surface": "The same Inbox, with two answerable decision cards drawn in the column.",
+      "command": "cd packages/dispatch && bun test web/src/features/inbox/Inbox.test.tsx -t \"the answer keys act on the selected decision block\"",
+      "observed": "Green: two decision asks of one document, ?item= naming the second, `1` ticking the second block's first option and Enter opening its note disclosure while the first block's stays shut.",
+      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
+      "negativeControl": "With the lookups restored to the whole pane the row fails: `1` ticks the first block's option, and the wait on the selected card's option times out."
+    },
+    {
+      "criterion": "Defect 3: Change answer then Cancel leaves no draft behind, so no card claims a recorded answer was never sent.",
+      "surface": "An answered ask's card.",
+      "command": "cd packages/dispatch && bun test web/src/features/inbox/AskCard.test.tsx -t \"Change answer\"",
+      "observed": "Green: after Change answer and Cancel there is no 'closed before you sent your answer' line and no leftover draft, so the column no longer holds that question either.",
+      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
+      "negativeControl": "The reviewer's probe is the control: before the fix it printed `BANNER: This question closed before you sent your answer, so it was not sent. Your text is here to copy.First note` over the reader's own recorded answer, on every card for that ask."
+    },
+    {
+      "criterion": "Defect 4: an approval's word marks land on their own characters, with a hard break before them.",
+      "surface": "The editor's change decorations, built against a real ProseMirror document.",
+      "command": "cd packages/proof-editor && bun run test",
+      "observed": "220 pass, 0 fail, including the new hard-break case: a decoration over `canary` after a `\\n` draws `canary`, where it drew `anary ` before.",
+      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
+      "negativeControl": "The reviewer's probe: `\"Line one  \\nthe canary word.\"` has textContent `\"Line one\\nthe canary word.\"`, one character per break, which `textRuns` did not count; the new case fails without the leafText advance."
+    },
+    {
+      "criterion": "Defect 5: the word diff is bounded, so two unrelated large blocks cannot hold the main thread.",
+      "surface": "The pairing module both surfaces read.",
+      "command": "cd packages/dispatch && bun test web/src/features/doc/change-set.test.ts",
+      "observed": "Green, with a row for a pair past the bound: the pair is drawn as one whole-block removal and one whole-block addition rather than word by word. Measured here with diff@9: unbounded 1000 words 655 ms and 3000 words 7.7 s; bounded, the worst case is about 113 ms, and a tenth of a 3000-word block changed still diffs word by word (47 ms).",
+      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
+      "negativeControl": "The reviewer's benchmark is the control for the unbounded path: 679 ms at 1000 words, 8.1 s at 3000, 39 s at 6000."
+    },
+    {
+      "criterion": "The reading pane, the change view and the keys still behave as the spec says, after five fixes and thirteen refactors.",
+      "surface": "The Inbox page and the document pages of a running Dispatch - the built SPA served by the real Go server against a real Postgres, driven in a real Chromium - at 1440, 1280, 1279 and 390 px and in the drawer.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts e2e/inbox.e2e.ts e2e/inbox-drawer.e2e.ts e2e/keyboard-inbox.e2e.ts e2e/keyboard.e2e.ts e2e/doc.e2e.ts e2e/artifacts.e2e.ts --project=chromium",
+      "observed": "88 passed. The eight rows of inbox-reading-pane.e2e.ts are among them, unmodified, two of them the tester's.",
+      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
+      "negativeControl": "Each of the two behaviour changes among the refactors carries its own red-before row: Next change offered where no mark drew (the button was there before the guard), and `j` from a held question (it selected the first row before the fix)."
+    },
+    {
+      "criterion": "Everything static is green here before the push, and CI runs on the code head.",
+      "surface": "The repository's own gates, and GitHub Actions.",
+      "command": "bunx biome check packages/dispatch/ packages/proof-editor/; bun run typecheck and bun run test in each package; gh api 'repos/sjawhar/legion/actions/runs?head_sha=a395dc20…'",
+      "observed": "biome `Checked 778 files, No fixes applied`; proof-editor typecheck clean and 220 pass 0 fail; dispatch typecheck clean and 3060 pass 0 fail. GitHub created CI run 41161396138 for this head, queued when read; I did not wait for it, as the daemon reads CI itself.",
+      "headSha": "a395dc20852a1a8c25d8ee64a0131a0ba639724f",
+      "negativeControl": "Round 4's reading of the same question is the control for the push shape: a head carrying `skip-checks: true` answered total_count 0, and an untrailered head answers with its runs."
     }
   ],
   "filesChanged": [
-    "None. This round changes no file of the product, the tests or the documentation: .legion/INFRA-575/implement.json is this handoff."
+    "4d610a30d062 - the five correctness defects: features/inbox/Inbox.tsx (the answer keys resolve the selected ask's own card; Enter asks what holds the focus), features/inbox/useAskAnswerForm.ts (change-mode text is the form's own), packages/proof-editor/src/editor-change-decorations.ts (a leaf counts its leafText characters), features/doc/change-set.ts (the bounded diff and its whole-block fallback), and the unit rows beside each",
+    "a59a216aef1d - the thirteen maintainability findings: new features/inbox/pane-selection.ts and features/inbox/draft-store.ts; Inbox.tsx, ReadingPane.tsx, ReadingPaneHead.tsx, AskCard.tsx, answer-drafts.ts, reply-drafts.ts, ChangeView.tsx, ProofDocument.tsx, ArtifactDocument.tsx, VersionView.tsx, change-marks.ts, change-set.ts, packages/proof-editor/src/lib.ts and editor-change-decorations.ts; both AGENTS.md files; the deleted packages/dispatch/.changes tree; the unit suites beside each",
+    "a395dc20852a - bun.lock back to the base's copy"
   ],
   "trickyParts": [
-    "This round's handoff push deliberately carries NO `skip-checks: true` line, though it touches only `.legion/INFRA-575/`. The line exists so GitHub starts no run for a handoff push and the daemon carries the code head's verdict to it (skill://legion-worker/references/skip-checks-trailer.md). Here the code head carries no verdict at all - no run was ever created for de8b7ea3 - so there is nothing to carry, and a trailered push would leave the pull request with no CI for a third round. Retro's push is the rule's own precedent for omitting the line when the head must have checks: 'a base that requires a check will not merge a head whose checks never ran'. The daemon classifies a push by the paths its commits touch and never by the trailer, so this is still a handoff push to it; the only difference is that GitHub now runs the lanes on the head the reviewer reads, which is better than a verdict carried from an ancestor. The architect sanctioned a head without the trailer for this round.",
-    "The rule this round breaks for me, so the next role does not repeat it: a push that carries a code commit and a trailered handoff commit TOGETHER gets no run at all, because GitHub reads only the head's message. Push the code first, on its own, and the handoff after it - which is what round 2 did and round 3 did not."
+    "bun.lock in this workspace is rewritten by every `bun install`: the base's copy records older workspace versions for envoy-plugin, pi-envoy and pi-legion than their package.json files carry, so bun corrects it each time even when it installs nothing. The commit keeps the base's copy; after any install, restore it (`jj -R \"$LEGION_WORKSPACE\" restore --from <the merge base> bun.lock`) before committing or pushing, and note that `jj restore --from main@origin` is wrong once main has moved past the merge base.",
+    "The two behaviour changes hidden among the refactors are the ones to re-read: Next change is now offered only while the drawn version carries marked blocks, and `j` from a question held past its row steps on from where that row stood. Both carry their own unit row."
   ],
-  "deviations": [
-    "No `skip-checks: true` on a handoff-only push, for the reason above."
-  ],
+  "deviations": [],
   "openQuestions": [
-    "e2e/hover-preview.e2e.ts:87, the one red row of this pod's whole-project run, is main's and is now FIXED on main by sjawhar/legion#2581 at df771175. I confirmed that fix in this pod at the fixing session's request, on a clean export of df771175 outside the workspace: the row five times (5 passed, about 4.5 s each, where it used to time out at 30 s) and the whole spec once (4 passed, 1 skipped). The architect has ruled against an extra forward merge to pick it up, since CI's own `dispatch` lane passed that row at our head; the pull request body keeps one line naming the row as main's and fixed above us. Note for the merger: sjawhar/legion has no merge queue (GitHub refused one, HTTP 422: a queue needs an organization-owned repository) and 'require branches to be up to date' is off, so this pull request merges on its own head's required checks and will not carry df771175 at the merge."
+    "e2e/hover-preview.e2e.ts:87 is main's, fixed on main by sjawhar/legion#2581 at df771175, which I confirmed green in this pod (the row five times and the whole spec once). The architect has ruled against a forward merge to pick it up, since CI's own dispatch lane passed that row at our head, and sjawhar/legion has no merge queue, so this pull request merges on its own head's required checks."
   ],
   "discoveredComplexity": [
-    "Two rounds of this issue were spent on what CI did or did not judge rather than on the change: round 2's forward merge (a conflicting pull request gets no merge ref and no `on: pull_request` run at all) and round 4's push shape (a head carrying the trailer gets no run either). Both are stated in skill://legion-worker/references/skip-checks-trailer.md; neither is visible from the branch itself, only from GitHub."
+    "Two of the five correctness defects are the price of one decision: the column draws the whole live document, so every open decision block of it is answerable, and anything the keys reach by a document-wide selector reaches the wrong block. Both fixes narrow the keys to the selected ask's own card."
   ]
 }
