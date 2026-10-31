@@ -619,24 +619,31 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 	return issue, progress.resolve(), nil
 }
 
-// loadChildren returns the issue's direct children, each with a rollup over its whole
+// issueChildrenQuery returns the issue's direct children, each with a rollup over its whole
 // subtree (the child itself included, every status): done/total counts and the newest
 // updated_at. The recursive walk uses `union` with parentDepthCap like refs.Closure, so it
 // terminates even if a raced reparent ever commits a cycle.
-func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]model.IssueChild, error) {
-	rows, err := q.Query(ctx, `
+//
+// The walk reads each subtree issue's row already, so it carries that row's status and
+// updated_at and the rollup counts them where it stands. Joining the walk's keys back to issues
+// instead read the whole table: the planner has no estimate of a recursive CTE's size, so it
+// hashed all 20,000 issues rather than key 1,834 primary-key lookups, which was 2,499 of the
+// statement's 8,097 buffers on the measurement database. The two columns are functionally
+// determined by the key the walk already carries, so `union` removes exactly the rows it
+// removed before.
+var issueChildrenQuery = `
 		with recursive subtree as (
-			select key as root, key, 1 as depth from issues where parent_key = $1
+			select key as root, key, 1 as depth, status, updated_at from issues where parent_key = $1
 			union
-			select s.root, i.key, s.depth + 1
+			select s.root, i.key, s.depth + 1, i.status, i.updated_at
 			from issues i join subtree s on i.parent_key = s.key
-			where s.depth < `+parentDepthCapSQL+`
+			where s.depth < ` + parentDepthCapSQL + `
 		), rollup as (
 			select s.root,
 			       count(distinct s.key) as total,
-			       count(distinct s.key) filter (where i.status = 'done') as done,
-			       max(i.updated_at) as active_at
-			from subtree s join issues i on i.key = s.key
+			       count(distinct s.key) filter (where s.status = 'done') as done,
+			       max(s.updated_at) as active_at
+			from subtree s
 			group by s.root
 		)
 		select c.key, c.title, c.status, r.done, r.total, r.active_at,
@@ -644,7 +651,10 @@ func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]mod
 		                 from issue_external_links l where l.issue_key = c.key), '[]')
 		from issues c join rollup r on r.root = c.key
 		where c.parent_key = $1 order by c.key
-	`, key)
+	`
+
+func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]model.IssueChild, error) {
+	rows, err := q.Query(ctx, issueChildrenQuery, key)
 	if err != nil {
 		return nil, err
 	}

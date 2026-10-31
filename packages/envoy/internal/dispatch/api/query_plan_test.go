@@ -6,8 +6,41 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/explaintest"
 )
+
+// planWithoutSeqScans is the plan Postgres builds for statement with sequential scans off, in a
+// transaction of its own. A test fixture holds a handful of rows, which is read fastest whole
+// however the statement is written, so without that setting the planner answers a sequential
+// scan whatever indexes exist and the plan says nothing about the statement. With it, a read
+// that no index serves still shows up: as a scan carrying no index condition.
+func planWithoutSeqScans(t *testing.T, database *store.Store, statement string, arguments ...any) json.RawMessage {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the plan's transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
+		t.Fatalf("disable sequential scans: %v", err)
+	}
+	var raw []byte
+	if err := tx.QueryRow(ctx, "explain (format json) "+statement, arguments...).Scan(&raw); err != nil {
+		t.Fatalf("explain the statement: %v", err)
+	}
+	var plans []struct {
+		Plan json.RawMessage `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode the explain answer: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("explain answered %d plans; want one:\n%s", len(plans), raw)
+	}
+	return plans[0].Plan
+}
 
 // Ask reads resolve their opening event and edit history by the payload id. Both
 // paths must use the partial events payload index rather than scale with global

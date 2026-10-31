@@ -49,14 +49,29 @@ func (s *server) agentOpenAskCounts(ctx context.Context, sessionIDs []string) (m
 	return counts, nil
 }
 
+// agentLastActivityQuery reads one session's newest event through
+// events_session_actor_created_at_idx, ((actor->>'id'), created_at desc) where the actor is a
+// session, and does that once for each session asked for: an ordered read that stops at its
+// first row. Grouping max(created_at) instead reads every event each session ever wrote to keep
+// one of them — 1,875 rows and 470 buffers to answer five sessions on the measurement database,
+// against 20 buffers here — because Postgres has no index skip scan. The lateral repeats
+// actor->>'kind' = 'session' because that index is partial on it, and it is joined with `cross
+// join`, not a left join: a session with no event is a session the caller's map must not hold,
+// which is what the grouped read answered by returning it no row.
+const agentLastActivityQuery = `
+		select s.id, e.created_at
+		from unnest($1::text[]) s(id)
+		cross join lateral (
+			select created_at
+			from events
+			where actor->>'kind' = 'session' and actor->>'id' = s.id
+			order by created_at desc
+			limit 1
+		) e
+	`
+
 func (s *server) agentLastActivity(ctx context.Context, sessionIDs []string) (map[string]time.Time, error) {
-	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select actor->>'id', max(created_at)
-		from events
-		where actor->>'kind' = 'session'
-			and actor->>'id' = any($1::text[])
-		group by actor->>'id'
-	`, sessionIDs)
+	rows, err := s.deps.Store.Pool.Query(ctx, agentLastActivityQuery, sessionIDs)
 	if err != nil {
 		return nil, fmt.Errorf("query agent activity: %w", err)
 	}
