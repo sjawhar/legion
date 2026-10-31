@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-707",
+  "previousHandoff": "a767aee67ade6d932f9367f43b3616c9a3c408f7",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2496",
+  "codeHead": "220af58097b28aaf551218b961675f687f0cdd8c",
+  "round": "answers red ci-ok at 688fe778 (envoy-go-race-api TestAReconnectCatchesUpWhatTheListenerMissed, main flake fixed by #2594): a confirmation forward merge of main b4dc9f96",
+  "proof": [
+    {
+      "criterion": "1. A test drives an agent write racing browser updates on one warm room, fails on main, passes at the head over enough rounds (count and main's failure rate stated).",
+      "surface": "Go tests against a real Postgres 18.6 + pgvector 0.8.7 (local, as CI runs them)",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<url> go test -p 1 ./internal/dispatch/docs/ -count=1 -timeout 75m ; go test -p 1 ./cmd/dispatch/ ./loadtest/browsertype/ -run 'StoredOrder|Protect' -count=1",
+      "observed": "At 220af580 (main b4dc9f96, ygo v1.54.1-sami.1): go build and vet clean; whole internal/dispatch/docs package ok 1398.0s (dispatch://INFRA-707/artifact/docs-suite-220af580-log); TestStoredOrder*, Backfill, TestAFailedRooms*, TestAFlush*, TestAReadPoint*, TestAShadow* ok; cmd/dispatch stored-order and loadtest/browsertype ok. Soak 200 rounds 0 mismatches and race ok at 6b5c1050 (same code diff). p = 1 on main, so n = 200.",
+      "headSha": "220af58097b28aaf551218b961675f687f0cdd8c",
+      "negativeControl": "main 7c2effba's production code plus this branch's storedorder.go and storedorder_test.go: all ten window tests and the soak fail (179 mismatches over 12 of 12 counted rounds); the tester rebuilt the same control from main's own tree (170 mismatches)."
+    },
+    {
+      "criterion": "Stored history replays under real browsers and agent HTTP writes on a real Dispatch server; browsertype -protect leaves the protected paragraph alone",
+      "surface": "local real envoy-dispatch built from the head, Postgres 18.6 + pgvector, browsertype peers over the document websocket, agent writes over the HTTP API, envoy-dispatch stored-order from the same head",
+      "command": "PROTECT='The last paragraph of the seed.' HEAD_SRC=<6b5c1050 packages/envoy> bash run.sh head <6b5c1050 packages/envoy> 18801 60 (run.sh, agent.py, pg.sh in dispatch://INFRA-707/artifact/infra-707-implementer-evidence-tar-gz version 6)",
+      "observed": "agent: 56 delete + 44 insert + 19 replace edits, 66 named versions, 55 uploads accepted; 6 peers errors=0; stored-order documents=2 clean=2 mismatched=0 refused=0 failed=0 unchecked=0 (1706 and 1735 updates, 95 and 99 versions checked), exit 0; protected sentence intact in both documents; server log 0 ERROR lines.",
+      "headSha": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
+      "negativeControl": "Same script with the server built from main 5455925b and no -protect (round 3): stored-order documents=2 clean=0 mismatched=2, 34 mismatches, exit 1; the unprotected sentence was typed into."
+    }
+  ],
+  "filesChanged": [
+    ".dispatch/architecture/dispatch-docs.md (merge resolution only)"
+  ],
+  "trickyParts": [
+    "RoomFlush is exported (fields unexported) because it crosses VersionedStore, which a test store in internal/dispatch/api wraps.",
+    "Local harness: pg.sh (Postgres 18.6 + pgvector under $TMPDIR/pg18, port 55418); restart it if tests fail with connection refused."
+  ],
+  "deviations": [],
+  "openQuestions": [
+    "Acceptance 2 cluster evidence was taken at eb0fe0be; rounds since change no live write, settlement, snapshot, worker or checker behaviour except that the backfill now takes the document lock before its flush."
+  ],
+  "answersToReview": [
+    "Forward merge of main b4dc9f96 (carries #2594's fix) at 220af580. One conflict, in the text file .dispatch/architecture/dispatch-docs.md: main's rewritten sentence kept whole, this PR's sentence appended; that line is the only fingerprint change (6da3c25e... -> 51c749df...). No code line of the PR changed. Comment https://github.com/sjawhar/legion/pull/2496#issuecomment-6543772349."
+  ]
+}

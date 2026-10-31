@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-707",
+  "completed": "2026-10-31T14:25:00Z",
+  "verdict": "pass",
+  "headTested": "220af58097b28aaf551218b961675f687f0cdd8c",
+  "branchHead": "ad4ac56b60f286368e6d9a48f1d1998d9d2a071f",
+  "round": 7,
+  "roundShape": "A confirmation round for the pull request's own diff, with one re-measurement the architect asked for because main's ygo pin moved under it. Nothing of the real-surface verification was repeated beyond what that pin makes necessary.",
+  "roundShapeCheck": {
+    "command": "LEGION_WORKSPACE=<workspace> python3 round-shape.py 688fe778051692832d1d21f7c20d3b74fea3a5d1 220af58097b28aaf551218b961675f687f0cdd8c 2496 (version 3, both ids resolved with jj first)",
+    "result": "files whose own diff differs: 1 - .dispatch/architecture/dispatch-docs.md",
+    "reading": "One documentation file, no runtime and no test file, so a confirmation round by the rule. It is the merge's one conflict, where main's rewritten sentence was kept whole and this pull request's sentence appended, which is what the implementer records and what the fingerprint change (6da3c25e -> 51c749df) is."
+  },
+  "whyThisRoundRanTestsAnyway": {
+    "fact": "The merge moved the ygo fork pin under the pull request: packages/envoy/go.mod at 688fe778 reads `replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.4`, and at 220af580 it reads `v1.54.1-sami.1`.",
+    "consequence": "Every document this change stores and folds is a ygo document, so a confirmation on the diff alone would have left the CRDT under it unmeasured. The runs below are at the new pin."
+  },
+  "proof": [
+    {
+      "criterion": "1. A test drives an agent write racing browser updates on one warm room, and passes at the head over enough rounds - re-measured under main's new ygo pin.",
+      "surface": "Go tests against a real Postgres (the harness's 16.2 with pgvector), the whole stored-order family at the new pin",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<local> go test -p 1 ./internal/dispatch/docs/ -run 'TestStoredOrderBackfill|TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable|TestStoredOrderHeld|TestStoredOrderEdit|TestStoredOrderSettlement|TestStoredOrderSnapshot|TestStoredOrderTwoBrowsers|TestStoredOrderAccept|TestStoredOrderRemeasured|TestStoredOrderChecker' -count=1 ; then the soak with -args -stored-order-rounds=300",
+      "observed": "The family is ok in 14.874s (the ten window tests, the checker's crafted faults, my backfill test and my 503 test among them). The soak gives `rounds=300 counted=300 mismatching_rounds=0 mismatching_counted_rounds=0 mismatches=0 writes=600 write_p50=123.505804ms write_p99=458.062182ms elapsed=11m23.632s`, PASS in 688.91s. The new pin is also visibly faster on this pod: the same soak at the old pin read write_p50 271.08ms and write_p99 1.174s in round 5, and 389ms / 3.295s in round 3.",
+      "headSha": "220af58097b28aaf551218b961675f687f0cdd8c",
+      "negativeControl": "Not rebuilt at this head and not needed for a pin move: the merge-base control was run at round 4's head (11 red, soak 12 of 12 counted rounds mismatching, 154 mismatches) and the pull request's own diff is unchanged since. The control that matters for THIS round's question is the backfill race test below, which is sensitive to the CRDT's behaviour and still red when the lock moves."
+    },
+    {
+      "criterion": "The backfill's lock and the two tests I added hold under the new ygo pin.",
+      "surface": "The same Go suite under the race detector",
+      "command": "cd packages/envoy && CGO_ENABLED=1 GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<local> go test -race -p 1 ./internal/dispatch/docs/ -run TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice -count=20",
+      "observed": "ok 18.225s, twenty runs under -race at the new pin, no failure and no data race. My TestStoredOrderBackfillStampOverAnUnstoredEdit and TestAnEditWhoseForkWentAndWhoseRoomHasCommittedIsRefusedAsUnavailable are in the family run above and pass.",
+      "headSha": "220af58097b28aaf551218b961675f687f0cdd8c",
+      "negativeControl": "Round 5's: the same test red within five runs when the lock is moved back to the first append (`bob's edit is stored in 2 rows, want 1`). The mutation was not repeated at this head; what changed under it is the CRDT, not the lock, and twenty clean race runs is the measurement that pin asks for."
+    }
+  ],
+  "bareGates": {
+    "build": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go build ./... - exit 0",
+    "vet": "the same over ./internal/dispatch/docs/ ./cmd/dispatch/ ./loadtest/browsertype/ - exit 0"
+  },
+  "memory": {
+    "why": "The tree's OOM rule, and the first run of mine under it.",
+    "how": "A bounded sampler of /sys/fs/cgroup/memory/memory.usage_in_bytes every 2 s, started as the harness's own named background job (mem-sampler-infra-707, pid 4486) and stopped with proc://mem-sampler-infra-707/kill at the end of the runs - the form that works in this shell, where $!, jobs -p, kill %1 and $BASHPID all fail.",
+    "result": "711 samples over 24m36s covering the family run, the race runs and the soak: sampled peak 2.55 GiB of the container's 19.0 GiB limit, minimum 1.95 GiB. So the docs suite under -p 1 with GOMAXPROCS=4 and GOMEMLIMIT=12GiB uses about an eighth of the limit on this pod, and nothing here approaches the OOM that stopped INFRA-771. The figure is a sampled peak: a spike shorter than 2 s is missed, and the cgroup serves no max_usage_in_bytes under gVisor to check it against."
+  },
+  "ciAtTheHead": {
+    "head": "220af58097b28aaf551218b961675f687f0cdd8c",
+    "readAt": "2026-10-31T14:20Z",
+    "failing": [],
+    "settled": ["changes", "pr-title"],
+    "unreadBecauseStillRunning": ["lint", "test", "docs / build", "envoy-go", "envoy-go-race", "envoy-go-race-api", "envoy-go-race-docs", "envoy-go-race-pmdoc", "dispatch", "dispatch-browser-multiprocess", "dispatch-memory", "dispatch-multiprocess", "envoy-session-stall", "envoy-smoke", "envoy-infra-go", "listener-server-change", "worker-image / build", "ci-filters"],
+    "skipped": ["typecheck", "pi-shared", "pi-legion", "pi-envoy", "and the other package lanes the filters skip"],
+    "note": "Eighteen lanes are still running and are therefore UNREAD; none has failed. I read once and did not wait.",
+    "thePreviousHeadsRed": "At 688fe778 the red was envoy-go-race-api with one failing test, which I read in its own job log (job 124510137519): `--- FAIL: TestAReconnectCatchesUpWhatTheListenerMissed (0.39s)`, and nothing else failed in that job. That is main's flake, and this head carries its fix: 3b0ae77e9 'test(dispatch): the reconnect catch-up test waits for the hub to settle and the listener's backend to exit (#2594)' is an ancestor of 220af580 (git merge-base --is-ancestor). So the red that sent round 6 back is answered by the merge itself, not by anything of this pull request."
+  },
+  "failed": 0,
+  "failures": [],
+  "notes": [
+    "I added no commit this round; my handoff push carries the skip-checks trailer, so the head's CI run is not restarted.",
+    "Everything else of the issue's evidence stands as rounds 3 to 5 recorded it: acceptance 2's cluster comparison at eb0fe0be (23 typed-document checks clean against a merge-base control mismatching on 5 of 6), acceptance 3's interleaved pairs, acceptance 4's three first-hand agreements, and the merge-base control for acceptance 1."
+  ]
+}

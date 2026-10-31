@@ -380,7 +380,7 @@ A compacted `doc_updates`, and any backup of it taken later, therefore holds no 
 text deleted before a version captured it is gone (the operator's decision, LEGION-496).
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and after;
-the one measure the room's update observer, `updateChangesMarkdown`, a transactional live write in `applyLive` and settlement's own closure, `closureChangedMarkdown`, all apply) - and settlement writes a version only when a content-class row lies past the latest version's `doc_update_version` cursor and the settled document renders differently from that version.
+the one measure the room's update observer, `updateChangesMarkdown`, a transactional live write in `applyLive`, and a settlement's or the block-id backfill's repair, `repairClass`, all apply) - and settlement writes a version only when a content-class row lies past the latest version's `doc_update_version` cursor and the settled document renders differently from that version.
 It stays one measure where a rendering is reused rather than made again:
 a write takes the rendering of its fork before the operation from the room's replica or from its own previous operation, and the observer takes a published write's own rendering, only where each is the rendering of the very state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`), since rendering is deterministic over one state;
 a margin write (`applyMargin`) renders nothing before it writes.
@@ -524,14 +524,18 @@ Inside a write transaction, `docTree` and a version's capture take the write's o
 `heldTree` still reads the fork and returns a tree its reader owns.
 
 A read takes up to three locks, in one order:
-the room's state lock; then the replica's, which a read only tries; then the live document's, for the copy's encode.
-A version's capture takes its authors under the state lock and releases it before it takes the room through `holdLive`, which keeps the replica's lock, when it reads the replica, until the capture has walked it:
-an author the update observer credits after that take is numbered past it and stays pending for the next version, whether or not the copy holds the edit (`captureLiveTextAndAuthors`, LEGION-503).
-The update observer's own turn with the replica (`renderedReplica.observe`) is the one exception to that order:
-it holds the replica's lock for its whole call (`lockForUpdate`, a blocking acquisition, unlike every other caller's), and the classification it runs for each update it drains (`observeAskBlocksForUpdate`, `creditContentChange`, `recordUpdateClass`) takes the state lock from inside it, nested the other way around (LEGION-503).
-This stays deadlock-free because every other acquisition of the replica's lock only tries it (`hold`, under `holdLive`/`readLive`) rather than blocking on it, and always after releasing the state lock first, never while holding it - so nothing can be waiting on the state lock while the observer waits for anyone else to release the replica's;
-only a Yjs transaction's own function holds a document's lock, and it takes neither of the others.
-So the caller of `readLive` or `holdLive` may hold the room's state lock, and must not hold the live document's lock - run inside a Yjs transaction on it - since the copy encodes under that lock.
+the room's state lock; then the replica's; then the live document's, for a copy's encode.
+A read of a resident room outside a write (`readLive`, through `holdLive`) only tries the replica's lock (`hold`), and its caller may hold the room's state lock.
+A version's capture, a settlement's read and a live write's fork read instead read the room at an exact commit position (`Service.readPoint`, `docs/flush.go`):
+an author the update observer credits after the capture's bound is numbered past it and stays pending for the next version, and every update through that position is stored before the version (`Ledger.flushThrough`).
+
+Three acquisitions block on the replica's lock (`lockForUpdate`) and classify each update they drain under it, which takes the room's state lock from inside it (`observeAskBlocksForUpdate`, `creditContentChange`, `queueUpdateClass`), nested the other way around:
+the update observer's own turn (`renderedReplica.observe`), the exact read (`renderedReplica.readPoint`), and the check that the room has committed since a read point (`renderedReplica.drainedSeq`), all in `docs/tree.go`.
+This stays deadlock-free because of one rule for all three:
+their callers hold no room state lock and run inside no Yjs transaction, and only a Yjs transaction's own function holds a document's lock, taking neither of the others.
+So nothing waits on the state lock while one of them waits for the replica's, and the encode `readPoint` runs under the live document's lock never meets a held state lock.
+Every other acquisition of the replica's lock only tries it, and never while holding the live document's lock:
+the caller of `readLive` or `holdLive` must not run inside a Yjs transaction on the document, since the copy encodes under that lock.
 A read that may load its room (a version's capture, `docTree`, `VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads and holds the room:
 a room looked up again with `GetDoc` once that Apply returned can have been evicted in between.
 
@@ -611,7 +615,7 @@ A close the service forces - a failed room's eviction, `Evict`, `Quiesce`, and t
 The close therefore keeps that state while anything holds it and forgets it when nothing does, as every other end of a room does (`releaseIfUnusedLocked`), so the browser, what the new room's load read - its issue's closed flag, its ask blocks, its latest edit source and the settlement it armed - and the new room's own credits and unstored updates stay where they were recorded, and so does what the closed room left for its own late callbacks to come back for (INFRA-352).
 Only a failed room's state has to go, since it carries the failure that its holders still read and no later access may (`handOverFailedRoomLocked`);
 a load refuses a failed room, so only a browser's connect can have reached it, and that browser is handed to the state registered in its place.
-A durable append of the state that went finishes on the state that counted it (`finishDurableAppend` takes the state `consumeUpdateClass` found the class on), so no count of it reaches that successor, where one below zero would hold it for good.
+A durable append of the state that went finishes on the state that counted it (`finishUpdateClass` takes the state `consumeUpdateClass` found the class on), so no count of it reaches that successor, where one below zero would hold it for good.
 
 Two `envoy-dispatch` processes do not share a live document session, and durable convergence does not depend on one:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored history is their union, so no edit is lost whichever process took it.

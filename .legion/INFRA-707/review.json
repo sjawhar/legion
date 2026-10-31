@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-707",
+  "completed": "2026-10-31T14:16:30Z",
+  "round": 4,
+  "reviewedCodeHead": "824881ce64f673dd591972a4106264f2754e2b92",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "fingerprint": "2306f275 6da3c25e... -> 824881ce 51c749df...: changed, so a new round. The PR's own lines changed only in .dispatch/architecture/dispatch-docs.md (220af580 kept main's sentence and appended this PR's). The forward merge also moved the ygo pin under the PR (main's #2526, INFRA-767): v1.51.3-sami.4 -> v1.54.1-sami.1.",
+  "ci": "Run 41204201579 (CI) at 220af580 still queued at 14:16Z; pr-title success. A request for changes does not wait on CI.",
+  "finding": {
+    "severity": "important",
+    "what": "At ygo v1.54.1-sami.1 a remote ApplyUpdateV1 that touches formatted text is followed by a nil-origin local cleanup commit (crdt/doc.go:767-810, ytext_format_cleanup.go formattingCleanupLocked, update.go:104-109; absent at v1.51.3-sami.4). The room runs no cleanup for its own local commits (Dispatch's Server.Apply writes, pmdoc Format), but every mirror that replays the room's log replays them as remote applies and does run it: the replica (tree.go:516, base at :614), the shadow (shadow.go:267), and every fold of stored history (a room load from the store, storedorder.go:287). So the replica's readPoint copy (the agent write's fork, a version's tree), its content classification, and a fold of the stored updates can hold formatting the room never held.",
+    "evidence": "YText harness replaying a live doc's UpdateLog into a replica exactly as takeLocked does, 3000 random insert/format/delete sequences of 40 steps: v1.54.1-sami.1 local-only 1243 runs whose state differs and 329 whose ToDelta differs (e.g. live xxy italic only, replica bold+italic); with peer edits 700 and 41. Every diverging run ran the replica's own cleanup first. Same harness at v1.51.3-sami.4: 0 and 0 on both workloads.",
+    "notCovered": "Acceptance 2's cluster evidence ran at eb0fe0be (old pin); round 7's soak at the new pin exercises no formatting, so nothing at this head shows formatted text replaying.",
+    "fix": "Mirror documents must replay the room's commits without the remote format cleanup: an option in the sjawhar/ygo fork (per document, e.g. at crdt.New, for the replica, shadow, forks and newDocumentCopy) and the pin moved to it; or keep the pin below the cleanup until it exists. Plus a test in this PR: formatted local writes (pmdoc marks through Server.Apply) and browser formatting, then the replica's markdown equals the room's and a stored-order fold equals every version."
+  },
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/tree.go", "description": "ygo v1.54.1-sami.1's remote format cleanup makes the replica, the shadow and a fold of stored updates diverge from the room on formatted text; replay no longer reproduces the room."}
+  ]
+}
