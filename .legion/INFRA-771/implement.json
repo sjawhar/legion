@@ -9,8 +9,8 @@
       "criterion": "Acceptance 3: the live proof passes with the core-path mode removed (plan section 12, row 3).",
       "surface": "scripts/e2e/envoy-session-delivery.sh in this issue's pod: natsd with JetStream, two Envoy listeners (machine ids shared and dispatch), envoy-dispatch on a scratch Postgres, a real Oh My Pi session running this checkout's packed pi-envoy and a real Claude Code session under legion claude-bridge with claude-envoy built from this checkout, each reaching NATS through a cuttable socat proxy.",
       "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh",
-      "observed": "exit 0, last line 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)'. All six windows ran (session restart, NATS cut, each listener killed, Dispatch killed with its connection cut, and the control). Both sessions registered with delivery \"consumer\" (listener registry line quoted in the run log). The run's table is committed at .legion/INFRA-771/evidence/envoy-session-delivery-TABLES.md.",
-      "headSha": "1e6ef9ee29989f68a6842c1810d8c7cd60f5d467",
+      "observed": "exit 0, last line 'ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)'. All six windows ran (session restart, NATS cut, each listener killed, Dispatch killed with its connection cut, and the control). Both sessions registered with delivery \"consumer\" (listener registry line quoted in the run log). Run twice: once at 1e6ef9ee before the forward merge, and again at this head after it, both PASS. The second run's table is committed at .legion/INFRA-771/evidence/envoy-session-delivery-TABLES.md.",
+      "headSha": "4610c9421b16896381e99c770cc1599cad869db4",
       "negativeControl": "The same script against the build before this change, bash scripts/e2e/envoy-session-delivery.sh --disruptions a --build-from f41a4d8cb9c1: exit 1, 'FAIL sessions: session pi (...) does not report consumer delivery (both sessions registered): [{\"session_id\":...,\"delivery\":null},{...,\"delivery\":null}]'. The older build answers no delivery mode at all, which is what this change makes readable."
     },
     {
@@ -18,7 +18,7 @@
       "surface": "The same live stack, window a, where both sessions are SIGKILLed and resumed under the same id while every event of the window is published.",
       "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh (window a rows of the run's table)",
       "observed": "a session-restart team team-publish LDT5427-011Z 1 1, and the window's role rows read 1 for each session: one copy of the team publish and of each role message in each transcript after the sessions came back, counted from the Oh My Pi session file and the Claude Code transcript.",
-      "headSha": "1e6ef9ee29989f68a6842c1810d8c7cd60f5d467",
+      "headSha": "4610c9421b16896381e99c770cc1599cad869db4",
       "negativeControl": "The run counts a repeat as a failure: after each window it waits SESSION_DELIVERY_SETTLE_S for every marker and then SESSION_DELIVERY_HOLD_S more for a second copy, and a count other than the expected one fails the step. The counts read 1, never 2."
     },
     {
@@ -26,7 +26,7 @@
       "surface": "The repository's own suites against a real nats-server and a real Postgres: the listener's package, the bus, the session and store packages, and the three TypeScript packages' real-process suites.",
       "command": "cd packages/envoy && go vet ./... && go test -count=1 ./internal/bus/ ./internal/session/ ./internal/store/ && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' go test -count=1 -timeout 25m ./cmd/listener/ ; then bun test in packages/envoy-client, packages/pi-envoy and packages/claude-envoy",
       "observed": "ok internal/bus 340.372s, ok internal/session 10.634s, ok internal/store 31.949s, ok cmd/listener 606.113s, go vet clean; envoy-client 1285 tests 0 fail, pi-envoy 1698 tests 0 fail, claude-envoy 270 tests 0 fail. The new tests include: the plugin holds exactly its relay subject and its agent-stream control subject after registration (both plugins), a registration that cannot be given a consumer is refused with no interest row and no session entry written, a portless session's stored message is delivered by its relay alone, an uncaptured notifications. topic is refused by name at publish and at interest subscribe, a team-topic publish to a session that is not connected is stored under notifications.team.>, and a controller session registers its own project's notice lane and carries it in its consumer filter.",
-      "headSha": "1e6ef9ee29989f68a6842c1810d8c7cd60f5d467",
+      "headSha": "4610c9421b16896381e99c770cc1599cad869db4",
       "negativeControl": "packages/envoy/infra/core's live test under the narrowed SessionPermissions on a real nats-server: a session's subscribe to notifications.> and to notifications.agent.* is refused with a permissions violation while its own relay subject works (go test -count=1 ./core/ , ok 3.284s)."
     },
     {
@@ -34,7 +34,7 @@
       "surface": "packages/envoy/infra/core against a real nats-server (the package's own live-test harness).",
       "command": "cd packages/envoy/infra && go vet ./... && go test -count=1 ./core/",
       "observed": "ok github.com/sjawhar/envoy/infra/core 3.284s. SessionPermissions subscribes only the session's relay subject and its agent-stream control subject; HostPermissions still names notifications.> itself, with a test asserting the narrowing does not take it, so a host listener running ENVOY_SUBSCRIBE_ALL_TOPICS still starts.",
-      "headSha": "1e6ef9ee29989f68a6842c1810d8c7cd60f5d467",
+      "headSha": "4610c9421b16896381e99c770cc1599cad869db4",
       "negativeControl": "The live test's own refusals are the control: the same credential-free session user is refused notifications.>, notifications.agent.*, its own notifications.agent.s1, _INBOX.> and the stream's message get, each with a permissions violation the server logged."
     }
   ],
