@@ -600,6 +600,12 @@ In a room, which keeps what it parks across updates, the queue is also the most 
 `TestTheStoreTakesOneBrowserUpdateItsRoomTook` and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates a check at ygo's default queue refuses, which fails the room;
 `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`, `TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and `TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
+Every copy that replays the room's commits makes no commit of its own:
+ygo follows a remote apply that changes formatted text with a format cleanup committed with a nil origin, as Yjs does, while the room's own repairs and sweeps are local commits, which never clean up, so `newDocumentCopy` builds every copy with `crdt.WithFormatCleanup(false)` (reearth/ygo#369, in the pinned fork), and a room's load applies its stored history itself, with the cleanup off, then turns the cleanup back on for the updates that follow (`applyLoadedState`, from `onLoadDocument`;
+ygo's `LoadDoc` is handed no bytes).
+A browser's update and a write's publish (`publishLiveUpdate`) reach the room as remote applies, and any cleanup either makes is stored with the rest of the room's history, so every copy replays it.
+Without this a replica and a fold of the stored history each ran cleanups the room never ran, and `*x*y` read back as `*xy*` (`TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown`), and a room loaded from a history holding repeated markers at a text's start held a state the room before it never held (`TestARoomLoadsItsStoredHistoryAsItWasStored`).
+
 A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's edit, a read outside any transaction - stays resident until it has been idle for a minute (`roomIdleTimeout`), when ygo's idle sweeper evicts it.
 ygo's default, eager eviction, evicts a room the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go` checks only the peers):
 the callback's write then lands on the evicted room and reaches the store only through its retiring persistence worker, while the next access has already loaded the store without it and serves, and takes, the next write on a document missing the first.
@@ -662,15 +668,10 @@ The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts 
 A room an `Apply` opened with no peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
 `PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
-A document socket's peer hears from it at least every 15 s (`documentKeepAlive`, `docs/keepalive.go`), as `/ws/live`'s page does.
-`@hocuspocus/provider` closes a socket that has delivered no message for 30 s, and counts every message and nothing else:
-a websocket ping reaches no page, and ygo, unlike `@hocuspocus/server`, sends no peer its own awareness renewal back, so a lone idle editor heard nothing after its sync and closed and re-synced every 33 s.
-The keep-alive is the protocol's own message, an awareness update naming no client, which the provider applies as no change.
-ygo gives no application a way to write to one of its peers, so `Service.ServeHTTP` hands ygo's upgrade a response writer whose hijacked connection follows the frames gorilla/websocket writes on it (`frameWatch`) and puts the keep-alive only between two of its messages:
-never inside a frame gorilla writes in two parts, between a streamed message's frames, or after a close (`TestAKeepAliveGoesOutOnlyBetweenTheWritersMessages`).
-A keep-alive that cannot be written within 10 s closes the connection, which ends ygo's read of it.
-A ygo that sends its peers a keep-alive of its own makes this wrapper removable;
-a provider upgrade that counts something other than messages needs `TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts` checked against it again.
+`@hocuspocus/provider` renews its awareness every 15 to 18 s and closes a socket that has delivered no message for 30 s, and counts every message and nothing else: a websocket ping reaches no page.
+ygo returns a read-write peer's awareness update to every peer, including its sender, so a lone editor receives that renewal.
+A read-only peer receives ygo's bounded empty awareness response and cannot change shared awareness.
+Dispatch writes no document-socket keep-alive frames.
 
 The room's update observer renders a replica of the room, the one its reads walk, not the live tree, since ygo fires it after the transaction has released the document's lock and another write can be integrating meanwhile (`renderedReplica`).
 The replica moves only through the room's commits, one at a time and in commit order:
@@ -2520,8 +2521,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `recipient_session` when a recipient is known (the receiving session, not `source_session`;
   omitted rather than empty when unknown), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`;
   the exception lane is not recursively exceptional.
-  Each refusal records its recipient before publishing its exception, so an identical redelivery emits at most one exception during the attempt-cache window and never NAKs the original envelope.
+  Each refusal of a session the refusing path delivers to records its recipient before publishing its exception, so an identical redelivery emits at most one exception during the attempt-cache window and never NAKs the original envelope.
   A role message the role lane kept for the role's next holder raises no exception either, because it is not lost.
+  A refusal of a session whose own consumer holds the message records nothing, whether the relay of that consumer reports it or the fan-out does for a portless session ("Session consumers"), so a second stored copy of the event -- the same dedupe key on another of the session's topics -- is judged and reported again rather than left under a record that would hold the session's copy for five minutes.
+  The same holds for a refusal whose resolution of the recipient failed, a session whose entry is gone (`session.ErrNoSessionRecord`) among them.
+  The cost is that session's exception dedupe: a portless session on consumer delivery is sent one `delivery_failed` per stored copy of the event and per redelivery of each, up to the durable's `consumerMaxDeliver` (20), where a recorded refusal gives one per dedupe key per attempt window.
   A role or ad-hoc topic sent through `/v1/messages/publish` raises no exception:
   the route answers its sender instead, with 202 for a role message it kept, with the unheld role's 404 when it kept nothing, and with 403 or 504 for a recipient that did not take it (the Listener API).
 
@@ -3196,8 +3200,12 @@ Each item below names an endpoint and its method, then its contract, and an item
 
   Claims a role for a live session; the claim alone makes it the holder, and the route also adds the role's topic to its interest record.
   Last-claim-wins by default.
-  With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues);
-  any other live holder answers `409 {error, role, holder}` and nothing changes.
+  With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues) in one of three cases:
+  that predecessor has no live registry entry, its live entry carries the claimant's own `client_instance_id`, or either side carries no instance id.
+  The third case is the one this route cannot tell from another client instance's, so it logs that takeover with both session ids.
+  A predecessor still live under another client instance keeps the role, and the claim answers `409 {error, role, holder}` naming it, as any other live holder does.
+  The predecessor's entry is read from the `envoy_sessions` bucket itself, never from this listener's trailing cache of it, and a predecessor read that did not answer is the bus-unavailable 503 with nothing changed.
+  The claimant's own entry is read from the bucket too, and a claimant read that does not answer falls back to the cached entry, so a cache that trails without the claimant's id decides that claim as the third case.
   A write route (below the list).
 
 - `/v1/interests/subscribe` (POST)
@@ -3208,6 +3216,9 @@ Each item below names an endpoint and its method, then its contract, and an item
   It also stores `plugin` and `plugin_version` on the session entry, trimmed of surrounding space and otherwise as sent:
   the npm package the session registers through and that plugin's build (`@legion/envoy-client`'s `subscribe()` sends both on every registration);
   a registration from an older plugin sends neither, and the entry keeps neither.
+  It stores `client_instance_id` the same way: the client instance driving the session, which is one Oh My Pi Envoy extension instance or one Claude Code channel-server process, each minting a random id when it starts.
+  Every registration replaces the stored id with the one it carries, or with none when it carries none, and `/v1/roles/set`'s refresh of the claimant's entry keeps the stored id.
+  That id is what decides a soft claim naming a predecessor and a deregistration that carries one, as those two entries say.
   A topic reaching a private stream subject (`bus.privateStreamSubjects`:
   each session's inbox `notifications.agent.>`, the failed-delivery lane `notifications.envoy.exceptions.notifications.agent.>`, the Legion controller lane `notifications.legion.>`) other than the session's own literal `notifications.agent.<id>` — another session's agent subject, any failed-delivery lane (its own included), a controller lane, or a wildcard overlapping one (`notifications.agent.*`, `notifications.envoy.>`, `notifications.>`, `notifications.*.<x>`;
   `bus.ReachesPrivateStreamSubject`) — is not stored, since `/v1/replay` answers the stored topics and the stored topics drive the fan-out to serve-port sessions, and such a topic would hand the session messages meant for another session or for the controller's role holder:
@@ -3308,7 +3319,11 @@ Each item below names an endpoint and its method, then its contract, and an item
 
 - `/v1/sessions/<session_id>` (DELETE)
 
-  Removes a live session registration.
+  Removes a live session registration, and answers 200 whether or not there was one to remove.
+  The optional `client_instance_id` query parameter names the client instance that is leaving:
+  with it the registration is removed only while it carries that id or carries none, answered `200 {"deleted":true}` for a registration that is gone and `200 {"deleted":false,"reason":…}` for one that stayed, since the caller has nothing to retry either way.
+  So a departing instance never removes the registration a later instance made under the same session id, which is what stops a Claude Code `/clear` handoff clearing the predecessor its own role claim is then weighed against.
+  Without the parameter the registration is removed whoever wrote it, and the answer carries no body at all, as this route always answered.
   A write route (below the list).
 
 The write routes - `POST /v1/interests/subscribe`, `POST /v1/interests/unsubscribe`, `POST /v1/roles/set`, `DELETE /v1/interests/<session_id>` and `DELETE /v1/sessions/<session_id>` - do every store read and write within one 3.5 s budget (`sendRequestBudget`) taken from the request's own context (`store.Registry.UpsertWithin`, `Remove`, `SetRoleWithPrevious`, `session.SessionRegistry.PutWithin` and `Delete`, each bucket call bounded by `bus.Bounded`), where a silent bus held them for the 10 s JetStream wait.
@@ -3416,6 +3431,8 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   `progress` every 20 s while it holds the frame unwritten (`InProgress`);
   `done` once it wrote, skipped or refused the frame (`Ack`, which also counts as `received`); `nak` when it cannot take it (`NakWithDelay` of 1 s).
   Up to `MaxAckPending` frames are in flight.
+  The relay judges none of them:
+  every frame it pulls is published whatever the caches hold, and a refusal of a message on a followed topic is the fan-out's to report for such a session (the "No consumer" bullet below), where a serving-port session's relay makes and reports that refusal itself.
   When the oldest unanswered frame gets no reply within 3 s (`relayReceiptWait`), the relay pauses:
   it sends nothing more and leaves the frames in flight to their ack wait.
   It resumes on its own, with no registration:
@@ -3435,7 +3452,7 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   A path that does not push to the session records nothing for it (the bullet below).
   And an attempt record is a push in flight, not a delivery, so the relay holds such a message rather than acking it (`holdWhilePushedElsewhere`):
   it leaves the copy unacked in the consumer, keeps it in progress, and judges it again every second (`relayHeldRecheck`).
-  It acks the message only on the dedupe key that push's 204 writes, and pushes it itself once the attempt record is gone -- the serving-port worker clears it when it drops its push or hands it back, the fan-out clears the one it recorded when its own resolution of that recipient then fails (`session.ErrNoSessionRecord`, a session whose entry is gone, among those failures), and `attemptCacheTTL` expires it 5 minutes after it was written -- so a hold lasts at most that TTL plus one recheck, and delivery rests on the consumer's ack state, never on a cache that expires.
+  It acks the message only on the dedupe key that push's 204 writes, and pushes it itself once the attempt record is gone -- the serving-port worker clears it when it drops its push or hands it back, the fan-out writes none at all when its own resolution of that recipient fails (`session.ErrNoSessionRecord`, a session whose entry is gone, among those failures) and clears the one it recorded when a push it made itself then fails, and `attemptCacheTTL` expires it 5 minutes after it was written -- so a hold lasts at most that TTL plus one recheck, and delivery rests on the consumer's ack state, never on a cache that expires.
   That is the case of a serving-port session whose entry flips from core delivery back to consumer delivery under a push already handed to its worker -- a registration answered `core` on a transient consumer call failure, then one that finds the consumer again -- where the worker's next try reads the flipped entry, drops its push and clears the attempt, and the relay then pushes the message itself.
   A held message delays only the session's own later messages, which wait behind it in stream order as they wait behind a head message the port keeps refusing.
   The worst case, relay and worker pushing at once, is a duplicate the session drops by its dedupe key, never a lost message.
@@ -3447,8 +3464,12 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   The durable path acknowledges, unread, a stored message for a live session whose entry records consumer delivery and whose consumer covers it (`takesStoredMessagesItself`):
   the message waits in the session's consumer.
   It records nothing for such a session -- no attempt, no dedupe key (`session.SessionEntry.ConsumerRelaysStored`, which the fan-out, the agent-subject path and the serving-port workers all skip by) -- since the relay of that consumer is what delivers the message and what records its key on the port's 204;
-  a dedupe record written for a session nothing was pushed to is one the relay reads as a copy the session already has and acks unpushed, and an attempt record one it would hold that copy under for a push nobody is making, so the fan-out reports even its own refusals of such a session as a skip.
-  The fan-out decides that once per recipient, from the session's entry, which `judgeFollowedTopic` reads for every verdict and not only the ones it judges against that entry, so a delivery mode it cannot read unambiguously -- a mode no session can be shown to advertise, and one any publisher can send on a followed topic -- is left to the relay like every other refusal of such a session, and reported once rather than reported here and left in an attempt record that stalls the session's relay for five minutes.
+  a dedupe record written for a session nothing was pushed to is one the relay reads as a copy the session already has and acks unpushed, and an attempt record one it would hold that copy under for a push nobody is making, so the fan-out records nothing for such a session, its own refusals included.
+  The fan-out decides that once per recipient, from the session's entry, which `judgeFollowedTopic` reads for every verdict and not only the ones it judges against that entry, so a delivery mode it cannot read unambiguously -- a mode no session can be shown to advertise, and one any publisher can send on a followed topic -- is judged for such a session too rather than left to a resolution that only skips it.
+  Who reports that refusal is whose relay judges what it sends.
+  A serving-port session's relay applies these same rules to each message it pushes (`sessionRelays.followedTopicVerdict`), so the fan-out leaves it the refusal and reports none of it, and the message is acked with one `delivery_failed` exception from that relay rather than reported here as well and left in an attempt record that stalls the relay for five minutes.
+  A portless session's relay publishes every frame unjudged (`sessionRelays.relayNATS`), and the plugin drops a frame whose delivery mode it cannot read without a word, so the fan-out publishes that session's `delivery_failed` itself -- and records no attempt for it, since `judgeFollowedTopic` is what reads such a record back and the relay of a serving-port session's consumer applies that same judgement (`sessionRelays.followedTopicVerdict`): a record would make that relay hold its copy of the message, and the session's later messages behind it, once the session is on a serving port.
+  The fan-out records none of its own refusals where its resolution of the recipient failed either, and for that same reason rather than for the resolution's sake: a session whose entry has lapsed keeps its interest for at least ten minutes and its consumer for three days, so an attempt record left for the unreadable-mode refusal of a session with no entry -- a mode any publisher can send on a followed topic -- is one the relay holds that message under, for `attemptCacheTTL`, as soon as the session registers again on a serving port with its consumer at or below the message.
   The entry records the sequence that consumer starts at (`consumer_start`, written by the registration from `bus.SessionConsumers.Ensure`), and only a message at or after it is the consumer's:
   one stored below that start -- a push NAKed back to the durable, or one deferred as unplaceable, before the session's first consumer was created -- is in no consumer, so the durable path delivers it as it would for a session with none, the stored copy of a role forward included (`roleForwardCopyDelivery`, which reads the copy's own sequence rather than the holder's delivery mode).
   An entry an earlier release wrote carries no start, which reads as today: the consumer holds every stored message of it.

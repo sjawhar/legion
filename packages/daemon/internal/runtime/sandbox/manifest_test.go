@@ -723,7 +723,11 @@ func TestEveryRolesGitStartsNoPlantedFsmonitorOrHook(t *testing.T) {
 			t.Fatalf("git %v: %v\n%s", args, err, output)
 		}
 	}
-	if output, err := exec.Command(git, "init", "--quiet", clone).CombinedOutput(); err != nil {
+	initialise := exec.Command(git, "init", "--quiet", clone)
+	// The init creates the clone, so it runs in the directory holding it rather than in the one
+	// the test process happens to have; every later command runs in the clone itself.
+	initialise.Dir = dir
+	if output, err := initialise.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, output)
 	}
 	if err := os.WriteFile(filepath.Join(clone, ".git", "config"), append(mustRead(t, filepath.Join(clone, ".git", "config")), planted...), 0o644); err != nil {
@@ -1264,6 +1268,7 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.TestPostgres = true
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -1808,6 +1813,8 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	// With every optional piece configured: the pod's own test database is one (testPGVolume).
+	opts.TestPostgres = true
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)

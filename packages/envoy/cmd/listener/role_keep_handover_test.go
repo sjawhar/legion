@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 )
 
@@ -105,7 +106,7 @@ func (l *keptLaneUnderClaim) register(t *testing.T, sessionID string) {
 func (l *keptLaneUnderClaim) claim(t *testing.T, sessionID, role string) {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	roleSetHandler(l.deps, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+	roleSetHandler(l.deps, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 		strings.NewReader(`{"session_id":"`+sessionID+`","role":"`+role+`"}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("claim of %s for %s: status %d, body %s", role, sessionID, recorder.Code, recorder.Body.String())

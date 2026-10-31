@@ -39,6 +39,14 @@ type subscribeBody struct {
 	// Empty for a session whose plugin predates the fields.
 	Plugin        string `json:"plugin"`
 	PluginVersion string `json:"plugin_version"`
+	// ClientInstanceID is the id the client instance mints at its own start (one Oh My Pi Envoy
+	// extension instance, one Claude Code channel-server process) and sends on every
+	// registration, so a soft claim naming a predecessor session can tell that predecessor's
+	// own instance from another instance's live session (session.InstanceMatches). Empty for a
+	// client whose plugin predates the field, which keeps the old rule; absent here it is
+	// written empty, clearing any id a previous registration stored, since the entry is built
+	// fresh from this body.
+	ClientInstanceID string `json:"client_instance_id"`
 	// Delivery asks for consumer delivery (subscribeDelivery); absent from an older plugin's
 	// registration, which stays on the core path.
 	Delivery *subscribeDelivery `json:"delivery"`
@@ -68,16 +76,17 @@ type subscribeResume struct {
 // consumer for it, consumer delivery, the plugin's epoch and the sequence that consumer starts at.
 func sessionEntryFromSubscribe(body subscribeBody, machineID string, delivery sessionDeliveryOutcome) session.SessionEntry {
 	entry := session.SessionEntry{
-		Port:           body.Port,
-		MachineID:      machineID,
-		Dir:            body.Dir,
-		Title:          body.Title,
-		Capabilities:   append([]string{}, body.Capabilities...),
-		Driving:        body.Driving,
-		SelfSubscribed: body.SelfSubscribed,
-		Host:           body.Host,
-		Plugin:         strings.TrimSpace(body.Plugin),
-		PluginVersion:  strings.TrimSpace(body.PluginVersion),
+		Port:             body.Port,
+		MachineID:        machineID,
+		Dir:              body.Dir,
+		Title:            body.Title,
+		Capabilities:     append([]string{}, body.Capabilities...),
+		Driving:          body.Driving,
+		SelfSubscribed:   body.SelfSubscribed,
+		Host:             body.Host,
+		Plugin:           strings.TrimSpace(body.Plugin),
+		PluginVersion:    strings.TrimSpace(body.PluginVersion),
+		ClientInstanceID: strings.TrimSpace(body.ClientInstanceID),
 	}
 	if delivery.relayed() {
 		entry.Delivery = session.DeliveryConsumer

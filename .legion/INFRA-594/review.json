@@ -2,21 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-594",
-  "completed": "2026-10-31T10:15:00Z",
-  "round": 5,
-  "reviewedCode": "ce082506b077 (code) under handoff head 89fb442f",
+  "completed": "2026-10-31T21:30:00Z",
+  "round": 7,
+  "reviewedCode": "3a38540c3919 (code) under handoff head d44e1d62",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 3,
-  "ci": "Main's ruleset now requires ci-ok and pr-title (read 2026-10-31). At CI head ce082506 (run 41177835093): pr-title success; ci-ok queued and bound to fail because envoy-go failed on TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (packages/envoy/internal/broker/oauth/claims_doc_test.go), which main fixed in #2598 (1a9095e6, 08:42Z), not in this branch. Every other lane green: lint, typecheck, test, envoy-go-race and its api/docs/pmdoc lanes, envoy-client, envoy-infra-go, pi-envoy, claude-envoy, envoy-session-stall, listener-server-change. Compare ce082506...89fb442f handoffsOnly true (2 files).",
-  "thermonuclear": "deep review: Verdict CHANGES at ce082506 (1 Medium reproduced with a scratch overlay test, 1 Minor; the round-4 loss confirmed fixed); code quality: Verdict CHANGES at ce082506 (structure and one test-timing race). I re-traced the Medium in the code.",
-  "threads": "Accepted PRRT_kwDORFy7ds6x97BJ, PRRT_kwDORFy7ds6yJh2F, PRRT_kwDORFy7ds6yMl6Q (the round-4 loss).",
+  "ci": "Required set ci-ok and pr-title. At code head 3a38540c: every named lane green; dispatch failed (one Playwright row of overlapping-marks.e2e.ts at browserContext.close, a package this PR does not touch), so ci-ok will be red. Compare 3a38540c...d44e1d62 handoffsOnly true (9 files). Changes requested, so no empty commit of mine: the implementer's push refreshes CI.",
+  "thermonuclear": "deep review: Verdict CHANGES at 3a38540c (1 Medium, reproduced in a scratch copy; the #2592 merge and the e2e order comparison hold); code quality: Verdict CHANGES at 3a38540c (structure only). I re-traced the Medium in the code.",
+  "threads": "Accepted PRRT_kwDORFy7ds6yRU8J, PRRT_kwDORFy7ds6yRU8K, PRRT_kwDORFy7ds6yRU8L, PRRT_kwDORFy7ds6yRU8N.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go:954", "description": "A followed-topic message whose delivery mode cannot be read: judgeFollowedTopic returns followedTopicModeUnreadable with no entry (delivery.go:860-861), so the consumer-relayed guard (target != nil) never fires; fanoutRefusalOutcome publishes delivery_failed and records an attempt naming no push. The relay then holds that message for attemptCacheTTL (5 min), blocking the session's later messages, and publishes a second exception. Any publisher can trigger it. Test that must fail: TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused with payload {\"delivery\":{\"mode\":\"bogus\"}}, synced on 'listener delivery mode cannot be read unambiguously': awaitAcked fails, and exactly one exception on notifications.envoy.exceptions.<topic> fails."},
-    {"severity": "important", "file": ".github/workflows/ci.yaml:8", "description": "Gate: main's ruleset now requires ci-ok and pr-title; ci-ok will be red at ce082506 because envoy-go fails on main's claims-doc test, fixed by #2598. Merge main forward for a fresh CI run. The ci.yaml comments (:8-9 and :1431) say the ruleset requires lint, typecheck, test and pr-title and not ci-ok, which is now false; correct them in that push (the review App may not push workflow files)."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:992", "description": "A fan-out attempt recorded before Resolve errors with no entry (non-retryable) is left behind, so a relay later holds that message up to 5 min with nothing in flight; no loss, but session_relay.go:967-969 and serve_port_workers.go:279-283 comments overstate it."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/session_relay_test.go:1215", "description": "The 'entry is gone' subtest races the worker's retry (about 4 s window) and awaitRelayJudged ends on a 500 ms sleep; wait on the hold's log line and order the steps through the test transport."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:954", "description": "Structure: the nested consumer-relayed guard repeats the Relayed branch below; check once right after judgeFollowedTopic (also fixes the Medium)."}
+    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go:993", "description": "A session with no entry sent an unreadable mode: judgeFollowedTopic returns followedTopicModeUnreadable before the nil-target check, Resolve fails ErrNoSessionRecord, so relayed is false and the refusal records an attempt (recorded = !relayed). When the session registers again with its consumer start at or below the message, its relay judges followedTopicAttempted and holds for attemptCacheTTL (5 min), stalling later messages, then reports a second delivery_failed. Contradicts delivery.go:999-1003, AGENTS.md:3411 and the changelog. fanout_refusal_reports_test.go:81 pins wantAttempt: true. Test that must fail: serving-port consumer session, delete its entry, publish {\"delivery\":{\"mode\":\"bogus\"}}, await the fan-out, assert no attempt record; register again and assert a later message reaches the port well inside attemptCacheTTL. Fix: recorded = err == nil && !delivery.Relayed."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:969", "description": "Structure: decide refusals before the take case (relayed && Port > 0 skip; else report with recorded) so the 'verdict == take ||' clause and the three copies of the reason go."},
+    {"severity": "minor", "file": "scripts/e2e/envoy-session-delivery.sh:1160", "description": "compare_issue_order's length check cannot fail: published_order and written_order come from the same filter; read the markers once and sort by stream_seq; the duplicated selector is checked in one copy only."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:990", "description": "The comment 'nothing reads such a record back for that session' is wrong (judgeFollowedTopic reads it on the next copy, which is why a portless relayed session now gets one exception per copy and redelivery); name the serving-port hold as the reason. session_relay_portless_refusal_test.go duplicates a row of fanout_refusal_reports_test.go."}
   ]
 }

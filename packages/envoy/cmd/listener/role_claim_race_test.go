@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 )
 
@@ -85,7 +86,7 @@ func TestRoleSetConcurrentClaimsOfOneRoleAnswerOnlyWhatTheRouteDocuments(t *test
 			})
 			ids := registerClaimants(t, sessions, claimants)
 
-			codes, bodies := claimRace(t, roleSetHandler(d, "test-machine"), ids, tc.role, tc.soft)
+			codes, bodies := claimRace(t, roleSetHandler(d, "test-machine", logging.New("test")), ids, tc.role, tc.soft)
 
 			for i, code := range codes {
 				switch {

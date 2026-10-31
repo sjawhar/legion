@@ -27,6 +27,21 @@ is kept for the session that claims the role next. That session is handed the me
 one hour of the keep, and the publish answers 202 to say the listener kept it. On the core path a
 session does not recover a role message it missed.
 
+This extension claims the role for the session the host has open, and every automatic claim is
+soft: it names the session it continues, which is a fork's or branch's parent, or the session
+this process last held the role under. The listener moves the role off that predecessor only
+when the predecessor has no live registration, when its live registration carries this extension
+instance's own client instance id, or when either side carries no instance id. A predecessor
+another process still runs keeps the role, and the claim is refused naming that holder. A refused
+session keeps running and stays registered, without the role: it does not claim again at each
+heartbeat, and it takes the role on its next session event once the holder is gone. Each
+extension instance mints its client instance id when it starts and sends it on every registration
+and on the deregistration at shutdown, where the listener removes the registration only while it
+carries the same id or none. The queues, deadlines and shared role state behind all of this are
+`src/registration-state.ts`, beside the extension's other `src/` modules: a queued task acts
+through a handle that refuses every step past the task's deadline, or once its session is no
+longer the open session.
+
 `envoy_list()` shows the union of the local subscriptions and the listener's persisted interest
 registry. Each reported interest identifies whether it is `live`, `registry`, or `both`, so
 temporary registration drift does not hide the extension's actual delivery state.

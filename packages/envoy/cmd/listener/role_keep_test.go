@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -253,7 +254,7 @@ func TestNoKeptRoleCopyOrPublishAnswerCarriesAKeepKey(t *testing.T) {
 		t.Fatalf("register the claimant: %v", err)
 	}
 	claimRecorder := httptest.NewRecorder()
-	roleSetHandler(d, "test-machine").ServeHTTP(claimRecorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+	roleSetHandler(d, "test-machine", logging.New("test")).ServeHTTP(claimRecorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 		strings.NewReader(`{"session_id":"`+holder+`","role":"`+role+`"}`)))
 	if claimRecorder.Code != http.StatusOK {
 		t.Fatalf("claim of %s: status %d, body %s", role, claimRecorder.Code, claimRecorder.Body.String())
@@ -305,7 +306,7 @@ func TestAClaimForwardsEachKeptRoleMessageToItsNewHolderExactlyOnce(t *testing.T
 	claim := func(what string) {
 		t.Helper()
 		claimRecorder := httptest.NewRecorder()
-		roleSetHandler(d, "test-machine").ServeHTTP(claimRecorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+		roleSetHandler(d, "test-machine", logging.New("test")).ServeHTTP(claimRecorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 			strings.NewReader(`{"session_id":"`+holder+`","role":"`+role+`"}`)))
 		if claimRecorder.Code != http.StatusOK {
 			t.Fatalf("%s claim of %s: status %d, body %s", what, role, claimRecorder.Code, claimRecorder.Body.String())
@@ -752,7 +753,7 @@ func TestAKeptRoleMessageCarriesTheSenderThePublishStamped(t *testing.T) {
 		t.Fatalf("register the claimant: %v", err)
 	}
 	claimRecorder := httptest.NewRecorder()
-	roleSetHandler(d, "test-machine").ServeHTTP(claimRecorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+	roleSetHandler(d, "test-machine", logging.New("test")).ServeHTTP(claimRecorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 		strings.NewReader(`{"session_id":"`+holder+`","role":"`+role+`"}`)))
 	if claimRecorder.Code != http.StatusOK {
 		t.Fatalf("claim of %s: status %d, body %s", role, claimRecorder.Code, claimRecorder.Body.String())
@@ -782,7 +783,7 @@ func TestAPublishToARoleNoClaimCanNameIsRefusedAndKeepsNothing(t *testing.T) {
 
 	// The claim route refuses the same token, which is why nothing may be kept under it.
 	claimRecorder := httptest.NewRecorder()
-	roleSetHandler(d, "test-machine").ServeHTTP(claimRecorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+	roleSetHandler(d, "test-machine", logging.New("test")).ServeHTTP(claimRecorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
 		strings.NewReader(`{"session_id":"ses_kept_invalid_role","role":"`+role+`"}`)))
 	if claimRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("claim of %s: status %d, body %s; want the 400 that refuses the token", role, claimRecorder.Code, claimRecorder.Body.String())

@@ -11,6 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/config"
+	"github.com/sjawhar/envoy/internal/logging"
 )
 
 func TestThermoOpsListenerConfigDefaultsToLoopback(t *testing.T) {
@@ -65,7 +66,7 @@ func TestThermoOpsRoleSetRejectsUnregisteredSession(t *testing.T) {
 		"/v1/roles/set",
 		strings.NewReader(`{"session_id":"ses_unregistered","role":"legion-controller"}`),
 	)
-	roleSetHandler(state, "test-machine").ServeHTTP(recorder, request)
+	roleSetHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("unregistered role claimant status = %d, want 404: %s", recorder.Code, recorder.Body.String())
