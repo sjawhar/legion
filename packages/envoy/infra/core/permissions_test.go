@@ -128,10 +128,13 @@ func TestListenerPermissionsNameTheDurableAndQueueOfAMachineIDWithASpace(t *test
 	require.Contains(t, p.Subscribe.Allow, "notifications.role.> envoy-listener-example-host")
 }
 
+// A session subscribes to its own relay subject and its agent stream's control subject, and to no
+// notification topic at all: a notification reaches it as a relay frame of its own consumer,
+// which the listener owning the session publishes there, or not at all.
 func TestSessionPermissions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish:   core.Rules{Allow: []string{"_INBOX.>", "agentstream.*.frames"}},
-		Subscribe: core.Rules{Allow: []string{"notifications.>", "agentstream.*.control"}},
+		Subscribe: core.Rules{Allow: []string{"notifications.envoy.deliver.*", "agentstream.*.control"}},
 	}, core.SessionPermissions())
 }
 
@@ -182,7 +185,9 @@ func admitsInbox(entry string) bool {
 }
 
 // The host's user runs a listener and holds every session's entries, and no session consumer's
-// call: a listener connecting as it keeps its own durable alone.
+// call: a listener connecting as it keeps its own durable alone. Its notifications.> subscribe is
+// the set's own, and it admits the session's relay subject, which is why the union adds no entry
+// for it.
 func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish: core.Rules{Allow: append(append([]string{}, listenerBasePublish...), "_INBOX.>", "agentstream.*.frames")},
@@ -190,6 +195,17 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 			"notifications.>", "agentstream.*.control",
 		)},
 	}, core.HostPermissions("example-host-a"))
+}
+
+// Narrowing the session's set to its relay subject does not take notifications.> from the host's
+// or the listener-host's: both name it themselves. A host listener opted into the live lane with
+// ENVOY_SUBSCRIBE_ALL_TOPICS=1 is refused that subscription without it and ends its start, and
+// the sessions sharing a host user keep the reach they have today until dispatch://INFRA-840
+// gives each session a credential of its own.
+func TestHostPermissionsKeepTheSubscribeToEveryTopicTheSessionsLost(t *testing.T) {
+	require.NotContains(t, core.SessionPermissions().Subscribe.Allow, "notifications.>")
+	require.Contains(t, core.HostPermissions("example-host-a").Subscribe.Allow, "notifications.>")
+	require.Contains(t, core.ListenerHostPermissions("example-host-a").Subscribe.Allow, "notifications.>")
 }
 
 // Dispatch's user is built on the same base grant, so it holds its own durables' per-durable
