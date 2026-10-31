@@ -2,73 +2,79 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-594",
-  "completed": "2026-10-31T16:45:00Z",
-  "round": 14,
+  "completed": "2026-10-31T20:52:00Z",
+  "round": 15,
   "roundShape": {
     "classification": "full",
     "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3, re-fetched into this pod",
-    "output": "pull request 2446, base main / old head 6c972822 / new head 91a71697 / files whose own diff differs: 7 — .github/workflows/ci.yaml, packages/envoy/.changes/unreleased/INFRA-594-serving-port-relay-refusals.yaml, packages/envoy/AGENTS.md, packages/envoy/cmd/listener/delivery.go, packages/envoy/cmd/listener/fanout_refusal_reports_test.go, packages/envoy/cmd/listener/session_relay_mode_stall_test.go and packages/envoy/cmd/listener/session_relay_test.go.",
-    "why": "delivery.go is the fan-out, so every criterion was driven again at this head."
+    "output": "pull request 2446, base main / old head e1cd36f3 / new head 65615107 / files whose own diff differs: 12 — packages/claude-envoy/AGENTS.md, packages/envoy-client/src/__tests__/transport.test.ts, packages/envoy/cmd/listener/claim_wiring_test.go, packages/envoy/cmd/listener/fanout_refusal_reports_test.go, packages/envoy/cmd/listener/session_relay_portless_refusal_test.go, packages/envoy/internal/session/registry.go, packages/pi-envoy/extensions/envoy.ts, packages/pi-envoy/src/registration-state.test.ts, packages/pi-envoy/src/registration-state.ts, scripts/e2e/envoy-session-delivery.sh, scripts/e2e/lib/session-delivery-order-compare.test.ts and scripts/e2e/lib/session-delivery-order.test.ts.",
+    "why": "The merge of main's #2592 lands in runtime on both sides — the listener's registry and the plugin's registration state — and the live proof's own order check changed, so every criterion was driven again."
   },
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "The product behaviour of review round 6 is right — I drove it and locked it myself — but the round's own proof does not hold: the new tests the implementer offers as the fix's evidence pass unchanged against the pre-fix tree, so they prove nothing about the change. That, and the issue-order assertion that has never run, are the two failures below."
+    "verdict": "verified",
+    "how": "Each of the round's claims was re-derived rather than read: the order check driven on two live runs of my own with its comparison lines quoted and a reordered row made to fail it, the merge's soft-claim rule driven over the listener's real routes with the instance check disabled as the control, every earlier control re-run, and the race suite run here with its output kept."
   },
-  "failed": 2,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "Each issue's events reach the session in order — the acceptance criterion this pull request's own live proof claims to show",
-      "evidence": "THE ASSERTION HAS NEVER RUN, confirmed at 0debf189 three ways. (1) By reading: scripts/e2e/envoy-session-delivery.sh fills published_order (:1150-1151) and written_order (:1156) with `jq -r 'select(.kind == \"issue\" and .expected == 1 and (.event | startswith(\"comment-\")))'`, while record() (:847-852) writes the fields marker, disruption, kind, source, sessions, expected, answer, at — there is no `event`. (2) By running this round's own evidence through both selectors: with `.event`, jq answers `Error: cannot use null as string` for every row and selects nothing; with `.source`, the same file yields the twelve comment markers LDT8961-001Z … LDT8961-052Z. (3) By this round's own six-window run, whose table.txt carries `note: Dispatch published LIVE-1's comments in another order than they were written: written ; stored` — both lists empty — and then `issue order: every comment of LIVE-1 appears in its stream order in both transcripts`, with nothing compared, and the run prints `ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)`. order_ok stays 1 because the loops at :1162 and :1167 iterate over an empty array. THE RED TEST: scripts/e2e/lib/session-delivery-order.test.ts, INFRA-771's, taken into this tree at commit ec9974d1995c on legion/INFRA-594-wip because the script is this pull request's. It fails here at 0debf189: `(fail) the issue-order selector reads the comment rows record() writes`, 0 pass 1 fail. THE FIX IS THE SCRIPT'S, and it is not enough to change `.event` to `.source`: the order must then be shown actually compared, with a control that a reordered row fails the assertion."
+      "criterion": "Round 14's blocking finding is answered: the live proof now compares the issue's order for real",
+      "surface": "The repository's own unit rows and both live runs in this pod",
+      "command": "bun test scripts/e2e/lib/session-delivery-order.test.ts scripts/e2e/lib/session-delivery-order-compare.test.ts; then both live runs",
+      "observed": "6 pass, 0 fail, 20 expect() calls. The six-window run's table carries what it compared: `issue order compared in pi (12 comments): LDT2084-001Z@seq4:line17 LDT2084-002Z@seq5:line18 … LDT2084-042Z@seq66:line114 LDT2084-041Z@seq71:line…`, the same twelve in cc, then `issue order: every comment of LIVE-1 appears in its stream order in both transcripts`. The upgrade run's: `issue order compared in pi (2 comments): LDT2eab-001Z@seq5:line19 LDT2eab-002Z@seq6:line20` and the same two in cc. Non-empty, counted, and equal to the stream order in both transcripts — which is what round 14 found was never checked. Worth noting in passing: window e's two comments were stored by Dispatch in the order comment-2 then comment-1 (seq 66 before seq 71), and the run compares the transcripts against the stream rather than against the writing order, as its own comment says.",
+      "headSha": "656151077b1b6f0ee3389552368497f7da5b9520",
+      "negativeControl": "Two. (1) The old selectors: in a `git archive 65615107` extraction with `(.source | …)` put back to `(.event | …)` in both places, INFRA-771's row fails — 0 pass, 1 fail. (2) A reordered transcript, driven through the script's own `compare_issue_order` with the live run's own rows (its twelve markers, their stream sequences and their transcript lines, read back out of the run's table): unchanged it prints the held line and `order_ok=1`; with the first two comments' transcript lines swapped it prints `order break in pi: LDT2084-002Z (stream seq 5, transcript line 17) after line 18`, the same for cc, and `order_ok=0`."
     },
     {
-      "criterion": "Review round 6's new tests pin the behaviour the fix changes",
-      "evidence": "THEY DO NOT: TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo (packages/envoy/cmd/listener/fanout_refusal_reports_test.go) PASSES against the pre-fix tree. I ran it outside the workspace, in a `git archive 196233c090e5` extraction with only that one test file copied in: ok 2.164s, all four subtests PASS, where at this head it is also ok 1.13s. A test that passes before and after the change it is offered as evidence for is not evidence. THE CAUSE is in its own table: its two portless rows set `SelfSubscribed: true` and take `core: true`, so the message reaches the fan-out through the core handler with no stored sequence; `delivery.Relayed` is then false whatever the entry says, and the branch the fix changes — `relayed && (verdict == takeFollowedTopic || target.Port > 0)` — is never reached. THE CASE THE FIX ACTUALLY CHANGES is a portless session on consumer delivery whose own consumer holds the STORED message, which needs a second recipient on the topic so the durable path reads it at all (takesStoredMessagesItself, durable.go:402, is true for any consumer-delivery session that holds the sequence). I wrote that test: TestAPortlessConsumerSessionIsReportedAnUnreadableDeliveryMode, commit 6d5c468e2eac on legion/INFRA-594-wip. At this head it passes; against the same pre-fix extraction it FAILS — `the exception lane of ses_portless_52241271… carried [], want one delivery_failed: nobody else reports a portless session's refusal`. So the fix is right and now has a lock; the round's own tests still need either replacing or keeping beside that one."
-    }
-  ],
-  "proof": [],
-  "verifiedAtThisHead": [
-    {
-      "what": "The (session kind × verdict) matrix, walked against the code rather than against the comment",
-      "observed": "fanoutDelivery's branch is `relayed := err == nil && delivery.Relayed; if relayed && (verdict == takeFollowedTopic || target.Port > 0)`, and `delivery.Relayed` comes from Resolve's ConsumerRelaysStored, which is `ConsumerHoldsStored(storedSeq) && StreamCaptures(topic)`. So: a serving-port consumer session (Port > 0) is left to its relay for every verdict, and its relay judges and reports by the same rules; a portless consumer session is left to the fan-out for a refusal and to its relay only for a take, which is right because relayNATS publishes frames and judges nothing; a core-path session, portless or with a port, is never 'relayed' (storedSeq 0 or no consumer) and is reported by the fan-out as before; a session with no entry cannot be judged against a mode, so it is taken and its resolution fails, recording no attempt. The last of those is the one row of the implementer's own table I found no second way to read, and its test is the one subtest of theirs that distinguishes nothing either way.",
-      "headSha": "91a71697f5320dd09c56008761577f65197dff1f"
+      "criterion": "The merge of main's #2592: a soft claim from another client instance is refused, the same instance's is not, and consumer delivery is untouched by either",
+      "surface": "The listener's real /v1 routes over its in-process server, against sessions registered for consumer delivery",
+      "command": "A scratch test of mine in cmd/listener (not committed): a holder registered on consumer delivery with client instance A, a second session of A, a third of B; the holder claims a role; then a soft claim from B naming the holder as predecessor, and one from A",
+      "observed": "ok 1.212s. B's claim answers 409 naming the holder; A's answers 200; and all three entries still record delivery `consumer` after both claims. Beside it, #2592's own tests at this head: TestRoleSetHandlerSoftClaim (6 subtests) and TestRoleSetHandlerSoftClaimPredecessorInstance (6 subtests) all PASS.",
+      "headSha": "656151077b1b6f0ee3389552368497f7da5b9520",
+      "negativeControl": "In a `git archive 65615107` extraction with `session.InstanceMatches` made to return true always — the rule #2592 adds, removed: FAIL, `a soft claim from another client instance answered 200 …`, which is the pre-#2592 takeover."
     },
     {
-      "what": "Pair one on the real stack: a portless consumer session gets exactly one delivery_failed for a mode that cannot be read",
-      "command": "cd packages/envoy && go test -p 1 -count=1 -run TestAPortlessConsumerSessionIsReportedAnUnreadableDeliveryMode ./cmd/listener",
-      "observed": "ok 3.490s at this head (real natsd, the listener's fan-out and relays, a bound durable, a second core-path recipient to make the durable read the message).",
-      "negativeControl": "The same test in the `git archive 196233c090e5` extraction: FAIL, 'the exception lane … carried []'. Also measured on the way there: without the second recipient the durable acknowledges the message unread and nobody refuses anything, which is correct and is why the test carries one.",
-      "headSha": "91a71697f5320dd09c56008761577f65197dff1f"
+      "criterion": "#2592's own tests are unmodified by the merge",
+      "surface": "The merge result against main's files, by checksum",
+      "command": "md5sum of `git show main:<file>` against `git show 3a38540c:<file>`",
+      "observed": "instance_test.go, registry_test.go and write_routes_frozen_bus_test.go are byte-identical to main's. claim_wiring_test.go differs in ten lines, every one of them the third argument this pull request adds to sessionEntryFromSubscribe (`, sessionDeliveryOutcome{}`); no assertion of #2592's is changed. api_test.go differs too, in this pull request's own role-forward worker wiring, not in #2592's rows.",
+      "headSha": "656151077b1b6f0ee3389552368497f7da5b9520"
     },
     {
-      "what": "Pair two on the real stack: a serving-port session is reported its unreadable mode once, and its later messages flow",
-      "command": "cd packages/envoy && go test -p 1 -count=1 -run 'TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused|TestAnUnreadableDeliveryModeDoesNotStallTheSessionsLaterMessages' ./cmd/listener",
-      "observed": "Both PASS at this head (6.38s and 2.15s): the refused message is acked and reported exactly once by the relay, and an ordinary message stored behind it reaches the port.",
-      "negativeControl": "Round 13's, still standing: delivery.go from ce082506 → the stall test fails after 30 s and the mode subtest fails on the ack floor. My lock for it is now committed on the branch at bed0de9f.",
-      "headSha": "91a71697f5320dd09c56008761577f65197dff1f"
+      "criterion": "Consumer delivery survives a registration-state transition on the real plugin",
+      "surface": "Real Oh My Pi and real Claude Code under this checkout's bridge, their NATS connection cut and restored (window b of the six-window run), which is the transition the merge wires `renewRelayEpoch` into",
+      "command": "LEGION_TEST_PG_DSN=… bash scripts/e2e/envoy-session-delivery.sh",
+      "observed": "Window b's ten events each counted exactly 1 in the session they were meant for — the two issue comments, both agent messages, both listener sends, and the role's listener-publish and core-publish to each session — so the session's consumer relay was re-registered and restarted after the cut without losing or repeating anything. Beside it, pi-envoy's registration-state suite: 62 pass, 0 fail. WHAT THIS DOES NOT SHOW: I did not find an epoch renewal line in the run's listener log to point at (the shared listener logs 6 lines at info, none of them a relay restart), so the evidence here is the delivery behaviour across the transition, not the plugin's own trace of it.",
+      "headSha": "656151077b1b6f0ee3389552368497f7da5b9520",
+      "negativeControl": "The run's own: the other five windows, and the counts of every window, which a lost or repeated frame would mark with '!'. None is marked."
     },
     {
-      "what": "Every earlier control still red, each run outside the shared workspace as the implementer asked",
-      "command": "A `git archive 91a71697` extraction under $TMPDIR with the workspace's node_modules linked; the five production files of 1881c6fe overlaid from 0d71712b with `git archive … | tar -x`; the TypeScript controls edited in the extraction",
-      "observed": "(a) Rounds 3 and 4: all three variants of TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer FAIL (138.6s). (b) The hold test with one package-level mutex around holdWhilePushedElsewhere: FAIL, 'the other session's message 0e69898a… never reached its port while ses_held_94b65d17… held one'. (c) `const asked = resumePoint()` alone: both seeded-resume tests fail. (d) The receive-side tellReplacedResume branch removed: that one test fails alone. Nothing of mine touched the shared working copy's product files this round.",
-      "headSha": "91a71697f5320dd09c56008761577f65197dff1f"
+      "criterion": "Every earlier control still fails, and my portless lock still fails before its fix",
+      "surface": "A `git archive` extraction of this head under $TMPDIR with the workspace's node_modules linked, and one of 196233c0 for the portless lock — nothing of mine touched the shared working copy's product files",
+      "command": "The four controls, then the portless lock against 196233c0",
+      "observed": "(a) The five production files of 1881c6fe from 0d71712b: all three variants of TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer FAIL, each `never logged \"session relay holds a message another path is pushing\" within 45s`. (b) One package-level mutex around holdWhilePushedElsewhere: FAIL, `the other session's message bbe606bd… never reached its port while ses_held_bb778e1e… held one`. (c) `const asked = resumePoint()` alone: both seeded-resume tests fail. (d) The receive-side tellReplacedResume branch removed: that one test fails alone. (e) TestAPortlessConsumerSessionIsReportedAnUnreadableDeliveryMode against 196233c0: FAIL, `the exception lane of ses_portless_ced60e57… carried [], want one delivery_failed`.",
+      "headSha": "656151077b1b6f0ee3389552368497f7da5b9520"
     },
     {
-      "what": "Both live runs at this head",
-      "command": "LEGION_TEST_PG_DSN=… bash scripts/e2e/envoy-session-delivery.sh; and the same with --disruptions a --resume-plugins-from 290625b75ce8 --second-followed-issue",
-      "observed": "Six windows: PASS, no '!' cell. Upgrade: PASS, starting on pi-envoy 13.11.0 from 290625b7 and resuming on this run's. BUT read the first failure above before trusting either run's 'the issue in order' half: the counts are measured, the order is not.",
-      "negativeControl": "ANTHROPIC_API_KEY unset; the key read into a shell variable and grepped over both evidence trees and both outputs: 0 hits over 248 and 66,062 files.",
-      "headSha": "91a71697f5320dd09c56008761577f65197dff1f"
+      "criterion": "Both live runs pass at this head with the model key reaching the sessions alone",
+      "surface": "Real Oh My Pi and Claude Code, natsd with JetStream, two listeners, envoy-dispatch on Postgres 17 with pgvector, in the issue pod",
+      "command": "bash scripts/e2e/envoy-session-delivery.sh; and the same with --disruptions a --resume-plugins-from 629f2b52756e --second-followed-issue",
+      "observed": "Six windows: ENVOY SESSION DELIVERY: PASS, no '!' cell. Upgrade: PASS, starting on pi-envoy 13.11.0 from 629f2b52 and resuming on this run's.",
+      "headSha": "656151077b1b6f0ee3389552368497f7da5b9520",
+      "negativeControl": "ANTHROPIC_API_KEY unset; the key read into a shell variable and grepped over both evidence trees and both outputs: 0 hits over 249 and 66,094 files."
     },
     {
-      "what": "The listener package under the race detector",
+      "criterion": "The listener package is free of data races at this head",
+      "surface": "The listener package under the race detector, cgo enabled, one package at a time, against the pod's Postgres",
       "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=… go test -race -p 1 -count=1 -timeout 40m ./cmd/listener",
-      "observed": "Three runs: the FIRST FAILED (722.767s) and I piped it through `tail`, so its output is gone and I cannot name the test that failed — my mistake, and I record it rather than leave a green pair standing for three runs. The second and third passed, ok 707.083s and ok 692.421s, with 0 occurrences of DATA RACE in either kept output. So the package is race-clean in two of three runs and something in it is flaky under -race; whoever runs it next should keep the output. Sampled peak during the first two: 3.83 GiB of 19, 420 samples, bounded sampler as a named job stopped by proc://…/kill.",
-      "headSha": "91a71697f5320dd09c56008761577f65197dff1f"
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 737.600s, 0 occurrences of DATA RACE, output kept at $TMPDIR/infra594-tester/r15-race2.out as the architect asked. An earlier attempt of mine ended `[build failed]` because I deleted a scratch test file out of the package while that run was compiling — my own mistake, not the tree's, and the clean run above is the one that counts.",
+      "headSha": "656151077b1b6f0ee3389552368497f7da5b9520"
     }
   ],
-  "ci": "LARGELY UNREAD, and deliberately so. At 16:40Z the run at the code head 0debf189 had 6 lanes green, 4 cancelled (pr-title, superseded by its own later run) and 26 still queued — the queue has been taking about two hours all day. I completed without waiting: this round fails on a finding that does not depend on CI, the fix for it is the script's and will push a new head whose CI supersedes this reading entirely, and the issue is the tree's first priority. Nothing was red at 16:40Z. The lanes left unread are: broker-multiprocess, ci-filters, ci-images, claude-envoy, contracts, dispatch, dispatch-browser-multiprocess, dispatch-memory, dispatch-multiprocess, docs / build, envoy-client, envoy-e2e-local, envoy-go, envoy-go-race and its api/docs/pmdoc lanes, envoy-infra-go, envoy-plugin, envoy-session-stall, envoy-smoke, lint, listener-server-change, pi-envoy, pi-legion, pi-shared, test, typecheck and worker-image / build, with ci-ok not started.",
+  "memory": "Both heavy runs under the architect's cap (-p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, -race one package). Sampled peak 4.43 GiB of 19 over 378 samples at two-second intervals, so a floor rather than a true peak. Leftover check after proc://mem-sampler-r15/kill, by the ps form and judged by its lines: `ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|go test|bun test|envoy-session-delivery'` printed NO LINES.",
+  "ci": "Read on GitHub at the code head 3a38540c, never re-run, at 20:49Z: 30 success, 1 failure, 1 skipped, 1 cancelled (pr-title, superseded by its own later green run), 1 still queued. Every lane the architect named is green: test, lint, typecheck, pr-title, envoy-go, envoy-go-race, pi-envoy, claude-envoy, listener-server-change, envoy-client and envoy-session-stall. THE ONE FAILURE IS OUTSIDE THIS DIFF: the `dispatch` lane (job 124630030090), where one Playwright row of packages/dispatch/e2e/overlapping-marks.e2e.ts failed with `Error: browserContext.close: Target page, context or browser has been closed` at its teardown — 1 failed, 1433 passed, 31 skipped. This branch changes no file under packages/dispatch or packages/proof-editor (its only `dispatch`-named changes are documentation), so the failure is not this change's; I could not find a main run of that lane recently settled to compare against, so I call it outside the diff rather than call it main's flake. UNREAD: `ci-ok`, still queued when I completed — it waits for every selected job and will be red while the dispatch lane is, so that lane decides it rather than anything of this round.",
   "observations": [
-    "Both of my test commits are on legion/INFRA-594-wip, not on the issue branch: ec9974d1995c (INFRA-771's order test, where the architect asked for it) and 6d5c468e2eac (the portless lock). This handoff push is handoff-only and trailered, so the lanes still running at 0debf189 are not restarted and can be read by whoever needs them.",
-    "Controls that change a product file now run in a `git archive` extraction under $TMPDIR with the workspace's node_modules linked, after I left a pre-fix delivery.go visible in the shared working copy for the length of a control run last round."
+    "The scratch soft-claim drive is not committed: it is three dozen lines and duplicates what #2592's own tests already assert, except for the consumer-delivery half, which is the merge's and which the live runs cover. The implementer is welcome to it.",
+    "Still true in this pod: GH_TOKEN and GITHUB_TOKEN are set in the environment, where `skill://legion-worker` says to leave them empty. Every gh call of mine this round was a read."
   ]
 }
