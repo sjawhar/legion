@@ -173,6 +173,8 @@ on:
       - 'packages/envoy/cmd/broker/*'
       - 'packages/envoy/cmd/broker-refgen/*'
       - 'packages/envoy/internal/broker/api/*'
+      # The approval page's own files, its embedded templates and stylesheet included.
+      - 'packages/envoy/internal/broker/approval/**'
       - 'packages/envoy/internal/broker/config/*'
       - 'packages/envoy/internal/broker/enroll/*'
       - 'packages/envoy/internal/broker/exchange/*'
