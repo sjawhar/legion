@@ -33,6 +33,9 @@ A new script's section, and its item in the index list below, go next to the scr
 
 Every `docker run` in these scripts sets a CPU and a memory limit inline, and its container is removed when the run ends (an `EXIT` trap's `docker rm -f -v`, or `--rm`):
 the proofs run on a shared devbox, where an unbounded container takes cores and memory from every other run there.
+A container is named for the pid of the driver that started it, and the kernel hands a pid out again, so Stage 4b's teardown removes by label rather than by name:
+every container it starts carries that run's own id as the docker label `legion.dev/e2e-run`, and the teardown removes a name only while the container at it carries that id (`remove_run_container`, `lib/stage4b-run-containers.test.ts`).
+What an earlier run left stays for [`lib/leftovers.sh`](#libleftoverssh) to name to the operator.
 Every scratch Postgres keeps its data directory on `tmpfs`, so no run leaves a volume behind, and tmpfs is charged to the container's memory.
 Every scratch Postgres gets `--cpus 2 --memory 2g`, except the session databases of Stage 4a and Stage 4b, which get `--cpus 2 --memory 4g`:
 they hold every pod's Oh My Pi session for the whole run, hours for Stage 4b.
@@ -1843,6 +1846,7 @@ The App inputs ([`lib/github-apps.sh`](#libgithub-appssh), optional) name anothe
 The daemon's `github_apps` is the block it proved.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused.
+Every development switch here is refused above `ensure_project`, the run's first write anywhere, so a mistyped one costs production Dispatch nothing.
 `STAGE4B_SKIP_CONTROLLER=1`, refused without `STAGE4B_UNTIL`, runs none of the checks of `controller`, `full-agent-negative` or `controller-walk` and only takes tree 3 out, printing `CHECK <checkpoint>: SKIPPED (…)` for each of the three, so a development run can reach a later checkpoint while a defect of the controller's own is unfixed;
 it also skips the GitHub credential check in `controller` and the one in `daemon-controller-liveness`'s phase 1, so a run with it proves neither controller's gh.
 `STAGE4B_EVIDENCE_DIR` keeps the evidence (default:
@@ -1851,6 +1855,11 @@ the transcript, the daemon log, `run.json` (source revision, image and plugin), 
 The pods' transcripts are copied from the session database before the teardown removes it, each at a name derived from its session key, so no key places a file outside `transcripts/pods/`;
 that directory holds the pods' sessions alone, so no key a pod writes can take a name the harness writes beside it (`controller`, `daemon-controller`).
 A key the copy refuses (its name empty, `.` or `..`, shared with another key, or resolving outside the directory) or cannot read is named, never its bytes, and skipped while every other session is still copied, and any key left out fails the teardown check `transcripts`, as does a failure to copy the operator's controller's sessions out of the run's profile before the teardown removes it.
+No role pod runs before the session database accepts connections, so a run that stopped earlier, a refusal in `prerequisites` or `preflight` among them, has no pod session to lose:
+the teardown copies nothing from that database, says so in a `transcripts:` note, and fails no check for it.
+Oh My Pi's sql storage creates the session table when it starts, so a started database with no session table means no role pod's Oh My Pi ever reached it.
+Before the daemon starts, no role pod can have run, and the copy says so in a note and copies nothing;
+once the daemon has started, the copy fails the teardown check `transcripts`, naming the database.
 The directory a copy writes in is the harness's own, never a path an agent's value chooses:
 the reviewer's subagents' go under `review-pair/subagents/`, a name the harness fixes, and the launched controller's under `transcripts/daemon-controller/<pod>/`, named for the pod the daemon launched it in, as the daemon's claim locator records it.
 The session file an agent records only selects which sessions to copy;
@@ -1874,6 +1883,7 @@ A wait with no subject, a starved pod outside the subject, any other timeout, an
 A failed teardown check outranks every reason the run stopped:
 it prints its own `CHECK <name>: FAIL` line (the audit's names the run's writes and subscriptions outside LEGSMOKE, as the `production-audit` checkpoint does), and the verdict is `stage 4b e2e: FAIL (check <teardown check>, in the teardown after check <check>)` whenever the checkpoint that stopped the run did not fail itself:
 a `STAGE4B_UNTIL` run's last checkpoint, a blocked checkpoint, a signal.
+A signal (`SIGHUP`, `SIGINT`, `SIGTERM`) also puts a line of its own above that verdict, `stage 4b e2e: <signal> stopped the run (exit <status>) while check <check> was running: …`, since the verdict alone would read as that checkpoint's own failure; a command of the run that exits 129, 130 or 143 by itself is the failure it always was, and gets no such line.
 `done` cleans the smoke `main` after tree 1's merge, which closed it, while the implementer works its production check's first look (`clean_smoke_main`, [stage 3's cleanup](#stage3-devbox-workflowsh), with its bounded wait).
 That cleanup is the fixture's teardown, not the workflow under test.
 It stays inside `done`, so a `STAGE4B_UNTIL=done` run still cleans the smoke `main`, and the driver marks it (`smoke_main_cleaning`) for the `EXIT` trap.
@@ -4276,7 +4286,9 @@ Each item below names a function, then what it does.
 
 - `run_processes`
 
-  prints every pid whose working directory or command line names `$work`
+  prints every pid whose working directory or command line names `$work`.
+  It reads `/proc` in one `find` pass and runs no command for each entry: a devbox holds thousands of them, and a `readlink` and a `grep` apiece cost a teardown, and every sweep a checkpoint makes, seconds.
+  A process whose working directory this user cannot read is another user's, so it is none of the run's
 
 - `real_bin_path DEST NAME…`
 
@@ -4289,6 +4301,9 @@ Each item below names a function, then what it does.
   Stage 3 prepends `real_bin_path "$work/realbin" gh jj tmux` to the daemon's own PATH (`start_daemon`), which every pane inherits (`paneEnvAllowList`);
   Stage 1 prepends `real_bin_path "$work/realbin" tmux` to its daemon's PATH when its first tmux is a script or mise itself, and keeps a real tmux binary, such as CI's apt tmux, otherwise;
   Stage 2, the 4b.13b acceptance and the Claude Code backend proof, which do not call it, put a link to `mise which tmux` on their daemons' PATH the same way
+
+`lib/run-processes.test.ts` (`bun test scripts/e2e/lib`) runs `run_processes` over the devbox's own `/proc`, under an `ERR` trap that prints, with a `readlink` and a `grep` on `PATH` that record every call and answer nothing:
+it names the process working in the run's directory and the one naming it in its command line, leaves a process of neither kind alone, calls neither command, and trips no trap.
 
 ## lib/omp-home.sh
 
@@ -4402,7 +4417,7 @@ Stage 4b's `prerequisites` calls it first, before the lock, and `read_bearers` c
 `dispatch_human METHOD PATH [BODY]` is every proof-human write, over `dispatch-human-header`;
 `dispatch_agent METHOD PATH BODY` is a write in an agent's name over `dispatch-auth-header`, the agents' bearer, whose body gains the stand-in session `stage3-architect-stand-in` as its `actor` (a bearer caller must name one;
 the stand-in holds no claim), for a proof step whose author must be a session, such as the decision block Stage 3 inserts into the spec as its architect would.
-`lib/ensure-project.test.ts` drives `write_dispatch_header`, `ensure_project` and `dispatch_agent` against a fake `curl`.
+`lib/ensure-project.test.ts` drives `write_dispatch_header`, `ensure_project` and `dispatch_agent` against a fake `curl`, and holds Stage 4b's refusal of each development switch above the `ensure_project` call that makes that first write.
 
 `require_proof_human` is the proof human's precondition, which every stage proof that writes to GitHub as the proof human runs in `prerequisites` before its first `gh` call.
 It asks the devbox `gh` which account it acts as, through GraphQL's `viewer` with `GH_REPO` naming `repo` (the owner the dotfiles shim routes by):
