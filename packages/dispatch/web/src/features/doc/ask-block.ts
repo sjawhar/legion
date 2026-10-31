@@ -1,112 +1,16 @@
-import {
-  type DOMOutputSpec,
-  DOMSerializer,
-  type Node as ProseMirrorNode,
-} from "@milkdown/kit/prose/model";
+import { DOMSerializer, type Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 
-import type { AskOption, AskUrgency, BlockSchema, BlockTypeSchema } from "../../api/types";
-import {
-  askBlockTint,
-  askUrgencyAccent,
-  borderDefault,
-  textMutedOnSurfaceMuted,
-  textPrimaryOnSurface,
-} from "../../theme/classes";
-import { URGENCY_LABELS } from "../inbox/ask-urgency";
+import type { BlockSchema, BlockTypeSchema } from "../../api/types";
 import { pictureNodeView } from "./picture-view";
-
-/**
- * `blockId` is the block's own identity rather than one of its schema attributes, so it is the
- * one name this function knows. Everything else it hides comes from the block type's own
- * schema: a hand-written list is a copy of that flag that goes stale the moment a type gains a
- * server-owned attribute (LEGION-67).
- */
-const BLOCK_IDENTITY_ATTRIBUTE = "blockId";
-
-function attributeValue(value: unknown): string {
-  return Array.isArray(value) ? JSON.stringify(value) : String(value);
-}
-
-/**
- * Draws a document's host-owned typed blocks other than `ask`, which `AskBlockView` owns: the
- * block's kind and the author's own attributes as a header the reader sees, above its content.
- * The header reads as a label rather than a dump: the block's name is an eyebrow, a `kind` is a
- * badge beside it, a `title` is the header's own text, and any other attribute the author wrote
- * follows as a quiet name/value pair. What the author did not write never appears - the block's
- * identity, and every attribute the type's schema marks `server`, which is where the parser's
- * complaint and a decision's recorded state live. `type` is that schema entry; without one
- * (a node whose type the schema no longer describes) only the identity is hidden. It is the
- * node view's drawing (`typedBlockView`), never the node's `toDOM`: HTML of the document - a
- * copy, a drag, or the editor's plain-text paste, which renders the markdown it parsed through
- * `toDOM` - carries only the block's section and content, which is all its parse rule reads.
- */
-export function renderTypedBlock(
-  node: ProseMirrorNode,
-  type?: BlockTypeSchema | undefined
-): DOMOutputSpec {
-  const shown = Object.entries(node.attrs).filter(
-    ([name, value]) =>
-      name !== BLOCK_IDENTITY_ATTRIBUTE &&
-      type?.attributes[name]?.server !== true &&
-      value !== null &&
-      value !== undefined &&
-      value !== ""
-  );
-  const title = shown.find(([name]) => name === "title");
-  const kind = shown.find(([name]) => name === "kind");
-  const rest = shown.filter(([name]) => name !== "title" && name !== "kind");
-  const badge: DOMOutputSpec[] =
-    kind === undefined
-      ? []
-      : [
-          [
-            "span",
-            { "data-proof-block-attribute": "kind", "data-proof-block-badge": "" },
-            attributeValue(kind[1]),
-          ],
-        ];
-  const heading: DOMOutputSpec[] =
-    title === undefined
-      ? []
-      : [
-          [
-            "span",
-            { "data-proof-block-attribute": "title", "data-proof-block-title": "" },
-            attributeValue(title[1]),
-          ],
-        ];
-  const others: DOMOutputSpec[] =
-    rest.length === 0
-      ? []
-      : [
-          [
-            "dl",
-            { "data-proof-block-attributes": "" },
-            ...rest.flatMap(([name, value]) => [
-              ["dt", {}, name],
-              ["dd", { "data-proof-block-attribute": name }, attributeValue(value)],
-            ]),
-          ],
-        ];
-  return [
-    "section",
-    {
-      class: `proof-typed-block proof-typed-block-${node.type.name}`,
-      "data-proof-block-type": node.type.name,
-    },
-    [
-      "header",
-      { contenteditable: "false", "data-proof-block-summary": "" },
-      ["span", { "data-proof-block-name": "" }, node.type.name],
-      ...badge,
-      ...heading,
-      ...others,
-    ],
-    ["div", { "data-proof-block-content": "" }, 0],
-  ];
-}
+import {
+  type AskBlockHost,
+  applyAskBlockShell,
+  askShellSlots,
+  renderAskBlockShell,
+  renderTypedBlock,
+} from "./typed-block-drawing";
 
 /** The node view of a host-owned typed block other than `ask`: `renderTypedBlock`'s drawing,
  * under the block's id. It stamps `data-block-id` the way `AskBlockView` does, from the node's
@@ -125,98 +29,17 @@ function typedBlockView(
   return { contentDOM, dom };
 }
 
-/** What an `ask` node says about itself, read once per render from its attributes and content. */
-export interface AskBlockFacts {
-  readonly answerText: string;
-  readonly answeredAt: string | undefined;
-  readonly answeredBy: string;
-  readonly blockId: string;
-  /** The ask on another document this block is a copy of and that document's `dispatch://`
-   *  address, which settlement names in `copied_from` and `copied_from_document`; the copy has no
-   *  ask of its own and is answered on that document. */
-  readonly copiedFrom: { readonly ask: string; readonly document: string } | undefined;
-  /** Why the block cannot be answered as written, or undefined when it parses. */
-  readonly malformedReason: string | undefined;
-  readonly multiple: boolean;
-  readonly options: AskOption[];
-  readonly question: string;
-  readonly selected: string[];
-  readonly state: string;
-  readonly urgency: AskUrgency;
-}
-
-export function askBlockFacts(node: ProseMirrorNode): AskBlockFacts {
-  const options: AskOption[] = [];
-  let blankOption: number | undefined;
-  if (node.lastChild?.type.name === "bullet_list") {
-    node.lastChild.forEach((item, _offset, index) => {
-      const text = item.textContent;
-      const separator = text.indexOf(": ");
-      const label = (separator < 0 ? text : text.slice(0, separator)).trim();
-      const description = separator < 0 ? "" : text.slice(separator + 2).trim();
-      if (label === "") {
-        blankOption ??= index + 1;
-        return;
-      }
-      options.push(description === "" ? { label } : { description, label });
-    });
-  }
-  const invalid =
-    typeof node.attrs.invalid === "string" && node.attrs.invalid.trim() !== ""
-      ? node.attrs.invalid.trim()
-      : undefined;
-  const question =
-    node.firstChild?.type.name === "bullet_list" ? "" : (node.firstChild?.textContent.trim() ?? "");
-  return {
-    answerText: typeof node.attrs.answer === "string" ? node.attrs.answer.trim() : "",
-    answeredAt: typeof node.attrs.answered_at === "string" ? node.attrs.answered_at : undefined,
-    answeredBy: String(node.attrs.answered_by ?? ""),
-    blockId: String(node.attrs.blockId),
-    copiedFrom:
-      typeof node.attrs.copied_from === "string" &&
-      node.attrs.copied_from !== "" &&
-      typeof node.attrs.copied_from_document === "string" &&
-      node.attrs.copied_from_document !== ""
-        ? { ask: node.attrs.copied_from, document: node.attrs.copied_from_document }
-        : undefined,
-    malformedReason:
-      invalid ??
-      (question === ""
-        ? "The question is empty"
-        : blankOption === undefined
-          ? undefined
-          : `Option ${blankOption} has no label`),
-    multiple: node.attrs.multiple === true,
-    options,
-    question,
-    selected: Array.isArray(node.attrs.selected)
-      ? node.attrs.selected.filter((value): value is string => typeof value === "string")
-      : [],
-    state: String(node.attrs.state),
-    urgency: node.attrs.urgency in URGENCY_LABELS ? (node.attrs.urgency as AskUrgency) : "med",
-  };
-}
-
-/** A mounted decision block: the React card portals into its two slots. A new object is issued
- * on every node change so a host list in React state re-renders. */
-export interface AskBlockHost {
-  /** Stable per mounted view, for React keys. */
-  readonly key: number;
-  readonly node: ProseMirrorNode;
-  readonly header: HTMLElement;
-  readonly footer: HTMLElement;
-}
-
 let nextHostKey = 0;
 
-/** The decision block's ProseMirror node view. It owns only the shell — the card frame with its
- * urgency accent and tint, a header slot, the content hole, and a footer slot — and hands the
- * slots to React through the host registry; `AskBlockCard` renders everything a reader sees in
- * them. Two things make a plain `toDOM` spec unusable here and justify the node view: ProseMirror
- * treats DOM changes inside a spec-rendered node as a suspect edit and redraws the node from its
- * state (wiping a portal and the reader's half-made choice), so `ignoreMutation` excludes the
- * slots; and the slots are `contenteditable="false"` with `stopEvent` keeping keystrokes in the
- * answer controls away from the editor's keymaps. */
+/** The decision block's ProseMirror node view. It owns only the shell — `renderAskBlockShell`'s
+ * drawing, the same spec the text engine draws: the card frame with its urgency accent and tint,
+ * a header slot, the content hole, and a footer slot — and hands the slots to React through the
+ * host registry; `AskBlockCard` renders everything a reader sees in them. Two things make a plain
+ * `toDOM` spec unusable here and justify the node view: ProseMirror treats DOM changes inside a
+ * spec-rendered node as a suspect edit and redraws the node from its state (wiping a portal and
+ * the reader's half-made choice), so `ignoreMutation` excludes the slots; and the slots are
+ * `contenteditable="false"` with `stopEvent` keeping keystrokes in the answer controls away from
+ * the editor's keymaps. */
 class AskBlockView implements NodeView {
   readonly dom: HTMLElement;
   readonly contentDOM: HTMLElement;
@@ -232,46 +55,25 @@ class AskBlockView implements NodeView {
     private readonly publish: () => void
   ) {
     this.node = node;
-    this.dom = document.createElement("section");
-    this.dom.dataset.proofBlockType = "ask";
-    // The slots hold the app's own card, not document text: `not-prose` keeps the editor
-    // root's Typography (`prose`, from the library theme) off everything React renders into
-    // them, in every state of the card.
-    this.header = document.createElement("div");
-    this.header.className = "not-prose";
-    this.header.contentEditable = "false";
-    this.header.dataset.dispatchAskHeader = "";
-    this.contentDOM = document.createElement("div");
-    this.contentDOM.dataset.proofBlockContent = "";
-    this.footer = document.createElement("div");
-    this.footer.className = "not-prose";
-    this.footer.contentEditable = "false";
-    this.footer.dataset.dispatchAskFooter = "";
-    this.dom.append(this.header, this.contentDOM, this.footer);
+    const { dom } = DOMSerializer.renderSpec(document, renderAskBlockShell(node));
+    this.dom = dom as HTMLElement;
+    const slots = askShellSlots(this.dom);
+    if (slots === undefined) {
+      throw new Error("the decision shell has no header, content or footer slot");
+    }
+    this.contentDOM = slots.content;
+    this.header = slots.header;
+    this.footer = slots.footer;
     this.applyShell();
     this.register();
   }
 
   private applyShell(): void {
-    const facts = askBlockFacts(this.node);
-    const malformed = facts.malformedReason !== undefined;
-    this.dom.className = `proof-typed-block proof-typed-block-ask my-5 rounded-xl border border-l-4 px-4 pt-3 pb-4 shadow-sm ${borderDefault} ${askUrgencyAccent[facts.urgency]} ${askBlockTint[facts.urgency]}`;
-    this.dom.dataset.blockId = facts.blockId;
-    this.dom.dataset.dispatchAskBlock = facts.blockId;
-    this.dom.dataset.dispatchAskUrgency = facts.urgency;
-    this.dom.dataset.dispatchAskState = facts.state;
-    if (malformed) {
-      this.dom.dataset.dispatchAskMalformed = "true";
-      delete this.dom.dataset.dispatchAskOptions;
-    } else {
-      delete this.dom.dataset.dispatchAskMalformed;
-      // The card renders the options as rows; the source list shows while malformed, or while
-      // the caret is inside the block (`askBlockEditingPlugin`).
-      this.dom.dataset.dispatchAskOptions = "rows";
-    }
-    this.contentDOM.className = malformed
-      ? `${textMutedOnSurfaceMuted} [&_li:has(>p:empty)]:hidden [&_li:has(>p>br:only-child)]:hidden`
-      : textPrimaryOnSurface;
+    // The block's identity is the editor's alone (`renderAskBlockShell` says why).
+    const blockId = String(this.node.attrs.blockId);
+    this.dom.dataset.blockId = blockId;
+    this.dom.dataset.dispatchAskBlock = blockId;
+    applyAskBlockShell(this.dom, this.contentDOM, this.node);
   }
 
   private register(): void {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // The smallest file that loads: the three Stage 1 keys and the Stage 3 workflow keys with no
@@ -391,6 +392,127 @@ func TestLoadRefusesProjectSlackChannels(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", tc.projects, 1)
+			if body == minimalFile {
+				t.Fatal("the fixture's projects block was not replaced")
+			}
+			_, err := Load(writeConfigFile(t, body), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Load error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A project's deploys are the workflows whose runs wake its production checks, each a parsed
+// repository, its workflow's path and the step whose success is a deploy, kept in the file's order.
+// A project that names none, or names an empty list, has none.
+func TestLoadReadsProjectDeploys(t *testing.T) {
+	body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n"+
+		"  DEMO:\n    deploys:\n"+
+		"      - {repo: acme/infra, workflow: .github/workflows/envoy.yaml, step: Apply}\n"+
+		"      - {repo: sjawhar/legion, workflow: .github/workflows/release.yml, step: Publish image}\n"+
+		"  OTHER: {}\n"+
+		"  EMPTY: { deploys: [] }\n", 1)
+	cfg, err := Load(writeConfigFile(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("Load project deploys: %v", err)
+	}
+	want := []Deploy{
+		{Repo: ghrepo.MustParse("acme/infra"), Workflow: ".github/workflows/envoy.yaml", Step: "Apply"},
+		{Repo: ghrepo.MustParse("sjawhar/legion"), Workflow: ".github/workflows/release.yml", Step: "Publish image"},
+	}
+	if got := cfg.Projects["DEMO"].Deploys; !reflect.DeepEqual(got, want) {
+		t.Errorf("DEMO deploys = %#v, want %#v", got, want)
+	}
+	for _, key := range []string{"OTHER", "EMPTY"} {
+		if got := cfg.Projects[key].Deploys; got != nil {
+			t.Errorf("%s deploys = %#v, want nil", key, got)
+		}
+	}
+}
+
+// The loader refuses a deploy it could match no run against, or would match one run against
+// twice: a list that is no list of mappings, a key besides repo, workflow and step, a repository
+// ghrepo refuses, a workflow that is not a file directly under .github/workflows/ ending .yml or
+// .yaml, a missing or empty step, and one repository's workflow named twice, whatever the case of
+// the repository's name.
+func TestLoadRefusesProjectDeploys(t *testing.T) {
+	const workflowRule = "must be a file directly under .github/workflows/ ending .yml or .yaml, as a workflow run's path names it"
+	for _, tc := range []struct{ name, deploys, want string }{
+		{
+			name:    "not a list",
+			deploys: "{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: Apply}",
+			want:    "projects.DEMO.deploys must be an array",
+		},
+		{
+			name:    "an entry that is no mapping",
+			deploys: "[sjawhar/legion]",
+			want:    "projects.DEMO.deploys[0] must be a mapping",
+		},
+		{
+			name:    "an unknown key",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: Apply, branch: main}]",
+			want:    "unknown key projects.DEMO.deploys[0].branch",
+		},
+		{
+			name:    "no repo",
+			deploys: "[{workflow: .github/workflows/envoy.yaml, step: Apply}]",
+			want:    "projects.DEMO.deploys[0].repo is required",
+		},
+		{
+			name:    "a repo that is no owner and name",
+			deploys: "[{repo: legion, workflow: .github/workflows/envoy.yaml, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].repo must be "owner/name" (got "legion")`,
+		},
+		{
+			name:    "a repo GitHub strips .git from",
+			deploys: "[{repo: sjawhar/legion.git, workflow: .github/workflows/envoy.yaml, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].repo "sjawhar/legion.git" ends in ".git", which GitHub strips from a repository's name: name it "sjawhar/legion"`,
+		},
+		{
+			name:    "no workflow",
+			deploys: "[{repo: sjawhar/legion, step: Apply}]",
+			want:    "projects.DEMO.deploys[0].workflow is required",
+		},
+		{
+			name:    "a workflow outside .github/workflows",
+			deploys: "[{repo: sjawhar/legion, workflow: envoy.yaml, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].workflow "envoy.yaml" ` + workflowRule,
+		},
+		{
+			name:    "a workflow in a nested directory",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/deploy/envoy.yaml, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].workflow ".github/workflows/deploy/envoy.yaml" ` + workflowRule,
+		},
+		{
+			name:    "a workflow that is no YAML file",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.json, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].workflow ".github/workflows/envoy.json" ` + workflowRule,
+		},
+		{
+			name:    "a workflow with no file name",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/.yaml, step: Apply}]",
+			want:    `projects.DEMO.deploys[0].workflow ".github/workflows/.yaml" ` + workflowRule,
+		},
+		{
+			name:    "no step",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml}]",
+			want:    "projects.DEMO.deploys[0].step is required",
+		},
+		{
+			name:    "an empty step",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: ' '}]",
+			want:    "projects.DEMO.deploys[0].step must not be empty",
+		},
+		{
+			name: "one workflow twice",
+			deploys: "[{repo: sjawhar/legion, workflow: .github/workflows/envoy.yaml, step: Apply}, " +
+				"{repo: Sjawhar/Legion, workflow: .github/workflows/envoy.yaml, step: Deploy}]",
+			want: "projects.DEMO.deploys names Sjawhar/Legion .github/workflows/envoy.yaml twice",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n  DEMO:\n    deploys: "+tc.deploys+"\n", 1)
 			if body == minimalFile {
 				t.Fatal("the fixture's projects block was not replaced")
 			}
@@ -926,12 +1048,12 @@ func TestLoadRefuses(t *testing.T) {
 			// the provider's own variable (GEMINI_API_KEY), so the one shape says both.
 			name: "provider_keys as a list",
 			body: minimalFile + "provider_keys: [GEMINI_API_KEY_TESTS]\n",
-			want: "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
+			want: "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key, or file:/abs/path under runtime tmux; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
 		},
 		{
 			name: "provider_keys a scalar",
 			body: minimalFile + "provider_keys: GEMINI_API_KEY_TESTS\n",
-			want: "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
+			want: "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key, or file:/abs/path under runtime tmux; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
 		},
 		{
 			name: "provider_keys with a variable that is not a variable name",
@@ -941,7 +1063,12 @@ func TestLoadRefuses(t *testing.T) {
 		{
 			name: "provider_keys with a command where the secretsd key goes",
 			body: minimalFile + "provider_keys: {GEMINI_API_KEY: \"secrets get GEMINI_API_KEY_TESTS\"}\n",
-			want: `provider_keys value "secrets get GEMINI_API_KEY_TESTS" for GEMINI_API_KEY (the key that holds it) must be an environment variable name (letters, digits, and underscores, not starting with a digit)`,
+			want: `provider_keys value "secrets get GEMINI_API_KEY_TESTS" for GEMINI_API_KEY (the key that holds it) must be an environment variable name (letters, digits, and underscores, not starting with a digit), or file: and an absolute path`,
+		},
+		{
+			name: "provider_keys naming a file by a relative path",
+			body: minimalFile + "provider_keys: {GEMINI_API_KEY: \"file:keys/gemini\"}\n",
+			want: `provider_keys value "file:keys/gemini" for GEMINI_API_KEY names a file by a path that is not absolute; write file:/abs/path`,
 		},
 		{
 			name: "provider_keys with a secretsd key that is not a string",
@@ -1037,12 +1164,66 @@ func TestLoadRefuses(t *testing.T) {
 		{
 			name: "a runtime mapping with two keys",
 			body: minimalFile + "runtime: {kubernetes: {namespace: legion}, tmux: {}}\n",
-			want: "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
+			want: "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes or tmux",
 		},
 		{
 			name: "a runtime mapping with another single key",
 			body: minimalFile + "runtime: {podman: {}}\n",
-			want: "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
+			want: "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes or tmux",
+		},
+		{
+			name: "a runtime.tmux block that is not a mapping",
+			body: minimalFile + "runtime: {tmux: [pane_env]}\n",
+			want: "runtime.tmux must be a mapping",
+		},
+		{
+			name: "an unknown member of runtime.tmux",
+			body: minimalFile + "runtime: {tmux: {session_store: pvc}}\n",
+			want: "unknown key runtime.tmux.session_store",
+		},
+		{
+			name: "runtime.tmux.pane_env a list",
+			body: minimalFile + "runtime: {tmux: {pane_env: [ELAN_HOME]}}\n",
+			want: "runtime.tmux.pane_env must be a mapping of variable name to value",
+		},
+		{
+			name: "runtime.tmux.pane_env naming something that is not a variable",
+			body: minimalFile + "runtime: {tmux: {pane_env: {1ELAN: /opt/elan}}}\n",
+			want: `runtime.tmux.pane_env key "1ELAN" must be an environment variable name (letters, digits, and underscores, not starting with a digit)`,
+		},
+		{
+			// The runtime composes every pane's PATH: the daemon's own behind its launcher directory.
+			name: "runtime.tmux.pane_env naming PATH",
+			body: minimalFile + "runtime: {tmux: {pane_env: {PATH: /usr/bin}}}\n",
+			want: "runtime.tmux.pane_env names PATH, which the runtime composes for every pane (the daemon's own PATH behind its launcher directory)",
+		},
+		{
+			// A value on tmux's command line is visible to every process on the host; a secret
+			// reaches a pane as a file.
+			name: "runtime.tmux.pane_env naming a credential",
+			body: minimalFile + "runtime: {tmux: {pane_env: {LEDGER_TOKEN: hunter2}}}\n",
+			want: "runtime.tmux.pane_env names LEDGER_TOKEN, a credential-shaped name: a secret reaches a pane as a file (provider_keys), never as a value on tmux's command line",
+		},
+		{
+			name: "runtime.tmux.pane_env naming one variable twice",
+			body: minimalFile + "runtime: {tmux: {pane_env: {ELAN_HOME: /opt/elan, ELAN_HOME: /srv/elan}}}\n",
+			want: "runtime.tmux.pane_env names ELAN_HOME twice",
+		},
+		{
+			name: "runtime.tmux.pane_env with a value that is not a string",
+			body: minimalFile + "runtime: {tmux: {pane_env: {ELAN_HOME: [/opt/elan]}}}\n",
+			want: "runtime.tmux.pane_env.ELAN_HOME must be a string",
+		},
+		{
+			name: "runtime.tmux.pane_env with a null value",
+			body: minimalFile + "runtime: {tmux: {pane_env: {ELAN_HOME: null}}}\n",
+			want: "runtime.tmux.pane_env.ELAN_HOME must be a string",
+		},
+		{
+			// PI_CONFIG_FILES separates its overlays with `:`, so it could not name this path.
+			name: "runtime.tmux.pi_config_files naming a path holding the separator",
+			body: minimalFile + "runtime: {tmux: {pi_config_files: [/etc/legion:operator/overlay.yml]}}\n",
+			want: "runtime.tmux.pi_config_files entry \"/etc/legion:operator/overlay.yml\" holds `:`, which separates the overlays PI_CONFIG_FILES names",
 		},
 		{
 			name: "a root that is not a mapping",

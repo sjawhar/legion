@@ -11,7 +11,7 @@
       "**",
       "!!packages/contracts/fixtures/classification",
       "!!packages/contracts/fixtures/daemon-api",
-      "!!packages/contracts/fixtures/delivery-live",
+      "!!packages/contracts/fixtures/live",
       "!!packages/daemon/internal/runtime/sandbox/testdata/golden",
       "!!packages/envoy/internal/dispatch/pmdoc/testdata",
       "!!packages/envoy/internal/dispatch/text/testdata",
@@ -63,11 +63,84 @@
         "!packages/proof-editor/src/record-mark-history.ts",
         "!packages/proof-editor/src/record-mark-retype.ts",
         "!packages/proof-editor/src/record-mark-target.ts",
+        "!packages/proof-editor/src/read-only-directives.ts",
+        "!packages/proof-editor/src/directive-container.ts",
+        "!packages/proof-editor/src/mermaid-svg.ts",
+        "!packages/proof-editor/src/mermaid-render.ts",
+        "!packages/proof-editor/src/mermaid-code-block-view.ts",
+        "!packages/proof-editor/src/typed-block-drawing.ts",
+        "!packages/proof-editor/src/ask-content.ts",
         "packages/proof-editor/upstream/**"
       ],
       "assist": { "enabled": false },
       "formatter": { "enabled": false },
       "linter": { "enabled": false }
+    },
+    {
+      "includes": ["packages/dispatch/web/src/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@legion/contracts": {
+                    "importNames": [
+                      "actorAttribution",
+                      "actorLabel",
+                      "actorName",
+                      "sessionLabel",
+                      "shortSessionId"
+                    ],
+                    "message": "An agent is shown only through features/refs/AgentName.tsx (AgentName, or useAgentText for an attribute or other plain string)."
+                  }
+                },
+                "patterns": [
+                  {
+                    "group": ["**/refs/routes", "./routes"],
+                    "importNamePattern": "AGENT_LIVE_PATH",
+                    "message": "A link to an agent's live conversation is AgentName's (features/refs/AgentName.tsx)."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["packages/dispatch/web/src/app.tsx"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@legion/contracts": {
+                    "importNames": [
+                      "actorAttribution",
+                      "actorLabel",
+                      "actorName",
+                      "sessionLabel",
+                      "shortSessionId"
+                    ],
+                    "message": "An agent is shown only through features/refs/AgentName.tsx (AgentName, or useAgentText for an attribute or other plain string)."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "packages/dispatch/web/src/features/refs/AgentName.tsx",
+        "packages/dispatch/web/src/features/refs/routes.ts"
+      ],
+      "linter": { "rules": { "style": { "noRestrictedImports": "off" } } }
     }
   ]
 }

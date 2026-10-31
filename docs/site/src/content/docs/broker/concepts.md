@@ -72,6 +72,30 @@ chooses. A `pod` enrollment records none, since the Legion daemon logs in as a s
 Kubernetes token rather than as a person; it records the service account the pod's projected token
 proved instead.
 
+### When no broker is serving
+
+A lease that runs out while no broker is serving is not ended. A session renews through a
+broker, so while every broker process is down, or none can reach the database, no session can
+renew. Every serving broker records a beat every `BROKER_SWEEP_SECONDS`, and a gap of more than
+three sweeps between beats counts as time no broker was serving. A lease that was still running
+at the last beat stays live through that gap, so the sweep does not end it. The first beat after
+the gap gives the gap back to every such lease that was not revoked, at most
+`BROKER_LEASE_SECONDS` from then, and the broker logs
+`broker: gave back the time no broker was serving …`
+(`packages/envoy/internal/broker/enroll/serving.go`, `ServingClock`). The session's renewer then
+renews as before. A revoked enrollment stays ended, and so does one whose lease ran out while a
+broker was serving. A renewal with another pod's or service account's token is still refused
+`POD_IDENTITY_MISMATCH`. A live session renews with at least two thirds of its lease left, so the
+broker refuses to start unless `BROKER_LEASE_SECONDS` is more than four and a half times
+`BROKER_SWEEP_SECONDS`: a lease that runs out inside a gap of three sweeps, which still counts as
+serving, would otherwise be ended. This covers only an outage of the broker itself:
+
+- A broker that runs but that sessions cannot reach (ingress, DNS, a NetworkPolicy, a stale
+  `AGENT_SECRETS_URL`) still counts as serving, so a lease that runs out then ends as before.
+- A grant's lifetime and a pending request's expiry still run on wall-clock time.
+- The first deploy of a broker with this behavior restores nothing that ran out before it.
+- A pod whose renewer already exited 76 has no renewer until the pod is relaunched.
+
 ## Machine login
 
 A launcher (a person's machine helper, or the Legion daemon) cannot enroll anything until the
@@ -140,7 +164,8 @@ without secrets until it is replaced. To stop it logging in, remove its account 
 A credential enrolls sessions only for its own operator: an enrollment naming anyone else is refused
 `OPERATOR_MISMATCH`. The broker's rate limiter caps how often anyone can start a machine login, per
 source address and per named person, and how often anyone can try a token login: per source
-address before the token is verified, and per account once it is.
+address before the token is verified, and per account once it is. A token login the broker could
+not complete (a 5xx, such as while its database is away) spends neither.
 
 ## Owner and tier: who may have which secret
 
@@ -293,7 +318,16 @@ reason of at most 400 characters. The broker evaluates every name
 - A **kind secret** has `kind=github-app` or `kind=google-login` and a current stored value. A
   GitHub App value holds an App identifier and private key. Its release returns a JSON object with
   one installation token for each installation of the App that is not suspended and is on an
-  account its `github-owners` tag lists. A Google login
+  account its `github-owners` tag lists. A release can narrow that token, with the `github_app`
+  body of `POST /v1/grants/{id}/values` or the exec form's `--github-owner`, `--github-repo` and
+  `--github-read-only`: the token of one listed account alone, limited to named repositories of
+  that account, to `contents: read` and `metadata: read`, or to both. A token limited to
+  repositories alone keeps every permission the App holds, its organization permissions among
+  them, so a token for a machine that must only read is limited to read access too. A narrowing
+  to an account the tag does not list is refused `NARROWING_OWNER_NOT_LISTED`, and one GitHub
+  refuses, such as a repository the installation does not reach, `NARROWING_REFUSED`; the broker
+  releases a narrowed token only once GitHub's answer shows it holds no more. It narrows that
+  release alone; the grant's next release is owner-wide unless it narrows too. A Google login
   value holds an `authorized_user` refresh-token credential. Its release returns a bare access
   token. The broker reads the stored value for each release, as it reads any secret, and mints from
   it. It never returns the stored App key or refresh token. A token lasts about an hour, so a client

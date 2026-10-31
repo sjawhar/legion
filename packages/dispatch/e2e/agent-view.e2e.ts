@@ -11,9 +11,9 @@ import {
   replyToMessageDelivery,
   setAgentStreamResponder,
 } from "./api";
-import { expectUncovered } from "./layout";
+import { expectConsecutiveLinksClear, expectUncovered } from "./layout";
 import { resetDatabase } from "./seed";
-import { navigateInApp, refusePosts } from "./sends";
+import { MESSAGE_REFUSED, navigateInApp, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 /**
@@ -302,12 +302,12 @@ async function expectNewestTurnAboveComposer(page: Page): Promise<void> {
     .toBe(true);
 }
 
-/** A rebuild of the whole transcript, the way a reader meets one. The live stream carries no
- *  cursor, so the only thing that rebuilds it is a reconnect: the relay drops this session's
- *  viewers the way a lost connection does, and the browser asks the session for its replay
- *  again. `publishAgentStreamFrame` sets what the NEXT connection is answered with rather than
- *  pushing into the open one, so `next` is in place before the stream is dropped. */
-async function rebuildThroughReconnect(sessionID: string, next: object): Promise<void> {
+/** A rebuild of the whole transcript, the way a reader meets one. The agent subscription carries
+ * no cursor, so its dropped relay viewer ends as `dropped`; the page resubscribes that view on the
+ * same live socket and asks the session for its replay again. `publishAgentStreamFrame` sets what
+ * that next subscription is answered with rather than pushing into the open one, so `next` is in
+ * place before the viewer is dropped. */
+async function rebuildThroughResubscribe(sessionID: string, next: object): Promise<void> {
   await publishAgentStreamFrame(sessionID, next, "replay");
   await dropAgentStreamViewers(sessionID);
 }
@@ -379,7 +379,10 @@ test("the conversation view replays what the session held, streams its next turn
     // A session Dispatch has never heard from sits in a collapsed fold, its row mounted and
     // hidden until the fold opens.
     await page.getByRole("button", { name: /No Dispatch activity/ }).click();
-    await agentRow(page, planner.session_id).getByRole("link", { name: "Open" }).click();
+    // The row's live link, which `AgentName` draws beside the row's toggle.
+    await agentRow(page, planner.session_id)
+      .getByRole("link", { name: "Open live conversation with Planner" })
+      .click();
     await expect(page).toHaveURL(new RegExp(`/agents/${planner.session_id}/live$`));
 
     // What the session replayed: the human's prompt, the reply, and the tool call with its
@@ -394,8 +397,8 @@ test("the conversation view replays what the session held, streams its next turn
 
     // The next turn arrives as snapshots of one message. The host delivers a message's last few
     // updates AFTER its end, so the late streaming snapshot carries the HIGHER sequence number;
-    // it must not rewind the settled text or leave the turn looking like it is still running,
-    // which is what disables the composer.
+    // it must not rewind the settled text or leave the finished turn rendered as still
+    // streaming.
     await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "Ther", true));
     await expect(page.getByTestId("agent-message-assistant").last()).toContainText("Ther");
     await publishAgentStreamFrame(planner.session_id, assistantFrame(5, "There are two.", false));
@@ -410,9 +413,6 @@ test("the conversation view replays what the session held, streams its next turn
 
     // Talking to the agent is the delivery the Agents page already uses, not a new write path,
     // and its default is Send - Enter at the session's terminal - since the session takes a steer.
-    // Send being usable here is also what the late-snapshot rule above buys: a thread left
-    // looking like it is still running disables the composer, and a viewer who opens a finished
-    // session cannot talk to it.
     await expect(page.getByRole("combobox", { name: "Delivery mode" })).toHaveValue("steer");
     await page.getByTestId("agent-composer").locator("textarea").fill("try the other branch");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
@@ -428,6 +428,135 @@ test("the conversation view replays what the session held, streams its next turn
         message: "try the other branch",
         payload: expect.objectContaining({ delivery: expect.objectContaining({ mode: "steer" }) }),
       });
+  } finally {
+    await context.close();
+  }
+});
+
+// A person talks to a session while it works, as at its terminal: a turn still streaming does
+// not hold Send, and the message goes out at once, before the turn ends. Taking it does not
+// stop the turn, and the thread grows no empty extra turn while it streams on.
+test("Send stays pressable while the session is mid-turn: a click sends as Send at once, and the turn streams on with no empty extra turn", async ({
+  browser,
+}) => {
+  await publishAgentStreamFrame(planner.session_id, replay, "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${planner.session_id}/live`);
+    const assistant = page.getByTestId("agent-message-assistant");
+    await expect(assistant.first()).toContainText("Checking the notes.");
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "Working", true));
+    await expect(assistant.last()).toContainText("Working");
+
+    await expect(page.getByRole("combobox", { name: "Delivery mode" })).toHaveValue("steer");
+    const composer = page.getByTestId("agent-composer");
+    await composer.locator("textarea").fill("stop after this file");
+    const send = composer.getByRole("button", { exact: true, name: "Send" });
+    await expect(send).toBeEnabled();
+    await send.click();
+    // No frame ends the turn before the send lands.
+    await expect
+      .poll(async () =>
+        (await getSentMessages()).map((sent) => ({
+          message: sent.message,
+          payload: JSON.parse(String(sent.payload)),
+        }))
+      )
+      .toContainEqual({
+        message: "stop after this file",
+        payload: expect.objectContaining({ delivery: expect.objectContaining({ mode: "steer" }) }),
+      });
+    await expect(
+      page.getByTestId("agent-message-user").filter({ hasText: "stop after this file" })
+    ).toBeVisible();
+
+    // The turn streams on: the replay's reply and this one, and no empty turn after the
+    // reader's message.
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(5, "Working on it", true));
+    await expect(assistant.last()).toContainText("Working on it");
+    await expect(assistant).toHaveCount(2);
+    await publishAgentStreamFrame(
+      planner.session_id,
+      assistantFrame(6, "Working on it. Done.", false)
+    );
+    await expect(assistant.last()).toContainText("Working on it. Done.");
+  } finally {
+    await context.close();
+  }
+});
+
+// Enter is the keyboard's Send, mid-turn too, and it sends in the mode the person picked.
+test("Enter sends mid-turn in the delivery mode the person picked", async ({ browser }) => {
+  await publishAgentStreamFrame(planner.session_id, replay, "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${planner.session_id}/live`);
+    const assistant = page.getByTestId("agent-message-assistant");
+    await expect(assistant.first()).toContainText("Checking the notes.");
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "Working", true));
+    await expect(assistant.last()).toContainText("Working");
+
+    await page.getByRole("combobox", { name: "Delivery mode" }).selectOption("aside");
+    const field = page.getByTestId("agent-composer").locator("textarea");
+    await field.fill("note the flaky test for later");
+    await field.press("Enter");
+    // The turn is still streaming: no frame has ended it.
+    await expect
+      .poll(async () =>
+        (await getSentMessages()).map((sent) => ({
+          message: sent.message,
+          payload: JSON.parse(String(sent.payload)),
+        }))
+      )
+      .toContainEqual({
+        message: "note the flaky test for later",
+        payload: expect.objectContaining({ delivery: expect.objectContaining({ mode: "aside" }) }),
+      });
+  } finally {
+    await context.close();
+  }
+});
+
+// An empty box is the one thing that refuses Send mid-turn, and Send says why: on its title, as
+// its accessible description, and on a line in the composer a reader with no pointer can see.
+// Neither a click nor Enter sends. With text, Send is pressable and the line says how to send.
+test("mid-turn, an empty box refuses Send, says why on screen, and sends nothing", async ({
+  browser,
+}) => {
+  await publishAgentStreamFrame(planner.session_id, replay, "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${planner.session_id}/live`);
+    const assistant = page.getByTestId("agent-message-assistant");
+    await expect(assistant.first()).toContainText("Checking the notes.");
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "Working", true));
+    await expect(assistant.last()).toContainText("Working");
+
+    const composer = page.getByTestId("agent-composer");
+    const field = composer.locator("textarea");
+    const send = composer.getByRole("button", { exact: true, name: "Send" });
+    const reason = composer.getByText("Type a message first.", { exact: true });
+    const hint = composer.getByText("Enter to send · Shift+Enter for a new line", { exact: true });
+    await expect(send).toBeDisabled();
+    await expect(send).toHaveAccessibleDescription("Type a message first.");
+    await expect(send).toHaveAttribute("title", "Type a message first.");
+    // `toBeVisible` passes for an `sr-only` line, a 1 px box, so its height is the check.
+    await expect(reason).toBeVisible();
+    expect((await reason.boundingBox())?.height ?? 0).toBeGreaterThan(8);
+    const sent = (await getSentMessages()).length;
+    await send.click({ force: true });
+    await field.press("Enter");
+    await page.waitForTimeout(500);
+    expect(await getSentMessages()).toHaveLength(sent);
+
+    await field.fill("status?");
+    await expect(send).toBeEnabled();
+    await expect(send).not.toHaveAttribute("aria-describedby");
+    await expect(reason).toHaveCount(0);
+    await expect(hint).toBeVisible();
   } finally {
     await context.close();
   }
@@ -661,7 +790,7 @@ test("a session nobody answers for is told so, and recovers when a responder app
   }
 });
 
-test("on a phone the live view never scrolls the page, keeps its header and composer on screen, and follows the keyboard", async ({
+test("on a phone the live view never scrolls the page, keeps its header and composer on screen, and follows the keyboard @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -730,7 +859,7 @@ test("on a phone the live view never scrolls the page, keeps its header and comp
 // pi-envoy (packages/pi-envoy/src/agent-stream.ts), is still an unbroken identifier with no
 // spaces: on a 390 px phone it does not fit the header pill or the turn's own label, and without
 // an ellipsis it forced the whole page to scroll sideways rather than wrapping.
-test("a capped model name ends in an ellipsis on a phone, in the header and on the turn, and never forces the page to scroll sideways", async ({
+test("a capped model name ends in an ellipsis on a phone, in the header and on the turn, and never forces the page to scroll sideways @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -778,6 +907,66 @@ test("a capped model name ends in an ellipsis on a phone, in the header and on t
   }
 });
 
+// A turn's reasoning is 12px italic text on 16px lines. Two reasoning links on consecutive lines:
+// the lower one's padded box has to start at or below the upper one's own text, or a tap on the
+// upper line can open the lower link.
+test("on a phone the live view keeps a reasoning link's padded box off the line above @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    !PHONE_PROJECTS.includes(testInfo.project.name),
+    "the padding is the phone media query's: at desktop width it is off, so the row would pass whatever the CSS"
+  );
+  const reasoning: FakeSession = {
+    ...planner,
+    session_id: "01a0e0c1-0000-7000-8000-0000000304a1",
+  };
+  await setLiveSessions([planner, reasoning]);
+  await publishAgentStreamFrame(
+    reasoning.session_id,
+    {
+      frames: [
+        {
+          kind: "message",
+          message: {
+            at: 1_000,
+            id: "a1000",
+            parts: [
+              {
+                text: "[Upper reasoning](https://example.invalid/upper)\n[Lower reasoning](https://example.invalid/lower)",
+                type: "reasoning",
+              },
+              { text: "Both links are in the reasoning.", type: "text" },
+            ],
+            role: "assistant",
+            streaming: false,
+          },
+          seq: 1,
+          v: 1,
+        },
+      ],
+      session_id: reasoning.session_id,
+      v: 1,
+    },
+    "replay"
+  );
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto(`/agents/${reasoning.session_id}/live`);
+    const body = page.getByTestId("agent-reasoning");
+    // The first paint can be the plain-text fallback, which has no links: wait for the link.
+    await expect(body.getByRole("link", { name: "Lower reasoning" })).toBeVisible();
+    await expectConsecutiveLinksClear(body, "Upper reasoning", "Lower reasoning", {
+      fontSize: 12,
+      lineHeight: 16,
+    });
+  } finally {
+    await context.close();
+  }
+});
+
 test("at desktop width the live view fills the main column beside the navigation and the thread is its scroller", async ({
   browser,
 }, testInfo) => {
@@ -801,7 +990,7 @@ test("at desktop width the live view fills the main column beside the navigation
   }
 });
 
-test("a document-scrolling route is never capped for the keyboard, at mount or after focus and resize", async ({
+test("a document-scrolling route is never capped for the keyboard, at mount or after focus and resize @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -850,7 +1039,7 @@ test("a document-scrolling route is never capped for the keyboard, at mount or a
 // A reader who goes back into a live session's transcript is reading it, and a turn that arrives
 // while they are back there is news to come back to, not a reason to take the page away from
 // them. The control is how they come back, and what it counts is what they have not seen.
-test("a reader scrolled back into a live session's transcript keeps their place, and Jump to latest carries what arrived", async ({
+test("a reader scrolled back into a live session's transcript keeps their place, and Jump to latest carries what arrived @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -988,18 +1177,30 @@ test("sending a message from the live view while scrolled back takes the reader 
     const input = page.getByTestId("agent-composer").locator("textarea");
     await input.fill("try the other branch");
     await page.getByRole("button", { name: "Send" }).click();
-    await expect(page.getByText("try the other branch")).toBeVisible();
+    // The transcript's own turn, not the held line above it, which shows while the send is out.
+    await expect(
+      page.getByTestId("agent-thread").getByText("try the other branch", { exact: true })
+    ).toBeVisible();
+    await expect(page.getByTestId("agent-send-held")).toHaveCount(0);
     await expectNewestTurnAboveComposer(page);
     await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
 
     // The session never took this one: the reader keeps their line, and the refusal is on screen
     // for them to read where they are.
     await scrollThreadTo(page, 1_200);
-    const refuse = await refusePosts(page, `**/api/v1/agents/${sender.session_id}/messages`);
+    const refuse = await refusePosts(
+      page,
+      `**/api/v1/agents/${sender.session_id}/messages`,
+      MESSAGE_REFUSED
+    );
     await input.fill("and this one is refused");
     await page.getByRole("button", { name: "Send" }).click();
     refuse();
     await expect(page.getByTestId("agent-send-error")).toBeVisible();
+    // A refused message is not lost: it is held on screen, with Retry, to send again.
+    await expect(page.getByTestId("agent-send-held")).toContainText(
+      "Your message: “and this one is refused”"
+    );
     expect((await liveViewLayout(page)).threadScrollTop).toBe(1_200);
   } finally {
     await context.close();
@@ -1067,7 +1268,7 @@ test("opening a session, switching to another, and reloading each land the reade
 // The control is something the page puts over the transcript, not a row inside it: on a phone,
 // where the composer is a finger's width below the thread's foot, it covers none of the composer,
 // and it takes nothing from how far the transcript scrolls.
-test("on a phone the live view's Jump to latest covers none of the composer and changes how far the transcript scrolls not at all", async ({
+test("on a phone the live view's Jump to latest covers none of the composer and changes how far the transcript scrolls not at all @phone", async ({
   browser,
 }) => {
   const phone: FakeSession = { ...planner, session_id: "01a0e0c1-0000-7000-8000-00000000a005" };
@@ -1186,7 +1387,7 @@ test("a rebuilt transcript keeps a scrolled-back reader on the turn they were re
     // The connection drops and the reconnect is answered with a shorter history: the session's
     // budget no longer reaches Turn 0 through Turn 7, and two turns it wrote while this viewer
     // was away are behind the forty.
-    await rebuildThroughReconnect(
+    await rebuildThroughResubscribe(
       kept.session_id,
       rebuiltReplay(kept.session_id, 8, [
         liveTurn(1, 41, "Written while they were away.", false),
@@ -1235,7 +1436,7 @@ test("a rebuilt transcript that dropped the reader's turn lands them at the newe
     // This reconnect is answered with an entirely later window - Turn 20 on - which still
     // scrolls, so landing at its end is a place the view had to go to, not the only place there
     // was.
-    await rebuildThroughReconnect(dropped.session_id, rebuiltReplay(dropped.session_id, 20));
+    await rebuildThroughResubscribe(dropped.session_id, rebuiltReplay(dropped.session_id, 20));
     await expect(page.getByText("Turn 12:")).toHaveCount(0);
     await expectNewestTurnAboveComposer(page);
     await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
@@ -1265,7 +1466,7 @@ test("a rebuilt transcript leaves a reader who was at the live end at the live e
     await expectNewestTurnAboveComposer(page);
     await expect(jump).toHaveCount(0);
 
-    await rebuildThroughReconnect(
+    await rebuildThroughResubscribe(
       held.session_id,
       rebuiltReplay(held.session_id, 8, [
         liveTurn(1, 41, "Written while they were away.", false),

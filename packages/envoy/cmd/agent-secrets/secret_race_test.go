@@ -152,8 +152,8 @@ func TestARetagExitsOneWhileTheBrokerServesTheOldKind(t *testing.T) {
 			if stale != (row.code == 1) {
 				t.Fatalf("stderr %q; want the stale-tags message exactly when the kind is stale", stderr)
 			}
-			if row.served != "" && !strings.Contains(stdout, "broker: serving LOGIN_KEY (kind "+row.served+")") {
-				t.Fatalf("stdout %q does not name the served kind", stdout)
+			if row.served != "" && (!strings.Contains(stdout, "broker: serving LOGIN_KEY from ") || !strings.Contains(stdout, "(kind "+row.served+")")) {
+				t.Fatalf("stdout %q does not name the served kind and the store it is in", stdout)
 			}
 		})
 	}

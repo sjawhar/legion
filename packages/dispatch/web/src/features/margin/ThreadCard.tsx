@@ -31,7 +31,9 @@ import {
 } from "../../theme/classes";
 import { useHeldSendsUnder } from "../conversation/held-sends";
 import { MentionComposer } from "../conversation/MentionComposer";
-import { actorLabel } from "../refs/actor";
+import { passageItem, ReplyQuote } from "../conversation/ReplyQuote";
+import type { SaveCommentEdit } from "../conversation/send-request";
+import { AgentName } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
@@ -105,7 +107,7 @@ export interface ThreadCardProps {
   hovered: boolean;
   isClosed: boolean;
   onAction(id: string, action: MarginItemAction): void;
-  onEdit(id: string, body: string): Promise<unknown>;
+  onEdit: SaveCommentEdit;
   onRetryAction(): void;
   onSelect?(): void;
   onToggle(): void;
@@ -205,7 +207,7 @@ function CommentBody({
       {isBareReferenceBody(comment.body) ? <Unfurl body={comment.body} /> : null}
       <p className={`mt-2 flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurfaceMuted}`}>
         <span>
-          {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
+          <AgentName actor={comment.author} inline /> · <Timestamp at={comment.created_at} />
           {comment.edited_at === null ? null : " · edited"}
         </span>
         {showReference && reference !== undefined ? <CopyRefButton route={reference} /> : null}
@@ -420,7 +422,7 @@ export function ThreadCard({
             )}
             {thread.resolved && root.resolved_by !== null && root.resolved_at !== null ? (
               <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>
-                {resolutionLabel} by {actorLabel(root.resolved_by)} ·{" "}
+                {resolutionLabel} by <AgentName actor={root.resolved_by} inline /> ·{" "}
                 <Timestamp at={root.resolved_at} />
               </p>
             ) : null}
@@ -439,6 +441,16 @@ export function ThreadCard({
                       renderEditor(reply)
                     ) : (
                       <>
+                        {reply.reply_block == null ? null : (
+                          <ReplyQuote
+                            author={
+                              passageItem(reply.reply_block, [root, ...thread.replies])?.author
+                            }
+                            block={reply.reply_block}
+                            className="mb-2"
+                            excerpt=""
+                          />
+                        )}
                         <CommentBody
                           artifactSlug={artifactSlug}
                           comment={reply}
@@ -536,7 +548,7 @@ export function ThreadCard({
               onClose={onToggle}
               onSent={() => {}}
               owner={composerOwner(owner)}
-              replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
+              replyTo={{ actor: root.author, excerpt: "", id: root.id, parentKind: "comment" }}
             />
           </div>
         ) : null}

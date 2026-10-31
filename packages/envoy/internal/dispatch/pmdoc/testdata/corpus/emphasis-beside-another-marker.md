@@ -15,6 +15,7 @@ a*_b*
 
 - *(c)\*\*\*\* \*****x's****x's*\_
 
-Beside a tilde the flanking rules alone decide, so a link's strong struck text reads as struck.
+A run of asterisks or underscores beside a tilde opens or closes toward it as beside another
+asterisk or underscore, so a link's strong struck text reads as strong and struck.
 
 [**~~**d**~~**](https://e.com/u)

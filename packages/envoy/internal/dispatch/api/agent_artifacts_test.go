@@ -86,8 +86,9 @@ func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
 	if backlinks.Node.ID != artifact.ID || backlinks.Node.Ref != "dispatch://agent/"+agentSession+"/artifact/shot-png" {
 		t.Fatalf("node = %+v, want artifact %s addressed under the session", backlinks.Node, artifact.ID)
 	}
-	if len(backlinks.Edges) != 1 || backlinks.Edges[0].Kind != "mentions" || backlinks.Edges[0].Node.Kind != "message" {
-		t.Fatalf("edges = %+v, want the message's one mention", backlinks.Edges)
+	if len(backlinks.Edges) != 1 || backlinks.Edges[0].Kind != "mentions" || backlinks.Edges[0].Node.Kind != "block" ||
+		backlinks.Edges[0].Node.Parent == nil || backlinks.Edges[0].Node.Parent.Kind != "message" {
+		t.Fatalf("edges = %+v, want the message's one mention, from its block", backlinks.Edges)
 	}
 }
 

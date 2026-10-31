@@ -23,14 +23,21 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 type client struct {
@@ -85,6 +92,82 @@ func (e *apiError) Permanent() bool {
 	return e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage)
 }
 
+// unreachableError is a broker call that did not complete. Its host might not resolve, nothing
+// might answer at the address, or a peer might answer the connection but fail the exchange. It is
+// not a broker refusal - the broker sent no usable response - and it reads as what it is, naming
+// the address tried and the variable the address came from, because a session that inherited a
+// stale AGENT_SECRETS_URL otherwise reads a bare DNS error as a broker that is down and the stale
+// value goes unnoticed.
+type unreachableError struct {
+	// what classifies the failure: a failed name resolution, no connection made, nothing answered
+	// in time, a peer that answered but failed the exchange, or a request that failed in a way
+	// none of those names.
+	what string
+	// base is the broker's address as AGENT_SECRETS_URL gave it, method and url the call tried;
+	// Error prints base through redact.URL and url through redact.Call, so a credential the
+	// variable carries never prints, while an id the call path-escaped still does.
+	base, method, url string
+	// cause is the transport's own error through redact.Cause: without net/http's *url.Error
+	// wrapper, which repeats the URL, or its class alone where its text may not print.
+	cause error
+}
+
+func (e *unreachableError) Error() string {
+	return fmt.Sprintf("%s: %s %s (%s names %s): %v", e.what, e.method, redact.Call(e.base, e.url), brokerURLVar, redact.URL(e.base), e.cause)
+}
+
+func (e *unreachableError) Unwrap() error { return e.cause }
+
+// unreachable classifies a failed HTTP exchange, sending its reader to the layer that failed.
+// Any resolver error is name resolution, before the generic timeout branch. A dial that made no
+// connection (refused, network or host unreachable, any other dial error) is a non-answer, which
+// routing or a listener fixes. Only what proves a peer answered - a TLS record or certificate
+// error, EOF, or a reset once the connection existed - is "answered but the exchange failed",
+// which TLS or a proxy fixes. An error that fits none says no more than that the request failed,
+// rather than name a layer it cannot prove.
+func unreachable(base, method, callURL string, err error) error {
+	cause := redact.Cause(err, base)
+	host := brokerHost(base)
+	failed := func(what string) error { return &unreachableError{what, base, method, callURL, cause} }
+	var dns *net.DNSError
+	var timeout net.Error
+	var op *net.OpError
+	switch {
+	case errors.As(err, &dns) && dns.IsNotFound:
+		return failed("the broker's host " + host + " does not resolve")
+	case errors.As(err, &dns):
+		return failed("the broker's host " + host + " name resolution failed")
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return failed("nothing answered at " + host + ": the connection was refused")
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
+		return failed("the broker at " + host + " did not answer in time")
+	case errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.EHOSTUNREACH),
+		errors.As(err, &op) && op.Op == "dial":
+		return failed("nothing answered at " + host + ": no connection could be made")
+	case peerAnswered(err):
+		return failed("the broker at " + host + " answered but the exchange failed")
+	default:
+		return failed("the request to the broker at " + host + " failed")
+	}
+}
+
+// peerAnswered reports whether err shows a peer took the connection and then broke the exchange:
+// a TLS record that is not TLS (an HTTP server answering an https URL, which net/http reports as
+// its fixed http.ErrSchemeMismatch in place of the record error), a TLS alert or certificate it
+// would not trust, or the stream ending or being reset once it existed.
+func peerAnswered(err error) bool {
+	var record tls.RecordHeaderError
+	var alert tls.AlertError
+	var verify *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	return errors.As(err, &record) || errors.Is(err, http.ErrSchemeMismatch) || errors.As(err, &alert) || errors.As(err, &verify) ||
+		errors.As(err, &authority) || errors.As(err, &hostname) || errors.As(err, &invalid) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
+}
+
 // do sends the request and, on a 2xx response, returns its raw body; any other status decodes
 // the broker's error envelope into an *apiError.
 func (c *client) do(ctx context.Context, method, url string, body []byte, headers map[string]string) ([]byte, error) {
@@ -94,7 +177,14 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
-		return nil, err
+		// With a base redact.URL prints, the part that did not parse is the path this client
+		// built, so the error says so (through redact.Error, which prints it as net/url wrote it
+		// only where that is clean). With any other base, the parser's own text could quote a bad
+		// escape in a password, so the message says only that the address is not valid.
+		if redact.Clean(c.baseURL) {
+			return nil, fmt.Errorf("the request could not be built: %w", redact.Error(err, c.baseURL))
+		}
+		return nil, &unreachableError{"the broker's address is not a valid URL", c.baseURL, method, url, errNothingSent}
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -104,12 +194,12 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, url, err)
+		return nil, unreachable(c.baseURL, method, url, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: read response: %w", method, url, err)
+		return nil, fmt.Errorf("%s %s: read response: %w", method, redact.Call(c.baseURL, url), redact.Error(err, c.baseURL))
 	}
 	if resp.StatusCode/100 != 2 {
 		var envelope struct {
@@ -124,6 +214,9 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	}
 	return data, nil
 }
+
+// errNothingSent is the cause of a call this client could not even build a request for.
+var errNothingSent = errors.New("nothing was sent")
 
 // doProof signs the request with signer.Sign against exactly this method and URL (no query
 // string appended after signing), the shape proof.Verifier.Verify compares htm/htu against.
@@ -215,7 +308,27 @@ type RequestStatus struct {
 	ApproveURL *string          `json:"approve_url"`
 }
 
+// refusedBeforeCall is a refusal this client made before it sent anything, so refusalText adds
+// no "asked the broker" ending to it.
+type refusedBeforeCall struct{ text string }
+
+func (e *refusedBeforeCall) Error() string { return e.text }
+
+// pathID refuses id, naming it as kind, when it would not appear in a call's path as written: the
+// proof signs the URL this client builds, and the broker checks it against its public URL and the
+// path it decoded, so an id url.PathEscape would change (a '%', a space, a '/') could only be
+// escaped into a proof the broker refuses, or sent raw into a different path.
+func pathID(kind, id string) error {
+	if url.PathEscape(id) != id {
+		return &refusedBeforeCall{fmt.Sprintf("%q is not %s", id, kind)}
+	}
+	return nil
+}
+
 func (c *client) GetRequest(ctx context.Context, signer Signer, id string) (RequestStatus, []byte, error) {
+	if err := pathID("a request id", id); err != nil {
+		return RequestStatus{}, nil, err
+	}
 	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/requests/"+id, nil)
 	if err != nil {
 		return RequestStatus{}, nil, err
@@ -228,20 +341,48 @@ func (c *client) GetRequest(ctx context.Context, signer Signer, id string) (Requ
 }
 
 func (c *client) CancelRequest(ctx context.Context, signer Signer, id string) error {
+	if err := pathID("a request id", id); err != nil {
+		return err
+	}
 	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/requests/"+id+"/cancel", nil)
 	return err
 }
 
 // --- POST /v1/grants/{id}/values, POST /v1/grants/{id}/revoke ---
 
-// GrantValues is POST /v1/grants/{id}/values's exact response shape.
+// GitHubNarrowing is POST /v1/grants/{id}/values's github_app object: one release's narrowing of
+// its GitHub App tokens, as the request names it and as the answer names what the broker applied.
+type GitHubNarrowing struct {
+	Owner        string   `json:"owner"`
+	Repositories []string `json:"repositories,omitempty"`
+	ReadOnly     bool     `json:"read_only,omitempty"`
+}
+
+// GrantValues is POST /v1/grants/{id}/values's exact response shape. GitHubApp is the narrowing
+// the broker applied: nil when it applied none, and always from a broker from before narrowing.
 type GrantValues struct {
 	Values    map[string]string `json:"values"`
 	ExpiresAt *time.Time        `json:"expires_at"`
+	GitHubApp *GitHubNarrowing  `json:"github_app"`
 }
 
-func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string) (GrantValues, error) {
-	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+grantID+"/values", nil)
+// GrantValues releases grantID's values, asking the broker to narrow its GitHub App tokens when
+// narrowing is not nil; nil sends no body, the release as the grant holds it.
+func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string, narrowing *GitHubNarrowing) (GrantValues, error) {
+	if err := pathID("a grant id", grantID); err != nil {
+		return GrantValues{}, err
+	}
+	var body []byte
+	if narrowing != nil {
+		encoded, err := json.Marshal(struct {
+			GitHubApp *GitHubNarrowing `json:"github_app"`
+		}{narrowing})
+		if err != nil {
+			return GrantValues{}, fmt.Errorf("encode the narrowing: %w", err)
+		}
+		body = encoded
+	}
+	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+grantID+"/values", body)
 	if err != nil {
 		return GrantValues{}, err
 	}
@@ -253,6 +394,9 @@ func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string)
 }
 
 func (c *client) RevokeGrant(ctx context.Context, signer Signer, grantID string) error {
+	if err := pathID("a grant id", grantID); err != nil {
+		return err
+	}
 	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/grants/"+grantID+"/revoke", nil)
 	return err
 }
@@ -293,6 +437,9 @@ func (c *client) Self(ctx context.Context, signer Signer) (SelfResult, []byte, e
 // payload. A pod's renewal carries its current projected token as pod_token; podToken "" sends no
 // body at all, a box's renewal.
 func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, podToken string) (time.Time, error) {
+	if err := pathID("an enrollment id", enrollmentID); err != nil {
+		return time.Time{}, err
+	}
 	var body []byte
 	if podToken != "" {
 		var err error
@@ -401,9 +548,12 @@ func (c *client) OperatorMachines(ctx context.Context, signer proofSigner) (Oper
 }
 
 // RevokeOperatorMachine ends one of the calling machine login's operator's own machines' logins.
-// id goes into the path escaped, so whatever a person types names one path segment.
+// An id that would not name one path segment as written is refused (pathID).
 func (c *client) RevokeOperatorMachine(ctx context.Context, signer proofSigner, id string) error {
-	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/machines/"+url.PathEscape(id)+"/revoke", nil)
+	if err := pathID("a machine id", id); err != nil {
+		return err
+	}
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/machines/"+id+"/revoke", nil)
 	return err
 }
 
@@ -446,9 +596,12 @@ func (c *client) OperatorGrants(ctx context.Context, signer proofSigner) (Operat
 	return out, raw, nil
 }
 
-// RevokeOperatorGrant ends grant id as the calling machine login's operator. id goes into the path
-// escaped, so whatever a person types names one path segment.
+// RevokeOperatorGrant ends grant id as the calling machine login's operator. An id that would
+// not name one path segment as written is refused (pathID).
 func (c *client) RevokeOperatorGrant(ctx context.Context, signer proofSigner, id string) error {
-	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/grants/"+url.PathEscape(id)+"/revoke", nil)
+	if err := pathID("a grant id", id); err != nil {
+		return err
+	}
+	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/grants/"+id+"/revoke", nil)
 	return err
 }

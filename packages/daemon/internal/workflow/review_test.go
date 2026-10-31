@@ -265,7 +265,12 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a draft's approval submitted after a request for changes", steps: []string{"cr head id=101 at=2", "approve head id=100 at=3", "complete"}, want: phase.Accepting},
 		{name: "an untimed request for changes, then an older approval redelivered with a time", steps: []string{"cr head id=12", "approve head id=11 at=2", "complete"}, want: phase.Implementing},
 		{name: "a timed approval, then a newer untimed request for changes", steps: []string{"approve head id=11 at=2", "cr head id=12", "complete"}, want: phase.Implementing},
-		{name: "a code push delivered after the branch was reset to the approved head", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete"}, want: phase.Reviewing},
+		// The code push head..head-2 arrives after head-2 arrived and the branch was reset to head: it
+		// is the move the record already made, spent as it arrives (classify.unspentPushes), not code
+		// on its way. A second push of the same two heads looks the same until its synchronize moves
+		// the head; meanwhile no merge can land it, since the READY merge carries the approved head as
+		// GitHub's expected head (daemon's TestAREADYMergeNeverLandsAHeadReplacedAfterTheREADY).
+		{name: "a code push delivered after the branch was reset to the approved head", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete"}, want: phase.Accepting},
 		{name: "a code push delivered after the branch was reset to the approved head, then the reviewer's handoff push", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete", "push handoff from=head head-4", "sync head-4", "green head-4"}, want: phase.Accepting},
 		// A handoff push can carry GitHub's skip-checks trailer and start no CI, so the code head's
 		// settlement stands for the handoff head that replaced it, whenever it arrives. A required
@@ -366,11 +371,11 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 				case "comment":
 					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: id, State: "commented", CommitID: "head-2", Body: "a comment"}
 				case "push handoff", "push code", "push code unplaced", "push truncated", "push paths unmarked":
-					paths, truncated := ".legion/review.json", "false"
+					paths, truncated := ".legion/LEGION-208/review.json", "false"
 					marker := &truncated
 					switch step {
 					case "push code", "push code unplaced":
-						paths = ".legion/review.json\nsrc/widget.go"
+						paths = ".legion/LEGION-208/review.json\nsrc/widget.go"
 					case "push truncated":
 						truncated = "true"
 					case "push paths unmarked":
@@ -942,7 +947,10 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 		return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: from, After: to,
 			ChangedPaths: &paths, Truncated: &whole, Forced: &unforced, Pusher: "legion-reviewer[bot]"}
 	}
-	const handoff, code = ".legion/review.json", ".legion/review.json\nsrc/widget.go"
+	const handoff, code = ".legion/LEGION-208/review.json", ".legion/LEGION-208/review.json\nsrc/widget.go"
+	// Another issue's handoffs are code to this round: its reviewer never read them, and READY
+	// refuses them as it refuses code.
+	const otherHandoffs = ".legion/LEGION-209/review.json"
 	for _, tc := range []struct {
 		name  string
 		steps []intake.Fact
@@ -959,6 +967,9 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 		{name: "a push since the approved head changed code, then a request for changes",
 			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), complete},
 			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{requestChanges}, want: phase.Implementing},
+		{name: "a push since the approved head changed another issue's handoffs",
+			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", otherHandoffs), complete},
+			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-2")}, want: phase.Accepting},
 		{name: "the handoff push over a code push is classified after the completion",
 			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), sync("head-3"), complete, push("head-2", "head-3", handoff)},
 			told:  []string{"head-3"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-3")}, want: phase.Accepting},
@@ -1030,7 +1041,7 @@ func TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound(t *testing.T) {
 	complete := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}
 	approve := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", Author: testReviewApp, Body: "approved"}
 	sync := intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"}
-	handoff, unforced, whole := ".legion/review.json", "false", "false"
+	handoff, unforced, whole := ".legion/LEGION-208/review.json", "false", "false"
 	push := intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "head", After: "head-2",
 		ChangedPaths: &handoff, Truncated: &whole, Forced: &unforced, Pusher: "legion-reviewer[bot]"}
 	for _, tc := range []struct {
@@ -1068,6 +1079,45 @@ func TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound(t *testing.T) {
 				if got[i].Summary != want.Summary || !strings.Contains(got[i].Reason, want.Reason) {
 					t.Fatalf("notice %d was written by %q naming %q, want by %q naming %q", i, got[i].Summary, got[i].Reason, want.Summary, want.Reason)
 				}
+			}
+		})
+	}
+}
+
+// An approval of a head the record has not reached - the reviewer approved its own handoff head
+// while the synchronize that brings it was still on its way - leaves the round stuck at the head the
+// record holds. That head's arrival ends the round even when its push is lost, since no push can
+// change what an approval of the head itself approves; any other head arriving without its push
+// leaves the round as it was, told nothing more, for the push or the required-checks pass's compare
+// to decide.
+func TestTheArrivalOfTheApprovedHeadEndsTheRoundWithoutItsPush(t *testing.T) {
+	complete := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}
+	approve := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-2", Author: testReviewApp, Body: "approved"}
+	sync := func(head string) intake.Fact {
+		return intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
+	}
+	for _, tc := range []struct {
+		name string
+		head string
+		want phase.Phase
+	}{
+		{name: "the approved head arrives", head: "head-2", want: phase.Accepting},
+		{name: "a head above the approved one arrives", head: "head-3", want: phase.Reviewing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "head", "green")
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			for i, fact := range []intake.Fact{approve, complete, sync(tc.head)} {
+				if result := apply(fmt.Sprintf("step-%d", i), fact); result.Refusal != nil {
+					t.Fatalf("step %d (%T) was refused: %+v", i, fact, result.Refusal)
+				}
+			}
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("the issue is in %s, want %s", got, tc.want)
+			}
+			if got := reviewStuckNotices(t, pool); len(got) != 1 || got[0].Summary != byCompletion {
+				t.Fatalf("the architect was told %+v, want once, by the reviewer's completion", got)
 			}
 		})
 	}
@@ -1265,5 +1315,128 @@ func TestATruncatedReviewWithNoFooterIsSetAsideAndLogsTruncation(t *testing.T) {
 	}
 	if got := logs.String(); !strings.Contains(got, "body_truncated=true") {
 		t.Fatalf("logs = %s, want the set-aside line to carry body_truncated=true", got)
+	}
+}
+
+// A push the record's bound lets go - the oldest of more pushes waiting for a link than the bound
+// keeps, each behind a webhook that never arrived - is logged as a warning that names it, once, by
+// the push that let it go: the move it would have linked into is judged without it.
+func TestAPushTheBoundLetsGoIsWarnedByName(t *testing.T) {
+	const message = "workflow: a pull request holds the most pushes waiting for a link; the oldest is let go"
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "green")
+	var logged bytes.Buffer
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil))))
+	// Sixteen pushes of a line the branch never takes are the most the record keeps waiting
+	// (classify's maxWaitingPushes); the seventeenth lets the first go.
+	for i := 1; i <= 17; i++ {
+		logged.Reset()
+		if result := apply(fmt.Sprintf("push-%d", i), pushedFromTo(fmt.Sprintf("x%d", i-1), fmt.Sprintf("x%d", i), "src/widget.go", "legion-implementer[bot]")); result.Refusal != nil {
+			t.Fatalf("push %d was refused: %+v", i, result.Refusal)
+		}
+		var warned []string
+		for _, line := range strings.Split(logged.String(), "\n") {
+			if strings.Contains(line, message) {
+				warned = append(warned, line)
+			}
+		}
+		if i < 17 {
+			if len(warned) != 0 {
+				t.Fatalf("push %d of 16 waiting warned %q, want nothing", i, warned)
+			}
+			continue
+		}
+		if len(warned) != 1 {
+			t.Fatalf("the push past the bound warned %d times (%q), want once", len(warned), warned)
+		}
+		for _, want := range []string{"level=WARN", "issue=LEGION-208", "pullRequest=42", "before=x0", "after=x1"} {
+			if !strings.Contains(warned[0], want) {
+				t.Fatalf("the warning %q does not name %s, want the push let go named", warned[0], want)
+			}
+		}
+	}
+}
+
+// A pull request holds at most seventeen pushes of the same two heads on their way, before their
+// move is made (classify's maxCopies): the eighteenth lets the oldest after the first go, logged as
+// a warning that names it, once, and no push waiting for a link is let go with it.
+func TestACopyOfTwoHeadsOnTheirWayLetGoIsWarnedByName(t *testing.T) {
+	const message = "workflow: a pull request holds the most pushes of the same two heads on their way; the oldest after the first is let go"
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "green")
+	var logged bytes.Buffer
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil))))
+	for i := 1; i <= 18; i++ {
+		logged.Reset()
+		if result := apply(fmt.Sprintf("push-%d", i), pushedFromTo("head", "h1", "src/widget.go", "legion-implementer[bot]")); result.Refusal != nil {
+			t.Fatalf("push %d was refused: %+v", i, result.Refusal)
+		}
+		var warned []string
+		for _, line := range strings.Split(logged.String(), "\n") {
+			if strings.Contains(line, "let go") {
+				warned = append(warned, line)
+			}
+		}
+		if i < 18 {
+			if len(warned) != 0 {
+				t.Fatalf("copy %d of 17 warned %q, want nothing", i, warned)
+			}
+			continue
+		}
+		if len(warned) != 1 || !strings.Contains(warned[0], message) {
+			t.Fatalf("the copy past the bound warned %q, want the one copy let go", warned)
+		}
+		for _, want := range []string{"level=WARN", "issue=LEGION-208", "pullRequest=42", "before=head", "after=h1"} {
+			if !strings.Contains(warned[0], want) {
+				t.Fatalf("the warning %q does not name %s, want the copy let go named", warned[0], want)
+			}
+		}
+	}
+}
+
+// A move holds at most sixteen later pushes of its two heads (classify's maxRepeats), each the
+// move made again or its push delivered again; the seventeenth lets the oldest go, logged as a
+// warning that names it, once, and no push waiting for a link is let go with it.
+func TestARepeatAMoveLetsGoIsWarnedByName(t *testing.T) {
+	const message = "workflow: a move holds the most pushes of its two heads made again; the oldest is let go"
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "green")
+	var logged bytes.Buffer
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil))))
+	if result := apply("push-0", pushedFromTo("head", "h1", "src/widget.go", "legion-implementer[bot]")); result.Refusal != nil {
+		t.Fatalf("the first push was refused: %+v", result.Refusal)
+	}
+	if result := apply("sync", intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", Before: "head", HeadSHA: "h1"}); result.Refusal != nil {
+		t.Fatalf("h1's synchronize was refused: %+v", result.Refusal)
+	}
+	for i := 1; i <= 17; i++ {
+		logged.Reset()
+		pusher := "legion-implementer[bot]"
+		if i%2 == 0 {
+			pusher = testReviewApp
+		}
+		if result := apply(fmt.Sprintf("push-%d", i), pushedFromTo("head", "h1", "src/widget.go", pusher)); result.Refusal != nil {
+			t.Fatalf("push %d was refused: %+v", i, result.Refusal)
+		}
+		var warned []string
+		for _, line := range strings.Split(logged.String(), "\n") {
+			if strings.Contains(line, message) || strings.Contains(line, "waiting for a link") {
+				warned = append(warned, line)
+			}
+		}
+		if i < 17 {
+			if len(warned) != 0 {
+				t.Fatalf("repeat %d of 16 warned %q, want nothing", i, warned)
+			}
+			continue
+		}
+		if len(warned) != 1 || !strings.Contains(warned[0], message) {
+			t.Fatalf("the repeat past the bound warned %q, want the one repeat let go", warned)
+		}
+		for _, want := range []string{"level=WARN", "issue=LEGION-208", "pullRequest=42", "before=head", "after=h1"} {
+			if !strings.Contains(warned[0], want) {
+				t.Fatalf("the warning %q does not name %s, want the repeat let go named", warned[0], want)
+			}
+		}
 	}
 }

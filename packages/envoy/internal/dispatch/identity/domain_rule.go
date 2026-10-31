@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -106,12 +105,12 @@ func (r DomainRule) ConfirmCookie(ctx context.Context, people auth.PeopleStore, 
 }
 
 // WriteSignIn records a sign-in for the Workspace domain (auth.PeopleStore.SignInSubject).
-func (r DomainRule) WriteSignIn(ctx context.Context, people auth.PeopleStore, email, subject, refreshToken string, confirmedAt time.Time) error {
-	return people.SignInSubject(ctx, email, subject, refreshToken, confirmedAt)
+func (r DomainRule) WriteSignIn(ctx context.Context, people auth.PeopleStore, email, subject, refreshToken string) error {
+	return people.SignInSubject(ctx, email, subject, refreshToken)
 }
 
 // WriteConfirm records a refresh that confirmed email's domain-mode membership
 // (auth.PeopleStore.ConfirmSubject).
-func (r DomainRule) WriteConfirm(ctx context.Context, people auth.PeopleStore, email, subject, refreshToken string, confirmedAt time.Time) error {
-	return people.ConfirmSubject(ctx, email, subject, refreshToken, confirmedAt)
+func (r DomainRule) WriteConfirm(ctx context.Context, people auth.PeopleStore, email, subject, refreshToken string) error {
+	return people.ConfirmSubject(ctx, email, subject, refreshToken)
 }

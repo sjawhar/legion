@@ -82,10 +82,11 @@ func seedChain(t *testing.T, store *Store, project string, length int) {
 	}
 }
 
-// censusCount takes the pre-deploy census of the migration and answers its count.
-func censusCount(t *testing.T, store *Store) int64 {
+// censusCount takes the pre-deploy census of the migrations through version, of which only
+// version is pending, and answers its count.
+func censusCount(t *testing.T, store *Store, version int) int64 {
 	t.Helper()
-	report, err := census(context.Background(), store.Pool.Config().ConnString(), migrationsThrough(t, repoProjectsDefaultVersion), pgmigrate.CensusOptions{})
+	report, err := census(context.Background(), store.Pool.Config().ConnString(), migrationsThrough(t, version), pgmigrate.CensusOptions{})
 	if err != nil {
 		t.Fatalf("census: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestMigrationRefusesAnIssueMoreThan32LinksBelowItsRoot(t *testing.T) {
 		t.Fatalf("migrate through %d: %v", repoProjectsDefaultVersion-1, err)
 	}
 	seedChain(t, store, "DEEP", 34) // DEEP-34 is 33 links below DEEP-1
-	if got := censusCount(t, store); got != 1 {
+	if got := censusCount(t, store, repoProjectsDefaultVersion); got != 1 {
 		t.Fatalf("census = %d, want 1: DEEP-34 alone sits more than 32 links below its root", got)
 	}
 	err := store.migrate(ctx, migrationsThrough(t, repoProjectsDefaultVersion))
@@ -124,7 +125,7 @@ func TestMigrationRefusesAnIssueMoreThan32LinksBelowItsRoot(t *testing.T) {
 	}
 	// 25 issues past the cap: the refusal names the first 20 by project and number, and counts the rest.
 	seedChain(t, store, "WIDE", 57) // WIDE-34 through WIDE-57 sit more than 32 links down
-	if got := censusCount(t, store); got != 25 {
+	if got := censusCount(t, store, repoProjectsDefaultVersion); got != 25 {
 		t.Fatalf("census = %d, want 25", got)
 	}
 	err = store.migrate(ctx, migrationsThrough(t, repoProjectsDefaultVersion))
@@ -143,7 +144,7 @@ func TestMigrationAppliesOverAChain32LinksDeep(t *testing.T) {
 		t.Fatalf("migrate through %d: %v", repoProjectsDefaultVersion-1, err)
 	}
 	seedChain(t, store, "EDGE", 33) // EDGE-33 is 32 links below EDGE-1
-	if got := censusCount(t, store); got != 0 {
+	if got := censusCount(t, store, repoProjectsDefaultVersion); got != 0 {
 		t.Fatalf("census = %d, want 0", got)
 	}
 	if err := store.migrate(ctx, migrationsThrough(t, repoProjectsDefaultVersion)); err != nil {
@@ -189,7 +190,7 @@ func TestMigrationCountsAnOverDeepIssueCommittedWhileItWaits(t *testing.T) {
 		t.Fatalf("migrate through %d: %v", repoProjectsDefaultVersion-1, err)
 	}
 	seedChain(t, store, "EDGE", 33) // EDGE-33 is 32 links below EDGE-1, within the cap
-	if got := censusCount(t, store); got != 0 {
+	if got := censusCount(t, store, repoProjectsDefaultVersion); got != 0 {
 		t.Fatalf("census = %d, want 0", got)
 	}
 	writer, err := store.Pool.Begin(ctx)

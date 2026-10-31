@@ -9,6 +9,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -141,12 +142,16 @@ type tmuxReads struct {
 }
 
 // readTmux is tmux's share of readBoot: each backend's launch (resolveLaunchers), Oh My Pi's only
-// when boot runs the host's Oh My Pi (hostOMP), and, for a configuration with a repository, the
+// when boot runs the host's Oh My Pi (hostOMP), every overlay role_config_files names, which must
+// be a file a pane can read (checkRoleConfigFiles), and, for a configuration with a repository, the
 // host's git and jj Legion runs itself.
 func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func(string) string, hostOMP bool) (tmuxReads, error) {
 	var r tmuxReads
 	var err error
 	if r.launches, err = resolveLaunchers(cfg, lookup, getenv, hostOMP); err != nil {
+		return tmuxReads{}, err
+	}
+	if err := checkRoleConfigFiles(cfg); err != nil {
 		return tmuxReads{}, err
 	}
 	if _, ok := cfg.Projects[cfg.Project]; ok {
@@ -155,6 +160,21 @@ func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func
 		}
 	}
 	return r, nil
+}
+
+// checkRoleConfigFiles refuses an overlay of role_config_files that is not a file a pane of its
+// role could read, naming the role and the file: a pane's Oh My Pi refuses to start on an overlay
+// it cannot read, and every pane of the daemon runs on this host as this daemon's user. Under
+// kubernetes the files are the pods' mounts', which only the image probe reads.
+func checkRoleConfigFiles(cfg config.Config) error {
+	for _, role := range config.RoleConfigRoles {
+		for _, file := range cfg.RoleConfigFiles[role] {
+			if err := podsafety.CheckOverlay(file); err != nil {
+				return fmt.Errorf("role_config_files.%s names %s, which the %s's Oh My Pi could not read: %w", role, file, role, err)
+			}
+		}
+	}
+	return nil
 }
 
 // CheckStart is `legion start --check-config`'s reading of what boot reads before it writes

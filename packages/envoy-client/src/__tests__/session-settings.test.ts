@@ -144,6 +144,17 @@ describe("sessionSettings", () => {
     );
   });
 
+  test("a checkout's askgate section is said", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), { dispatch: dispatchOn });
+    const cwd = tempDir();
+    const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), {
+      askgate: { enabled: false },
+    });
+    const settings = sessionSettings({ path: file, error: null }, {}, { cwd });
+    expect(settings.dispatch.enabled).toBe(true);
+    expect(settings.notice).toContain(`askgate in ${checkout} is not read; set it in ${file}`);
+  });
+
   test("a checkout's file that cannot be used is Dispatch's error, or said as not read while DISPATCH_URL replaces it", () => {
     const file = writeFile(path.join(tempDir(), "envoy.json"), {
       dispatch: dispatchOn,
@@ -330,6 +341,30 @@ describe("sessionDispatchSettings", () => {
       warnings: [],
       missing: { link: null },
     });
+  });
+
+  test("commands: kept never runs a token command, and takes the value a run kept", () => {
+    const home = tempDir();
+    const runs = path.join(home, "runs");
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; echo kept-token` },
+    });
+    const chosen = { path: file, error: null } as const;
+    const env = { HOME: home, PATH: process.env.PATH };
+    expect(
+      sessionDispatchSettings(chosen, env, { cwd: tempDir(), commands: "kept" }).dispatch
+    ).toEqual({
+      enabled: false,
+      notice: null,
+      error: `${file}: dispatch.token's command has not run in this process yet, and this read does not run it`,
+    });
+    expect(existsSync(runs)).toBe(false);
+    expect(sessionDispatchSettings(chosen, env, { cwd: tempDir() }).dispatch).toMatchObject({
+      token: "kept-token",
+    });
+    expect(
+      sessionDispatchSettings(chosen, env, { cwd: tempDir(), commands: "kept" }).dispatch
+    ).toMatchObject({ enabled: true, token: "kept-token" });
   });
 });
 

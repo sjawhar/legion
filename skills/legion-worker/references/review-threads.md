@@ -45,7 +45,7 @@ Three facts govern every thread, whoever opened it.
     Reply on each thread you answer, then tell the implementer the node ids of exactly the threads
     you accepted — a bot's findings you adjudicated — never one you have not read: an
     `envoy_publish` to the implementer's role topic (it is live on the issue and answers while you
-    wait; `skill://legion-worker` "Asking another role" has the topic), or your review body, which
+    wait; its topic is yours from the `Legion addressing` line with `-implementer` as the last part), or your review body, which
     it reads at its next round. The implementer resolves exactly those with its own `gh`. GitHub
     cannot tell a CI bot from a person whose `gh` is routed to an App, so such a thread may be a
     person's finding: accept it only when the finding itself is settled (a genuine Minor is settled

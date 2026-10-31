@@ -36,9 +36,11 @@ func cmdGrantList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
 		return exitUsageError
 	}
-	grants, raw, err := newClient(base).OperatorGrants(context.Background(), signer)
+	ctx := context.Background()
+	c := newClient(base)
+	grants, raw, err := c.OperatorGrants(ctx, signer)
 	if err != nil {
-		return operatorFail(stderr, form, err)
+		return operatorFail(stderr, form, c.source(ctx), err)
 	}
 	if *asJSON {
 		writeVerbatim(stdout, raw)
@@ -62,6 +64,10 @@ func cmdGrantList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
 		return 1
 	}
+	// The source line goes to stderr, so the table on stdout stays one row per grant for a
+	// script. Every SECRETS cell names secrets of this one store, never another CLI's of the
+	// same name.
+	fmt.Fprintf(stderr, "Every row is a grant from %s.\n", c.source(ctx))
 	return 0
 }
 
@@ -92,9 +98,11 @@ func cmdGrantRevoke(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
 		return exitUsageError
 	}
-	if err := newClient(base).RevokeOperatorGrant(context.Background(), signer, positional[0]); err != nil {
-		return operatorFail(stderr, form, err)
+	ctx := context.Background()
+	c := newClient(base)
+	if err := c.RevokeOperatorGrant(ctx, signer, positional[0]); err != nil {
+		return operatorFail(stderr, form, c.source(ctx), err)
 	}
-	fmt.Fprintf(stdout, "revoked %s\n", positional[0])
+	fmt.Fprintf(stdout, "revoked %s at %s\n", positional[0], brokerSource(base))
 	return 0
 }

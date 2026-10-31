@@ -99,7 +99,7 @@ func TestEachIssuesActionsActOnTheRepositoryItsRecordNames(t *testing.T) {
 			provisioned = append(provisioned, request.Issue+" "+request.Repo.String()+"@"+request.DefaultBranch)
 			return workspace.Workspace{Dir: t.TempDir()}, nil
 		},
-		remove: func(_ context.Context, working workspace.Workspace) error {
+		remove: func(_ context.Context, working workspace.Workspace, _ sync.Locker) error {
 			removed = append(removed, working.Dir)
 			return nil
 		},

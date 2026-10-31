@@ -3,19 +3,16 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 
-import { api } from "../../api/client";
+import type { WriteBounds } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
-import { whoAmIQuery } from "../../api/queries";
-import type { Ask, UserState } from "../../api/types";
+import { issueQuery, whoAmIQuery } from "../../api/queries";
+import type { Ask } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import { useHeldSend, useHeldSends, useHeldSendsUnder } from "../conversation/held-sends";
+import type { CarriedBlockIds } from "../conversation/send-request";
 import { useProjectArtifact } from "../document/useProjectArtifact";
-import { eventItemId, stateForIssue } from "../issue/pins";
-import {
-  applyPinStateOperation,
-  issueStateTransport,
-  sharedIssueStateWrites,
-} from "../issue/state-write-queue";
+import { writePin } from "../issue/pin-write";
+import { eventItemId } from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
@@ -40,10 +37,15 @@ import {
 } from "./useMarginItems";
 import { useMarginListeners } from "./useMarginListeners";
 
-/** A retracted ask was withdrawn by its asker: history, not a decision to read, so the margin
- *  folds it away with the resolved threads until a reader asks for them. */
-function isRetractedAsk(ask: Pick<Ask, "state" | "resolution">): boolean {
-  return ask.state === "resolved" && ask.resolution?.kind === "retracted";
+/** A retracted ask was taken back by its asker, and a withdrawn one by its issue's close: neither
+ *  is a live question or a decision to read, so the margin folds both away with the resolved
+ *  threads until a reader asks for them. Reopening the issue opens a withdrawn ask again, and an
+ *  open ask never folds. */
+export function isFoldedAsk(ask: Pick<Ask, "state" | "resolution">): boolean {
+  return (
+    ask.state === "resolved" &&
+    (ask.resolution?.kind === "retracted" || ask.resolution?.kind === "withdrawn")
+  );
 }
 
 /** The margin item a focus request names, once the request's mark has an item. */
@@ -145,16 +147,7 @@ export function useMarginSheet(): MarginSheetModel {
     if (sheetThreadKey !== undefined) store.discard(marginReplySendKey(sheetThreadKey));
   }, [sheetReplySendingNow, sheetThreadKey, store]);
   const marginRef = useRef<HTMLElement>(null);
-  const issue = useQuery({
-    enabled: issueKey !== undefined,
-    queryKey: ["issue", issueKey],
-    queryFn: () => {
-      if (issueKey === undefined) {
-        throw new Error("Issue margin query requires an issue owner.");
-      }
-      return api.getIssue(issueKey);
-    },
-  });
+  const issue = useQuery({ ...issueQuery(issueKey), enabled: issueKey !== undefined });
   const viewer = useQuery(whoAmIQuery());
   const visibleArtifact =
     documentRoute === undefined
@@ -165,34 +158,7 @@ export function useMarginSheet(): MarginSheetModel {
   const visibleArtifactId = visibleArtifact?.id;
   const removePin = useCallback(
     (id: string) => {
-      if (owner?.kind !== "issue") {
-        return;
-      }
-      const operation = { id, op: "unpin" as const };
-      queryClient.setQueryData<UserState>(["user-state"], (current) => {
-        const issueState = stateForIssue(current, owner.key);
-        return {
-          ...current,
-          [owner.key]: {
-            ...issueState,
-            dismissed: applyPinStateOperation(issueState.dismissed, operation),
-          },
-        };
-      });
-      void sharedIssueStateWrites
-        .enqueue(owner.key, operation, {
-          ...issueStateTransport,
-          onDrained: (key, next) => {
-            queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-              ...current,
-              [key]: next,
-            }));
-          },
-          onError: () => {
-            void queryClient.invalidateQueries({ queryKey: ["user-state"] });
-          },
-        })
-        .catch(() => {});
+      if (owner?.kind === "issue") writePin(queryClient, owner.key, { id, op: "unpin" });
     },
     [owner, queryClient]
   );
@@ -225,10 +191,10 @@ export function useMarginSheet(): MarginSheetModel {
     held: heldReplyKeys,
   });
   const onEdit = useCallback(
-    async (id: string, body: string) => {
+    async (id: string, body: string, carried: CarriedBlockIds | undefined, bounds: WriteBounds) => {
       setSavingCommentEditId(id);
       try {
-        return await editComment(id, body);
+        return await editComment(id, body, carried, bounds);
       } finally {
         setSavingCommentEditId(undefined);
       }
@@ -236,7 +202,7 @@ export function useMarginSheet(): MarginSheetModel {
     [editComment]
   );
 
-  // A retracted ask is withdrawn history; it rides the same "show resolved" toggle as
+  // A retracted or withdrawn ask is history; it rides the same "show resolved" toggle as
   // resolved comment threads instead of sitting among the answered decisions.
   const askItems = useMemo(
     () =>
@@ -245,12 +211,12 @@ export function useMarginSheet(): MarginSheetModel {
         .map((item) => item.ask),
     [items]
   );
-  const retractedAskCount = useMemo(
-    () => askItems.filter((ask) => isRetractedAsk(ask)).length,
+  const foldedAskCount = useMemo(
+    () => askItems.filter((ask) => isFoldedAsk(ask)).length,
     [askItems]
   );
   const historicalAsks = useMemo(
-    () => askItems.filter((ask) => showResolved || !isRetractedAsk(ask)),
+    () => askItems.filter((ask) => showResolved || !isFoldedAsk(ask)),
     [askItems, showResolved]
   );
   const markItemIds = useMemo(() => {
@@ -631,7 +597,7 @@ export function useMarginSheet(): MarginSheetModel {
       pinnedConversations,
       pinnedIds,
       resolvedThreads,
-      retractedAskCount,
+      foldedAskCount,
       threads,
       viewerLogin: viewer.data?.login ?? "",
       visibleArtifact,

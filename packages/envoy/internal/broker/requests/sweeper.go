@@ -10,12 +10,14 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 )
 
-// Sweeper is the one thing that moves state no human decides:
-// every tick it ends the enrollments whose lease
-// lapsed (revoking their grants and cancelling their pending requests), expires overdue pending
-// agent_secret requests (waking each one's owner) and overdue pending machine logins, deletes
-// spent OAuth state (oauthstore.Store.Sweep), and deletes expired browser sessions — all read
-// fresh from Postgres, never from memory, so a restart resumes exactly where the rows are.
+// Sweeper is the one thing that ends what no human decides: every tick it ends the enrollments
+// whose lease lapsed (revoking their grants and cancelling their pending requests), expires overdue
+// pending agent_secret requests (waking each one's owner) and overdue pending machine logins,
+// deletes spent OAuth state (oauthstore.Store.Sweep), and deletes expired browser sessions — all
+// read fresh from Postgres, never from memory, so a restart resumes exactly where the rows are. A
+// lease that ran out while no broker was serving is not lapsed (enroll.Service.EndLapsed), so the
+// first sweep after an outage never ends it for that: the broker's serving clock
+// (enroll.ServingClock) gives it the time back instead.
 type Sweeper struct {
 	Enrollments   *enroll.Service
 	Machine       *Machine

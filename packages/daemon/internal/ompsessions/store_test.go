@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// The endpoint a role container's launcher serves: a socket in the generation's own private
+// The endpoint a pod's launcher serves: a socket in the generation's own private
 // directory, and an IAM login, which holds an `@`.
 var testEndpoint = Endpoint{
 	SocketDir: "/var/run/legion/private/generation-1",

@@ -6,98 +6,50 @@ disable-model-invocation: true
 
 # Thermonuclear Code Quality
 
-A strict maintainability audit of the current branch's changes.
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-## Baseline
+This is a maintainability review of one diff: the current branch's changes, or the range you are given. Every remedy keeps behavior the same and removes code or concepts, or moves code where a reader finds it without reading the rest of the file, because a behavior change is work for `skill://thermonuclear-deep-review`, not a cleanup. The table's last two rows change ordering or failure behavior: say so in the finding.
 
-- Rethink how to structure and implement the changes so code quality improves and behavior does not change. The aim is code that is smaller, more direct and easier to maintain.
-- Improve abstractions and modularity. Reduce spaghetti code. Make the code succinct and legible.
-- Restructure when there is a clear path to a simpler implementation. Do not stop at local cleanup when a coherent simplification is available.
-- Be thorough and rigorous. Verify each claim before you report it.
+## Report
 
-## Look for the code-judo move first
+The first line is the verdict, with the short sha of the head you reviewed (`git rev-parse --short=8 HEAD`, or the sha your brief names when you have no shell):
 
-- For each meaningful change, ask: can a reorganization that uses the existing architecture better make whole branches, helpers, modes, conditionals or layers disappear?
-- Push hard to delete complexity, not to rearrange it. Prefer the solution that looks inevitable in hindsight.
-- A refactor that moves code but leaves the reader the same number of concepts to hold is not a simplification. Ask whether the model itself can be simpler.
-- Do not accept a cleaner version of the same messy idea when a much simpler idea is plausible. Do not give "maybe rename this" feedback when the real issue is structural.
-- "It works" and "tests pass" are not the bar. If the structure can become meaningfully cleaner with the same behavior, push for the cleaner version.
+- `Verdict: APPROVE at <sha>` when no finding stands.
+- `Verdict: CHANGES at <sha>` when one does.
 
-## What to flag, and the remedy to propose
+Put nothing before it: a PR gate reads only the first line of a posted report.
 
-Flag these aggressively, and any change that makes the surrounding code harder to reason about, even when the code works:
+Then one entry per finding: `path:line`, the smell, the cost it adds, and the remedy, so the author can act on it without asking. Report few findings, each one you are sure of: a long list hides the ones that block. Order them so the costliest is read first: step 2's structural regressions and missed code-judo moves, then rows 2-3, 7-8, 1, 9-10, then the rest. Write each as a plain request: `this adds another special-case branch to an already busy flow. Move it into its own function.`
 
-| Smell | Remedy |
-|---|---|
-| The PR pushes a file from under 1000 lines to over 1000 | Ask whether to decompose first into helpers, subcomponents, modules or local abstractions. Accept only for a compelling structural reason, with the file still well organized. |
-| Ad-hoc conditionals, special cases, one-off booleans, nullable modes or flags in unrelated or busy flows. Narrow edge cases in the middle of a busy function. "Temporary" branches. | A design problem, not a nit. Reframe the state model so the conditionals disappear, not only move to one place. Make the special case part of a simpler default flow. Else move it behind its own abstraction, helper, state machine, policy object or module. |
-| Repeated conditionals or condition chains | A typed model or an explicit dispatcher. |
-| Copy-pasted logic or duplicate branches | Extract a helper or pure function. Collapse into one flow. |
-| Hacky, brittle or "magic" behavior. Generic mechanisms that hide simple data-shape assumptions. | Direct, boring code. |
-| Thin wrappers, identity abstractions, pass-through helpers | Delete the layer. |
-| Unnecessary optionality, `unknown`, `any`, casts, loose ad-hoc objects. A silent fallback over an unclear invariant. | Explicit typed models or shared contracts, so the control flow gets simpler. |
-| Feature logic in shared paths. Implementation details leaking through APIs. Logic in the wrong file, layer or package. | Move it to the layer that owns the concept, so the feature extends an existing abstraction. |
-| A bespoke helper where a canonical utility exists | Reuse the canonical helper. |
-| A module that became more coupled, stateful or hard to scan. Orchestration mixed with business logic. | Split into focused modules. Separate orchestration from business logic. |
-| Independent work run in sequence for no good reason | Run it in parallel when that also simplifies the orchestration. |
-| Related updates that can leave state half-applied | A more atomic flow. |
+## Steps
 
-Flag orchestration only when the cleaner structure is obvious. Do not over-index on micro-optimizations.
+1. Read the diff and each changed file around its hunks. Flag lines the diff adds or changes, and existing code it makes harder to follow, such as a function it lengthens or adds a branch or parameter to. A finding on code the diff leaves alone blocks the PR for work it did not cause.
+2. Look for the code-judo move first: a restructure onto the existing architecture that deletes whole branches, helpers, modes, conditionals or layers. A structural fix often removes the line-level findings with it.
+3. For a refactor, count the concepts (the types, functions, flags and modes) a reader must know before and after. A move that keeps the count is not a simplification: say so, rather than accept a cleaner version of the same idea. When the problem is structural, do not suggest a rename, which hides the finding that matters.
+4. Check every hunk against the table below, because each row is a smell this review blocks on. For file size, compare `git show <base>:<path> | wc -l` with `wc -l <path>`; `<base>` is the range start your brief names, else `git merge-base HEAD origin/<default branch>`.
+5. Before you report a finding, quote its line at the reviewed head. For a boundary, type or duplicate-helper claim, also read the callers (`grep` the symbol) and the existing helper you name. A finding built on a misread costs the author a round.
+6. Report only a cost you can name (the table's Cost column). A preference or a micro-optimization with no such cost is not a finding. When a structural finding exists, leave out naming and style nits, because they bury it.
+7. Ask for a new abstraction (a type, module or policy object) only when the code shows two real callers or two ways it will change. With one, the abstraction is the thin wrapper row 6 flags.
 
-## Tone
+## Smells and remedies
 
-- Be direct, serious and demanding. Do not be rude.
-- Do not soften a major maintainability issue into a mild suggestion. If the code makes the codebase messier, or missed a substantial simplification, say so.
-- Examples:
-  - `this pushes the file past 1k lines. can we decompose this first?`
-  - `this adds another special-case branch into an already busy flow. can we move this behind its own abstraction?`
-  - `this works, but it makes the surrounding code more spaghetti. let's keep the behavior and restructure the implementation.`
-  - `why does this need a cast / optional here? can we make the boundary more explicit instead?`
-  - `i think there's a code-judo move here that makes this much simpler. can we reframe this so these branches disappear?`
-
-## Output
-
-Order findings:
-
-1. Structural regressions
-2. Missed dramatic simplifications (code judo)
-3. Spaghetti and branching growth
-4. Boundary, abstraction and type-contract problems
-5. File size and decomposition
-6. Modularity and abstraction
-7. Legibility and maintainability
-
-Give a small number of high-conviction comments. When larger structural issues exist, leave out low-value nits.
+| Smell | Cost | Remedy |
+|---|---|---|
+| The PR pushes a file from under 1000 lines to over 1000 | more to scan for every change | Decompose it first into helpers, modules or local abstractions. Accept the growth only when the PR names the caller or constraint that keeps the code in that file. |
+| Ad-hoc conditionals, special cases, one-off booleans, nullable modes or flags in unrelated or busy flows. A branch for one input value in the middle of a busy function. A branch whose name or comment says it is temporary. | each later change reads every branch | Reframe the state model so the conditionals disappear, not only move to one place. Make the special case part of a simpler default flow. Else move it into its own function, or behind an abstraction step 7 allows. |
+| Repeated conditionals or condition chains | each new case edits every chain | A typed model or an explicit dispatcher. |
+| Copy-pasted logic or duplicate branches | a fix lands in one copy | Extract a helper or pure function. Collapse into one flow. |
+| Hacky, brittle or "magic" behavior, such as reading a value by its string form or position. Generic mechanisms that hide simple data-shape assumptions. | the assumption breaks with no error | Direct code that states the assumption: a typed field, a named constant, an explicit check. |
+| Thin wrappers, identity abstractions, pass-through helpers | one more layer to cross | Delete the layer. |
+| Unnecessary optionality, `unknown`, `any`, casts, loose ad-hoc objects. A silent fallback over an unclear invariant. | the type hides what the value is | Explicit typed models or shared contracts, so the control flow gets simpler. |
+| Feature logic in shared paths. Implementation details leaking through APIs. Logic in the wrong file, layer or package. | every caller of the shared path pays | Move it to the package whose existing code already reads or writes that data (`grep` its type). |
+| A bespoke helper where the repository already has one that does the same | two helpers drift apart | Reuse the existing helper; name it as `path:line`. |
+| A module that became more coupled (a new import of another package), stateful (new module-level state) or hard to scan. Orchestration mixed with business logic. | a change to one concern touches the others | Split into focused modules. Separate orchestration from business logic. |
+| Independent work run in sequence | an order nothing needs | Run it in parallel, only when the parallel code is also simpler. |
+| Related updates that can leave state half-applied | a failure leaves state no code expects | A more atomic flow. |
 
 ## Approval bar
 
-Correct behavior alone does not earn approval. Approve only when the diff has none of these:
-
-- a clear structural regression
-- a missed, visible path to a dramatically simpler implementation
-- unjustified file-size growth
-- spaghetti growth from special-case branching
-- a hacky or magic abstraction
-- wrapper, cast or optionality churn that hides the design
-- a clear boundary leak, or avoidable duplication of a canonical helper
-- a missed obvious decomposition that would materially help maintainability
-
-These block unless the author justifies them with evidence:
-
-- incidental complexity kept when a plausible code-judo move would delete it
-- a file pushed from under 1000 lines to over 1000
-- ad-hoc branching that tangles an existing flow
-- a local problem solved by scattering feature conditionals across shared code
-- an unnecessary abstraction, wrapper or cast-heavy contract
-- a duplicated helper, or logic in the wrong layer, when a clear canonical home exists
-
-When the bar is not met, leave explicit, actionable feedback and push for a cleaner decomposition.
-
-## Verdict
-
-Make the first line of the report the verdict, in exactly this form, with the short sha of the head commit you reviewed (`git rev-parse --short=8 HEAD`):
-
-- `Verdict: APPROVE at <sha>` when the diff meets the approval bar.
-- `Verdict: CHANGES at <sha>` when it does not.
-
-A PR gate can read the verdict from the first line of a posted report, and it reads only that line. Put nothing before the verdict.
+- A structural regression, a hacky or magic abstraction, a boundary leak, or a missed obvious decomposition blocks whatever the PR says, because no evidence makes the code easier to change.
+- Every other finding blocks, and the verdict is CHANGES, unless the PR gives evidence that the simpler form fails: a caller it breaks, a measured cost, or a constraint outside the diff that the PR names with `path:line` or a link. "It works" and "tests pass" are no such evidence, because this review judges structure, not behavior.
+- State a blocking finding as blocking, directly and without rudeness. A "maybe" or "consider" finding reads as optional and gets skipped.

@@ -32,6 +32,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 const exitUsageError = 2
@@ -85,7 +87,7 @@ type commonFlags struct {
 
 func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
 	c := &commonFlags{}
-	fs.StringVar(&c.broker, "broker", os.Getenv("AGENT_SECRETS_URL"), "broker base URL (default $AGENT_SECRETS_URL)")
+	fs.StringVar(&c.broker, "broker", "", "broker base URL (default $AGENT_SECRETS_URL)")
 	fs.StringVar(&c.tokenFile, "account-token-file", os.Getenv("AGENT_SECRETS_ACCOUNT_TOKEN_FILE"),
 		"file holding the token of a ServiceAccount the broker lists in BROKER_API_ACCOUNTS (default $AGENT_SECRETS_ACCOUNT_TOKEN_FILE)")
 	fs.StringVar(&c.login, "login", os.Getenv("AGENT_SECRETS_APPROVER"), "the deciding human's login (default $AGENT_SECRETS_APPROVER)")
@@ -93,6 +95,11 @@ func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
 }
 
 func (c *commonFlags) validate() error {
+	if c.broker == "" {
+		// Read here, not as the flag's default: flag's usage text prints a non-empty default
+		// whole, credential included.
+		c.broker = os.Getenv("AGENT_SECRETS_URL")
+	}
 	if c.broker == "" {
 		return errors.New("--broker (or AGENT_SECRETS_URL) is required")
 	}
@@ -153,9 +160,11 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) ([]by
 		}
 		reader = bytes.NewReader(b)
 	}
+	// Each error naming the URL names it through redact.Error, so no credential the broker's URL
+	// carries prints.
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
 	if err != nil {
-		return nil, err
+		return nil, redact.Error(err, c.base)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if body != nil {
@@ -163,7 +172,7 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) ([]by
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redact.Error(err, c.base)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)

@@ -31,31 +31,54 @@ type Session struct {
 }
 
 // CodeFlow signs a person in with OpenID Connect's authorization code flow as one confidential
-// client of one issuer, in one of two modes the caller picks by the methods it calls. Offline mode
-// (AuthURL, Exchange) keeps the sign-in's refresh token, renews the sign-in with it (Refresh) and
-// revokes it at the issuer's revocation endpoint (Revoke): Dispatch's sign-in. Online mode
-// (OnlineAuthURL, OnlineExchange) signs a person in once with PKCE and keeps no refresh token: the
-// secrets broker's approval sign-in. Every ID token it returns has been verified against the
+// client of one issuer, renews the sign-in with its refresh token, and revokes a refresh token at
+// the issuer's revocation endpoint. Every ID token it returns has been verified against the
 // issuer's keys, the client as audience, and its expiry.
+//
+// The issuer's discovery document is read when first needed, not at construction, so Dispatch
+// starts and serves agents and signed-in people whose confirmation stands while the issuer is
+// down: Run reads it from the start in the background, and each method reads it first when it is
+// not read yet (Discover's rules bound how often). Until it has been read, AuthURL, Exchange,
+// Refresh and Revoke fail with an error matching ErrIssuerUnavailable.
 type CodeFlow struct {
-	verifier *Verifier
-	config   oauth2.Config
-	// revocationURL is the revocation_endpoint the issuer's discovery document names; empty when it
-	// names none.
-	revocationURL string
+	discovery *discovery[*codeFlowIssuer]
 	// hostedDomain is the Google Workspace domain a domain-mode flow signs people in for; empty in
 	// group mode, a Cognito sign-in pool's.
 	hostedDomain string
 	http         *http.Client
 }
 
-// NewCodeFlow reads the issuer's discovery document now and returns the code flow for the client.
-// An issuer whose discovery names no authorization_endpoint or token_endpoint offers no sign-in,
-// and is refused. One that names no revocation_endpoint is accepted, and Revoke fails against it.
-// hostedDomain is the Google Workspace domain of a domain-mode flow (Google's issuer), which reads
-// the Workspace claims and, in offline mode, asks for offline access; empty, the flow is a Cognito
-// sign-in pool's and does neither.
-func NewCodeFlow(ctx context.Context, issuer, clientID, clientSecret, hostedDomain string) (*CodeFlow, error) {
+// codeFlowIssuer is what a code flow reads from its issuer's discovery document: the verifier of
+// the ID tokens it issues to the client, the client's endpoints there, and the revocation_endpoint
+// the document names, empty when it names none.
+type codeFlowIssuer struct {
+	verifier      *Verifier
+	config        oauth2.Config
+	revocationURL string
+}
+
+// NewCodeFlow returns the code flow for the client, and reads nothing: the issuer's discovery
+// document is read by Discover, by Run, or by the first call that needs it. hostedDomain is the
+// Google Workspace domain of a domain-mode flow (Google's issuer), which asks for offline access
+// and reads the Workspace claims; empty, the flow is a Cognito sign-in pool's and does neither.
+func NewCodeFlow(issuer, clientID, clientSecret, hostedDomain string) *CodeFlow {
+	return &CodeFlow{
+		discovery: newDiscovery(issuer, func(ctx context.Context) (*codeFlowIssuer, error) {
+			return discoverCodeFlow(ctx, issuer, clientID, clientSecret)
+		}),
+		hostedDomain: hostedDomain,
+		// A redirect is answered as it stands: following a 307 or 308 would re-send the form, and
+		// with it a code or a refresh token, to wherever the redirect points.
+		http: &http.Client{Timeout: tokenTimeout, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}},
+	}
+}
+
+// discoverCodeFlow reads issuer's discovery document. An issuer whose document names no
+// authorization_endpoint or token_endpoint offers no sign-in, and fails discovery. One that names
+// no revocation_endpoint is accepted, and Revoke fails against it.
+func discoverCodeFlow(ctx context.Context, issuer, clientID, clientSecret string) (*codeFlowIssuer, error) {
 	provider, err := gooidc.NewProvider(ctx, issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc: discovering issuer %s: %w", issuer, err)
@@ -70,7 +93,7 @@ func NewCodeFlow(ctx context.Context, issuer, clientID, clientSecret, hostedDoma
 	if err := provider.Claims(&revocation); err != nil {
 		return nil, fmt.Errorf("oidc: read issuer %s's revocation_endpoint: %w", issuer, err)
 	}
-	return &CodeFlow{
+	return &codeFlowIssuer{
 		verifier: newVerifier(provider, issuer, clientID),
 		config: oauth2.Config{
 			ClientID:     clientID,
@@ -79,52 +102,62 @@ func NewCodeFlow(ctx context.Context, issuer, clientID, clientSecret, hostedDoma
 			Scopes:       signInScopes,
 		},
 		revocationURL: revocation.Endpoint,
-		hostedDomain:  hostedDomain,
-		// A redirect is answered as it stands: following a 307 or 308 would re-send the form, and
-		// with it a code or a refresh token, to wherever the redirect points.
-		http: &http.Client{Timeout: tokenTimeout, CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}},
 	}, nil
 }
 
-// DiscoverCodeFlow is NewCodeFlow under a deadline on the discovery read, as Discover is for the
-// pod-token verifier. A caller that builds the flow at its first sign-in rather than at boot (the
-// secrets broker, whose machines must not wait on a person's issuer) calls it then, and signs in
-// with OnlineAuthURL and OnlineExchange.
-func DiscoverCodeFlow(ctx context.Context, issuer, clientID, clientSecret, hostedDomain string, timeout time.Duration) (*CodeFlow, error) {
-	discovery, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return NewCodeFlow(discovery, issuer, clientID, clientSecret, hostedDomain)
+// Discover reads the issuer's discovery document unless it has been read. Concurrent calls share
+// one read, bounded by its own ten seconds whatever ctx allows (ctx ends only this caller's wait),
+// and for five seconds after a read fails every call fails at once with that failure rather than
+// reading again. Its error matches ErrIssuerUnavailable.
+func (f *CodeFlow) Discover(ctx context.Context) error {
+	_, err := f.discovery.discover(ctx)
+	return err
 }
 
-// AuthURL is where a browser starts an offline-mode sign-in: the issuer's authorization endpoint
-// asking for a code to be sent to redirectURL with state, and an ID token carrying nonce. A
-// domain-mode flow also asks Google for offline access with consent, since Google returns a
-// refresh token only for access_type=offline and, after the first exchange, only with
-// prompt=consent; and it names the domain as hd, a hint for Google's account chooser that the
-// callback does not rely on.
-func (f *CodeFlow) AuthURL(redirectURL, state, nonce string) string {
-	config := f.config
+// Discovered reports whether the issuer's discovery document has been read.
+func (f *CodeFlow) Discovered() bool { return f.discovery.done() }
+
+// Run reads the issuer's discovery document in the background from the process's start until it
+// succeeds or ctx ends: at once, then after waits of one second doubling to thirty while reads
+// fail, logging a failure at ERROR at most once a minute.
+func (f *CodeFlow) Run(ctx context.Context) { f.discovery.run(ctx) }
+
+// AuthURL is where a browser starts the sign-in: the issuer's authorization endpoint asking for a
+// code to be sent to redirectURL with state, and an ID token carrying nonce. A domain-mode flow
+// also asks Google for offline access with consent, since Google returns a refresh token only for
+// access_type=offline and, after the first exchange, only with prompt=consent; and it names the
+// domain as hd, a hint for Google's account chooser that the callback does not rely on. It fails
+// with ErrIssuerUnavailable while the issuer is not discovered.
+func (f *CodeFlow) AuthURL(ctx context.Context, redirectURL, state, nonce string) (string, error) {
+	issuer, err := f.discovery.discover(ctx)
+	if err != nil {
+		return "", err
+	}
+	config := issuer.config
 	config.RedirectURL = redirectURL
 	options := []oauth2.AuthCodeOption{gooidc.Nonce(nonce)}
 	if f.hostedDomain != "" {
 		options = append(options, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"), oauth2.SetAuthURLParam("hd", f.hostedDomain))
 	}
-	return config.AuthCodeURL(state, options...)
+	return config.AuthCodeURL(state, options...), nil
 }
 
 // Exchange trades the code the issuer redirected to redirectURL for the signed-in person's ID
-// token and refresh token, in offline mode; an answer with no refresh token is refused. The ID
-// token must carry nonce, the value the sign-in that sent the browser to AuthURL bound it to.
+// token and refresh token. The ID token must carry nonce, the value the sign-in that sent the
+// browser to AuthURL bound it to. It fails with ErrIssuerUnavailable while the issuer is not
+// discovered.
 func (f *CodeFlow) Exchange(ctx context.Context, redirectURL, code, nonce string) (Session, error) {
-	config := f.config
+	issuer, err := f.discovery.discover(ctx)
+	if err != nil {
+		return Session{}, err
+	}
+	config := issuer.config
 	config.RedirectURL = redirectURL
 	token, err := config.Exchange(f.tokenContext(ctx), code)
 	if err != nil {
 		return Session{}, fmt.Errorf("oidc: exchange code: %w", err)
 	}
-	session, err := f.session(ctx, token)
+	session, err := f.session(ctx, issuer, token)
 	if err != nil {
 		return Session{}, err
 	}
@@ -137,79 +170,39 @@ func (f *CodeFlow) Exchange(ctx context.Context, redirectURL, code, nonce string
 	return session, nil
 }
 
-// OnlineSignIn is one sign-in in online mode, the values the caller generated for it and keeps
-// until the callback: the same value goes to OnlineAuthURL and then to OnlineExchange.
-type OnlineSignIn struct {
-	// State is the value the issuer hands back to the callback, which the caller compares.
-	State string
-	// Nonce is the value the ID token must carry, binding it to this sign-in.
-	Nonce string
-	// Verifier is the PKCE code verifier (RFC 7636, oauth2.GenerateVerifier): the authorization
-	// request carries its S256 challenge and the exchange the verifier, so a code is worth nothing
-	// to whoever intercepts it without the verifier.
-	Verifier string
-	// LoginHint, when set, names the account the issuer's chooser should offer.
-	LoginHint string
-	// SelectAccount asks the issuer to show its account chooser (prompt=select_account), for a
-	// person switching to another account.
-	SelectAccount bool
-}
-
-// OnlineAuthURL is where a browser starts an online-mode sign-in: the issuer's authorization
-// endpoint asking for a code to be sent to redirectURL with signIn's state, an ID token carrying
-// its nonce, and PKCE with its verifier's S256 challenge. It asks for no offline access and no
-// consent, since an online sign-in keeps no refresh token: the person is signed in once, and signs
-// in again when the caller's own session ends. It names the hosted domain as hd, as AuthURL does,
-// when the flow has one.
-func (f *CodeFlow) OnlineAuthURL(redirectURL string, signIn OnlineSignIn) string {
-	config := f.config
-	config.RedirectURL = redirectURL
-	options := []oauth2.AuthCodeOption{gooidc.Nonce(signIn.Nonce), oauth2.S256ChallengeOption(signIn.Verifier)}
-	if f.hostedDomain != "" {
-		options = append(options, oauth2.SetAuthURLParam("hd", f.hostedDomain))
-	}
-	if signIn.LoginHint != "" {
-		options = append(options, oauth2.SetAuthURLParam("login_hint", signIn.LoginHint))
-	}
-	if signIn.SelectAccount {
-		options = append(options, oauth2.SetAuthURLParam("prompt", "select_account"))
-	}
-	return config.AuthCodeURL(signIn.State, options...)
-}
-
-// OnlineExchange trades the code the issuer redirected to redirectURL, with signIn's PKCE
-// verifier, for the signed-in person's verified ID token claims (the Workspace claims too, when
-// the flow has a hosted domain). The ID token must carry signIn's nonce. A refresh token the issuer
-// returns anyway is dropped, never returned: an online sign-in keeps none.
-func (f *CodeFlow) OnlineExchange(ctx context.Context, redirectURL, code string, signIn OnlineSignIn) (Claims, error) {
-	if signIn.Nonce == "" || signIn.Verifier == "" {
-		return Claims{}, errors.New("oidc: an online sign-in needs its nonce and PKCE verifier")
-	}
-	config := f.config
-	config.RedirectURL = redirectURL
-	token, err := config.Exchange(f.tokenContext(ctx), code, oauth2.VerifierOption(signIn.Verifier))
-	if err != nil {
-		return Claims{}, fmt.Errorf("oidc: exchange code: %w", err)
-	}
-	session, err := f.session(ctx, token)
-	if err != nil {
-		return Claims{}, err
-	}
-	if session.Claims.Nonce != signIn.Nonce {
-		return Claims{}, errors.New("oidc: the ID token's nonce is not the sign-in's")
-	}
-	return session.Claims, nil
-}
-
 // Refresh renews a sign-in with its refresh token, returning the person's claims as the issuer
-// holds them now. An error is any refresh the issuer did not answer with a verified ID token: a
-// revoked or expired refresh token, a person the issuer no longer has, or no answer at all.
+// holds them now. Its error matches ErrGrantRefused when the token endpoint answered 400 or 401
+// with the OAuth error invalid_grant (RFC 6749 section 5.2): the refresh token has expired, been
+// revoked, or is not this client's, so the sign-in is over. Every other failure matches
+// ErrIssuerUnavailable and says nothing about the sign-in: the issuer not discovered, no answer or
+// a timeout, a 5xx or a 429, any other OAuth error (invalid_client among them: the client's own
+// configuration, not the person), or an answer without an ID token that verifies.
 func (f *CodeFlow) Refresh(ctx context.Context, refreshToken string) (Session, error) {
-	token, err := f.config.TokenSource(f.tokenContext(ctx), &oauth2.Token{RefreshToken: refreshToken}).Token()
+	issuer, err := f.discovery.discover(ctx)
 	if err != nil {
-		return Session{}, fmt.Errorf("oidc: refresh: %w", err)
+		return Session{}, err
 	}
-	return f.session(ctx, token)
+	token, err := issuer.config.TokenSource(f.tokenContext(ctx), &oauth2.Token{RefreshToken: refreshToken}).Token()
+	if err != nil {
+		if grantRefused(err) {
+			return Session{}, fmt.Errorf("oidc: refresh: %w: %w", ErrGrantRefused, err)
+		}
+		return Session{}, fmt.Errorf("oidc: refresh: %w: %w", ErrIssuerUnavailable, err)
+	}
+	session, err := f.session(ctx, issuer, token)
+	if err != nil {
+		return Session{}, fmt.Errorf("oidc: refresh: %w: %w", ErrIssuerUnavailable, err)
+	}
+	return session, nil
+}
+
+// grantRefused reports whether err is the token endpoint's 400 or 401 naming invalid_grant.
+func grantRefused(err error) bool {
+	var retrieve *oauth2.RetrieveError
+	if !errors.As(err, &retrieve) || retrieve.ErrorCode != "invalid_grant" || retrieve.Response == nil {
+		return false
+	}
+	return retrieve.Response.StatusCode == http.StatusBadRequest || retrieve.Response.StatusCode == http.StatusUnauthorized
 }
 
 // Revoke revokes refreshToken at the revocation endpoint the issuer's discovery document names
@@ -219,16 +212,20 @@ func (f *CodeFlow) Refresh(ctx context.Context, refreshToken string) (Session, e
 // included, is an error naming the HTTP status and the OAuth error code the body names, if any;
 // the error never carries the token.
 func (f *CodeFlow) Revoke(ctx context.Context, refreshToken string) error {
-	if f.revocationURL == "" {
+	issuer, err := f.discovery.discover(ctx)
+	if err != nil {
+		return err
+	}
+	if issuer.revocationURL == "" {
 		return errors.New("oidc: revoke: the issuer names no revocation_endpoint in its discovery document")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, f.revocationURL, strings.NewReader(url.Values{"token": {refreshToken}}.Encode()))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, issuer.revocationURL, strings.NewReader(url.Values{"token": {refreshToken}}.Encode()))
 	if err != nil {
 		return fmt.Errorf("oidc: revoke: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// The token endpoint's encoding (oauth2's AuthStyleInHeader): RFC 6749 section 2.3.1.
-	request.SetBasicAuth(url.QueryEscape(f.config.ClientID), url.QueryEscape(f.config.ClientSecret))
+	request.SetBasicAuth(url.QueryEscape(issuer.config.ClientID), url.QueryEscape(issuer.config.ClientSecret))
 	response, err := f.http.Do(request)
 	if err != nil {
 		return fmt.Errorf("oidc: revoke: %w", err)
@@ -250,12 +247,12 @@ func (f *CodeFlow) Revoke(ctx context.Context, refreshToken string) error {
 // session verifies the ID token of a token-endpoint answer and returns its claims with the refresh
 // token. A domain-mode flow also reads the Workspace claims from the verified token (Claims.Email,
 // EmailVerified, HostedDomain); Verify, which every other token kind goes through, never does.
-func (f *CodeFlow) session(ctx context.Context, token *oauth2.Token) (Session, error) {
+func (f *CodeFlow) session(ctx context.Context, issuer *codeFlowIssuer, token *oauth2.Token) (Session, error) {
 	raw, ok := token.Extra("id_token").(string)
 	if !ok || raw == "" {
 		return Session{}, errors.New("oidc: the issuer's token response carries no id_token")
 	}
-	claims, err := f.verifier.Verify(ctx, raw)
+	claims, err := issuer.verifier.Verify(ctx, raw)
 	if err != nil {
 		return Session{}, fmt.Errorf("oidc: ID token rejected (%s): %w", Reason(err), err)
 	}

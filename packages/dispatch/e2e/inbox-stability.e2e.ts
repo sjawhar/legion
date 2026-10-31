@@ -114,7 +114,7 @@ async function leaveRow(page: Page): Promise<void> {
     .toBe(true);
 }
 
-test("a row being typed into stays put, draft and all, when an agent's progress note flips its turn, and moves only once the reader leaves it", async ({
+test("a row being typed into stays put, draft and all, when an agent's progress note flips its turn, and moves only once the reader leaves it @phone", async ({
   browser,
 }) => {
   const target = await seedBothSections();
@@ -157,7 +157,7 @@ test("a row being typed into stays put, draft and all, when an agent's progress 
   }
 });
 
-test("the reader's own Ask back keeps the row where it is and the view still, until they leave it", async ({
+test("the reader's own Ask back keeps the row where it is and the view still, until they leave it @phone", async ({
   browser,
 }) => {
   const target = await seedBothSections();
@@ -206,7 +206,7 @@ test("the reader's own Ask back keeps the row where it is and the view still, un
   }
 });
 
-test("the row at the viewport centre stays put when a P0 ask arrives above it", async ({
+test("the row at the viewport centre stays put when a P0 ask arrives above it @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -238,7 +238,7 @@ test("the row at the viewport centre stays put when a P0 ask arrives above it", 
   }
 });
 
-test("the row under the pointer stays put when a row above it is answered elsewhere, and is let go once the pointer leaves the list", async ({
+test("the row under the pointer stays put when a row above it is answered elsewhere, and is let go once the pointer leaves the list @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -429,7 +429,9 @@ async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
   }
 }
 
-test("a travelling pointer keeps its destination when a P0 row arrives", async ({ browser }) => {
+test("a travelling pointer keeps its destination when a P0 row arrives @phone", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   await seedAsks("Travelling pointer", 8);
   const alice = await asUser(browser, "alice");
@@ -442,7 +444,7 @@ test("a travelling pointer keeps its destination when a P0 row arrives", async (
   }
 });
 
-test("a travelling pointer crosses a grouped owner without losing its destination", async ({
+test("a travelling pointer crosses a grouped owner without losing its destination @phone", async ({
   browser,
 }) => {
   await seedTravellingPointerGroup();

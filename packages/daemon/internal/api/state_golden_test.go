@@ -14,7 +14,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -70,6 +72,8 @@ dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
 projects:
   LEGION:
     slack_channels: [C0123ABCD, C0123ABCE]
+    deploys:
+      - {repo: sjawhar/legion, workflow: .github/workflows/release.yaml, step: Apply}
   WIDGETS:
     merge_queue_role: merge-queue
     merge:
@@ -117,7 +121,7 @@ runtime:
         - {key: spot, operator: Exists, effect: NoExecute}
       priority_class: legion-workers
     resources:
-      implementer: {cpu: 1500m, memory: 8Gi}
+      issue: {cpu: 4, memory: 24Gi}
       controller: {cpu: 2, cpu_request: 1, memory: 6Gi, memory_request: 4Gi}
     pod:
       env: {PI_CONFIG_FILES: /etc/legion-operator/overlay.yml, OPERATOR_FIXTURE_FLAG: operator-fixture-value}
@@ -182,6 +186,8 @@ func minimalSettingsConfig(t *testing.T) config.Config {
 func populatedState(t *testing.T) State {
 	t.Helper()
 	approvedVersion := 6
+	waitedSince := time.Date(2026, 9, 22, 8, 5, 0, 0, time.UTC)
+	answeredAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
 	return State{
 		Daemon: DaemonInfo{
 			Project:       "legion",
@@ -194,6 +200,14 @@ func populatedState(t *testing.T) State {
 			Cap:     2,
 			Active:  []string{"LEGION-208", "LEGION-210"},
 			Waiting: []string{"LEGION-211"},
+			// LEGION-211 is the waiting root admission skips, so it is in `waiting` too;
+			// LEGION-209 is a child of LEGION-208's tree the workflow holds at `admitted`, which
+			// no waiting line carries. Both are listed, by issue key, with what each waits on —
+			// LEGION-213 among them a key the daemon has no record of, which counts as unfinished.
+			Blocked: []BlockedIssue{
+				{Issue: "LEGION-209", BlockedBy: []string{"LEGION-210", "LEGION-213"}},
+				{Issue: "LEGION-211", BlockedBy: []string{"LEGION-210"}},
+			},
 		},
 		Issues: map[string]Issue{
 			"LEGION-208": {
@@ -224,7 +238,7 @@ func populatedState(t *testing.T) State {
 								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/2",
 								Sandbox: &runtime.SandboxLocator{
 									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-									Container: "planner", Generation: 2,
+									Container: "roles", Generation: 2,
 								},
 							},
 						},
@@ -241,7 +255,7 @@ func populatedState(t *testing.T) State {
 								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
 								Sandbox: &runtime.SandboxLocator{
 									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-									Container: "implementer", Generation: 5,
+									Container: "roles", Generation: 5,
 								},
 							},
 							// The session's capability report (LEGION-663), from the process the locator
@@ -286,6 +300,24 @@ func populatedState(t *testing.T) State {
 				HoldReason:    "escalated",
 				Workers: map[claim.Role]PhaseView{
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
+				},
+			},
+			// LEGION-212's architect asked a person a question and handed the turn back, which gave
+			// its slot up; the person has answered the question.
+			"LEGION-212": {
+				Key:           "LEGION-212",
+				Generation:    1,
+				Phase:         phase.AwaitingPerson,
+				Status:        "in_progress",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
+				Workers:       map[claim.Role]PhaseView{},
+				WaitingOn: &WaitingOnView{
+					Kind:       "ask",
+					Ask:        "9a8fd348-55d5-4d72-a793-3cd037f75f13",
+					Since:      &waitedSince,
+					AnsweredAt: &answeredAt,
+					AnsweredBy: record.AnsweredByAsk,
 				},
 			},
 			// LEGION-207 merged and closed; its production check is open at its second look, woken by
@@ -339,8 +371,8 @@ func populatedState(t *testing.T) State {
 		// stale.
 		Capabilities: CapabilityStatesOf(capabilities.Deployment{
 			Runtime: "kubernetes", Probed: true, ModelFallback: "on",
-			Decided:               map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
-			RolesWithoutResources: []claim.Role{claim.RoleTester},
+			Decided:        map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
+			UnreservedPods: []capabilities.Pod{capabilities.PodIssue},
 		}.Report()),
 		// The project maps three repositories of two owners; the review App is not installed on one,
 		// which the daemon leaves out. acme/widgets' cache is Ready and its last health read
@@ -359,12 +391,25 @@ func populatedState(t *testing.T) State {
 				}},
 			},
 			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
+			// Dispatch's GitHub App is not installed on zeta/tools, which is served all the same.
+			WithoutWebhookApp: []WebhookAppGapView{{Repo: "zeta/tools", Reason: "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes"}},
 			Caches: []CacheView{{
 				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
 			}},
 		},
 		// The resolved maximal kubernetes file, so the fixture pins every key `settings` can carry.
 		Settings: SettingsOf(settingsFixtureConfig(t)),
+		// The Dispatch consumer is caught up; the Dispatch-server consumer's info read ran out of the
+		// bound; the GitHub consumer has 412 messages waiting and has handled none for over a
+		// minute.
+		Consumers: ConsumerLagViewsOf([]intake.ConsumerLag{
+			{Name: "legion-go-LEGION-dispatch", LastHandledAt: time.Date(2026, 9, 22, 9, 17, 50, 0, time.UTC)},
+			{Name: "legion-go-LEGION-dispatch-server", Unavailable: "read the consumer's info: context deadline exceeded"},
+			{
+				Name: "legion-go-LEGION-github", Waiting: 412, OldestAt: time.Date(2026, 9, 22, 9, 5, 34, 0, time.UTC), OldestAge: 754 * time.Second,
+				LastHandledAt: time.Date(2026, 9, 22, 9, 16, 41, 0, time.UTC), Stalled: true,
+			},
+		}),
 	}
 }
 

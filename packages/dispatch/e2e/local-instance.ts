@@ -1,29 +1,32 @@
 /** `bun run dispatch:local`: the e2e harness, left running and seeded, with a signed-in URL.
- *  It starts every listener the Playwright config starts (e2e/harness-listeners.ts), on the same
- *  ports and variables, so `DISPATCH_E2E_REUSE_SERVERS=1 bunx playwright test ...` runs any spec
- *  against this instance — and empties its database and its fake Envoy, so restart it to reseed. */
+ *  It starts the harness through e2e/harness-start.ts, the starter e2e/run.ts runs Playwright on,
+ *  on ports the OS chooses (or those the port variables set), and prints them, so
+ *  `DISPATCH_E2E_REUSE_SERVERS=1 <those ports> bunx playwright test ...` runs any spec against this
+ *  instance — and empties its database and its fake Envoy, so restart it to reseed. */
 import { fileURLToPath } from "node:url";
 
-import { baseUrl, getInbox, listAgents, listBroadcasts, userHeaders } from "./api";
-import { goBuildBootMs, type HarnessListener, harnessListeners } from "./harness-listeners";
-import { harnessPorts } from "./harness-ports";
-import { databaseUrlRefusal, Interrupted, Supervisor, shellQuote } from "./local-instance-support";
-import { isPortUsed, takenPorts } from "./port-probe";
+import { harnessVariables } from "./harness-ports";
+import { harnessProcessCount } from "./harness-processes";
+import { type Harness, startHarness } from "./harness-start";
+import {
+  agentViewRefusal,
+  databaseUrlRefusal,
+  Interrupted,
+  Supervisor,
+  shellQuote,
+} from "./local-instance-support";
 import { sqlAt } from "./psql";
-import { resetDatabase } from "./seed";
-import { seedWorkspace, workspaceSessionIds } from "./workspace";
+import { sessionIds } from "./session-ids";
 
 const dispatchPackage = fileURLToPath(new URL("..", import.meta.url));
 const envoyPackage = fileURLToPath(new URL("../../envoy", import.meta.url));
 /** The server packages/envoy/scripts/dev-postgres.sh serves, at its `postgres` database. */
 const adminUrl = "postgres://postgres:dispatch@127.0.0.1:55432/postgres?sslmode=disable";
 const localDatabase = "dispatch_local";
-/** Every listener but the ones that build Go (`goBuildBootMs`) is a Bun process up in moments. */
-const listenerBootMs = 30_000;
 
-/** Every process this command starts. Ctrl-C or a SIGTERM interrupts it from the first step on,
- *  so a stop during the web build, the server build or the seed stops what has started rather
- *  than leaving it listening. */
+/** Every foreground step this command runs. Ctrl-C or a SIGTERM interrupts it from the first step
+ *  on, so a stop during the web build, the server build or the seed stops what has started rather
+ *  than leaving it listening: the harness stops its own processes when its signal fires. */
 const supervisor = new Supervisor();
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => supervisor.interrupt());
@@ -32,39 +35,6 @@ const untilInterrupted = <T>(step: Promise<T>) => supervisor.untilInterrupted(st
 /** psql against the dev container's admin database, killed by an interrupt like every child. */
 const adminSql = (...statements: string[]) =>
   untilInterrupted(sqlAt(adminUrl, statements, supervisor.signal));
-
-/** Waits until `listener` is ready: the Dispatch server once its `/healthz` answers 200, which
- *  the reset below waits for, and every other listener once its port takes a connection, which is
- *  what Playwright's `webServer` waits for (the plain-HTTP proxy answers no request addressed to
- *  127.0.0.1). It fails as soon as the process that serves it exits, so a server whose build
- *  failed is reported at once rather than when the wait runs out. */
-async function waitUntilReady(listener: HarnessListener): Promise<void> {
-  const { child, name } = supervisor.start(listener.name, listener.argv, dispatchPackage);
-  const server = listener.port === harnessPorts.dispatch.port;
-  const target = server ? `${baseUrl}/healthz` : `127.0.0.1:${listener.port}`;
-  const timeoutMs = listener.buildsGo ? goBuildBootMs : listenerBootMs;
-  const ready = async () => {
-    if (!server) return isPortUsed(listener.port);
-    try {
-      return (await fetch(target)).ok;
-    } catch {
-      return false;
-    }
-  };
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error(
-        `${name} exited ${child.exitCode ?? child.signalCode} before ${target} answered`
-      );
-    }
-    if (await ready()) return;
-    if (Date.now() > deadline) {
-      throw new Error(`${target} (${name}) did not answer within ${timeoutMs / 1000} s`);
-    }
-    await untilInterrupted(Bun.sleep(500));
-  }
-}
 
 function check(ok: boolean, what: string): void {
   if (!ok) throw new Error(`smoke failed: ${what}`);
@@ -94,39 +64,40 @@ async function ensureLocalPostgres(): Promise<string> {
 }
 
 /** The harness inputs a command needs to reach this instance, as a shell prefix: the database,
- *  and each port variable and the broker switch (e2e/harness-broker.ts) this shell set. */
-function harnessEnvironment(databaseUrl: string): string {
-  const variables = [
-    ...harnessListeners.map((listener) => listener.variable),
+ *  each port the harness reported, and the broker switch (e2e/harness-broker.ts) this shell set. */
+function harnessEnvironment(databaseUrl: string, ports: Readonly<Record<string, string>>): string {
+  const switches = [
     "DISPATCH_E2E_AGENT_SECRETS_URL",
     "DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE",
-  ];
-  const given = variables.filter((variable) => process.env[variable] !== undefined);
+  ].filter((variable) => process.env[variable] !== undefined);
   return [
     `DATABASE_URL=${shellQuote(databaseUrl)}`,
-    ...given.map((variable) => `${variable}=${shellQuote(process.env[variable] ?? "")}`),
+    ...Object.entries(ports).map(([variable, port]) => `${variable}=${port}`),
+    ...switches.map((variable) => `${variable}=${shellQuote(process.env[variable] ?? "")}`),
   ].join(" ");
 }
 
+let harness: Harness | undefined;
+
 async function main(): Promise<void> {
-  // 1. Preconditions: no deployed-server override, the tools, a loopback database, free ports.
+  // 1. Preconditions: no deployed-server override, the tools, a loopback database.
   if (process.env.PLAYWRIGHT_BASE_URL) {
     throw new Error("unset PLAYWRIGHT_BASE_URL: this command starts its own servers");
   }
+  // It builds, seeds and hands out one server, where two-process mode needs B's build of its own
+  // (DISPATCH_E2E_WEB_DIST_B) and serves only the multiprocess specs `bun run e2e:multiprocess` runs.
+  if (harnessProcessCount !== 1) {
+    throw new Error(
+      "unset DISPATCH_E2E_PROCESSES: this command runs one Dispatch server; " +
+        "`bun run e2e:multiprocess` runs two"
+    );
+  }
   const given = process.env.DATABASE_URL?.trim();
-  for (const tool of ["go", "psql", "flock", "openssl", "curl", ...(given ? [] : ["docker"])]) {
+  for (const tool of ["go", "psql", "flock", "openssl", "python3", ...(given ? [] : ["docker"])]) {
     if (!Bun.which(tool)) throw new Error(`${tool} is required on PATH`);
   }
   const refusal = given ? databaseUrlRefusal(given) : undefined;
   if (refusal !== undefined) throw new Error(refusal);
-  const ports = await takenPorts(harnessListeners);
-  if (ports !== undefined) {
-    const variables = harnessListeners.map((listener) => listener.variable).join("/");
-    throw new Error(
-      `already in use: ${ports}. Stop that instance, or move this one with ${variables} and ` +
-        "its own DATABASE_URL."
-    );
-  }
 
   // 2. Postgres: DATABASE_URL as given (it is truncated and seeded), else the repo's dev container.
   // It stays ahead of the web build, so a database problem is the failure reported.
@@ -136,8 +107,14 @@ async function main(): Promise<void> {
   // 3. The SPA, which the server reads from web/dist on every request.
   await supervisor.run(["bun", "run", "build:web"], dispatchPackage);
 
-  // 4. The harness processes, then readiness.
-  await untilInterrupted(Promise.all(harnessListeners.map(waitUntilReady)));
+  // 4. The harness, ready once every listener reported its port and the server's /healthz
+  // answered. An interrupt while it starts stops what it started, and it rejects with Interrupted.
+  harness = await startHarness({ signal: supervisor.signal });
+  // The e2e modules read the ports when they are first imported, so they are imported only now.
+  Object.assign(process.env, harness.env);
+  const { baseUrl, getInbox, listAgents, listBroadcasts, userHeaders } = await import("./api");
+  const { resetDatabase } = await import("./seed");
+  const { seedWorkspace, workspaceSessionIds } = await import("./workspace");
 
   // 5. Reset, seed, and prove the signed-in surfaces over HTTP before handing out the URL. The
   // broadcast's recipient ORDER is deliberately not checked here: e2e/broadcast.e2e.ts owns that
@@ -156,14 +133,22 @@ async function main(): Promise<void> {
     workspaceSessionIds.every((id) => agents.has(id)),
     "agents listed"
   );
+  // The live view rides the live socket, not the API, and Dispatch refuses an agent view whose
+  // session id is not a uuid: a seed of named sessions passes every check above and still reads
+  // "This session's conversation is unavailable" at /agents/<id>/live.
+  const liveView = await untilInterrupted(
+    agentViewRefusal(baseUrl, await userHeaders("alice"), sessionIds.planner)
+  );
+  check(liveView === undefined, `the Planner's live view: ${liveView}`);
 
   // 6. Hand over, and run until Ctrl-C or until one of the processes stops by itself.
-  const fakeEnvoy = `http://127.0.0.1:${harnessPorts.fakeEnvoy.port}`;
+  const fakeEnvoy = `http://127.0.0.1:${harness.env[harnessVariables.fakeEnvoy]}`;
   console.log(
     "\nDispatch local instance is up.\n" +
       `  Open (signed in as alice): ${baseUrl}/auth/_dev/signin?login=alice&next=/\n` +
       `  Sign in as bob:            ${baseUrl}/auth/_dev/signin?login=bob&next=/\n` +
       `  Seeded broadcast:          ${baseUrl}/agents/broadcasts/${seeded.broadcast.id}\n` +
+      `  Planner's live view:       ${baseUrl}/agents/${sessionIds.planner}/live\n` +
       `  Agent bearer:              e2e-token (for a local Oh My Pi session: DISPATCH_URL=${baseUrl} ` +
       "DISPATCH_TOKEN=e2e-token, with DISPATCH_TOKEN_FILE unset since it wins)\n" +
       `  Database (truncated and reseeded on every start): ${databaseUrl}\n` +
@@ -171,13 +156,13 @@ async function main(): Promise<void> {
       `reseed them with PUT ${fakeEnvoy}/__fixture/sessions\n` +
       "  Run a spec against it from packages/dispatch (this empties the instance; restart it to " +
       "reseed):\n" +
-      `    DISPATCH_E2E_REUSE_SERVERS=1 ${harnessEnvironment(databaseUrl)} bunx playwright test ` +
-      "--config e2e/playwright.config.ts --project=chromium e2e/broadcast.e2e.ts\n" +
+      `    DISPATCH_E2E_REUSE_SERVERS=1 ${harnessEnvironment(databaseUrl, harness.env)} bunx ` +
+      "playwright test --config e2e/playwright.config.ts --project=chromium e2e/broadcast.e2e.ts\n" +
       "Open exactly that origin: 'localhost' is another Host and the server refuses it (421).\n" +
       "Press Ctrl-C to stop."
   );
   try {
-    await untilInterrupted(supervisor.firstExit());
+    await untilInterrupted(harness.firstExit());
   } catch (error) {
     if (error instanceof Interrupted) return;
     throw error;
@@ -199,5 +184,6 @@ try {
     exitCode = 1;
   }
 }
+await harness?.stop();
 await supervisor.stop();
 process.exit(exitCode);

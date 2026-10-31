@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useState } from "react";
 
-import { useDeliveryLiveState } from "../../api/delivery-live";
+import { useLiveSocketState } from "../../api/live-socket";
 import {
   connectionDotConnected,
   connectionDotFailed,
@@ -24,7 +24,7 @@ export function SourceFreshness({
   freshness: DeliveryFreshness;
   readAtMs: number;
 }): ReactNode {
-  const live = useDeliveryLiveState();
+  const live = useLiveSocketState();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);

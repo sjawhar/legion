@@ -57,9 +57,9 @@ func TestAnApprovedVersionShowingADecisionOtherThanItsRowsCarriesNothing(t *test
 		t.Run(tc.attribute, func(t *testing.T) {
 			handler, database, documents := settlingCarryDocuments(t, 2*time.Second)
 			issue := createInteractionIssue(t, handler, "TEST", "Approved "+tc.attribute+" other than the row's", "Context\n\n"+regionAsk)
-			asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+			asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
 			answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
-			waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+			settledVersion(t, handler, documents, issue.PrimaryArtifactID, 2)
 
 			setLiveBlockAttributes(t, database, documents, issue.PrimaryArtifactID, "region", map[string]any{tc.attribute: tc.shown})
 			named := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]any{"summary": "Name the " + tc.attribute + " other than the row's", "actor": sessionActor()})
@@ -73,7 +73,7 @@ func TestAnApprovedVersionShowingADecisionOtherThanItsRowsCarriesNothing(t *test
 			}
 			approveVersion(t, handler, issue.PrimaryArtifactID, "alice", 3)
 
-			waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 4)
+			settledVersion(t, handler, documents, issue.PrimaryArtifactID, 4)
 			restored := versionMarkdown(t, handler, issue.PrimaryArtifactID, 4)
 			if !strings.Contains(restored, `selected="[&#x22;East&#x22;]"`) || strings.Contains(restored, tc.rendered) {
 				t.Fatalf("version 4 = %s, want settlement to have written the row back over the %s", restored, tc.attribute)
@@ -81,28 +81,30 @@ func TestAnApprovedVersionShowingADecisionOtherThanItsRowsCarriesNothing(t *test
 			if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "stale" {
 				t.Fatalf("approval after settlement wrote the row back = %#v, want stale", got.Approval)
 			}
-			for id, ask := range insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 5, map[string]string{"wave": "How many regions take the first wave?"}) {
+			insertDecisionMarkdown(t, handler, issue.PrimaryArtifactID, waveAsk, 5)
+			for id, ask := range settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"wave": "How many regions take the first wave?"}) {
 				asks[id] = ask
 			}
 
 			answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
-			waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 6)
+			settledVersion(t, handler, documents, issue.PrimaryArtifactID, 6)
 			requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 		})
 	}
 	t.Run("row-true", func(t *testing.T) {
-		handler := settlingCarryHandler(t, 2*time.Second)
+		handler, _, documents := settlingCarryDocuments(t, 2*time.Second)
 		issue := createInteractionIssue(t, handler, "TEST", "Approved as the row has it", "Context\n\n"+regionAsk)
-		asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+		asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
 		answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
-		waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+		settledVersion(t, handler, documents, issue.PrimaryArtifactID, 2)
 		approveVersion(t, handler, issue.PrimaryArtifactID, "alice", 2)
-		for id, ask := range insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 3, map[string]string{"wave": "How many regions take the first wave?"}) {
+		insertDecisionMarkdown(t, handler, issue.PrimaryArtifactID, waveAsk, 3)
+		for id, ask := range settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"wave": "How many regions take the first wave?"}) {
 			asks[id] = ask
 		}
 
 		answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
-		waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 4)
+		settledVersion(t, handler, documents, issue.PrimaryArtifactID, 4)
 		requireCarriedReview(t, handler, issue.PrimaryArtifactID, 4, 2, nil)
 	})
 }
@@ -117,11 +119,11 @@ func TestAnApprovedVersionShowingADecisionOtherThanItsRowsCarriesNothing(t *test
 // nobody decided, so the block is not as he approved it, and his answer to it predates his
 // approval: nothing is carried.
 func TestAnApprovedVersionShowingADecidedBlockUnderOtherWordingCarriesNothing(t *testing.T) {
-	handler := settlingCarryHandler(t, 2*time.Second)
+	handler, _, documents := settlingCarryDocuments(t, 2*time.Second)
 	issue := createInteractionIssue(t, handler, "TEST", "Approved under other wording", "Context\n\n"+regionAsk)
-	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+	asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
 	answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
-	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	settledVersion(t, handler, documents, issue.PrimaryArtifactID, 2)
 
 	reviseDocument(t, handler, issue.PrimaryArtifactID, "Which region goes first?", "Which region goes last?", 3)
 	reworded := versionMarkdown(t, handler, issue.PrimaryArtifactID, 3)
@@ -130,7 +132,7 @@ func TestAnApprovedVersionShowingADecidedBlockUnderOtherWordingCarriesNothing(t 
 	}
 	approveVersion(t, handler, issue.PrimaryArtifactID, "alice", 3)
 
-	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 4)
+	settledVersion(t, handler, documents, issue.PrimaryArtifactID, 4)
 	restored := versionMarkdown(t, handler, issue.PrimaryArtifactID, 4)
 	if !strings.Contains(restored, "Which region goes first?") || strings.Contains(restored, "goes last?") {
 		t.Fatalf("version 4 = %s, want settlement to have written the decided wording back", restored)
@@ -138,11 +140,12 @@ func TestAnApprovedVersionShowingADecidedBlockUnderOtherWordingCarriesNothing(t 
 	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "stale" {
 		t.Fatalf("approval after settlement wrote the wording back = %#v, want stale", got.Approval)
 	}
-	for id, ask := range insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 5, map[string]string{"wave": "How many regions take the first wave?"}) {
+	insertDecisionMarkdown(t, handler, issue.PrimaryArtifactID, waveAsk, 5)
+	for id, ask := range settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"wave": "How many regions take the first wave?"}) {
 		asks[id] = ask
 	}
 
 	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
-	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 6)
+	settledVersion(t, handler, documents, issue.PrimaryArtifactID, 6)
 	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 }

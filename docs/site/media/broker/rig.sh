@@ -9,9 +9,7 @@
 #     alice@example.com at the human tier, whose value is made up, in a database of its own beside
 #     DATABASE_URL's, created and dropped by this run, trusting the ServiceAccount tokens of
 #     packages/envoy/cmd/dev-oidc-issuer, the local stand-in for a cluster's issuer, which keeps
-#     Dispatch's own token in a file and rewrites it before it lapses, and signing a person in to
-#     its approval page through the same issuer, which stands in for the Workspace's identity
-#     provider and signs in the request's approver, alice@example.com, with no page to fill in;
+#     Dispatch's own token in a file and rewrites it before it lapses;
 #   - the Dispatch e2e harness (packages/dispatch/e2e: fake Envoy, fake GitHub, run-server.sh) on
 #     DATABASE_URL, emptied, pointed at that broker; its signed-in human is `alice@example.com`;
 #   - an agent machine whose hostname is example-host-build: agent-secrets-helper (the host side of
@@ -31,11 +29,14 @@
 # DATABASE_URL, the one input, names a Postgres database on this machine (a loopback host or a unix
 # socket directory) that this run may empty, as the e2e harness requires; the rig refuses any other
 # before it runs a single psql. The broker's database is created beside it under a name of this
-# run's own and dropped on exit. Every port is the run's own: the harness's three are picked
-# (scripts/e2e/lib/rig.sh's pick_port), and the broker binds one the kernel assigns.
+# run's own and dropped on exit. Every port is the run's own and chosen by the kernel: a keeper holds
+# Dispatch's from before the broker starts, since the broker names Dispatch's machine-login page to
+# every machine that logs in (scripts/e2e/lib/rig.sh's keep_port), and run-server.sh serves Dispatch
+# on that socket (DISPATCH_E2E_LISTEN_FROM); the broker and the harness's fakes bind ports the kernel
+# assigns and report them.
 #
-# Needs go, bun, psql, curl, openssl and setsid, and passwordless sudo with unshare and setpriv,
-# which give the helper its hostname; nothing else from the machine: no credential, private
+# Needs go, bun, python3, psql, curl, openssl and setsid, and passwordless sudo with unshare and
+# setpriv, which give the helper its hostname; nothing else from the machine: no credential, private
 # hostname or production service.
 set -euo pipefail
 
@@ -44,6 +45,9 @@ set -euo pipefail
 # truncates PLAYWRIGHT_DATABASE_URL and calls PLAYWRIGHT_BASE_URL with E2E_AGENT_TOKEN whenever
 # PLAYWRIGHT_BASE_URL is set (packages/dispatch/e2e/psql.ts, api.ts), as a deployed run's shell has.
 unset PGHOSTADDR PGHOST PGSERVICE PLAYWRIGHT_BASE_URL PLAYWRIGHT_DATABASE_URL E2E_AGENT_TOKEN
+# The harness's port variables are this run's to set, once its servers report their ports: a
+# caller's would bind a fake or Dispatch to a port this run does not hold.
+unset DISPATCH_E2E_PORT FAKE_ENVOY_PORT FAKE_GITHUB_PORT FAKE_BROKER_PORT
 
 # local_database URL succeeds when every host the postgres:// URL names is this machine: a unix
 # socket directory, localhost, 127.0.0.0/8 or ::1, the hosts Dispatch's dev sign-in accepts
@@ -95,12 +99,12 @@ local_database "$DATABASE_URL" || {
   echo "rig: DATABASE_URL must be a postgres:// URL naming a database on this machine (a loopback host or a unix socket directory)" >&2
   exit 1
 }
-for tool in go bun psql curl openssl setsid sudo unshare setpriv; do
+for tool in go bun python3 psql curl openssl setsid sudo unshare setpriv; do
   command -v "$tool" >/dev/null || { echo "rig: $tool is required on PATH" >&2; exit 1; }
 done
 sudo -n true 2>/dev/null || { echo "rig: the agent machine's helper needs passwordless sudo" >&2; exit 1; }
 
-# scripts/e2e/lib/rig.sh's bounded waits, port picks and process start and stop: each service
+# scripts/e2e/lib/rig.sh's bounded waits, held ports and process start and stop: each service
 # logs to $work/logs/<name>.log.
 work="$(mktemp -d /tmp/legion-docs-broker.XXXXXX)"
 evidence=$work
@@ -114,9 +118,9 @@ fail() {
 . "$root/scripts/e2e/lib/rig.sh"
 mkdir -p "$work/logs" "$work/bin" "$work/agent"
 
-# What cleanup stops: the pids start_process sets (<name>_pid) and the helper's own, and the
-# broker's database. The ports are pick_port's.
-broker_pid='' issuer_pid='' fake_envoy_pid='' fake_github_pid='' dispatch_pid='' helper_pid=''
+# What cleanup stops: the pids start_process sets (<name>_pid), Dispatch's port keeper among them,
+# and the helper's own, and the broker's database.
+broker_pid='' issuer_pid='' fake_envoy_pid='' fake_github_pid='' dispatch_pid='' helper_pid='' dispatch_keeper_pid=''
 broker_database='' admin_url='' dispatch_port='' fake_envoy_port='' fake_github_port=''
 cleanup() {
   local status=$? pid
@@ -131,6 +135,7 @@ cleanup() {
     [ -z "$pid" ] || kill -TERM -- "-$pid" 2>/dev/null || true
     stop_pid "$pid"
   done
+  stop_pid "$dispatch_keeper_pid"
   if [ -n "$broker_database" ]; then
     PGOPTIONS="-c client_min_messages=warning" psql "$admin_url" -q \
       -c "drop database if exists ${broker_database} with (force)" >/dev/null 2>&1 || true
@@ -168,28 +173,19 @@ EOF
 chmod 600 "$work/fake-secrets.json"
 # Dispatch calls the broker as its own ServiceAccount, whose token dev-oidc-issuer keeps in a file
 # Dispatch's server reads, never an argv; the broker lists that account as the caller "dispatch".
-# The same issuer is the provider a person signs in to the broker's approval page with: the
-# broker's own client, whose secret both read from a file written under umask 077, every person's
-# hd claim naming example.com, and a sign-in that names no login_hint signing in the operator.
-# The issuer writes the token file before it logs its URL, the issuer the broker discovers at boot.
+# The issuer writes the file before it logs its URL, the issuer the broker discovers at boot.
 dispatch_account="system:serviceaccount:example-ns:example-dispatch"
 broker_audience="legion-broker-pod"
-signin_client="docs-broker"
-signin_secret_file="$work/signin-client-secret"
-(umask 077 && od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$signin_secret_file")
 note "starting dev-oidc-issuer"
 start_process issuer setsid "$work/bin/dev-oidc-issuer" \
-  --token "$broker_audience=$dispatch_account=$work/dispatch-account-token" \
-  --sign-in-client "$signin_client" \
-  --sign-in-client-secret-file "$signin_secret_file" \
-  --sign-in-domain example.com \
-  --sign-in-default "$OPERATOR"
-await_start issuer "$issuer_pid" 0 60 "dev-oidc-issuer to report its URL" \
+  --token "$broker_audience=$dispatch_account=$work/dispatch-account-token"
+await_start issuer "$issuer_pid" 60 "dev-oidc-issuer to report its URL" \
   grep -q 'issuer listening url=' "$work/logs/issuer.log"
 issuer_url="$(sed -n 's/.*issuer listening url=\([^ ]*\).*/\1/p' "$work/logs/issuer.log" | head -n1)"
-# Dispatch's port is picked before the broker starts, since the broker names Dispatch's
-# machine-login page to every machine that logs in.
-pick_port dispatch_port
+# Dispatch's port is held before the broker starts, since the broker names Dispatch's
+# machine-login page to every machine that logs in: a keeper holds it for the run, and Dispatch
+# serves on a copy of its socket.
+keep_port dispatch_keeper dispatch_port
 dispatch_url="http://127.0.0.1:${dispatch_port}"
 
 note "starting the broker"
@@ -201,38 +197,41 @@ start_process broker setsid env -i PATH="$PATH" \
   BROKER_K8S_OIDC_ISSUER="$issuer_url" \
   BROKER_K8S_OIDC_AUDIENCE="$broker_audience" \
   BROKER_API_ACCOUNTS="dispatch=$dispatch_account" \
-  BROKER_SIGNIN_ISSUER="$issuer_url" \
-  BROKER_SIGNIN_CLIENT_ID="$signin_client" \
-  BROKER_SIGNIN_CLIENT_SECRET_FILE="$signin_secret_file" \
-  BROKER_SIGNIN_DOMAIN=example.com \
   BROKER_SECRETS_PREFIX="$secrets_prefix" \
   BROKER_SECRETS_KMS_KEY_ARN="$secrets_key" \
   BROKER_FAKE_SECRETS_FILE="$work/fake-secrets.json" \
   "$work/bin/broker"
-await_start broker "$broker_pid" 0 60 "the broker to report its address" \
+await_start broker "$broker_pid" 60 "the broker to report its address" \
   grep -q 'broker listening addr=' "$work/logs/broker.log"
 broker_url="http://$(sed -n 's/.*broker listening addr=\([^ ]*\).*/\1/p' "$work/logs/broker.log" | head -n1)"
 until_true 30 "the broker's health check" curl -sf "$broker_url/healthz"
 
-# --- Dispatch: the e2e harness's three servers on picked ports, the server pointed at the broker. -
+# --- Dispatch: the e2e harness's three servers, the server pointed at the broker. The fakes bind
+# ports the kernel assigns and print them; the server serves on the keeper's socket. -------------
 if [ ! -f "$root/packages/dispatch/web/dist/index.html" ]; then
   note "building the Dispatch dashboard"
   (cd "$root" && bun install --frozen-lockfile >/dev/null)
   (cd "$root/packages/dispatch" && bun run build:web >/dev/null)
 fi
-pick_port fake_envoy_port
-pick_port fake_github_port
-export DISPATCH_E2E_PORT=$dispatch_port FAKE_ENVOY_PORT=$fake_envoy_port FAKE_GITHUB_PORT=$fake_github_port
+start_process fake_envoy setsid bun "$root/packages/dispatch/e2e/fake-envoy.ts"
+start_process fake_github setsid bun "$root/packages/dispatch/e2e/fake-github.ts"
+await_start fake_envoy "$fake_envoy_pid" 60 "the fake Envoy to report its port" \
+  report_port "$work/logs/fake_envoy.log" 'fake envoy listener on 127\.0\.0\.1:'
+fake_envoy_port=$(report_port "$work/logs/fake_envoy.log" 'fake envoy listener on 127\.0\.0\.1:')
+await_start fake_github "$fake_github_pid" 60 "the fake GitHub to report its port" \
+  report_port "$work/logs/fake_github.log" 'fake github listener on 127\.0\.0\.1:'
+fake_github_port=$(report_port "$work/logs/fake_github.log" 'fake github listener on 127\.0\.0\.1:')
+export FAKE_ENVOY_PORT=$fake_envoy_port FAKE_GITHUB_PORT=$fake_github_port
 # The harness's broker switch (packages/dispatch/e2e/harness-broker.ts), exported so seed.ts's
 # reset reads it as run-server.sh does and leaves alone the fake broker this rig never starts.
 export DISPATCH_E2E_AGENT_SECRETS_URL="$broker_url" DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE="$work/dispatch-account-token"
 note "starting Dispatch at $dispatch_url"
-start_process fake_envoy setsid bun "$root/packages/dispatch/e2e/fake-envoy.ts"
-start_process fake_github setsid bun "$root/packages/dispatch/e2e/fake-github.ts"
-start_process dispatch setsid bash "$root/packages/dispatch/e2e/run-server.sh"
-await_start fake_envoy "$fake_envoy_pid" 0 60 "the fake Envoy" curl -s -o /dev/null "http://127.0.0.1:$fake_envoy_port/"
-await_start fake_github "$fake_github_pid" 0 60 "the fake GitHub" curl -s -o /dev/null "http://127.0.0.1:$fake_github_port/"
-await_start dispatch "$dispatch_pid" 0 600 "Dispatch" curl -sf "$dispatch_url/"
+DISPATCH_E2E_LISTEN_FROM="$work/dispatch_keeper.sock" start_process dispatch setsid bash "$root/packages/dispatch/e2e/run-server.sh"
+# The port is kept, so a request before the server serves waits unanswered: each poll times out.
+await_start dispatch "$dispatch_pid" 600 "Dispatch" curl -sf --max-time 5 "$dispatch_url/"
+# seed.ts reaches the server through the harness's port variable, set only now: run-server.sh, given
+# it, would bind that port itself rather than serve on the keeper's socket.
+export DISPATCH_E2E_PORT=$dispatch_port
 note "emptying the Dispatch database"
 bun "$SCRIPT_DIR/seed.ts"
 
@@ -259,7 +258,7 @@ start_process agent sudo -n unshare --uts --fork -- env -i PATH="$work/bin:/usr/
 until_true 30 "the helper's pid" test -s "$work/agent/helper.pid"
 helper_pid="$(cat "$work/agent/helper.pid")"
 # The helper's own pid, not sudo's: kill -0 cannot probe a root process.
-await_start agent "$helper_pid" 0 600 "agent-secrets-helper" \
+await_start agent "$helper_pid" 600 "agent-secrets-helper" \
   grep -q 'agent-secrets-helper listening' "$work/logs/agent.log"
 agent_exec="$work/agent-exec"
 cat >"$agent_exec" <<EOF
@@ -276,14 +275,13 @@ cat >&2 <<EOF
 rig: ready.
 
   Dispatch    $dispatch_url  (sign in as $OPERATOR at $dispatch_url/auth/_dev/signin?login=$OPERATOR)
-  broker      $broker_url  (a secret request's page, $broker_url/approve/<record>, signs you in as its approver through dev-oidc-issuer)
+  broker      $broker_url
   agent       $agent_exec bash   (hostname $AGENT_HOST; agent-secrets-helper for $OPERATOR)
   logs        $work/logs
 
   On the agent machine: agent-secrets machine login, type its code at $dispatch_url/credentials/machine,
   then agent-secrets register --wait 10 --exec -- bash, then
-  agent-secrets DEMO_API_KEY --reason "<why>" -- ./check-demo-key.sh, and approve it on the page it
-  prints, which the Inbox's Secret request row links to.
+  agent-secrets DEMO_API_KEY --reason "<why>" -- ./check-demo-key.sh
 EOF
 
 if [ "$#" -gt 0 ]; then

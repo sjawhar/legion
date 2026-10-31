@@ -101,7 +101,7 @@ func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A stored role still working keeps the close a wait, independently of runtime membership.
-	if err := g.r.SuspendIssue(g.ctx, testTree, testTree, false, authorize); !errors.Is(err, wait.ErrWaiting) || !strings.Contains(err.Error(), "stored claim") {
+	if err := g.r.SuspendIssue(g.ctx, testTree, testTree, authorize); !errors.Is(err, wait.ErrWaiting) || !strings.Contains(err.Error(), "stored claim") {
 		t.Fatalf("issue suspension with a remaining role process = %v, want the stored claim's wait", err)
 	}
 	if g.sandbox(name).mode() != modeRunning {
@@ -114,11 +114,11 @@ func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
 	if err := st.PutClaim(g.ctx, stored); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.r.SuspendIssue(g.ctx, testTree, testTree, false, authorize); err != nil {
+	if err := g.r.SuspendIssue(g.ctx, testTree, testTree, authorize); err != nil {
 		t.Fatal(err)
 	}
-	if got := g.sandbox(name); got == nil || got.mode() != modeSuspended || got.UID != uid {
-		t.Fatalf("closed issue Sandbox = %+v, want the same Sandbox Suspended", got)
+	if got := g.sandbox(name); got != nil {
+		t.Fatalf("closed issue Sandbox = %+v, want it deleted: a close keeps nothing", got)
 	}
 	if g.pod(name) != nil {
 		t.Fatal("issue suspension returned while its pod remained")
@@ -132,8 +132,8 @@ func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loc.Sandbox.PodUID == old.Sandbox.PodUID || g.sandbox(name).UID != uid || g.sandbox(name).mode() != modeRunning {
-		t.Fatalf("re-admission did not resume the retained Sandbox in a new pod: old=%+v new=%+v sandbox=%+v", old, loc, g.sandbox(name))
+	if s := g.sandbox(name); loc.Sandbox.PodUID == old.Sandbox.PodUID || s == nil || s.UID == uid || s.mode() != modeRunning {
+		t.Fatalf("re-admission did not resume the session in a Sandbox and pod of its own: old=%+v new=%+v sandbox=%+v", old, loc, g.sandbox(name))
 	}
 	var resumed string
 	for _, frame := range g.sent(rootToken) {
@@ -144,7 +144,7 @@ func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
 	if resumed != stored.SessionFile {
 		t.Fatalf("resumed session = %q, want %q", resumed, stored.SessionFile)
 	}
-	if err := g.r.SuspendIssue(context.Background(), testTree, testTree, false, authorize); err != nil {
+	if err := g.r.SuspendIssue(context.Background(), testTree, testTree, authorize); err != nil {
 		t.Fatalf("stale close: %v", err)
 	}
 	if obs, err := g.r.Probe(g.ctx, loc); err != nil || obs.Kind != runtime.Alive {
@@ -152,21 +152,22 @@ func TestIssueSuspensionReadmissionResumesTheRetainedSession(t *testing.T) {
 	}
 }
 
-// A child's close never touches its parent's pod: the parent runs on a Sandbox and volume of its
-// own. A child parked (backlog, icebox, triage) has its Sandbox Suspended and kept, its volume and
-// the sessions on it with it, for a later todo to resume. A child closed as done releases it: once
-// its claims have retired, the Sandbox is deleted with foreground propagation, fenced to the object
-// as read, and awaited until the API no longer has it, so garbage collection takes the volume and
-// Secrets it owns; the restricted runtime sends no PVC request itself. A retried close finds the
+// A child's close never touches its parent's pod: the parent runs in a pod of its own. Whichever
+// state the close's stops left the child's claim in — suspended with its session for a child
+// parked in backlog, icebox or triage, retired for one closed as done — the close deletes the
+// child's Sandbox, since keeping it keeps nothing: the disk the roles worked on was the pod's own
+// and went with the pod. The delete is a foreground one, fenced to the object as read, and
+// awaited until the API no longer has it, so garbage collection takes the role Secrets the
+// Sandbox owns; the restricted runtime sends no PVC request itself. A retried close finds the
 // Sandbox gone and finishes.
 func TestChildIssueSuspensionKeepsItsParentRunning(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		release bool
+		session bool
 		state   supervise.ClaimState
 	}{
-		{name: "a parked child keeps its Sandbox", state: supervise.StateSuspended},
-		{name: "a done child releases its Sandbox and volume", release: true, state: supervise.StateRetired},
+		{name: "a parked child, its claim suspended with its session", session: true, state: supervise.StateSuspended},
+		{name: "a done child, its claim retired", state: supervise.StateRetired},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := migratedStore(t)
@@ -196,7 +197,7 @@ func TestChildIssueSuspensionKeepsItsParentRunning(t *testing.T) {
 			// session for a parked child, retired with none for a done one.
 			stored := supervise.Claim{Token: childToken, Project: testProject, Tree: testTree, TreeEpoch: 1, Issue: childIssue, Role: claim.RoleImplementer,
 				Generation: 1, State: tc.state}
-			if !tc.release {
+			if tc.session {
 				stored.Session, stored.SessionFile = "child-session", resumeSession
 			}
 			if err := st.PutClaim(g.ctx, stored); err != nil {
@@ -205,9 +206,9 @@ func TestChildIssueSuspensionKeepsItsParentRunning(t *testing.T) {
 			name := SandboxName(childToken)
 			uid := g.sandbox(name).UID
 			g.clearActions()
-			authorize := authorizeClose(st, store.IssueClose{Issue: childIssue, Tree: testTree, IssueGeneration: 2, TreeGeneration: 7, Row: 1, Release: tc.release})
+			authorize := authorizeClose(st, store.IssueClose{Issue: childIssue, Tree: testTree, IssueGeneration: 2, TreeGeneration: 7, Row: 1})
 
-			if err := g.r.SuspendIssue(g.ctx, childIssue, testTree, tc.release, authorize); err != nil {
+			if err := g.r.SuspendIssue(g.ctx, childIssue, testTree, authorize); err != nil {
 				t.Fatal(err)
 			}
 
@@ -217,17 +218,8 @@ func TestChildIssueSuspensionKeepsItsParentRunning(t *testing.T) {
 			if got := g.sandbox(SandboxName(rootToken)); got == nil || got.mode() != modeRunning {
 				t.Fatalf("parent Sandbox after the child's close = %+v, want Running", got)
 			}
-			if !tc.release {
-				if got := g.sandbox(name); got == nil || got.mode() != modeSuspended || got.UID != uid {
-					t.Fatalf("parked child Sandbox = %+v, want the same Sandbox Suspended", got)
-				}
-				if len(deletes) != 0 {
-					t.Fatalf("a parked child's close deleted %v, want nothing deleted", deletes)
-				}
-				return
-			}
 			if got := g.sandbox(name); got != nil {
-				t.Fatalf("done child Sandbox = %+v, want it gone", got)
+				t.Fatalf("closed child Sandbox = %+v, want it gone", got)
 			}
 			got, deleted := deletes[name]
 			if !deleted || got.PropagationPolicy == nil || *got.PropagationPolicy != metav1.DeletePropagationForeground {
@@ -245,11 +237,11 @@ func TestChildIssueSuspensionKeepsItsParentRunning(t *testing.T) {
 				}
 			}
 			// A retry after the delete — the outbox row run again — finds no Sandbox and finishes.
-			if err := g.r.SuspendIssue(g.ctx, childIssue, testTree, true, authorize); err != nil {
-				t.Fatalf("retried release = %v, want it finished on the Sandbox already gone", err)
+			if err := g.r.SuspendIssue(g.ctx, childIssue, testTree, authorize); err != nil {
+				t.Fatalf("retried close = %v, want it finished on the Sandbox already gone", err)
 			}
 			if len(deletes) != 1 {
-				t.Fatalf("the retried release deleted again: %v", deletes)
+				t.Fatalf("the retried close deleted again: %v", deletes)
 			}
 		})
 	}

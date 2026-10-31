@@ -4,6 +4,9 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerAskSnoozes, answerIssuePatches } from "../../__tests__/send-answers";
+import { wholeText } from "../../__tests__/whole-text";
 import { ApiError, api } from "../../api/client";
 import type { AskRead, Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -28,7 +31,16 @@ function artifactAsk(): InboxRow {
     multiple: false,
     opened_event_id: 1,
     options: [],
-    thread: { answers: [], edits: [], followers: [], replies: [] },
+    thread: {
+      answers: [],
+      claimant: null,
+      edits: [],
+      followers: [],
+      replies: [],
+      route: null,
+      route_status: null,
+      route_holder: null,
+    },
     question: "Does this design need review?",
     priority: null,
     snoozed_until: null,
@@ -93,7 +105,11 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
       thread: {
         answers: [],
         edits: [],
+        claimant: null,
         followers: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
         replies: [
           {
             ...commentDeliveryFields(),
@@ -153,7 +169,11 @@ test("an unchanged old Inbox cache does not refetch every thread on remount", as
     thread: {
       answers: [],
       edits: [],
+      claimant: null,
       followers: [],
+      route: null,
+      route_status: null,
+      route_holder: null,
       replies: [
         {
           ...commentDeliveryFields(),
@@ -208,7 +228,11 @@ test("Inbox labels an artifact-owned ask with its project and document page link
     ask,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -246,7 +270,11 @@ test("Inbox puts every ask waiting on the viewer under Waiting on you", async ()
     ask: id === askA.id ? askA : askB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -286,7 +314,11 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
     ask: id === askA.id ? askA : askB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -304,7 +336,9 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
       .getAllByRole("heading", { level: 2 })
       .map((heading) => heading.textContent);
     expect(headings).toEqual(["Waiting on you", "Waiting on agents"]);
-    expect(screen.getByText("Waiting on session:session-…")).toBeTruthy();
+    expect(screen.getByText(wholeText("Waiting on session:session-…"))).toBeTruthy();
+    // No `?agent=`, so no agent filter to clear.
+    expect(screen.queryByRole("link", { name: "Clear agent filter" })).toBeNull();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -334,7 +368,11 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
     ask: id === askA.id ? askA : askB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -348,7 +386,7 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
 
   try {
     await screen.findByText("Which approach?");
-    expect(screen.getByText("session:session-… replied")).toBeTruthy();
+    expect(screen.getByText(wholeText("session:session-… replied"))).toBeTruthy();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -371,7 +409,11 @@ test("Inbox partitions by waiting_on: an agent's progress note keeps its ask und
     ask: noted,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -389,8 +431,8 @@ test("Inbox partitions by waiting_on: an agent's progress note keeps its ask und
       .getAllByRole("heading", { level: 2 })
       .map((heading) => heading.textContent);
     expect(headings).toEqual(["Waiting on agents"]);
-    expect(screen.queryByText("session:session-… replied")).toBeNull();
-    expect(screen.getByText("Waiting on session:session-…")).toBeTruthy();
+    expect(screen.queryByText(wholeText("session:session-… replied"))).toBeNull();
+    expect(screen.getByText(wholeText("Waiting on session:session-…"))).toBeTruthy();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -423,7 +465,11 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
     ask: [p0, p2, agentWaits].find((ask) => ask.id === id) ?? p0,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -788,7 +834,11 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
     ask: rows.find((ask) => ask.id === id) ?? fromPlanner,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([
@@ -824,6 +874,14 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
     const chip = await screen.findByRole("link", { name: "Clear agent filter" });
     expect(chip.textContent).toBe("Asks from Planner · clear");
     expect(chip.getAttribute("href")).toBe("/");
+    // The agent's live link sits beside the clear-filter link, never inside it.
+    const chipAgent = chip.closest<HTMLElement>("[data-agent-name]");
+    if (chipAgent === null) throw new Error("the agent filter chip is not drawn by AgentName");
+    const live = await within(chipAgent).findByRole("link", {
+      name: "Open live conversation with Planner",
+    });
+    expect(live.getAttribute("href")).toBe("/agents/session-1/live");
+    expect(chip.contains(live)).toBe(false);
     // The whole-inbox banner would contradict the filtered list (and its link clears the filter).
     expect(screen.queryByText(/Blocked on you:/)).toBeNull();
   } finally {
@@ -849,7 +907,11 @@ test("Inbox ?section=needs-you keeps only the agent's asks waiting on the viewer
     ask: rows.find((ask) => ask.id === id) ?? fromPlanner,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
@@ -886,7 +948,11 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
     ask: issueAsk(),
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   });
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
@@ -902,7 +968,8 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
 
   try {
     const emptyState = await screen.findByRole("region", { name: "Inbox empty state" });
-    expect(within(emptyState).getByText("No open asks from idle-session")).toBeTruthy();
+    // A session the registry does not list and no listed ask names reads by its short id.
+    expect(within(emptyState).getByText("No open asks from session:idle-ses…")).toBeTruthy();
     expect(screen.getByRole("link", { name: "Clear agent filter" }).getAttribute("href")).toBe("/");
     expect(screen.queryByText("Which approach?")).toBeNull();
   } finally {
@@ -934,7 +1001,11 @@ test("a row being typed into stays under Waiting on you when an agent's note fli
     ask: [askA, askB, askC].find((ask) => ask.id === id) ?? askA,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1020,7 +1091,11 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
     ask: [askA, askB, askC].find((ask) => ask.id === id) ?? askA,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: id === askB.id ? repliesB : [],
   }));
   // The server records the clarification: the turn is the agent's, and the inbox says so on
@@ -1079,10 +1154,14 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
     await waitFor(() =>
       expect(screen.getByTestId("turn-ask-b").textContent).toBe("Waiting on session:session-…")
     );
-    expect(createComment).toHaveBeenCalledWith("CORE-2", {
-      ask_id: "ask-b",
-      body: "Ship what, exactly?",
-    });
+    expect(createComment).toHaveBeenCalledWith(
+      "CORE-2",
+      {
+        ask_id: "ask-b",
+        body: "Ship what, exactly?",
+      },
+      keyedAttempt
+    );
     expect(document.activeElement).toBe(row);
     expect(row.getAttribute("data-inbox-section")).toBe("human");
     expect(rowIds()).toEqual(["ask-a", "ask-b", "ask-c"]);
@@ -1128,7 +1207,11 @@ test("an ask answered elsewhere stays in place with its recorded answer while th
     ask: id === askA.id ? askA : threadB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1191,7 +1274,11 @@ test("the reader's own answer leaves the Inbox at once, even though their focus 
     ask: id === askA.id ? askA : askB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const answerAsk = spyOn(api, "answerAsk").mockImplementation(async () => {
@@ -1249,7 +1336,11 @@ test("after the reader's own answer fails, an answer from elsewhere still holds 
     ask: id === askA.id ? askA : threadB,
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   }));
   const answerAsk = spyOn(api, "answerAsk").mockRejectedValue(new Error("offline"));
@@ -1670,12 +1761,14 @@ test("Assign to me PATCHes the viewer's lowercase login and keeps its row until 
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
   const save = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
   const { unmount } = renderInbox("/?assignee=unassigned");
   try {
     await screen.findByText("Orphan question?");
     fireEvent.click(screen.getByRole("button", { name: "Assign CORE-3 to me" }));
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-3", { assignee: "alice" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-3", { assignee: "alice" }, keyedAttempt)
+    );
     // The optimistic assignment takes the row out of this filter at once; the live write keeps
     // it on screen, so `Assigning…` is shown by the control the reader clicked.
     await waitFor(() =>
@@ -1715,7 +1808,7 @@ test("a refused Assign to me keeps its row under the Unassigned filter, with the
   const getAsk = mockAskReads(rows);
   const firstSave = Promise.withResolvers<Issue>();
   let attempts = 0;
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async () => {
+  const patchIssue = answerIssuePatches().mockImplementation(async () => {
     attempts += 1;
     return attempts === 1 ? firstSave.promise : narrowIssueOf(orphan, "alice");
   });
@@ -1773,7 +1866,7 @@ test("a sibling ask of the same issue leaving the list does not drop an in-fligh
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
   const save = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => save.promise);
   const { queryClient, unmount } = renderInbox("/?assignee=everyone");
   try {
     await screen.findByText("Question A?");
@@ -1883,7 +1976,7 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
   // the server would now hold rather than resurrecting the pre-snooze list.
   let served: InboxRow[] = [askA, askB];
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
-  const snoozeAsk = spyOn(api, "snoozeAsk").mockImplementation(async (id, until) => {
+  const snoozeAsk = answerAskSnoozes().mockImplementation(async (id, { snoozed_until: until }) => {
     served = served.map((row) => (row.id === id ? { ...row, snoozed_until: until } : row));
     return { snoozed_until: until };
   });
@@ -1908,8 +2001,8 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
     expect(rowIds()).toEqual(["ask-a"]);
     expect(screen.getByText(/Blocked on you: 1 item/)).toBeTruthy();
     expect(snoozeAsk).toHaveBeenCalledTimes(1);
-    const [, until] = snoozeAsk.mock.calls[0] ?? [];
-    expect(Date.parse(until ?? "")).toBeGreaterThan(Date.now());
+    const [, body] = snoozeAsk.mock.calls[0] ?? [];
+    expect(Date.parse(body?.snoozed_until ?? "")).toBeGreaterThan(Date.now());
 
     fireEvent.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
     const later = screen.getByTestId("ask-ask-b").closest<HTMLElement>("[data-inbox-row]");
@@ -1919,7 +2012,7 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
       within(later as HTMLElement).getByRole("button", { name: "Un-snooze CORE-2: Which format?" })
     );
     await waitFor(() => expect(headings()).toEqual(["Waiting on you"]));
-    expect(unsnoozeAsk).toHaveBeenCalledWith("ask-b");
+    expect(unsnoozeAsk).toHaveBeenCalledWith("ask-b", keyedAttempt);
     expect(rowIds()).toEqual(["ask-a", "ask-b"]);
     expect(screen.getByText(/Blocked on you: 2 items/)).toBeTruthy();
   } finally {
@@ -2006,8 +2099,8 @@ test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
   // Held open, so the render under test is the one while the write is in flight.
   let settle: (() => void) | undefined;
-  const snoozeAsk = spyOn(api, "snoozeAsk").mockImplementation(
-    (id, until) =>
+  const snoozeAsk = answerAskSnoozes().mockImplementation(
+    (id, { snoozed_until: until }) =>
       new Promise((resolve) => {
         settle = () => {
           served = served.map((each) =>
@@ -2056,7 +2149,7 @@ test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it
 test("a refused snooze rolls the row back and says why, where the reader can still see it", async () => {
   const row = issueAsk({ id: "ask-b", question: "Which format?" });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([row]);
-  const snoozeAsk = spyOn(api, "snoozeAsk").mockRejectedValue(
+  const snoozeAsk = answerAskSnoozes().mockRejectedValue(
     new ApiError(400, { code: "SNOOZE_INPUT", error: "snoozed_until must be in the future" })
   );
   const getAsk = mockAskReads([row]);

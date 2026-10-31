@@ -7,8 +7,9 @@ services:
     network_mode: host
     command: ["/usr/local/bin/envoy-listener"]
     restart: unless-stopped
-    # A SIGTERM runs the listener's ordered shutdown: up to 10 s for HTTP, then up to 13 s to drain
-    # NATS, about 23 s in all. Docker's 10 s default would SIGKILL it before the drain starts.
+    # A SIGTERM runs the listener's ordered shutdown: up to 10 s for HTTP, up to 3 s to drain the
+    # live topics lane when it is on, then up to 13 s to drain NATS, about 26 s in all. Docker's
+    # 10 s default would SIGKILL it before the drain starts.
     stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9020/healthz"]
@@ -27,6 +28,11 @@ services:
       # own without this (packages/envoy/internal/bus/reach.go).
       ENVOY_ALLOW_REMOTE_NATS: "1"
       ENVOY_HOST_BRIDGE: 127.0.0.1
+      # A host's own listener, whose NATS user holds the host grant (a plain notifications.>
+      # subscribe): it takes every topic the stream does not store, a team topic for one, off the
+      # bus for the sessions on this machine that registered a port. A user without that grant
+      # refuses the subscription and the start exits naming this variable.
+      ENVOY_SUBSCRIBE_ALL_TOPICS: "1"
       ENVOY_WEBHOOKS: ${ENVOY_WEBHOOKS:-}
       ENVOY_GITHUB_WEBHOOK_SECRET: ${ENVOY_GITHUB_WEBHOOK_SECRET:-}
       ENVOY_GITHUB_MENTION_TRIGGER: ${ENVOY_GITHUB_MENTION_TRIGGER:-@legion}

@@ -73,7 +73,8 @@ func (e *Engine) mergeFailed(ctx context.Context, tx pgx.Tx, fact intake.MergeFa
 // head it does not name, and nothing withdraws a READY the issue never reached awaiting_merge to
 // hold. The route held the commit to GitHub's head, and passes the record as it read it, head and
 // clock (intake.HandoffComplete.RecordedHead, RecordedHeadAt), and GitHub's clock in its read
-// (HeadAt): the record follows GitHub only by webhook, so one still exactly that snapshot is
+// (HeadAt): the record follows GitHub only by webhook and the daemon's two-minute read of each pull
+// request (daemon's followHead), so one still exactly that snapshot is
 // lagging, not moved, one at the commit has caught up, and one with a clock still before GitHub's
 // read applied only pushes that read had passed, so it is behind, not moved (a push between the
 // snapshot's head and the commit, its webhook applied while the route checked READY). Any other
@@ -106,7 +107,8 @@ func (e *Engine) holdReadyToItsHead(ctx context.Context, tx pgx.Tx, issue record
 		return intake.Result{}, nil
 	}
 	if pr.HeadSHA != fact.Commit {
-		*pr = classify.AdvancePullRequestHead(*pr, fact.Commit)
+		*pr = classify.AdvancePullRequestHead(*pr, classify.Arrival{}, fact.Commit)
+		e.stampRun(pr)
 	}
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.HeadAt)
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
@@ -212,19 +214,16 @@ func (e *Engine) voidMovedHeldReady(ctx context.Context, tx pgx.Tx, issue record
 // close in the record has ended, and one still waiting absorbs the new one, since the outbox holds
 // one ready_merge row per issue and head.
 //
-// A push to a pull request GitHub has already merged takes neither move. A merged root stands in
-// awaiting_merge for as long as the rest of its tree runs (closeMerged), so a push can land there
-// for days after the merge, and there is nothing left to merge or to re-implement: no READY is
-// withdrawn and the issue stays where it is. The neighbouring doors are already shut this way —
-// a red withdraws a READY only on an open pull request (classify.RedWithdrawsReady), as does a
+// A merged root stands in awaiting_merge for as long as the rest of its tree runs (closeMerged),
+// and there is nothing left to merge or to re-implement, so no head move reaches here for a merged
+// pull request: GitHub synchronizes and reopens only a pull request it has not merged, so a
+// synchronize or a reopen observed after the merge is older than it and returns early
+// (pullRequestSynchronized, pullRequestOpened). The neighbouring doors are shut the same way — a
+// red withdraws a READY only on an open pull request (classify.RedWithdrawsReady), as does a
 // conflict (classify.ConflictWithdrawsReady), a merge queue's failed merge returns early unless
-// the pull request is open (mergeFailed), a reopen of a merged one returns early
-// (pullRequestOpened), and the row that submits READY's merge ends itself once the record shows
-// the merge (queueReadyMerge).
+// the pull request is open (mergeFailed), and the row that submits READY's merge ends itself once
+// the record shows the merge (queueReadyMerge).
 func (e *Engine) withdrawMovedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reopened bool) error {
-	if pr.State == record.PullRequestMerged {
-		return nil
-	}
 	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
 	if err != nil {
 		return err

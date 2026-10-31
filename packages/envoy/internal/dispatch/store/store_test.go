@@ -146,6 +146,40 @@ func TestOpenRefusesAConnectionStringThatSetsThePoolSize(t *testing.T) {
 	t.Cleanup(store.Pool.Close)
 }
 
+// Dispatch's timestamps are UTC whatever zone the host runs in, because a time.Time marshals
+// JSON in the zone it carries and every reader that compares a timestamp as a string reads that
+// zone: a Pacific host answered "2026-10-01T17:00:01.12-07:00" where a UTC one answered
+// "2026-10-02T00:00:01.12Z" for the same instant. pgx otherwise hands back a timestamptz in
+// time.Local, which is never time.UTC - not even under TZ=UTC, where it is a location of its own
+// named "UTC" - so this holds the connection to the zone rather than to the host's.
+func TestScannedTimestampsCarryUTCWhateverTheHostZone(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	// Both wire formats: the pool's own (binary, the statement cache's) and the text one a
+	// simple-protocol query answers, each with a scan plan of its own in pgx.
+	for name, args := range map[string][]any{
+		"binary": nil,
+		"text":   {pgx.QueryExecModeSimpleProtocol},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var scanned, stored time.Time
+			if err := store.Pool.QueryRow(ctx,
+				`select now(), '2026-10-02T00:00:01.12Z'::timestamptz`, args...,
+			).Scan(&scanned, &stored); err != nil {
+				t.Fatalf("read a timestamptz: %v", err)
+			}
+			if scanned.Location() != time.UTC || stored.Location() != time.UTC {
+				t.Fatalf("scanned in %s and %s, want both in %s",
+					scanned.Location(), stored.Location(), time.UTC)
+			}
+			// What the server writes into JSON, which is what a client compares.
+			if written := stored.Format(time.RFC3339Nano); written != "2026-10-02T00:00:01.12Z" {
+				t.Fatalf("the stored instant reads back as %q, want 2026-10-02T00:00:01.12Z", written)
+			}
+		})
+	}
+}
+
 func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -173,8 +207,22 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"message_deliveries",
 		"refs",
 		"events",
+		"event_horizon",
 		"user_issue_state",
 		"user_agent_state",
+		"document_blocks",
+		"block_refs",
+		"document_block_versions",
+		"document_block_texts",
+		"document_indexed_versions",
+		"block_grammar_owed",
+		"comment_blocks",
+		"message_blocks",
+		"comment_block_texts",
+		"comment_block_state",
+		"message_block_state",
+		"comment_block_refs",
+		"message_block_refs",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename
@@ -199,10 +247,31 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"issues_parent_key",
 		"artifacts_issue_key",
 		"asks_anchor_artifact",
+		"asks_anchor_artifact_id",
 		"comments_anchor_artifact",
 		"ask_followers_ask_id_text",
 		"events_ask_answered_by_user",
 		"comments_ask_replies_by_user",
+		"document_blocks_node_id",
+		"block_refs_to",
+		"block_refs_from_node",
+		"document_block_versions_owed",
+		"block_grammar_owed_enqueued",
+		"comment_blocks_node_id",
+		"comment_blocks_comment_id_text",
+		"message_blocks_node_id",
+		"message_blocks_message_id_text",
+		"comment_block_state_owed",
+		"message_block_state_owed",
+		"comment_block_refs_to",
+		"comment_block_refs_from_node",
+		"message_block_refs_to",
+		"message_block_refs_from_node",
+		"comments_replies_to_block",
+		"messages_replies_to_block",
+		"events_person_words",
+		"comment_deliveries_session",
+		"message_deliveries_session_created",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname

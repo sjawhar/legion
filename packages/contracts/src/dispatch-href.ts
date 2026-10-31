@@ -54,8 +54,14 @@ export function itemFromSearch(search: string): DispatchHrefItem | undefined | n
  * `packages/envoy/internal/dispatch/text` through its JSON copy of these rows - so a new href
  * shape cannot reach one of them and not the others.
  *
- * A `#b-<block>` href resolves to its document, not to the ask the block holds: it is a document
- * link with a block anchor, and naming the ask would need a block-id-to-ask lookup on the server.
+ * A `#b-<block>` href names that block of its document, or of the comment or issue message an
+ * item page (`/comments/<id>`, `/messages/<id>`) shows: its reference is the document's or the
+ * item's with `#b-` and the id written by `encodeBlockId`. A document page's `?comment=` names the
+ * comment whatever its fragment: the dashboard writes a document block's fragment beside it, so
+ * the fragment there is never a block of the comment. Any other fragment leaves the document or
+ * item, and so does a document's version page whatever its fragment, a version's stored text
+ * holding no block ids: the version of an issue's spec (`/spec?v=N`) is the spec's artifact at
+ * that version.
  */
 export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] = [
   { href: "/issues/CORE-1", ref: "dispatch://CORE-1" },
@@ -101,13 +107,39 @@ export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] 
     href: "/projects/CORE/documents/handbook-md?ask=99999999-9999-4999-8999-999999999999",
     ref: "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999",
   },
-  { href: "/issues/CORE-1/spec#b-ship-it", ref: "dispatch://CORE-1/spec" },
+  { href: "/issues/CORE-1/spec#b-ship-it", ref: "dispatch://CORE-1/spec#b-ship-it" },
   {
     href: "/issues/CORE-1/artifacts/notes-md#b-ship-it",
-    ref: "dispatch://CORE-1/artifact/notes-md",
+    ref: "dispatch://CORE-1/artifact/notes-md#b-ship-it",
   },
   {
     href: "/projects/CORE/documents/handbook-md#b-ship-it",
-    ref: "dispatch://CORE/artifact/handbook-md",
+    ref: "dispatch://CORE/artifact/handbook-md#b-ship-it",
+  },
+  {
+    href: "/issues/CORE-1/comments/11111111-1111-4111-8111-111111111111#b-b2",
+    ref: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2",
+  },
+  {
+    href: "/issues/CORE-1/messages/33333333-3333-4333-8333-333333333333#b-b2",
+    ref: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
+  },
+  {
+    href: "/projects/CORE/documents/handbook-md?comment=88888888-8888-4888-8888-888888888888#b-b2",
+    ref: "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888",
+  },
+  {
+    href: "/issues/CORE-1/spec#b-d%C3%A9cision%3A1",
+    ref: "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1",
+  },
+  { href: "/issues/CORE-1/spec#top", ref: "dispatch://CORE-1/spec" },
+  { href: "/issues/CORE-1/spec?v=2#b-ship-it", ref: "dispatch://CORE-1/artifact/spec@v2" },
+  {
+    href: "/issues/CORE-1/artifacts/notes-md?v=2#b-ship-it",
+    ref: "dispatch://CORE-1/artifact/notes-md@v2",
+  },
+  {
+    href: "/projects/CORE/documents/handbook-md?version=3#b-ship-it",
+    ref: "dispatch://CORE/artifact/handbook-md@v3",
   },
 ];

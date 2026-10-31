@@ -120,19 +120,19 @@ func TestALaunchTryItsContextEndsIsChargedNothing(t *testing.T) {
 // three boot timeouts, the repository cache's waits (cacheWaits: five boot timeouts and one other
 // ensure's calls), the launcher backstop, the termination grace, then the calls. At the daemon's
 // production defaults — worker_boot_timeout_seconds 120 and worker_stop_timeout_seconds 10
-// (config), and ProvisionBound's 100 minutes (workspace.FetchBudget + workspace.CloneTimeout) —
-// that is 2 h 49 min 41 s with relaunchCalls at 85: well past the 100-minute floor a provisioning
+// (config), and ProvisionBound's 220 minutes (workspace.FetchBudget + workspace.CloneTimeout) —
+// that is 4 h 49 min 41 s with relaunchCalls at 85: well past the 220-minute floor a provisioning
 // pod's rightful wait sets, and never under the boot timeout, ProvisionBound and the grace
 // together. The rig's runtime answers the same arithmetic over its own options.
 func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
-	boot, provision, grace := 120*time.Second, 100*time.Minute, 10*time.Second
+	boot, provision, grace := 120*time.Second, 220*time.Minute, 10*time.Second
 	if relaunchCalls != 85 || cacheEnsureCalls != 14 {
 		t.Fatalf("relaunchCalls = %d, want 85: %d per try (%d of them the repository cache's ensure) and %d per each of %d roles", relaunchCalls, relaunchPodCalls, cacheEnsureCalls, relaunchRoleCalls, len(claim.Roles))
 	}
 	cache := 5*boot + 14*apiTimeout
 	waits := 3*boot + cache + (2*boot + provision + 2*recheckInterval) + grace
-	if got, want := launchBound(boot, provision, grace), waits+85*apiTimeout; got != want || want != 2*time.Hour+49*time.Minute+41*time.Second {
-		t.Fatalf("launchBound = %s, want %s (2h49m41s)", got, want)
+	if got, want := launchBound(boot, provision, grace), waits+85*apiTimeout; got != want || want != 4*time.Hour+49*time.Minute+41*time.Second {
+		t.Fatalf("launchBound = %s, want %s (4h49m41s)", got, want)
 	}
 	production := testOptions()
 	production.BootTimeout, production.TerminationGrace = boot, grace
@@ -140,8 +140,8 @@ func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := r.LaunchBound(); got != launchBound(boot, provision, grace) || got < boot+r.ProvisionBound()+grace || got <= 100*time.Minute {
-		t.Fatalf("LaunchBound at the production defaults = %s, want %s, at least %s and past 100m", got, launchBound(boot, provision, grace), boot+r.ProvisionBound()+grace)
+	if got := r.LaunchBound(); got != launchBound(boot, provision, grace) || got < boot+r.ProvisionBound()+grace || got <= 220*time.Minute {
+		t.Fatalf("LaunchBound at the production defaults = %s, want %s, at least %s and past 220m", got, launchBound(boot, provision, grace), boot+r.ProvisionBound()+grace)
 	}
 	g := newRig(t, nil)
 	if got, want := g.r.LaunchBound(), launchBound(g.opts.BootTimeout, g.r.ProvisionBound(), g.opts.TerminationGrace); got != want {
@@ -162,11 +162,6 @@ func (c countingTokens) Token(ctx context.Context, owner string) (string, error)
 type countingStore struct {
 	Store
 	reads *atomic.Int32
-}
-
-func (s countingStore) IssueHasSessions(ctx context.Context, project, issue string) (bool, error) {
-	s.reads.Add(1)
-	return s.Store.IssueHasSessions(ctx, project, issue)
 }
 
 func (s countingStore) IssueRunsElsewhere(ctx context.Context, project, issue, tree string) (string, error) {

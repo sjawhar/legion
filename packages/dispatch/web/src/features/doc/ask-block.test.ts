@@ -4,7 +4,8 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import { Schema } from "prosemirror-model";
 
 import type { BlockTypeSchema } from "../../api/types";
-import { askBlockEditingPlugin, editingAskBlockPos, renderTypedBlock } from "./ask-block";
+import { askBlockEditingPlugin, editingAskBlockPos } from "./ask-block";
+import { renderTypedBlock } from "./typed-block-drawing";
 
 const schema = new Schema({
   nodes: {

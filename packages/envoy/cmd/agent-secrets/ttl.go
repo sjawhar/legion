@@ -19,9 +19,7 @@ const ttlFlag = "how long the grant lasts, a whole number of seconds such as 2m 
 // most the broker records (record.ValidLifetime), so `--ttl 0` is refused rather than read as
 // unset.
 func ttlSeconds(flags *flag.FlagSet, ttl time.Duration) (*int, error) {
-	set := false
-	flags.Visit(func(f *flag.Flag) { set = set || f.Name == "ttl" })
-	if !set {
+	if !flagGiven(flags, "ttl") {
 		return nil, nil
 	}
 	if ttl%time.Second != 0 || !record.ValidLifetime(int(min(ttl/time.Second, math.MaxInt32+1))) {

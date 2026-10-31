@@ -7,8 +7,13 @@ description: >-
 
   Bun is a toolchain, so CI runs the version this repository locks rather than whatever is
   latest: an unpinned runner moved to 1.4.2 and segfaulted `bun test` intermittently (8 crashes
-  in 60 runs against 2 in 60 on the pinned version, same tree, four cores). Raising Bun means
-  editing .bun-version and the two Dockerfile ARG BUN_VERSION defaults together.
+  in 60 runs against 2 in 60 on the pinned version, same tree, four cores). Raising Bun is two
+  commits: the new version's row in .github/ci-images.yaml first, then .bun-version, the
+  `ARG BUN_VERSION` default of packages/daemon/docker/worker.Dockerfile and every `FROM`.
+
+  A run off main passes no-cache, so only a run on main saves: an entry a pull request writes is
+  readable by no other pull request. no-cache is setup-bun's only cache input and also skips the
+  restore, so a run off main downloads Bun (about 34 MB) instead of restoring it.
 
 runs:
   using: composite
@@ -16,3 +21,4 @@ runs:
     - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       with:
         bun-version-file: .bun-version
+        no-cache: ${{ github.ref != 'refs/heads/main' }}

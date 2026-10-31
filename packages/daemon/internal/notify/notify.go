@@ -22,14 +22,80 @@ const refusalBodyLimit = 4096
 
 // ErrNoHolder is a role publish the listener refused because no live session holds the role: nobody
 // claimed it, or its holder's registration lapsed (writeRoleHolderError,
-// packages/envoy/cmd/listener/api.go). It is the ordinary state before a role's session claims it,
-// not a broken publish path, so a caller can hold what it published until one does.
+// packages/envoy/cmd/listener/api.go). Every listener release answers it, 404 with one of
+// roleHolderReasons. It is the ordinary state before a role's session claims it, not a broken
+// publish path, so a caller can hold what it published until one does.
 var ErrNoHolder = errors.New("no live session holds the role")
 
 // roleHolderReasons are the reasons the listener's 404 names for a role with no live holder
 // (roleHolderUnclaimed, roleHolderLapsed). A 404 without one of them is some other refusal — a route
 // an older listener lacks — and never ErrNoHolder.
 var roleHolderReasons = []string{"unclaimed", "holder_lapsed"}
+
+// The reasons of a role publish the listener answers 504 (ErrNotDelivered). ReasonReceiptTimeout
+// says the last forward reached the NATS server and the holder's session sent no receipt for it,
+// which a holder that stopped running while its registration lives gives; ReasonDeliveryFailed
+// says the listener found no live holder to forward to, could not read the role or session in
+// time, or could not show that a forward reached the server, which a hub that is down gives.
+const (
+	ReasonReceiptTimeout = "receipt_timeout"
+	ReasonDeliveryFailed = "delivery_failed"
+)
+
+// ErrNotDelivered is a role publish the listener answered 504: it forwarded the message to the
+// role's holder, or tried to, and the holder's session did not confirm it within the listener's
+// delivery window (publishDeliveryWindow, packages/envoy/cmd/listener/confirmed.go). Reason is
+// ReasonReceiptTimeout or ReasonDeliveryFailed; Holder is the session the listener last resolved,
+// "" when it resolved none; EventID names the envelope it forwarded. Only a listener
+// that confirms a role message before it answers gives it. An earlier listener answers 200 once
+// the NATS server took the message and reports a forward that then fails as a role-lane exception
+// (notifications.envoy.exceptions.notifications.role.*), so a caller that acts on this answer
+// still has to hear those reports while such a listener runs. A 504 without one of the two
+// reasons is a plain refusal, never ErrNotDelivered.
+type ErrNotDelivered struct {
+	Reason  string
+	Holder  string
+	EventID string
+}
+
+func (e ErrNotDelivered) Error() string {
+	return fmt.Sprintf("the role's holder %q did not confirm event %s (%s)", e.Holder, e.EventID, e.Reason)
+}
+
+// ErrRefusedByHolder is a role publish the listener answered 403 with reason "capability": the
+// role's holder, the session Holder names, does not advertise the delivery mode of the payload, or
+// the mode cannot be read unambiguously, so the listener forwarded nothing. Sending it again
+// changes nothing until another session holds the role. Only a listener that confirms a role
+// message before it answers gives it; an earlier listener's role lane drops such a message after
+// its 200 without a report.
+type ErrRefusedByHolder struct {
+	Holder string
+}
+
+func (e ErrRefusedByHolder) Error() string {
+	return fmt.Sprintf("the role's holder %q does not advertise the delivery mode", e.Holder)
+}
+
+// ErrPublishDenied is a role publish the listener answered 403 because the NATS server refused the
+// forward under the listener's own publish permissions, so the listener forwarded nothing: its body's
+// error opens with publishDeniedPrefix (writeBusUnavailable, packages/envoy/cmd/listener/api.go).
+// Message is that error, which names the subject the grant does not cover; it is bounded by
+// refusalBodyLimit as the refusal is. Sending it again changes nothing until an operator changes the
+// listener's grant. Any other 403 (one whose error does not open with the prefix, or whose body is
+// not JSON, as a proxy in front of the listener could write) stays a plain refusal, retried.
+type ErrPublishDenied struct {
+	Message string
+}
+
+// publishDeniedPrefix mirrors the listener's publishDeniedPrefix (packages/envoy/cmd/listener/api.go),
+// the opening of every answer it gives a publish its own NATS grant denies. Every listener since
+// sjawhar/legion#2167, which added the prefix, writes it, so a daemon that takes this release before
+// its listeners reads their denials too.
+const publishDeniedPrefix = "envoy: the message bus denied the publish under this listener's own permissions"
+
+func (e ErrPublishDenied) Error() string {
+	return fmt.Sprintf("the listener's NATS grant denied the forward (%s)", e.Message)
+}
 
 // RoleTopicPrefix is the Envoy subject a role token is reached on (ROLE_TOPIC_PREFIX,
 // packages/contracts/src/subject.ts): a notice goes to its architect's, and a review-stuck notice
@@ -41,14 +107,17 @@ const RoleTopicPrefix = "notifications.role."
 // daemon's notice executor), since every issue's topic is a subject its phase workers subscribe
 // to. It carries the controller notices (record.ControllerNotice), each an outbox row of its own:
 // every hold and a tree architect's own failed claim (workflow's noticeWithController), a root in
-// triage handed to Legion (admission), a root admission took out of the workflow because it held
-// no slot and waited for none (`unslotted`, admit's releaseUnslotted), and the slot wakes admission
-// sends through wakeController, `slot-free`, `todo` and `tick` (admit.Admission.wakeController and
-// its callers say when; the tick alone carries `openCapabilities`, the deployment capabilities with
-// no decision, admit.Admission.ReportCapabilities). The controller takes no issue for `slot-free`
-// or `todo`: it names the free slots in its summary and report, and only a person hands Legion
-// work (skill://legion-controller, "Free slots"). It sits among the issue topics, where no issue
-// key (`[A-Z][A-Z0-9]*-[0-9]+`) can be `controller`, and the plugin's controller subscribes to it
+// triage handed to Legion (admission), a root that gave its admission slot up while its architect
+// waits on a person (`awaiting-person`, workflow's enterAwaiting), a root admission took out of the
+// workflow because it held no slot and waited for none (`unslotted`, admit's releaseUnslotted), and
+// the slot wakes admission sends through wakeController, `slot-free`, `todo` and `tick`
+// (admit.Admission.wakeController and its callers say when; the tick alone carries
+// `openCapabilities`, the deployment capabilities with no decision,
+// admit.Admission.ReportCapabilities). The controller takes no issue for `slot-free`, `todo` or
+// `awaiting-person`: it names the free slots in its summary and report, and work reaches Legion
+// only when a person hands it over or a role reports a clear defect the controller files
+// (skill://legion-controller, "Free slots"). It sits among the issue topics, where no
+// issue key (`[A-Z][A-Z0-9]*-[0-9]+`) can be `controller`, and the plugin's controller subscribes to it
 // while it holds the controller role (legionControllerNoticeSubject,
 // packages/contracts/src/subject.ts). project is the project token panes are told as LEGION_PROJECT
 // (packages/pi-legion/src/controller-session.ts), never the Dispatch project key. It is a live
@@ -110,11 +179,24 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
 		refusal := fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
-		var reason struct {
-			Reason string `json:"reason"`
+		var answer struct {
+			Error   string `json:"error"`
+			Reason  string `json:"reason"`
+			Holder  string `json:"holder"`
+			EventID string `json:"event_id"`
 		}
-		if response.StatusCode == http.StatusNotFound && json.Unmarshal(body, &reason) == nil && slices.Contains(roleHolderReasons, reason.Reason) {
+		if json.Unmarshal(body, &answer) != nil {
+			return refusal
+		}
+		switch {
+		case response.StatusCode == http.StatusNotFound && slices.Contains(roleHolderReasons, answer.Reason):
 			return fmt.Errorf("%w: %w", refusal, ErrNoHolder)
+		case response.StatusCode == http.StatusGatewayTimeout && (answer.Reason == ReasonReceiptTimeout || answer.Reason == ReasonDeliveryFailed):
+			return fmt.Errorf("%w: %w", refusal, ErrNotDelivered{Reason: answer.Reason, Holder: answer.Holder, EventID: answer.EventID})
+		case response.StatusCode == http.StatusForbidden && answer.Reason == "capability":
+			return fmt.Errorf("%w: %w", refusal, ErrRefusedByHolder{Holder: answer.Holder})
+		case response.StatusCode == http.StatusForbidden && strings.HasPrefix(answer.Error, publishDeniedPrefix):
+			return fmt.Errorf("%w: %w", refusal, ErrPublishDenied{Message: answer.Error})
 		}
 		return refusal
 	}

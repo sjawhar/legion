@@ -188,6 +188,31 @@ func TestPanePairs(t *testing.T) {
 	}
 }
 
+// The four stall limits a phase worker's reminder runs on reach a pane as ordinary -e pairs: the
+// daemon merges the ones it holds into the spec's Env (the daemon package's workerSpawnSpec) and
+// a pane carries Env verbatim, so nothing of them is tmux's own.
+func TestPanePairsCarryTheStallLimits(t *testing.T) {
+	spec := testSpec()
+	limits := map[string]string{
+		"LEGION_STALL_REMINDER_MS":     "45000",
+		"LEGION_STALL_WAITING_MS":      "900000",
+		"LEGION_STALL_RESUME_MS":       "15000",
+		"LEGION_STALL_ARCHITECT_AFTER": "3",
+	}
+	maps.Copy(spec.Env, limits)
+	in := PaneInputs{
+		StateDir: "/state", Workspace: "/state/workspaces/LEGION-43", DaemonURL: "http://127.0.0.1:13370",
+		EnvoyURL: "http://127.0.0.1:9020", GHOwnersDir: "/state/secrets/legion-omp-legion-43-tester-gh",
+		GHDefault: "acme", GH: "/usr/bin/gh",
+	}
+	pairs := panePairs(spec, in, secretFiles("/state", spec))
+	for name, value := range limits {
+		if !slices.Contains(pairs, name+"="+value) {
+			t.Errorf("the pane's -e pairs = %q, want %q among them", pairs, name+"="+value)
+		}
+	}
+}
+
 // The tmux runtime never reads spec.Plugins: a pane always resumes on the plugin installed on
 // the daemon's host, which the boot gate already holds to the daemon's contract, so a stale-plugin
 // relaunch (LEGION-164) needs nothing of it here. panePairs and secretFiles — what builds the
@@ -239,7 +264,8 @@ func TestPaneVariablesNamesAndWritesTheTurnScopeOverlay(t *testing.T) {
 // A spec the runtime cannot honour exactly is refused before anything touches the disk or tmux:
 // the shared refusal against tmux's own runtime-owned variables (runtime.ValidateSpawnSpec, tested
 // with its own table, which also holds the claim token to the one its coordinates derive), then
-// what is tmux's alone: a pane's workspace is never lost and recovered.
+// what is tmux's alone: a pane's workspace is provisioned on the daemon's host, never recovered
+// from a ref, and the controller's marker is the runtime's to set.
 func TestValidateSpawnSpecRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -248,19 +274,18 @@ func TestValidateSpawnSpecRefuses(t *testing.T) {
 	}{
 		{"no claim", func(s *runtime.SpawnSpec) { s.Claim = "" }, "spawn: no claim token"},
 		{"an XDG directory", func(s *runtime.SpawnSpec) { s.Env["XDG_CONFIG_HOME"] = "/home/me/.config" }, "spawn legion-omp-legion-43-tester: Env sets XDG_CONFIG_HOME, which the runtime sets itself"},
-		{"a recovered workspace", func(s *runtime.SpawnSpec) { s.WorkspaceRecoveredFrom = "legion/LEGION-43" },
-			"spawn legion-omp-legion-43-tester: the spec recovers a lost workspace from legion/LEGION-43, and a tmux pane's workspace is on the daemon's own disk, never lost"},
+		{"the controller's marker", func(s *runtime.SpawnSpec) { s.Env["LEGION_CONTROLLER"] = "1" }, "spawn legion-omp-legion-43-tester: Env sets LEGION_CONTROLLER, which the runtime sets itself"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := testSpec()
 			tc.mutate(&spec)
-			err := validateSpawnSpec(spec, nil)
+			err := validateSpawnSpec(spec, nil, nil)
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("validateSpawnSpec = %v, want %q", err, tc.want)
 			}
 		})
 	}
-	if err := validateSpawnSpec(testSpec(), []string{"ANTHROPIC_API_KEY"}); err != nil {
+	if err := validateSpawnSpec(testSpec(), []string{"ANTHROPIC_API_KEY"}, map[string]string{"ELAN_HOME": "/opt/elan"}); err != nil {
 		t.Errorf("a well-formed spec was refused: %v", err)
 	}
 }
@@ -286,7 +311,7 @@ func TestValidateSpawnSpecRefusesACollisionWithAProviderKey(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := testSpec()
 			tc.mutate(&spec)
-			if err := validateSpawnSpec(spec, []string{tc.key}); err == nil || err.Error() != tc.want {
+			if err := validateSpawnSpec(spec, []string{tc.key}, nil); err == nil || err.Error() != tc.want {
 				t.Fatalf("validateSpawnSpec = %v, want %q", err, tc.want)
 			}
 		})

@@ -8,6 +8,7 @@ import type { AgentStreamFrame } from "@legion/contracts";
 import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { NO_SESSION_SENDS } from "../conversation/useSessionSends";
 import { AgentThread } from "./AgentThread";
 import { applyFrames, EMPTY_CONVERSATION, toThreadMessages } from "./conversation";
 import { type KeyedMessage, turnKey } from "./dispatch-marks";
@@ -57,10 +58,12 @@ function Harness({ messages }: { messages: KeyedMessage[] }): ReactNode {
         commands={undefined}
         contentIds={messages.map((message) => turnKey(message.metadata?.custom ?? {}, message.id))}
         empty="Nothing yet."
+        held={false}
         ownSendCount={0}
         placeholder="Message the session…"
         replayCount={0}
         resetKey="session-1"
+        sends={NO_SESSION_SENDS}
         sessionId="session-1"
       />
     </AssistantRuntimeProvider>

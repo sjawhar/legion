@@ -1,0 +1,26 @@
+kind: Fixed
+body: |-
+    An agent's options edit of a Dispatch decision keeps what a person wrote under an option.
+    Each sent option is paired with the list item already holding it, first by the whole option
+    and then by its label, so an option the edit does not change keeps its own node — its line as
+    it stands, its block id, its marks and the sub-list, second paragraph or link under it — and
+    one whose description it changes keeps every block under its line. An edit that would drop
+    an option holding more than its plain line, or rewrite a line that holds a link, bold, code or
+    an image, is refused whole, with that item or that line quoted and `dispatch doc-edit` named,
+    since the ask row shows an
+    option's label and description alone. What those refusals weigh is what the markdown writes,
+    so a mark no reader sees — the editor's own on every character a person types — is nothing to
+    lose. Settlement's restore of a decided ask's recorded wording has no caller a refusal could
+    reach, so it drops an item no decided option is paired with, whatever that item holds: a block
+    left disagreeing with the row of the ask it was decided on would disagree for good. A decision
+    whose question a person emptied is repaired by an ask edit carrying a question, which keeps
+    every option list in place; an edit of it carrying no question is refused with that step named,
+    where before every edit of it was refused with a sentence that named none. Where that repair
+    leaves the block holding more than one list, the ask row keeps the options it holds rather than
+    the options of every list joined, which is no decision's reading. A refusal that names blocks
+    to delete names a nested decision the content rule leaves nothing of by its own block id, where
+    it used to claim no document edit works, and says that an open ask on a decision it names is
+    answered or resolved before the delete.
+time: 2026-10-29T22:40:00.000000000Z
+custom:
+    Issue: pr2525

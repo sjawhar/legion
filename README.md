@@ -126,9 +126,10 @@ bun run docs:dev
 | `skills/` | The skills Legion's agents load: the architect, the controller, the phase workers, Dispatch, Envoy and the review rubrics. |
 | `deploy/kubernetes/` | Example files for running Legion on Kubernetes: `legion.yaml`, the controller's file, and a model route. |
 | `docs/site/` | The documentation site, in Astro Starlight. |
-| `docs/` | Beside the site: the Kubernetes runtime's reference (`kubernetes.md`), design principles, plans and learnings. |
+| `STRATEGY.md` | What Legion and Dispatch are for, their key metrics, tracks, principles, and the boundaries that need the owner's decision. |
+| `docs/` | Beside the site: the Kubernetes runtime's reference (`kubernetes.md`), plans and learnings. |
 | `scripts/` | The live end-to-end proofs (`scripts/e2e/`) and repository tooling. |
-| `patches/` | Patches Bun applies to three editor dependencies at install. |
+| `patches/` | Patches Bun applies at install: three editor dependencies, and nats.js (`packages/envoy-client/README.md` says why). |
 | `.github/` | CI and release workflows, and the checks they run. |
 | `.dispatch/architecture/` | Legion's architecture model, which Dispatch imports for the project. |
 
@@ -149,17 +150,22 @@ go -C packages/envoy test ./...                      # Envoy, Dispatch's server 
 ```
 
 Envoy's Go tests start NATS in Docker, and the tests that need a Postgres read its address from the
-environment. The repository's conventions and each part's commands are in `AGENTS.md` at the root
-and in the `AGENTS.md` beside most packages; `skills/AGENTS.md` covers the skills. The documentation
-site's [contributing page](https://sjawhar.github.io/legion/contributing/) covers writing its pages.
+environment (`LEGION_TEST_PG_DSN` for the daemon's). On a host without Docker, the daemon's NATS
+tests use a running nats-server with JetStream instead when `LEGION_TEST_NATS_URL` (its client URL)
+and `LEGION_TEST_NATS_MONITOR_URL` (its monitoring endpoint) are both set, one package at a time
+(`go test -p 1`). The repository's conventions and each part's commands are in `AGENTS.md` at the
+root and in the `AGENTS.md` beside most packages; `skills/AGENTS.md` covers the skills. The
+documentation site's [contributing page](https://sjawhar.github.io/legion/contributing/) covers
+writing its pages.
 
 ## License
 
 Apache License 2.0; see [LICENSE](LICENSE). Code copied from other projects keeps its own license in
 a `LICENSE` file beside it.
 
-Every artifact this repository ships — each release, and the documentation site, which `docs.yaml`
-deploys on every push to `main` rather than on a release — carries the licenses of the third-party
+Every artifact this repository ships — each release, and the documentation site, which the
+`.github/workflows/docs-pages.yaml` builds and deploys on each push to `main` whose change selects
+the `docs` build rather than on a release — carries the licenses of the third-party
 code in it, written at build time from what the build included, and the build fails when a
 dependency's license cannot be determined:
 

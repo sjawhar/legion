@@ -16,8 +16,9 @@ import {
   patchIssue,
 } from "./api";
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
+import { expectConsecutiveLinksClear } from "./layout";
 import { insertExternalLink, resetDatabase } from "./seed";
-import { refusePosts } from "./sends";
+import { refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 const session = {
@@ -59,7 +60,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the phone shell traps focus, dismisses on Escape at the right nesting level, never wraps a key, and renders a pinned event's own description", async ({
+test("the phone shell traps focus, dismisses on Escape at the right nesting level, never wraps a key, and renders a pinned event's own description @phone", async ({
   browser,
 }, testInfo) => {
   const isPhone = testInfo.project.name === "iphone";
@@ -191,7 +192,9 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
   }
 });
 
-test("a phone thread trap skips a held composer's disabled controls", async ({ browser }) => {
+test("a phone thread trap skips a held composer's disabled controls @phone", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -250,7 +253,7 @@ test("a phone thread trap skips a held composer's disabled controls", async ({ b
 // The wrap's other end. Shift+Tab from the sheet's first control goes to its last enabled one,
 // past the held composer's disabled controls, which a trap that read the `disabled` attribute
 // counted as the last and could not focus, leaving focus where it was.
-test("a phone sheet trap wraps Shift+Tab from its first control past a held composer", async ({
+test("a phone sheet trap wraps Shift+Tab from its first control past a held composer @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -299,14 +302,14 @@ test("a phone sheet trap wraps Shift+Tab from its first control past a held comp
     ).toBe(true);
     await expect(body).toHaveValue("Keep this draft");
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(body).toHaveValue("Keep this draft");
   } finally {
     await alice.close();
   }
 });
 
-test("a project document has no horizontal overflow, 44px controls, and a Comments margin sheet", async ({
+test("a project document has no horizontal overflow, 44px controls, and a Comments margin sheet @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -343,7 +346,7 @@ test("a project document has no horizontal overflow, 44px controls, and a Commen
   }
 });
 
-test("inline @ autocomplete has touch-sized controls and no overflow on iPhone", async ({
+test("inline @ autocomplete has touch-sized controls and no overflow on iPhone @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the 390 px interaction applies on iPhone");
@@ -391,9 +394,10 @@ test("inline @ autocomplete has touch-sized controls and no overflow on iPhone",
 // padding, not an overlay: padding on an inline element grows the hit box without moving the
 // line, and without covering whatever happens to sit within 44px of the link.
 // The row places the turn itself and then waits for it to stop moving: the Conversation's jump
-// to its newest turn lands well after a link first has a box, and when it is missed the turn is
-// left under the fixed comment composer, where a hit test reads the composer and not the link.
-test("an inline link keeps its line and grows its hit box without covering its neighbours", async ({
+// to its newest turn lands well after a link first has a box, and the row measures what it
+// placed rather than trusting the page's own placement, since a turn left under the fixed comment
+// composer would have a hit test read the composer and not the link.
+test("an inline link keeps its line and grows its hit box without covering its neighbours @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the 390 px interaction applies on iPhone");
@@ -413,8 +417,10 @@ test("an inline link keeps its line and grows its hit box without covering its n
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
   );
   // An open ask's question renders in full on the Inbox, so it is where a body with a wrapped
-  // link and two stacked links can be measured. A generous hit box would reach the words
-  // beside the first and the link above the last.
+  // link, two stacked links and two links on consecutive lines can be measured. A generous hit
+  // box would reach the words beside the first, the link below the stacked pair's upper one, and
+  // the text of the line above the last. A question reads a single newline as a space, so the
+  // last pair is split by a hard break.
   const bodyAsk = await createAsk(
     issue.key,
     {
@@ -424,13 +430,15 @@ test("an inline link keeps its line and grows its hit box without covering its n
         "[First choice](https://example.invalid/one)",
         "",
         "[Second choice](https://example.invalid/two)",
+        "",
+        "[Upper choice](https://example.invalid/upper-choice)\\\n[Lower choice](https://example.invalid/lower-choice)",
       ].join("\n"),
     },
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
   );
 
-  // A message turn is 16px prose on 24px lines - the tightest pitch a message body reaches -
-  // and a hard break puts two links on consecutive lines of it.
+  // A message turn is 16px prose on 24px lines, and a hard break puts two links on consecutive
+  // lines of it.
   await createMessage(
     issue.key,
     {
@@ -554,9 +562,9 @@ test("an inline link keeps its line and grows its hit box without covering its n
       line.probeClear,
       'the turn was left under the fixed comment composer, so the probe measured the composer - or [aria-label="Comment composer"] is gone'
     ).toBe(true);
-    // On consecutive lines of one message turn - 16px prose on 24px lines, the tightest pitch
-    // a message body reaches - the lower link's padded box starts at least two pixels below
-    // the upper link's own text, which is the margin the probe at `upperText.bottom + 1` needs.
+    // On consecutive lines of one message turn - 16px prose on 24px lines - the lower link's
+    // padded box starts at least two pixels below the upper link's own text, which is the
+    // margin the probe at `upperText.bottom + 1` needs.
     expect(
       line.lowerClearance,
       "the lower link's padded box starts within a pixel of the upper link's own text, so the probe one pixel below that text is inside the lower link, and the padding check below would go red for the pitch rather than for the padding"
@@ -570,16 +578,15 @@ test("an inline link keeps its line and grows its hit box without covering its n
       .locator('main a:not([data-testid^="ask-"] a)')
       .filter({ hasText: /^Upper line$/ });
     await expect(upperLink).toHaveCount(1);
-    // On consecutive lines of one message turn - 16px prose on 24px lines, the tightest pitch
-    // a message body reaches - a tap at the bottom of the upper link's own text is taken by
-    // the upper link.
+    // On consecutive lines of one message turn - 16px prose on 24px lines - a tap at the bottom
+    // of the upper link's own text is taken by the upper link.
     await upperLink.click({
       position: { x: line.hitX, y: line.onTextBottomY },
       timeout: 5_000,
       trial: true,
     });
     // One pixel below that text is still inside the upper link's hit box: this trial click is
-    // the check that goes red when the three pixels of `.prose a { padding-block }` are gone.
+    // the check that goes red when the padding of `.prose a { padding-block }` is gone.
     await upperLink.click({
       position: { x: line.hitX, y: line.inPaddingY },
       timeout: 5_000,
@@ -662,6 +669,13 @@ test("an inline link keeps its line and grows its hit box without covering its n
     //    second.
     expect(measured.onFirstLowerEdge).toBe("First choice");
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
+    // 5. Two choices a hard break puts on consecutive lines of the card's 15px text on 24.375px
+    //    lines (`text-[15px] leading-relaxed`): the lower one's padded box starts at or below
+    //    the upper one's own text.
+    await expectConsecutiveLinksClear(card, "Upper choice", "Lower choice", {
+      fontSize: 15,
+      lineHeight: 24.375,
+    });
   } finally {
     await context.close();
   }
@@ -727,7 +741,7 @@ async function expectStacked(control: Locator): Promise<void> {
   }
 }
 
-test("a long name ends in an ellipsis wherever a link or control truncates it", async ({
+test("a long name ends in an ellipsis wherever a link or control truncates it @phone", async ({
   browser,
 }, testInfo) => {
   test.setTimeout(90_000);
@@ -834,7 +848,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expectEllipsis(authorChip);
     await expect
       .soft(authorChip.getByText(longTitle, { exact: true }))
-      .toHaveAttribute("title", longTitle);
+      .toHaveAttribute("title", `${longTitle} · e2e-long-title`);
 
     await page.goto(`/issues/${issue.key}`);
     await expectEllipsis(page.getByRole("link", { name: longUrl }));

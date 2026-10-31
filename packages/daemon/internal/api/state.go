@@ -17,7 +17,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/controller"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -66,16 +68,58 @@ type State struct {
 	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
 	// inside: every collection in it is emitted non-nil (contract 35).
 	Settings Settings `json:"settings"`
+	// Consumers is the lag of the daemon's three durable consumers (ConsumerLagView), read from
+	// NATS at the request after the state's transaction commits, so no NATS read holds the
+	// snapshot open. Never null: a daemon with no workflow has none (contract 43).
+	Consumers []ConsumerLagView `json:"consumers"`
+}
+
+// ConsumerLagView is one durable consumer's lag as the state shows it (intake.ConsumerLag): its
+// name; how many messages wait for it (Waiting); the stream time of the oldest and its age in whole
+// seconds at the read, both null when nothing waits or when that message could not be read; when
+// the daemon last handled one of its messages, null before the first; whether it is stalled,
+// messages waiting and none handled for 60 seconds; and Unavailable, what NATS did not answer or
+// refused, absent when every read answered.
+type ConsumerLagView struct {
+	Name             string     `json:"name"`
+	Waiting          uint64     `json:"waiting"`
+	OldestAt         *time.Time `json:"oldestAt"`
+	OldestAgeSeconds *int64     `json:"oldestAgeSeconds"`
+	LastHandledAt    *time.Time `json:"lastHandledAt"`
+	Stalled          bool       `json:"stalled"`
+	Unavailable      string     `json:"unavailable,omitempty"`
+}
+
+// ConsumerLagViewsOf is lags as the state shows them, consumer for consumer; no lags is an empty
+// list.
+func ConsumerLagViewsOf(lags []intake.ConsumerLag) []ConsumerLagView {
+	views := make([]ConsumerLagView, len(lags))
+	for i, lag := range lags {
+		view := ConsumerLagView{Name: lag.Name, Waiting: lag.Waiting, Stalled: lag.Stalled, Unavailable: lag.Unavailable}
+		if !lag.OldestAt.IsZero() {
+			oldestAt, age := lag.OldestAt, int64(lag.OldestAge/time.Second)
+			view.OldestAt, view.OldestAgeSeconds = &oldestAt, &age
+		}
+		if !lag.LastHandledAt.IsZero() {
+			handledAt := lag.LastHandledAt
+			view.LastHandledAt = &handledAt
+		}
+		views[i] = view
+	}
+	return views
 }
 
 // RepositoriesView is the project's repository mapping as the daemon serves it. Owners, Mapped,
-// Refused and Caches are sorted, and never null. Caches are the repository caches of repositories
-// the mapping no longer names, each kept until its RetainedUntil (contract 32).
+// Refused, WithoutWebhookApp and Caches are sorted, and never null. Caches are the repository
+// caches of repositories the mapping no longer names, each kept until its RetainedUntil (contract
+// 32). WithoutWebhookApp is each served repository Dispatch's GitHub App is not known to be
+// installed on, with why (contract 43).
 type RepositoriesView struct {
-	Owners  []string                `json:"owners"`
-	Mapped  []MappedRepositoryView  `json:"mapped"`
-	Refused []RefusedRepositoryView `json:"refused"`
-	Caches  []CacheView             `json:"caches"`
+	Owners            []string                `json:"owners"`
+	Mapped            []MappedRepositoryView  `json:"mapped"`
+	Refused           []RefusedRepositoryView `json:"refused"`
+	WithoutWebhookApp []WebhookAppGapView     `json:"withoutWebhookApp"`
+	Caches            []CacheView             `json:"caches"`
 }
 
 // MappedRepositoryView is a repository the daemon serves, as GitHub names it, whether it is the
@@ -113,7 +157,14 @@ type RefusedRepositoryView struct {
 	Reason string `json:"reason"`
 }
 
-// MarshalJSON keeps the four lists arrays on the wire.
+// WebhookAppGapView is a served repository, as Dispatch maps it, that Dispatch's GitHub App is not
+// installed on, or whose check failed, and why. The daemon serves it all the same.
+type WebhookAppGapView struct {
+	Repo   string `json:"repo"`
+	Reason string `json:"reason"`
+}
+
+// MarshalJSON keeps the five lists arrays on the wire.
 func (r RepositoriesView) MarshalJSON() ([]byte, error) {
 	type wire RepositoriesView
 	out := wire(r)
@@ -125,6 +176,9 @@ func (r RepositoriesView) MarshalJSON() ([]byte, error) {
 	}
 	if out.Refused == nil {
 		out.Refused = []RefusedRepositoryView{}
+	}
+	if out.WithoutWebhookApp == nil {
+		out.WithoutWebhookApp = []WebhookAppGapView{}
 	}
 	if out.Caches == nil {
 		out.Caches = []CacheView{}
@@ -192,8 +246,8 @@ type AgentSecretsLoginView struct {
 }
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
-// `strandedClaims` and `capabilities` arrays on the wire: a nil Go map or slice is `null`, which the
-// plugin's strict reader refuses.
+// `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go map or slice is
+// `null`, which the plugin's strict reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -211,6 +265,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.Capabilities == nil {
 		out.Capabilities = []CapabilityState{}
+	}
+	if out.Consumers == nil {
+		out.Consumers = []ConsumerLagView{}
 	}
 	return json.Marshal(out)
 }
@@ -231,9 +288,21 @@ type Admission struct {
 	Cap     int      `json:"cap"`
 	Active  []string `json:"active"`
 	Waiting []string `json:"waiting"`
+	// Blocked is every issue Legion is waiting to start that waits on a Dispatch issue nobody has
+	// finished (INFRA-225), by issue key: a waiting root admission skips and a child the workflow
+	// holds at `admitted`, together in one list, each with what it still waits on. Waiting is the
+	// waiting line and stays roots alone, so a blocked root is in both. Never null; empty when
+	// nothing waits on a link.
+	Blocked []BlockedIssue `json:"blocked"`
 }
 
-// MarshalJSON keeps `active` and `waiting` arrays on the wire, empty rather than `null`.
+// BlockedIssue is one issue of Blocked and the issues it waits on that are not done. It is
+// record.BlockedIssue: the state's `blocked` and a tick controller notice's are the same list
+// read two ways, and the row is declared once, under both.
+type BlockedIssue = record.BlockedIssue
+
+// MarshalJSON keeps `active`, `waiting` and `blocked` arrays on the wire, empty rather than
+// `null`.
 func (a Admission) MarshalJSON() ([]byte, error) {
 	type wire Admission
 	out := wire(a)
@@ -242,6 +311,9 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 	}
 	if out.Waiting == nil {
 		out.Waiting = []string{}
+	}
+	if out.Blocked == nil {
+		out.Blocked = []BlockedIssue{}
 	}
 	return json.Marshal(out)
 }
@@ -269,9 +341,28 @@ type Issue struct {
 	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
 	DesignGate  *GateView                `json:"designGate,omitempty"`
 	Slot        *SlotView                `json:"slot,omitempty"`
+	// WaitingOn is present only while the root is in awaiting_person: what it waits on from a
+	// person, when the wait began and, once a person answered, when and by what act.
+	WaitingOn *WaitingOnView `json:"waitingOn,omitempty"`
 	// Check is the issue's open production check, the work after its close (record.ProductionCheck):
 	// present only while the check is open, and absent once it closed or while none was opened.
 	Check *CheckView `json:"check,omitempty"`
+}
+
+// WaitingOnView is what a root in awaiting_person waits on from a person (record.Awaiting). Kind
+// is `ask` with Ask, the id of the oldest question of its tree still with the person, or `gate`
+// with GateVersion and ArtifactID, the spec version of its registered document a person has not
+// reviewed. Since is Dispatch's time of the hand-back the wait began at,
+// absent when unknown. AnsweredAt and AnsweredBy are absent until a person's act answers the wait;
+// the root then waits at the front of admission's waiting line for its slot.
+type WaitingOnView struct {
+	Kind        string        `json:"kind"`
+	Ask         string        `json:"ask,omitempty"`
+	GateVersion int           `json:"gateVersion,omitempty"`
+	ArtifactID  string        `json:"artifactId,omitempty"`
+	Since       *time.Time    `json:"since,omitempty"`
+	AnsweredAt  *time.Time    `json:"answeredAt,omitempty"`
+	AnsweredBy  record.Answer `json:"answeredBy,omitempty"`
 }
 
 // MarshalJSON keeps `workers` an object on the wire for an issue that has no worker yet.
@@ -401,8 +492,9 @@ type CheckView struct {
 }
 
 // CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge`,
-// `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`), Detail the
-// cause's own detail (the run and its completion, or the build's commit), and At when.
+// `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
+// Detail the cause's own detail (the run and its completion, the deploy workflow's run, attempt,
+// job and step success, or the build's commit), and At when.
 type CheckWakeView struct {
 	Kind   string    `json:"kind"`
 	Detail string    `json:"detail"`
@@ -475,9 +567,9 @@ func StrandedMoves() []StrandedMove {
 //     task or its phase start waits, otherwise the operator's delivery of its phase's resume task.
 //   - StrandedRetry, a failed architect: the operator's retry (`legion claims retry`), which
 //     relaunches its session with fresh budgets, and a catch-up follows.
-//   - StrandedWorkflowStart, a failed phase worker: its architect's retry of the held phase, since
-//     a failed claim ignores resume and deliver and the operator's retry relaunches only an
-//     architect.
+//   - StrandedWorkflowStart, a failed phase worker: the retry of its held phase — its architect's
+//     retry_or_escalate, or the operator's retry (`legion claims retry`, which applies the same
+//     retry) — since a failed claim ignores resume and deliver.
 func (c StrandedClaim) Move() StrandedMove {
 	failed := c.State == string(supervise.StateFailed)
 	switch {

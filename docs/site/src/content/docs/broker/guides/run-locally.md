@@ -1,15 +1,14 @@
 ---
 title: Run the broker locally
-description: Start a whole Secrets Broker stack on your machine with one script and drive a machine login, a session and an approval on the broker's own page by hand.
+description: Start a whole Secrets Broker stack on your machine with one script and drive a machine login, a session and an approval by hand.
 sidebar:
   order: 13
 ---
 
 `packages/envoy/scripts/dev-broker.sh` creates a Postgres database of its own, builds the broker,
 its clients and `dev-oidc-issuer`, writes a fake secrets file, which stands in for Secrets Manager,
-starts `dev-oidc-issuer`, which stands in for a cluster's ServiceAccount token issuer and for the
-identity provider a person signs in to the broker's approval page with, and starts the broker on a
-free port, trusting that issuer for both. It needs Go, and a Postgres server: by default it
+starts `dev-oidc-issuer`, which stands in for a cluster's ServiceAccount token issuer, and starts
+the broker on a free port, trusting that issuer. It needs Go, and a Postgres server: by default it
 starts one in Docker through `packages/envoy/scripts/dev-postgres.sh` (a container named
 `dispatch-pg`, reused when it is there; one made from another image than that script's is
 refused, with the commands that move its data onto the right one). Without Docker, run Postgres
@@ -21,34 +20,30 @@ role that may create databases; the script then creates and drops its database t
 With Docker the command is the script alone; this run used a Postgres of its own:
 
 ```console
-$ DEV_BROKER_POSTGRES_URL='postgres://legion@127.0.0.1:55432/postgres?sslmode=disable' packages/envoy/scripts/dev-broker.sh
-dev-broker: workdir /tmp/agent-secrets-dev.naddLJ
-dev-broker: created isolated database dev_broker_naddlj
+$ DEV_BROKER_POSTGRES_URL='postgres://broker:<password>@127.0.0.1:5433/postgres?sslmode=disable' packages/envoy/scripts/dev-broker.sh
+dev-broker: workdir /tmp/agent-secrets-dev.Tp2tQV
+dev-broker: created isolated database dev_broker_tp2tqv
 dev-broker: building broker, dev-oidc-issuer, agent-secrets, agent-secrets-helper and agent-secrets-devrelay...
 dev-broker: starting dev-oidc-issuer...
-dev-oidc-issuer: /tmp/agent-secrets-dev.naddLJ/account-token holds system:serviceaccount:example-ns:example-dispatch's token for audience legion-broker-pod (pod 9b9707fd-692f-4ce2-a6de-f6b83f3d3f3a)
-dev-oidc-issuer: /tmp/agent-secrets-dev.naddLJ/exchange-token holds system:serviceaccount:example-ns:example-worker's token for audience legion-broker-exchange (pod 0bbfc061-a470-4ad6-be39-8f1ebdef5670)
-dev-oidc-issuer: signs people in for client dev-broker with hd example.com
-dev-oidc-issuer: issuer listening url=http://127.0.0.1:17593
+dev-oidc-issuer: /tmp/agent-secrets-dev.Tp2tQV/account-token holds system:serviceaccount:example-ns:example-dispatch's token for audience legion-broker-pod (pod f3b3a12a-56ff-4e89-ac85-889b20d971a9)
+dev-oidc-issuer: /tmp/agent-secrets-dev.Tp2tQV/exchange-token holds system:serviceaccount:example-ns:example-worker's token for audience legion-broker-exchange (pod a829f93b-ad87-4efb-8d03-74b51e97c810)
+dev-oidc-issuer: issuer listening url=http://127.0.0.1:36930
 dev-broker: starting broker...
-2026/10/25 17:32:10 INFO broker stop budget drain=0s shutdown=60s total=60s
-2026/10/25 17:32:10 INFO database sign-in method=password
-2026/10/25 17:32:10 INFO approval sign-in on issuer=http://127.0.0.1:17593 client_id=dev-broker
-2026/10/25 17:32:10 INFO secret store store=aws-secrets-manager credentials="fake secrets file"
-2026/10/25 17:32:10 INFO broker: listening for the other pods' secret rereads channel=broker_secret_reread
-2026/10/25 17:32:10 INFO broker listening addr=127.0.0.1:19403
-2026/10/25 17:32:10 INFO token exchange state=on kubernetes=true github=false accounts=1 workflows=0
+2026/10/25 10:49:22 INFO database sign-in method=password
+2026/10/25 10:49:22 INFO secret store store=aws-secrets-manager credentials="fake secrets file"
+2026/10/25 10:49:22 INFO broker listening addr=127.0.0.1:62083
+2026/10/25 10:49:22 INFO token exchange state=on kubernetes=true github=false accounts=1 workflows=0
 
 dev-broker: ready.
 
-  export AGENT_SECRETS_URL=http://127.0.0.1:19403
-  export AGENT_SECRETS_ACCOUNT_TOKEN_FILE=/tmp/agent-secrets-dev.naddLJ/account-token
+  export AGENT_SECRETS_URL=http://127.0.0.1:62083
+  export AGENT_SECRETS_ACCOUNT_TOKEN_FILE=/tmp/agent-secrets-dev.Tp2tQV/account-token
   export AGENT_SECRETS_APPROVER=ada@example.com
-  export AGENT_SECRETS_HELPER_SOCK=/tmp/agent-secrets-dev.naddLJ/helper.sock
-  export AGENT_SECRETS_OPERATOR_FILE=/tmp/agent-secrets-dev.naddLJ/operator
-  export AGENT_SECRETS_MACHINE_FILE=/tmp/agent-secrets-dev.naddLJ/machine.json
-  export DEV_BROKER_DIR=/tmp/agent-secrets-dev.naddLJ
-  export PATH=/tmp/agent-secrets-dev.naddLJ/bin:$PATH
+  export AGENT_SECRETS_HELPER_SOCK=/tmp/agent-secrets-dev.Tp2tQV/helper.sock
+  export AGENT_SECRETS_OPERATOR_FILE=/tmp/agent-secrets-dev.Tp2tQV/operator
+  export AGENT_SECRETS_MACHINE_FILE=/tmp/agent-secrets-dev.Tp2tQV/machine.json
+  export DEV_BROKER_DIR=/tmp/agent-secrets-dev.Tp2tQV
+  export PATH=/tmp/agent-secrets-dev.Tp2tQV/bin:$PATH
 ...
 ```
 
@@ -57,7 +52,7 @@ creates the database.
 
 Leave it running, and paste the exports into a second shell. They point the clients at this broker
 and name the caller token, the ServiceAccount token with which Dispatch's server, and here
-`agent-secrets-devrelay` in its place, relays a person's machine-login decision
+`agent-secrets-devrelay` in its place, decides for an approver
 ([Concepts](/legion/broker/concepts/#approvals)). The broker lists that token's account,
 `system:serviceaccount:example-ns:example-dispatch`, as its caller `dispatch`, and
 `dev-oidc-issuer` rewrites the file before its token lapses, as a kubelet rewrites a pod's
@@ -88,11 +83,11 @@ agent-secrets machine login
 ```
 
 `machine login` prints a code and waits. In a third shell with the same exports, approve it as
-Dispatch would, with the code:
+Dispatch would:
 
 ```console
 $ agent-secrets-devrelay machine-approve --code YE9L-5FM5
-{"credential_id":"3bc28cd1-d04b-4481-92a8-ff10350fe795","state":"approved"}
+{"credential_id":"3bc28cd1-d04b-4481-92a8-ff10350fe795","grant_id":null,"state":"approved"}
 ```
 
 and `machine login` exits 0. The helper's log, `$DEV_BROKER_DIR/helper.log`, says
@@ -110,28 +105,31 @@ enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
+agent-secrets: DEMO_READ_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 demo-read-token-value
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'echo "deploying with a ${#DEMO_API_KEY}-character key"'
 ```
 
-The last command waits for approval, and names who approves it and where: `waiting for
-ada@example.com to approve it on the secrets broker: http://127.0.0.1:<port>/approve/<record>`.
-Open that address in a browser on this machine. The broker has no session for you yet, so it sends
-the browser to sign in at `dev-oidc-issuer`, which signs you in as the request's approver,
-`ada@example.com`, with no page to fill in (its `--sign-in-default`, the same login, covers a
-shared secret's request, which names no one), and brings you back to the request's page. Click
-**Approve** ([approving a request](/legion/broker/guides/approve-a-request/) covers the page), and
-the command runs:
+Every line about a secret names where it came from: the broker this stack runs, and the kind of
+store that broker reads. The local stack's store is `BROKER_FAKE_SECRETS_FILE`, which stands in for
+AWS Secrets Manager. No session's line names the broker's host or the store's account or region,
+since an agent's output is often quoted; `agent-secrets secret show` names the account and region
+its key ARN carries.
+
+The last command waits for approval, and names who approves it (`waiting for ada@example.com to
+approve it under Credential requests in their Dispatch Inbox`). In the third shell, list what waits
+on the approver and approve it ([approving a request](/legion/broker/guides/approve-a-request/#without-dispatch)
+shows the output), and the command runs:
 
 ```console
 deploying with a 18-character key
 ```
 
-A request has two ids: the request id `agent-secrets` prints, and the record id its page's address
-ends in. `agent-secrets request NAME --json` prints both, and **Deny** on the page denies a
-request. `agent-secrets-devrelay` decides no secret request: the broker refuses every route a
-service calls to decide one, `DECIDE_ON_BROKER_PAGE`.
+A request has two ids: the request id `agent-secrets` prints, and the record id the approver's list
+shows and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` prints both, and
+`agent-secrets-devrelay deny --record <record id>` denies a request.
 
 Each grant so far lasts until the session ends (`agent-secrets self` lists it `until this session
 ends`). A request may ask for less with `--ttl`, and the grant then ends on its own once that has
@@ -139,12 +137,14 @@ passed, while the session lives on:
 
 ```console
 $ agent-secrets DEMO_READ_TOKEN --ttl 2m -- printenv DEMO_READ_TOKEN
+agent-secrets: DEMO_READ_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 demo-read-token-value
 $ agent-secrets self
 enrollment_id: 7cf72ec3-d10f-46fd-984f-ddd856b229c2
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-11T01:51:13Z
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 grant: f81251ab-6552-450c-9eca-12a793a29f4c (request 86237327-1f78-4c79-82a5-4f71174e71c5, expires 2026-10-11T01:38:14Z)
 ```
 
@@ -164,10 +164,15 @@ as Dispatch's pages would, under the helper's machine login
 $ agent-secrets machine list
 CREDENTIAL_ID                         HOST                 APPROVED_BY      ISSUED                EXPIRES               STATE
 a0324632-0cc0-4113-bb26-d4123fab9da6  example-host-devbox  ada@example.com  2026-10-10T15:01:31Z  2026-10-17T15:01:31Z  ok
+Every row is a login to the broker AGENT_SECRETS_URL names.
 $ agent-secrets grant list
 GRANT_ID                              SECRETS          GRANTED    APPROVER  SESSION                                       OPERATOR         EXPIRES
 8fe92a26-b355-4c28-8679-60e8ce98b1d9  DEMO_READ_TOKEN  automatic  -         session/example-host-devbox:2856922:35395441  ada@example.com  session-end
+Every row is a grant from the broker AGENT_SECRETS_URL names (AWS Secrets Manager).
 ```
+
+Each list says on standard error which broker and store its rows are from, so the table on
+standard output stays one row per login or grant for a script.
 
 `machine list` shows your own machines' logins alone; Dispatch's machine-login page also lists
 every service's. `agent-secrets grant revoke <grant id>` ends a grant there, and
@@ -251,12 +256,10 @@ $ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" 
 ## What is real and what is not
 
 The broker, its database, its policy and every client are the real ones. Three things stand in for
-production: `agent-secrets-devrelay` plays Dispatch's server for a machine login (it presents the
-caller token and names the approver itself); `dev-oidc-issuer` plays the cluster's ServiceAccount token issuer
+production: `agent-secrets-devrelay` plays Dispatch's server (it presents the caller token and
+names the approver itself); `dev-oidc-issuer` plays the cluster's ServiceAccount token issuer
 (the Go tests' own local issuer, `internal/oidc/oidctest`, served on a loopback port: it publishes
-a key it holds in memory and mints the two token files, each bound to a pod of its own) and the
-Workspace's identity provider (it signs in, for the broker's sign-in client `dev-broker`, whoever
-a sign-in names as its `login_hint`, with no page and no password); and the
+a key it holds in memory and mints the two token files, each bound to a pod of its own); and the
 fake secrets file (`BROKER_FAKE_SECRETS_FILE`: each secret's name, key, tags and value, as JSON)
 plays Secrets Manager and KMS. The broker reads that file again on every call it makes to it, so
 editing it is how you write a secret here.

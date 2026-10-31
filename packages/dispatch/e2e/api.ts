@@ -6,6 +6,7 @@ import type {
   ArchitectureSource,
   ArchitectureTree,
   Artifact,
+  ArtifactBlock,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
@@ -31,6 +32,7 @@ import type {
   Issue,
   IssueDetails,
   IssueSummary,
+  ItemBlocks,
   Message,
   MessageDelivery,
   MessageRead,
@@ -46,12 +48,16 @@ import type {
   UserAgentStateInput,
   UserAgentStates,
   UserIssueState,
+  UserState,
   Version,
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
+import { type DispatchProcess, pinnedTo } from "./harness-processes";
 
+// The harness server's port, which e2e/run.ts exports from the server's report before anything
+// imports this module (e2e/harness-ports.ts).
 export const baseUrl =
-  process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts.dispatch.port}`;
+  process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts().dispatch.port}`;
 /** The origin the server compares every cookie-authenticated write against (enforceCookieOrigin). */
 export const dashboardOrigin = new URL(baseUrl).origin;
 // A deployed server has its own agent token; the local harness pins `e2e-token` in
@@ -65,9 +71,15 @@ const seedActor: Actor = { kind: "session", id: "e2e-seed" };
 interface ApiOptions {
   actor?: Actor;
   as?: "agent" | "user";
+  /** The `Idempotency-Key` header the write carries, naming one intent: a repeat under it is
+   *  answered what the first was answered. None when absent, which Dispatch handles unkeyed. */
+  idempotencyKey?: string;
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
+  /** In two-process mode, the process the round-robin proxy sends the call to; absent, whichever
+   *  takes its turn (e2e/round-robin-proxy.ts). */
+  process?: DispatchProcess;
 }
 
 /** The name of the session cookie the server issues at sign-in, dev or GitHub. */
@@ -77,6 +89,14 @@ export const sessionCookieName = "dsession";
  *  sign-in with a 302 that sets the session cookie. */
 export function devSignInPath(login: string): string {
   return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
+}
+
+/** The `name=value` of the session cookie `response` sets, or undefined when it sets none. */
+export function sessionCookieFrom(response: Response): string | undefined {
+  return response.headers
+    .getSetCookie()
+    .find((header) => header.startsWith(`${sessionCookieName}=`))
+    ?.split(";")[0];
 }
 
 export function devSignInError(login: string, status: number, responseText: string): Error {
@@ -97,10 +117,7 @@ function sessionCookie(login: string): Promise<string> {
   }
   const cookie = fetch(new URL(devSignInPath(login), baseUrl), { redirect: "manual" }).then(
     async (response) => {
-      const value = response.headers
-        .getSetCookie()
-        .find((header) => header.startsWith(`${sessionCookieName}=`))
-        ?.split(";")[0];
+      const value = sessionCookieFrom(response);
       if (response.status !== 302 || value === undefined) {
         throw devSignInError(login, response.status, await response.text());
       }
@@ -148,6 +165,10 @@ async function request<T>(
   } else {
     Object.assign(headers, await userHeaders(options.login));
   }
+  if (options.idempotencyKey !== undefined) {
+    headers["Idempotency-Key"] = options.idempotencyKey;
+  }
+  if (options.process !== undefined) Object.assign(headers, pinnedTo(options.process));
 
   const response = await fetch(new URL(path, baseUrl), {
     body: payload === undefined ? undefined : JSON.stringify(payload),
@@ -516,6 +537,29 @@ export function getComment(
   return request(`/api/v1/comments/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
 
+/** `GET /api/v1/comments/{id}/blocks`: the comment's current blocks in body order, each with its
+ *  span in the stored body, its revision, and whether the blocks are indexed from that body. */
+export function getCommentBlocks(id: string, options: ApiOptions = {}): Promise<ItemBlocks> {
+  return request<ItemBlocks>(
+    `/api/v1/comments/${encodeURIComponent(id)}/blocks`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** A reply to comment `comment` of `issue` that answers its block `block` (`b2`): `reply_to`
+ *  with `reply_to_block`. */
+export function replyToCommentBlock(
+  issue: string,
+  comment: string,
+  block: string,
+  input: Omit<CreateCommentInput, "reply_to" | "reply_to_block">,
+  options: ApiOptions = {}
+): Promise<Comment> {
+  return createComment(issue, { ...input, reply_to: comment, reply_to_block: block }, options);
+}
+
 export function getAsk(id: string, options: ApiOptions = {}): Promise<AskRead> {
   return request<AskRead>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
@@ -541,6 +585,16 @@ export function followAsk(id: string, sessionID: string, actor: Actor): Promise<
 export function getArtifactText(id: string, options: ApiOptions = {}): Promise<ArtifactText> {
   return request<ArtifactText>(
     `/api/v1/artifacts/${encodeURIComponent(id)}/text`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** The blocks of the document's current version, each with the span of markdown it covers. */
+export function getArtifactBlocks(id: string, options: ApiOptions = {}): Promise<ArtifactBlock[]> {
+  return request<ArtifactBlock[]>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/blocks`,
     "GET",
     undefined,
     options
@@ -633,6 +687,12 @@ export function claimIssue(issue: string, options: ApiOptions = {}): Promise<Iss
   );
 }
 
+/** `DELETE /api/v1/issues/{key}/claim`: the holder, `options.actor` with the agent bearer, gives
+ *  the issue up. */
+export function releaseClaim(issue: string, options: ApiOptions = {}): Promise<Issue> {
+  return request<Issue>(`/api/v1/issues/${encodeURIComponent(issue)}/claim`, "DELETE", {}, options);
+}
+
 export function createMessage(
   issue: string,
   input: CreateMessageInput,
@@ -646,6 +706,7 @@ export function createMessage(
   );
 }
 
+/** Sends one message to a session as a human; `options.idempotencyKey` keys it. */
 export function createAgentMessage(
   sessionID: string,
   input: CreateAgentMessageInput,
@@ -659,18 +720,13 @@ export function createAgentMessage(
   );
 }
 
-/** Sends one broadcast as a human. Every send carries an `idempotency_key`; this mints one unless
- *  the caller names its own, as a row that replays a request the page made does. */
+/** Sends one broadcast as a human; `options.idempotencyKey` keys it, as a row that repeats a
+ *  request the page made does. */
 export function createBroadcast(
-  input: Omit<CreateBroadcastInput, "idempotency_key"> & { readonly idempotency_key?: string },
+  input: CreateBroadcastInput,
   options: ApiOptions = {}
 ): Promise<BroadcastCreated> {
-  return request<BroadcastCreated>(
-    "/api/v1/broadcasts",
-    "POST",
-    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
-    options
-  );
+  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
 }
 
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {
@@ -706,6 +762,33 @@ export function getMessage(
     `/api/v1/issues/${encodeURIComponent(issue)}/messages/${encodeURIComponent(messageID)}`,
     "GET",
     undefined,
+    options
+  );
+}
+
+/** `GET /api/v1/messages/{id}/blocks`: the message's blocks in body order, each with its span in
+ *  the stored body, and whether they are indexed from that body. */
+export function getMessageBlocks(id: string, options: ApiOptions = {}): Promise<ItemBlocks> {
+  return request<ItemBlocks>(
+    `/api/v1/messages/${encodeURIComponent(id)}/blocks`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** A reply to message `message` of `issue` that answers its block `block` (`b2`): `in_reply_to`
+ *  with `in_reply_to_block`. */
+export function replyToMessageBlock(
+  issue: string,
+  message: string,
+  block: string,
+  input: Omit<CreateMessageInput, "in_reply_to" | "in_reply_to_block">,
+  options: ApiOptions = {}
+): Promise<{ id: string }> {
+  return createMessage(
+    issue,
+    { ...input, in_reply_to: message, in_reply_to_block: block },
     options
   );
 }
@@ -779,15 +862,33 @@ export function putIssueState(
   );
 }
 
+/** `login`'s own state on every issue, `GET /api/v1/me/state`: each issue's pin and its pinned
+ *  items (`dismissed`), as the page reads them. */
+export function getMyState(login = "alice"): Promise<UserState> {
+  return request<UserState>("/api/v1/me/state", "GET", undefined, { login });
+}
+
 /**
- * Forces every open SSE connection on the server closed, as if it had restarted.
+ * Forces every open live socket on the server closed, as if it had restarted.
  * Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh) that
- * proves the client's reconnect-from-lastId path without seeding thousands of
- * events to trip the real replay cap.
+ * proves the page resumes every subscription after an unplanned gap.
  */
-export function disconnectAllStreams(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+export function disconnectLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(
-    "/api/v1/events/_test/disconnect",
+    "/api/v1/live/_test/disconnect",
+    "POST",
+    {},
+    {
+      as: "agent",
+      ...options,
+    }
+  );
+}
+
+/** Forces every open live socket closed with 4001, as its bounded age does. */
+export function rotateLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/live/_test/rotate",
     "POST",
     {},
     {
@@ -815,16 +916,46 @@ export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolea
   );
 }
 
-/** Points `project` at `repo`'s `.dispatch/architecture` on `branch` (the fake GitHub serves it). */
+/**
+ * Makes every keyed `method` request to `path` (the exact request path) take `delayMs` longer on
+ * the server: once Dispatch has claimed its key, the run waits that long on the handler's own
+ * context before the handler runs, so a write Dispatch is slow to finish is slow server-side
+ * rather than held in the browser; a context that ends during the wait answers
+ * `503 SLOW_WRITE_CUT_OFF` and the handler never runs. Each call replaces the delay for that
+ * method and path, and `delayMs` 0 removes it. Test-only endpoint (mounted when
+ * DISPATCH_TEST_HOOKS=1, see run-server.sh), called as a person: its body takes no `actor`.
+ */
+export function slowWrites(
+  method: "PATCH" | "POST",
+  path: string,
+  delayMs: number,
+  options: ApiOptions = {}
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/writes/_test/slow",
+    "POST",
+    { delay_ms: delayMs, method, path },
+    options
+  );
+}
+
+/** The route of `project`'s source `repo` (`owner/name`): a source is addressed by its repository. */
+function architectureSourcePath(project: string, repo: string): string {
+  const [owner = "", name = ""] = repo.split("/");
+  return `/api/v1/projects/${encodeURIComponent(project)}/architecture-sources/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+}
+
+/** Adds `repo`'s `.dispatch/architecture` on `branch` as one of `project`'s sources, or moves that
+ *  source to `branch` (the fake GitHub serves it). */
 export function putArchitectureSource(
   project: string,
   input: { branch: string; repo: string },
   options: ApiOptions = {}
 ): Promise<ArchitectureSource> {
   return request<ArchitectureSource>(
-    `/api/v1/projects/${encodeURIComponent(project)}/architecture-source`,
+    architectureSourcePath(project, input.repo),
     "PUT",
-    input,
+    { branch: input.branch },
     options
   );
 }
@@ -855,13 +986,15 @@ export function listProjectDefaultAssignees(
   );
 }
 
-/** Imports the model now; a rejected model answers 200 with the reason in `last_error`. */
+/** Imports `project`'s source `repo` now; a rejected model answers 200 with the reason in
+ *  `last_error`. */
 export function syncArchitectureSource(
   project: string,
+  repo: string,
   options: ApiOptions = {}
 ): Promise<ArchitectureSource> {
   return request<ArchitectureSource>(
-    `/api/v1/projects/${encodeURIComponent(project)}/architecture-source/sync`,
+    `${architectureSourcePath(project, repo)}/sync`,
     "POST",
     undefined,
     options
@@ -932,10 +1065,10 @@ export function publishAgentStreamFrame(
   );
 }
 
-/** Ends every open viewer stream for a session, as a connection lost on the way to the browser
- *  does. The live stream carries no cursor, so the browser's reconnect asks the session for its
- *  replay again and rebuilds its whole transcript from it: this is how a test gets a second
- *  replay into a page that is already open, which a published frame alone cannot do. */
+/** Ends every open agent viewer for a session. The page resubscribes its dropped view on the live
+ * socket, which asks the session for its replay again and rebuilds the transcript: this is how a
+ * test gets a second replay into a page that is already open, which a published frame alone
+ * cannot do. */
 export function dropAgentStreamViewers(
   sessionID: string,
   options: ApiOptions = {}

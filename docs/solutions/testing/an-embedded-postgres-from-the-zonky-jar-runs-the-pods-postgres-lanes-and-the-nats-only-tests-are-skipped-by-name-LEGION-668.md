@@ -9,7 +9,7 @@ tags:
   - go-test
   - proof-environment
 date: 2026-10-10
-status: active
+status: superseded in part by INFRA-257 — the supervise table tests pass in a pod with no `CGO_ENABLED` of your own, since the image carries gcc and libc6-dev with cgo off by default; the rest stands
 module: packages/daemon
 related_issues:
   - "LEGION-668"
@@ -39,6 +39,8 @@ Extends docs/solutions/testing/go-test-in-a-worker-pod-leaves-gowork-to-go-work-
   on `go tool cgo` otherwise), and `internal/launcher`'s
   `TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten` reads the pane's own
   `LEGION_WORKSPACE` in its no-workspace case: run it with `env -u LEGION_WORKSPACE`.
+  (INFRA-257: on an image with gcc they pass in any environment; set `CGO_ENABLED=0` yourself only
+  on an older pinned image digest without gcc.)
 - `go vet -tags e2e ./...` and an overlay build download modules and rewrite `go.work.sum`; restore
   it before a commit.
 

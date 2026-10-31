@@ -1,59 +1,46 @@
 // Command dev-oidc-issuer is the local stand-in for a Kubernetes cluster's ServiceAccount token
 // issuer, so a broker run on one machine (scripts/dev-broker.sh, the broker's docs rig) can list
 // its callers in BROKER_API_ACCOUNTS and take a pod's token at its RFC 8693 token exchange with no
-// cluster and no Docker. It serves internal/oidc/oidctest's issuer, the one the Go tests mint
-// against, on a loopback port, and keeps each token it is asked for in a file, as the kubelet
-// keeps a pod's projected token: minted for an hour, the longest the broker's API routes take
-// (machine.MaxTokenLoginLifetime), and rewritten in place once four fifths of that has passed.
+// cluster and no Docker, and for the identity provider a person signs in to Dispatch at, so a
+// Dispatch run on one machine can sign a browser in with no Google. It serves
+// internal/oidc/oidctest's issuer, the one the Go tests mint against, on a loopback port, and keeps
+// each token it is asked for in a file, as the kubelet keeps a pod's projected token: minted for an
+// hour, the longest the broker's API routes take (machine.MaxTokenLoginLifetime), and rewritten in
+// place once four fifths of that has passed.
 //
-//	dev-oidc-issuer [--listen <host:port>] [--token <audience>=<service account>=<file> ...]
-//		[--sign-in-client <client id> --sign-in-client-secret-file <file>
-//		[--sign-in-domain <domain>] [--sign-in-default <email>]]
+//	dev-oidc-issuer [--token <audience>=<service account>=<file> ...]
+//	                [--code-flow <client id>=<client secret file> [--sign-in-as <email> [--sign-in-group <group>]]]
 //
 // Each token is bound to a pod of its own (kubernetes.io → pod → uid), kept across rewrites as a
 // pod keeps its uid, so a file serves a pod's enrolment and its token exchange as well as a listed
-// caller. Once every file is written it logs "issuer listening url=<issuer URL>", the value
-// BROKER_K8S_OIDC_ISSUER takes, and serves until it is interrupted. Its signing key lives in its
-// memory alone: a restart publishes another, and no token minted before it verifies again.
+// caller.
 //
-// --listen fixes the issuer's address, so a harness can name the issuer before it starts; the
-// host must be a loopback one, since the issuer mints for and signs in whoever asks. Without it the
-// issuer takes a random loopback port.
+// --code-flow serves the authorization code flow for one confidential client, whose secret is the
+// file's content less surrounding whitespace: the values DISPATCH_SIGNIN_CLIENT_ID and
+// DISPATCH_SIGNIN_CLIENT_SECRET take. Each authorization signs in the next person queued at the
+// loopback-only control route POST <issuer URL>/_dev/sign-in-as, whose body is the JSON object of
+// that person's ID token claims; with none queued, it signs in --sign-in-as's person, and without
+// --sign-in-as it refuses the authorization. That person carries both claim shapes Dispatch reads:
+// a Google Workspace account of the email's domain (identity.DomainRule), and a Cognito sign-in
+// pool user federated from the provider DevIdP, a member of --sign-in-group's group when it is
+// given (identity.GroupRule). Dispatch takes a domain only from Google's own issuer, so a Dispatch
+// signing people in here runs under DISPATCH_SIGNIN_GROUP set to --sign-in-group's group.
 //
-// The sign-in flags make it a person's identity provider as well, the stand-in for Google that a
-// secrets broker's approval sign-in goes to outside a Go test (Dispatch's Playwright suite,
-// scripts/dev-broker.sh). Its discovery then names an authorization and a token endpoint for the
-// one confidential client, whose secret is read from the file and never from the command line; a
-// code whose request carried a PKCE challenge is exchanged only with its S256 verifier, and the
-// exchange answers an ID token and no refresh token, as Google does for an online sign-in. Each
-// authorization request signs a person in with no page to fill in: the next one POST
-// /dev/sign-in-as queued, else the request's login_hint, else --sign-in-default, and with none of
-// them it is refused 400. The ID token names that email as given, a sub kept per address,
-// email_verified true, hd the --sign-in-domain (example.com unless given), and the request's nonce.
-// Once sign-in is enabled it logs a line naming the client, never its secret.
-//
-// Two control endpoints serve a harness:
-//
-//	POST /dev/sign-in-as	{"email": "..."}, as JSON or a form: the next sign-in's person; 204.
-//	POST /dev/mint		{"subject": "system:serviceaccount:<namespace>:<name>", "audience": "...",
-//				"pod_uid": "...", "lifetime_seconds": n}: {"token": "..."}, minted as a
-//				--token file's token is, for a random pod unless pod_uid names one, living
-//				lifetime_seconds, at most and by default the hour.
+// Once every file is written it logs "issuer listening url=<issuer URL>", the value
+// BROKER_K8S_OIDC_ISSUER and DISPATCH_SIGNIN_ISSUER take, and serves until it is interrupted. Its
+// signing key lives in its memory alone: a restart publishes another, and no token minted before
+// it verifies again.
 package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"mime"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -79,19 +66,15 @@ func main() {
 	os.Exit(run(ctx, os.Args[1:], os.Stderr))
 }
 
-// maxControlBody bounds the body of a control endpoint's request, each a few short strings.
-const maxControlBody = 1 << 16
-
 func run(ctx context.Context, args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("dev-oidc-issuer", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var tokens tokenFlags
 	fs.Var(&tokens, "token", "keep `<audience>=<service account>=<file>`'s token in file (repeatable)")
-	listen := fs.String("listen", "", "serve on the loopback `<host:port>` rather than a random port")
-	clientID := fs.String("sign-in-client", "", "sign people in for the confidential client `<client id>`")
-	secretFile := fs.String("sign-in-client-secret-file", "", "read the sign-in client's secret from `<file>`")
-	domain := fs.String("sign-in-domain", "example.com", "the `<domain>` every signed-in person's hd claim names")
-	defaultEmail := fs.String("sign-in-default", "", "sign in as `<email>` a request with no login_hint and no one queued")
+	var flow codeFlowSpec
+	fs.Var(&flow, "code-flow", "serve the sign-in code flow for `<client id>=<client secret file>`")
+	fs.StringVar(&flow.signInAs, "sign-in-as", "", "sign each authorization in as `<email>` when none is queued (needs --code-flow)")
+	fs.StringVar(&flow.signInGroup, "sign-in-group", "", "make --sign-in-as's person a member of the sign-in pool group `<group>` (needs --sign-in-as)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -102,63 +85,103 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "dev-oidc-issuer: unexpected argument %q\n", fs.Arg(0))
 		return exitUsageError
 	}
-	config := issuerConfig{specs: tokens, lifetime: tokenLifetime, listen: *listen}
-	if *listen != "" {
-		if err := checkLoopback(*listen); err != nil {
-			fmt.Fprintf(stderr, "dev-oidc-issuer: --listen %s: %v\n", *listen, err)
-			return exitUsageError
-		}
-	}
-	given := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
-	switch {
-	case given["sign-in-client"] != given["sign-in-client-secret-file"]:
-		fmt.Fprintln(stderr, "dev-oidc-issuer: --sign-in-client and --sign-in-client-secret-file are given together or not at all")
-		return exitUsageError
-	case !given["sign-in-client"] && (given["sign-in-domain"] || given["sign-in-default"]):
-		fmt.Fprintln(stderr, "dev-oidc-issuer: --sign-in-domain and --sign-in-default need --sign-in-client")
-		return exitUsageError
-	case given["sign-in-client"]:
-		secret, err := os.ReadFile(*secretFile)
+	if flow.signInAs != "" {
+		local, domain, _ := strings.Cut(flow.signInAs, "@")
 		switch {
-		case err != nil:
-			fmt.Fprintf(stderr, "dev-oidc-issuer: --sign-in-client-secret-file: %v\n", err)
+		case flow.clientID == "":
+			fmt.Fprintln(stderr, "dev-oidc-issuer: --sign-in-as needs --code-flow")
 			return exitUsageError
-		case *clientID == "" || *domain == "" || strings.TrimSpace(string(secret)) == "":
-			fmt.Fprintln(stderr, "dev-oidc-issuer: the sign-in client, its secret and the sign-in domain must not be empty")
+		case local == "" || domain == "" || strings.Contains(domain, "@"):
+			fmt.Fprintf(stderr, "dev-oidc-issuer: --sign-in-as %q is not an email address\n", flow.signInAs)
 			return exitUsageError
 		}
-		config.signIn = &signIn{clientID: *clientID, clientSecret: strings.TrimSpace(string(secret)), domain: *domain, defaultEmail: *defaultEmail}
 	}
-	return serveIssuer(ctx, config, stderr)
-}
-
-// issuerConfig is everything the issuer serves: the --token files and how long each token lives,
-// the --listen address (empty for a random loopback port), and the sign-in (nil without one).
-type issuerConfig struct {
-	specs    []tokenSpec
-	lifetime time.Duration
-	listen   string
-	signIn   *signIn
-}
-
-// signIn is the sign-in flags: the one confidential client and its secret, the domain every
-// person's hd names, and the person a request signs in when it names none and no one is queued.
-type signIn struct {
-	clientID, clientSecret, domain, defaultEmail string
-}
-
-// person is the claims a sign-in as email carries before the issuer adds iss, aud, iat, exp and the
-// nonce. Its sub is derived from the address in lower case, as Google keeps one sub per account
-// whatever case its address is typed in, while email keeps the case it was given in.
-func (s signIn) person(email string) map[string]any {
-	sum := sha256.Sum256([]byte(strings.ToLower(email)))
-	return map[string]any{
-		"sub":            hex.EncodeToString(sum[:12]),
-		"email":          email,
-		"email_verified": true,
-		"hd":             s.domain,
+	if flow.signInGroup != "" && flow.signInAs == "" {
+		fmt.Fprintln(stderr, "dev-oidc-issuer: --sign-in-group needs --sign-in-as")
+		return exitUsageError
 	}
+	if flow.clientID == "" {
+		return serve(ctx, tokens, nil, tokenLifetime, stderr)
+	}
+	return serve(ctx, tokens, &flow, tokenLifetime, stderr)
+}
+
+// codeFlowSpec is --code-flow, --sign-in-as and --sign-in-group: the one client the code flow
+// serves, its secret, the email of the person an authorization signs in as when none is queued,
+// empty for none, and the sign-in pool group that person is a member of, empty for none.
+type codeFlowSpec struct {
+	clientID, clientSecret, signInAs, signInGroup string
+}
+
+func (f *codeFlowSpec) String() string { return "" }
+
+// Set parses <client id>=<client secret file> and reads the secret from the file now, so a file
+// that cannot be read, or holds nothing but whitespace, is refused before any issuer runs rather
+// than serving a client no caller can authenticate as.
+func (f *codeFlowSpec) Set(value string) error {
+	clientID, file, _ := strings.Cut(value, "=")
+	switch {
+	case f.clientID != "":
+		return errors.New("the code flow serves one client; --code-flow is given twice")
+	case clientID == "" || file == "":
+		return errors.New("want <client id>=<client secret file>")
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return fmt.Errorf("read the client secret: %w", err)
+	}
+	secret := strings.TrimSpace(string(raw))
+	if secret == "" {
+		return fmt.Errorf("the client secret file %s is empty", file)
+	}
+	f.clientID, f.clientSecret = clientID, secret
+	return nil
+}
+
+// devProvider is the federated identity provider every default person's sign-in pool username
+// names, as a Cognito pool names the SAML or OIDC provider a person signed in through.
+const devProvider = "DevIdP"
+
+// person is the ID token claims of the person email, in both shapes Dispatch reads. The Google
+// Workspace account its domain rule (identity.DomainRule) reads: a subject, the email,
+// email_verified true, and hd the email's domain. The subject is the address itself, lowercased,
+// so every sign-in as one address is one Google account, as it is at Google: a subject that
+// changed between sign-ins would read to Dispatch as another account taking the address over.
+// And the Cognito sign-in pool user its group rule (identity.GroupRule) reads: the username
+// `<provider>_<email>` of a user federated from devProvider, which the identities name, and, when
+// group is set, cognito:groups naming it.
+func person(email, group string) map[string]any {
+	email = strings.ToLower(email)
+	_, domain, _ := strings.Cut(email, "@")
+	claims := map[string]any{
+		"sub": email, "email": email, "email_verified": true, "hd": domain,
+		"cognito:username": devProvider + "_" + email,
+		"identities":       []map[string]any{{"providerName": devProvider}},
+	}
+	if group != "" {
+		claims["cognito:groups"] = []string{group}
+	}
+	return claims
+}
+
+// signInAsHandler is POST /_dev/sign-in-as: it queues the JSON object of claims its body holds as
+// the person the next authorization signs in as. It answers loopback callers only: whoever can
+// reach it chooses who signs in, so a listener opened wider than loopback must not open it too.
+func signInAsHandler(issuer *oidctest.Issuer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+			http.Error(w, "the sign-in control answers loopback callers only", http.StatusForbidden)
+			return
+		}
+		var claims map[string]any
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&claims); err != nil || len(claims) == 0 {
+			http.Error(w, "want a JSON object of the next sign-in's ID token claims", http.StatusBadRequest)
+			return
+		}
+		issuer.SignInAs(claims)
+		w.WriteHeader(http.StatusNoContent)
+	})
 }
 
 // tokenSpec is one --token: the audience and the service account a token is minted for, the file
@@ -177,61 +200,31 @@ func (f *tokenFlags) String() string { return "" }
 func (f *tokenFlags) Set(value string) error {
 	audience, rest, _ := strings.Cut(value, "=")
 	account, file, _ := strings.Cut(rest, "=")
-	if audience == "" || account == "" || file == "" {
+	namespace, name, _ := strings.Cut(strings.TrimPrefix(account, "system:serviceaccount:"), ":")
+	switch {
+	case audience == "" || account == "" || file == "":
 		return errors.New("want <audience>=<service account>=<file>")
-	}
-	if err := checkAccount(account); err != nil {
-		return err
+	case !strings.HasPrefix(account, "system:serviceaccount:") || namespace == "" || name == "" || strings.Contains(name, ":"):
+		return fmt.Errorf("service account %q is not system:serviceaccount:<namespace>:<name>", account)
 	}
 	*f = append(*f, tokenSpec{audience: audience, account: account, file: file})
 	return nil
 }
 
-// checkAccount refuses a subject that is not a ServiceAccount's, the only kind of subject a
-// cluster's issuer mints for.
-func checkAccount(account string) error {
-	namespace, name, _ := strings.Cut(strings.TrimPrefix(account, "system:serviceaccount:"), ":")
-	if !strings.HasPrefix(account, "system:serviceaccount:") || namespace == "" || name == "" || strings.Contains(name, ":") {
-		return fmt.Errorf("service account %q is not system:serviceaccount:<namespace>:<name>", account)
-	}
-	return nil
-}
-
-// checkLoopback refuses an address whose host is not a loopback one: the issuer mints a token for
-// and signs in whoever asks, so it answers this machine alone.
-func checkLoopback(address string) error {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return err
-	}
-	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		return fmt.Errorf("host %q is not a loopback address", host)
-	}
-	return nil
-}
-
-// serveIssuer runs the issuer until ctx ends, writing every spec's token before it reports its URL
-// and again each time four fifths of the lifetime has passed. A token it cannot write, or an
-// address it cannot listen on, ends it, 1.
-func serveIssuer(ctx context.Context, config issuerConfig, stderr io.Writer) int {
-	specs, lifetime := config.specs, config.lifetime
+// serve runs the issuer until ctx ends, writing every spec's token before it reports its URL and
+// again each time four fifths of lifetime has passed, and serving flow's code flow when flow is not
+// nil. A token it cannot write ends it, 1.
+func serve(ctx context.Context, specs []tokenSpec, flow *codeFlowSpec, lifetime time.Duration, stderr io.Writer) int {
 	p := &process{stderr: stderr}
 	defer p.stop()
-	var issuer *oidctest.Issuer
-	if config.listen == "" {
-		issuer = oidctest.New(p)
-	} else {
-		listener, err := net.Listen("tcp", config.listen)
-		if err != nil {
-			fmt.Fprintf(stderr, "dev-oidc-issuer: %v\n", err)
-			return 1
-		}
-		issuer = oidctest.NewOnListener(p, listener)
-	}
+	issuer := oidctest.New(p)
 	key := issuer.PublishKey(p, "dev-signing-key")
-	issuer.Handle("POST /dev/mint", handleMint(issuer, key, p, lifetime))
-	if config.signIn != nil {
-		enableSignIn(issuer, key, *config.signIn)
+	if flow != nil {
+		issuer.EnableCodeFlow(key, flow.clientID, flow.clientSecret)
+		if flow.signInAs != "" {
+			issuer.SignInByDefault(person(flow.signInAs, flow.signInGroup))
+		}
+		issuer.Handle("POST /_dev/sign-in-as", signInAsHandler(issuer))
 	}
 	// Each token's pod, a random UUID as the API server assigns a pod's uid.
 	for i := range specs {
@@ -252,8 +245,12 @@ func serveIssuer(ctx context.Context, config issuerConfig, stderr io.Writer) int
 	for _, spec := range specs {
 		fmt.Fprintf(stderr, "dev-oidc-issuer: %s holds %s's token for audience %s (pod %s)\n", spec.file, spec.account, spec.audience, spec.podUID)
 	}
-	if config.signIn != nil {
-		fmt.Fprintf(stderr, "dev-oidc-issuer: signs people in for client %s with hd %s\n", config.signIn.clientID, config.signIn.domain)
+	if flow != nil {
+		signsIn := "nobody until one is queued"
+		if flow.signInAs != "" {
+			signsIn = strings.ToLower(flow.signInAs)
+		}
+		fmt.Fprintf(stderr, "dev-oidc-issuer: code flow serves client %s; an authorization with none queued at /_dev/sign-in-as signs in %s\n", flow.clientID, signsIn)
 	}
 	fmt.Fprintf(stderr, "dev-oidc-issuer: issuer listening url=%s\n", issuer.URL())
 	ticker := time.NewTicker(lifetime * 4 / 5)
@@ -271,121 +268,15 @@ func serveIssuer(ctx context.Context, config issuerConfig, stderr io.Writer) int
 	}
 }
 
-// enableSignIn arms the issuer's code flow for s's client, answering no refresh token, signs in a
-// request that finds no one queued as its login_hint or else s's default, and serves
-// /dev/sign-in-as, which queues the next request's person.
-func enableSignIn(issuer *oidctest.Issuer, key *oidctest.Key, s signIn) {
-	issuer.EnableCodeFlow(key, s.clientID, s.clientSecret)
-	issuer.OmitRefreshTokens()
-	issuer.SignInUnqueued(func(query url.Values) (map[string]any, error) {
-		email := query.Get("login_hint")
-		if email == "" {
-			email = s.defaultEmail
-		}
-		if email == "" {
-			return nil, errors.New("no one to sign in: queue one with POST /dev/sign-in-as, send a login_hint, or start the issuer with --sign-in-default")
-		}
-		return s.person(email), nil
-	})
-	issuer.Handle("POST /dev/sign-in-as", func(w http.ResponseWriter, r *http.Request) {
-		email, err := readEmail(w, r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		issuer.SignInAs(s.person(email))
-		w.WriteHeader(http.StatusNoContent)
-	})
-}
-
-// readEmail reads the email of a /dev/sign-in-as request's body, a JSON object or a form.
-func readEmail(w http.ResponseWriter, r *http.Request) (string, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxControlBody)
-	var email string
-	if mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mediaType == "application/json" {
-		var body struct {
-			Email string `json:"email"`
-		}
-		decoder := json.NewDecoder(r.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&body); err != nil {
-			return "", fmt.Errorf("read the request: %w", err)
-		}
-		email = body.Email
-	} else {
-		if err := r.ParseForm(); err != nil {
-			return "", fmt.Errorf("read the request: %w", err)
-		}
-		email = r.PostForm.Get("email")
-	}
-	if email == "" {
-		return "", errors.New(`want {"email": "..."}`)
-	}
-	return email, nil
-}
-
-// mintRequest is a /dev/mint request's body.
-type mintRequest struct {
-	Subject         string `json:"subject"`
-	Audience        string `json:"audience"`
-	PodUID          string `json:"pod_uid"`
-	LifetimeSeconds *int64 `json:"lifetime_seconds"`
-}
-
-// handleMint answers /dev/mint: the token of the request's ServiceAccount for its audience, bound
-// to its pod or a random one, living its lifetime_seconds or else maxLifetime, which it may not
-// exceed.
-func handleMint(issuer *oidctest.Issuer, key *oidctest.Key, p *process, maxLifetime time.Duration) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var request mintRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxControlBody))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&request); err != nil {
-			http.Error(w, "read the request: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := checkAccount(request.Subject); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if request.Audience == "" {
-			http.Error(w, "want an audience", http.StatusBadRequest)
-			return
-		}
-		lifetime := maxLifetime
-		if seconds := request.LifetimeSeconds; seconds != nil {
-			// Compared in seconds before the conversion, which a huge value would overflow.
-			if *seconds <= 0 || *seconds > int64(maxLifetime/time.Second) {
-				http.Error(w, fmt.Sprintf("lifetime_seconds %d is not between 1 and %d", *seconds, int64(maxLifetime/time.Second)), http.StatusBadRequest)
-				return
-			}
-			lifetime = time.Duration(*seconds) * time.Second
-		}
-		podUID := request.PodUID
-		if podUID == "" {
-			podUID = uuid.NewString()
-		}
-		token := mintToken(issuer, key, p, request.Subject, request.Audience, podUID, lifetime)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
-	}
-}
-
-// mintToken mints account's token for audience, bound to the pod podUID, issued now and expiring
-// lifetime from now: the token a kubelet projects into that pod.
-func mintToken(issuer *oidctest.Issuer, key *oidctest.Key, p *process, account, audience, podUID string, lifetime time.Duration) string {
-	now := time.Now()
-	claims := issuer.Claims(account, audience)
-	claims["iat"] = now.Unix()
-	claims["exp"] = now.Add(lifetime).Unix()
-	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
-	return issuer.Mint(p, key, claims)
-}
-
 // writeToken mints spec's token, issued now and expiring lifetime from now, and replaces spec.file
 // with it in one rename, so a reader sees the old token or the new one and never a part of either.
 func writeToken(issuer *oidctest.Issuer, key *oidctest.Key, p *process, spec tokenSpec, lifetime time.Duration) error {
-	token := mintToken(issuer, key, p, spec.account, spec.audience, spec.podUID, lifetime)
+	now := time.Now()
+	claims := issuer.Claims(spec.account, spec.audience)
+	claims["iat"] = now.Unix()
+	claims["exp"] = now.Add(lifetime).Unix()
+	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": spec.podUID}}
+	token := issuer.Mint(p, key, claims)
 	temporary, err := os.CreateTemp(filepath.Dir(spec.file), "."+filepath.Base(spec.file)+".*")
 	if err != nil {
 		return fmt.Errorf("write %s: %w", spec.file, err)

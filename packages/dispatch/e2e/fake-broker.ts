@@ -18,9 +18,11 @@ export type FakePendingRequest = CredentialPendingRow & { readonly approver: str
 
 let pending: FakePendingRequest[] = [];
 
-Bun.serve({
+// FAKE_BROKER_PORT, or with it unset port 0, so the OS chooses; the line at the end reports the
+// port bound, which e2e/harness-start.ts reads.
+const server = Bun.serve({
   hostname: "127.0.0.1",
-  port: harnessPorts.fakeBroker.port,
+  port: harnessPorts().fakeBroker.port,
   async fetch(request) {
     const url = new URL(request.url);
     // The broker's own row shape names no approver: it lists one approver's requests.
@@ -49,4 +51,4 @@ Bun.serve({
   },
 });
 
-console.log(`fake broker listener on 127.0.0.1:${harnessPorts.fakeBroker.port}`);
+console.log(`fake broker listener on 127.0.0.1:${server.port}`);

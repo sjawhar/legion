@@ -43,7 +43,7 @@ func TestAKindChangedAwayAndBackWithNoReleaseBetweenLeavesTheGrantAsItWas(t *tes
 			if err != nil || grant.GrantID == nil {
 				t.Fatalf("Create = %+v, %v", grant, err)
 			}
-			if values, _, err := machine.Values(t.Context(), *grant.GrantID, enrollmentID); err != nil || values["QUIET_KIND_KEY"] != "github-installation-token" {
+			if values, _, err := machine.Values(t.Context(), *grant.GrantID, enrollmentID, nil); err != nil || values["QUIET_KIND_KEY"] != "github-installation-token" {
 				t.Fatalf("Values before the retag = %v, %v; want the GitHub App minter's token", values, err)
 			}
 			moved := secret
@@ -55,7 +55,7 @@ func TestAKindChangedAwayAndBackWithNoReleaseBetweenLeavesTheGrantAsItWas(t *tes
 			}
 			retag(t, machine, moved)
 			retag(t, machine, secret)
-			values, _, err := machine.Values(t.Context(), *grant.GrantID, enrollmentID)
+			values, _, err := machine.Values(t.Context(), *grant.GrantID, enrollmentID, nil)
 			if err != nil || values["QUIET_KIND_KEY"] != "github-installation-token" {
 				t.Fatalf("Values once the kind is back, with no release while it was away = %v, %v; want the GitHub App minter's token: the grant is as it was", values, err)
 			}
@@ -99,7 +99,7 @@ func TestAMaxGrantLoweredAndRaisedWithNoReleaseBetweenLeavesTheGrantAsItWas(t *t
 	}
 	retag(t, machine, requestKindSecret("QUIET_BOUNDED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, "30m"))
 	retag(t, machine, requestKindSecret("QUIET_BOUNDED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, "1h"))
-	values, _, err := machine.Values(t.Context(), *long.GrantID, enrollmentID)
+	values, _, err := machine.Values(t.Context(), *long.GrantID, enrollmentID, nil)
 	if err != nil || values["QUIET_BOUNDED_LOGIN"] != "google-access-token" {
 		t.Fatalf("Values(1h) once max-grant is 1h again, with no release while it was 30m = %v, %v; want the Google login minter's token: the grant is as it was", values, err)
 	}

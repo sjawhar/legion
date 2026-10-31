@@ -5,7 +5,6 @@
 package api
 
 import (
-	"bytes"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,9 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // credentialTestAccountToken stands in for Dispatch's own projected ServiceAccount token: what
@@ -75,7 +76,7 @@ func newCredentialTestHandlerReading(t *testing.T, brokerURL, tokenFile string) 
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 
@@ -298,10 +299,8 @@ func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(
 	rig := newFakeBrokerRig(t)
 	missing := filepath.Join(t.TempDir(), "missing")
 	handler := newCredentialTestHandlerReading(t, rig.server.URL, missing)
-	previous := slog.Default()
-	var logs bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logs := &storetest.LockedLog{}
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-grants?approver=me", nil, "alice")
 	if response.Code != http.StatusInternalServerError {
@@ -316,9 +315,15 @@ func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(
 	if rig.lastAuth != "" {
 		t.Fatalf("the broker was called with Authorization %q, want no call at all", rig.lastAuth)
 	}
-	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	// The request's own access-log line is not the record this test is about.
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if !strings.Contains(line, `msg="`+accesslog.Message+`"`) {
+			lines = append(lines, line)
+		}
+	}
 	if len(lines) != 1 || !strings.Contains(lines[0], "level=ERROR") || !strings.Contains(lines[0], "path="+missing) {
-		t.Fatalf("logged %q, want one ERROR line naming %s", logs.String(), missing)
+		t.Fatalf("logged %q, want one ERROR line naming %s beside the access line", logs.String(), missing)
 	}
 }
 

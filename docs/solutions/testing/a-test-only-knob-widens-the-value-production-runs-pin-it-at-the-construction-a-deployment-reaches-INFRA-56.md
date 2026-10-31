@@ -85,3 +85,24 @@ Still open in that package: `TestComputeAndPersistSuggestionsRespectsDeadlineUnd
 (`suggestions_test.go:290`, `:326`) assert elapsed time against that same
 `writeSuggestionTimeout + 500 ms` ceiling, doing locked-table work on the same Postgres. The
 arithmetic above indicts them; INFRA-56 left them unedited by its own scope and reported them.
+**Note 2026-10-25 (INFRA-260):** both tests now set the allowance on their own server through
+`suggestionsBehindLock` and assert `Missing` reached while the call's own query waits behind the
+lock, with no elapsed-time bound. The waiter counted is the call's own backend: the call runs on a
+one-connection pool of its own, and that connection's pid is read in `pg_locks` through the
+holder's transaction. Counting every backend behind the holder was not enough, because the seeded
+spec's settlement queues behind the same locks (found in review of sjawhar/legion#2217).
+
+**Note 2026-10-27:** the 300 ms allowance this record measured is gone. The related-item check
+replaced LEGION-550's keyword suggestions; it searches by meaning
+and by the project's rarest words and makes a write wait for it at most 5 s
+(`relatedCheckAllowance`, `internal/dispatch/api/suggestions.go`); `computeAndPersistSuggestions`
+and `writeSuggestionTimeout` were removed with the old step. The seam this record describes
+stayed: `server.suggestionTimeout` is now read through `relatedAllowance()`, whose zero value is
+`relatedCheckAllowance`, and the pin is
+`TestTheDeploymentsRelatedCheckAllowanceIsTheDocumentedBound`, still
+`register(http.NewServeMux(), Deps{}).relatedAllowance()`, now wanting 5s, the value the route
+descriptions and the README promise. The two lock tests above are
+`TestRelatedCheckRespectsDeadlineUnderLock` and
+`TestRelatedCheckRespectsDeadlineWhenProjectLookupIsLocked`; `suggestionsBehindLock` runs the
+check at a 5 s allowance and they assert `outcome` `not_made` with the timeout reason. The
+measurements above stand as measured against the 300 ms bound of their day.

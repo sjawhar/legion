@@ -66,7 +66,10 @@ Legion's coordinator works only the issues handed to it, which are the ones carr
 label `legion`. That lets Legion share a project with people and other agents. A person sets the
 label from the issue header, or asks Legion's own **controller** agent to set it for them; the
 controller never hands over work on its own. An agent that finds a problem outside its own issue
-asks a person in a Dispatch ask whether it needs an issue, rather than filing one.
+files no issue: a defect with a clear fix in code its own tree touches or depends on is fixed in that tree's
+pull request, any other goes to the controller, which gives it to the tree that owns that code and
+files it for Legion only when none does, and a
+problem that needs a decision goes to a person in a Dispatch ask.
 
 Each admitted issue gets an **architect**, which owns the issue's tree. It writes the spec, splits
 large work into child issues, and runs each change through phase workers in turn: a **planner**, an
@@ -121,8 +124,11 @@ into events on topics for each repository and pull request. Legion's coordinator
 with durable consumers, so an event that arrives while it is down is read when it comes back.
 
 Envoy also delivers messages to agent sessions directly: a message to one session, to whichever
-session holds a role, or a broadcast a person sends from the Dispatch Agents page. Envoy decides
-only where an event goes; what to do about it is the coordinator's and the agents' business.
+session holds a role, or a broadcast a person sends from the Dispatch Agents page. An Oh My Pi or
+Claude Code session whose connection drops gets what was sent to it, and what was published on
+the issue topics it follows, from the stream when it reconnects, for up to 72 hours; a role's
+messages are live only. Envoy decides only where an event goes; what to do about it is the
+coordinator's and the agents' business.
 
 ## An issue, start to finish
 
@@ -139,8 +145,10 @@ only where an event goes; what to do about it is the coordinator's and the agent
 7. The daemon submits the pull request for merge, and it lands under the repository's own rules.
    The merge closes the issue: it is Done.
 8. After the close, once the deploy carries the merge, the implementer drives the change in
-   production and records what it observed on the pull request; Dispatch's `issue.deployed` event
-   is what wakes it for that look.
+   production and records what it observed on the pull request. Dispatch's `issue.deployed` event
+   wakes it for that look, as does each run of the repository's deploy workflow on its default
+   branch whose deploy step succeeded after the merge, when the project's `legion.yaml` names that
+   workflow.
 
 Read on in [Legion](/legion/legion/), [Dispatch](/legion/dispatch/) and the
 [Secrets Broker](/legion/broker/).

@@ -3,34 +3,30 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
-	"net"
+	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"golang.org/x/oauth2"
-
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 const (
 	testAudience = "legion-broker-dev"
 	testAccount  = "system:serviceaccount:example-ns:example-worker"
-	testClient   = "legion-broker-dev-sign-in"
-	testSecret   = "dev-sign-in-secret"
-	// testRedirect is the sign-in's callback. Nothing listens there: the test reads the code and
-	// state from the issuer's redirect, as the callback would, without following it.
-	testRedirect = "http://127.0.0.1:1/approve/callback"
 )
 
 // lockedBuffer is the command's stderr, read by the test while the command still writes it.
@@ -53,6 +49,18 @@ func (b *lockedBuffer) String() string {
 
 var listening = regexp.MustCompile(`issuer listening url=(\S+)`)
 
+// awaitListening waits for the command to log its URL on stderr and answers it.
+func awaitListening(t *testing.T, stderr *lockedBuffer) string {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if match := listening.FindStringSubmatch(stderr.String()); match != nil {
+			return match[1]
+		}
+	}
+	t.Fatalf("the issuer never logged its URL:\n%s", stderr.String())
+	return ""
+}
+
 // TestTheTokenFileVerifiesAgainstTheIssuerAndIsRewrittenBeforeItLapses runs the issuer with a
 // lifetime of seconds: the file it writes before it reports its URL holds a token the broker's own
 // verifier accepts for the account and audience asked for, bound to a pod and living exactly the
@@ -68,24 +76,16 @@ func TestTheTokenFileVerifiesAgainstTheIssuerAndIsRewrittenBeforeItLapses(t *tes
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() {
-		done <- serveIssuer(ctx, issuerConfig{specs: []tokenSpec{{audience: testAudience, account: testAccount, file: file}}, lifetime: lifetime}, &stderr)
+		done <- serve(ctx, []tokenSpec{{audience: testAudience, account: testAccount, file: file}}, nil, lifetime, &stderr)
 	}()
 	t.Cleanup(func() {
 		cancel()
 		if code := <-done; code != 0 {
-			t.Errorf("serveIssuer returned %d after its context ended, want 0\n%s", code, stderr.String())
+			t.Errorf("serve returned %d after its context ended, want 0\n%s", code, stderr.String())
 		}
 	})
 
-	var issuerURL string
-	for deadline := time.Now().Add(10 * time.Second); issuerURL == "" && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if match := listening.FindStringSubmatch(stderr.String()); match != nil {
-			issuerURL = match[1]
-		}
-	}
-	if issuerURL == "" {
-		t.Fatalf("the issuer never logged its URL:\n%s", stderr.String())
-	}
+	issuerURL := awaitListening(t, &stderr)
 	verifier, err := oidc.New(context.Background(), issuerURL, testAudience)
 	if err != nil {
 		t.Fatalf("oidc.New(%s): %v", issuerURL, err)
@@ -153,9 +153,19 @@ func TestRunRefusesATokenItCannotMint(t *testing.T) {
 	}
 }
 
-// start runs the command with args until the test ends, and returns the issuer URL it logs once
-// it serves.
-func start(t *testing.T, args ...string) string {
+const (
+	testClientID     = "dispatch-dev"
+	testClientSecret = "dev-client-secret"
+	testRedirect     = "http://127.0.0.1:1/auth/callback"
+	testDomain       = "d.example"
+)
+
+// noRedirects hands back each redirect rather than following it, so a test reads where the
+// issuer sends the browser.
+var noRedirects = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+// startRun runs the command on args until the test ends, and answers the URL it logs.
+func startRun(t *testing.T, args ...string) string {
 	t.Helper()
 	var stderr lockedBuffer
 	ctx, cancel := context.WithCancel(context.Background())
@@ -167,288 +177,236 @@ func start(t *testing.T, args ...string) string {
 			t.Errorf("run returned %d after its context ended, want 0\n%s", code, stderr.String())
 		}
 	})
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if match := listening.FindStringSubmatch(stderr.String()); match != nil {
-			return match[1]
-		}
-		select {
-		case code := <-done:
-			done <- code
-			t.Fatalf("run %v exited %d before it served:\n%s", args, code, stderr.String())
-		default:
-		}
-	}
-	t.Fatalf("the issuer never logged its URL:\n%s", stderr.String())
-	return ""
+	return awaitListening(t, &stderr)
 }
 
-// signInArgs are the arguments of an issuer that signs people in for testClient, on a loopback
-// port the system picks, followed by extra.
-func signInArgs(t *testing.T, extra ...string) []string {
+// secretFile writes content to a file of t's own and answers its path.
+func secretFile(t *testing.T, content string) string {
 	t.Helper()
-	secretFile := filepath.Join(t.TempDir(), "client-secret")
-	if err := os.WriteFile(secretFile, []byte(testSecret+"\n"), 0o600); err != nil {
+	file := filepath.Join(t.TempDir(), "client-secret")
+	if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return append([]string{"--listen", "127.0.0.1:0", "--sign-in-client", testClient, "--sign-in-client-secret-file", secretFile}, extra...)
+	return file
 }
 
-// discover reads the issuer's discovery as the secrets broker does, for testClient in domain mode.
-func discover(t *testing.T, issuerURL, hostedDomain string) *oidc.CodeFlow {
+// authorizeURL is the authorization request a confidential client sends the browser to.
+func authorizeURL(endpoint, state, nonce string) string {
+	return endpoint + "?" + url.Values{
+		"client_id":     {testClientID},
+		"response_type": {"code"},
+		"scope":         {"openid email"},
+		"redirect_uri":  {testRedirect},
+		"state":         {state},
+		"nonce":         {nonce},
+	}.Encode()
+}
+
+// authorize follows authURL as a browser does and answers the code the issuer redirects back to
+// testRedirect with, failing unless it redirects there with state.
+func authorize(t *testing.T, authURL, state string) string {
 	t.Helper()
-	flow, err := oidc.DiscoverCodeFlow(context.Background(), issuerURL, testClient, testSecret, hostedDomain, 5*time.Second)
-	if err != nil {
-		t.Fatalf("DiscoverCodeFlow(%s): %v", issuerURL, err)
-	}
-	return flow
-}
-
-// newSignIn is a fresh online sign-in naming hint, empty for none.
-func newSignIn(hint string) oidc.OnlineSignIn {
-	return oidc.OnlineSignIn{State: uuid.NewString(), Nonce: uuid.NewString(), Verifier: oauth2.GenerateVerifier(), LoginHint: hint}
-}
-
-// authorize sends a browser to authURL and returns the issuer's status and, from its redirect, the
-// code and the state, without following the redirect.
-func authorize(t *testing.T, authURL string) (status int, code, state string) {
-	t.Helper()
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Get(authURL)
+	response, err := noRedirects.Get(authURL)
 	if err != nil {
 		t.Fatalf("GET %s: %v", authURL, err)
 	}
-	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
 	location, err := url.Parse(response.Header.Get("Location"))
 	if err != nil {
-		t.Fatalf("parse the authorization redirect %q: %v", response.Header.Get("Location"), err)
+		t.Fatal(err)
 	}
-	return response.StatusCode, location.Query().Get("code"), location.Query().Get("state")
+	query := location.Query()
+	location.RawQuery = ""
+	if response.StatusCode != http.StatusFound || location.String() != testRedirect || query.Get("state") != state || query.Get("code") == "" {
+		t.Fatalf("GET %s: status %d to %q (%s), want 302 to %s with state %s and a code", authURL, response.StatusCode, response.Header.Get("Location"), body, testRedirect, state)
+	}
+	return query.Get("code")
 }
 
-// signInWith runs one online sign-in naming hint to its exchange, and returns the verified claims.
-func signInWith(t *testing.T, flow *oidc.CodeFlow, hint string) oidc.Claims {
+// exchangeCode posts code to the token endpoint as testClientID authenticating with secret, and
+// answers the status and body.
+func exchangeCode(t *testing.T, endpoint, code, secret string) (int, []byte) {
 	t.Helper()
-	signIn := newSignIn(hint)
-	status, code, state := authorize(t, flow.OnlineAuthURL(testRedirect, signIn))
-	if status != http.StatusFound || code == "" || state != signIn.State {
-		t.Fatalf("authorize with hint %q: status %d, code %q, state %q; want 302 with a code and state %q", hint, status, code, state, signIn.State)
-	}
-	claims, err := flow.OnlineExchange(context.Background(), testRedirect, code, signIn)
-	if err != nil {
-		t.Fatalf("OnlineExchange for hint %q: %v", hint, err)
-	}
-	return claims
-}
-
-// post sends body to the issuer's path with contentType and returns the status and response body.
-func post(t *testing.T, issuerURL, path, contentType, body string) (int, string) {
-	t.Helper()
-	response, err := http.Post(issuerURL+path, contentType, strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
-	}
-	defer response.Body.Close()
-	var answer bytes.Buffer
-	if _, err := answer.ReadFrom(response.Body); err != nil {
-		t.Fatalf("read the answer to POST %s: %v", path, err)
-	}
-	return response.StatusCode, answer.String()
-}
-
-// TestASignInSignsInTheQueuedPersonElseTheLoginHint signs in through the broker's own online code
-// flow: a sign-in naming a login_hint signs that address in, its case kept, with the domain's hd
-// and a verified email; a person queued at /dev/sign-in-as, as JSON or as a form, is signed in
-// instead by the next sign-in alone, in the order queued; and an address keeps its sub across
-// sign-ins.
-func TestASignInSignsInTheQueuedPersonElseTheLoginHint(t *testing.T) {
-	issuerURL := start(t, signInArgs(t)...)
-	flow := discover(t, issuerURL, "example.com")
-
-	ada := signInWith(t, flow, "Ada@Example.com")
-	if ada.Email != "Ada@Example.com" || !ada.EmailVerified || ada.HostedDomain != "example.com" || ada.Subject == "" {
-		t.Fatalf("the hinted sign-in signed in %+v, want Ada@Example.com, verified, hd example.com, with a sub", ada)
-	}
-	if status, body := post(t, issuerURL, "/dev/sign-in-as", "application/json", `{"email": "grace@example.com"}`); status != http.StatusNoContent {
-		t.Fatalf("POST /dev/sign-in-as as JSON: %d %s, want 204", status, body)
-	}
-	if status, body := post(t, issuerURL, "/dev/sign-in-as", "application/x-www-form-urlencoded", url.Values{"email": {"bob@example.com"}}.Encode()); status != http.StatusNoContent {
-		t.Fatalf("POST /dev/sign-in-as as a form: %d %s, want 204", status, body)
-	}
-	for _, want := range []string{"grace@example.com", "bob@example.com", "Ada@Example.com"} {
-		got := signInWith(t, flow, "Ada@Example.com")
-		if got.Email != want || !got.EmailVerified || got.HostedDomain != "example.com" {
-			t.Fatalf("a sign-in hinting Ada@Example.com signed in %+v, want %s, verified, hd example.com", got, want)
-		}
-		switch {
-		case want == "Ada@Example.com" && got.Subject != ada.Subject:
-			t.Fatalf("Ada's second sign-in has sub %q, want her first's %q", got.Subject, ada.Subject)
-		case want != "Ada@Example.com" && got.Subject == ada.Subject:
-			t.Fatalf("%s has Ada's sub %q", want, got.Subject)
-		}
-	}
-	if status, _ := post(t, issuerURL, "/dev/sign-in-as", "application/json", `{}`); status != http.StatusBadRequest {
-		t.Fatalf("POST /dev/sign-in-as naming no email: %d, want 400", status)
-	}
-}
-
-// TestASignInWithNoOneToSignInIsRefused pins the last two choices: with no one queued and no
-// login_hint, the authorization request is refused 400 unless --sign-in-default names a person, who
-// is then signed in with the --sign-in-domain's hd.
-func TestASignInWithNoOneToSignInIsRefused(t *testing.T) {
-	flow := discover(t, start(t, signInArgs(t)...), "example.com")
-	if status, code, _ := authorize(t, flow.OnlineAuthURL(testRedirect, newSignIn(""))); status != http.StatusBadRequest || code != "" {
-		t.Fatalf("a sign-in naming no one: status %d, code %q; want 400 and no code", status, code)
-	}
-
-	flow = discover(t, start(t, signInArgs(t, "--sign-in-default", "dora@example.org", "--sign-in-domain", "example.org")...), "example.org")
-	if got := signInWith(t, flow, ""); got.Email != "dora@example.org" || got.HostedDomain != "example.org" || !got.EmailVerified {
-		t.Fatalf("a sign-in naming no one with a default signed in %+v, want dora@example.org, verified, hd example.org", got)
-	}
-}
-
-// TestACodeIsExchangedOnlyWithItsVerifier holds the issuer to PKCE S256: the code of a sign-in
-// whose request carried a challenge is refused with another verifier.
-func TestACodeIsExchangedOnlyWithItsVerifier(t *testing.T) {
-	flow := discover(t, start(t, signInArgs(t)...), "example.com")
-	signIn := newSignIn("ada@example.com")
-	status, code, _ := authorize(t, flow.OnlineAuthURL(testRedirect, signIn))
-	if status != http.StatusFound || code == "" {
-		t.Fatalf("authorize: status %d, code %q; want 302 with a code", status, code)
-	}
-	stolen := signIn
-	stolen.Verifier = oauth2.GenerateVerifier()
-	if claims, err := flow.OnlineExchange(context.Background(), testRedirect, code, stolen); err == nil {
-		t.Fatalf("the code was exchanged with another verifier, signing in %+v", claims)
-	}
-}
-
-// TestACodeExchangeAnswersNoRefreshToken reads the token endpoint's answer itself, since the online
-// flow drops a refresh token: the issuer answers an ID token and none, as Google does for an online
-// sign-in.
-func TestACodeExchangeAnswersNoRefreshToken(t *testing.T) {
-	issuerURL := start(t, signInArgs(t)...)
-	flow := discover(t, issuerURL, "example.com")
-	signIn := newSignIn("ada@example.com")
-	_, code, _ := authorize(t, flow.OnlineAuthURL(testRedirect, signIn))
-	request, err := http.NewRequest(http.MethodPost, issuerURL+"/token", strings.NewReader(url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {code},
-		"redirect_uri":  {testRedirect},
-		"code_verifier": {signIn.Verifier},
-	}.Encode()))
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {testRedirect}}
+	request, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.SetBasicAuth(testClient, testSecret)
+	request.SetBasicAuth(testClientID, secret)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		t.Fatalf("POST /token: %v", err)
+		t.Fatalf("POST %s: %v", endpoint, err)
 	}
 	defer response.Body.Close()
-	var answer map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&answer); err != nil {
-		t.Fatalf("decode the token answer: %v", err)
-	}
-	if _, hasRefresh := answer["refresh_token"]; response.StatusCode != http.StatusOK || answer["id_token"] == nil || hasRefresh {
-		t.Fatalf("the code exchange answered %d with id_token %t and refresh_token %t; want 200, an ID token and no refresh token",
-			response.StatusCode, answer["id_token"] != nil, hasRefresh)
-	}
+	body, _ := io.ReadAll(response.Body)
+	return response.StatusCode, body
 }
 
-// TestMintAnswersAServiceAccountTokenTheIssuerVerifies mints at /dev/mint and verifies the answer
-// with the broker's own pod-token verifier: the subject, audience, pod and lifetime asked for, a
-// random pod and the hour when none is asked for, and a subject that is not a ServiceAccount or a
-// lifetime past the hour refused 400.
-func TestMintAnswersAServiceAccountTokenTheIssuerVerifies(t *testing.T) {
-	issuerURL := start(t, "--listen", "127.0.0.1:0")
-	verifier, err := oidc.New(context.Background(), issuerURL, testAudience)
-	if err != nil {
-		t.Fatalf("oidc.New(%s): %v", issuerURL, err)
+// idTokenClaims is the payload of the compact JWT raw, whose signature the caller has verified.
+func idTokenClaims(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 {
+		t.Fatalf("the ID token %q is not a compact JWT", raw)
 	}
-	mint := func(request map[string]any) enroll.AccountClaims {
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatal(err)
+	}
+	return claims
+}
+
+// TestTheCodeFlowSignsInTheDefaultPersonUntilAnotherIsQueued drives the command through its flags:
+// discovery names the authorization and token endpoints; an authorization with none queued signs
+// in --sign-in-as's person, whose ID token, issued for the client's secret, carries the claims
+// Dispatch's domain rule and its sign-in pool group rule read; a person queued at
+// /_dev/sign-in-as is the next authorization's, once; and a code exchanged with another secret is
+// refused. The last sign-in goes through Dispatch's own client and both its rules, which name the
+// default person.
+func TestTheCodeFlowSignsInTheDefaultPersonUntilAnotherIsQueued(t *testing.T) {
+	ctx := context.Background()
+	// The trailing newline is the file's, not the secret's.
+	issuerURL := startRun(t, "--code-flow", testClientID+"="+secretFile(t, testClientSecret+"\n"), "--sign-in-as", "Alice@D.example", "--sign-in-group", "dispatch-members")
+
+	response, err := http.Get(issuerURL + "/.well-known/openid-configuration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var discovery struct {
+		AuthorizationEndpoint string `json:"authorization_endpoint"`
+		TokenEndpoint         string `json:"token_endpoint"`
+	}
+	err = json.NewDecoder(response.Body).Decode(&discovery)
+	response.Body.Close()
+	if err != nil || discovery.AuthorizationEndpoint != issuerURL+"/authorize" || discovery.TokenEndpoint != issuerURL+"/token" {
+		t.Fatalf("discovery = %+v (%v), want the authorization and token endpoints at %s", discovery, err, issuerURL)
+	}
+	verifier, err := oidc.New(ctx, issuerURL, testClientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signIn := func(nonce string) map[string]any {
 		t.Helper()
-		body, err := json.Marshal(request)
+		code := authorize(t, authorizeURL(discovery.AuthorizationEndpoint, "state-"+nonce, nonce), "state-"+nonce)
+		status, body := exchangeCode(t, discovery.TokenEndpoint, code, testClientSecret)
+		var tokens struct {
+			IDToken string `json:"id_token"`
+		}
+		if err := json.Unmarshal(body, &tokens); status != http.StatusOK || err != nil {
+			t.Fatalf("token exchange: status %d, body %s, want 200 with an ID token", status, body)
+		}
+		verified, err := verifier.Verify(ctx, tokens.IDToken)
+		if err != nil || verified.Nonce != nonce {
+			t.Fatalf("the ID token verifies %v with nonce %q, want verified with nonce %q", err, verified.Nonce, nonce)
+		}
+		return idTokenClaims(t, tokens.IDToken)
+	}
+	alice := map[string]any{"sub": "alice@d.example", "email": "alice@d.example", "email_verified": true, "hd": testDomain}
+	bob := map[string]any{"sub": "bob-account", "email": "bob@d.example", "email_verified": true, "hd": testDomain}
+	wantPerson := func(got, want map[string]any) {
+		t.Helper()
+		for claim, value := range want {
+			if got[claim] != value {
+				t.Errorf("the ID token's %s is %#v, want %#v (claims %v)", claim, got[claim], value, got)
+			}
+		}
+	}
+
+	wantPerson(signIn("nonce-1"), alice)
+
+	queue := func(body string) int {
+		t.Helper()
+		response, err := http.Post(issuerURL+"/_dev/sign-in-as", "application/json", strings.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
-		status, answer := post(t, issuerURL, "/dev/mint", "application/json", string(body))
-		var minted struct {
-			Token string `json:"token"`
-		}
-		if status != http.StatusOK || json.Unmarshal([]byte(answer), &minted) != nil || minted.Token == "" {
-			t.Fatalf("POST /dev/mint %s: %d %s, want 200 with a token", body, status, answer)
-		}
-		claims, err := enroll.K8sPodVerifier{Verifier: verifier}.VerifyAccount(context.Background(), minted.Token)
-		if err != nil {
-			t.Fatalf("the minted token does not verify against the issuer for %s: %v", testAudience, err)
-		}
-		return claims
+		response.Body.Close()
+		return response.StatusCode
+	}
+	if status := queue(`["not", "claims"]`); status != http.StatusBadRequest {
+		t.Fatalf("POST /_dev/sign-in-as with a JSON array: status %d, want 400", status)
+	}
+	queued, _ := json.Marshal(bob)
+	if status := queue(string(queued)); status != http.StatusNoContent {
+		t.Fatalf("POST /_dev/sign-in-as: status %d, want 204", status)
+	}
+	wantPerson(signIn("nonce-2"), bob)
+
+	code := authorize(t, authorizeURL(discovery.AuthorizationEndpoint, "state-wrong", "nonce-wrong"), "state-wrong")
+	if status, body := exchangeCode(t, discovery.TokenEndpoint, code, "not-the-secret"); status != http.StatusUnauthorized || !strings.Contains(string(body), "invalid_client") {
+		t.Fatalf("token exchange with another secret: status %d, body %s, want 401 invalid_client", status, body)
 	}
 
-	asked := mint(map[string]any{"subject": testAccount, "audience": testAudience, "pod_uid": "pod-uid-asked", "lifetime_seconds": 600})
-	if asked.Subject != testAccount || asked.PodUID != "pod-uid-asked" || asked.Expiry.Sub(asked.IssuedAt) != 10*time.Minute {
-		t.Fatalf("the minted token names %q, pod %q, a life of %s; want %s, pod-uid-asked, 10m0s", asked.Subject, asked.PodUID, asked.Expiry.Sub(asked.IssuedAt), testAccount)
-	}
-	unasked := mint(map[string]any{"subject": testAccount, "audience": testAudience})
-	if unasked.PodUID == "" || unasked.PodUID == asked.PodUID || unasked.Expiry.Sub(unasked.IssuedAt) != tokenLifetime {
-		t.Fatalf("a token minted with no pod or lifetime names pod %q and a life of %s, want a random pod and %s", unasked.PodUID, unasked.Expiry.Sub(unasked.IssuedAt), tokenLifetime)
-	}
-
-	for _, refused := range []string{
-		`{"subject": "ada@example.com", "audience": "` + testAudience + `"}`,
-		`{"subject": "system:serviceaccount:example-ns", "audience": "` + testAudience + `"}`,
-		`{"subject": "` + testAccount + `"}`,
-		`{"subject": "` + testAccount + `", "audience": "` + testAudience + `", "lifetime_seconds": ` + strconv.FormatInt(int64(tokenLifetime/time.Second)+1, 10) + `}`,
-	} {
-		if status, answer := post(t, issuerURL, "/dev/mint", "application/json", refused); status != http.StatusBadRequest {
-			t.Errorf("POST /dev/mint %s: %d %s, want 400", refused, status, answer)
-		}
-	}
-}
-
-// TestListenServesOnTheAddressGiven runs the issuer on a port fixed before it starts and finds it
-// there, the URL it logs naming that port.
-func TestListenServesOnTheAddressGiven(t *testing.T) {
-	free, err := net.Listen("tcp", "127.0.0.1:0")
+	flow := oidc.NewCodeFlow(issuerURL, testClientID, testClientSecret, testDomain)
+	authURL, err := flow.AuthURL(ctx, testRedirect, "state-3", "nonce-3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	address := free.Addr().String()
-	if err := free.Close(); err != nil {
-		t.Fatal(err)
+	session, err := flow.Exchange(ctx, testRedirect, authorize(t, authURL, "state-3"), "nonce-3")
+	if err != nil {
+		t.Fatalf("Dispatch's code flow: %v", err)
 	}
-	if issuerURL := start(t, "--listen", address); issuerURL != "http://"+address {
-		t.Fatalf("the issuer logged %s, want http://%s", issuerURL, address)
+	email, err := identity.DomainRule{Domain: testDomain}.Person(session.Claims)
+	if err != nil || email != "alice@d.example" || session.Claims.Subject != "alice@d.example" {
+		t.Fatalf("Dispatch's domain rule names %q (%v) for subject %q, want alice@d.example, the default once bob's turn is spent", email, err, session.Claims.Subject)
 	}
-	if _, err := oidc.New(context.Background(), "http://"+address, testAudience); err != nil {
-		t.Fatalf("the issuer's discovery at %s: %v", address, err)
+	if email, err := (identity.GroupRule{Group: "dispatch-members"}).Person(session.Claims); err != nil || email != "alice@d.example" {
+		t.Fatalf("Dispatch's group rule names %q (%v), want alice@d.example, a member of dispatch-members", email, err)
+	}
+	if _, err := (identity.GroupRule{Group: "other-group"}).Person(session.Claims); !errors.Is(err, identity.ErrNotMember) {
+		t.Fatalf("Dispatch's group rule for another group: %v, want ErrNotMember", err)
 	}
 }
 
-// TestRunRefusesAnIssuerItCannotServeSafely pins the usage refusals of the new flags, each exit 2
-// before any issuer runs: a --listen host that is not loopback, and sign-in flags given in part.
-func TestRunRefusesAnIssuerItCannotServeSafely(t *testing.T) {
-	secretFile := filepath.Join(t.TempDir(), "client-secret")
-	if err := os.WriteFile(secretFile, []byte(testSecret), 0o600); err != nil {
+// TestTheSignInControlRefusesACallerOffLoopback sends /_dev/sign-in-as a request from an address
+// that is not loopback: it is refused 403 and queues nobody, so the issuer, which has no default
+// person, still refuses the next authorization.
+func TestTheSignInControlRefusesACallerOffLoopback(t *testing.T) {
+	issuer := oidctest.New(t)
+	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), testClientID, testClientSecret)
+	request := httptest.NewRequest(http.MethodPost, "/_dev/sign-in-as", strings.NewReader(`{"sub":"mallory","email":"mallory@d.example","email_verified":true,"hd":"d.example"}`))
+	request.RemoteAddr = "192.0.2.1:40000"
+	recorder := httptest.NewRecorder()
+	signInAsHandler(issuer).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("POST /_dev/sign-in-as from %s: status %d, want 403", request.RemoteAddr, recorder.Code)
+	}
+	response, err := noRedirects.Get(authorizeURL(issuer.URL()+"/authorize", "state", "nonce"))
+	if err != nil {
 		t.Fatal(err)
 	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("the authorization after a refused sign-in: status %d, want 400, nobody queued", response.StatusCode)
+	}
+}
+
+// TestRunRefusesACodeFlowItCannotServe pins the usage refusals of --code-flow and --sign-in-as,
+// each exit 2 naming what is wrong before any issuer runs: a value with no secret file, a secret
+// file that cannot be read or holds only whitespace, --sign-in-as with no code flow to sign in at,
+// and a --sign-in-as that is not an email address.
+func TestRunRefusesACodeFlowItCannotServe(t *testing.T) {
+	secret := secretFile(t, testClientSecret)
 	for _, tc := range []struct {
 		args []string
 		says string
 	}{
-		{[]string{"--listen", "0.0.0.0:0"}, `host "0.0.0.0" is not a loopback address`},
-		{[]string{"--listen", ":8080"}, `host "" is not a loopback address`},
-		{[]string{"--listen", "issuer.internal.example:8080"}, `host "issuer.internal.example" is not a loopback address`},
-		{[]string{"--sign-in-client", testClient}, "--sign-in-client and --sign-in-client-secret-file are given together or not at all"},
-		{[]string{"--sign-in-client-secret-file", secretFile}, "--sign-in-client and --sign-in-client-secret-file are given together or not at all"},
-		{[]string{"--sign-in-domain", "example.org"}, "--sign-in-domain and --sign-in-default need --sign-in-client"},
-		{[]string{"--sign-in-default", "ada@example.com"}, "--sign-in-domain and --sign-in-default need --sign-in-client"},
-		{[]string{"--sign-in-client", testClient, "--sign-in-client-secret-file", filepath.Join(t.TempDir(), "absent")}, "--sign-in-client-secret-file:"},
+		{[]string{"--code-flow", testClientID}, "want <client id>=<client secret file>"},
+		{[]string{"--code-flow", testClientID + "=" + filepath.Join(t.TempDir(), "missing")}, "read the client secret"},
+		{[]string{"--code-flow", testClientID + "=" + secretFile(t, " \n")}, "is empty"},
+		{[]string{"--sign-in-as", "alice@d.example"}, "--sign-in-as needs --code-flow"},
+		{[]string{"--code-flow", testClientID + "=" + secret, "--sign-in-as", "alice"}, `--sign-in-as "alice" is not an email address`},
+		{[]string{"--code-flow", testClientID + "=" + secret, "--sign-in-group", "dispatch-members"}, "--sign-in-group needs --sign-in-as"},
 	} {
 		var stderr lockedBuffer
 		if code := run(context.Background(), tc.args, &stderr); code != exitUsageError || !strings.Contains(stderr.String(), tc.says) {
-			t.Errorf("run %v: exit %d, stderr %q; want %d saying %q", tc.args, code, stderr.String(), exitUsageError, tc.says)
+			t.Errorf("%q: exit %d, stderr %q; want %d saying %q", tc.args, code, stderr.String(), exitUsageError, tc.says)
 		}
 	}
 }

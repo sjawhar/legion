@@ -27,8 +27,8 @@ is for the document that hands that job to the next worker, and for proving the 
   image by carrying its name through every place that spells it", write the grep: the command name
   and the package name, over the Dockerfile, the Go sources and `docs/`. Say which hits a test
   checks (here the `onPath` call, the capability `Summary` and the test stubs and expected string)
-  and which are hand-kept: the Dockerfile's comments, its notices string and its smoke step. A list
-  in prose is a copy that goes wrong at the next site nobody counted.
+  and which are hand-kept: the Dockerfile's comments and its smoke step. A list in prose is a copy
+  that goes wrong at the next site nobody counted.
 - **A change to `skills/` text is a worker-image change.** `worker.Dockerfile` copies `skills/` into
   the image, so the image half of a proof holds only at the final head's own tag. When that tag is
   still building at your completion, say it is not proven. Drive it once the build is done.

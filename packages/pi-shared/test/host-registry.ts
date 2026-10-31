@@ -21,6 +21,12 @@ export interface TestAgentRef {
      *  frame lists. */
     readonly slashCommands?: readonly TestSessionCommand[];
     readonly promptTemplates?: readonly TestSessionCommand[];
+    /** The live session's model and thinking-level getters, which pi-envoy's settings frame
+     *  reads. */
+    readonly model?: { readonly provider: string; readonly id: string };
+    configuredThinkingLevel?(): string | undefined;
+    getAvailableModels?(): readonly { readonly provider: string; readonly id: string }[];
+    getAvailableEffortSelectors?(): readonly string[];
   } | null;
   readonly sessionFile: string | null;
 }

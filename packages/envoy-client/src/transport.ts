@@ -6,6 +6,19 @@ import { machineID } from "./machine";
 const DEFAULT_TIMEOUT_MS = 5_000;
 const RETRY_DELAY_MS = 250;
 
+/**
+ * How long one replay call may take. The listener stops reading at 5 s and its HTTP server writes
+ * for at most 10 s, so this waits out a full answer without outliving the server's own deadline.
+ */
+const REPLAY_TIMEOUT_MS = 10_000;
+
+/**
+ * The `code` a listener answers a replay with, under 503, when NATS refuses the read outright (the
+ * listener's user lacks the grant, or there is no notification stream). Retrying at once cannot
+ * help, unlike a 503 the listener's start-up gate answers, so a caller tells its session instead.
+ */
+export const REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
+
 const InterestWireSchema = z.object({
   session_id: z.string(),
   machine_id: z.string(),
@@ -19,9 +32,14 @@ const SessionWireSchema = z.object({
   session_id: z.string(),
   machine_id: z.string(),
   // The session's real machine, as the client reported it (machineID()); machine_id stays the
-  // registering listener's own machine and keeps its routing meaning (session.go's hostFor,
-  // store.Registry.Match). Optional here only for a listener predating the field — the live
-  // listener always fills it in, falling back to machine_id itself (session.SessionEntry.HostOrMachine).
+  // listener it last registered through. The session's owner is the listener its stored
+  // subscription names (the one store.Registry.Match fans its topics out on), else the one on
+  // machine_id; only the owner delivers to a serve-port session, at this host unless the session
+  // runs on the owner's machine (registered through it, or this host is the owner's machine id)
+  // and the owner has a host bridge, and any other listener leaves inbox messages
+  // to it silently (session.go's ErrWrongMachine). Optional here only for a listener predating
+  // the field — the live listener always fills it in, falling back to machine_id itself
+  // (session.SessionEntry.HostOrMachine).
   host: z.string().optional(),
   dir: z.string(),
   port: z.number().int(),
@@ -31,6 +49,10 @@ const SessionWireSchema = z.object({
   capabilities: z.array(z.string()).optional(),
   self_subscribed: z.boolean(),
   last_seen: z.number().int().optional(),
+  // The plugin the session registered through and its build; absent from a listener predating the
+  // fields and for a session whose plugin predates them.
+  plugin: z.string().optional(),
+  plugin_version: z.string().optional(),
 });
 
 const RoleWireSchema = z.object({
@@ -48,12 +70,42 @@ const RoleHeldWireSchema = z.object({
 
 const ErrorWireSchema = z.object({
   error: z.string(),
+  code: z.string().optional(),
   expected: z.array(z.string()).optional(),
 });
 
 const EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: z.string().optional(),
   holder: z.string().optional(),
+});
+
+const ReplayWireSchema = z.object({
+  stream: z.object({
+    // The stream's `envoy_stream_id` metadata: absent from an older listener's answer, or for a
+    // stream without it. `created` is what identifies the stream then.
+    id: z.string().min(1).optional(),
+    created: z.string(),
+    first_seq: z.number().int().nonnegative(),
+    last_seq: z.number().int().nonnegative(),
+  }),
+  subjects: z.array(
+    z.object({
+      subject: z.string(),
+      messages: z.array(
+        z.object({
+          seq: z.number().int().positive(),
+          subject: z.string(),
+          time: z.string(),
+          data: z.string(),
+        })
+      ),
+      next_after: z.number().int().nonnegative(),
+      more: z.boolean(),
+      // `not_followed` or `not_retained` today; read as a string so a reason a later listener adds
+      // still parses, as a subject that answered nothing.
+      refused: z.string().optional(),
+    })
+  ),
 });
 
 export type EnvoyFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -104,6 +156,10 @@ export type SubscribeInput = {
   readonly capabilities?: readonly string[];
   readonly driving: boolean;
   readonly selfSubscribed?: boolean;
+  /** The plugin this session registers through (its npm package name) and that plugin's build,
+   * sent on every registration so the listener's session list shows which build each session
+   * runs. */
+  readonly plugin: { readonly name: string; readonly version: string };
 };
 
 export type UnsubscribeInput = {
@@ -204,9 +260,31 @@ export type PublishResult = {
   readonly holder?: string;
 };
 
+/** One followed subject of a replay request, read from after `after`, or, without one, started. */
+export interface ReplaySubjectInput {
+  readonly subject: string;
+  /** The last stream sequence handled; absent, the listener answers no messages and the watermark,
+   *  which is where a new cursor starts. */
+  readonly after?: number;
+}
+
+export interface ReplayInput {
+  readonly sessionID: string;
+  readonly subjects: readonly ReplaySubjectInput[];
+  /** The most messages across the whole answer; the listener defaults to 100 and caps it at 500. */
+  readonly maxMessages?: number;
+}
+
+/** The listener's answer to `POST /v1/replay`, in its wire shape. */
+export type ReplayResult = z.infer<typeof ReplayWireSchema>;
+export type ReplaySubjectResult = ReplayResult["subjects"][number];
+export type ReplayMessage = ReplaySubjectResult["messages"][number];
+
 export class EnvoyApiError extends Error {
   readonly name = "EnvoyApiError";
   readonly expected: readonly string[] | undefined;
+  /** The listener's machine-readable `code`, when its error body carries one. */
+  readonly code: string | undefined;
 
   constructor(
     readonly details: {
@@ -229,6 +307,7 @@ export class EnvoyApiError extends Error {
         : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`
     );
     this.expected = parsed?.expected;
+    this.code = parsed?.code;
   }
 }
 
@@ -242,17 +321,30 @@ export type EnvoyClient = {
   readonly setRole: (input: SetRoleInput) => Promise<SetRoleResult>;
   readonly getRole: (role: string) => Promise<RoleInfo>;
   readonly listSessions: (input?: ListSessionsInput) => Promise<readonly SessionInfo[]>;
+  /**
+   * Reads what the notification stream stored for a session's followed subjects after each one's
+   * cursor. Tried once, with no retry of a 5xx: a sweep runs again on its next trigger, and a 503
+   * `REPLAY_UNAVAILABLE` must reach the caller at once so the session can be told.
+   */
+  readonly replay: (input: ReplayInput) => Promise<ReplayResult>;
 };
+
+type RequestOptions = { readonly timeoutMs?: number; readonly retry?: boolean };
 
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config.token;
 
-  const request = async (path: string, init: RequestInit): Promise<string> => {
+  const request = async (
+    path: string,
+    init: RequestInit,
+    options: RequestOptions = {}
+  ): Promise<string> => {
     const url = `${baseUrl}${path}`;
     const attempts = config.retry === false ? 1 : 2;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const tries = options.retry === false ? 1 : attempts;
+    for (let attempt = 0; attempt < tries; attempt += 1) {
       let response: Response;
       try {
         const headers = new Headers(init.headers);
@@ -260,10 +352,10 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         response = await config.fetch(url, {
           ...init,
           headers,
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs),
         });
       } catch (error) {
-        if (attempt + 1 < attempts) {
+        if (attempt + 1 < tries) {
           await waitForRetry();
           continue;
         }
@@ -278,7 +370,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         status: response.status,
         responseBody,
       });
-      if (response.status >= 500 && attempt + 1 < attempts) {
+      if (response.status >= 500 && attempt + 1 < tries) {
         await waitForRetry();
         continue;
       }
@@ -287,12 +379,16 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     throw new Error("Envoy request exhausted retries");
   };
 
-  const post = (path: string, body: object) =>
-    request(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+  const post = (path: string, body: object, options?: RequestOptions) =>
+    request(
+      path,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      options
+    );
 
   return {
     subscribe: async (input) =>
@@ -312,8 +408,16 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
             // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
             // re-subscribes on each tick). The listener stores it separately from the registering
-            // listener's own machine_id, which keeps its routing meaning either way.
+            // listener's own machine_id, and the session's owner reaches a serve-port session at
+            // it unless the session runs on the owner's machine (registered through it, or this
+            // value is the owner's machine id) and the owner has a host bridge.
+            // The owner is the listener the session's stored subscription names, else the one it
+            // registered through; only the owner delivers to the session, and any other listener
+            // leaves inbox messages to it silently. With a port, a value that is not a host name
+            // or IP address is refused with 400 (expected: ["host"]).
             host: machineID(),
+            plugin: input.plugin.name,
+            plugin_version: input.plugin.version,
           })
         )
       ),
@@ -405,6 +509,24 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
     },
+    replay: async (input) =>
+      ReplayWireSchema.parse(
+        JSON.parse(
+          await post(
+            "/v1/replay",
+            {
+              session_id: input.sessionID,
+              subjects: input.subjects.map((cursor) =>
+                cursor.after === undefined
+                  ? { subject: cursor.subject }
+                  : { subject: cursor.subject, after: cursor.after }
+              ),
+              ...(input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }),
+            },
+            { timeoutMs: REPLAY_TIMEOUT_MS, retry: false }
+          )
+        )
+      ),
   };
 }
 

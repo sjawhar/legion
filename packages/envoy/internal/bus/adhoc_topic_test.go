@@ -48,13 +48,13 @@ func TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCaptur
 		{"team.deploy-squad.all", false},
 		{"$KV.envoy_roles.reviewer", false},
 	} {
-		if got := usesCoreTransport(tc.topic); got != tc.core {
-			t.Errorf("usesCoreTransport(%q) = %t, want %t", tc.topic, got, tc.core)
+		if got := UsesCoreTransport(tc.topic); got != tc.core {
+			t.Errorf("UsesCoreTransport(%q) = %t, want %t", tc.topic, got, tc.core)
 		}
 	}
 }
 
-// streamCaptures reads each stream subject as a literal prefix and `.>`; a subject of any other
+// StreamCaptures reads each stream subject as a literal prefix and `.>`; a subject of any other
 // shape needs a matcher that splits tokens.
 func TestEveryStreamSubjectIsALiteralPrefixAndWildcard(t *testing.T) {
 	for _, subject := range streamSubjects {

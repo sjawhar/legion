@@ -25,7 +25,8 @@ import (
 // stops with no signal anywhere that the listener has gone deaf.
 func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 	consumer := "listener-unbound-health"
-	client, get := setupUnboundDurableFixture(t, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	client := setupTestNATS(t)
+	get := setupUnboundDurableFixture(t, client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
 	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 		t.Fatalf("before the durable is recreated: /healthz = %d %v, want 200 healthy", code, body)
 	}
@@ -39,13 +40,14 @@ func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 	}
 }
 
-// setupUnboundDurableFixture is the listener a recreated durable is tested against: handler bound
-// to the durable, both registries open with their caches ready, and the listenerDeps /healthz
-// reads. It returns the client and a get() that serves one /healthz request, which is every piece
-// the tests in this file share.
-func setupUnboundDurableFixture(t *testing.T, consumer string, handler natsgo.MsgHandler) (*bus.Client, func() (int, map[string]any)) {
+// setupUnboundDurableFixture is the listener a recreated durable or a stalled rewatch is tested
+// against, built on client: handler bound to the durable, both registries open with their caches
+// ready, and the listenerDeps /healthz reads. The client is the caller's, so a test that needs one
+// of its own, with a clock for the bus's reconnect reporting, connects it and hands it over. It
+// returns a get() that serves one /healthz request, which is every piece the tests against this
+// listener share.
+func setupUnboundDurableFixture(t *testing.T, client *bus.Client, consumer string, handler natsgo.MsgHandler) func() (int, map[string]any) {
 	t.Helper()
-	client := setupTestNATS(t)
 	sub, err := startListenerSubscription(client, consumer, handler)
 	if err != nil {
 		t.Fatalf("bind the durable: %v", err)
@@ -56,7 +58,7 @@ func setupUnboundDurableFixture(t *testing.T, consumer string, handler natsgo.Ms
 		t.Fatalf("open interest registry: %v", err)
 	}
 	t.Cleanup(registry.StopWatch)
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer readyCancel()
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for interest cache: %v", err)
@@ -70,7 +72,7 @@ func setupUnboundDurableFixture(t *testing.T, consumer string, handler natsgo.Ms
 		t.Fatalf("wait for session cache: %v", err)
 	}
 	state := &atomic.Pointer[listenerDeps]{}
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, consumer: consumer})
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), consumer: consumer})
 	get := func() (int, map[string]any) {
 		recorder := httptest.NewRecorder()
 		healthzHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -78,7 +80,7 @@ func setupUnboundDurableFixture(t *testing.T, consumer string, handler natsgo.Ms
 		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
 		return recorder.Code, body
 	}
-	return client, get
+	return get
 }
 
 // startUnboundDurableMonitor runs the self-health monitor over client's durable the way the
@@ -143,7 +145,8 @@ func TestTheSelfHealthMonitorRebindsARecreatedDurable(t *testing.T) {
 		delivered.Add(1)
 		_ = msg.Ack()
 	}
-	client, _ := setupUnboundDurableFixture(t, consumer, handler)
+	client := setupTestNATS(t)
+	setupUnboundDurableFixture(t, client, consumer, handler)
 
 	recreateListenerDurable(t, client, consumer)
 	if _, err := client.JS().Publish("notifications.github.acme.widgets.push.branch.main", []byte(`{}`)); err != nil {
@@ -179,7 +182,8 @@ func TestTheSelfHealthMonitorRebindsARecreatedDurable(t *testing.T) {
 // listener rebuild itself every interval and eventually terminate.
 func TestABoundDurableNeverFailsItsProbe(t *testing.T) {
 	consumer := "listener-unbound-control"
-	client, get := setupUnboundDurableFixture(t, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	client := setupTestNATS(t)
+	get := setupUnboundDurableFixture(t, client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
 
 	// The monitor logs from its own goroutine, so the buffer the test reads back is guarded.
 	logs := &lockedBuffer{}
