@@ -302,10 +302,14 @@ func roomCursorFrom(ctx context.Context) *roomCursor {
 // flush is passed by the appends of a flush alone (AppendRoomUpdateTx), and is the only way the
 // room's own persistence worker reaches its flush here: its transaction has no ledger, so the
 // cursor its context carries is the instance's alone, one version behind the head from the flush's
-// second append on. A joined transaction's flush appends pass it too - Service.flushThrough passes
-// flush to every append it makes - so the flush branch decides those as well. What the ledger
-// lookup in the room-cursor branch is for is the transaction's other appends of that instance, the
-// repairs storeRepair stores through AppendUpdateTx, which the flush's versions gate.
+// second append on. A joined transaction's flush appends pass it too (Service.flushThrough passes
+// flush to every append it makes), but the write branch comes first: a live write's own flush
+// (Ledger.flushThrough, from recordLiveOperation) is decided by the write, whose heldThrough folds
+// the flushed versions in (withOwnAppends). The flush branch decides the flush appends of a
+// transaction that holds no write of the room: a settlement's, a version's, the block-id
+// backfill's. What the ledger lookup in the room-cursor branch is for is the transaction's other
+// appends of that instance, the repairs storeRepair stores through AppendUpdateTx, which the
+// flush's versions gate.
 //
 // A transaction's write decides for itself: a cold write, whose fork came from the store because
 // no room of this process held the document (coldFork), carries no cursor and is not gated. The
