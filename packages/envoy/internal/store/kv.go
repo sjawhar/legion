@@ -949,8 +949,8 @@ func (e *ErrRoleHeld) Error() string {
 // the listener passes the ids it has established may lose the role: a holder
 // whose session entry the session bucket no longer has, and the claimant's
 // own declared predecessor when the bucket says that predecessor is gone,
-// carries the claimant's own client instance id, or carries no client
-// instance id (and neither does the claimant). So a resumed session can
+// when it carries the claimant's own client instance id, or when either it
+// or the claimant carries no client instance id. So a resumed session can
 // recover a role its own earlier session held without ever taking one from a
 // live peer, or from a live session of another client instance.
 func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, supersedable ...string) (Interest, error) {

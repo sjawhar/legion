@@ -3112,7 +3112,8 @@ Each item below names an endpoint and its method, then its contract, and an item
   that predecessor has no live registry entry, its live entry carries the claimant's own `client_instance_id`, or either side carries no instance id.
   The third case is the one this route cannot tell from another client instance's, so it logs that takeover with both session ids.
   A predecessor still live under another client instance keeps the role, and the claim answers `409 {error, role, holder}` naming it, as any other live holder does.
-  The claimant's entry and the predecessor's are both read from the `envoy_sessions` bucket itself, never from this listener's trailing cache of it, and a predecessor read that did not answer is the bus-unavailable 503 with nothing changed.
+  The predecessor's entry is read from the `envoy_sessions` bucket itself, never from this listener's trailing cache of it, and a predecessor read that did not answer is the bus-unavailable 503 with nothing changed.
+  The claimant's own entry is read from the bucket too, and a claimant read that does not answer falls back to the cached entry, so a cache that trails without the claimant's id decides that claim as the third case.
   A write route (below the list).
 
 - `/v1/interests/subscribe` (POST)
