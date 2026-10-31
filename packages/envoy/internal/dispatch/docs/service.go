@@ -401,10 +401,14 @@ func (s *Service) prepareSuppressedPersistence(room string) *suppressSlot {
 // and returns the updates the room recorded for that origin, in order: the bytes the room's
 // persistence observer is handed, which a suppression slot must match. A mutation that changes
 // nothing is no error. A mutation that fails returns the updates it recorded before it failed.
+//
+// It applies through roomServer.applyRepair, which holds the room open against no close: the
+// repair holds the close gate itself over the span its write needs (applySuppressed, holdOpen),
+// and one that waited for a close would close the cycle that gate is there to break.
 func (s *Service) applyCaptured(ctx context.Context, room string, origin any, mutate func(*crdt.Doc) error) ([][]byte, error) {
 	var updates [][]byte
 	var mutationErr error
-	err := s.srv.Apply(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.srv.applyRepair(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		unsubscribe := doc.OnUpdate(func(update []byte, updateOrigin any) {
 			if updateOrigin == origin {
 				updates = append(updates, append([]byte(nil), update...))
@@ -701,9 +705,10 @@ func New(deps Deps) *Service {
 	srv.MaxMessageBytes = maxMessageBytes
 
 	service.srv = newRoomServer(srv)
-	// A room the server's own work opened over the budget is closed once that work no longer holds
-	// it, the end of the Server.Apply that opened it among the moments it is looked at.
-	service.srv.applied = service.closeIfOpenedOverBudget
+	// A room an Apply held is looked at again once it returns: the budget's closes give up in
+	// front of an apply, and a room the server's own work opened over the budget is closed once
+	// that work no longer holds it (roomApplied).
+	service.srv.applied = service.roomApplied
 	srv.Authorize = service.authorize
 	srv.OnTokenAuth = service.authorizeSchemaVersion
 	srv.OnInject = service.allowInject
@@ -2626,6 +2631,20 @@ func (s *Service) invalidateForEviction(room string) *roomState {
 // settlement the new load armed was left to a timer that found its record gone (INFRA-352).
 func (s *Service) evictRoom(room string, state *roomState) error {
 	return s.forgetEvicted(room, state, s.srv.CloseRoom(room, true))
+}
+
+// evictUnusedRoom is evictRoom for the room budget's closes (sweepRooms,
+// closeIfOpenedOverBudget): it closes room and settles its record unless a Server.Apply is inside
+// its callback on the room, when it closes nothing and answers false (roomServer.closeUnused),
+// for its caller to leave the room pending as it leaves one a writer or a settlement holds. A
+// room it leaves keeps its record as it found it: nothing was closed, so there is nothing to
+// settle.
+func (s *Service) evictUnusedRoom(room string, state *roomState) (bool, error) {
+	closed, err := s.srv.closeUnused(room)
+	if !closed {
+		return false, nil
+	}
+	return true, s.forgetEvicted(room, state, err)
 }
 
 // forgetEvicted is an eviction's end once its close has returned err: it settles state, the

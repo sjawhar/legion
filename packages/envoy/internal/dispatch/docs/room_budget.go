@@ -982,6 +982,25 @@ func (b *roomBudget) isMarked(room string) bool {
 	return entry != nil && slices.ContainsFunc(entry.charges, func(charge *roomCharge) bool { return charge.closeOnceUnused })
 }
 
+// markAgain marks room's loaded charges closeOnceUnused again, for a close takeMark unmarked them
+// for that could not be made: an Apply was inside its callback on the room (closeUnused). A room
+// whose charge has retired meanwhile takes no mark, having no charge to close. Only
+// Service.closeIfOpenedOverBudget calls it, with the mark it took.
+func (b *roomBudget) markAgain(room string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	entry := b.rooms[room]
+	if entry == nil {
+		return
+	}
+	for _, charge := range entry.charges {
+		if !charge.closeOnceUnused && !charge.retired {
+			charge.closeOnceUnused = true
+			b.marked.Add(1)
+		}
+	}
+}
+
 func (b *roomBudget) unmarkLocked(charge *roomCharge) {
 	if charge.closeOnceUnused {
 		charge.closeOnceUnused = false
@@ -1024,11 +1043,14 @@ func (b *roomBudget) heaviest() []string {
 	return rooms
 }
 
-// kick is room's state reporting that the room may have become closable while the budget is full
-// or an admission waits on it (Service.unlockState): while the budget is short and room is
-// charged, it starts a sweep, or has the running one run again once it ends (sweepAgainLocked),
-// since that one may have passed the room while something still held it. A state of a document
-// the budget does not charge has no room to close, and starts nothing.
+// kick is a report that room may have become closable: its state holds nothing more while the
+// budget is full or an admission waits on it (Service.unlockState), or a Server.Apply on it has
+// returned, which the budget's closes give up in front of (Service.roomApplied, closeUnused).
+// While the budget is short and room is charged, it starts a sweep, or has the running one run
+// again once it ends (sweepAgainLocked), since that one may have passed the room while something
+// still held it.
+// A state, or an apply, on a document the budget does not charge has no room to close, and starts
+// nothing.
 func (b *roomBudget) kick(room string) {
 	b.mu.Lock()
 	defer b.unlock()
@@ -1627,7 +1649,14 @@ func (s *Service) sweepRooms() {
 		state.roomGeneration++
 		state.mu.Unlock()
 		before, _, _ := s.budget.figures()
-		_ = s.evictRoom(room, state)
+		closed, _ := s.evictUnusedRoom(room, state)
+		if !closed {
+			// An Apply is inside its callback on the room (closeUnused): the room will be
+			// closable once that apply ends, which hands it to closeIfOpenedOverBudget and kicks
+			// the budget, so the admissions waiting on it wait for that rather than being refused.
+			pending = true
+			continue
+		}
 		after, limit, wanted := s.budget.figures()
 		slog.Info("dispatch: the room budget closed an unused document",
 			"room", room, "charged_before", before, "charged", after, "limit", limit, "making_room_for", wanted)
@@ -1642,8 +1671,10 @@ func (s *Service) sweepRooms() {
 // opener's use: a writer's, a settlement's and an append's end in the state, a read's in its
 // Apply. A room still loading, or one a browser holds, is left: a browser connected is a holder
 // unusedLocked names, so a room a browser holds is never closed this way. The close is the
-// eviction the sweep makes (evictRoom), on a goroutine of its own, which Shutdown joins (evictWG),
-// and is logged with the budget's figures before and after it as the sweep's are.
+// eviction the sweep makes (evictUnusedRoom), on a goroutine of its own, which Shutdown joins
+// (evictWG), and is logged with the budget's figures before and after it as the sweep's are. A
+// room an Apply is inside its callback on is left marked, for the end of that Apply to look at
+// again.
 func (s *Service) closeIfOpenedOverBudget(room string) {
 	if s.budget.marked.Load() == 0 || !s.budget.isMarked(room) {
 		return
@@ -1664,9 +1695,24 @@ func (s *Service) closeIfOpenedOverBudget(room string) {
 	go func() {
 		defer s.evictWG.Done()
 		before, _, _ := s.budget.figures()
-		_ = s.evictRoom(room, state)
+		closed, _ := s.evictUnusedRoom(room, state)
+		if !closed {
+			s.budget.markAgain(room)
+			return
+		}
 		after, limit, _ := s.budget.figures()
 		slog.Info("dispatch: the room budget closed a document the server opened over it",
 			"room", room, "charged_before", before, "charged", after, "limit", limit)
 	}()
+}
+
+// roomApplied is what the service does with a room once a Server.Apply on it has returned
+// (roomServer.applied). An apply holds the room against the budget's closes while it is inside
+// its callback and holds nothing in the room's state, so those closes give up in front of it
+// (closeUnused) and nothing else reports its end: this is where a room the sweep passed over, and
+// one the server opened over the budget, are looked at again. A room the budget does not charge
+// starts no sweep (roomBudget.kick) and carries no mark.
+func (s *Service) roomApplied(room string) {
+	s.budget.kick(room)
+	s.closeIfOpenedOverBudget(room)
 }
