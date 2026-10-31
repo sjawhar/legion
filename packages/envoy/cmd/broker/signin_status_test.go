@@ -212,7 +212,13 @@ func TestTheBinaryEndSessionsEndsALiveSession(t *testing.T) {
 
 	adaBrowser := brokertest.NewBrowser(t, base, http.DefaultTransport, f.issuer)
 	adaBrowser.SignIn(t, record, brokertest.Person(ada))
-	adaBrowser.Page(t, record)
+	// The form ada's page offered while her session was live, and the cookie that signed it: A2
+	// asks what they decide once the operator has ended her sessions, which is nothing.
+	form := brokertest.DecisionForm(t, adaBrowser.Page(t, record).Body, record)
+	if form == nil {
+		t.Fatalf("ada's page for %s offers no decision", record)
+	}
+	adaCookie := &http.Cookie{Name: sessionCookieName, Value: adaBrowser.Cookie(t, sessionCookieName)}
 	carolBrowser := brokertest.NewBrowser(t, base, http.DefaultTransport, f.issuer)
 	carolBrowser.SignIn(t, record, brokertest.Person(carol))
 	carolBrowser.Page(t, record)
@@ -226,8 +232,14 @@ func TestTheBinaryEndSessionsEndsALiveSession(t *testing.T) {
 		t.Fatalf("the subcommand bound a listener: %s", out)
 	}
 
-	// Ada's cookie signs nobody in now; carol's still does.
+	// Ada's cookie signs nobody in now and decides nothing; carol's still signs her in.
 	requireSignInRedirect(t, f.issuer, adaBrowser.Get(t, "/approve/"+record), "ada's page after her sessions were ended")
+	replay := brokertest.NewBrowser(t, base, http.DefaultTransport, f.issuer)
+	res := replay.Post(t, "/approve", brokertest.Decision(form, "approve"), map[string]string{"Origin": base}, adaCookie)
+	if res.Status != http.StatusOK || !strings.Contains(brokertest.PageText(t, res.Body), "Not signed in") {
+		t.Fatalf("Approve with the ended session's cookie = %d, want 200 not signed in:\n%s", res.Status, res.Body)
+	}
+	requirePending(pods, pod, reply.RequestID, "the ended session's POST")
 	carolBrowser.Page(t, record)
 
 	// A second run finds nothing left to end, and a login with no session is no failure.
