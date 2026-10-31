@@ -210,18 +210,22 @@ type roomLoad struct {
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
 	instance *roomInstance
-	// refused is set where the load's own hook refused it (refuse), which leaves no instance
-	// either but is this service's answer rather than a load the room failed under.
-	refused bool
+	// number is this load's place in the loads this service has begun, and after the number of
+	// the record it replaced, zero where the room's name held none: set before the record is
+	// stored, read unlocked, and what names one load to the caller answering for the refusal
+	// that ended it (roomLoadWaitedOn).
+	number, after uint64
 }
 
 // beginRoomLoad records that room is loading, before the load reads the store: every version
 // appended from here on is one the instance this load leaves behind takes in. It replaces the
 // record of the room's last load, which ygo has finished with - one room loads at a time
-// (getOrCreateRoom) - so the records never outnumber the documents this process has loaded, and
-// each goes with the document of the load that left it (keepInstance).
+// (getOrCreateRoom), which is why the number it takes can be read off that record unlocked - so
+// the records never outnumber the documents this process has loaded. A record goes when the
+// document of the load that left it is collected (keepInstance), or, for a load that left none,
+// with the failure that ended it (onLoadDocument, failRoomLoad).
 func (s *Service) beginRoomLoad(room string) *roomLoad {
-	load := &roomLoad{}
+	load := &roomLoad{number: s.loadsBegun.Add(1), after: s.roomLoadNumber(room)}
 	s.roomLoads.Store(room, load)
 	return load
 }
@@ -265,23 +269,6 @@ func (load *roomLoad) start() *roomInstance {
 	return load.instance
 }
 
-// refuse records that the hook this load runs through refused it (onLoadDocument), so the load's
-// failure is this service's own answer and not one to fail the room for.
-func (load *roomLoad) refuse() {
-	load.mu.Lock()
-	defer load.mu.Unlock()
-	load.refused = true
-}
-
-// unfinished reports a load that failed before it could leave an instance behind, and failed on
-// nothing this service answered: ygo refused the history LoadDoc handed it, decoding it into the
-// room it was loading, and the hook that starts the instance never ran (failUnfinishedLoad).
-func (load *roomLoad) unfinished() bool {
-	load.mu.Lock()
-	defer load.mu.Unlock()
-	return load.instance == nil && !load.refused
-}
-
 // tookResidentVersion records version, which this process has just made durable for room outside
 // the room itself, on the instance that has to take it in: the resident one, or the one the load
 // under way is about to leave behind (roomLoad). A document this process holds no room or load
@@ -299,8 +286,8 @@ func (s *Service) tookResidentVersion(room string, version persistence.Version) 
 // the instance's writes (instanceOf) while live is resident (listResident). The load is the first
 // advance of the instance's cursor: the instance holds every durable update through the head that
 // load read, and every version this process appended while it ran (roomLoad). The load's record
-// goes with the document, as the listing does: until then took still reaches this instance
-// through it, which is what ygo's loading window needs it for.
+// goes with the document from here, as the listing does: until then took still reaches this
+// instance through it, which is what ygo's loading window needs it for.
 func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 	value, ok := s.roomLoads.Load(room)
 	if !ok {

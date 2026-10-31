@@ -165,8 +165,9 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 // connection - a redial backs off as far as thirty seconds (pglisten.RedialBackoff) - because
 // each of those reached nobody, nothing sends them again, and a document nobody writes again
 // notifies nobody again. service.roomLoads is every room this process has loaded, and nothing
-// here takes an entry out of it: an entry goes when its document is collected and not before
-// (keepInstance), so this ranges over every room loaded since the last collection. An entry
+// here takes an entry out of it: an entry goes when its document is collected (keepInstance),
+// or, for a load that left no document, with the failure that ended that load (onLoadDocument,
+// failRoomLoad), so this ranges over every room loaded since the last collection. An entry
 // whose room has gone costs the interval's lookup and the server's (mayEvict, srv.GetDoc) and no
 // database read, since the head is read only for a room that is still resident.
 //

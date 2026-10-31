@@ -8,12 +8,15 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	"github.com/reearth/ygo/persistence"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -314,12 +317,13 @@ func TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable(t *testing.T) {
 }
 
 // refusedForTheItemCap checks a refusal naming the item count an update's header declares, the
-// count read from that header alone.
+// count read from that header alone: the refusal the store writes for that count
+// (itemCapRefusal), rather than the sentence written again here.
 func refusedForTheItemCap(t *testing.T, what string, err error, items uint64) {
 	t.Helper()
-	want := fmt.Sprintf("its %d items exceed the %d one document update can hold", items, maxUpdateItems)
-	if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), want) {
-		t.Fatalf("%s: %v, want ErrDocumentTooLarge saying %q", what, err, want)
+	want := itemCapRefusal(items)
+	if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), want.Error()) {
+		t.Fatalf("%s: %v, want %v", what, err, want)
 	}
 }
 
@@ -331,10 +335,10 @@ func refusedForTheItemCap(t *testing.T, what string, err error, items uint64) {
 //
 // A header that reads says nothing about the body behind it, so the append of a malformed update
 // is taken, and it is ygo that refuses the history, decoding it into the room it is loading
-// (loadRoomDoc). That refusal reaches the Apply the load answers rather than the adapter, and
-// fails the room there (applyRoom, failUnfinishedLoad) as a history the adapter itself refused
-// fails it: the room is left failed for the next access to reload, and the record the load began
-// goes with it, since no instance will ever take it (beginRoomLoad, keepInstance).
+// (loadRoomDoc). That refusal reaches the Apply the load answers rather than the adapter, which
+// answers for that load there (applyRoom, failUnfinishedLoad) as a history the adapter itself
+// refused fails it: the room is left failed for the next access to reload, and the record the
+// load began goes with it, since no instance will ever take it (beginRoomLoad, keepInstance).
 func TestTheStoreJudgesAnUpdateByItsHeader(t *testing.T) {
 	overTheCap := encoding.NewEncoder()
 	overTheCap.WriteVarUint(1)
@@ -412,6 +416,111 @@ func TestTheStoreJudgesAnUpdateByItsHeader(t *testing.T) {
 				t.Error("the refused load left its record behind, which no instance will take")
 			}
 		})
+	}
+}
+
+// heldSecondLoadStore serves update as every room's stored history, and holds the second load of
+// one room where that load has recorded itself and has read nothing yet (beginRoomLoad, inside
+// servicePersistenceAdapter.LoadDoc): the window in which the room's name holds a record whose
+// load is still running.
+type heldSecondLoadStore struct {
+	VersionedStore
+	room    string
+	update  []byte
+	loads   atomic.Int64
+	reading chan struct{}
+	release chan struct{}
+}
+
+func (s *heldSecondLoadStore) Load(_ context.Context, room string) (persistence.LoadResult, error) {
+	if room == s.room && s.loads.Add(1) == 2 {
+		close(s.reading)
+		<-s.release
+	}
+	return persistence.LoadResult{Update: s.update, Version: 1}, nil
+}
+
+// A load's failure is answered for the load that failed, and never for the load after it. ygo
+// removes the room and closes its barrier before any waiter wakes (sjawhar/ygo v1.51.3-sami.4,
+// provider/websocket/server.go:1879-1888), so a second load of the room can begin before the
+// first load's caller has answered for the first, and the record under the room's name by then
+// is the second load's: failing the room there would fail the room that load is building, and
+// dropping that record would leave its instance holding none, so the versions appended while it
+// ran would reach no cursor (keepInstance, sjawhar/legion#2519). Here the second load is held
+// where it has recorded itself and read nothing, and the first load's caller answers in that
+// window: it must leave both the record and the room alone, and the second load's own failure
+// must still fail the room and drop its own record.
+func TestALoadFailureAnswersForItsOwnLoadAndNotTheLoadAfterIt(t *testing.T) {
+	malformed := encoding.NewEncoder()
+	malformed.WriteVarUint(1)
+	malformed.WriteVarUint(1)
+	malformed.WriteRaw([]byte{0xff, 0xff, 0xff})
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "")
+	held := &heldSecondLoadStore{
+		VersionedStore: NewPgVersioned(database),
+		room:           artifactID,
+		update:         malformed.Bytes(),
+		reading:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	service := New(Deps{
+		Store:       database,
+		Persistence: held,
+		Events:      events.NewBroker(),
+		Identity:    headerIdentity(database),
+		Settle:      time.Hour,
+	})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	// The failed room's eviction is held, so the failure the second load leaves is still the
+	// room's to read below: the eviction releases the room's state as it goes.
+	evicting := make(chan struct{})
+	defer close(evicting)
+	service.beforeFailedEviction = func(room string) {
+		if room == artifactID {
+			<-evicting
+		}
+	}
+	// Only the first caller is held: the second answers for its own load once this test has read
+	// what the first one left.
+	var first sync.Once
+	answering, answer := make(chan struct{}), make(chan struct{})
+	service.beforeFailUnfinishedLoad = func(room string) {
+		if room != artifactID {
+			return
+		}
+		first.Do(func() {
+			close(answering)
+			<-answer
+		})
+	}
+
+	refused := make(chan error, 1)
+	go func() { refused <- service.warmLiveDocument(context.Background(), artifactID) }()
+	<-answering
+	later := make(chan error, 1)
+	go func() { later <- service.warmLiveDocument(context.Background(), artifactID) }()
+	<-held.reading
+	close(answer)
+
+	if err := <-refused; err == nil {
+		t.Fatal("the first load took a history ygo cannot decode, so nothing here is answered for")
+	}
+	if _, kept := service.roomLoads.Load(artifactID); !kept {
+		t.Error("the first load's caller dropped the record of the load that began after it")
+	}
+	if failure := service.roomFailure(artifactID); failure != nil {
+		t.Errorf("the first load's caller failed the room the load after it is building: %v", failure)
+	}
+	close(held.release)
+	if err := <-later; err == nil {
+		t.Fatal("the second load took a history ygo cannot decode, want its load refused")
+	}
+	if failure := service.roomFailure(artifactID); failure == nil {
+		t.Error("the second load's own failure left the room healthy, so nothing reloads the document")
+	}
+	if _, kept := service.roomLoads.Load(artifactID); kept {
+		t.Error("the second load's failure left its record behind, which no instance will take")
 	}
 }
 

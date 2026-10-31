@@ -877,6 +877,16 @@ func updateItems(update []byte) (uint64, bool) {
 	return items, err == nil
 }
 
+// itemCapRefusal is the one way this package names an update too large to store: its header
+// declares items, more than the maxUpdateItems one document update may hold. Both refusals of
+// such an update say it with this - the store's own, before anything is written
+// (refuseUpdateItemCap), and ygo's, answered for an update the server encoded (itemCapError) -
+// and TestTheStoreJudgesAnUpdateByItsHeader reads it back from here rather than writing the
+// sentence again (sjawhar/legion#2519).
+func itemCapRefusal(items uint64) error {
+	return fmt.Errorf("%w: its %d items exceed the %d one document update can hold", ErrDocumentTooLarge, items, maxUpdateItems)
+}
+
 // itemCapError is ygo's refusal err of update, an update the server encoded itself, named as the
 // write too large to store it is when update's header declares more than maxUpdateItems items:
 // ygo refuses such an update with the same error it gives a malformed one, and a seed or a
@@ -884,7 +894,7 @@ func updateItems(update []byte) (uint64, bool) {
 // Any other refusal of a server-encoded update is a fault, and is err unchanged.
 func itemCapError(update []byte, err error) error {
 	if items, ok := updateItems(update); ok && items > maxUpdateItems {
-		return fmt.Errorf("%w: its %d items exceed the %d one document update can hold (%v)", ErrDocumentTooLarge, items, maxUpdateItems, err)
+		return fmt.Errorf("%w (%v)", itemCapRefusal(items), err)
 	}
 	return err
 }
@@ -904,7 +914,7 @@ func refuseUpdateItemCap(update []byte) error {
 		return crdt.ApplyUpdateV1(newDocumentCopy(), update, nil)
 	}
 	if items > maxUpdateItems {
-		return fmt.Errorf("%w: its %d items exceed the %d one document update can hold", ErrDocumentTooLarge, items, maxUpdateItems)
+		return itemCapRefusal(items)
 	}
 	return nil
 }
