@@ -2,42 +2,46 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-31T09:30:00Z",
-  "round": "tester's round-18 failure",
+  "completed": "2026-10-31T14:30:00Z",
+  "round": "review round 13",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "9c2471397600f57efa702c1859cfe390e3b499b8",
-  "answersTest": "7494c07d267c3fab008d2900325ba707a6fa0346",
+  "codeHead": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+  "answersReview": "efcb9c02318ca74b762dc558495f6fe331e97907",
   "proof": [
     {
-      "criterion": "On a route that drops packets, a holder whose receive connection alone is lost releases the lease and a standby delivers within 15 s (the tester's red row, unmodified)",
-      "surface": "two real envoy-listener processes under the rendered ListenerPermissions grant; pod-a's receive connection cut by mpLaneRelay.blackholeNew, its reconnect dials hanging",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=3 -timeout 30m -run '^TestTwoPodsReceiveConnection' -v ./cmd/listener",
-      "observed": "TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s PASS 3 of 3, all 110 messages within 15 s, slowest 11.951/11.949/11.954 s; the other two receive-cut rows pass 3 of 3",
-      "headSha": "9c2471397600f57efa702c1859cfe390e3b499b8",
-      "negativeControl": "at ff705a78 (and the tree before 6828bbb3): 'pod-a never released the lease for its lost receive connection' / '10 of 150 messages reached their session later than 15s'"
+      "criterion": "A replaced connection whose receiver hook never ran reads down; the holder releases within the bound and takes no lease back",
+      "surface": "in-process receiver and lease on a real nats-server, main's hook order with a failing rewatch ahead of the receiver's hook",
+      "command": "cd packages/envoy && go test -count=1 -run '^TestAReplacedConnectionBehindAFailingHookReadsDownAndReleasesTheLease$' ./cmd/listener/",
+      "observed": "pass: receiveUp false after the replacement, release within leaseReceiveLost + a round, no lease and no up signal afterwards",
+      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+      "negativeControl": "at 9c247139 the signal read up after the replacement; with the clientConn check removed the row fails at receive_signal_test.go:241 ('reads its receive signal up (true)')"
     },
     {
-      "criterion": "The lease's receive signal and Client.Connected never wait on nats.go's connection lock",
-      "surface": "internal/bus client against a real nats-server; the receiver with the receive connection's locks held",
-      "command": "cd packages/envoy && go test -count=1 -run TestConnectedAnswersWhileAReconnectDialHangs ./internal/bus/ && go test -count=1 -run TestTheReceiveSignalAnswersWhileTheReceiveConnectionsLocksAreHeld ./cmd/listener/",
-      "observed": "both answer within 100 ms",
-      "headSha": "9c2471397600f57efa702c1859cfe390e3b499b8",
-      "negativeControl": "with the old reads: 'Connected took 4.896773062s while nats.go held the connection's lock'; 'the receive signal took 4.89439741s to answer'"
+      "criterion": "A cut during slow reconnect hooks reads Connected() false within 1 s",
+      "surface": "internal/bus client on a real nats-server, a hook that blocks, the link cut",
+      "command": "cd packages/envoy && go test -count=1 -run TestConnectedReadsDownAtACutWhileTheReconnectHooksRun ./internal/bus/",
+      "observed": "the cut read 6 ms after it, with the hooks still running",
+      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+      "negativeControl": "at 9c247139: 'the client still reads connected 1.005s after the link was cut while its reconnect hooks run'"
     },
     {
-      "criterion": "No regression; the merge of main; the PR merges",
-      "surface": "listener suites, internal/bus with -race, ci.yaml router check, layout check, GitHub",
-      "command": "go test -tags multiprocess -count=1 -timeout 40m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; go test ./internal/bus/... (and -race); .github/scripts/check-ci-filters.sh; bun scripts/semantic-line-breaks.ts scripts/e2e/README.md packages/envoy/AGENTS.md; gh api repos/sjawhar/legion/pulls/2404",
-      "observed": "multiprocess ok 706.820s; listener ok 837.423s; bus ok 335.069s / race ok 354.697s; 29 gates; layout ok; mergeable true. https://github.com/sjawhar/legion/pull/2404#issuecomment-6541571491",
-      "headSha": "9c2471397600f57efa702c1859cfe390e3b499b8",
-      "negativeControl": "a data race (TestAConnectionThatClosesAsARecoveryEndsIsRecovered) while a connect set the flag before install wrote c.Conn; fixed by counting a connect only for the installed connection"
+      "criterion": "The tester's packet-dropping row and no regression",
+      "surface": "real envoy-listener binaries under the rendered grant; listener suites; internal/bus with -race",
+      "command": "go test -tags multiprocess -count=7 -run '^TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s$' ./cmd/listener; go test -tags multiprocess -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; go test ./internal/bus/... and -race",
+      "observed": "7 of 7, slowest 11.952/11.951/11.949/11.947/11.939/11.964/11.939 s; multiprocess ok 709.502s; listener ok 850.274s; race lease/receive ok 298.857s; bus ok 346.560s, race ok 360.114s",
+      "headSha": "581c5f4bfb19009b68f8ac86ce0afd1e4d2c71e7",
+      "negativeControl": "the two rows above fail at 9c247139"
     }
   ],
   "filesChanged": [
-    "6828bbb3: internal/bus/nats.go (connectedConn, installedConn, noteConnection, markConnected, settleConnected; Connected reads the flag), internal/bus/connect.go (state callback), internal/bus/connected_test.go (new) and five existing bus tests (new parameter), cmd/listener/receive.go (clientConn, subscribed atomics; lock-free receiveUp and reconnected), receive_stop.go, receive_signal_test.go (new), receive_durable_test.go, README.md, AGENTS.md, changie fragment",
-    "9c247139: merge of main (scripts/e2e/README.md in main's one-sentence-per-line layout)"
+    "581c5f4b: internal/bus/connect.go (connectCallbacks struct), nats.go (ConnectedConn; the never-installed clear removed), recovery.go (queueReconnect, countConnectionEvent, workThroughReconnects), export_test.go, connected_cut_during_hooks_test.go (new), drain_test.go and five call-site test updates; cmd/listener/receive.go (receiveUp on ConnectedConn and clientConn), lease.go (standDown, owesAckWait, no dead guard), receive_signal_test.go, receive_test.go; README.md, AGENTS.md, changie fragment (14.5 s worst case)"
   ],
-  "deviations": [],
+  "trickyParts": [
+    "The reconnect work runs on a client-owned serialized runner; the flag still moves only on nats.go's dispatcher, which keeps sets and clears in nats.go's order."
+  ],
+  "deviations": [
+    "Defect 2 uses the dispatcher's own ordering instead of per-connection generations (the architect allowed a simpler design that meets both conditions); the reason is in the thread reply."
+  ],
   "openQuestions": [],
   "discoveredComplexity": []
 }
