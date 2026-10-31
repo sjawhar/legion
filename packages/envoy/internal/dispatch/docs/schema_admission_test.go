@@ -447,42 +447,94 @@ func TestARevokeWaitsForTheMessageTheServerHasInFlight(t *testing.T) {
 	}
 }
 
+// ygoHandshakeTimeout is the deadline ygo's ServeHTTP sets on a new socket's first read, after
+// which it ends a connection whose page has sent nothing of its own; Dispatch leaves it at ygo's
+// default (sjawhar/ygo provider/websocket/server.go, defaultHandshakeTimeout and the
+// SetReadDeadline ServeHTTP sets before the first message it reads). The slow page below sends
+// nothing, so this deadline ends its socket by itself 30 s after it connects, revoke or no
+// revoke.
+const ygoHandshakeTimeout = 30 * time.Second
+
+// ygoPeerWriteTimeout is the deadline ygo sets on each write to a peer, after which it gives up
+// on that write and closes the peer (sjawhar/ygo provider/websocket/server.go, writeTimeout, set
+// by peer.writeToConn). The slow page below reads nothing, so the server's write of the document
+// to it is stalled from the moment it connects and this deadline runs from there.
+const ygoPeerWriteTimeout = 10 * time.Second
+
+// revokeAfterDialBound is how soon after the slow page connects the revoke must be taken, a
+// quarter of the earlier of the two deadlines ygo would end that socket on by itself, and
+// revokedEndBound is how long after the revoke the socket must end: the two seconds the page
+// reads nothing for, and two more to drain what was in flight and read the end, which takes
+// milliseconds on a loopback socket. Together they put the end at most 6.5 s after the page
+// connected, well inside both, so an end this test accepts is the revoke's work and neither of
+// theirs.
+const (
+	revokeAfterDialBound = min(ygoPeerWriteTimeout, ygoHandshakeTimeout) / 4
+	revokedEndBound      = 4 * time.Second
+)
+
 // A page on a slow link takes nothing from its socket for longer than the revoked close waits, so
 // it reads the connection's end as 1006 rather than 4412 and loses nothing by it; the rule is in
 // packages/envoy/cmd/dispatch/README.md, "Two builds at once". This pins both of its halves on
-// real sockets. A writer page sends the room whole-document replacements of about 1 MB each, far
-// more than the slow page's buffers hold, while that page reads nothing; the re-check revokes it
-// with those writes still going out, and it starts reading two seconds later. Its socket must end
-// with one of the two codes the provider reconnects on - never a protocol error from a frame cut
-// in half, and never a socket that does not end - and the page's reconnect must hold the server's
-// whole document once it has synced, the writes that were in flight included.
+// real sockets. A writer page sends the room eight whole-document replacements of about 1 MB
+// each, and the slow page then connects to a room holding far more than its buffers can take and
+// reads nothing: the server's write of all of it is part way out when the re-check revokes that
+// socket, and the page starts reading two seconds later. The re-check must return that page's
+// admission as one it closed; its socket must end within revokedEndBound of the revoke, with one
+// of the two codes the provider reconnects on - never a protocol error from a frame cut in half,
+// and never a socket that does not end; and the page's reconnect must hold the server's whole
+// document once it has synced, the writes that were in flight included.
 func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, bigDocumentMarkdown())
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)
 
-	reader := dialSlowPage(t, server.URL, artifactID, page(1, 1))
-	time.Sleep(250 * time.Millisecond)
 	// The writer presents this build's numbers, which the fleet below still admits writable, so
-	// its updates go on reaching the revoked page's socket while that page takes nothing.
+	// the re-check leaves its socket open. Its rounds leave the room holding megabytes of document
+	// and history, which is what the slow page is then owed.
 	writer := connectBrowser(t, server.URL, artifactID, "bob")
 	for round := range 8 {
 		editAsBrowser(t, service, artifactID, writer,
 			strings.ReplaceAll(bigDocumentMarkdown(), "document ", fmt.Sprintf("round%d ", round)))
 	}
+
+	// The slow page connects last and reads nothing, so the server's write of all of that is still
+	// going out when the revoke arrives, and every round is still owed to it.
+	dialed := time.Now()
+	reader := dialSlowPage(t, server.URL, artifactID, page(1, 1))
+	time.Sleep(250 * time.Millisecond)
 	fleetProcess(t, service, 3, 2, 0)
-	if err := service.recheckSchemaAdmissions(context.Background()); err != nil {
-		t.Fatalf("re-check the sockets' admission: %v", err)
+	fleet, err := readSchemaFleet(context.Background(), service.store.Pool)
+	if err != nil {
+		t.Fatalf("read the live fleet: %v", err)
+	}
+	// The re-check's own revoke (recheckSchemaAdmissions), taken here so the admissions it closed
+	// are read: this fleet still admits the writer's page, so the slow page's is the only socket
+	// it closes, and the end below is that revoke's and no other's.
+	revokedAt := time.Now()
+	revoked := service.schemaAdmissions.revokeUnless(fleet)
+	if len(revoked) != 1 {
+		t.Fatalf("the re-check revoked %d sockets, want the slow page's alone", len(revoked))
+	}
+	if got := revoked[0]; got.key.room != artifactID || got.page != (schemaPage{version: 1, creatable: 1, valid: true}) {
+		t.Fatalf("the re-check revoked room %q presenting %+v, want room %q presenting version 1 and creating up to 1, the slow page's",
+			got.key.room, got.page, artifactID)
+	}
+	if took := revokedAt.Sub(dialed); took > revokeAfterDialBound {
+		t.Fatalf("the revoke came %v after the slow page connected, past %v: a run this slow cannot tell the revoke's close from ygo's own %v deadline on the stalled write",
+			took, revokeAfterDialBound, ygoPeerWriteTimeout)
 	}
 	time.Sleep(2 * time.Second)
 
-	_ = reader.SetReadDeadline(time.Now().Add(30 * time.Second))
+	// The end must reach the page within revokedEndBound of the revoke, which is what makes it
+	// the revoke's: both deadlines ygo would end this socket on by itself fall after it.
+	_ = reader.SetReadDeadline(revokedAt.Add(revokedEndBound))
 	var ended error
 	for ended == nil {
 		_, _, ended = reader.ReadMessage()
 	}
-	requireReconnectableEnd(t, ended, "the revoked page, reading two seconds after the revoke")
+	requireReconnectableEnd(t, ended, fmt.Sprintf("the revoked page, reading two seconds after the revoke and within %v of it", revokedEndBound))
 
 	want, err := service.Text(context.Background(), artifactID)
 	if err != nil {

@@ -139,6 +139,18 @@ func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
 	}
 }
 
+// admittedRequest is request on a request context of its own carrying the admission ServeHTTP
+// puts on every document socket's context, that context's cancel included: authorize fills the
+// admission in, and cancelling the context with errSchemaRevoked is how a re-check closes the
+// socket (revokeUnless).
+func admittedRequest(t *testing.T, request *http.Request) *http.Request {
+	t.Helper()
+	ctx, cancel := context.WithCancelCause(request.Context())
+	t.Cleanup(func() { cancel(nil) })
+	connection := &connectionState{admission: &schemaAdmission{cancel: cancel}}
+	return request.WithContext(context.WithValue(ctx, connectionContextKey{}, connection))
+}
+
 func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
 	service, artifactID := newTestService(t)
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
@@ -147,7 +159,7 @@ func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/ws/doc/"+artifactID, nil)
 	request.Header.Set("X-Dispatch-User", "alice")
 	request.SetPathValue("room", artifactID)
-	request = request.WithContext(context.WithValue(request.Context(), connectionContextKey{}, &connectionState{admission: &schemaAdmission{}}))
+	request = admittedRequest(t, request)
 	config, ok := service.authorize(request)
 	if !ok || !config.ReadOnly {
 		t.Fatalf("cold closed room authorization = %#v, %t; want read-only acceptance", config, ok)
@@ -165,9 +177,7 @@ func TestSchemaVersionAdmissionAuthorizesMismatchAndVersionlessClientsReadOnly(t
 			)
 			request.Header.Set("X-Dispatch-User", "alice")
 			request.SetPathValue("room", artifactID)
-			request = request.WithContext(
-				context.WithValue(request.Context(), connectionContextKey{}, &connectionState{admission: &schemaAdmission{}}),
-			)
+			request = admittedRequest(t, request)
 
 			config, ok := service.authorize(request)
 			if !ok || !config.ReadOnly {
@@ -195,7 +205,7 @@ func TestSchemaAdmissionAuthorizesAPagePresentingItsCreatableVersionReadWrite(t 
 	)
 	request.Header.Set("X-Dispatch-User", "alice")
 	request.SetPathValue("room", artifactID)
-	request = request.WithContext(context.WithValue(request.Context(), connectionContextKey{}, &connectionState{admission: &schemaAdmission{}}))
+	request = admittedRequest(t, request)
 
 	accepted, ok := service.authorize(request)
 	if !ok || accepted.ReadOnly {

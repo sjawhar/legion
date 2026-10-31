@@ -156,9 +156,7 @@ func (a *schemaAdmissions) revokeUnless(fleet schemaFleet) []*schemaAdmission {
 		}
 	}
 	for _, admission := range revoked {
-		if admission.cancel != nil {
-			admission.cancel(errSchemaRevoked)
-		}
+		admission.cancel(errSchemaRevoked)
 	}
 	return revoked
 }

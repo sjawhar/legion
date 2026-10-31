@@ -3143,9 +3143,9 @@ export const DOCUMENT_NEWER_CONTENT_CLOSE_REASON = "DOC_NEWER_CONTENT";
  * the live server processes no longer admit the page that opened it: a build whose numbers the
  * admission held against has joined or rolled away, so that page may no longer write
  * (`RunSchemaAdmission`). The close carries this code and
- * `DOCUMENT_ADMISSION_REVOKED_CLOSE_REASON`, and goes out once the message the server has in
- * flight on the socket is out; a peer too slow to take it within a second gets no close frame at
- * all (1006) and reconnects just the same. The pinned `@hocuspocus/provider` (2.15) stops
+ * `DOCUMENT_ADMISSION_REVOKED_CLOSE_REASON`; what that close waits for, and what a peer too slow
+ * to take it reads instead, are in `packages/envoy/cmd/dispatch/README.md`, "Two builds at once",
+ * which is the one statement of that rule. The pinned `@hocuspocus/provider` (2.15) stops
  * reconnecting only on 4401, 4403 and 1009 (`HocuspocusProviderWebsocket.ts` `onClose`), so the
  * page reconnects on this code, presents its numbers again and is admitted again: read-only,
  * unless a live process admits it. 412 is HTTP's "Precondition Failed", which the admission the
