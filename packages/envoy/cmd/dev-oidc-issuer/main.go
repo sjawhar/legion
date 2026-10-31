@@ -9,7 +9,7 @@
 // place once four fifths of that has passed.
 //
 //	dev-oidc-issuer [--token <audience>=<service account>=<file> ...]
-//	                [--code-flow <client id>=<client secret file> [--sign-in-as <email> [--sign-in-group <group>]]]
+//	                [--code-flow <client id>=<client secret file> ... [--sign-in-as <email> [--sign-in-group <group>]]]
 //
 // Each token is bound to a pod of its own (kubernetes.io → pod → uid), kept across rewrites as a
 // pod keeps its uid, so a file serves a pod's enrolment and its token exchange as well as a listed
@@ -17,10 +17,14 @@
 //
 // --code-flow serves the authorization code flow for one confidential client, whose secret is the
 // file's content less surrounding whitespace: the values DISPATCH_SIGNIN_CLIENT_ID and
-// DISPATCH_SIGNIN_CLIENT_SECRET take. Each authorization signs in the next person queued at the
+// DISPATCH_SIGNIN_CLIENT_SECRET take. It is repeatable, each time for another client id, so one
+// issuer serves Dispatch's client and the secrets broker's at once, as Dispatch's browser suite
+// now runs both against one issuer; each client has its own secret, and a code issued to one is
+// not exchanged by the other. Each authorization signs in the next person queued at the
 // loopback-only control route POST <issuer URL>/_dev/sign-in-as, whose body is the JSON object of
 // that person's ID token claims; with none queued, it signs in --sign-in-as's person, and without
-// --sign-in-as it refuses the authorization. That person carries both claim shapes Dispatch reads:
+// --sign-in-as it refuses the authorization. The queue and --sign-in-as's person are the issuer's
+// own, shared by every client it serves. That person carries both claim shapes Dispatch reads:
 // a Google Workspace account of the email's domain (identity.DomainRule), and a Cognito sign-in
 // pool user federated from the provider DevIdP, a member of --sign-in-group's group when it is
 // given (identity.GroupRule). Dispatch takes a domain only from Google's own issuer, so a Dispatch
@@ -71,8 +75,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var tokens tokenFlags
 	fs.Var(&tokens, "token", "keep `<audience>=<service account>=<file>`'s token in file (repeatable)")
-	var flow codeFlowSpec
-	fs.Var(&flow, "code-flow", "serve the sign-in code flow for `<client id>=<client secret file>`")
+	var flow codeFlow
+	fs.Var(&flow.clients, "code-flow", "serve the sign-in code flow for `<client id>=<client secret file>` (repeatable)")
 	fs.StringVar(&flow.signInAs, "sign-in-as", "", "sign each authorization in as `<email>` when none is queued (needs --code-flow)")
 	fs.StringVar(&flow.signInGroup, "sign-in-group", "", "make --sign-in-as's person a member of the sign-in pool group `<group>` (needs --sign-in-as)")
 	if err := fs.Parse(args); err != nil {
@@ -88,7 +92,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 	if flow.signInAs != "" {
 		local, domain, _ := strings.Cut(flow.signInAs, "@")
 		switch {
-		case flow.clientID == "":
+		case len(flow.clients) == 0:
 			fmt.Fprintln(stderr, "dev-oidc-issuer: --sign-in-as needs --code-flow")
 			return exitUsageError
 		case local == "" || domain == "" || strings.Contains(domain, "@"):
@@ -100,31 +104,51 @@ func run(ctx context.Context, args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "dev-oidc-issuer: --sign-in-group needs --sign-in-as")
 		return exitUsageError
 	}
-	if flow.clientID == "" {
-		return serve(ctx, tokens, nil, tokenLifetime, stderr)
+	return serve(ctx, tokens, flow, tokenLifetime, stderr)
+}
+
+// codeFlow is --code-flow, --sign-in-as and --sign-in-group: the clients the code flow serves,
+// the email of the person an authorization signs in as when none is queued, empty for none, and
+// the sign-in pool group that person is a member of, empty for none. With no client it serves no
+// sign-in at all.
+type codeFlow struct {
+	clients               codeFlowFlags
+	signInAs, signInGroup string
+}
+
+// clientIDs names every client the code flow serves, in the order --code-flow gave them.
+func (f codeFlow) clientIDs() []string {
+	ids := make([]string, len(f.clients))
+	for i, client := range f.clients {
+		ids[i] = client.clientID
 	}
-	return serve(ctx, tokens, &flow, tokenLifetime, stderr)
+	return ids
 }
 
-// codeFlowSpec is --code-flow, --sign-in-as and --sign-in-group: the one client the code flow
-// serves, its secret, the email of the person an authorization signs in as when none is queued,
-// empty for none, and the sign-in pool group that person is a member of, empty for none.
+// codeFlowSpec is one --code-flow: a confidential client the code flow serves, and its secret.
 type codeFlowSpec struct {
-	clientID, clientSecret, signInAs, signInGroup string
+	clientID, clientSecret string
 }
 
-func (f *codeFlowSpec) String() string { return "" }
+// codeFlowFlags is the repeated --code-flow flag.
+type codeFlowFlags []codeFlowSpec
+
+func (f *codeFlowFlags) String() string { return "" }
 
 // Set parses <client id>=<client secret file> and reads the secret from the file now, so a file
 // that cannot be read, or holds nothing but whitespace, is refused before any issuer runs rather
-// than serving a client no caller can authenticate as.
-func (f *codeFlowSpec) Set(value string) error {
+// than serving a client no caller can authenticate as. A client id given twice is refused: the
+// second secret would replace the first, and the client the caller meant would authenticate with
+// neither.
+func (f *codeFlowFlags) Set(value string) error {
 	clientID, file, _ := strings.Cut(value, "=")
-	switch {
-	case f.clientID != "":
-		return errors.New("the code flow serves one client; --code-flow is given twice")
-	case clientID == "" || file == "":
+	if clientID == "" || file == "" {
 		return errors.New("want <client id>=<client secret file>")
+	}
+	for _, served := range *f {
+		if served.clientID == clientID {
+			return fmt.Errorf("--code-flow names client %s twice", clientID)
+		}
 	}
 	raw, err := os.ReadFile(file)
 	if err != nil {
@@ -134,7 +158,7 @@ func (f *codeFlowSpec) Set(value string) error {
 	if secret == "" {
 		return fmt.Errorf("the client secret file %s is empty", file)
 	}
-	f.clientID, f.clientSecret = clientID, secret
+	*f = append(*f, codeFlowSpec{clientID: clientID, clientSecret: secret})
 	return nil
 }
 
@@ -212,15 +236,17 @@ func (f *tokenFlags) Set(value string) error {
 }
 
 // serve runs the issuer until ctx ends, writing every spec's token before it reports its URL and
-// again each time four fifths of lifetime has passed, and serving flow's code flow when flow is not
-// nil. A token it cannot write ends it, 1.
-func serve(ctx context.Context, specs []tokenSpec, flow *codeFlowSpec, lifetime time.Duration, stderr io.Writer) int {
+// again each time four fifths of lifetime has passed, and serving the code flow for every client
+// flow names. A token it cannot write ends it, 1.
+func serve(ctx context.Context, specs []tokenSpec, flow codeFlow, lifetime time.Duration, stderr io.Writer) int {
 	p := &process{stderr: stderr}
 	defer p.stop()
 	issuer := oidctest.New(p)
 	key := issuer.PublishKey(p, "dev-signing-key")
-	if flow != nil {
-		issuer.EnableCodeFlow(key, flow.clientID, flow.clientSecret)
+	for _, client := range flow.clients {
+		issuer.EnableCodeFlow(key, client.clientID, client.clientSecret)
+	}
+	if len(flow.clients) > 0 {
 		if flow.signInAs != "" {
 			issuer.SignInByDefault(person(flow.signInAs, flow.signInGroup))
 		}
@@ -245,12 +271,12 @@ func serve(ctx context.Context, specs []tokenSpec, flow *codeFlowSpec, lifetime 
 	for _, spec := range specs {
 		fmt.Fprintf(stderr, "dev-oidc-issuer: %s holds %s's token for audience %s (pod %s)\n", spec.file, spec.account, spec.audience, spec.podUID)
 	}
-	if flow != nil {
+	if len(flow.clients) > 0 {
 		signsIn := "nobody until one is queued"
 		if flow.signInAs != "" {
 			signsIn = strings.ToLower(flow.signInAs)
 		}
-		fmt.Fprintf(stderr, "dev-oidc-issuer: code flow serves client %s; an authorization with none queued at /_dev/sign-in-as signs in %s\n", flow.clientID, signsIn)
+		fmt.Fprintf(stderr, "dev-oidc-issuer: code flow serves client %s; an authorization with none queued at /_dev/sign-in-as signs in %s\n", strings.Join(flow.clientIDs(), ", "), signsIn)
 	}
 	fmt.Fprintf(stderr, "dev-oidc-issuer: issuer listening url=%s\n", issuer.URL())
 	ticker := time.NewTicker(lifetime * 4 / 5)

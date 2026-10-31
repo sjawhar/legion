@@ -321,6 +321,7 @@ type wireRecord struct {
 	ExpiresAt       time.Time           `json:"expires_at"`
 	RequestedAt     time.Time           `json:"requested_at"`
 	Decided         *wireDecided        `json:"decided"`
+	ApproveURL      *string             `json:"approve_url"`
 }
 
 type wireCreateRequestResponse struct {
@@ -1221,20 +1222,39 @@ func TestEveryAnswerNamingAPendingSecretRequestLinksItsPage(t *testing.T) {
 	}
 }
 
-// TestTheRecordReadRouteIsGone pins the removal of GET /v1/credential-requests/{record}: the
-// listed caller's read of a pending secret request's record is not a route, while the decide
-// routes under the same path still answer.
-func TestTheRecordReadRouteIsGone(t *testing.T) {
+// TestTheRecordReadRouteLinksASecretRequestsPage pins GET /v1/credential-requests/{record}: the
+// listed caller reads one record, and a pending secret request's carries the broker's own page
+// where a person signed in to the broker decides it, the same link GET /v1/pending's row carries.
+// A machine login's record carries none: it is decided with its typed code.
+func TestTheRecordReadRouteLinksASecretRequestsPage(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
 		map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "", "DEEL_API_KEY"), "session_id": nil})
 	recordID := *decode[wireCreateRequestResponse](t, body).RecordID
-	if status, body := ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil); status != http.StatusNotFound && status != http.StatusMethodNotAllowed {
-		t.Fatalf("GET /v1/credential-requests/{record} = %d %s, want no such route", status, body)
+
+	status, body := ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/credential-requests/{record} = %d %s, want 200", status, body)
 	}
-	if status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/deny", map[string]any{"approver": testApprover}); status != http.StatusForbidden {
-		t.Fatalf("POST .../deny = %d %s, want the route's own 403", status, body)
+	page := ts.URL + "/approve/" + recordID
+	got := decode[wireRecord](t, body)
+	if got.RecordID != recordID || got.Kind != "agent_secret" || got.State != "pending" {
+		t.Fatalf("the record = %+v, want the pending secret request %s", got, recordID)
+	}
+	if got.ApproveURL == nil || *got.ApproveURL != page {
+		t.Fatalf("the record's approve_url = %v, want %s", got.ApproveURL, page)
+	}
+
+	code := ts.openMachineLogin(t, newSigningKey(t), testApprover, "example-host-devbox")
+	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	login := decode[wireRecord](t, body).RecordID
+	status, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+login, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/credential-requests/{machine record} = %d %s, want 200", status, body)
+	}
+	if got := decode[wireRecord](t, body); got.Kind != "launcher_credential" || got.ApproveURL != nil {
+		t.Fatalf("a machine login's record = %+v, want launcher_credential with no approve_url", got)
 	}
 }
 

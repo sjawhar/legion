@@ -113,7 +113,7 @@ func (s *server) decisionFor(w http.ResponseWriter, r *http.Request, actor model
 	return agentsecrets.Decision{Approver: model.CanonicalLogin(actor.ID), Code: input.Code}, true
 }
 
-// --- GET /api/v1/credential-requests ---
+// --- GET /api/v1/credential-requests, GET .../{id} ---
 
 // listCredentialPending answers the viewer's pending list, or null when this Dispatch has no broker.
 // Every page reads this list (the Needs-you badge counts it), and a deployment without a broker is
@@ -133,6 +133,18 @@ func (s *server) listCredentialPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := s.deps.AgentSecrets.Pending(r.Context(), login)
+	relayBrokerResponse(w, body, err)
+}
+
+func (s *server) getCredentialRecord(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHuman(w, r); !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.Record(r.Context(), r.PathValue("id"))
 	relayBrokerResponse(w, body, err)
 }
 

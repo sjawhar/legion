@@ -61,9 +61,14 @@ func (p *Page) beginSignIn(w http.ResponseWriter, r *http.Request, detail reques
 	if detail.Approver != record.AnyoneApprover {
 		hint = detail.Approver
 	}
-	redirect(w, http.StatusFound, flow.OnlineAuthURL(p.redirectURL, oidc.OnlineSignIn{
+	authURL, err := flow.OnlineAuthURL(r.Context(), p.redirectURL, oidc.OnlineSignIn{
 		State: pending.State, Nonce: pending.Nonce, Verifier: pending.Verifier, LoginHint: hint, SelectAccount: selectAccount,
-	}))
+	})
+	if err != nil {
+		p.writeDiscoveryFailed(w, err)
+		return
+	}
+	redirect(w, http.StatusFound, authURL)
 }
 
 // readPending is the sign-in in progress r's signInCookie holds, when it holds one.

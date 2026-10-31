@@ -85,6 +85,7 @@ func newCredentialTestHandlerReading(t *testing.T, brokerURL, tokenFile string) 
 var featureOffRoutes = []struct {
 	method, path string
 }{
+	{http.MethodGet, "/api/v1/credential-requests/rec1"},
 	{http.MethodPost, "/api/v1/credential-requests/rec1/approve"},
 	{http.MethodPost, "/api/v1/credential-requests/rec1/deny"},
 	{http.MethodPost, "/api/v1/credential-requests/machine-lookup"},
@@ -186,23 +187,38 @@ func newFakeBrokerRig(t *testing.T) *fakeBrokerRig {
 	return rig
 }
 
-// The pending list relays the broker's rows untouched, a secret request's approve_url among them:
-// that link is the broker's, and Dispatch adds nothing to it.
+// Every read relays the broker's answer untouched: the pending list's rows, a secret request's
+// approve_url among them, and one record's own answer. That link is the broker's, and Dispatch
+// adds nothing to it.
 func TestCredentialRouteForwardsBrokerSuccessBodyAndAuth(t *testing.T) {
-	rig := newFakeBrokerRig(t)
-	pending := `{"pending":[{"record_id":"rec1","kind":"agent_secret","approve_url":"https://secrets.example.com/approve/rec1"}]}`
-	rig.bodyByRoute["GET /v1/pending"] = pending
-	handler := newCredentialTestHandler(t, rig.server.URL)
+	for _, tc := range []struct {
+		name, brokerRoute, dispatchPath, body string
+	}{
+		{
+			"the pending list", "GET /v1/pending", "/api/v1/credential-requests?approver=me",
+			`{"pending":[{"record_id":"rec1","kind":"agent_secret","approve_url":"https://secrets.example.com/approve/rec1"}]}`,
+		},
+		{
+			"one record", "GET /v1/credential-requests/rec1", "/api/v1/credential-requests/rec1",
+			`{"record_id":"rec1","state":"pending","approve_url":"https://secrets.example.com/approve/rec1"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newFakeBrokerRig(t)
+			rig.bodyByRoute[tc.brokerRoute] = tc.body
+			handler := newCredentialTestHandler(t, rig.server.URL)
 
-	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests?approver=me", nil, "alice")
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
-	}
-	if response.Body.String() != pending {
-		t.Fatalf("body = %s, want the broker's body verbatim", response.Body.String())
-	}
-	if rig.lastAuth != "Bearer "+credentialTestAccountToken {
-		t.Fatalf("broker saw Authorization = %q, want Dispatch's own ServiceAccount token", rig.lastAuth)
+			response := dispatchRequest(t, handler, http.MethodGet, tc.dispatchPath, nil, "alice")
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+			}
+			if response.Body.String() != tc.body {
+				t.Fatalf("body = %s, want the broker's body verbatim", response.Body.String())
+			}
+			if rig.lastAuth != "Bearer "+credentialTestAccountToken {
+				t.Fatalf("broker saw Authorization = %q, want Dispatch's own ServiceAccount token", rig.lastAuth)
+			}
+		})
 	}
 }
 
@@ -280,7 +296,7 @@ func TestCredentialRouteTransportFailureIsAgentSecretsUnavailable(t *testing.T) 
 	dead.Close() // nothing listens here now: every call is a transport failure.
 	handler := newCredentialTestHandler(t, deadURL)
 
-	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-grants?approver=me", nil, "alice")
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests/rec1", nil, "alice")
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503: %s", response.Code, response.Body.String())
 	}
@@ -302,7 +318,7 @@ func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(
 	logs := &storetest.LockedLog{}
 	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
-	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-grants?approver=me", nil, "alice")
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests/rec1", nil, "alice")
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500: %s", response.Code, response.Body.String())
 	}

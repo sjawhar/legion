@@ -13,6 +13,7 @@ package approval
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"embed"
@@ -311,17 +312,20 @@ func ServeStylesheet(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(stylesheet)
 }
 
-// codeFlow is the provider's code flow, discovered now when no sign-in has discovered it yet.
+// codeFlow is the provider's code flow, with its discovery document read: the flow is built at the
+// first sign-in and reads the document then, so the broker's machines never wait on a person's
+// provider at boot, and a read that has already succeeded is not repeated.
 func (p *Page) codeFlow(r *http.Request) (*oidc.CodeFlow, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.flow == nil {
 		s := p.cfg.SignIn
-		flow, err := oidc.DiscoverCodeFlow(r.Context(), s.Issuer, s.ClientID, s.ClientSecret, s.Domain, discoveryTimeout)
-		if err != nil {
-			return nil, err
-		}
-		p.flow = flow
+		p.flow = oidc.NewCodeFlow(s.Issuer, s.ClientID, s.ClientSecret, s.Domain)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), discoveryTimeout)
+	defer cancel()
+	if err := p.flow.Discover(ctx); err != nil {
+		return nil, err
 	}
 	return p.flow, nil
 }

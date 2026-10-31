@@ -66,7 +66,6 @@ test("Approve is one plain POST for the record, with no body", async () => {
   const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(record);
   const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({
     credential_id: null,
-    grant_id: "grant-1",
     state: "approved",
   });
 
