@@ -51,7 +51,7 @@ func keepAliveFrame(room string) []byte {
 		encoder.WriteVarUint(hocuspocusAwareness)
 		encoder.WriteVarBytes(noAwarenessChange)
 	})
-	return append(frameHeader(gws.BinaryMessage, true, int64(len(message)), 0), message...)
+	return append(frameHeader(gws.BinaryMessage, true, int64(len(message)), nil), message...)
 }
 
 // keepAliveWriter is a document socket's response writer. The connection ygo's websocket upgrade
@@ -280,24 +280,30 @@ func framePayloadLength(header []byte) int64 {
 
 // frameHeader is the header of a websocket frame of opcode carrying length payload bytes: the
 // opcode byte, with the FIN bit set when final, then the payload's length in the 7-, 16- or
-// 64-bit form RFC 6455 section 5.2 gives it, with mask set on the length's first byte -
-// maskedFrame for a frame a client masks, zero for a frame a server sends. It is the one place a
-// frame's length is encoded: the keep-alive's own frame (keepAliveFrame) and the awareness
-// filter's frames to ygo (awarenessLimitConn.writeFrame) both build their header here. The
-// caller appends the masking key, when the frame has one, and then the payload.
-func frameHeader(opcode byte, final bool, length int64, mask byte) []byte {
+// 64-bit form RFC 6455 section 5.2 gives it, then key, the masking key. A frame a client sends
+// gives its four-byte key, which sets the MASK bit on the length's first byte; a frame a server
+// sends gives none (nil), and its MASK bit stays clear. It is the one place a frame's header is
+// encoded: the keep-alive's own frame (keepAliveFrame) and the awareness filter's frames to ygo
+// (awarenessLimitConn.writeFrame, and the continuation header awarenessLimitConn.pass writes)
+// all build theirs here. The caller appends the payload, masked under key when it gives one.
+func frameHeader(opcode byte, final bool, length int64, key []byte) []byte {
 	header := append(make([]byte, 0, maxFrameHeader), opcode)
 	if final {
 		header[0] |= finalFrame
 	}
+	var mask byte
+	if key != nil {
+		mask = maskedFrame
+	}
 	switch {
 	case length < 126:
-		return append(header, mask|byte(length))
+		header = append(header, mask|byte(length))
 	case length <= 0xffff:
-		return binary.BigEndian.AppendUint16(append(header, mask|126), uint16(length))
+		header = binary.BigEndian.AppendUint16(append(header, mask|126), uint16(length))
 	default:
-		return binary.BigEndian.AppendUint64(append(header, mask|127), uint64(length))
+		header = binary.BigEndian.AppendUint64(append(header, mask|127), uint64(length))
 	}
+	return append(header, key...)
 }
 
 // frameBegins reads the frame header just written: the frame's payload follows it.

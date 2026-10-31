@@ -15,8 +15,10 @@ import (
 // process's view of a document is judged against while another envoy-dispatch process writes the
 // same document: what a read compares a resident room's cursor against (readStoredHead,
 // roomHoldsHead, docTree), what a cold write's fork is brought up to under the document's lock
-// (followStoredHead), what a committed write's lost operations are judged on (lostAtStoredHead),
-// and what the other processes are asked to store before any of that is read (flushOtherRooms).
+// (followStoredHead), what a warm write checks its room against under the document's lock
+// (roomBehindHead), what a committed write's lost operations are judged on (lostAtStoredHead),
+// what a published write's lost operations are judged on (recordPublishedLoss), and what the other
+// processes are asked to store before any of that is read (flushOtherRooms).
 // A room of this process is the head only while it holds every stored row (roomCursor,
 // roomCatchUps); behind it, a read takes the stored document instead and waits for no catch-up.
 

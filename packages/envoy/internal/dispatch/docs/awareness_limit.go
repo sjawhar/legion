@@ -316,7 +316,7 @@ func (c *awarenessLimitConn) pass(rest int64, final bool) {
 	c.writeFrame(gws.BinaryMessage, final && rest == 0, c.message)
 	c.message = c.message[:0]
 	if rest > 0 {
-		c.out.Write(append(frameHeader(continuationFrame, final, rest, maskedFrame), c.key[:]...))
+		c.out.Write(frameHeader(continuationFrame, final, rest, c.key[:]))
 		c.through = rest
 	}
 	c.mode = limitIdle
@@ -389,8 +389,7 @@ func (c *awarenessLimitConn) writeAwareness(update []byte) {
 // writeFrame puts payload on the stream ygo reads as one frame, masked under the frame's own key
 // as every frame a client sends is.
 func (c *awarenessLimitConn) writeFrame(opcode byte, final bool, payload []byte) {
-	header := frameHeader(opcode, final, int64(len(payload)), maskedFrame)
-	c.out.Write(append(header, c.key[:]...))
+	c.out.Write(frameHeader(opcode, final, int64(len(payload)), c.key[:]))
 	for i, b := range payload {
 		c.out.WriteByte(b ^ c.key[i%4])
 	}
