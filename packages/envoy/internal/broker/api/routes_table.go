@@ -98,8 +98,10 @@ func accountAuthAfterRecordKind(h func(*server, http.ResponseWriter, *http.Reque
 // the broker itself (OpenID Connect with the broker's own client, BROKER_SIGNIN_*). The handler is
 // given the session the request's __Host-broker-session cookie names, or the zero session when it
 // names none that is live, since what that means is the route's to answer: the page starts a
-// sign-in, a decision answers a page linking the record it names. Mounted only when the broker
-// builds its approval page, which every broker does.
+// sign-in, a decision answers a page linking the record it names. Every route of the class spends
+// its source address's bucket first, the one the account class spends (authenticate), so no
+// caller drives a record read, a token request to the sign-in provider or a session write
+// unmetered. Mounted only when the broker builds its approval page, which every broker does.
 func signInAuth(h func(*approval.Page, http.ResponseWriter, *http.Request, approval.Session)) routeHandler {
 	return routeHandler{auth: authSignIn, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
 		h(s.deps.Approval, w, r, who.signIn)
@@ -221,14 +223,15 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/secrets/{name}/reread", public((*server).rereadSecret)},
 		// A person's approval page for one credential-request record, an HTML page on the broker's
 		// own origin: the record's secret names, the enrollment the broker verified asked, the
-		// session the request claims when it differs, the reason, the lifetime, the times, the
-		// approver and the state, then every other pending secret request the person may decide,
-		// with Approve and Deny for each the person may decide and one "Approve all N shown". It
-		// checks the id's shape, then the session, then the record: a malformed id is a 400, a
-		// request with no live session, or with ?switch=1, redirects to the sign-in provider and
-		// returns here, and only a signed-in person's unknown record id is a 404. A machine
-		// login's record is printed with the note that it is decided by typing its code on
-		// Dispatch's machine-login page, and offers no button.
+		// session the request claims when it differs, the reason or "No reason given", the
+		// lifetime, the times, the approver and the state, one sentence saying what Approve gives
+		// and for how long and one saying what Deny and the expiry do, then every other pending
+		// secret request the person may decide, with Approve and Deny for each the person may
+		// decide and one "Approve all N shown". It checks the id's shape, then the session, then
+		// the record: a malformed id is a 400, a request with no live session, or with ?switch=1,
+		// redirects to the sign-in provider and returns here, and only a signed-in person's
+		// unknown record id is a 404. A machine login's record is printed with the note that it
+		// is decided by typing its code on Dispatch's machine-login page, and offers no button.
 		{http.MethodGet, "/approve/{record}", signInAuth((*approval.Page).ServeRecord)},
 		// Decide records an approval page printed, as the signed-in person: a form from the
 		// broker's own origin only, carrying the page's token, which binds it to the session and to
@@ -249,10 +252,13 @@ func routes() []apiRoute {
 		// made on the approval page. It needs no credential because a production check fetches
 		// it from a pod where no person is signed in, and because it names no login, no secret
 		// and no provider's message: every word it answers is one of two closed sets this
-		// broker chose (internal/broker/store's signin_status).
+		// broker chose (internal/broker/store's signin_status). It spends its source address's
+		// bucket in its own handler, as the page's routes spend it in authenticate, so this read
+		// of the broker's own row is metered too.
 		{http.MethodGet, "/signin/status", public((*server).signInStatus)},
-		// The approval page's one stylesheet, embedded in the broker; it needs no credential,
-		// since every page it dresses is read before anyone has signed in.
+		// The approval page's one stylesheet, embedded in the broker; it needs no credential and
+		// spends no rate-limit bucket, since every page it dresses is read before anyone has
+		// signed in and the bytes are the binary's.
 		{http.MethodGet, "/approve/assets/approve.css", public((*server).approvalStylesheet)},
 		// Report whether the broker can reach its database. From SIGTERM onward it answers 503
 		// SHUTTING_DOWN instead (Deps.Draining) while the process goes on serving every other route,

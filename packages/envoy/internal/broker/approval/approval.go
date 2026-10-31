@@ -13,7 +13,6 @@ package approval
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"embed"
@@ -26,7 +25,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -48,8 +46,6 @@ const (
 	signInMaxAge = 10 * time.Minute
 	// secretBytes is the length of a session secret, and of a sign-in's state and nonce.
 	secretBytes = 32
-	// discoveryTimeout bounds the read of the provider's discovery document at a first sign-in.
-	discoveryTimeout = 10 * time.Second
 	// maxFormBytes bounds a POST's form body: a decision names at most maxRecords ids twice.
 	maxFormBytes = 64 << 10
 )
@@ -95,14 +91,17 @@ type Page struct {
 	// redirectURL is the sign-in's redirect URI.
 	redirectURL string
 
-	// flow is the provider's code flow, discovered at the first sign-in that needs it rather than
-	// at boot, so a provider outage never stops the broker serving machines; a failed discovery
-	// is not kept, and the next sign-in tries again.
-	mu   sync.Mutex
-	flow *oidc.CodeFlow
+	// signIn is the provider's code flow, built here and reading nothing: oidc reads the
+	// issuer's discovery document when a sign-in first needs it, shares that read among
+	// concurrent callers, bounds it, and waits before reading again after a failure, so a
+	// provider outage never stops the broker serving machines and never queues page loads
+	// behind one another (internal/oidc/discovery.go).
+	signIn *oidc.CodeFlow
 }
 
-// New builds the page from cfg, refusing a public URL that is not an absolute http(s) URL.
+// New builds the page from cfg, refusing a public URL that is not an absolute http(s) URL. It
+// reads nothing: the sign-in's code flow reads the provider's discovery document when the first
+// sign-in needs it.
 func New(cfg Config) (*Page, error) {
 	u, err := url.Parse(cfg.PublicURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
@@ -111,7 +110,10 @@ func New(cfg Config) (*Page, error) {
 	if cfg.Store == nil || cfg.Machine == nil {
 		return nil, errors.New("approval: the page needs the store and the request machine")
 	}
-	return &Page{cfg: cfg, origin: originOf(u), redirectURL: strings.TrimRight(cfg.PublicURL, "/") + "/signin/callback"}, nil
+	return &Page{
+		cfg: cfg, origin: originOf(u), redirectURL: strings.TrimRight(cfg.PublicURL, "/") + "/signin/callback",
+		signIn: oidc.NewCodeFlow(cfg.SignIn.Issuer, cfg.SignIn.ClientID, cfg.SignIn.ClientSecret, cfg.SignIn.Domain),
+	}, nil
 }
 
 // originOf is u's origin as a browser serializes it: lowercase scheme and host, and the port only
@@ -307,31 +309,10 @@ func ServeStylesheet(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(stylesheet)
 }
 
-// codeFlow is the provider's code flow, with its discovery document read: the flow is built at the
-// first sign-in and reads the document then, so the broker's machines never wait on a person's
-// provider at boot, and a read that has already succeeded is not repeated. A flow whose read
-// failed is dropped, so the next sign-in builds one and reads again rather than answering from
-// oidc's own record of the failure: the person in front of the page is the only traffic here, and
-// a provider that has come back must serve the next page load.
-func (p *Page) codeFlow(r *http.Request) (*oidc.CodeFlow, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.flow == nil {
-		s := p.cfg.SignIn
-		p.flow = oidc.NewCodeFlow(s.Issuer, s.ClientID, s.ClientSecret, s.Domain)
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), discoveryTimeout)
-	defer cancel()
-	if err := p.flow.Discover(ctx); err != nil {
-		p.flow = nil
-		return nil, err
-	}
-	return p.flow, nil
-}
-
-// writeDiscoveryFailed answers a sign-in whose provider's discovery document could not be read.
-func (p *Page) writeDiscoveryFailed(w http.ResponseWriter, err error) {
-	slog.Error("approval sign-in: discover the provider", "issuer", p.cfg.SignIn.Issuer, "error", err)
+// writeSignInUnavailable answers a sign-in whose provider could not be reached, the one failure
+// of a sign-in that is the broker's dependency rather than the person's credential.
+func (p *Page) writeSignInUnavailable(w http.ResponseWriter, err error) {
+	slog.Error("approval sign-in: reach the provider", "issuer", p.cfg.SignIn.Issuer, "error", err)
 	writeMessage(w, http.StatusServiceUnavailable, say("Sign-in unavailable",
 		"The secrets broker could not reach its sign-in provider, "+p.cfg.SignIn.Issuer+". Try again shortly."))
 }

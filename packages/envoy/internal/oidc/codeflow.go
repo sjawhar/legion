@@ -161,16 +161,32 @@ func (f *CodeFlow) AuthURL(ctx context.Context, redirectURL, state, nonce string
 
 // Exchange trades the code the issuer redirected to redirectURL for the signed-in person's ID
 // token and refresh token. The ID token must carry nonce, the value the sign-in that sent the
-// browser to AuthURL bound it to. It fails with ErrIssuerUnavailable while the issuer is not
-// discovered.
+// browser to AuthURL bound it to; one carrying another, and a caller naming no nonce, fail with
+// ErrNonce. An issuer that returns no refresh token is refused, since this mode renews the
+// sign-in with one. It fails with ErrIssuerUnavailable while the issuer is not discovered.
 func (f *CodeFlow) Exchange(ctx context.Context, redirectURL, code, nonce string) (Session, error) {
+	session, err := f.exchange(ctx, redirectURL, code, nonce)
+	if err != nil {
+		return Session{}, err
+	}
+	if session.RefreshToken == "" {
+		return Session{}, errors.New("oidc: the issuer returned no refresh token")
+	}
+	return session, nil
+}
+
+// exchange is the steps both exchanges share: discover the issuer, trade code for its tokens
+// there with options (the online exchange's PKCE verifier, and none for the other), verify the
+// ID token, and refuse one whose nonce is not the sign-in's with ErrNonce. An empty nonce is
+// refused as well, since it binds the token to no sign-in.
+func (f *CodeFlow) exchange(ctx context.Context, redirectURL, code, nonce string, options ...oauth2.AuthCodeOption) (Session, error) {
 	issuer, err := f.discovery.discover(ctx)
 	if err != nil {
 		return Session{}, err
 	}
 	config := issuer.config
 	config.RedirectURL = redirectURL
-	token, err := config.Exchange(f.tokenContext(ctx), code)
+	token, err := config.Exchange(f.tokenContext(ctx), code, options...)
 	if err != nil {
 		return Session{}, fmt.Errorf("oidc: exchange code: %w", err)
 	}
@@ -179,10 +195,7 @@ func (f *CodeFlow) Exchange(ctx context.Context, redirectURL, code, nonce string
 		return Session{}, err
 	}
 	if nonce == "" || session.Claims.Nonce != nonce {
-		return Session{}, errors.New("oidc: the ID token's nonce is not the sign-in's")
-	}
-	if session.RefreshToken == "" {
-		return Session{}, errors.New("oidc: the issuer returned no refresh token")
+		return Session{}, ErrNonce
 	}
 	return session, nil
 }
@@ -241,22 +254,9 @@ func (f *CodeFlow) OnlineExchange(ctx context.Context, redirectURL, code string,
 	if signIn.Nonce == "" || signIn.Verifier == "" {
 		return Claims{}, errors.New("oidc: an online sign-in needs its nonce and PKCE verifier")
 	}
-	issuer, err := f.discovery.discover(ctx)
+	session, err := f.exchange(ctx, redirectURL, code, signIn.Nonce, oauth2.VerifierOption(signIn.Verifier))
 	if err != nil {
 		return Claims{}, err
-	}
-	config := issuer.config
-	config.RedirectURL = redirectURL
-	token, err := config.Exchange(f.tokenContext(ctx), code, oauth2.VerifierOption(signIn.Verifier))
-	if err != nil {
-		return Claims{}, fmt.Errorf("oidc: exchange code: %w", err)
-	}
-	session, err := f.session(ctx, issuer, token)
-	if err != nil {
-		return Claims{}, err
-	}
-	if session.Claims.Nonce != signIn.Nonce {
-		return Claims{}, ErrNonce
 	}
 	return session.Claims, nil
 }

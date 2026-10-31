@@ -72,7 +72,7 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 		"Approver " + ada,
 		"State pending",
 		"SECOND_SECRET",
-		"Lasts once approved 1h0m0s",
+		"Lasts once approved for 1h0m0s",
 		"Reason rotate the second key",
 	} {
 		if !strings.Contains(got, want) {
@@ -108,6 +108,29 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 		t.Errorf("the page carries a script:\n%s", res.Body)
 	}
 
+	// Each secret request says what Approve gives it, with that request's own lifetime, and what
+	// Deny and the expiry do, in the request's own block.
+	for _, c := range []struct {
+		p         pending
+		sentences []string
+	}{
+		{first, []string{
+			"Approve gives this session the value of these secrets until the session ends.",
+			"Deny refuses them, and so does leaving the request until it expires.",
+		}},
+		{second, []string{
+			"Approve gives this session the value of these secrets for 1h0m0s.",
+			"Deny refuses them, and so does leaving the request until it expires.",
+		}},
+	} {
+		block := pageText(t, recordBlock(t, res.Body, c.p.recordID))
+		for _, want := range c.sentences {
+			if !strings.Contains(block, want) {
+				t.Errorf("the block of %s does not say %q:\n%s", c.p.recordID, want, block)
+			}
+		}
+	}
+
 	t.Run("a machine login links Dispatch's page and offers no button", func(t *testing.T) {
 		machineRecord, _ := r.machineLogin(t, newKey(t), ada, "ada-laptop")
 		res := b.Page(t, machineRecord)
@@ -117,6 +140,9 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 		}
 		if decisionForm(t, res.Body, machineRecord) != nil {
 			t.Errorf("the machine login's page offers a decision form:\n%s", res.Body)
+		}
+		if block := recordBlock(t, res.Body, machineRecord); strings.Contains(block, "Approve gives this session") {
+			t.Errorf("the machine login's block says what Approve gives a secret request:\n%s", block)
 		}
 	})
 
@@ -168,6 +194,21 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 		res := b.Get(t, "/approve/assets/approve.css")
 		if res.Status != http.StatusOK || !strings.HasPrefix(res.Header.Get("Content-Type"), "text/css") {
 			t.Errorf("stylesheet = %d %q, want 200 text/css", res.Status, res.Header.Get("Content-Type"))
+		}
+	})
+
+	t.Run("a request with no reason says so, and says what Approve gives for its own lifetime", func(t *testing.T) {
+		silent := r.request(t, enrollmentID, key, "", &lifetime, "", "THIRD_SECRET")
+		block := pageText(t, recordBlock(t, b.Page(t, silent.recordID).Body, silent.recordID))
+		for _, want := range []string{
+			"Reason No reason given",
+			"Lasts once approved for 1h0m0s",
+			"Approve gives this session the value of these secrets for 1h0m0s.",
+			"Deny refuses them, and so does leaving the request until it expires.",
+		} {
+			if !strings.Contains(block, want) {
+				t.Errorf("the block of a request with no reason does not say %q:\n%s", want, block)
+			}
 		}
 	})
 }
@@ -670,7 +711,10 @@ func TestABatchDecidesEachRecordOnItsOwn(t *testing.T) {
 }
 
 // TestASignInWhoseProviderCannotBeReached: a provider whose discovery document cannot be read is
-// a 503 naming its issuer, and the next sign-in reads it again.
+// a 503 naming its issuer. The read that failed is oidc's, shared by every caller and not read
+// again for five seconds (internal/oidc/discovery.go's discoveryRetrySpacing), so a page load
+// during the outage is answered from that failure at once rather than queued behind a read of
+// its own; the first load after that wait reads the provider again and signs the person in.
 func TestASignInWhoseProviderCannotBeReached(t *testing.T) {
 	r := newRig(t)
 	enrollmentID, key := r.benSession(t, "ben-box")
@@ -682,6 +726,24 @@ func TestASignInWhoseProviderCannotBeReached(t *testing.T) {
 		t.Fatalf("sign-in with discovery failing = %d, want 503 naming %s:\n%s", res.Status, r.issuer.URL(), res.Body)
 	}
 	r.issuer.FailDiscovery(0)
+	if res := b.Get(t, "/approve/"+p.recordID); res.Status != http.StatusServiceUnavailable {
+		t.Fatalf("the page right after the provider came back = %d, want 503 from the failed read oidc still holds", res.Status)
+	}
+	start := time.Now()
+	for {
+		res := b.Get(t, "/approve/"+p.recordID)
+		if res.Status == http.StatusFound {
+			t.Logf("the sign-in was reached again %s after the provider came back", time.Since(start).Round(time.Millisecond))
+			break
+		}
+		if res.Status != http.StatusServiceUnavailable {
+			t.Fatalf("the page while oidc waits to read again = %d, want 503 or the sign-in's 302:\n%s", res.Status, res.Body)
+		}
+		if time.Since(start) > 30*time.Second {
+			t.Fatalf("the sign-in was still unavailable %s after the provider came back", time.Since(start))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	b.SignIn(t, p.recordID, person(ada))
 	r.requirePending(t, p.recordID)
 }

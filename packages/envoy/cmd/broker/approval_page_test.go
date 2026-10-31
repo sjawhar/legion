@@ -25,6 +25,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/config"
+	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -209,6 +211,51 @@ func requireSignInRedirect(t *testing.T, issuer *oidctest.Issuer, res brokertest
 	}
 }
 
+// recordBlock is the page's own block for recordID, the <article> that record's facts, its two
+// sentences and its buttons are in, so a test reads one record's block and not the whole page's.
+func recordBlock(t *testing.T, body, recordID string) string {
+	t.Helper()
+	start := strings.Index(body, `<article class="record" id="record-`+recordID+`">`)
+	if start < 0 {
+		t.Fatalf("the page prints no block for %s:\n%s", recordID, body)
+	}
+	end := strings.Index(body[start:], "</article>")
+	if end < 0 {
+		t.Fatalf("the block for %s is not closed:\n%s", recordID, body)
+	}
+	return body[start : start+end]
+}
+
+// askWithoutReason has p ask the broker at base for secretName with no reason at all, which
+// brokertest.Pods.Ask never does, and answers the record its pending request opened: the page
+// prints "No reason given" for it.
+func askWithoutReason(t *testing.T, base string, p brokertest.Pod, secretName string) string {
+	t.Helper()
+	request, err := record.Sign(p.Key, base, []record.AuthorizationDetail{
+		{Type: record.KindAgentSecret, Identifier: secretName, Actions: []string{"inject"}},
+	}, "", "", nil, time.Now())
+	if err != nil {
+		t.Fatalf("sign %s's request for %s: %v", p.RuntimeID, secretName, err)
+	}
+	signed, err := proof.Sign(p.Key, p.EnrollmentID, http.MethodPost, base+"/v1/requests", time.Now())
+	if err != nil {
+		t.Fatalf("sign %s's proof: %v", p.RuntimeID, err)
+	}
+	status, answer := accountCall(t, base, http.MethodPost, "/v1/requests", map[string]string{"Proof": signed},
+		map[string]any{"request": request, "session_id": nil})
+	var reply struct {
+		State    string  `json:"state"`
+		RecordID *string `json:"record_id"`
+	}
+	if err := json.Unmarshal(answer, &reply); err != nil {
+		t.Fatalf("decode %s: %v", answer, err)
+	}
+	if status != http.StatusOK || reply.State != "pending" || reply.RecordID == nil {
+		t.Fatalf("%s's request with no reason = %d %s, want pending on a record", p.RuntimeID, status, answer)
+	}
+	return *reply.RecordID
+}
+
 // front is one public URL in front of whichever broker process a row routes it to, as a load
 // balancer stands in front of replicas. Every process behind it is configured with its URL as
 // BROKER_PUBLIC_URL, so each verifies records and proofs against the same audience, checks the
@@ -371,6 +418,26 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 				t.Fatalf("pod-a's grant values = %v, want %s=%s", values, approvalSecretName, approvalSecretValue)
 			}
 		})
+	})
+
+	t.Run("A1: the page says what Approve gives and what Deny and the expiry do, and a request with no reason says so", func(t *testing.T) {
+		pods := f.pods(t, base)
+		podD := pods.Enroll(launch, "pod-d", approvalPodAccount)
+		silent := askWithoutReason(t, base, podD, approvalSecretName)
+		b := newBrowser(t)
+		b.SignIn(t, silent, brokertest.Person(ada))
+		block := brokertest.PageText(t, recordBlock(t, b.Page(t, silent).Body, silent))
+		t.Logf("ada's block for pod-d's request, which named no reason, reads: %s", block)
+		for _, want := range []string{
+			"Reason No reason given",
+			"Lasts once approved until the session ends",
+			"Approve gives this session the value of these secrets until the session ends.",
+			"Deny refuses them, and so does leaving the request until it expires.",
+		} {
+			if !strings.Contains(block, want) {
+				t.Fatalf("the block does not say %q:\n%s", want, block)
+			}
+		}
 	})
 
 	t.Run("a second pending record for the refusals", func(t *testing.T) {
@@ -614,4 +681,41 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 			t.Fatalf("pod-c's grant values = %v, want %s=%s", values, approvalSecretName, approvalSecretValue)
 		}
 	})
+}
+
+// TestTheBinaryEndSessionsEndsAMixedCaseLogin drives the REAL compiled broker's subcommand, the
+// immediate offboarding control: a sign-in is kept under the lowercased email
+// (oidc.WorkspaceLogin) and store.DeleteBrowserSessionsForLogin matches the login exactly, so an
+// argument typed in another case must go through record.CanonicalLogin. `broker end-sessions
+// Ada@Example.COM` ends ada's session and says so, and her cookie then signs nobody in; a
+// subcommand that only trimmed its argument would print "ended 0 sessions" and leave her able to
+// decide for the rest of the session's day.
+func TestTheBinaryEndSessionsEndsAMixedCaseLogin(t *testing.T) {
+	f := newApprovalFixture(t)
+	databaseURL := storetest.URL(t)
+	public := newFront(t)
+	broker := f.start(t, databaseURL, public.URL, f.signInEnv()...)
+	public.route(t, broker)
+	base := public.URL
+
+	pods := f.pods(t, base)
+	pod := pods.Enroll(pods.LogIn(approvalLauncherService, approvalLauncherAccount), "pod-mixed-case", approvalPodAccount)
+	reply := pods.Ask(pod, approvalSecretName)
+	if reply.State != "pending" || reply.RecordID == nil {
+		t.Fatalf("the pod's request = %+v, want pending on a record", reply)
+	}
+	recordID := *reply.RecordID
+
+	b := brokertest.NewBrowser(t, base, http.DefaultTransport, f.issuer)
+	b.SignIn(t, recordID, brokertest.Person(ada))
+	b.Page(t, recordID)
+
+	typed := "Ada@Example.COM"
+	out := runBrokerCommand(t, f.binary, databaseURL, public.URL, 0, endSessionsCommand, typed)
+	t.Logf("broker %s %s printed: %s", endSessionsCommand, typed, strings.TrimSpace(out))
+	if want := endSessionsCommand + ": ended 1 session of " + ada + "\n"; out != want {
+		t.Fatalf("broker %s %s printed %q, want %q", endSessionsCommand, typed, out, want)
+	}
+	requireSignInRedirect(t, f.issuer, b.Get(t, "/approve/"+recordID), "ada's page after a mixed-case login ended her sessions")
+	requirePending(pods, pod, reply.RequestID, "the sessions were ended")
 }

@@ -46,25 +46,22 @@ func validNext(next string) bool {
 // accounts. The session the browser may hold now is left alone: the callback ends it when it
 // makes the new one.
 func (p *Page) beginSignIn(w http.ResponseWriter, r *http.Request, recordID, hint string, selectAccount bool) {
-	flow, err := p.codeFlow(r)
+	pending := pendingSignIn{State: randomValue(), Nonce: randomValue(), Verifier: oauth2.GenerateVerifier(), Next: approvePrefix + recordID}
+	// The one failure here is the provider's discovery document, which the sign-in's code flow
+	// reads when it is first needed; nothing is written to the browser until it has succeeded.
+	authURL, err := p.signIn.OnlineAuthURL(r.Context(), p.redirectURL, oidc.OnlineSignIn{
+		State: pending.State, Nonce: pending.Nonce, Verifier: pending.Verifier, LoginHint: hint, SelectAccount: selectAccount,
+	})
 	if err != nil {
-		p.writeDiscoveryFailed(w, err)
+		p.writeSignInUnavailable(w, err)
 		return
 	}
-	pending := pendingSignIn{State: randomValue(), Nonce: randomValue(), Verifier: oauth2.GenerateVerifier(), Next: approvePrefix + recordID}
 	raw, err := json.Marshal(pending)
 	if err != nil {
 		writeUnavailable(w, "start the sign-in", err)
 		return
 	}
 	setCookie(w, signInCookie, base64.RawURLEncoding.EncodeToString(raw), signInMaxAge)
-	authURL, err := flow.OnlineAuthURL(r.Context(), p.redirectURL, oidc.OnlineSignIn{
-		State: pending.State, Nonce: pending.Nonce, Verifier: pending.Verifier, LoginHint: hint, SelectAccount: selectAccount,
-	})
-	if err != nil {
-		p.writeDiscoveryFailed(w, err)
-		return
-	}
 	redirect(w, http.StatusFound, authURL)
 }
 
@@ -127,21 +124,19 @@ func (p *Page) ServeCallback(w http.ResponseWriter, r *http.Request, _ Session) 
 			"The sign-in provider did not sign you in. Open the request again to try once more."))
 		return
 	}
-	flow, err := p.codeFlow(r)
-	if err != nil {
-		// A callback is a sign-in with a code in hand, so a provider that cannot be reached
-		// here is an exchange that failed, and the status says so (issuer_unreachable). The
-		// start of a sign-in is not: no code exists yet to exchange.
-		p.recordFailedSignIn(r.Context(), err)
-		p.writeDiscoveryFailed(w, err)
-		return
-	}
-	claims, err := flow.OnlineExchange(r.Context(), p.redirectURL, query.Get("code"), oidc.OnlineSignIn{
+	claims, err := p.signIn.OnlineExchange(r.Context(), p.redirectURL, query.Get("code"), oidc.OnlineSignIn{
 		State: pending.State, Nonce: pending.Nonce, Verifier: pending.Verifier,
 	})
 	if err != nil {
-		slog.Warn("approval sign-in refused: the code exchange or the ID token failed", "error", err)
+		// A callback is a sign-in with a code in hand, so a provider that cannot be reached here
+		// is an exchange that failed, and the status says so (issuer_unreachable); the person
+		// reads that the broker could not reach the provider rather than that they were refused.
 		p.recordFailedSignIn(r.Context(), err)
+		if errors.Is(err, oidc.ErrIssuerUnavailable) {
+			p.writeSignInUnavailable(w, err)
+			return
+		}
+		slog.Warn("approval sign-in refused: the code exchange or the ID token failed", "error", err)
 		writeMessage(w, http.StatusForbidden, say("Sign-in refused",
 			"The sign-in provider's answer did not verify, so you are not signed in. Open the request again to sign in."))
 		return

@@ -45,10 +45,13 @@ type recordView struct {
 	// when it differs from EnrollmentSession.
 	RequestSession string
 	Reason         string
-	Lifetime       string
-	RequestedAt    string
-	ExpiresAt      string
-	Approver       string
+	// Lifetime is how long the grant an approval mints lasts, worded to read after both "Lasts
+	// once approved" and "Approve gives this session the value of these secrets": "until the
+	// session ends", or "for <duration>" when the request signed one.
+	Lifetime    string
+	RequestedAt string
+	ExpiresAt   string
+	Approver    string
 	// State is the record's state, "expired" too for one past its expiry the sweeper has not
 	// ended yet; DecidedBy, DecidedAt and Detail are its decision's.
 	State, DecidedBy, DecidedAt, Detail string
@@ -97,8 +100,10 @@ type pageView struct {
 // prints the record and every other pending agent_secret record the person may decide, with
 // Approve and Deny for each the person may decide and one "Approve all N shown" when N is two or
 // more, and, after a decision, one outcome line per decided record, read from the broker's own
-// record now. A machine login's record is printed with the note that its typed code is decided
-// on Dispatch's machine-login page, and offers no button.
+// record now. Each secret request is printed with two sentences of its own: what Approve gives
+// and for how long, and what Deny and the expiry do. A machine login's record is printed with
+// the note that its typed code is decided on Dispatch's machine-login page, and offers no
+// button.
 func (p *Page) ServeRecord(w http.ResponseWriter, r *http.Request, sess Session) {
 	id := r.PathValue("record")
 	if !record.ValidID(id) {
@@ -212,7 +217,7 @@ func (p *Page) recordView(d requests.RecordDetail, login string, now time.Time) 
 		v.RequestSession = d.Session.Request
 	}
 	if d.LifetimeSeconds != nil {
-		v.Lifetime = (time.Duration(*d.LifetimeSeconds) * time.Second).String()
+		v.Lifetime = "for " + (time.Duration(*d.LifetimeSeconds) * time.Second).String()
 	}
 	if d.Decided != nil {
 		v.DecidedBy, v.DecidedAt, v.Detail = d.Decided.Login, d.Decided.At.UTC().Format(timeLayout), d.Decided.Detail

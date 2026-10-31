@@ -79,7 +79,8 @@ type Deps struct {
 	// TokenLimit bounds POST /v1/oauth/token per source address; nil means DefaultTokenLimit.
 	TokenLimit *ratelimit.Limit
 	// AccountLimit bounds every route accountAuth authenticates per source address, in one bucket
-	// the whole class shares and spent before the caller's token is verified; nil means
+	// the whole class shares and spent before the caller's token is verified, and with it the
+	// approval page's routes and the sign-in's (authenticate, signInStatus); nil means
 	// DefaultAccountLimit.
 	AccountLimit *ratelimit.Limit
 	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
@@ -126,7 +127,8 @@ type server struct {
 	rereadLimiter *ratelimit.Keyed
 	rereadOverall *ratelimit.Bucket
 	// tokenLimiter is TokenLimit applied per source address (clientAddress), over its route's own
-	// bucket, and accountLimiter AccountLimit, over the bucket every accountAuth route shares.
+	// bucket, and accountLimiter AccountLimit, over the bucket every accountAuth route and every
+	// route of the approval page share.
 	tokenLimiter   *ratelimit.Keyed
 	accountLimiter *ratelimit.Keyed
 }
@@ -198,7 +200,8 @@ const (
 // credential is a 401; a store that cannot answer is a 503 naming it, never mistaken for a bad
 // credential. A route a ServiceAccount token authenticates first spends its source address's
 // bucket (DefaultAccountLimit), a refusal being 429 RATE_LIMITED with Retry-After, so a flood of
-// forged tokens past that bucket costs no verification and no fetch of the issuer's keys.
+// forged tokens past that bucket costs no verification and no fetch of the issuer's keys. The
+// approval page's routes spend that same bucket, for the same reason: see the authSignIn case.
 func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth routeAuth) (caller, bool) {
 	switch auth {
 	case authNone:
@@ -209,6 +212,17 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 		}
 		return s.accountCaller(w, r)
 	case authSignIn:
+		// The page's routes and the sign-in's spend the bucket the account class spends, so no
+		// caller drives them unmetered either. GET /approve/{record} with no session does one
+		// record read and hands the caller a valid __Host-broker-signin cookie; GET
+		// /signin/callback with that cookie's own state makes the broker send a token request to
+		// its sign-in provider, with the broker's client credentials, and write the failed
+		// sign-in row; and POST /approve and POST /signin/logout each read and write a session's
+		// row. GET /signin/status spends it in its own handler, being public, and the page's
+		// stylesheet spends nothing: it is bytes of the binary, and every page is read under it.
+		if s.refuseAccountAddress(w, r) {
+			return caller{}, false
+		}
 		session, ok := s.deps.Approval.Authenticate(w, r)
 		return caller{signIn: session}, ok
 	case authLauncher:
@@ -491,8 +505,14 @@ type signInStatusResponse struct {
 
 // signInStatus answers the broker's sign-in status to any caller. It is read from Postgres on
 // every call rather than from this process's memory, so every replica and every restart answers
-// the same thing.
+// the same thing. It spends its source address's bucket first, the one the approval page's
+// routes and the routes a ServiceAccount token authenticates share (refuseAccountAddress,
+// DefaultAccountLimit), so no caller drives this read unmetered; the route takes no credential,
+// so nothing else bounds it.
 func (s *server) signInStatus(w http.ResponseWriter, r *http.Request) {
+	if s.refuseAccountAddress(w, r) {
+		return
+	}
 	status, err := s.deps.Enroll.Store.SignInStatus(r.Context())
 	if err != nil {
 		writeUnavailable(w, "DATABASE_UNAVAILABLE", "read the sign-in status", err)

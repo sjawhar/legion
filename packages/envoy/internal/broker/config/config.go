@@ -284,10 +284,18 @@ type SignIn struct {
 	SessionLifetime time.Duration
 }
 
-// SignInSettings are the four settings the broker's sign-in needs, every one of them required:
-// the provider's issuer, the client's id, the file holding the client's secret, and the Workspace
-// domain. Every message that names them names them in this order.
-var SignInSettings = []string{"BROKER_SIGNIN_ISSUER", "BROKER_SIGNIN_CLIENT_ID", "BROKER_SIGNIN_CLIENT_SECRET_FILE", "BROKER_SIGNIN_DOMAIN"}
+// The four settings the broker's sign-in needs, each read by its own name: the provider's issuer,
+// the client's id, the file holding the client's secret, and the Workspace domain.
+const (
+	signInIssuerSetting       = "BROKER_SIGNIN_ISSUER"
+	signInClientIDSetting     = "BROKER_SIGNIN_CLIENT_ID"
+	signInClientSecretSetting = "BROKER_SIGNIN_CLIENT_SECRET_FILE"
+	signInDomainSetting       = "BROKER_SIGNIN_DOMAIN"
+)
+
+// SignInSettings are those four settings, every one of them required. Every message that names
+// them names them in this order.
+var SignInSettings = []string{signInIssuerSetting, signInClientIDSetting, signInClientSecretSetting, signInDomainSetting}
 
 // NotServingSweeps is how many sweeps a gap between two serving records may last and still count
 // as a broker serving; a longer gap is time no broker was serving.
@@ -921,28 +929,32 @@ func Load(getenv func(string) string) (Config, error) {
 // refuses: any of them missing, naming each one; an issuer that is not an absolute https URL, or
 // http to a loopback host; and an unreadable or blank secret file. No refusal carries the secret.
 func parseSignIn(getenv func(string) string, sessionLifetime time.Duration) (SignIn, error) {
-	values := make([]string, len(SignInSettings))
+	signIn := SignIn{
+		Issuer:          strings.TrimSpace(getenv(signInIssuerSetting)),
+		ClientID:        strings.TrimSpace(getenv(signInClientIDSetting)),
+		Domain:          strings.TrimSpace(getenv(signInDomainSetting)),
+		SessionLifetime: sessionLifetime,
+	}
+	secretPath := strings.TrimSpace(getenv(signInClientSecretSetting))
 	var missing []string
-	for i, name := range SignInSettings {
-		values[i] = getenv(name)
-		if strings.TrimSpace(values[i]) == "" {
-			missing = append(missing, name)
+	for _, setting := range []struct{ name, value string }{
+		{signInIssuerSetting, signIn.Issuer},
+		{signInClientIDSetting, signIn.ClientID},
+		{signInClientSecretSetting, secretPath},
+		{signInDomainSetting, signIn.Domain},
+	} {
+		if setting.value == "" {
+			missing = append(missing, setting.name)
 		}
 	}
 	if len(missing) > 0 {
 		return SignIn{}, fmt.Errorf("the broker's approval page needs %s; missing %s", strings.Join(SignInSettings, ", "), strings.Join(missing, ", "))
 	}
-	signIn := SignIn{
-		Issuer:          strings.TrimSpace(values[0]),
-		ClientID:        strings.TrimSpace(values[1]),
-		Domain:          strings.TrimSpace(values[3]),
-		SessionLifetime: sessionLifetime,
-	}
 	if !signInIssuerOK(signIn.Issuer) {
-		return SignIn{}, fmt.Errorf("BROKER_SIGNIN_ISSUER must be an absolute https URL, or http to a loopback host, got %q", signIn.Issuer)
+		return SignIn{}, fmt.Errorf("%s must be an absolute https URL, or http to a loopback host, got %q", signInIssuerSetting, signIn.Issuer)
 	}
 	var err error
-	if signIn.ClientSecret, err = secretFile(SignInSettings[2], values[2]); err != nil {
+	if signIn.ClientSecret, err = secretFile(signInClientSecretSetting, secretPath); err != nil {
 		return SignIn{}, err
 	}
 	return signIn, nil

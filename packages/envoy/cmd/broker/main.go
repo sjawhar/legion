@@ -44,6 +44,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/reread"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -199,22 +200,11 @@ func main() {
 	// Who a person signs in to the approval page as, logged once at boot. Its client secret is
 	// never logged.
 	slog.Info("approval sign-in on", "issuer", cfg.SignIn.Issuer, "client_id", cfg.SignIn.ClientID, "domain", cfg.SignIn.Domain)
-	// The AWS config, loaded once when anything needs it: an IAM-form BROKER_DATABASE_URL, whose
-	// connections sign in with RDS IAM tokens minted from it (so it is loaded before the database
-	// is opened), and the Secrets Manager and KMS clients of the AWS store, unless the fake
-	// secrets file stands in. The GCP store needs none.
-	var awsCfg aws.Config
-	if cfg.DatabaseIAM || (fakeSecrets == "" && cfg.SecretsStore == secrets.StoreAWS) {
-		awsCfg, err = awsconfig.LoadDefaultConfig(ctx)
-		fatal(err)
-	}
-	var storeOpts []store.Option
-	if cfg.DatabaseIAM {
-		mint, err := rdsAuthTokens(awsCfg)
-		fatal(err)
-		storeOpts = append(storeOpts, store.WithTokenMinter(mint))
-	}
-	st, err := store.Open(ctx, cfg.DatabaseURL, storeOpts...)
+	// The database, and with it the AWS config loaded once when anything needs it: an IAM-form
+	// BROKER_DATABASE_URL, whose connections sign in with RDS IAM tokens minted from it, and the
+	// Secrets Manager and KMS clients of the AWS store, unless the fake secrets file stands in.
+	// The GCP store needs none.
+	st, awsCfg, err := openStore(ctx, cfg, fakeSecrets == "" && cfg.SecretsStore == secrets.StoreAWS)
 	fatal(err)
 	fatal(st.Migrate(ctx))
 	// The secret store, logged with how it signs in so an operator reads it from the log: the
@@ -710,6 +700,36 @@ func fatal(err error) {
 	}
 }
 
+// openStore opens the broker's database as cfg says, and answers the AWS configuration it loaded
+// for it. An IAM-form BROKER_DATABASE_URL signs each new connection in with an RDS IAM token
+// minted from that configuration, so it is loaded before the database is opened; awsAlso asks for
+// it where the database does not, for the Secrets Manager and KMS clients of the AWS store, and
+// with neither the answer is the zero aws.Config. It migrates nothing: the server migrates after
+// this, and the end-sessions subcommand must not. Both of them open the store here, so the
+// subcommand reaches the same database and signs in to it the same way as the server.
+func openStore(ctx context.Context, cfg config.Config, awsAlso bool) (*store.Store, aws.Config, error) {
+	var awsCfg aws.Config
+	var err error
+	if cfg.DatabaseIAM || awsAlso {
+		if awsCfg, err = awsconfig.LoadDefaultConfig(ctx); err != nil {
+			return nil, aws.Config{}, fmt.Errorf("load the AWS configuration: %w", err)
+		}
+	}
+	var opts []store.Option
+	if cfg.DatabaseIAM {
+		mint, err := rdsAuthTokens(awsCfg)
+		if err != nil {
+			return nil, aws.Config{}, err
+		}
+		opts = append(opts, store.WithTokenMinter(mint))
+	}
+	st, err := store.Open(ctx, cfg.DatabaseURL, opts...)
+	if err != nil {
+		return nil, aws.Config{}, fmt.Errorf("open the database: %w", err)
+	}
+	return st, awsCfg, nil
+}
+
 // refusePortZeroPublicURLInProduction refuses a BROKER_PUBLIC_URL whose port is literally "0"
 // unless BROKER_FAKE_SECRETS_FILE makes this a local run: port 0 is never dialable, so it can only
 // be dev-broker.sh's own "derive my public URL from whatever address I actually bind" convention
@@ -820,35 +840,25 @@ func runSubcommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 // sign-ins everywhere at once, run in a broker pod by whoever holds pods/exec in the broker's
 // namespace.
 //
-// It reads the same configuration the server does, so it reaches the same database and signs in
-// to it the same way, the RDS IAM token minter included, and it binds no listener. It does not
-// migrate: an image older than this subcommand cannot be allowed to boot and migrate the
-// database because a deployment asked it to end some sessions, so the schema is whatever the
-// servers have already applied (cmd/dispatch/main.go's subcommands take the opposite view, and
-// say why: each of them exists to work on a schema it brings up to date first).
+// It reads the same configuration the server does and opens the database the same way, the RDS
+// IAM token minter included (openStore), and it binds no listener. It does not migrate: an image
+// older than this subcommand cannot be allowed to boot and migrate the database because a
+// deployment asked it to end some sessions, so the schema is whatever the servers have already
+// applied (cmd/dispatch/main.go's subcommands take the opposite view, and say why: each of them
+// exists to work on a schema it brings up to date first).
 func endSessions(ctx context.Context, login string, stdout, stderr io.Writer) int {
+	// The form every login comparison in the module is made in (record.CanonicalLogin), and the
+	// form oidc.WorkspaceLogin stores a session under: a login typed in another case ends the
+	// person's sessions here as surely as the one they signed in with.
+	login = record.CanonicalLogin(login)
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", endSessionsCommand, err)
 		return 1
 	}
-	var storeOpts []store.Option
-	if cfg.DatabaseIAM {
-		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: load the AWS configuration: %v\n", endSessionsCommand, err)
-			return 1
-		}
-		mint, err := rdsAuthTokens(awsCfg)
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", endSessionsCommand, err)
-			return 1
-		}
-		storeOpts = append(storeOpts, store.WithTokenMinter(mint))
-	}
-	st, err := store.Open(ctx, cfg.DatabaseURL, storeOpts...)
+	st, _, err := openStore(ctx, cfg, false)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: open the database: %v\n", endSessionsCommand, err)
+		fmt.Fprintf(stderr, "%s: %v\n", endSessionsCommand, err)
 		return 1
 	}
 	defer st.Close()
