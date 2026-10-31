@@ -2,41 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "completed": "2026-10-31T03:45:00Z",
+  "completed": "2026-10-31T05:25:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
-  "round": 12,
-  "answersReview": "Review round 7 at 20e03351 (REQUEST_CHANGES, review head f7e516d3): 1 important (two more stored-state decodes logged the doubled refusal) and 6 minors, all fixed in 800ec539; main merged forward (28e1edbb); ygo repinned from 845ce79c (on no branch) to the rc/v1.54.1-sami.1 head a23bc871 per INFRA-514's architect.",
+  "round": 13,
   "proof": [
     {
-      "criterion": "Every decode of stored state refuses ygo's reasonless refusal once: history check, room load, cold read, socket admission (loadTree) and a write's fork (coldFork)",
+      "criterion": "The fold a load, a cold read and a compaction make of stored rows refuses ygo's reasonless error once; the tester's red test passes unmodified",
       "surface": "go test of internal/dispatch/docs on Postgres 16.2",
-      "command": "go test ./internal/dispatch/docs -run '^TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce$' -v; and -race -count=300",
-      "observed": "PASS; each path's error ends ': crdt: invalid update', with no doubled text, and errors.Is ErrInvalidUpdate; a cut mid-structure keeps 'encoding: unexpected end of input'.",
-      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
-      "negativeControl": "With loadTree, or coldFork, reverted to crdt.ApplyUpdateV1, the test fails: '... decode live document: crdt: invalid update: crdt: invalid update, want an invalid update ending \"crdt: invalid update\"'."
+      "command": "go test ./internal/dispatch/docs -run '^TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce$'; and with the refusal, peer and wording tests under -race -count=300",
+      "observed": "PASS; -race -count=300: 300 PASS of each of 4 tests (fold, history, refused peer, parked), 0 DATA RACE, ok 436.7 s. fold_reason_test.go is unchanged from 7c35d610.",
+      "headSha": "eb992560d00799f117f86275ac233bc9bd368149",
+      "negativeControl": "With fold.go's per-row apply reverted to crdt.ApplyUpdateV1 the red test fails: 'the fold's refusal = \"apply a stored document update: crdt: invalid update: crdt: invalid update\"'."
     },
     {
-      "criterion": "The evidence holds at the new ygo pin a23bc871: refused, parked and wording tests deterministic under -race, the tester's a22f0f29 test passing unmodified",
-      "surface": "go test -race of internal/dispatch/docs on Postgres 16.2",
-      "command": "GOMAXPROCS=4 CGO_ENABLED=1 go test -race -p 2 -parallel 4 ./internal/dispatch/docs -count=300 -run '^(TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks|TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt|TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce)$' -v",
-      "observed": "ok 539.8 s: 300 PASS of each, 0 FAIL, 0 DATA RACE.",
-      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
-      "negativeControl": "At b24baf7d (ygo sami.7) the tester's a22f0f29 test failed: the room read 'after / hello' while the other peer read 'after / hello world'."
+      "criterion": "No decode of stored state is left outside the shared refusal",
+      "surface": "source read of every crdt.ApplyUpdateV1 / MergeUpdatesV1 / DiffUpdateV1 call in internal/dispatch",
+      "command": "grep -rn 'crdt\\.\\(ApplyUpdate\\|MergeUpdates\\|DiffUpdate\\)' internal/dispatch --include=*.go | grep -v _test.go",
+      "observed": "Stored-state reads all go through decodeStoredState/invalidOnce: the fold's apply and read-back, mergedThrough, the parked DiffUpdate/MergeUpdates, documentThrough, loadTree, coldFork, validateUpdate, bootstrapLoadedState and the test hooks. The rest decode live or incoming state: tree.go copies/replica, livewrite.go fork catch-up, transaction writes and publish, persistence.go append checks, growth.go's fork check, mutation.go's merge of live updates.",
+      "headSha": "eb992560d00799f117f86275ac233bc9bd368149",
+      "negativeControl": "At 800ec539 fold.go:259 and the read-back were outside it, which is what the tester's scenD log showed."
     },
     {
-      "criterion": "The merge of main and the round's changes keep the packages and server working",
-      "surface": "local build, vet and suites on Postgres 16.2 (en_US collation)",
-      "command": "go build ./... && go vet (plain, -tags multiprocess, -tags memory); infra TestDispatchConnectionsPerPodIsTheServers; GOMAXPROCS=4 go test -p 2 -parallel 4 ./internal/dispatch/docs ./cmd/dispatch ./internal/dispatch/store/... ./internal/pgmigrate/...",
-      "observed": "vet clean; connection test ok (91); ok docs 1746.9 s, cmd/dispatch 389.4 s, store 424.0 s, pgmigrate 3.9 s. Fingerprint comment: https://github.com/sjawhar/legion/pull/2444#issuecomment-6538465002.",
-      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
-      "negativeControl": "Before the merge GitHub reported f7e516d3 CONFLICTING with main 21b40359; at 800ec539 it reports MERGEABLE and started CI."
+      "criterion": "Every websocket client of the document rooms resends on reconnect (ygo #343)",
+      "surface": "source of the clients in this repository",
+      "command": "grep -rn 'ws/doc' (non-test); read @hocuspocus/provider 2.15.3 dist (bun.lock) and docstest.go",
+      "observed": "Two clients: the web app's @hocuspocus/provider 2.15.3 sends step 1 on every open and answers the room's step 1 with its whole diff (dist lines 2100, 2147, 2645-2647); docstest.Peer (tests only) answers step 1 with step 2 (docstest.go:127). The load test uses /ws/live only; agents and the CLI use HTTP.",
+      "headSha": "eb992560d00799f117f86275ac233bc9bd368149",
+      "negativeControl": "The tester's client with its step-1 answer off lost 957 of 1,500 keystrokes; with it, none."
     },
     {
-      "criterion": "Acceptance 1, 2 and 5 at the head",
-      "surface": "real envoy-dispatch built from the head on Postgres 16.2, DISPATCH_NATS_DISABLED=1, through the HTTP API",
-      "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 15)",
-      "observed": "41 rows; after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37 leaving 4 rows; the 3 young rows unchanged in version, xmin and md5; text sha256 identical; a 31st upload reads back.",
-      "headSha": "800ec5393830b1c60ba79f9cd894bba74aa20854",
+      "criterion": "Packages and server still work; acceptance 1, 2 and 5 at the head",
+      "surface": "local suites on Postgres 16.2, and real envoy-dispatch with NATS off",
+      "command": "go vet (plain, multiprocess, memory); GOMAXPROCS=4 go test -p 2 -parallel 4 ./internal/dispatch/docs ./cmd/dispatch; bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 16)",
+      "observed": "vet clean; ok docs 1579.4 s, cmd/dispatch 390.7 s; e2e: 41 rows, the restart's sweep compacted=1 rows_deleted=37 leaving 4, the 3 young rows unchanged in version, xmin and md5, text sha256 identical.",
+      "headSha": "eb992560d00799f117f86275ac233bc9bd368149",
       "negativeControl": "The restarted process's first sweep tick logs candidates=0 while the hour is recorded as served."
     }
   ],
@@ -48,6 +47,8 @@
   "deviations": [
     "Correction of round 11's handoff: it said ygo sami.4 words a cut row's refusal 'crdt: invalid update: crdt: invalid update' too. That was wrong. sami.4, sami.7 and sami.9 name 'encoding: unexpected end of input' for all 200 cuts of a real stored row, and the release candidate (845ce79c and a23bc871) drops it for 196: a candidate regression, whose fix is with the ygo release session (dispatch://INFRA-593/artifact/ygo-truncated-reason-patch). Until it ships, decodeStoredState states the refusal once, and the log no longer says a history was cut short.",
     "ygo is pinned to the rc head a23bc871, not a tag; #2444 must not merge until it repins to v1.54.1-sami.1.",
-    "main's #2422 reflowed AGENTS.md and cmd/dispatch/README.md one sentence per line; this branch's six doc changes are written back into main's files in that layout, words unchanged."
-  ]
+    "My pod was replaced at 04:27Z mid-round; the merge lane rescued the unpushed fold.go/websocket.go edits to legion/INFRA-593-rescue. My redo matched it byte for byte (jj diff empty), and I deleted that branch.",
+    "No merge of main this round: GitHub reports MERGEABLE."
+  ],
+  "answersTest": "Tester round 12 at 800ec539 (fail): fold.go's per-row apply logged the doubled refusal; red test 7c35d610. Per INFRA-514's architect: route it through decodeStoredState, leave no stored-state decode outside it, and list every document-room websocket client and whether it resends (ygo #343)."
 }
