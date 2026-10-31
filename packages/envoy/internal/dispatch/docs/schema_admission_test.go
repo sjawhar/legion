@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,7 +21,7 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
@@ -445,15 +447,16 @@ func TestARevokeWaitsForTheMessageTheServerHasInFlight(t *testing.T) {
 	}
 }
 
-// A page on a slow link takes longer than a second to drain what the server is writing to it when
-// the re-check revokes its socket. The close must still go out between two messages, with the
-// admission-revoked code: a close that gives up after a second and drops the connection cuts the
-// message the server is writing, and the page reads a bare 1006 instead of the code it reconnects
-// on. Here the room sends the page several whole-document replacements of about 1 MB each, more
-// than the connection's buffers hold, while the page reads nothing; the re-check revokes it with
-// those writes still going out, and the page starts reading two seconds later - within ygo's
-// ten-second bound on a write. It must read every message whole and then the close.
-func TestARevokedSlowPageReadsTheMessageInFlightAndThenTheRevokedClose(t *testing.T) {
+// A page on a slow link takes nothing from its socket for longer than the revoked close waits, so
+// it reads the connection's end as 1006 rather than 4412 and loses nothing by it; the rule is in
+// packages/envoy/cmd/dispatch/README.md, "Two builds at once". This pins both of its halves on
+// real sockets. A writer page sends the room whole-document replacements of about 1 MB each, far
+// more than the slow page's buffers hold, while that page reads nothing; the re-check revokes it
+// with those writes still going out, and it starts reading two seconds later. Its socket must end
+// with one of the two codes the provider reconnects on - never a protocol error from a frame cut
+// in half, and never a socket that does not end - and the page's reconnect must hold the server's
+// whole document once it has synced, the writes that were in flight included.
+func TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, bigDocumentMarkdown())
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
@@ -461,14 +464,12 @@ func TestARevokedSlowPageReadsTheMessageInFlightAndThenTheRevokedClose(t *testin
 
 	reader := dialSlowPage(t, server.URL, artifactID, page(1, 1))
 	time.Sleep(250 * time.Millisecond)
+	// The writer presents this build's numbers, which the fleet below still admits writable, so
+	// its updates go on reaching the revoked page's socket while that page takes nothing.
+	writer := connectBrowser(t, server.URL, artifactID, "bob")
 	for round := range 8 {
-		markdown := strings.ReplaceAll(bigDocumentMarkdown(), "document ", fmt.Sprintf("round%d ", round))
-		if err := joinedWrite(service, func(ctx context.Context) error {
-			_, err := service.ReplaceText(ctx, artifactID, markdown, model.Actor{Kind: "user", ID: "alice"})
-			return err
-		}); err != nil {
-			t.Fatalf("replace the document (round %d): %v", round, err)
-		}
+		editAsBrowser(t, service, artifactID, writer,
+			strings.ReplaceAll(bigDocumentMarkdown(), "document ", fmt.Sprintf("round%d ", round)))
 	}
 	fleetProcess(t, service, 3, 2, 0)
 	if err := service.recheckSchemaAdmissions(context.Background()); err != nil {
@@ -477,16 +478,43 @@ func TestARevokedSlowPageReadsTheMessageInFlightAndThenTheRevokedClose(t *testin
 	time.Sleep(2 * time.Second)
 
 	_ = reader.SetReadDeadline(time.Now().Add(30 * time.Second))
-	for {
-		if _, _, err := reader.ReadMessage(); err != nil {
-			var closed *gws.CloseError
-			if !errors.As(err, &closed) || closed.Code != contracts.DocumentAdmissionRevokedCloseCode {
-				t.Fatalf("the revoked page, reading two seconds after the revoke, ended with %v, want every message whole and then a close with %d",
-					err, contracts.DocumentAdmissionRevokedCloseCode)
-			}
+	var ended error
+	for ended == nil {
+		_, _, ended = reader.ReadMessage()
+	}
+	requireReconnectableEnd(t, ended, "the revoked page, reading two seconds after the revoke")
+
+	want, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read the server's document: %v", err)
+	}
+	// The reconnect is that page on a new socket of the same room, read-only now: the fleet that
+	// revoked it admits it no other way. What it syncs must be the whole document.
+	address := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID + "?" + page(1, 1).Encode()
+	reconnected := docstest.Dial(t, address, http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID, crdt.New())
+	waitForPeerDocument(t, reconnected, want)
+}
+
+// requireReconnectableEnd accepts the two ends a revoked socket may have, and only those: the
+// close frame carrying the admission-revoked code, and the 1006 of a connection dropped with no
+// close frame, which gorilla reports as a CloseError of 1006 when the drop lands inside a message
+// and as the connection's own reset or EOF otherwise. A close with any other code, the protocol
+// error gorilla raises on a frame cut in half, and a socket still open at the read deadline all
+// fail.
+func requireReconnectableEnd(t *testing.T, err error, what string) {
+	t.Helper()
+	var closed *gws.CloseError
+	if errors.As(err, &closed) {
+		if closed.Code == contracts.DocumentAdmissionRevokedCloseCode || closed.Code == gws.CloseAbnormalClosure {
 			return
 		}
+	} else if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		// The drop reached the page as the connection's own end, with no close frame: 1006.
+		return
 	}
+	t.Fatalf("%s ended with %v, want a close with %d or the %d of a connection dropped with no close frame",
+		what, err, contracts.DocumentAdmissionRevokedCloseCode, gws.CloseAbnormalClosure)
 }
 
 // admitSocket is one document socket of room, admitted as presented and writable, on a request
