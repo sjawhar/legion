@@ -95,6 +95,20 @@ const EnvelopeResponseSchema = EnvelopeSchema.extend({
   holder: z.string().optional(),
 });
 
+/**
+ * The publish route's answer. A role topic has three of them, told apart by status: 200, a live
+ * holder took the message, with `holder`; 202, nobody holds the role, so the listener kept the
+ * message on the role's kept lane and hands it to the role's next holder, with `kept`,
+ * `kept_reason` and `holder` when a lapsed claim named one; 404, nothing was kept and the
+ * sender's own fallback must run, which `request` throws as an `EnvoyApiError`. 202 is a success
+ * answer, so it passes `response.ok` and reaches this schema — load-bearing: without it a kept
+ * message would read as a refusal.
+ */
+const PublishResponseSchema = EnvelopeResponseSchema.extend({
+  kept: z.boolean().optional(),
+  kept_reason: z.enum(["unclaimed", "holder_lapsed"]).optional(),
+});
+
 const ReplayWireSchema = z.object({
   stream: z.object({
     // The stream's `envoy_stream_id` metadata: absent from an older listener's answer, or for a
@@ -283,6 +297,13 @@ export type PublishInput = (AgentSourceInput | HumanSourceInput) &
     readonly message: string;
     readonly payload?: string;
     readonly idempotencyKey?: string;
+    /**
+     * Only a role topic reads this. Unset, or true, keeps a message no live holder took on the
+     * role's kept lane for the role's next holder, which the listener answers 202 (`kept`).
+     * False keeps nothing, so the listener answers 404 and the sender's own fallback runs. The
+     * field is omitted from the wire unless set, so an older listener sees an unchanged request.
+     */
+    readonly keep?: boolean;
   };
 
 export type SetRoleInput = {
@@ -320,7 +341,16 @@ export type SendResult = {
 
 export type PublishResult = {
   readonly envelope: Envelope;
+  /** The session the message reached, or the one a lapsed claim named on a kept answer. */
   readonly holder?: string;
+  /**
+   * True on the listener's 202: no live holder took the message, so the listener kept it on the
+   * role's kept lane and hands it to the role's next holder. The message is not lost, so this is
+   * a success answer, not a refusal. Absent unless the listener answered it.
+   */
+  readonly kept?: boolean;
+  /** Why the message was kept: the role was unclaimed, or its holder's claim had lapsed. */
+  readonly keptReason?: "unclaimed" | "holder_lapsed";
 };
 
 /** One followed subject of a replay request, read from after `after`, or, without one, started. */
@@ -515,7 +545,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     },
     publish: async (input) => {
       const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(
+      const response = PublishResponseSchema.parse(
         JSON.parse(
           await post("/v1/messages/publish", {
             source: input.source ?? "agent",
@@ -525,12 +555,16 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             ...(input.payload === undefined ? {} : { payload: input.payload }),
             idempotency_key: idempotencyKey,
             ...messageMetadata(input),
+            // Omitted unless the caller set it, so an older listener sees an unchanged request.
+            ...(input.keep === undefined ? {} : { keep: input.keep }),
           })
         )
       );
       return {
         envelope: response,
         ...(response.holder === undefined ? {} : { holder: response.holder }),
+        ...(response.kept === undefined ? {} : { kept: response.kept }),
+        ...(response.kept_reason === undefined ? {} : { keptReason: response.kept_reason }),
       };
     },
     unregisterSession: async (sessionID) => {

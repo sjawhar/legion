@@ -96,10 +96,23 @@ export interface PhaseReminder {
  * aborts it at the bound. */
 export const RECORD_READ_BOUND_MS = 5_000;
 
-/** The listener's "no live session holds that role": a 404 whose body names `unclaimed` or
- * `holder_lapsed` (`packages/envoy/cmd/listener/api.go`). The next delivered reminder tries the
- * same notice again, under the same idempotency key. */
-function roleUnheld(error: unknown): boolean {
+/**
+ * The listener's "nothing was kept for that role": a 404 whose body names `unclaimed` or
+ * `holder_lapsed` (`packages/envoy/cmd/listener/api.go`).
+ *
+ * It no longer means the architect is simply away. This notice is published with `keep` unset,
+ * which the listener reads as true, so a role no session holds is answered 202: the listener
+ * keeps the notice and hands it to the session that claims the architect role next, and the
+ * publish resolves, which marks the notice reported. A 404 now reaches here only when the keep
+ * itself failed, or when the listener is of a release before the kept lane (INFRA-839) and still
+ * refuses an unheld role.
+ *
+ * Both cases are answered the same way, and the same way as before: the architect was not told,
+ * so `reported` stays false and the next delivered reminder publishes the same notice again,
+ * under the same idempotency key. It stays a debug line rather than a warning because neither
+ * case is this worker's doing, and the retry is already in hand.
+ */
+function keptNothing(error: unknown): boolean {
   if (!(error instanceof EnvoyApiError) || error.details.status !== 404) return false;
   let body: unknown;
   try {
@@ -281,11 +294,14 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       reported = true;
       writeEntry();
     } catch (error) {
-      if (roleUnheld(error)) {
-        deps.log.debug("legion: no live session holds the architect role; telling it again later", {
-          issue: claim.issue,
-          reminders,
-        });
+      if (keptNothing(error)) {
+        deps.log.debug(
+          "legion: the listener kept nothing for the architect role; telling it again later",
+          {
+            issue: claim.issue,
+            reminders,
+          }
+        );
         return;
       }
       // Any other failure — a 5xx, a 400 or 403, a timeout — leaves `reported` false too, and the

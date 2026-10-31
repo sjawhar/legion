@@ -52,6 +52,7 @@ import { postSlackReply } from "@legion/envoy-client/slack-post"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
+  publishConfirmationText,
   sendConfirmationText,
   sessionsOnMachine,
   type ToolArgumentsByOperation,
@@ -164,7 +165,9 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Pr
  * A rejection handler for a listener read whose subject legitimately may not
  * exist yet: `undefined` on the listener's 404 — no such role, no such entry —
  * and a rethrow for everything else, so a transport failure is never read as an
- * absence.
+ * absence. These are reads: only the publish route keeps a message it cannot
+ * deliver and answers 202 (INFRA-839), and `GET /v1/roles/<role>` still refuses
+ * an unheld role, so a 404 here is the absence it always was.
  */
 function undefinedOnNotFound(error: unknown): undefined {
   if (error instanceof EnvoyApiError && error.details.status === 404) return undefined
@@ -1547,13 +1550,16 @@ export async function executeEnvoyTool(
     }
     case EnvoyToolOperation.publish: {
       const args = parseArguments(spec, input)
-      return runtime.client.publish({
+      const result = await runtime.client.publish({
         source: "agent",
         sourceSessionID: identity.id,
         topic: args.topic,
         message: args.message,
         ...toMessageMetadata(args),
       })
+      // A kept answer is a success: the listener holds the message for the role's next holder.
+      // The line says so, in the words the Oh My Pi plugin uses (`publishConfirmationText`).
+      return { message: publishConfirmationText(result), ...result }
     }
     case EnvoyToolOperation.subscribe: {
       const args = parseArguments(spec, input)

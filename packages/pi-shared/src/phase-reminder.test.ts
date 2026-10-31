@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import type { LegionState } from "@legion/contracts/legion-api";
-import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport";
+import {
+  createEnvoyClient,
+  EnvoyApiError,
+  type PublishInput,
+} from "@legion/envoy-client/transport";
 import { createPhaseReminder, type PhaseReminder } from "./phase-reminder";
 import type { PhaseStallEntry } from "./phase-stall";
 import { DEFAULT_STALL_LIMITS } from "./stall-limits";
@@ -184,6 +188,91 @@ test("a notice the listener failed is published again by the run's next reminder
   expect(await reminder.settle("Still here.")).toBeUndefined();
   await fireLast(timers);
   expect(published).toHaveLength(2);
+});
+
+// Nobody holds the architect role, so the listener keeps the notice and hands it to the session
+// that claims the role next (INFRA-839). The publish is answered 202, which is a success: the
+// architect is told, once, and no later reminder of the run publishes again.
+test("a notice kept for an architect role no session holds is told once, not published again", async () => {
+  const requests: unknown[] = [];
+  const client = createEnvoyClient({
+    baseUrl: "http://listener.test",
+    fetch: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { readonly topic: string };
+      requests.push(body);
+      return new Response(
+        JSON.stringify({
+          event_id: "event-kept",
+          source: "agent",
+          source_event_id: "agent.ses_implementer.event-kept",
+          source_session: "ses_implementer",
+          topic: body.topic,
+          dedupe_key: "agent.architect.event-kept",
+          issued_at: 1,
+          payload_summary: "stalled",
+          trace_id: "trace-kept",
+          kept: true,
+          kept_reason: "unclaimed",
+        }),
+        { status: 202, headers: { "Content-Type": "application/json" } }
+      );
+    },
+  });
+  const { reminder, timers, entries, published, warned } = rig({
+    publish: (input) => client.publish(input),
+  });
+
+  expect(await reminder.settle("Pushed.")).toBeString();
+  expect(await reminder.settle("Still here.")).toBeUndefined();
+  await fireLast(timers);
+
+  expect(published).toHaveLength(1);
+  expect(warned).toEqual([]);
+  expect(entries.at(-1)).toMatchObject({ count: 2, reported: true });
+  // The notice asks for no `keep: false`, so the listener keeps it for the role's next holder.
+  expect(requests[0]).not.toHaveProperty("keep");
+
+  // Told once is told once: the run's later reminders add no second notice.
+  expect(await reminder.settle("Still here.")).toBeUndefined();
+  await fireLast(timers);
+  expect(published).toHaveLength(1);
+});
+
+// A 404 no longer says the architect is away: with `keep` unset the listener keeps an unheld
+// role's message, so this is a keep that failed, or a listener from before the kept lane. Either
+// way nobody was told, so the next delivered reminder publishes again under the same key, and
+// the worker's transcript gets no warning for something that is not its doing.
+test("a notice the listener kept nothing for is published again by the run's next reminder, under the same key", async () => {
+  let attempt = 0;
+  const { reminder, timers, entries, published, warned } = rig({
+    publish: async () => {
+      attempt += 1;
+      if (attempt > 1) return {};
+      throw new EnvoyApiError({
+        method: "POST",
+        url: "http://listener.test/v1/messages/publish",
+        status: 404,
+        responseBody: JSON.stringify({
+          error: "no holder for role architect",
+          reason: "unclaimed",
+        }),
+      });
+    },
+  });
+
+  expect(await reminder.settle("Pushed.")).toBeString();
+  expect(await reminder.settle("Still here.")).toBeUndefined();
+  await fireLast(timers);
+  expect(published).toHaveLength(1);
+  expect(warned).toEqual([]);
+  const refused = entries.at(-1);
+  expect(refused).toMatchObject({ count: 2, reported: false });
+
+  expect(await reminder.settle("Still here.")).toBeUndefined();
+  await fireLast(timers);
+  expect(published).toHaveLength(2);
+  expect(published[1]?.idempotencyKey).toBe(refused?.reportKey);
+  expect(entries.at(-1)).toMatchObject({ count: 3, reported: true });
 });
 
 // No turn starts on a reminder that never reached the worker, so no settle would arm the next

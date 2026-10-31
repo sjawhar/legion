@@ -6,6 +6,7 @@ import {
   MessageMetadataSchema,
   messageMetadataShape,
   parseEnvoyToolArguments,
+  publishConfirmationText,
   sessionsOnMachine,
   toMessageMetadata,
 } from "../tool-contract";
@@ -119,8 +120,53 @@ describe("envoyToolSpecs", () => {
     expect(publish?.description).toContain(
       "a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions"
     );
+  });
+
+  test("tells an agent the three answers a role message has, the kept one as a success", () => {
+    const publish = envoyToolSpecs.find((spec) => spec.name === "envoy_publish");
+
+    expect(publish?.description).toContain("A role message has three possible answers.");
+    // 200: a live holder took it, and must confirm it.
     expect(publish?.description).toContain(
-      "a role message errs when its holder did not confirm it within the listener's window"
+      "the session that holds the role takes the message. That session must confirm the message inside the listener's window, or this tool errs"
+    );
+    // 202: nobody holds the role, so the listener keeps the message. This is not a refusal.
+    expect(publish?.description).toContain(
+      "The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success"
+    );
+    // 404: nothing was kept, so the sender's own fallback must run.
+    expect(publish?.description).toContain("the listener keeps nothing and errs");
+  });
+});
+
+describe("publishConfirmationText", () => {
+  test("says a kept answer is a success, and that the message waits for the role's next holder", () => {
+    const line = publishConfirmationText({ envelope: { event_id: "event-kept" }, kept: true });
+
+    expect(line).toBe(
+      "published event-kept; kept for the role: no session holds it yet, and the message waits for the session that claims it next"
+    );
+  });
+
+  test("names no holder on a kept answer whose lapsed claim named one", () => {
+    // `holder` on a kept answer is the session whose claim lapsed. It never got the message, so
+    // naming it as the holder would be a lie.
+    const line = publishConfirmationText({
+      envelope: { event_id: "event-lapsed" },
+      holder: "ses_lapsed",
+      kept: true,
+    });
+
+    expect(line).not.toContain("ses_lapsed");
+    expect(line).toContain("kept for the role");
+  });
+
+  test("names the holder a delivered role message reached, and nothing else for a plain topic", () => {
+    expect(
+      publishConfirmationText({ envelope: { event_id: "event-held" }, holder: "ses_architect" })
+    ).toBe("published event-held; holder ses_architect");
+    expect(publishConfirmationText({ envelope: { event_id: "event-team" } })).toBe(
+      "published event-team"
     );
   });
 });
