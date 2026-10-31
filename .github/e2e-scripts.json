@@ -97,6 +97,10 @@
       "needs": "a live multi-repository run on the production cluster: it is the operator's acceptance observer, reads that run's daemon, Dispatch, GitHub and kubectl, and starts nothing of its own"
     },
     {
+      "script": "parked-decision-devbox.sh",
+      "needs": "a devbox, run from the operator's own Oh My Pi session: a model route (LEGION_E2E_MODEL_ROUTE), docker for its Postgres and NATS containers, Legion's two role Apps, and the proof human's gh, as Stage 3's rig"
+    },
+    {
       "script": "share-volumes-kind.sh",
       "needs": "a throwaway kind cluster with gVisor on an amd64 Linux host, an NFS server in that cluster, with docker, go, kubectl, curl, zstd, a tar that supports --zstd and kind, and a worker image by digest (LEGION_E2E_IMAGE)"
     },
