@@ -2,37 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-10-31T05:02:53Z",
-  "round": 20,
-  "testedHead": "61e2e8023913125502dea81cb4dcc9356fb03174",
-  "codeHead": "f9f6188deeda",
-  "scope": "Architect's ask: f9f6188d takes main's flaky-test fix from sjawhar/legion#2594 (4b7746eb) for TestAReconnectCatchesUpWhatTheListenerMissed, which failed CI's envoy-go-race-api at a8c1b638. Fingerprint, equality with #2594, the test under -race -count=50, ci-ok and the four required checks. Earlier rounds' real-binary results stand.",
+  "completed": "2026-10-31T07:30:00Z",
+  "round": 21,
+  "testedHead": "97d366f7436556ef93d31ae561ad13b7b2391dfc",
+  "codeHead": "fd7b9b1b2d07",
+  "scope": "Architect's ask: fd7b9b1b takes #2598's claims_doc_test.go byte for byte. Fingerprint, TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries at the head (failing at 0fcb7729), ci-ok and pr-title at the code head. Earlier rounds' results stand.",
   "fingerprint": {
-    "previousVerifiedHead": "6d02b0050983390f00a4e2e51543a953d58c75b2",
-    "previous": "61825754fc740c8f0ad18dc2242bf50efcf8c9612c47ad9f6704103e9ba4b28a",
-    "current": "5353f2474ff8a4d8b68308915eec2f74f98bcde32338dd757c10c4c6fafa3d44",
-    "verdict": "changed by one file alone: `jj diff --from 6d02b005 --to 61e2e802 --name-only` lists packages/envoy/internal/dispatch/api/delivery_live_hub_test.go beside the .legion/ handoffs (+32/-8), same fork point 8a72cf79. Its content at f9f6188d is byte-equal to #2594's at 4b7746eb (sha256 8026139d... for both); #2594 (open, another tree) changes that one file and nothing else, and both start from the same main copy of it (the fork point's copy equals main@origin's). No product code changed."
+    "previousVerifiedHead": "61e2e8023913125502dea81cb4dcc9356fb03174",
+    "previous": "5353f2474ff8a4d8b68308915eec2f74f98bcde32338dd757c10c4c6fafa3d44",
+    "current": "457b9d99de6f1292d1bd55927e545b156f58cabbfcba1c340b6ce60c420851a3",
+    "verdict": "changed by one file alone: `jj diff --from 61e2e802 --to 97d366f7 --name-only` lists packages/envoy/internal/broker/oauth/claims_doc_test.go beside the .legion/ handoffs, same fork point 8a72cf79. Its content at the head is byte-equal to #2598's at 930cad24 (sha256 8e06e83b... for both; #2598 open, its only file). No product code changed."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command at the head on the pod's Postgres 17: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable CGO_ENABLED=1 go test -race -count=50 -timeout 40m -run 'TestAReconnectCatchesUpWhatTheListenerMissed$' ./internal/dispatch/api/` -> ok 219.468s: 50 of 50 pass, 0 '--- FAIL', 0 'WARNING: DATA RACE'. Log: $TMPDIR/race50-f9f6188d.log."
+    "how": "The test reads docs/kubernetes.md, which main changed, and CI judges the pull request's merge with main, so the test was run on that tree as well as the branch's own. On a tree of `git merge-tree --write-tree 97d366f7 main@origin` (packages/envoy and docs): `cd packages/envoy && GOWORK=off go test -count=1 -v -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries ./internal/broker/oauth/` -> PASS. In the branch's own tree at the head -> PASS."
   },
   "failed": 0,
   "failures": [],
-  "negativeControl": "The same 50-run command with the test file as it stood at 6d02b005 (before f9f6188d; written into the working copy and restored after, nothing committed): FAIL, 2 of 50 at 'delivery_live_hub_test.go:776: after a merge the listener could not hear, a frame nobody should be sent: {\"type\":\"delta\",...}', the failure CI's envoy-go-race-api showed at a8c1b638. Log: $TMPDIR/race50-prefix.log.",
-  "ci": "Read on GitHub at 05:02Z: CI run 41170368978 and PR Title run 41170368907 at code head f9f6188d queued; no check run has reported yet (pr-title queued), so ci-ok, lint, typecheck and test have no result. Not waited for. The PR is MERGEABLE and APPROVED.",
+  "negativeControl": "The same command on a tree of `git merge-tree --write-tree 0fcb7729 main@origin` (the test file before fd7b9b1b): FAIL, 'claims_doc_test.go:79: docs/kubernetes.md's claim list and the claims the exchange decides on disagree'. In the branch's own tree, without main's docs/kubernetes.md, that older test file passes, so the red shows only on the merge ref CI runs.",
+  "ci": "Read on GitHub at 07:28Z: CI run 41180620989 and PR Title run 41180620994 at code head fd7b9b1b queued; pr-title queued; ci-ok not yet reported. Not waited for. The PR is MERGEABLE.",
   "observations": [
-    "When #2594 merges to main, this branch's copy of delivery_live_hub_test.go already equals it, so that merge brings no conflict in the file.",
+    "When #2598 merges to main, this branch's claims_doc_test.go already equals it, so that merge brings no conflict in the file.",
     "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY; a claim or ask follow made during a comment request mid take-over can still give that session two copies."
   ],
   "proof": [
     {
-      "criterion": "CI's envoy-go-race-api red at a8c1b638 is fixed: TestAReconnectCatchesUpWhatTheListenerMissed passes under the race detector, by main's own fix from #2594",
-      "surface": "Dispatch's api test package under the race detector against a rootless Postgres 17 + pgvector (the package envoy-go-race-api runs)",
-      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race -count=50 -timeout 40m -run 'TestAReconnectCatchesUpWhatTheListenerMissed$' ./internal/dispatch/api/",
-      "observed": "ok 219.468s, 50 of 50 pass, no data race; the file is byte-equal to #2594's",
-      "headSha": "61e2e8023913125502dea81cb4dcc9356fb03174",
-      "negativeControl": "the test file before f9f6188d, same command -> FAIL 2 of 50 at delivery_live_hub_test.go:776"
+      "criterion": "The claims-doc test passes on the tree CI judges, by #2598's own fix",
+      "surface": "the broker's oauth test package on a tree of this head merged with main@origin (docs/kubernetes.md as main has it)",
+      "command": "cd packages/envoy && GOWORK=off go test -count=1 -v -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries ./internal/broker/oauth/",
+      "observed": "PASS; the file is byte-equal to #2598's",
+      "headSha": "97d366f7436556ef93d31ae561ad13b7b2391dfc",
+      "negativeControl": "0fcb7729 merged with main -> FAIL at claims_doc_test.go:79, the documented claim list and the exchanged token's claims disagree"
     }
   ]
 }
