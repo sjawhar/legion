@@ -2,49 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-10-31T02:00:14Z",
-  "round": 19,
-  "testedHead": "6d02b0050983390f00a4e2e51543a953d58c75b2",
-  "codeHead": "a8c1b638444a",
-  "scope": "Conflict return after the second retro: the merge with main's #2422 (packages/envoy/AGENTS.md and cmd/dispatch/README.md relaid one sentence per line, tables made lists, a migration describing itself in its own .up.sql header); no behaviour change.",
+  "completed": "2026-10-31T05:02:53Z",
+  "round": 20,
+  "testedHead": "61e2e8023913125502dea81cb4dcc9356fb03174",
+  "codeHead": "f9f6188deeda",
+  "scope": "Architect's ask: f9f6188d takes main's flaky-test fix from sjawhar/legion#2594 (4b7746eb) for TestAReconnectCatchesUpWhatTheListenerMissed, which failed CI's envoy-go-race-api at a8c1b638. Fingerprint, equality with #2594, the test under -race -count=50, ci-ok and the four required checks. Earlier rounds' real-binary results stand.",
   "fingerprint": {
-    "previousVerifiedHead": "c2c28144fcfb563d0e75712d846faee2c6050367",
-    "previous": "b22bfdf8f5244d7d718b5f93c139991cff3ad50ffd1cc905abf0b10bfc57b943",
-    "current": "61825754fc740c8f0ad18dc2242bf50efcf8c9612c47ad9f6704103e9ba4b28a",
-    "verdict": "changed in six files alone: packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, and the four migrations 0150-0153's .up.sql, whose changed lines are all SQL comments (`--`), 0 statements. No Go file and no migration number changed (still 0150-0153, main@origin 39b51494's newest 0149). For the two docs, a word-level comparison of this PR's insertions against main's copy at each fork point: AGENTS.md 26 of 26 insertions present word for word at the new head; README 22 of 23, the one missing being its migration-log paragraph for 0150-0153, which #2422's rule moves into each migration's header: 0150's header now carries the census 0, the image rollback, the release before's behaviour and the sweep's use of 0138's indexes."
+    "previousVerifiedHead": "6d02b0050983390f00a4e2e51543a953d58c75b2",
+    "previous": "61825754fc740c8f0ad18dc2242bf50efcf8c9612c47ad9f6704103e9ba4b28a",
+    "current": "5353f2474ff8a4d8b68308915eec2f74f98bcde32338dd757c10c4c6fafa3d44",
+    "verdict": "changed by one file alone: `jj diff --from 6d02b005 --to 61e2e802 --name-only` lists packages/envoy/internal/dispatch/api/delivery_live_hub_test.go beside the .legion/ handoffs (+32/-8), same fork point 8a72cf79. Its content at f9f6188d is byte-equal to #2594's at 4b7746eb (sha256 8026139d... for both); #2594 (open, another tree) changes that one file and nothing else, and both start from the same main copy of it (the fork point's copy equals main@origin's). No product code changed."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at 6d02b005 (code a8c1b638, merged with main through 8a72cf79; a merge-tree with main@origin 39b51494 shows no conflict): `bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md` -> exit 0, no output; `bun test scripts/semantic-line-breaks.guides.test.ts` -> 1 pass; `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 55m -v ./cmd/dispatch` -> ok 1280.846s, 136 top-level PASS, 0 FAIL, 0 '--- SKIP' (TestADeliveryAKilledProcessLeftPendingIsSentByTheOther 147.32s, TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient 17.64s, TestASendDuringAListenerTakeOverReachesItsSession 120.18s, TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain 7.97s). Log: $TMPDIR/mp-6d02b005.log."
+    "how": "Re-ran its command at the head on the pod's Postgres 17: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable CGO_ENABLED=1 go test -race -count=50 -timeout 40m -run 'TestAReconnectCatchesUpWhatTheListenerMissed$' ./internal/dispatch/api/` -> ok 219.468s: 50 of 50 pass, 0 '--- FAIL', 0 'WARNING: DATA RACE'. Log: $TMPDIR/race50-f9f6188d.log."
   },
   "failed": 0,
   "failures": [],
-  "layoutNegativeControl": "A copy of the merged README with three sentences joined onto one line, given to the same tool: `bun scripts/semantic-line-breaks.ts <copy>` -> exit 1, '<copy>:4: R1: …owercase email; This sentence is joined. And this one is joined too, so the line…'. Copy removed.",
-  "migrationChecks": [
-    "Roll on real binaries: envoy-dispatch built at the merge point 8a72cf79 booted on a fresh database (schema_migrations max 149); the head's build then booted beside it on the same database -> versions 150 151 152 153 applied; /healthz 200 and POST /api/v1/agents/{session}/messages 201 on each build. Scratch database dropped, processes stopped, build trees removed."
-  ],
-  "ciFilters": "`bash .github/scripts/check-ci-filters.sh` (PyYAML 6.0.2, throwaway venv) on a tree of `git merge-tree --write-tree 6d02b005 main@origin` -> exit 0, 'every ci.yaml filter matches every file its job reads (28 gates)'.",
-  "ci": "Read on GitHub at 02:00Z at code head a8c1b638: pr-title success; lint, typecheck and test queued; ci-ok not yet reported. Not waited for. GitHub reports mergeability UNKNOWN while it recomputes; a merge-tree with main@origin shows no conflict.",
+  "negativeControl": "The same 50-run command with the test file as it stood at 6d02b005 (before f9f6188d; written into the working copy and restored after, nothing committed): FAIL, 2 of 50 at 'delivery_live_hub_test.go:776: after a merge the listener could not hear, a frame nobody should be sent: {\"type\":\"delta\",...}', the failure CI's envoy-go-race-api showed at a8c1b638. Log: $TMPDIR/race50-prefix.log.",
+  "ci": "Read on GitHub at 05:02Z: CI run 41170368978 and PR Title run 41170368907 at code head f9f6188d queued; no check run has reported yet (pr-title queued), so ci-ok, lint, typecheck and test have no result. Not waited for. The PR is MERGEABLE and APPROVED.",
   "observations": [
-    "The second retro removed .legion/INFRA-562/ (34385efb); this handoff writes test.json back, so the next retro removes it again before READY.",
+    "When #2594 merges to main, this branch's copy of delivery_live_hub_test.go already equals it, so that merge brings no conflict in the file.",
     "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY; a claim or ask follow made during a comment request mid take-over can still give that session two copies."
   ],
   "proof": [
     {
-      "criterion": "The merge with #2422 changes only the two docs' layout and the migrations' header comments, and the docs keep main's one-sentence-per-line layout",
-      "surface": "the repository's layout tool, scripts/semantic-line-breaks.ts, on packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md at the head",
-      "command": "bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md",
-      "observed": "exit 0, no finding; the fingerprint delta holds only those two docs and SQL comment lines of 0150-0153",
-      "headSha": "6d02b0050983390f00a4e2e51543a953d58c75b2",
-      "negativeControl": "the README with three sentences joined on one line -> exit 1, 'R1' naming that line"
-    },
-    {
-      "criterion": "Migrations 0150-0153 apply on a database main migrated to 0149, both builds serve, and the two-process suite holds on the merged head",
-      "surface": "the envoy-dispatch binary's boot-time migration (main's build 8a72cf79 and the head's build on one Postgres 17 database), and the two-process suite on real binaries",
-      "command": "boot dispatch-main on a fresh database, then dispatch-branch beside it, curl /healthz and a send on each; go test -tags multiprocess -count=1 -timeout 55m -v ./cmd/dispatch",
-      "observed": "149 -> 150-153 applied, both builds 200 /healthz and 201 on a send; suite ok 1280.846s, 136 PASS, 0 FAIL, 0 SKIP",
-      "headSha": "6d02b0050983390f00a4e2e51543a953d58c75b2",
-      "negativeControl": "TestASendDuringAListenerTakeOverReachesItsSession/sent_to_a_session_the_listener_never_knows: a session the listener never knows settles failed: no live session after the real 12 s window"
+      "criterion": "CI's envoy-go-race-api red at a8c1b638 is fixed: TestAReconnectCatchesUpWhatTheListenerMissed passes under the race detector, by main's own fix from #2594",
+      "surface": "Dispatch's api test package under the race detector against a rootless Postgres 17 + pgvector (the package envoy-go-race-api runs)",
+      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race -count=50 -timeout 40m -run 'TestAReconnectCatchesUpWhatTheListenerMissed$' ./internal/dispatch/api/",
+      "observed": "ok 219.468s, 50 of 50 pass, no data race; the file is byte-equal to #2594's",
+      "headSha": "61e2e8023913125502dea81cb4dcc9356fb03174",
+      "negativeControl": "the test file before f9f6188d, same command -> FAIL 2 of 50 at delivery_live_hub_test.go:776"
     }
   ]
 }
