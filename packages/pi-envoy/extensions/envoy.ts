@@ -3220,6 +3220,10 @@ export default function envoyExtension(pi: PiApi): void {
         `Envoy has no active session for Legion notice subscription: ${targetSessionID}`
       );
     }
+    // A notice lane reaches the session only over NATS, so a subscription with inbound off
+    // would be one nothing is ever delivered on: it refuses before any listener call, as the
+    // role claim does.
+    requireInbound();
     if (establishedSession !== targetSessionID) await establishForBridge(context);
     const marked: string[] = [];
     if (whileHolding !== undefined) {
@@ -3244,15 +3248,18 @@ export default function envoyExtension(pi: PiApi): void {
     const snapshot = roleSnapshot(topic);
     try {
       if (!followUnlessRoleEnds(topic, snapshot)) return;
+      // The registration is what tells the listener this session follows the topic, so a
+      // subscription is open only once it lands.
+      await registerSession();
     } catch (error) {
       // Nothing opened, so nothing may keep the session's role in place on its behalf. A role that
       // ended meanwhile already dropped these marks, and a newer subscription may hold them now.
       if (roleEnds === snapshot.endsBefore) {
+        unfollow(topic);
         for (const subject of marked) roleNoticeSubjects.delete(subject);
       }
       throw error;
     }
-    await registerSession();
   };
 
   const claimInstance: LegionRoleClaimInstance = {
@@ -4008,6 +4015,10 @@ export default function envoyExtension(pi: PiApi): void {
       const { client } = requireEnvoy();
       switch (operation) {
         case EnvoyToolOperation.subscribe: {
+          // A followed topic reaches the session only through its own consumer's relay, which
+          // needs NATS: with inbound off the session would follow a topic it can never receive
+          // on, so the tool refuses here, saying why.
+          requireInbound();
           const added: string[] = [];
           const already: string[] = [];
           for (const topic of topicsFor(parameters)) {
