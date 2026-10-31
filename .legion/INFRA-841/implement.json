@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-841",
+  "generation": 2,
+  "completed": "2026-10-31T18:05:00Z",
+  "proof": [
+    {
+      "criterion": "Neither of the two named learning pages cites a line number, and the three citations review 5723093389 blocked are gone.",
+      "surface": "The two pages as a reader reads them in the tree, read with the acceptance table's own pattern.",
+      "command": "grep -nE '[A-Za-z0-9_./-]+\\.(ts|go|md|yaml|yml|json|sh):[0-9]+|`:[0-9]+' docs/solutions/testing/the-envoy-guides-layout-checker-runs-only-when-you-run-it-pr2580.md docs/solutions/legion/a-red-check-in-a-package-the-branch-does-not-touch-is-mains-until-mains-own-run-says-otherwise-pr2580.md",
+      "observed": "No output, exit 1. Eight line citations went: the three the review blocked (scripts/semantic-line-breaks.ts:47 for MAX_LINE, :771-786 for wrapLongLine, and internal/broker/oauth/claims_doc_test.go:176-190 for the claim-list parser) and the five more the acceptance's absolute wording reaches (.github/workflows/ci.yaml:1544-1547 and :477-478, packages/envoy/AGENTS.md:2607, scripts/semantic-line-breaks.guides.test.ts:12 and :25-40), each replaced by a symbol, a workflow step's name, a test title or a quoted phrase.",
+      "headSha": "c23e8401ebdc3f59b0012369a994a0197be6bc80",
+      "negativeControl": "The same pattern over the two pages at the old head f11e42a8 matches eight times, and each of the three blocked citations fails its own reading there: `git show f11e42a8:scripts/semantic-line-breaks.ts | sed -n '47p'` is the doc comment rather than the constant, `sed -n '771,786p'` is longLineBreaks and cutLine's doc comment rather than wrapLongLine, and `sed -n '176,190p'` of the head's claims_doc_test.go is the fixed parser whose comment contradicts the sentence that cited it."
+    },
+    {
+      "criterion": "Every citation the two pages now carry resolves in the code at this head, and the one historical citation is historical.",
+      "surface": "The cited files themselves, each read with the grep the plan's acceptance table names.",
+      "command": "grep -Fqn per citation: 'const MAX_LINE = 160' and 'function wrapLongLine' in scripts/semantic-line-breaks.ts; 'const GUIDES' and the three test titles in scripts/semantic-line-breaks.guides.test.ts; 'Test the semantic line-break checker' and both path-filter entries in .github/workflows/ci.yaml; the quoted clause in packages/envoy/AGENTS.md; 'claimListNames' and 'only when the next non-blank line is neither a bullet nor' in packages/envoy/internal/broker/oauth/claims_doc_test.go",
+      "observed": "All eleven exit 0. The historical pair holds too: the old comment 'the list runs to the first line that is neither a bullet nor a wrapped bullet' is present at c10800814dec (exit 0) and absent at this head (exit 1), which is what makes the page's pinned-commit citation historical rather than stale.",
+      "headSha": "c23e8401ebdc3f59b0012369a994a0197be6bc80",
+      "negativeControl": "The head-absent half of that pair is itself the control: a grep that found the old comment at the head would mean the page had pinned a commit for text the head still carries, and the citation would be an ordinary stale one. It exits 1."
+    },
+    {
+      "criterion": "The layout page's test count is right, and no file outside docs/solutions/ and .legion/INFRA-841/ differs from the approved head 7e630849.",
+      "surface": "The guides test file and its runner, and the branch's own tree against the approved head.",
+      "command": "grep -c '^test(' scripts/semantic-line-breaks.guides.test.ts ; bun test scripts/semantic-line-breaks.guides.test.ts ; jj diff --from 7e630849 --to c23e8401 --name-only | grep -vE '^(docs/solutions/|\\.legion/INFRA-841/)'",
+      "observed": "3 tests; `3 pass, 0 fail, 7 expect() calls` in 2.11 s; and the filtered diff prints nothing (exit 1), so the round touched only the two learning pages. The page now names the five files across three tests, each test by its title, where it had said five files in two tests. The test count moved under the page: 1 test at c10800814dec, 3 from 1a9095e6cf22 on, both read with the same grep.",
+      "headSha": "c23e8401ebdc3f59b0012369a994a0197be6bc80",
+      "negativeControl": "`bun install` was needed before the guides test could run at all, and it rewrote bun.lock; that change was restored with `jj restore --from @- bun.lock` before the commit, which is why the tree comparison above prints nothing. A round that had left it would have shown bun.lock in that output."
+    }
+  ],
+  "filesChanged": [
+    "docs/solutions/testing/the-envoy-guides-layout-checker-runs-only-when-you-run-it-pr2580.md: five files across three tests, each test named by its title; the workflow step, the path filter's entries, MAX_LINE, wrapLongLine, the AGENTS.md clause and const GUIDES named instead of their lines; 'brought a second test' corrected to two more.",
+    "docs/solutions/legion/a-red-check-in-a-package-the-branch-does-not-touch-is-mains-until-mains-own-run-says-otherwise-pr2580.md: the parser citation is now the loop in documentedClaims as it stood at c10800814dec, with its comment quoted, and the page says what claimListNames does at the head instead."
+  ],
+  "trickyParts": [
+    "A citation to code that still exists under the same symbol but with the opposite behaviour is worse than a stale line number: the reader checks it and is told the page is wrong. documentedClaims is that case, which is why its citation carries the symbol, the quoted old comment and the commit together.",
+    "The guides test cannot run in a fresh workspace without `bun install`, and that install rewrites bun.lock. The acceptance forbids a file outside docs/solutions/, so the lockfile was restored before the commit rather than after it."
+  ],
+  "deviations": [
+    "Eight line citations were removed where review 5723093389 named three. The five extra were all true at the head; they go because the acceptance for this round reads 'neither page cites a line number', which is absolute. The other two pr2580 learning pages keep their twelve line citations, since the acceptance names two pages; the planner reported that inconsistency to the architect and it stands as the owner's call."
+  ],
+  "openQuestions": [
+    "The ban on line citations is this issue's acceptance and not a rule in the tree: no AGENTS.md carries it, and skills/dispatch-writing-specs/SKILL.md scopes its version to specs. Making it a project-wide rule for learning pages would be an edit of skills/legion-retro/references/learnings.md, which is another issue's."
+  ],
+  "discoveredComplexity": [
+    "The reply to a review is read by a required check: pr-title.yaml runs on pull_request_review, so check-pr-text.sh reads the reply's text, and pr-title must be read green after the reply as well as after the push."
+  ]
+}
