@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-558",
-  "completed": "2026-10-31T18:10:00Z",
+  "completed": "2026-10-31T22:40:00Z",
   "proof": [
+    {
+      "criterion": "Review round 6 item 1: the slow-page revoke test fails when the revoke's cancel is removed.",
+      "surface": "Real sockets through docs.Service on real Postgres; the page reads 2 s after the revoke",
+      "command": "cd packages/envoy && go test -count=1 -run TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole ./internal/dispatch/docs/ && CGO_ENABLED=1 go test -race -count=10 -run 'Revoke|Revoked|Admission|Token|Rebuild|Replica|Park' ./internal/dispatch/docs/",
+      "observed": "The test requires revokeUnless returned the slow page's admission and the end (4412 or 1006) within 4 s of the revoke, at most 6.5 s after connecting, under ygo's 30 s handshake and 10 s write timeouts; passes, and 10 race runs of the revoke, token, rebuild and replica tests pass; docs, api, cmd/dispatch and multiprocess suites ok",
+      "headSha": "7a037ba4f521",
+      "negativeControl": "admission.cancel(errSchemaRevoked) removed from revokeUnless: FAIL 'ended with read tcp ...: i/o timeout, want a close with 4412 or the 1006 of a connection dropped with no close frame'."
+    },
     {
       "criterion": "Tester round 7: a document that reads DOCUMENT_UNLOADABLE, which offers a rebuild, can be rebuilt; a history ygo refuses from its clocks included.",
       "surface": "docs.Service on real Postgres: a doc_updates row ygo refuses (a delete range at 2^53), read, then rebuilt",
@@ -62,6 +70,8 @@
     }
   ],
   "filesChanged": [
+    "338cfeaf: schema_admission_test.go (bounded slow-page test), schema_admission.go (no nil guard), websocket_test.go (fixtures with a real cancel), contracts dispatch-api.ts (points to the README's 1 s rule)",
+    "7a037ba4: merge of main efed4e4d (ygo pin is main's v1.54.1-sami.3, which carries OnTokenAuthContext; ProofDocument.tsx and pending-sync.test.ts keep both sides)",
     "4a1c0f57: schema_admission_test.go (the tester's c0b46985 slow-page test replaced by TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole)",
     "e9defcab: docs/rebuild.go (an unloadable pre-load goes on to rebuild); the 1 s rule stated once in cmd/dispatch/README.md, with pointers in packages/envoy/AGENTS.md, cmd/dispatch/AGENTS.md, packages/dispatch/AGENTS.md, schema_admission.go",
     "7a7c8f8c: docs/websocket.go, schema_admission.go, service.go (admission on the request context, OnTokenAuthContext, cancel-cause revoke with 4412), keepalive.go reverted, contracts dispatch-api.ts + gen-go.ts + generated.go (DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE), docs and fragments",
@@ -79,7 +89,8 @@
     "Plan departures 1-3 as approved.",
     "D1, D2 and N1's tests are gone with the code they tested (admittedConn, the shared waiting list); the architect's round-5 decision replaced both designs.",
     "The two-build browser run needs a previous build of legion-envoy-v20.1.0 or later (held socket, shared cookie key); build-dispatch-build.sh refuses older ones.",
-    "The tester's red test c0b46985 (TestARevokedSlowPageReadsTheMessageInFlightAndThenTheRevokedClose) is deleted, not made to pass: the architect accepted ygo's 1 s bound and directed a test that pins it instead (4412 or 1006, then a whole sync)."
+    "The tester's red test c0b46985 (TestARevokedSlowPageReadsTheMessageInFlightAndThenTheRevokedClose) is deleted, not made to pass: the architect accepted ygo's 1 s bound and directed a test that pins it instead (4412 or 1006, then a whole sync).",
+    "The ygo pin is main's v1.54.1-sami.3 (sami.2 plus format-cleanup options); this change no longer moves the pin."
   ],
   "openQuestions": []
 }
