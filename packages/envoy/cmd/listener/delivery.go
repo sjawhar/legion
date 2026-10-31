@@ -430,18 +430,21 @@ func laneHolderFresh(entry session.SessionEntry) bool {
 
 // resolveCoreRoleHolder resolves the current live holder for a role-lane delivery by role
 // delivery's rule (resolveRoleHolder with laneHolderFresh), applying the terminal outcome itself
-// and reporting ok=false when there is nobody to deliver to. Its two give-up branches - the
-// unclaimed role and the lapsed holder - keep the message for the role's next holder first
-// (keepRoleLaneMessage), and a copy that was kept publishes no delivery exception: the message is
-// not lost. A keep that failed leaves each branch exactly as it was: an unclaimed role is
-// no_holder, a lapsed holder delivery_failed. Every failed read is delivery_failed and keeps
-// nothing, since a read that did not answer is no evidence the role has no holder. Each branch
-// logs a line that names which it was. Role delivery answers no caller, so it resolves
-// under context.Background(): the holder's session read keeps roleHolderReadTimeout
-// (roleHolderSession's bound) as its own cap. Its first claim read is the registry's watched copy
-// of the role bucket (store.Registry.CachedRoleHolder, passed as the resolution's firstHolder), so
-// a role message costs no bucket round trip; a retry after a superseded release reads the bucket
-// itself, since the copy can trail the claim that superseded it.
+// and reporting ok=false when there is nobody to deliver to. A resolution that found no live
+// holder keeps the message for the role's next holder first (keepRoleLaneMessage), in one
+// decision for both give-up branches: roleKeepable says which states a copy is kept for - an
+// unclaimed role and a lapsed claim that was released or already absent, never a claim the
+// restart grace retained - and a copy that was kept publishes no delivery exception, since the
+// message is not lost. Every other case leaves its branch exactly as it was before the kept lane:
+// an unclaimed role is no_holder, a lapsed holder delivery_failed, and so is a keep that failed.
+// Every failed read is delivery_failed and keeps nothing, since a read that did not answer is no
+// evidence the role has no holder. Each branch logs a line that names which it was. Role delivery
+// answers no caller, so it resolves under context.Background(): the holder's session read keeps
+// roleHolderReadTimeout (roleHolderSession's bound) as its own cap. Its first claim read is the
+// registry's watched copy of the role bucket (store.Registry.CachedRoleHolder, passed as the
+// resolution's firstHolder), so a role message costs no bucket round trip; a retry after a
+// superseded release reads the bucket itself, since the copy can trail the claim that superseded
+// it.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
 	resolved, err := resolveRoleHolderFrom(context.Background(), cfg.registry, cfg.registry.CachedRoleHolder, cfg.sessions, role, laneHolderFresh)
 	sessionID := resolved.holder
@@ -453,13 +456,13 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 		failure = &roleHolderFailure{step: roleHolderClaimRead, cause: err}
 	}
 	if err == nil {
-		switch resolved.state {
-		case roleHolderLive:
+		if resolved.state == roleHolderLive {
 			return sessionID, resolved.entry, true
-		case roleHolderUnclaimed:
-			if keepRoleLaneMessage(cfg, role, "", item, roleHolderUnclaimed) {
-				break
-			}
+		}
+		if roleKeepable(resolved) && keepRoleLaneMessage(cfg, role, sessionID, item, resolved.state) {
+			return "", session.SessionEntry{}, false
+		}
+		if resolved.state == roleHolderUnclaimed {
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				metricStatus: "skipped",
 				log: func(logger *logging.Logger) {
@@ -467,19 +470,16 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 				},
 				exceptionReason: "no_holder",
 			})
-		default:
-			if keepRoleLaneMessage(cfg, role, sessionID, item, roleHolderLapsed) {
-				break
-			}
-			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				sessionID:    sessionID,
-				metricStatus: "failed",
-				log: func(logger *logging.Logger) {
-					logger.DeliveryLog(slog.LevelWarn, "listener role holder is not live", sessionID, item.Topic, item.EventID, "failed")
-				},
-				exceptionReason: "delivery_failed",
-			})
+			return "", session.SessionEntry{}, false
 		}
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    sessionID,
+			metricStatus: "failed",
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelWarn, "listener role holder is not live", sessionID, item.Topic, item.EventID, "failed")
+			},
+			exceptionReason: "delivery_failed",
+		})
 		return "", session.SessionEntry{}, false
 	}
 	switch failure.step {

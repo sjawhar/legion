@@ -659,7 +659,8 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 }
 
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
-// instead) and sends the envelope. A role topic is forwarded to its holder and
+// instead) and the listener's own kept lane, and sends the envelope. A role
+// topic is forwarded to its holder and
 // an ad-hoc topic confirmed with each self-subscribed recipient, both answered
 // once confirmed or when publishDeliveryWindow from the request's arrival has
 // passed (sendToRole, sendToTopic in confirmed.go); a topic the stream captures
@@ -679,7 +680,8 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // keep is meaningful only for a role topic, and unset means true: a role message the listener
 // cannot deliver is kept on the role's kept lane and handed to the role's next holder, and the
 // send is answered 202 kept rather than 404 (roleSend.kept). A sender that holds a queue of its
-// own and must get today's answer passes keep: false, which keeps nothing and answers the 404.
+// own and must get today's answer passes keep: false, which keeps nothing and answers the 404,
+// and so does a role token no claim can name (isValidRole).
 func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		arrived := time.Now()
@@ -716,6 +718,10 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
 		}
+		if strings.HasPrefix(request.Topic, contracts.KeptTopicPrefix) {
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to "+contracts.KeptTopicPrefix+" topics; that lane is the listener's own, holding the copies it keeps for a role's next holder and the cursors of its drains")
+			return
+		}
 		if message, field := validateMessageBody(request.messageBody); message != "" {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, message, field)
 			return
@@ -748,7 +754,11 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
 			defer cancel()
-			sendToRole(ctx, w, record, d, item, role, arrived, request.Keep == nil || *request.Keep)
+			// Keeping is only for a role a claim can take. POST /v1/roles/set refuses every role
+			// outside rolePattern (isValidRole), so a copy kept under a token it refuses waits for
+			// a claim that cannot be made and expires unread, where the 404 its sender gets
+			// instead is an answer the sender can act on.
+			sendToRole(ctx, w, record, d, item, role, arrived, (request.Keep == nil || *request.Keep) && isValidRole(role))
 			return
 		}
 		if bus.UsesCoreTransport(request.Topic) {

@@ -47,12 +47,15 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 }
 
 // withPublishRoute gives d what the publish route needs beyond its stores, as main wires it: a
-// delivery config over d's stores with a dedupe cache, startRoleForward(client) as the forward, a
+// delivery config over d's stores with the dedupe cache and the attempt cache the kept lane's
+// drain judges a forward against (beforeForward), startRoleForward(client) as the forward, a
 // logger, a delivered counter and the drain's kept-expired counter, and a confirmation record.
 func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
 	cache := dedupe.New(10 * time.Minute)
 	t.Cleanup(cache.Stop)
+	attempts := dedupe.New(5 * time.Minute)
+	t.Cleanup(attempts.Stop)
 	logs := &cmdtest.LockedBuffer{}
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -65,6 +68,7 @@ func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 		registry:          d.registry,
 		sessions:          d.sessions,
 		dedupeCache:       cache,
+		attemptCache:      attempts,
 		logger:            logging.NewWithWriter("test", logs),
 		messagesDelivered: metrics.New().NewCounter("test_messages_delivered", "test"),
 		roleKeptExpired:   metrics.New().NewCounter("test_role_kept_expired", "test"),
