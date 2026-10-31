@@ -428,7 +428,7 @@ describe("the dispatch CLI", () => {
 
   test("an empty session id counts as unset", async () => {
     const { code, stdout } = await run(["message", "--issue", "DSP-1", "--body", "x"], {
-      DISPATCH_HOST: "opencode",
+      DISPATCH_HOST: "omp",
       DISPATCH_SESSION_ID: "",
     });
     expect(code).toBe(2);
@@ -1070,19 +1070,10 @@ describe("the dispatch CLI's envoy.json", () => {
       ENVOY_CONFIG_FILE: handed,
     });
     expect(namedClaude.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
-    // OpenCode likewise.
-    const opencode = await run(["projects"], {
-      ...fromFile,
-      DISPATCH_HOST: "opencode",
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
-      ENVOY_CONFIG_FILE: handed,
-    });
-    expect(opencode.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
   });
 
   test("with DISPATCH_HOST set and no ENVOY_CONFIG_FILE, each host takes its own harness's directory and no other's, else the neutral file", async () => {
     const claude = { DISPATCH_HOST: "claude", CLAUDE_CODE_SESSION_ID: "ses-1" };
-    const opencode = { DISPATCH_HOST: "opencode", DISPATCH_SESSION_ID: "ses-1" };
     const profile = join(stateDir, "profile");
     serverConfig(profile);
     const ompRun = await run(["projects"], {
@@ -1090,7 +1081,6 @@ describe("the dispatch CLI's envoy.json", () => {
       OMP_PROFILE: "work",
       PI_CODING_AGENT_DIR: profile,
       CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
     });
     expect(ompRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
@@ -1115,21 +1105,10 @@ describe("the dispatch CLI's envoy.json", () => {
     });
     expect(emptyHanded.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
-    const own = join(stateDir, "opencode");
-    serverConfig(own);
-    const ownRun = await run(["projects"], {
-      ...fromFile,
-      ...opencode,
-      OPENCODE_CONFIG_DIR: own,
-      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-    });
-    expect(ownRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
-
     serverConfig(join(stateDir, ".config", "legion"));
     const neutral = await run(["projects"], {
       ...fromFile,
       CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
     });
     expect(neutral.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
   });

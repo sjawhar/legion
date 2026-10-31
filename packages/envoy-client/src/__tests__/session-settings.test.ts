@@ -43,9 +43,7 @@ describe("sessionConfigFile", () => {
   });
 
   test("turns a location that cannot be worked out into an error instead of a throw", () => {
-    expect(
-      sessionConfigFile("opencode", { HOME: "/home/someone", XDG_CONFIG_HOME: "rel" })
-    ).toEqual({
+    expect(sessionConfigFile("claude", { HOME: "/home/someone", XDG_CONFIG_HOME: "rel" })).toEqual({
       path: null,
       error: "XDG_CONFIG_HOME is rel, which is not an absolute path",
     });
@@ -498,7 +496,6 @@ describe("old user file notices", () => {
     const profiles = [
       ["omp", { OMP_PROFILE: "work", PI_CODING_AGENT_DIR: path.join(home, "omp") }],
       ["claude", { CLAUDE_CONFIG_DIR: path.join(home, "claude") }],
-      ["opencode", { OPENCODE_CONFIG_DIR: path.join(home, "opencode") }],
     ] as const;
 
     for (const [harness, profile] of profiles) {

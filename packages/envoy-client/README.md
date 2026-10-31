@@ -197,18 +197,17 @@ Every client and command reads one envoy.json holding a `dispatch` section and a
 
 `envoyConfigPath(harness, env)` (`envoy-config.ts`) picks the file. A plugin reads its own
 harness's directory and no other harness's: Oh My Pi's `$PI_CODING_AGENT_DIR/envoy.json` when
-`OMP_PROFILE` names a profile other than `default`, Claude Code's `$CLAUDE_CONFIG_DIR/envoy.json`,
-OpenCode's `$OPENCODE_CONFIG_DIR/envoy.json`. Without that directory it reads the file
-`ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script
-outside any plugin (harness `command`: `scripts/dispatch/ask-census.ts`, the e2e operator scripts,
-`claude-envoy`'s `envoy-send`) reads `ENVOY_CONFIG_FILE` first, then the Oh My Pi, Claude Code and
-OpenCode directories in that order (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`, which
-Claude Code alone sets, in every Bash it runs), then the same neutral file. A relative
-`ENVOY_CONFIG_FILE`, harness directory or `XDG_CONFIG_HOME` is refused, naming it and its value,
-when the rule would use it. Each plugin hands the path it chose to the commands its session runs in
-`ENVOY_CONFIG_FILE` (Oh My Pi sets it in `process.env` at load, Claude Code's `SessionStart` hook
-appends it to `$CLAUDE_ENV_FILE`, OpenCode's `shell.env` hook sets it), beside `DISPATCH_HOST`; the
-innermost session's value wins.
+`OMP_PROFILE` names a profile other than `default`, Claude Code's `$CLAUDE_CONFIG_DIR/envoy.json`.
+Without that directory it reads the file `ENVOY_CONFIG_FILE` names, else
+`${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script outside any plugin (harness
+`command`: `scripts/dispatch/ask-census.ts`, the e2e operator scripts, `claude-envoy`'s
+`envoy-send`) reads `ENVOY_CONFIG_FILE` first, then the Oh My Pi and Claude Code directories in
+that order (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`, which Claude Code alone sets,
+in every Bash it runs), then the same neutral file. A relative `ENVOY_CONFIG_FILE`, harness
+directory or `XDG_CONFIG_HOME` is refused, naming it and its value, when the rule would use it.
+Each plugin hands the path it chose to the commands its session runs in `ENVOY_CONFIG_FILE` (Oh My
+Pi sets it in `process.env` at load, Claude Code's `SessionStart` hook appends it to
+`$CLAUDE_ENV_FILE`), beside `DISPATCH_HOST`; the innermost session's value wins.
 
 The `dispatch` command reads the file its session's plugin chose: with `DISPATCH_HOST` set, the
 file `ENVOY_CONFIG_FILE` names, else its host's own rule (`envoyConfigPath(host)`). A Bash that
@@ -325,8 +324,9 @@ empty `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` is refused, naming it. `inbound`
 takes inbound messages: `{ natsUrls, natsSeed }`, never with an empty `natsUrls`, or `{ off }`, `off`
 saying why: `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)` when nothing names one, a
 seed's refusal (below), or `this session opens no NATS connection` for a caller that opens none
-(`{ nats: false }`, OpenCode's plugin). The seed is resolved only when there are NATS servers to
-use it on, so that caller resolves none. A set `_FILE` pointer that
+(`{ nats: false }`: the `dispatch` command, `claude-envoy`'s `envoy-send`,
+pi-legion's extension). The seed is resolved only when there are NATS servers
+to use it on, so that caller resolves none. A set `_FILE` pointer that
 cannot be read is refused, never a fallback. The file's `envoy.token` goes with `ENVOY_URL` only
 when it names the origin of the listener written in the file (`http://127.0.0.1:9020` when it names
 none), and is otherwise refused with `ENVOY_URL names <origin>, but <file>'s envoy.token is for
@@ -527,8 +527,8 @@ the ref). It reads neither Dispatch nor this session's state, so it runs with Di
 and a call it passed can still stop on either.
 
 `runDispatchCli` (`dispatch-cli.ts`) runs one call per process. The host plugin sets
-`DISPATCH_HOST` (`omp`, `claude` or `opencode`) and the session's id (`CLAUDE_CODE_SESSION_ID`
-under Claude Code, `DISPATCH_SESSION_ID` elsewhere); with either missing the command exits 2
+`DISPATCH_HOST` (`omp` or `claude`) and the session's id (`CLAUDE_CODE_SESSION_ID` under Claude
+Code, `DISPATCH_SESSION_ID` elsewhere); with either missing the command exits 2
 naming it, and an empty variable counts as unset. `DISPATCH_SESSION_TITLE`, or the session
 directory's `title` file, names the session on what it writes. It resolves Dispatch from the
 envoy.json its session's plugin chose (above): with Dispatch off it prints `dispatch: <notice>` for
