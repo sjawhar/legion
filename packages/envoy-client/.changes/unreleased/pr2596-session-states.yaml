@@ -1,0 +1,9 @@
+kind: Added
+body: |-
+    A session row and a role answer carry the session's state: `SessionWireSchema` gains `state`,
+    `RoleWireSchema` gains `state` and `holder_state`, a send answer gains `recipient_state`, and
+    `listSessions` takes `include`. A listener that names no state is read as `live`, so an older
+    listener still works. The tool descriptions say what the three states mean and what to do
+    about them, in place of "List all live sessions" and "stays registered for up to 5 minutes":
+    an unresponsive session is not dead, so start no replacement for it and take no claim from it
+    until it is `gone`, or has been unresponsive for more than twenty minutes.
