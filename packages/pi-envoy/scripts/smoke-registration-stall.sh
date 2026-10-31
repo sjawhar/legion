@@ -244,11 +244,16 @@ if ((local_stack == 1)); then
   port_floor=10000
   ((ephemeral_low > port_floor + 1000)) ||
     refuse "the kernel's ephemeral range starts at ${ephemeral_low}, leaving no ports below it above ${port_floor}"
+  # pick_port VAR: a loopback port nothing answers on, below the kernel's ephemeral range and
+  # distinct from this run's earlier picks.
+  picked_ports=" "
   pick_port() {
     local candidate i
     for ((i = 0; i < 200; i++)); do
       candidate=$((port_floor + RANDOM % (ephemeral_low - port_floor)))
+      [[ "$picked_ports" != *" ${candidate} "* ]] || continue
       (exec 3<>"/dev/tcp/127.0.0.1/${candidate}") 2>/dev/null && continue
+      picked_ports+="${candidate} "
       printf -v "$1" '%s' "$candidate"
       return 0
     done

@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto"
 import { type Stats, unwatchFile, watchFile } from "node:fs"
 import { rm } from "node:fs/promises"
 import {
@@ -58,6 +57,7 @@ import {
   type EnvoyClient,
   expandSubscriptionTopics,
   mergeInterestSources,
+  newClientInstanceID,
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import { findHandoffCommit } from "@legion/pi-shared/handoff-commit"
@@ -1492,7 +1492,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // predecessor goes only to the instance that registered it, and a deregistration removes only
   // this instance's entry. One per process, not per session id: this server drives one session
   // at a time, and a restart is a new instance with a new id.
-  const clientInstanceID = randomBytes(16).toString("hex")
+  const clientInstanceID = newClientInstanceID()
   let runtime: ChannelToolRuntime | undefined
   let claim: LegionClaim | undefined
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl)

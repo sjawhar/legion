@@ -2017,6 +2017,13 @@ export default function envoyExtension(pi: PiApi): void {
   // Whether `id` is the session open here, for this instance and the host alike: a role move
   // decided for `id` acts only while it is.
   const sessionOpen = (id: string): boolean => sessionID === id && hostSessionID() === id;
+  // The refusal a role move that decided nothing carries: the session it was decided for stopped
+  // being the open one, so nothing was claimed. Both the plugin bridge's claim and the tool say
+  // the same sentence.
+  const sessionLeftDuringClaim = (from: string, role: string): SessionLeftError =>
+    new SessionLeftError(
+      `the session moved from ${from} to ${hostSessionID()} while its claim of role ${role} ran; nothing was claimed`
+    );
 
   // The registration and role state the two serial queues write, the queues themselves, each
   // task's deadline and this extension instance's client instance id, all private to
@@ -2632,11 +2639,7 @@ export default function envoyExtension(pi: PiApi): void {
     });
     // The move decided nothing, because the session it was decided for stopped being the open
     // one: the plugin that asked hears that, as it hears a claim that failed.
-    if (claimed === undefined) {
-      throw new SessionLeftError(
-        `the session moved from ${targetSessionID} to ${hostSessionID()} while its claim of role ${role} ran; nothing was claimed`
-      );
-    }
+    if (claimed === undefined) throw sessionLeftDuringClaim(targetSessionID, role);
   };
 
   const subscribeNotice: LegionNoticeSubscription = async (
@@ -3603,11 +3606,7 @@ export default function envoyExtension(pi: PiApi): void {
           });
           // The move decided nothing, because the session it was decided for stopped being the
           // open one: the tool says so rather than report a role it never took.
-          if (moved === undefined) {
-            throw new SessionLeftError(
-              `the session moved from ${target} to ${hostSessionID()} while its claim of role ${role} ran; nothing was claimed`
-            );
-          }
+          if (moved === undefined) throw sessionLeftDuringClaim(target, role);
           const { released } = moved;
           return toolSuccess(
             released === undefined

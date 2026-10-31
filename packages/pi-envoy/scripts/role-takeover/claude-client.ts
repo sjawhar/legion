@@ -23,7 +23,6 @@
  *   {"id":"1","op":"tool","name":"envoy_role_set","args":{"role":"reviewer"}}
  *   {"id":"2","op":"clear","session":"<the id Claude Code minted>"}
  *   {"id":"3","op":"kill"}          a crash: the registration outlives the process
- *   {"id":"4","op":"stop"}          a clean exit: the server deregisters itself
  */
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -155,14 +154,6 @@ function writeHandoff(sessionID: string): string {
   return file;
 }
 
-async function stopChild(signal: "SIGTERM" | "SIGKILL"): Promise<number | null> {
-  child.kill(signal);
-  const killer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-  const code = await child.exited;
-  clearTimeout(killer);
-  return code;
-}
-
 async function run(command: Command): Promise<Record<string, unknown>> {
   switch (command.op) {
     case "tool":
@@ -173,20 +164,15 @@ async function run(command: Command): Promise<Record<string, unknown>> {
       if (command.session === undefined) throw new Error("clear needs the id Claude Code minted");
       return { handoff: writeHandoff(command.session) };
     }
-    case "kill":
-      return { exit: await stopChild("SIGKILL") };
-    case "stop":
-      return { exit: await stopChild("SIGTERM") };
-    case "stderr":
-      return { stderr: serverStderr };
-    case "exit":
-      await stopChild("SIGTERM");
-      process.exit(0);
-      break;
+    case "kill": {
+      // A crash: SIGKILL leaves the server no chance to deregister, so its registration outlives
+      // the process it was made by.
+      child.kill("SIGKILL");
+      return { exit: await child.exited };
+    }
     default:
       throw new Error(`unknown op ${command.op}`);
   }
-  return {};
 }
 
 function answer(line: Record<string, unknown>): void {

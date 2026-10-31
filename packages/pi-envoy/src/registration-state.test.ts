@@ -420,26 +420,6 @@ describe("the serial queues", () => {
     expect(closedConnections).toEqual(["subscribe-dial"]);
   });
 
-  test("the handle's listener reads, hand-backs and subscribes refuse once the session moved", async () => {
-    const { state, control, subscribedTopics, handBacks } = createHarness();
-    control.open = "ses_a";
-    const release = Promise.withResolvers<void>();
-    const running = state.passes.run(async (handle) => {
-      handle.actFor("ses_a");
-      await release.promise;
-      await handle.subscribe("notifications.dispatch.issue.A-1");
-      await handle.readInterest("ses_a");
-      await handle.readRoleHolder("alpha");
-      await handle.handBack(ALPHA, "ses_a");
-      return true;
-    });
-    control.open = "ses_b";
-    release.resolve();
-    expect(await running).toBeUndefined();
-    expect(subscribedTopics).toEqual([]);
-    expect(handBacks).toEqual([]);
-  });
-
   test("the handle's listener reads and subscribes answer a task that still decides", async () => {
     const { state, control, subscribedTopics } = createHarness();
     control.open = "ses_a";

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { machineID } from "../machine";
-import { createEnvoyClient, EnvoyApiError } from "../transport";
+import { createEnvoyClient, EnvoyApiError, newClientInstanceID } from "../transport";
 
 type RecordedFetch = {
   readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -875,5 +875,15 @@ describe("EnvoyClient", () => {
     expect((failure as EnvoyApiError).code).toBe("REPLAY_UNAVAILABLE");
     expect((failure as EnvoyApiError).message).toBe("nats: permissions violation");
     expect(recorded.requests).toHaveLength(1);
+  });
+});
+
+describe("newClientInstanceID", () => {
+  test("mints 128 random bits as 32 lower-case hex characters", () => {
+    expect(newClientInstanceID()).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  test("mints a different id for each client instance", () => {
+    expect(newClientInstanceID()).not.toBe(newClientInstanceID());
   });
 });

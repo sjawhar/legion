@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { type Envelope, EnvelopeSchema } from "@legion/contracts";
 import { z } from "zod";
 import { normalizeEnvoyUrl } from "./envoy-settings";
@@ -168,6 +169,17 @@ export type SubscribeInput = {
    * runs. */
   readonly plugin: { readonly name: string; readonly version: string };
 };
+
+/**
+ * A new {@link SubscribeInput.clientInstanceID}: 128 random bits as 32 lower-case hex characters.
+ *
+ * A client instance is one host process driving sessions at the listener — one Oh My Pi Envoy
+ * extension instance, one Claude Code channel-server process — and mints this once, when it
+ * starts, for every registration and deregistration it makes.
+ */
+export function newClientInstanceID(): string {
+  return randomBytes(16).toString("hex");
+}
 
 export type UnsubscribeInput = {
   readonly sessionID: string;

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
 import {
@@ -6,8 +5,10 @@ import {
   type EnvoyClient,
   expandSubscriptionTopics,
   type Interest,
+  newClientInstanceID,
   type SubscribeInput,
 } from "@legion/envoy-client/transport";
+import type { RoleRegainReason } from "@legion/pi-shared/role-claim-bridge";
 import type { NatsConnection } from "nats";
 
 /**
@@ -43,9 +44,6 @@ export function taskWasAbandoned(error: unknown): error is AbandonedTaskError {
  * session moved.
  */
 class StepRefused extends Error {}
-
-/** Why a held role had to be re-asserted at the listener, for the Legion regain hook. */
-export type RoleRegainReason = "reclaimed" | "reregistered";
 
 /** Whether a topic served the session's role, and how many roles had ended, at one moment. */
 export interface RoleSnapshot {
@@ -175,14 +173,12 @@ export interface TaskHandle {
    *  opened them. Writes nothing while that plugin's subjects are still open. */
   readonly noteNoticesClosed: (role: string) => void;
 
-  // — listener reads and hand-backs —
+  // — listener reads —
   /** The session the listener names as `role`'s holder; `undefined` when it names none or the
    *  read failed. */
   readonly readRoleHolder: (role: string) => Promise<string | undefined>;
   /** The listener's registered interests for a session; `undefined` when the read failed. */
   readonly readInterest: (sessionID: string) => Promise<Interest | undefined>;
-  /** Hands one hold back at the listener; throws when the listener refuses it. */
-  readonly handBack: (topic: string, sessionID: string) => Promise<void>;
 
   // — NATS —
   /** Opens a NATS connection. One a refused task opened is closed here and never answered. */
@@ -292,7 +288,7 @@ export interface RegistrationState {
 }
 
 export function createRegistrationState(deps: RegistrationStateDeps): RegistrationState {
-  const clientInstanceID = randomUUID().replaceAll("-", "");
+  const clientInstanceID = newClientInstanceID();
 
   // The one role this process holds at the listener, and the session id the listener names for
   // it, which a pass that keeps the role for another session supersedes by naming it.
@@ -744,10 +740,6 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
           .client()
           .getInterest(sessionID)
           .catch(() => undefined);
-      },
-      handBack: async (topic, sessionID) => {
-        guard();
-        await handBackAt(topic, sessionID);
       },
       dial,
       subscribe: async (topic) => {

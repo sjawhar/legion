@@ -6,11 +6,11 @@
  * It loads the real `extensions/envoy.ts` from this checkout and hands it the stand-in host the
  * package's own suite uses (`createPi` in `extensions/envoy.test.ts`): one session manager whose
  * id and branch the driver moves, `pi.appendEntry` writing into that branch, and
- * `context.setInterval` collecting the heartbeat rather than arming a timer, so the smoke ticks
- * the heartbeat when it wants one. Nothing else is faked: the extension dials the smoke's natsd,
- * and every listener call goes over HTTP to the smoke's recording proxy (`envoy.url` in the
- * `ENVOY_CONFIG_FILE` the smoke writes). One process is one client instance, which is what the
- * listener's rule turns on (R5, R6 of dispatch://INFRA-404/spec).
+ * `context.setInterval` dropping the heartbeat timer rather than arming one, so no tick of it
+ * interleaves with what the smoke drives. Nothing else is faked: the extension dials the smoke's
+ * natsd, and every listener call goes over HTTP to the smoke's recording proxy (`envoy.url` in
+ * the `ENVOY_CONFIG_FILE` the smoke writes). One process is one client instance, which is what
+ * the listener's rule turns on (R5, R6 of dispatch://INFRA-404/spec).
  *
  * Run it as `bun --preload <dir>/host-stub.ts <dir>/omp-client.ts`: the preload supplies the host
  * package the extension imports.
@@ -72,7 +72,6 @@ const entries: BranchEntry[] = [];
 const tools: RegisteredTool[] = [];
 const handlers = new Map<string, EventHandler>();
 const notices: string[] = [];
-const intervals: (() => void)[] = [];
 /** Handlers a `detach` command left running, awaited by `join`. */
 const detached: Promise<unknown>[] = [];
 
@@ -93,9 +92,9 @@ const context = {
   agent: { kind: "main" as const },
   sessionManager,
   isIdle: () => true,
-  setInterval: (callback: () => void) => {
-    intervals.push(callback);
-  },
+  // The extension arms its heartbeat here; the smoke drives every pass itself, so the timer is
+  // dropped rather than armed.
+  setInterval: () => undefined,
   setTimeout: (callback: () => void) => {
     setTimeout(callback, 0);
   },
@@ -161,28 +160,11 @@ async function run(command: Command): Promise<Record<string, unknown>> {
       await handlerFor("session_switch")({ reason: command.reason }, context);
       return { session: sessionID };
     }
-    case "branch": {
-      await handlerFor("session_before_branch")({}, context);
-      sessionID = command.session ?? sessionID;
-      setBranch(command.roles);
-      await handlerFor("session_branch")({}, context);
-      return { session: sessionID };
-    }
     case "tree": {
       sessionID = command.session ?? sessionID;
       setBranch(command.roles);
       await handlerFor("session_tree")({}, context);
       return { session: sessionID };
-    }
-    case "move": {
-      // A move the host made with no session event, which only the next pass sees.
-      sessionID = command.session ?? sessionID;
-      setBranch(command.roles);
-      return { session: sessionID };
-    }
-    case "tick": {
-      for (const callback of intervals) callback();
-      return { ticked: intervals.length };
     }
     case "tool": {
       const tool = tools.find((candidate) => candidate.name === command.name);
@@ -199,15 +181,9 @@ async function run(command: Command): Promise<Record<string, unknown>> {
       await Promise.allSettled(waiting);
       return { joined: waiting.length };
     }
-    case "notices":
-      return { notices: [...notices] };
-    case "exit":
-      process.exit(0);
-      break;
     default:
       throw new Error(`unknown op ${command.op}`);
   }
-  return {};
 }
 
 function answer(line: Record<string, unknown>): void {
