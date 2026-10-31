@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -124,6 +125,59 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 		return fmt.Errorf("re-hold the notice of exception %s: %w", envelope.EventID, err)
 	}
 	return nil
+}
+
+// noticeAnswered is what the listener's answer to one notice publish decides for its row:
+// published is that answer, notice the Notice as it went out (Notice.Published) and tree the
+// snapshot the row was routed against.
+//
+// A delivery its architect's session did not confirm (504 `receipt_timeout`) is queued again as a
+// copy of its own (reholdNotice). A holder that does not advertise the notice's delivery mode, and
+// a forward the listener's own NATS grant denies, refuse every attempt until something outside
+// this daemon changes, so each finishes undelivered with one log line rather than holding every
+// later notice to that architect behind the fence. A holder only unresponsive — its session past
+// the listener's live window and still inside its gone horizon — holds the role yet, so its notice
+// is kept whole: no copy is spent and no slot of the re-hold schedule with it, and the row is tried
+// again on the outbox's backoff until the session's heartbeats land, which is what reaches a
+// session stalled under box load once it answers again (dispatch://INFRA-392). A role no session
+// holds is held for its architect while that architect's claim can hold it again, and finishes
+// undelivered once nobody will. Any other failure is the row's, retried on its backoff.
+func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, payload, notice record.Notice,
+	tree treeSnapshot, architect claim.Token, published error,
+) error {
+	var notDelivered notify.ErrNotDelivered
+	var refused notify.ErrRefusedByHolder
+	var denied notify.ErrPublishDenied
+	switch {
+	case published == nil:
+		return nil
+	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
+		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
+		source := cmp.Or(payload.ResendOf, row.ID)
+		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect}
+		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder); err != nil {
+			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
+		}
+		return nil
+	case errors.As(published, &refused):
+		r.log.Warn("outbox notice finished undelivered: its architect's session does not advertise the delivery mode",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "holder", refused.Holder, "error", published)
+		return nil
+	case errors.As(published, &denied):
+		r.log.Warn("outbox notice finished undelivered: the listener's NATS grant denied the forward to its architect",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "reason", denied.Message)
+		return nil
+	case errors.Is(published, notify.ErrHolderUnresponsive):
+		return fmt.Errorf("publish notice for %s to its architect %s, whose session is unresponsive: %w", row.Issue, architect, published)
+	case !errors.Is(published, notify.ErrNoHolder):
+		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
+	}
+	if ended := architectEnded(tree, r.claimState(architect)); ended != "" {
+		r.log.Info("outbox notice finished undelivered: its architect will not hold its role again",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "because", ended)
+		return nil
+	}
+	return fmt.Errorf("%w: %s holds no role for %s: %w", errNoticeWaits, architect, row.Issue, published)
 }
 
 // reholdNotice queues reported's notice again after a publish its architect's session did not

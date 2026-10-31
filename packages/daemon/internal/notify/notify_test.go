@@ -112,6 +112,42 @@ func TestHTTPPublisherTellsANoHolderRefusalFromAnyOther(t *testing.T) {
 	}
 }
 
+// A listener that carries the session's state in its refusal tells an unresponsive holder from a
+// dead one (dispatch://INFRA-392): `holder_lapsed` with `holder_state` `unresponsive` is a session
+// past its live window but inside its gone horizon, which still holds the role, so the publish is
+// held and sent again (ErrHolderUnresponsive) rather than read as a role nobody holds. A holder
+// already `gone`, a role nobody claimed, and a `holder_lapsed` from a listener that names no state
+// at all are each no holder.
+func TestHTTPPublisherTellsAnUnresponsiveHolderFromNoHolder(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want error
+	}{
+		{"the holder is unresponsive", `{"error":"role legion-demo-controller holder ses_a lapsed; claim retained (last seen 1)","reason":"holder_lapsed","holder":"ses_a","holder_state":"unresponsive","last_seen":1,"claim_released":false}`, ErrHolderUnresponsive},
+		{"the holder is gone", `{"error":"role legion-demo-controller holder ses_a lapsed","reason":"holder_lapsed","holder":"ses_a","holder_state":"gone","last_seen":1,"claim_released":false}`, ErrNoHolder},
+		{"nobody claimed the role", `{"error":"no holder for role legion-demo-controller","reason":"unclaimed","holder_state":"gone"}`, ErrNoHolder},
+		{"an older listener names no state", `{"error":"no live holder for role legion-demo-controller","reason":"holder_lapsed","holder":"ses_a"}`, ErrNoHolder},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			err := New(server.URL, "").Publish(context.Background(), "notifications.role.legion-demo-controller", "held on DEMO-1", map[string]string{"kind": "held"}, "legion-outbox:9")
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("publish error = %v, want %v", err, tc.want)
+			}
+			if other := ErrNoHolder; tc.want == ErrHolderUnresponsive && errors.Is(err, other) {
+				t.Fatalf("publish error = %v, want an unresponsive holder told apart from no holder", err)
+			}
+		})
+	}
+}
+
 // A listener that confirms a role message before it answers says why it did not deliver one:
 // 504 with receipt_timeout or delivery_failed, naming the holder and the envelope it forwarded
 // (roleSendFailure, packages/envoy/cmd/listener/confirmed.go), 403 with capability when the

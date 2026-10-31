@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1093,5 +1094,44 @@ func TestACatchUpCopyCommittedAfterTheFreshOneIsNotPublished(t *testing.T) {
 	}
 	if fmt.Sprint(got) != "[launch 3]" || outboxRows(t, pool) != 0 || !strings.Contains(logged.String(), `msg="outbox catch-up finished without publishing: a newer catch-up supersedes it"`) {
 		t.Fatalf("delivered %v with %d rows left, logged:\n%s\nwant the fresh catch-up alone and the stale copy finished", got, outboxRows(t, pool), logged.String())
+	}
+}
+
+// A listener that says the architect's session is only unresponsive — past its live window,
+// inside its gone horizon, still holding the role — has refused nothing permanent: the row is
+// kept and tried again on the outbox's backoff, so the notice reaches that session once its
+// heartbeats land, and no copy of the re-hold schedule is spent on it. Read as no holder at all,
+// which is what every such refusal was before dispatch://INFRA-392, the same answer finishes the
+// notice undelivered the moment nobody will hold the role for it — here an architect this daemon
+// supervises no claim for — and the notice is lost. Both answers come from a listener answering
+// as the real one does, since the notice's fate turns on how that body is read.
+func TestANoticeIsKeptWhileItsArchitectsSessionIsUnresponsive(t *testing.T) {
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	runner := &outbox{supervisor: sup, log: quietLogger()}
+	architect := claim.Token("legion-LEGION-2-architect")
+	notice := record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}
+	row := mustOutboxRow(t, "LEGION-2", notice, time.Now())
+	row.ID = 71
+	state := "unresponsive"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"role holder ses_architect lapsed; claim retained","reason":"holder_lapsed",`+
+			`"holder":"ses_architect","holder_state":"`+state+`","last_seen":1,"claim_released":false}`)
+	}))
+	defer server.Close()
+	refused := func() error {
+		return notify.New(server.URL, "").Publish(context.Background(), notify.RoleTopicPrefix+string(architect),
+			noticeSummary(notice.Kind, row.Issue), notice, record.OutboxKey(row.ID))
+	}
+
+	kept := runner.noticeAnswered(context.Background(), row, notice, notice, treeSnapshot{}, architect, refused())
+	if !errors.Is(kept, notify.ErrHolderUnresponsive) || errors.Is(kept, errNoticeWaits) {
+		t.Fatalf("answer to an unresponsive holder = %v, want the row kept and retried on its backoff", kept)
+	}
+
+	state = "gone"
+	if dropped := runner.noticeAnswered(context.Background(), row, notice, notice, treeSnapshot{}, architect, refused()); dropped != nil {
+		t.Fatalf("answer to a holder that is gone = %v, want the notice finished undelivered", dropped)
 	}
 }

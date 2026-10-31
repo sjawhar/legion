@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -708,6 +710,32 @@ func TestOutboxMergeQueueWithNoLiveHolderSaysSoOnTheIssue(t *testing.T) {
 	publisher.err = errors.New("listener unavailable")
 	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
 		t.Fatalf("merge queue publish failure = %v, want the listener failure, retried", err)
+	}
+}
+
+// A merge queue holder the listener calls unresponsive still holds the role: its session is past
+// the live window and inside the gone horizon, so the READY packet is kept and retried on the
+// row's backoff, and no Dispatch message stands in for a delivery that was never lost
+// (dispatch://INFRA-392). The refusal comes from a listener answering as the real one does, since
+// what the packet's fate turns on is how that body is read.
+func TestOutboxMergeQueueKeepsThePacketForAnUnresponsiveHolder(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	row.ID = 61
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"role merge-queue holder ses_mq lapsed; claim retained","reason":"holder_lapsed",`+
+			`"holder":"ses_mq","holder_state":"unresponsive","last_seen":1,"claim_released":false}`)
+	}))
+	defer server.Close()
+	client := &outboxDispatch{}
+	runner := &outbox{notices: notify.New(server.URL, ""), dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
+
+	if err := runner.execute(context.Background(), row); !errors.Is(err, notify.ErrHolderUnresponsive) {
+		t.Fatalf("execute = %v, want the packet kept for an unresponsive holder", err)
+	}
+	if len(client.messages) != 0 {
+		t.Fatalf("Dispatch messages = %q, want none while the role's holder is only unresponsive", client.messages)
 	}
 }
 
