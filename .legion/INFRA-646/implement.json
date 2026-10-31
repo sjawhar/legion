@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-646",
-  "completed": "2026-10-31T05:40:00Z",
+  "completed": "2026-10-31T08:52:00Z",
   "proof": [
     {
       "criterion": "A1, the merge rule: on LINUX's replay the change is not slower - the median of three head runs uses no more whole-process CPU-seconds than the highest of three base runs. Six runs alternating, base first, in one session on one pod (m-base-1 20:04:38Z, m-head-1 20:47:39Z, m-base-2 21:30:29Z, m-head-2 22:13:08Z, m-base-3 22:55:52Z, m-head-3 23:38:15Z).",
@@ -67,6 +67,14 @@
       "observed": "Code head 1c9ce28b (merge of main 5330bcb2) has CI run 41172647856 and PR Title 41172647835, both queued at 05:25Z, where e4118455 and af34d101 had check-runs total_count 0. The Go half of the branch's own diff is byte-equal across the merge: 1b8fd788ae228f9e2a0aa5f793ea63b12c7e827a0d91cff1bfb3f0a493361753 at e4118455 and at 1c9ce28b. The whole-diff fingerprints differ (e4118455 2d27ff8b, 1c9ce28b f8a74c51) and the entire delta is one hunk, packages/envoy/AGENTS.md, where main (#2466 and after) reflowed that file to one sentence per line and this branch's own paragraph was rewrapped to match; the changed-file list is identical (36 files, list hash 401d3a49).",
       "headSha": "1c9ce28b07bf362063c339b3c5b8f1871e39f23d",
       "negativeControl": "gh api repos/sjawhar/legion/commits/e4118455e7becb6f3b6036ffde8bdc87900e1fa5/check-runs --jq .total_count is 0, and 0 at af34d101: the previous push carried code and the handoff together under a skip-checks head, so GitHub started nothing. The same query at 1c9ce28b returns 2."
+    },
+    {
+      "criterion": "The head's CI is green of main's own red, and the merge still changes no code",
+      "surface": "GitHub Actions on sjawhar/legion#2522, and go test in this workspace",
+      "command": "go test -count=1 -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries ./internal/broker/oauth/; gh run list --repo sjawhar/legion --branch legion/INFRA-646; jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 'glob:\"packages/**/*.go\"' | sed -e '/^@@/d' -e '/^index /d' | sha256sum",
+      "observed": "Code head 6db39f4d, the merge of main 1a9095e6, which carries #2598. The claim-list test passes in this workspace at that head (ok github.com/sjawhar/envoy/internal/broker/oauth 0.025s), where at 1c9ce28b it failed with documented: session against issued: person, project, project_scope, session. CI run 41185900963 and PR Title 41185900902 are queued at 6db39f4d. The Go half of the branch's own diff is unchanged across this merge too: 1b8fd788ae228f9e2a0aa5f793ea63b12c7e827a0d91cff1bfb3f0a493361753, the same hash as at e4118455 and 1c9ce28b. The merge took no conflict and the tree holds no conflict marker.",
+      "headSha": "6db39f4d0147cc7a6e89e130a33cbf84d4aa5f0f",
+      "negativeControl": "The same test command at 1c9ce28b, in this same workspace and before the merge, failed at claims_doc_test.go:79, and jj diff --name-only there named neither docs/kubernetes.md nor anything under internal/broker, so the red was main's #2474 reflow and not this change."
     }
   ],
   "filesChanged": [
@@ -103,7 +111,8 @@
     "The equivalence corpus is 23 real LINUX specs and A5's is ten, not all 1,204: each spec costs about 40 s a side and the dumps are byte-compared, so more specs buy repetition rather than coverage.",
     "The FindQuote benchmark is the tester's throwaway, not a committed one, and it measures the preallocation alone; the validation a reused finder skips is the tester's A4 by agreement with the architect.",
     "The previous round's handoff said the pmdoc suite was green at the merge head. It was not: the run had a second failure, TestTheZeroValidDocumentWantsADocument/BlockIndexes, which I never saw because I read the run's tail rather than every '^--- FAIL' line, re-ran the one test the tail named and recorded the suite green. That test is one this change added, so it was a test added and never seen to pass, and the tester found it red in CI (envoy-go and envoy-go-race, run 41061824411). A suite is now read by its FAIL count and its final line, and this handoff and the pull request body say how each was run.",
-    "Round 4's push was wrong twice and both are fixed here. (1) It put packages/envoy/internal/dispatch/pmdoc/splice.go and .legion/INFRA-646/implement.json in one push whose head commit carried the skip-checks trailer, so GitHub started no workflow and the code head had no verdict to carry; skill://legion-worker reserves that line for a push touching .legion/<issue>/ alone. This round pushes the merge as a code head with no trailer, waits for its run, and only then pushes this handoff. (2) The merge resolution of packages/envoy/AGENTS.md left jj's closing marker line in the file; it was pushed at 0967458a and removed at 1c9ce28b, which is why there are two merge commits rather than one."
+    "Round 4's push was wrong twice and both are fixed here. (1) It put packages/envoy/internal/dispatch/pmdoc/splice.go and .legion/INFRA-646/implement.json in one push whose head commit carried the skip-checks trailer, so GitHub started no workflow and the code head had no verdict to carry; skill://legion-worker reserves that line for a push touching .legion/<issue>/ alone. This round pushes the merge as a code head with no trailer, waits for its run, and only then pushes this handoff. (2) The merge resolution of packages/envoy/AGENTS.md left jj's closing marker line in the file; it was pushed at 0967458a and removed at 1c9ce28b, which is why there are two merge commits rather than one.",
+    "Round 5's ci-ok red was main's, not this branch's: #2474 reflowed docs/kubernetes.md to one sentence per line, which blank-separated the claim list that packages/envoy/internal/broker/oauth/claims_doc_test.go parses, and the parser stops at the first blank line. The fix is main's #2598 (1a9095e6), merged here rather than re-run, since a re-run of run 41172647856 would reuse the old merge ref. One red of main's may still follow at this head: TestAReconnectCatchesUpWhatTheListenerMissed, which main's open #2594 fixes; if envoy-go fails only on it, the remedy is another merge of main once #2594 lands."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
