@@ -171,11 +171,15 @@ func documentedClaims(t *testing.T) []string {
 
 	var claims []string
 	// The list is the section's first one: the prose lines between the heading and it are skipped,
-	// and the list runs to the first line that is neither a bullet nor a wrapped bullet's indented
-	// continuation — in the document as written, the blank line under it.
+	// and the list runs to the first line that is none of a bullet, a wrapped bullet's indented
+	// continuation, and the blank line docs/kubernetes.md's own layout puts between two items
+	// (AGENTS.md, "Guides use semantic line breaks": "A blank line between list items"). Ending
+	// the list at the first blank line is what this did until that layout reached the file, and it
+	// then read a four-item list as one item and reported the three it could not see as claims the
+	// document had dropped.
 	for i := heading + 1; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], " ")
-		if len(claims) > 0 && line != "" && strings.HasPrefix(line, " ") {
+		if len(claims) > 0 && (line == "" || strings.HasPrefix(line, " ")) {
 			continue
 		}
 		if !strings.HasPrefix(line, "- ") {
