@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-841",
-  "completed": "2026-10-31T00:05:00Z",
-  "round": 3,
+  "completed": "2026-10-31T01:05:00Z",
+  "round": 4,
   "proof": [
     {
       "criterion": "Item 3, and review round 2's four requested changes: the repair test's last check can fail, the reconcile timeout names the error that blocks the reconcile now, awaitHookFailure keeps no copy of awaitReconciled's check, and four stale or repeated comments are gone.",
@@ -12,6 +12,14 @@
       "observed": "5 of 5 PASS, 1.57-1.60 s each. awaitHookFailure returns the retried WARN `envoy nats reconnect hook failed; it is retried` with `reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: no suitable peers for placement, peer offline`, the test starts the stopped member again and waits for the cluster, awaitReconciled returns, and testnats.AwaitStreamCopies finds the stream configured for three copies and holding three settled ones, re-read from a cluster connection.",
       "headSha": "ec52456102149991e14ef490414b7d1886001a85",
       "negativeControl": "Two controls, both reverted with nothing committed. The old rule put back inside awaitReconciled (a logged failure closes the client and ends the wait): `--- FAIL (0.82s)` with `start Dispatch's stream: reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: no suitable peers for placement, peer offline`. A vacuity control on the new last assertion, AwaitStreamCopies asked for 4 copies rather than 3: `--- FAIL (31.65s)` with `stream ENVOY_NOTIFICATIONS did not hold 4 settled copies within 30s`, so the assertion that replaced the dead one does fail when the stream is not at three settled copies."
+    },
+    {
+      "criterion": "The forward merge: GitHub reported the pull request CONFLICTING with main, and the merge head keeps both sides of the one conflicted file and still proves the change.",
+      "surface": "The jj workspace's merge of legion/INFRA-841 with main@origin, then the packages/envoy test binaries and the Dispatch binary's published settings table at the merge head.",
+      "command": "jj new legion/INFRA-841 main@origin -m 'merge: resolve conflict against main@origin' ; cd packages/envoy && go test ./cmd/dispatch/ ./internal/bus/... -count=1 ; go test ./cmd/dispatch/ -run 'TestADispatchStartWaitsOutAReconcileFailureTheBusRetries' -count=3 -v ; go run ./cmd/dispatch settings",
+      "observed": "One merge commit, f89294cde69191fead238b95ad45ef9b47d8d06d over 0b4e17c1aaab and main at 39b51494224f, nothing rebased and nothing rewritten; GitHub now reports the pull request MERGEABLE. One conflicted file, packages/envoy/AGENTS.md, both sides kept: main reflowed the NATS bullet to one sentence per line, and this branch's sentence naming both stop paths is written into that reflowed text at the position the old sentence held (AGENTS.md:2607). At the merge head: ok cmd/dispatch 58.847s and ok internal/bus 336.182s; the repair test 3 of 3 PASS in 1.61-1.68 s; the settings table still prints both corrected rows; gofmt -l and go vet print nothing.",
+      "headSha": "f89294cde69191fead238b95ad45ef9b47d8d06d",
+      "negativeControl": "The unchanged-diff fingerprint, which answers whether the merge moved the pull request's own lines: 1febf71f78eefda4ff4f247b489c31973946f51b56d16ed3b08fe10a04695d48 at 0b4e17c1aaab, 756fb89b1b0d8f5ba38f18deef45354f689510358b15f9754de4db3ad510fe73 at the merge head, so it changed. Read per file, only packages/envoy/AGENTS.md's own diff changed, and only in shape, because main reflowed the lines it replaces; the diffs of stream_replicas_test.go, settings_test.go, settings.go and the changelog fragment are byte-identical across the merge."
     },
     {
       "criterion": "Item 2: the two settings descriptions state the real bound between the WARN and the ERROR, on the surface an operator reads them through. The reviewer corrected their wording in 4430e212; rounds 2 and 3 changed neither row.",
