@@ -8,7 +8,7 @@ Pulumi language needs only the Pulumi CLI:
 | --- | --- |
 | `envoy-infra:host:Listener` | An `envoy-listener` container on a Docker host: see [host:Listener](#hostlistener). |
 | `envoy-infra:aws:NatsService` | A NATS server with JetStream on ECS Fargate, reachable in the VPC through Cloud Map and on a tailnet through a Tailscale sidecar: see [The AWS components](#the-aws-components). |
-| `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. |
+| `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. It is the one component here that serves callers outside your deployment: GitHub's and Slack's webhook senders cannot join a tailnet. |
 | `envoy-infra:gcp:NatsHub` | A NATS server with JetStream on one Google Cloud VM that joins a tailnet, where its clients reach it: see [docs/nats-hub.md](docs/nats-hub.md), which says what it deploys, its inputs and how it is updated, with an example. |
 | `envoy-infra:gcp:ClusteredNatsHub` | NATS with JetStream as three servers on a GKE cluster, one per zone, through the `nats` Helm chart, with an optional tailnet entry whose hosts also run Envoy's session listener: see [gcp:ClusteredNatsHub](#gcpclusterednatshub). |
 | `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster; inside that cluster alone with the tailnet inputs unset, or the cluster alone with `clusterOnly`: see [gcp:Dispatch](#gcpdispatch). |
