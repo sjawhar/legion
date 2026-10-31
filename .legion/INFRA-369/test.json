@@ -2,63 +2,65 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-369",
-  "completed": "2026-10-31T03:20:00Z",
-  "round": "the round after the second review, at code head 1b769383daf41f9cace0e65e1e704a4745745fbc; this round ends in request_backward_move to implementing, not in a completion, because the pull request conflicts with main",
-  "outcome": "The real surface passes and I found no defect. The phase still goes back to implementing: GitHub reports the pull request CONFLICTING with main, so it computes no merge ref and has started no check on this head, and no verdict of mine can stand on a head CI never read. The tree's architect ruled the move and gave its reason, which this handoff's backwardMove field quotes.",
+  "completed": "2026-10-31T04:35:00Z",
+  "round": "the round after the forward merge of main, at code head b290218745ac0425fa4b903250f3bb243e814d89",
+  "workspaceRecreated": "This session's workspace was recreated before this round (LEGION_WORKSPACE_RECREATED=true). It holds legion/INFRA-369 as pushed, and every handoff of mine is there: .legion/INFRA-369/test.json at 8fb9423a is the round-3 file this one replaces, so nothing of mine was lost.",
+  "forwardMerge": {
+    "from": "74af24267b84a24d67020087e43426f0330b582c",
+    "to": "7ff8412ea87c50d6cd285bf5d567dbda518ed765",
+    "fingerprintBefore": "db4665d48ddc360fbc96b00c84fcf2c1fbe78fcee6605f8c61589bdb8ed7224a",
+    "fingerprintAfter": "261412325119208618ac31b25d8555a92ed7a89228e7319720020964c9798fc3",
+    "verdict": "changed",
+    "filesWhoseDiffMoved": [
+      "packages/envoy/AGENTS.md",
+      "packages/envoy/cmd/dispatch/README.md"
+    ],
+    "how": "I computed both fingerprints myself with the procedure in skill://legion-worker/references/conflicts-and-rewrites.md (base read with gh, jj git fetch, diff from fork_point(main@origin | <head>) to <head>, --git --context 0, fileset '~(.legion | docs/solutions)', @@ and index lines dropped) and got the implementer's two numbers. I then split each side's diff into its per-file sections and compared them: of the pull request's 76 files, exactly two differ, both documentation, reflowed into main's one-sentence-per-line layout. No code file's own diff moved.",
+    "scope": "The skill makes a changed fingerprint a full test round. The tree's architect scoped this one on 2026-10-31 to the basic checks, a read of the two resolutions against the code, and a read of CI, on the ground that the change is confined to two guides — which I verified myself before accepting it, per the file list above. I record the scoping here rather than letting the E2E line imply a full round."
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran both of the implementer's commands on a Dispatch stack and database of my own in the issue's pod (the Go server on PostgreSQL 17 with pgvector, database dispatch_tester3, started with DATABASE_URL=postgres://postgres:…@127.0.0.1:55432/dispatch_tester3 bun run dispatch:local, serving on 127.0.0.1:33088 with the fake GitHub on 18616): the acceptance driver answered exit=0 PASS=171 FAIL=0 SKIP=0 and both browser rows passed, the counts the implement handoff records. Its first proof entry also names two package typechecks; those are CI's lanes, so I read CI rather than running them, and CI has run nothing on this head at all (below)."
+    "how": "The implement handoff of this round records the merge and nothing else changed; its own proof entries carry the earlier heads. I re-ran the two commands that exercise the product on a Dispatch stack and database of my own in the issue's pod (database dispatch_tester4, port 30566, fake GitHub 35552) at the merge head, and both answered what it records: the acceptance driver exit=0 PASS=171 FAIL=0 SKIP=0, the two browser rows 2 passed. I also re-computed its fingerprints rather than taking its numbers."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The acceptance lines of the issue, re-proven at this head after the second review round's refactors: A6, A11/R12, A15, R7, R10 and R11 for ask parts, and the reader-facing change.",
+      "criterion": "The acceptance lines of the issue hold at the merge head: A6, A11/R12, A15, R7, R10 and R11 for ask parts, and the reader-facing change.",
       "surface": "A real Dispatch stack in the issue's pod — the Go server on PostgreSQL 17 with pgvector, the production SPA bundle and a real Chromium — driven through the real dispatch CLI, HTTP and the browser.",
-      "command": "DISPATCH_URL=http://127.0.0.1:33088 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=18616 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; then bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/ask-part-references.e2e.ts --reporter=list",
+      "command": "DISPATCH_URL=http://127.0.0.1:30566 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=35552 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; then bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/ask-part-references.e2e.ts --reporter=list",
       "observed": "exit=0, PASS=171 FAIL=0 SKIP=0; 2 passed (the reference opens the ask at that part, and the backlink panel names the ask rather than an artifact).",
-      "headSha": "74af24267b84a24d67020087e43426f0330b582c",
+      "headSha": "7ff8412ea87c50d6cd285bf5d567dbda518ed765",
       "negativeControl": "The driver's own R10 case: GET /api/v1/references?to=<ask>%23b-b9 answers 404 naming the part and the ask while #b-b2 answers 200 with that option's text."
     },
     {
-      "criterion": "The refactor of this round: askPartLinks, one fragment the issue closure and the document's own incoming read share, keeps both consumers and the ask's own refs row (review findings 3 and 9).",
-      "surface": "The same running Dispatch, over HTTP and through dispatch read --issue.",
-      "command": "GET /api/v1/artifacts/<document>/references, GET /api/v1/references?to=<document> and dispatch read --issue <the asking issue>, for a document cited from an option alone, then from a person's answer alone, then from a question alone, then from a question and an option together",
-      "observed": "Option alone: the document read answers referenced_by [{\"kind\":\"ask\",\"id\":\"ede7acdf-…\",\"excerpt\":\"The question names nothing.\"}], the closure prints \"CORE/r3doc-… · depth 1 via ask ede7acdf-…\", and the graph read lists mentions ask/ede7acdf-…#b2. Answer alone: both the document read and the closure list the ask. Question alone: the document read still lists the ask, so the ask-level arm survived the refactor. Question and an option together: the ask is listed once, and two asks citing the same document are listed once each.",
-      "headSha": "74af24267b84a24d67020087e43426f0330b582c",
-      "negativeControl": "Dropping the one citing option empties all three together — referenced_by [], the closure \"- none\", the graph read [] — so each read follows the live part rather than a row left behind."
+      "criterion": "The merge changed the pull request's own diff in two documentation files and in nothing else, so no code surface needs re-exercising beyond the checks above.",
+      "surface": "The workspace's jj history, read with the repository's own fingerprint procedure.",
+      "command": "base=$(gh pr view 2546 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json'); jj git fetch; for each of 74af2426… and 7ff8412e…: jj diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum; then split each output per `diff --git` section and compare section by section",
+      "observed": "db4665d48ddc360f… at the old head, 261412325119208618… at the merge head: changed, and the implementer's two numbers reproduced. 76 file sections on each side; exactly two differ, packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md. No code file's section differs.",
+      "headSha": "7ff8412ea87c50d6cd285bf5d567dbda518ed765",
+      "negativeControl": "The fingerprints differ, which is the control for the comparison being sensitive at all: had I compared the wrong heads or dropped the diff's failure, both sides would have hashed alike or to sha256 of empty input (e3b0c442…), and neither happened."
     },
     {
-      "criterion": "The refactor of this round: AskPartIDs, the one owner of the matching of stored parts to an ask's options and answer (review finding 10), still answers by identity and not by position.",
-      "surface": "The same running Dispatch, over HTTP, with the ask row moved under the index by a direct SQL update — what a stale index or an older build leaves.",
-      "command": "update asks set options = … directly in PostgreSQL, then GET /api/v1/asks/<id>; and an ask whose two options render to the same part text",
-      "observed": "Two options swapped under the index keep their own ids (Beta b3, Alpha b2), so an id follows the text; a row grown by one gives the new option id null; a shrunk row keeps the survivor's b3. Two options whose rendered text is identical have equal text_sha256 in ask_blocks (c824ca3cbe for both) and still take b2 and b3, each reference reading its own part.",
-      "headSha": "74af24267b84a24d67020087e43426f0330b582c",
-      "negativeControl": "The swap is the control: a matcher that fell back to position would answer Beta b2 and Alpha b3, the defect the second review found, and it answers Beta b3 and Alpha b2."
+      "criterion": "The CI selection this branch's files fall under is still complete after the merge.",
+      "surface": "The repository's own gate, run as CI runs it.",
+      "command": "bash .github/scripts/check-ci-filters.sh",
+      "observed": "exit 0: \"every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)\", with 0 uncovered files on each of the 28 gates.",
+      "headSha": "7ff8412ea87c50d6cd285bf5d567dbda518ed765",
+      "negativeControl": "The check's own failure mode is the control: it fails naming each file a filter misses, and it named none."
     },
     {
-      "criterion": "Review finding 3 of this round (important): the five published texts give the reply rule the code keeps.",
-      "surface": "The route index the running server serves, and the texts in the tree a client reads.",
-      "command": "GET /api/v1 against the running server, read for POST /api/v1/issues/{key}/comments; then packages/contracts/src/dispatch-api.ts, packages/envoy/cmd/dispatch/AGENTS.md and packages/envoy/.changes/unreleased/pr2546-ask-parts.yaml",
-      "observed": "The served description reads \"A reply names the comment it answers in reply_to, and one block of it in reply_to_block; with ask_id in place of reply_to, reply_to_block names one part of that ask.\" CreateCommentInput.reply_to_block says the block is \"a block of the comment reply_to names, checked against that comment before reply_to climbs to its thread's head, in an ask's thread as anywhere else, or, with ask_id, a part of that ask\"; Comment.reply_block says the same; AGENTS.md's route row and the changelog fragment carry the same rule.",
-      "headSha": "74af24267b84a24d67020087e43426f0330b582c",
-      "negativeControl": "The old rule is the control: no served or committed text now says a reply in an ask's thread names a part of the ask, which is what a client following the stale text would have sent."
-    },
-    {
-      "criterion": "Review finding 6 of this round (minor): the reply_to_ask hint suggests a value the next refusal accepts.",
-      "surface": "The real dispatch CLI against the running server.",
-      "command": "dispatch comment --ref 'dispatch://KEY/ask/<id>#b-b3@v2' --body x, then the value it hints run through dispatch comment --issue KEY --reply-to-ask <that value>",
-      "observed": "The hint reads \"reply under it with reply_to_ask dispatch://CORE-3/ask/550688d0-…#b-b3 and issue CORE-3\" — the pin stripped — and that value answers \"Replied on ask 550688d0-… (comment e04dde9d-…; ask now waiting on human)\".",
-      "headSha": "74af24267b84a24d67020087e43426f0330b582c",
-      "negativeControl": "The pinned form is still refused by replyBlockProblem — \"reply_to_ask …#b-b3@v2 names revision 2 of the block, but a reply answers the block whatever its text becomes: drop @v2\" — which is the value the hint used to print."
+      "criterion": "This branch's ask-part facts survived the reflow of the two guides the merge resolved.",
+      "surface": "The two guides' own added lines, read against the tree's code, and the sentences a reader acts on driven against the running server.",
+      "command": "jj diff --from fork_point(main@origin | 7ff8412e…) --to 7ff8412e… --git --context 0 for each guide, then every backticked identifier in the 81 added lines looked up in packages/; then GET /api/v1/references for a missing part, a pin to a revision that did not hold it, a pin past the current revision, and ?to=<ask> with and without ?kind=",
+      "observed": "Every identifier the added lines name resolves: askPartLinks (refs/ask_blocks.go:296, used by refs/closure.go:46 and by asksCitingTheDocument, which refs/graph.go:360 calls), refs.AskAnswerPart passed by indexAskParts to the now-variadic itemblocks.Align (align.go:39, ask_blocks.go:211), askAnswerPart's hash salted with the answerer (ask_blocks.go:82), refs.AskBacklinkExclusions = {replies_to, part_of} (graph.go:68), namedReplyBlock (comment_create.go:294), attachAskEventPartIDs (events.go:343), and 0150's reply arm split by the ask/ prefix (0150_ask_blocks.up.sql:97-99, 182). Driven: a part no revision holds answers 404 \"no part \\\"b9\\\" in ask <id>\"; a pin to a revision that did not hold it adds \"at revision 1\"; a pin past the current revision answers \"no revision 9 of ask <id>; its current revision is 1\"; ?to=<ask> lists neither replies_to nor part_of while ?kind=part_of returns b1, b2, b3 and ?kind=replies_to returns the thread; and a comment citing one part counts referenced_by_count 1 on the ask.",
+      "headSha": "7ff8412ea87c50d6cd285bf5d567dbda518ed765",
+      "negativeControl": "The identifier sweep is written to print MISSING for a name the tree does not hold — the failure a reflow that dropped or renamed a fact would show — and it printed none; and #b-b9 is refused where #b-b2 answers 200 with that option's text."
     }
   ],
-  "ci": "Read on GitHub: the pull request is CONFLICTING with main (mergeable CONFLICTING, mergeStateStatus DIRTY, read at 03:00Z), so GitHub computes no merge ref and runs no workflow on it. GET /repos/sjawhar/legion/commits/<sha>/check-runs answers an empty list both at the code head 1b769383daf41f9cace0e65e1e704a4745745fbc and at the branch head 74af24267b84a24d67020087e43426f0330b582c, and the newest run on the branch is at 5775f9cf, the previous review's handoff commit. No static lane — lint, types, the unit and integration suites — is green or red at this head, and the two typecheck lanes the previous CI reported red (pi-legion, claude-envoy) have therefore not been read by CI since the fix. Nothing of CI was re-run here.",
-  "backwardMove": {
-    "to": "implementing",
-    "why": "The tree's architect ruled it on 2026-10-31 after reading the conflict, and I confirmed the conflict myself before acting on it.",
-    "reason": "sjawhar/legion#2546 conflicts with main. Merge main forward (a merge commit, never a rebase). If INFRA-562's #2387 has merged by then, it holds 0150-0152, so renumber this branch's migrations after main's highest at the push. Post the fingerprints, change nothing else.",
-    "testerNote": "No defect of mine is added to that reason: this round's real-surface verification passed in full. After the merge, compute the unchanged-diff fingerprint at 74af24267b84a24d67020087e43426f0330b582c and at the new head; equal means the bare gates alone, and the E2E (tester) line takes the new SHA with the forward-merge re-check note."
-  },
+  "ci": "Read on GitHub at the merge head: the conflict is gone (gh pr view 2546 reports mergeable MERGEABLE, mergeStateStatus BLOCKED), so GitHub computes a merge ref again and CI runs. Run 41166230738 at code head b290218745ac0425fa4b903250f3bb243e814d89 was queued when this handoff was written, with every lane queued beside it — lint, test, typecheck, envoy-go, dispatch, contracts, envoy-client, docs and the rest; changes success, pr-title queued. This is the first CI on this branch since 5775f9cf and the first since round 2's fix of the pi-legion and claude-envoy typecheck lanes, so those two lanes have still not been read by CI since the fix. No lane is green or red here; nothing of CI was re-run by me and no CI result is carried into this handoff for a later step to trust. The reviewer reads the head's checks itself.",
+  "notDriven": [
+    "The two package typechecks round 2 fixed (pi-legion, claude-envoy): they are CI's lanes, and CI's first read of them since the fix was still queued at this completion, so this handoff carries no verdict on them."
+  ],
   "findings": []
 }
