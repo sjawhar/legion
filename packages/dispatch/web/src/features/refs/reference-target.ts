@@ -1,7 +1,8 @@
 import { type QueryClient, type QueryStatus, queryOptions, useQuery } from "@tanstack/react-query";
 
-import { api, artifactVersionPath } from "../../api/client";
+import { ApiError, api, artifactVersionPath } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
+import { issueQuery } from "../../api/queries";
 import type {
   Artifact,
   ArtifactText,
@@ -13,6 +14,7 @@ import type {
   IssueReferenceSummaryDocument,
   MessageRead,
 } from "../../api/types";
+import { itemOfBlock } from "./block-reference";
 import { useMarkdownHeadline } from "./markdown-engine";
 import {
   buildDispatchReference,
@@ -85,14 +87,6 @@ export const documentSummaryQuery = (project: string | undefined, slug: string |
     refetchOnWindowFocus: refetchFailedOnFocus,
   });
 
-/** The full issue, under the key the issue page reads it by. Of the reference surfaces only the
- *  hover card's issue view reads it (priority, labels, open asks, spec), while it is shown. */
-export const issueQuery = (key: string | undefined) =>
-  queryOptions({
-    queryKey: ["issue", key],
-    queryFn: () => api.getIssue(key ?? ""),
-  });
-
 /** One issue message and its replies, as the Conversation's landing, a reference and the hover
  *  card read it. Outside the `["issue"]` prefix, so a refresh of issue details leaves it alone. */
 export const messageQuery = (key: string | undefined, id: string | undefined) =>
@@ -143,8 +137,9 @@ export const referencesQuery = (reference: string | undefined) =>
 /** A block reference's graph read, under the Referenced by panel's key: its node carries the
  *  block's whole text and, for a pinned reference, its pin. A link to a block reads it as a link
  *  to an issue reads its summary, fetched again only by an event that can change it (a version of
- *  the block's document, or a citation of the block added or removed), or on focus after it
- *  failed. */
+ *  the block's document, a citation of the block added or removed, an edit of the comment whose
+ *  block it is, or a reply that names the block), or on focus after it failed. A read that answers
+ *  that the block is gone shows none of the text it held before (`useReferenceData`). */
 export const blockQuery = (reference: string | undefined) =>
   queryOptions({
     ...referencesQuery(reference),
@@ -190,8 +185,8 @@ function blockReferenceOf(route: DispatchReferenceRoute | undefined): string | u
  * document/artifact reference names (never the owning issue's primary spec); `markdown` is that
  * document's text at the referenced version, read only when the caller asked for it; `block` is a
  * block reference's graph read, whose node carries the block's whole text and, for a pinned
- * reference, its pin. A block reference reads that alone: its document's name is the hover card's
- * own read (`useBlockDocument`). */
+ * reference, its pin, undefined once the read answers that the block is gone. A block reference
+ * reads that alone: its document's name is the hover card's own read (`useBlockDocument`). */
 export interface ReferenceData {
   readonly issue: IssueReferenceSummary | undefined;
   readonly artifact: ReferenceArtifact | undefined;
@@ -211,8 +206,10 @@ export interface ReferenceReadOptions {
 /** Warms every query the hover card will read for route, so a card mounted after the hover
  * delay renders populated instead of in its loading form: an issue's full read and its primary
  * spec text (the card's issue view, which no link reads); a document's summary, then its text once
- * its id is known; a block's graph read and the summary that names its document, and no document
- * text; an ask's, comment's or message's own read. Every key comes from the query builders above. */
+ * its id is known; a block's graph read and, for a block of a document, the summary that names its
+ * document, and no document text (a block of a comment or message is its graph read alone, whose
+ * node carries the block's text); an ask's, comment's or message's own read. Every key comes from
+ * the query builders above. */
 export function prefetchReference(queryClient: QueryClient, route: DispatchReferenceRoute): void {
   const warmText = (
     artifact: Pick<ReferenceArtifact, "id" | "kind"> | undefined,
@@ -225,6 +222,9 @@ export function prefetchReference(queryClient: QueryClient, route: DispatchRefer
   const block = blockReferenceOf(route);
   if (block !== undefined) {
     void queryClient.prefetchQuery(blockQuery(block));
+    if (itemOfBlock(route) !== undefined) {
+      return;
+    }
     if (route.kind === "document") {
       void queryClient.prefetchQuery(documentSummaryQuery(route.project, route.slug));
     } else if ("key" in route) {
@@ -293,6 +293,9 @@ export function useReferenceData(
   options: ReferenceReadOptions
 ): ReferenceData {
   const blockReference = blockReferenceOf(route);
+  // A block of a comment or message is read from its graph node alone, which carries its text:
+  // no issue, document, ask, comment or message read behind it.
+  const record = route !== undefined && itemOfBlock(route) !== undefined ? undefined : route;
   const issueRoute =
     route === undefined ||
     route.kind === "agent-artifact" ||
@@ -314,22 +317,22 @@ export function useReferenceData(
       ? route
       : undefined;
   const agentArtifact = route?.kind === "agent-artifact" ? route : undefined;
-  const message = route?.kind === "message" ? route : undefined;
+  const message = record?.kind === "message" ? record : undefined;
   const version =
     route?.kind === "artifact" || route?.kind === "document" || route?.kind === "agent-artifact"
       ? route.version
       : undefined;
   const askId =
-    route?.kind === "ask"
-      ? route.id
-      : route?.kind === "document" && route.item?.kind === "ask"
-        ? route.item.id
+    record?.kind === "ask"
+      ? record.id
+      : record?.kind === "document" && record.item?.kind === "ask"
+        ? record.item.id
         : undefined;
   const commentId =
-    route?.kind === "comment"
-      ? route.id
-      : route?.kind === "document" && route.item?.kind === "comment"
-        ? route.item.id
+    record?.kind === "comment"
+      ? record.id
+      : record?.kind === "document" && record.item?.kind === "comment"
+        ? record.item.id
         : undefined;
   const issue = useQuery({
     ...issueSummaryQuery(summaryKey),
@@ -373,17 +376,32 @@ export function useReferenceData(
     ask: ask.data,
     comment: comment.data,
     message: messageQueryResult.data,
-    block: block.data,
+    // TanStack keeps a query's last data through a failed refetch, so a link or card open when an
+    // edit deletes its block would go on showing text its document or item no longer holds. The
+    // read answers 404 `NOT_FOUND` for that block, and the link and card then read as a freshly
+    // loaded page reads the same link. A pinned reference to a removed block answers 200 with the
+    // pin's `removed` state and keeps its pinned text; any other failure (a dropped connection, a
+    // 5xx) leaves the last data shown.
+    block:
+      block.error instanceof ApiError &&
+      block.error.status === 404 &&
+      block.error.code === "NOT_FOUND"
+        ? undefined
+        : block.data,
   };
 }
 
 /** The document a block reference names, as the hover card shows it: the spec or the issue
  *  document from the issue's summary, or the project document's summary. Undefined until read, and
- *  for a route that names no block. */
+ *  for a route that names no block of a document: a block of a comment or message names its item,
+ *  never a document, so it reads no summary. */
 export function useBlockDocument(
   route: DispatchReferenceRoute | undefined
 ): ReferenceArtifact | undefined {
-  const named = blockReferenceOf(route) === undefined ? undefined : route;
+  const named =
+    route === undefined || blockReferenceOf(route) === undefined || itemOfBlock(route) !== undefined
+      ? undefined
+      : route;
   const project = named?.kind === "document" ? named : undefined;
   const issueKey =
     named !== undefined && named.kind !== "document" && "key" in named ? named.key : undefined;

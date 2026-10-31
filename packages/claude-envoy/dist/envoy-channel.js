@@ -6792,7 +6792,7 @@ var require_protocol = __commonJS(function(exports) {
     }
     disconnect() {
       this.dispatchStatus({ type: core_1.DebugEvents.StaleConnection, data: "" });
-      this.transport.disconnect();
+      this.transport.close();
     }
     reconnect() {
       if (this.connected) {
@@ -15633,6 +15633,7 @@ var require_node_transport = __commonJS(function(exports) {
         d.resolve(socket);
         socket.removeAllListeners();
       });
+      this.socket = socket;
       socket.on("error", (err) => {
         dialError = err;
       });
@@ -15915,8 +15916,11 @@ var require_node_transport = __commonJS(function(exports) {
     }
     _closed(err_1) {
       return __awaiter(this, arguments, undefined, function* (err, internal = true) {
-        if (!this.connected)
+        if (!this.connected) {
+          if (this.socket)
+            this.socket.destroy();
           return;
+        }
         if (this.done)
           return;
         this.closeError = err;
@@ -36256,6 +36260,21 @@ var MAX_ISSUE_PAGE_LIMIT = 250;
 var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
+var IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+var IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
+var IDEMPOTENCY_KEY_MAX = 128;
+var IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[A-Za-z0-9._:-]{1,${IDEMPOTENCY_KEY_MAX}}$`);
+var IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
+var IDEMPOTENCY_KEY_COMMITTED = "KEY_COMMITTED";
+var IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+function retriesUnderKey(status, code) {
+  return status >= 500 || status === 408 || status === 429 || status === 409 && code === IDEMPOTENCY_KEY_IN_FLIGHT;
+}
+function answerNotKept(status, replayed, body) {
+  return replayed && status >= 200 && status < 300 && typeof body === "object" && body !== null && Reflect.get(body, "code") === IDEMPOTENCY_ANSWER_NOT_KEPT;
+}
+var IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+var IDEMPOTENCY_LEASE_MS = 60 * 1000;
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 var SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
 var IssueDeployedEventPayloadSchema = strictObject({
@@ -36383,6 +36402,13 @@ var CommentDeliverySchema = object({
   reply_id: string2().nullable(),
   created_at: string2()
 });
+var ReplyBlockSchema = object({
+  node: string2(),
+  ref: string2().optional(),
+  block_id: string2(),
+  text: string2(),
+  removed: boolean2()
+});
 var CommentEventPayloadSchema = object({
   id: string2().optional(),
   artifact_name: string2().optional(),
@@ -36408,6 +36434,7 @@ var CommentEventPayloadSchema = object({
   created_at: string2().optional(),
   mentions: array(CommentMentionSchema).optional(),
   deliveries: array(CommentDeliverySchema).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: array(string2()).optional()
 }).passthrough();
 var MessageEventPayloadSchema = object({
@@ -36418,6 +36445,7 @@ var MessageEventPayloadSchema = object({
   reply_body: string2().optional(),
   thread_target: string2().optional(),
   author: object({ kind: string2(), id: string2() }).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: array(string2()).optional()
 });
 var DispatchTargetedResourceIDSchema = uuid2();
@@ -36792,11 +36820,12 @@ var DOC_EDIT_OPS = [
   "delete_row",
   "delete_column"
 ];
+var RELATED_CHECK_RESULT = "Dispatch then runs the related-item check (waiting at most five seconds; dispatch related runs " + "it without writing), and the result says, right after the line naming what was created, " + "which items it found and how it searched, that it searched and found nothing, or that no " + "check was made, why, and the dispatch search to run instead.";
 var dispatchToolSpecs = [
   {
     name: "dispatch_issue",
     example: { project: "DSP", title: "Native workspace" },
-    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
+    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " + `${RELATED_CHECK_RESULT} With --force, the result also names each issue whose title you forced past. ` + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
       title: z.string({ max: ISSUE_TITLE_MAX }).describe("Concise issue title, at most 1,000 characters."),
@@ -36869,7 +36898,7 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -36971,7 +37000,7 @@ var dispatchToolSpecs = [
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
-      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
+      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. Mutually " + "exclusive with reply_to.").optional(),
       turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
@@ -37006,7 +37035,7 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
-      in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
+      in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " + "replies to that message and names the passage the reply answers. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
       images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: messageValidation
@@ -37019,7 +37048,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37052,7 +37081,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37134,6 +37163,25 @@ var dispatchToolSpecs = [
     }
   },
   {
+    name: "dispatch_related",
+    example: { project: "CORE", title: "Retry failed webhook deliveries" },
+    description: "Run the related-item check that dispatch issue, dispatch ask and a new decision block in " + "dispatch doc-edit run on their own write, and write nothing: it lists the three items of " + "one project most like a title and a text (at most one per issue or document, open ones " + "first), each ask with whether it is answered, and a past decision that already answers " + "the same question. Use it to check a draft before filing it. It searches by meaning and by " + "the text's rarest words, and says how it searched; when meaning search cannot run it " + "searches by keywords only and says why. When it could not search at all it says why and " + "names the dispatch search to run instead. exclude_issue leaves that issue's own items out, " + "as a check on that issue's own write does; keywords_only skips meaning search.",
+    arguments: (z) => ({
+      project: z.string().describe("Project key to search within, such as CORE."),
+      title: z.string({ max: ISSUE_TITLE_MAX }).describe("Optional title to check, as an issue title; at most 1,000 characters.").optional(),
+      text: z.string().describe("Optional text to check, such as a draft spec or a question.").optional(),
+      exclude_issue: z.string().describe("Optional issue key in the project whose own items are left out.").optional(),
+      keywords_only: z.boolean().describe("Search by keywords only, skipping meaning search.").optional()
+    }),
+    validation: {
+      check: (value) => {
+        const { project } = value;
+        return typeof project !== "string" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: `project is not a project key: ${PROJECT_KEY_RULE}`
+    }
+  },
+  {
     name: "dispatch_issues",
     example: { project: "PROJ", limit: 250, offset: 250 },
     description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running, as of the server's copy of the listener's session list, at " + "most 5 s old, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never. " + "all takes the whole filtered list in one read instead, for a caller that must not miss or " + "repeat a row while other writers change the list, and especially for one whose own writes " + "move issues out of what it filtered on.",
@@ -37191,6 +37239,13 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       project: z.string().describe("Project key; when supplied, lists every open ask in the project instead of only this session's own.").optional()
     }),
+    strict: true
+  },
+  {
+    name: "dispatch_answers",
+    example: {},
+    description: "List every answer and comment a person wrote to this session in the last 72 hours, newest first, each in full: " + "answers to its asks, replies on its asks and in its comment threads, comments on its documents and on issues routed to it, " + "mentions of it, messages to it and replies to its messages. Each item names its time, its writer, what it is, its " + "dispatch:// reference and its issue or document, an answer's question and choices, and the words, never cut. " + "Run it when the list of people's answers on a model request says it left older items out. " + "It reads this session's id from CLAUDE_CODE_SESSION_ID under Claude Code and DISPATCH_SESSION_ID elsewhere, so a subagent reads its parent's.",
+    arguments: () => ({}),
     strict: true
   },
   {
@@ -37280,7 +37335,82 @@ var LEGION_ROLES = [
   "reviewer",
   "merger"
 ];
+var PROJECT_TOKEN = /^[a-z0-9]+$/;
 var DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
+function roleForPhase(phase) {
+  switch (phase) {
+    case "planning":
+      return "planner";
+    case "implementing":
+    case "retro":
+      return "implementer";
+    case "testing":
+      return "tester";
+    case "reviewing":
+      return "reviewer";
+    case "accepting":
+      return "architect";
+    case "merging":
+      return "merger";
+    default:
+      return;
+  }
+}
+function isLegionProjectToken(project) {
+  return PROJECT_TOKEN.test(project);
+}
+function assertLegionProjectToken(project) {
+  if (!isLegionProjectToken(project)) {
+    throw new Error(`Invalid Legion project token: ${project}`);
+  }
+}
+function roleToken(project, issue, role) {
+  assertLegionProjectToken(project);
+  const dispatchMatch = DISPATCH_KEY_PATTERN.exec(issue);
+  if (!dispatchMatch)
+    throw new Error(`Invalid IssueKey: ${issue}`);
+  const [, dispatchProject, number] = dispatchMatch;
+  return `legion-${project}-${dispatchProject?.toLowerCase()}-${number}-${role}`;
+}
+// ../contracts/src/related-forms.ts
+function relatedCheckFormOf(suggestions) {
+  const { outcome, missing } = suggestions;
+  const searchQuery = suggestions.search_query;
+  if (outcome === "not_made" || outcome === undefined && missing !== undefined) {
+    return { form: "not_made", reason: missing ?? "the server gave no reason", searchQuery };
+  }
+  const mode = relatedCheckModeWords(suggestions);
+  if (suggestions.related.length > 0) {
+    return { form: "items", mode, related: suggestions.related };
+  }
+  if (outcome === undefined) {
+    return {
+      form: "not_made",
+      reason: "the server did not say whether it searched",
+      searchQuery
+    };
+  }
+  if (outcome === "found" || outcome === "none") {
+    return { form: "nothing", mode };
+  }
+  return {
+    form: "not_made",
+    reason: `the server answered an outcome this client does not know (${String(outcome)})`,
+    searchQuery
+  };
+}
+function relatedCheckModeWords(suggestions) {
+  const { search, search_note: note } = suggestions;
+  if (search === undefined)
+    return;
+  if (search === "meaning_and_keywords")
+    return "meaning and keywords";
+  const words = search === "keywords_only" ? "keywords only" : String(search);
+  return note === undefined || note === "" ? words : `${words}: ${note}`;
+}
+function relatedCheckSearchWords(text) {
+  return (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4).slice(0, 3).join(" ");
+}
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
@@ -38340,9 +38470,844 @@ function commandsHelp() {
 `);
 }
 
+// ../envoy-client/src/dispatch-http.ts
+class DispatchServiceError extends Error {
+  code;
+  status;
+  candidates;
+  current;
+  mismatches;
+  name = "DispatchServiceError";
+  fromDispatch = true;
+  constructor(code, status, message, candidates, current, mismatches) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.candidates = candidates;
+    this.current = current;
+    this.mismatches = mismatches;
+  }
+}
+
+class DispatchGatewayError extends DispatchServiceError {
+  answer;
+  advice;
+  fromDispatch = false;
+  transient;
+  mayHaveReachedDispatch;
+  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
+    super(`HTTP_${status}`, status, message);
+    this.answer = answer;
+    this.advice = advice;
+    this.transient = transientStatus(status);
+    this.mayHaveReachedDispatch = reachesDispatch(status);
+  }
+}
+
+class DispatchWriteUnsettledError extends Error {
+  last;
+  attempts;
+  name = "DispatchWriteUnsettledError";
+  constructor(last, attempts, unanswered) {
+    let answer;
+    let why = "an earlier attempt of the write may have reached Dispatch";
+    if (last instanceof DispatchGatewayError) {
+      answer = last.answer;
+    } else if (last instanceof DispatchServiceError) {
+      answer = `${last.code}: ${last.message}`;
+      if (last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
+        why = "Dispatch was still running an earlier attempt of the write";
+      }
+    } else {
+      answer = unanswered ?? last.message;
+      why = "an attempt of the write may have reached Dispatch";
+    }
+    const tried = attempts === 1 ? "its only attempt" : `the last of ${attempts} attempts`;
+    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect: check whether ` + "it did before retrying it.", { cause: last });
+    this.last = last;
+    this.attempts = attempts;
+  }
+}
+
+class DispatchWriteLandedError extends Error {
+  code;
+  status;
+  name = "DispatchWriteLandedError";
+  constructor(code, status, method, url) {
+    const lost = code === IDEMPOTENCY_ANSWER_NOT_KEPT ? "Dispatch kept no copy of its answer, which was too large" : "its answer was lost on the way back";
+    super(`${method} ${url} was made, but ${lost} (${code}), so this command cannot print what it ` + "made: read it back with `dispatch read`, or with the matching list for something it created.");
+    this.code = code;
+    this.status = status;
+  }
+}
+function asErrorShape(value) {
+  return typeof value === "object" && value !== null ? value : {};
+}
+function isJson(response) {
+  return response.headers.get("content-type")?.includes("application/json") ?? false;
+}
+function isNoRoute(error) {
+  return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith("no route for ");
+}
+var ISSUE_EVENTS_PAGE_MAX = 200;
+var DISPATCH_TOOL_DEADLINE_MS = 60000;
+function requestSignal(signal) {
+  const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
+  return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
+var DISPATCH_WRITE_RETRY = {
+  pausesMs: [1000, 2000, 4000, 8000],
+  withinMs: 30000,
+  silenceMs: 20000
+};
+function pauseFor(ms, signal) {
+  const { promise, resolve, reject } = Promise.withResolvers();
+  if (signal.aborted) {
+    reject(signal.reason);
+    return promise;
+  }
+  const stop = () => {
+    clearTimeout(timer);
+    reject(signal.reason);
+  };
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", stop);
+    resolve();
+  }, ms);
+  signal.addEventListener("abort", stop, { once: true });
+  return promise;
+}
+function retryAfterMs(response) {
+  const value = response.headers.get("Retry-After")?.trim() ?? "";
+  if (/^\d+$/.test(value))
+    return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
+}
+var KEYED_LAYER_MEMORY_MS = 5 * 60000;
+var KEYED_LAYER_SEEN = new Map;
+var KEYED_LAYER_PROBES = new Map;
+var KEY_LAYER_PROBE_MS = 5000;
+function keyEchoed(response, key) {
+  const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
+  return echoed.replace(/^"(.*)"$/, "$1") === key;
+}
+var STREAMED_BODY_MIN = 1 << 20;
+var STREAMED_BODY_CHUNK = 64 << 10;
+function attemptBody(body, headers, progress) {
+  const bytes = typeof body.content === "string" ? new TextEncoder().encode(body.content) : body.content;
+  if (bytes.byteLength < STREAMED_BODY_MIN)
+    return { body: body.content, headers };
+  let sent = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      progress();
+      if (sent >= bytes.byteLength) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(sent + STREAMED_BODY_CHUNK, bytes.byteLength);
+      controller.enqueue(bytes.subarray(sent, end));
+      sent = end;
+    }
+  });
+  return { body: stream, headers: { ...headers, "Content-Length": String(bytes.byteLength) } };
+}
+
+class WriteAttemptSilent extends Error {
+  name = "WriteAttemptSilent";
+  constructor(silenceMs) {
+    super(`made no progress for ${silenceMs / 1000} s, so it was cut off`);
+  }
+}
+var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+async function writeAnswer(response, key) {
+  const echoed = keyEchoed(response, key);
+  if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
+    return { response, again: false, reached: false, echoed, unjudged: false };
+  }
+  const { status } = response;
+  const text = await response.text();
+  let shape = {};
+  if (isJson(response)) {
+    try {
+      shape = asErrorShape(JSON.parse(text));
+    } catch {
+      shape = {};
+    }
+  }
+  const again = retriesUnderKey(status, shape.code);
+  return {
+    response: new Response(text, {
+      status,
+      statusText: response.statusText,
+      headers: response.headers
+    }),
+    again,
+    reached: status >= 500 || again && status === 409,
+    echoed,
+    unjudged: !echoed && typeof shape.error === "string"
+  };
+}
+function whyNotAPage(answer) {
+  if (typeof answer === "string") {
+    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
+  }
+  let what;
+  if (Array.isArray(answer)) {
+    what = `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
+  } else if (answer === null || typeof answer !== "object") {
+    what = answer === null ? "null" : `a ${typeof answer}`;
+  } else {
+    const fields = answer;
+    const lacking = [
+      ...Array.isArray(fields.issues) ? [] : ["an issues array"],
+      ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
+    ];
+    if (lacking.length === 0)
+      return;
+    what = `an object without ${lacking.join(" or ")}`;
+  }
+  return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
+}
+function whyNotAnArray(answer) {
+  if (typeof answer === "string")
+    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
+  if (answer === null)
+    return "null";
+  if (typeof answer !== "object")
+    return `a ${typeof answer}`;
+  if ("issues" in answer && Array.isArray(answer.issues)) {
+    return "a page, so this Dispatch pages a request that carries no limit and no offset";
+  }
+  return "an object that is not the listing";
+}
+var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
+function gatewayAdvice(method, status) {
+  if (!transientStatus(status)) {
+    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
+  }
+  if (method === "GET")
+    return "a retry may succeed";
+  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
+}
+function transientStatus(status) {
+  return status >= 500 || status === 408 || status === 429;
+}
+function reachesDispatch(status) {
+  return status >= 500;
+}
+var REDACTED = "[redacted]";
+var EXCERPT_SCAN_LIMIT = 64 * 1024;
+var BEARER_PIECE = 8;
+function redactBearer(text, bearer) {
+  if (bearer === "")
+    return text.slice(0, EXCERPT_SCAN_LIMIT);
+  const length = Math.min(BEARER_PIECE, bearer.length);
+  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
+  const covered = new Uint8Array(scanned.length);
+  const pieces = new Set;
+  for (let at = 0;at + length <= bearer.length; at++)
+    pieces.add(bearer.slice(at, at + length));
+  for (const piece of pieces) {
+    let found = scanned.indexOf(piece);
+    while (found !== -1) {
+      covered.fill(1, found, found + length);
+      found = scanned.indexOf(piece, found + 1);
+    }
+  }
+  let redacted = "";
+  let kept = 0;
+  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
+    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
+    const end = covered.indexOf(0, start);
+    kept = end === -1 ? scanned.length : end;
+  }
+  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
+}
+function excerpt(text, token) {
+  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
+  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
+}
+
+class DispatchClient {
+  token;
+  fetchImpl;
+  writeRetry;
+  #baseUrl;
+  #resolvedIssues = new Map;
+  #signal;
+  constructor(baseUrl, token, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
+    this.token = token;
+    this.fetchImpl = fetchImpl;
+    this.writeRetry = writeRetry;
+    this.#baseUrl = baseUrl.replace(/\/+$/, "");
+    this.#signal = requestSignal(signal);
+  }
+  async issue(input) {
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "issues"], input);
+    return { ...answer.payload, created: answer.status === 201 };
+  }
+  async resolveIssue(issueReference) {
+    return this.#resolveIssue(issueReference);
+  }
+  async listIssuePage(options, page) {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options, limit: page.limit, offset: page.offset };
+    const answer = await this.#json("GET", path, undefined, query);
+    const refusal = whyNotAPage(answer);
+    if (refusal === undefined)
+      return answer;
+    throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
+  }
+  async listAllIssues(options) {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options };
+    const answer = await this.#json("GET", path, undefined, query);
+    if (Array.isArray(answer))
+      return answer;
+    throw new Error(`GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`);
+  }
+  async listProjectArtifacts(project, unlinked = false) {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
+  }
+  async projectArtifact(project, input, key) {
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input, key);
+  }
+  async getProjectArtifact(project, slug) {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
+  }
+  async agentArtifact(sessionId, input) {
+    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
+  }
+  async getAgentArtifact(sessionId, slug) {
+    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
+  }
+  async getIssueArtifact(issue, slug) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "artifacts",
+      slug
+    ]);
+  }
+  async search(query, options = {}) {
+    return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
+  }
+  async related(project, input) {
+    return this.#json("POST", ["api", "v1", "projects", project, "related"], input);
+  }
+  async getIssue(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue)]);
+  }
+  async updateIssue(issue, input) {
+    return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
+  }
+  async claimIssue(issue, input = {}) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
+  }
+  async releaseIssueClaim(issue, input = {}) {
+    return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
+  }
+  async getIssueEvents(issue, after = 0, limit = ISSUE_EVENTS_PAGE_MAX) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "events"], undefined, { after, limit });
+  }
+  async read(issueReference, options = {}) {
+    const issueKey = await this.#resolveIssue(issueReference);
+    const issue = await this.getIssue(issueKey);
+    const requested = options.events;
+    const count = requested === undefined ? DEFAULT_ISSUE_READ_EVENTS : requested === "all" ? issue.last_seq : Math.min(requested, issue.last_seq);
+    const events = [];
+    let after = Math.max(0, issue.last_seq - count);
+    while (events.length < count) {
+      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
+      const page = await this.getIssueEvents(issueKey, after, limit);
+      events.push(...page);
+      const last = page.at(-1);
+      if (page.length < limit || last === undefined || events.length >= count)
+        break;
+      if (last.seq <= after) {
+        throw new Error(`GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`);
+      }
+      after = last.seq;
+    }
+    return { issue, events };
+  }
+  async ask(issue, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], input);
+  }
+  async openAsks(sessionID, since) {
+    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, {
+      author_session: sessionID,
+      ...since === undefined ? {} : { since }
+    });
+  }
+  async openAsksForProject(project) {
+    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
+  }
+  async sessionAnswers(sessionID, options = {}) {
+    return this.#json("GET", ["api", "v1", "agents", sessionID, "answers"], undefined, {
+      ...options.since === undefined ? {} : { since: options.since },
+      ...options.maxChars === undefined ? {} : { max_chars: options.maxChars }
+    }, options.signal);
+  }
+  async listAgents() {
+    return this.#json("GET", ["api", "v1", "agents"]);
+  }
+  async whoami() {
+    return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+  async createProject(input) {
+    return this.#json("POST", ["api", "v1", "projects"], input);
+  }
+  async listProjects() {
+    return this.#json("GET", ["api", "v1", "projects"]);
+  }
+  async listArchitectureSources(project) {
+    try {
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
+    } catch (error) {
+      if (!isNoRoute(error))
+        throw error;
+    }
+    try {
+      const source = await this.#json("GET", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-source"
+      ]);
+      return source === null ? [] : [source];
+    } catch (error) {
+      if (error instanceof DispatchServiceError && error.status === 404 && error.code === "SOURCE_NOT_FOUND") {
+        return [];
+      }
+      throw error;
+    }
+  }
+  async syncArchitectureSources(project) {
+    try {
+      return await this.#json("POST", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-sources",
+        "sync"
+      ]);
+    } catch (error) {
+      if (!isNoRoute(error))
+        throw error;
+    }
+    const source = await this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-source",
+      "sync"
+    ]);
+    return [source];
+  }
+  async syncArchitectureSource(project, repo) {
+    const [owner, name, ...rest] = repo.split("/");
+    if (!owner || !name || rest.length > 0) {
+      throw new Error(`repository must be owner/name, got ${JSON.stringify(repo)}`);
+    }
+    return this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-sources",
+      owner,
+      name,
+      "sync"
+    ]);
+  }
+  async resolveAsk(id, input) {
+    return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
+  }
+  async requestApproval(artifactID, input) {
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+    return { ...answer.payload, recorded: answer.status === 201 };
+  }
+  async editAsk(id, input) {
+    return this.#json("PATCH", ["api", "v1", "asks", id], input);
+  }
+  async comment(issue, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], input);
+  }
+  async listIssueAsks(issue, state) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], undefined, state === undefined ? undefined : { state });
+  }
+  async getArtifactAsks(id, state) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "asks"], undefined, state === undefined ? undefined : { state });
+  }
+  async artifactAsk(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
+  }
+  async suggest(issue, input) {
+    const { replace_with, ...comment } = input;
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], {
+      ...comment,
+      suggestion: { replace_with }
+    });
+  }
+  async getArtifactComments(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
+  }
+  async artifactComment(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
+  }
+  async artifactSuggest(id, input) {
+    const { replace_with, ...comment } = input;
+    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
+      ...comment,
+      suggestion: { replace_with }
+    });
+  }
+  async message(issue, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"], input);
+  }
+  async messageReply(id, input, options = {}) {
+    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
+  }
+  async deliveryReply(resource, id, input) {
+    const collection = resource === "message" ? "messages" : "comments";
+    await this.#json("POST", ["api", "v1", collection, id, "reply"], input);
+  }
+  async getMessage(issue, id) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "messages",
+      id
+    ]);
+  }
+  async getMessageThread(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
+  }
+  async acceptMessageDelivery(id, attempt, input) {
+    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
+  }
+  async artifact(issue, input) {
+    return this.#upload(["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"], input);
+  }
+  async getArtifact(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id]);
+  }
+  async docRead(id, version) {
+    return version === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version)]);
+  }
+  async fileVersion(id, version) {
+    const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
+    const response = await this.#send("GET", url, undefined, "*/*");
+    if (!response.ok)
+      return this.#response("GET", url, response);
+    return {
+      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+      bytes: new Uint8Array(await response.arrayBuffer())
+    };
+  }
+  async artifactBlocks(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
+  }
+  async commentBlocks(id) {
+    return this.#json("GET", ["api", "v1", "comments", id, "blocks"]);
+  }
+  async messageBlocks(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id, "blocks"], undefined, session === undefined ? undefined : { session });
+  }
+  async docEdit(id, input, key) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input, undefined, undefined, key);
+  }
+  async nameArtifactVersion(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
+  }
+  async getArtifactEvents(id, after = 0, limit = 200) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "events"], undefined, { after, limit });
+  }
+  async getArtifactReferences(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
+  }
+  async getAsk(id) {
+    return this.#json("GET", ["api", "v1", "asks", id]);
+  }
+  async followAsk(id, sessionId, actor) {
+    await this.#json("PUT", ["api", "v1", "asks", id, "followers", sessionId], { actor });
+  }
+  async unfollowAsk(id, sessionId, actor) {
+    await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
+  }
+  async getComment(id) {
+    return this.#json("GET", ["api", "v1", "comments", id]);
+  }
+  async resolveComment(id, actor) {
+    return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
+  }
+  async getComments(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
+  }
+  async getIssueReferences(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "references"], undefined, { versions: "latest" });
+  }
+  async getReferences(query) {
+    return this.#json("GET", ["api", "v1", "references"], undefined, {
+      ..."to" in query ? { to: query.to } : { from: query.from },
+      ...query.kind === undefined || query.kind.length === 0 ? {} : { kind: query.kind.join(",") },
+      ...query.since === undefined ? {} : { since: query.since }
+    });
+  }
+  async#resolveIssue(issueReference) {
+    if (!issueReference.includes("#"))
+      return issueReference;
+    let resolved = this.#resolvedIssues.get(issueReference);
+    if (!resolved) {
+      resolved = this.#json("GET", ["api", "v1", "issues", "resolve"], undefined, {
+        ref: issueReference
+      }).then((resolution) => resolution.key);
+      this.#resolvedIssues.set(issueReference, resolved);
+    }
+    try {
+      return await resolved;
+    } catch (error) {
+      this.#resolvedIssues.delete(issueReference);
+      throw error;
+    }
+  }
+  async#json(method, path, body, query, signal, key) {
+    return (await this.#jsonAnswer(method, path, body, query, signal, key)).payload;
+  }
+  async#jsonAnswer(method, path, body, query, signal, key) {
+    const url = this.#url(path, query);
+    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" }, undefined, signal, key);
+    return { status: response.status, payload: await this.#response(method, url, response) };
+  }
+  async#upload(path, input, key) {
+    if ("content" in input)
+      return this.#json("POST", path, input, undefined, undefined, key);
+    const form = new FormData;
+    form.set("name", input.name);
+    if (input.summary !== undefined)
+      form.set("summary", input.summary);
+    if (input.actor !== undefined)
+      form.set("actor", JSON.stringify(input.actor));
+    form.set("file", input.file, input.name);
+    return this.#form("POST", path, form, key);
+  }
+  async#form(method, path, form, key) {
+    const url = this.#url(path);
+    const encoded = new Response(form);
+    const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
+    const content = new Uint8Array(await encoded.arrayBuffer());
+    const response = await this.#send(method, url, { content, type }, undefined, undefined, key);
+    return this.#response(method, url, response);
+  }
+  async#send(method, url, body, accept = "application/json", signal, callerKey) {
+    const headers = {
+      Accept: accept,
+      Authorization: `Bearer ${this.token}`
+    };
+    if (body !== undefined)
+      headers["Content-Type"] = body.type;
+    if (method !== "POST" && method !== "PATCH") {
+      return this.fetchImpl(url, {
+        method,
+        headers,
+        signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
+        ...body === undefined ? {} : { body: body.content }
+      });
+    }
+    const key = callerKey ?? crypto.randomUUID();
+    headers[IDEMPOTENCY_KEY_HEADER] = key;
+    const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
+    const request = `${method} ${url}`;
+    const started = this.#now();
+    let reached = false;
+    for (let attempt = 1;; attempt++) {
+      let answer;
+      let thrown;
+      try {
+        answer = await writeAnswer(await this.#attempt(url, method, headers, body, silenceMs), key);
+        if (answer.echoed)
+          KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
+        if (!answer.again)
+          return answer.response;
+        reached ||= answer.reached;
+      } catch (error) {
+        const name = error instanceof Error || error instanceof DOMException ? error.name : "";
+        if (!(error instanceof WriteAttemptSilent) && (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")) {
+          throw this.#ended(error, request, attempt, true);
+        }
+        thrown = error;
+        reached = true;
+      }
+      const scheduled = pausesMs[attempt - 1];
+      const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
+      const inTime = scheduled !== undefined && this.#now() - started + wait <= withinMs;
+      if (!inTime || !(answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false))) {
+        if (answer !== undefined) {
+          return this.#unsettled(method, url, answer.response, reached, attempt);
+        }
+        if (thrown instanceof WriteAttemptSilent) {
+          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`);
+        }
+        throw thrown;
+      }
+      await answer?.response.body?.cancel().catch(() => {
+        return;
+      });
+      try {
+        await pause(wait, this.#signal);
+      } catch (error) {
+        throw this.#ended(error, request, attempt, reached);
+      }
+    }
+  }
+  #now() {
+    return this.writeRetry.now?.() ?? performance.now();
+  }
+  async#attempt(url, method, headers, body, silenceMs) {
+    const cut = new AbortController;
+    const silent = () => cut.abort(new WriteAttemptSilent(silenceMs));
+    let timer = setTimeout(silent, silenceMs);
+    let answered = false;
+    const progress = () => {
+      if (answered)
+        return;
+      clearTimeout(timer);
+      timer = setTimeout(silent, silenceMs);
+    };
+    try {
+      return await this.fetchImpl(url, {
+        method,
+        signal: AbortSignal.any([this.#signal, cut.signal]),
+        ...body === undefined ? { headers } : attemptBody(body, headers, progress)
+      });
+    } catch (error) {
+      if (cut.signal.aborted && !this.#signal.aborted)
+        throw cut.signal.reason;
+      throw error;
+    } finally {
+      answered = true;
+      clearTimeout(timer);
+    }
+  }
+  #ended(error, request, attempts, mayHaveReached) {
+    const reason = this.#signal.aborted ? this.#signal.reason : error;
+    const timedOut = (reason instanceof Error || reason instanceof DOMException) && reason.name === "TimeoutError";
+    if (!timedOut || !mayHaveReached || !(error instanceof Error))
+      return error;
+    return new DispatchWriteUnsettledError(error, attempts, `${request} had no definitive answer when its deadline ended it`);
+  }
+  async#runsKeyedLayer(unjudged) {
+    const origin = this.#baseUrl;
+    if (unjudged)
+      KEYED_LAYER_SEEN.delete(origin);
+    const seen = KEYED_LAYER_SEEN.get(origin);
+    if (seen !== undefined && this.#now() - seen < KEYED_LAYER_MEMORY_MS)
+      return true;
+    let probe = KEYED_LAYER_PROBES.get(origin);
+    if (probe === undefined) {
+      probe = this.#probeKeyedLayer().finally(() => KEYED_LAYER_PROBES.delete(origin));
+      KEYED_LAYER_PROBES.set(origin, probe);
+    }
+    const runs = await probe;
+    if (runs)
+      KEYED_LAYER_SEEN.set(origin, this.#now());
+    return runs;
+  }
+  async#probeKeyedLayer() {
+    try {
+      const response = await this.fetchImpl(`${this.#baseUrl}/healthz`, {
+        method: "GET",
+        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)])
+      });
+      if (!isJson(response))
+        return false;
+      const health = await response.json();
+      return typeof health === "object" && health !== null && Reflect.get(health, "idempotency_keys") === true;
+    } catch {
+      return false;
+    }
+  }
+  async#unsettled(method, url, response, reached, attempts) {
+    const refusal = await this.#response(method, url, response).catch((error) => error);
+    if (reached && refusal instanceof DispatchServiceError) {
+      const landedAlone = refusal instanceof DispatchGatewayError ? refusal.mayHaveReachedDispatch : refusal.status >= 500;
+      if (!landedAlone)
+        throw new DispatchWriteUnsettledError(refusal, attempts);
+    }
+    throw refusal;
+  }
+  #url(path, query) {
+    const url = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
+    if (query) {
+      for (const [name, value] of Object.entries(query)) {
+        if (typeof value === "string" || typeof value === "number") {
+          url.searchParams.set(name, String(value));
+        } else if (Array.isArray(value)) {
+          for (const item of value)
+            url.searchParams.append(name, String(item));
+        }
+      }
+    }
+    return url.toString();
+  }
+  async#response(method, url, response) {
+    const text = await response.text();
+    let payload = text;
+    if (text && isJson(response)) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = text;
+      }
+    }
+    if (!response.ok) {
+      const error = asErrorShape(payload);
+      if (typeof error.error === "string") {
+        if (response.status === 409 && error.code === IDEMPOTENCY_KEY_COMMITTED) {
+          throw new DispatchWriteLandedError(IDEMPOTENCY_KEY_COMMITTED, response.status, method, url);
+        }
+        throw new DispatchServiceError(error.code ?? `HTTP_${response.status}`, response.status, error.error, error.candidates, error.current, error.mismatches);
+      }
+      const quoted = excerpt(text, this.token);
+      let body;
+      if (quoted !== "") {
+        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      } else if (text === "") {
+        body = "an empty body";
+      } else {
+        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
+        const size = Buffer.byteLength(text).toLocaleString("en-US");
+        body = `a body of ${size} bytes and no readable text${within}`;
+      }
+      const reasonPhrase = excerpt(response.statusText, this.token);
+      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
+      throw new DispatchGatewayError(response.status, `${method} ${url} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
+    }
+    const replayed = response.headers.get(IDEMPOTENCY_REPLAYED_HEADER)?.trim() === "?1";
+    if (answerNotKept(response.status, replayed, payload)) {
+      throw new DispatchWriteLandedError(IDEMPOTENCY_ANSWER_NOT_KEPT, response.status, method, url);
+    }
+    return payload;
+  }
+}
+
 // ../envoy-client/src/dispatch-owner.ts
 function documentLabel(project, slug) {
   return `${project}/${slug}`;
+}
+function ownerTitle(owner) {
+  return "issue" in owner ? `${owner.issue.key}: ${owner.issue.title}` : `${owner.document.project} / ${owner.document.name}`;
 }
 function issueTopic(key) {
   return { label: key, topic: dispatchIssueSubject(key, ">") };
@@ -38362,10 +39327,26 @@ function dispatchDocumentRef(owner, slug) {
 function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
-function parseBlockRef(document, fragment) {
-  const target = parseBlockFragment(fragment);
-  const parsed = parseDispatchRef(document);
-  if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
+function parseBlockRef(holder, fragment) {
+  const target = holder.includes("@") ? undefined : parseBlockFragment(fragment);
+  const parsed = parseDispatchRef(holder);
+  if (target === undefined || parsed === null) {
+    return null;
+  }
+  const pin = target.pin === undefined ? {} : { pin: target.pin };
+  const artifact = parsed.artifact === undefined ? {} : { artifact: parsed.artifact };
+  if (parsed.kind === "comment" || parsed.kind === "message" && target.pin === undefined) {
+    return {
+      owner: parsed.owner,
+      kind: "block",
+      id: parsed.id,
+      block: target.block,
+      item: { kind: parsed.kind, id: parsed.id },
+      ...artifact,
+      ...pin
+    };
+  }
+  if (parsed.kind !== "spec" && parsed.kind !== "artifact") {
     return null;
   }
   return {
@@ -38373,9 +39354,9 @@ function parseBlockRef(document, fragment) {
     kind: "block",
     id: parsed.id,
     block: target.block,
-    document,
+    document: holder,
     ...parsed.owner.kind === "project" ? { artifact: parsed.id } : {},
-    ...target.pin === undefined ? {} : { pin: target.pin }
+    ...pin
   };
 }
 function parseDispatchRef(ref) {
@@ -38576,19 +39557,12 @@ function dispatchReplyPath(resource, id) {
   return `/api/v1/${collection}/${encodeURIComponent(id)}/reply`;
 }
 async function postDeliveryReply(config, sessionId, delivery, result) {
-  const response = await fetch(`${config.url}${dispatchReplyPath(delivery.resource, delivery.id)}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      actor: { kind: "session", id: sessionId },
-      attempt: delivery.attempt,
-      ...delivery.replyFields,
-      ...result
-    })
+  await new DispatchClient(config.url, config.token).deliveryReply(delivery.resource, delivery.id, {
+    actor: { kind: "session", id: sessionId },
+    attempt: delivery.attempt,
+    ...delivery.replyFields,
+    ...result
   });
-  if (!response.ok) {
-    throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
-  }
 }
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
@@ -39004,6 +39978,7 @@ function parseDispatchFrame(rawPayload) {
       return {
         event: targeted.data.event,
         notify: wireFrame.event.notify,
+        quiet: wireFrame.event.quiet,
         delivery: targeted.data.delivery
       };
     }
@@ -39037,6 +40012,7 @@ function parseDispatchFrame(rawPayload) {
   return {
     event: parsed.data,
     notify: wireEvent.notify,
+    quiet: wireEvent.quiet,
     delivery: undefined
   };
 }
@@ -39093,7 +40069,8 @@ function renderInbound(raw, sessionID, subject) {
     } else {
       const frame = parseDispatchFrame(envelope.payload);
       if ("event" in frame) {
-        if (frame.notify === false && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
+        const quiet = frame.quiet === undefined ? frame.notify === false : frame.quiet === true;
+        if (quiet && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
           return { skip: true, content: "", envelope };
         }
         if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {
@@ -39271,24 +40248,52 @@ ${trailer}`,
   };
 }
 
+// ../envoy-client/src/dispatch-session-directory.ts
+import { randomUUID } from "crypto";
+import { renameSync, rmSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
+var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
+var PRIVATE_FILE = 384;
+function sessionStateRoot(env) {
+  const stateDir = env["DISPATCH_STATE_DIR"];
+  if (stateDir)
+    return stateDir;
+  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+}
+function sessionDirectory(env, sessionId) {
+  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
+    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
+  }
+  return join(sessionStateRoot(env), "sessions", sessionId);
+}
+function writeAtomically(path, text) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, text, { mode: PRIVATE_FILE });
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
 // ../envoy-client/src/dispatch-session-state.ts
 import { createHash as createHash2 } from "crypto";
 import {
   appendFileSync,
   closeSync as closeSync2,
   fstatSync,
-  mkdirSync as mkdirSync2,
+  mkdirSync as mkdirSync3,
   openSync as openSync2,
   readdirSync as readdirSync2,
-  readFileSync as readFileSync2,
+  readFileSync as readFileSync3,
   readSync,
-  renameSync as renameSync2,
-  rmSync as rmSync2,
+  rmSync as rmSync3,
   statSync as statSync2,
-  writeFileSync as writeFileSync2
+  writeFileSync as writeFileSync3
 } from "fs";
-import { homedir } from "os";
-import { join as join2 } from "path";
+import { join as join4 } from "path";
 
 // ../envoy-client/src/askgate-marker.ts
 import { createHash, randomBytes } from "crypto";
@@ -39299,13 +40304,13 @@ import {
   openSync,
   readdirSync,
   readFileSync,
-  renameSync,
-  rmSync,
+  renameSync as renameSync2,
+  rmSync as rmSync2,
   statSync,
   unlinkSync,
-  writeFileSync
+  writeFileSync as writeFileSync2
 } from "fs";
-import { isAbsolute, join, resolve } from "path";
+import { isAbsolute, join as join2, resolve } from "path";
 var ASKGATE_RECORD = "askgate";
 var MARKER_MAX_AGE_MS = 2 * 60 * 60000;
 var MARKERS = "markers";
@@ -39408,7 +40413,7 @@ var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
 function storeTouched(store) {
   const own = statSync(store).mtimeMs;
   try {
-    return Math.max(own, statSync(join(store, MARKERS)).mtimeMs);
+    return Math.max(own, statSync(join2(store, MARKERS)).mtimeMs);
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return own;
@@ -39416,7 +40421,7 @@ function storeTouched(store) {
   }
 }
 function sweepStores(root, now) {
-  const parent = join(root, "askgate");
+  const parent = join2(root, "askgate");
   let names;
   try {
     names = readdirSync(parent);
@@ -39427,18 +40432,18 @@ function sweepStores(root, now) {
     const match = STORE_NAME.exec(name);
     if (match === null)
       continue;
-    const store = join(parent, name);
+    const store = join2(parent, name);
     try {
       if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store }))
         continue;
       if (now - storeTouched(store) <= MARKER_MAX_AGE_MS)
         continue;
-      rmSync(store, { recursive: true, force: true });
+      rmSync2(store, { recursive: true, force: true });
     } catch {}
   }
 }
 function askgateState(dir) {
-  const record = join(dir, ASKGATE_RECORD);
+  const record = join2(dir, ASKGATE_RECORD);
   let names;
   try {
     names = readdirSync(record);
@@ -39451,7 +40456,7 @@ function askgateState(dir) {
   for (const name of names) {
     if (!name.endsWith(OWNER_FILE))
       continue;
-    const file = join(record, name);
+    const file = join2(record, name);
     let text;
     try {
       text = readFileSync(file, "utf-8");
@@ -39470,7 +40475,7 @@ function askgateState(dir) {
     return { kind: "off" };
   for (const { file, store } of live) {
     try {
-      if (!statSync(join(store, MARKERS)).isDirectory())
+      if (!statSync(join2(store, MARKERS)).isDirectory())
         throw new Error("not a directory");
     } catch (error) {
       return {
@@ -39522,17 +40527,17 @@ function consumeMarker(stores, argv, args, files, now) {
   let expired = false;
   const usable = [];
   for (const store of stores) {
-    const dir = join(store, MARKERS);
+    const dir = join2(store, MARKERS);
     for (const name of readdirSync(dir)) {
       if (!name.startsWith(`${key}.`))
         continue;
-      const file = join(dir, name);
+      const file = join2(dir, name);
       const marker = readMarker(file);
       if (marker === undefined || marker.argv !== key)
         continue;
       if (now - marker.createdAt > MARKER_MAX_AGE_MS) {
         expired = true;
-        rmSync(file, { force: true });
+        rmSync2(file, { force: true });
         continue;
       }
       if (marker.args !== null) {
@@ -39684,563 +40689,6 @@ async function resolveOrigin(env, exec, cwd) {
       origin.pane = paneId;
   }
   return origin;
-}
-
-// ../envoy-client/src/dispatch-http.ts
-class DispatchServiceError extends Error {
-  code;
-  status;
-  candidates;
-  current;
-  mismatches;
-  name = "DispatchServiceError";
-  fromDispatch = true;
-  constructor(code, status, message, candidates, current, mismatches) {
-    super(message);
-    this.code = code;
-    this.status = status;
-    this.candidates = candidates;
-    this.current = current;
-    this.mismatches = mismatches;
-  }
-}
-
-class DispatchGatewayError extends DispatchServiceError {
-  answer;
-  advice;
-  fromDispatch = false;
-  transient;
-  mayHaveReachedDispatch;
-  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
-    super(`HTTP_${status}`, status, message);
-    this.answer = answer;
-    this.advice = advice;
-    this.transient = transientStatus(status);
-    this.mayHaveReachedDispatch = reachesDispatch(status);
-  }
-}
-function asErrorShape(value) {
-  return typeof value === "object" && value !== null ? value : {};
-}
-function isJson(response) {
-  return response.headers.get("content-type")?.includes("application/json") ?? false;
-}
-function isNoRoute(error) {
-  return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith("no route for ");
-}
-var ISSUE_EVENTS_PAGE_MAX = 200;
-var DISPATCH_TOOL_DEADLINE_MS = 60000;
-function requestSignal(signal) {
-  const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
-  return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
-}
-function whyNotAPage(answer) {
-  if (typeof answer === "string") {
-    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
-  }
-  let what;
-  if (Array.isArray(answer)) {
-    what = `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
-  } else if (answer === null || typeof answer !== "object") {
-    what = answer === null ? "null" : `a ${typeof answer}`;
-  } else {
-    const fields = answer;
-    const lacking = [
-      ...Array.isArray(fields.issues) ? [] : ["an issues array"],
-      ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
-    ];
-    if (lacking.length === 0)
-      return;
-    what = `an object without ${lacking.join(" or ")}`;
-  }
-  return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
-}
-function whyNotAnArray(answer) {
-  if (typeof answer === "string")
-    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
-  if (answer === null)
-    return "null";
-  if (typeof answer !== "object")
-    return `a ${typeof answer}`;
-  if ("issues" in answer && Array.isArray(answer.issues)) {
-    return "a page, so this Dispatch pages a request that carries no limit and no offset";
-  }
-  return "an object that is not the listing";
-}
-var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
-function gatewayAdvice(method, status) {
-  if (!transientStatus(status)) {
-    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
-  }
-  if (method === "GET")
-    return "a retry may succeed";
-  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
-}
-function transientStatus(status) {
-  return status >= 500 || status === 408 || status === 429;
-}
-function reachesDispatch(status) {
-  return status >= 500;
-}
-var REDACTED = "[redacted]";
-var EXCERPT_SCAN_LIMIT = 64 * 1024;
-var BEARER_PIECE = 8;
-function redactBearer(text, bearer) {
-  if (bearer === "")
-    return text.slice(0, EXCERPT_SCAN_LIMIT);
-  const length = Math.min(BEARER_PIECE, bearer.length);
-  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
-  const covered = new Uint8Array(scanned.length);
-  const pieces = new Set;
-  for (let at = 0;at + length <= bearer.length; at++)
-    pieces.add(bearer.slice(at, at + length));
-  for (const piece of pieces) {
-    let found = scanned.indexOf(piece);
-    while (found !== -1) {
-      covered.fill(1, found, found + length);
-      found = scanned.indexOf(piece, found + 1);
-    }
-  }
-  let redacted = "";
-  let kept = 0;
-  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
-    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
-    const end = covered.indexOf(0, start);
-    kept = end === -1 ? scanned.length : end;
-  }
-  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
-}
-function excerpt(text, token) {
-  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
-  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
-}
-
-class DispatchClient {
-  token;
-  fetchImpl;
-  #baseUrl;
-  #resolvedIssues = new Map;
-  #signal;
-  constructor(baseUrl, token, fetchImpl = fetch, signal) {
-    this.token = token;
-    this.fetchImpl = fetchImpl;
-    this.#baseUrl = baseUrl.replace(/\/+$/, "");
-    this.#signal = requestSignal(signal);
-  }
-  async issue(input) {
-    return this.#json("POST", ["api", "v1", "issues"], input);
-  }
-  async resolveIssue(issueReference) {
-    return this.#resolveIssue(issueReference);
-  }
-  async listIssuePage(options, page) {
-    const path = ["api", "v1", "issues"];
-    const query = { ...options, limit: page.limit, offset: page.offset };
-    const answer = await this.#json("GET", path, undefined, query);
-    const refusal = whyNotAPage(answer);
-    if (refusal === undefined)
-      return answer;
-    throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
-  }
-  async listAllIssues(options) {
-    const path = ["api", "v1", "issues"];
-    const query = { ...options };
-    const answer = await this.#json("GET", path, undefined, query);
-    if (Array.isArray(answer))
-      return answer;
-    throw new Error(`GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`);
-  }
-  async listProjectArtifacts(project, unlinked = false) {
-    return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
-  }
-  async projectArtifact(project, input) {
-    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
-  }
-  async getProjectArtifact(project, slug) {
-    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
-  }
-  async agentArtifact(sessionId, input) {
-    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
-  }
-  async getAgentArtifact(sessionId, slug) {
-    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
-  }
-  async getIssueArtifact(issue, slug) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "artifacts",
-      slug
-    ]);
-  }
-  async search(query, options = {}) {
-    return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
-  }
-  async getIssue(issue) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue)]);
-  }
-  async updateIssue(issue, input) {
-    return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
-  }
-  async claimIssue(issue, input = {}) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
-  }
-  async releaseIssueClaim(issue, input = {}) {
-    return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
-  }
-  async getIssueEvents(issue, after = 0, limit = ISSUE_EVENTS_PAGE_MAX) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "events"], undefined, { after, limit });
-  }
-  async read(issueReference, options = {}) {
-    const issueKey = await this.#resolveIssue(issueReference);
-    const issue = await this.getIssue(issueKey);
-    const requested = options.events;
-    const count = requested === undefined ? DEFAULT_ISSUE_READ_EVENTS : requested === "all" ? issue.last_seq : Math.min(requested, issue.last_seq);
-    const events = [];
-    let after = Math.max(0, issue.last_seq - count);
-    while (events.length < count) {
-      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
-      const page = await this.getIssueEvents(issueKey, after, limit);
-      events.push(...page);
-      const last = page.at(-1);
-      if (page.length < limit || last === undefined || events.length >= count)
-        break;
-      if (last.seq <= after) {
-        throw new Error(`GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`);
-      }
-      after = last.seq;
-    }
-    return { issue, events };
-  }
-  async ask(issue, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], input);
-  }
-  async openAsks(sessionID, since) {
-    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, {
-      author_session: sessionID,
-      ...since === undefined ? {} : { since }
-    });
-  }
-  async openAsksForProject(project) {
-    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
-  }
-  async listAgents() {
-    return this.#json("GET", ["api", "v1", "agents"]);
-  }
-  async whoami() {
-    return this.#json("GET", ["api", "v1", "whoami"]);
-  }
-  async createProject(input) {
-    return this.#json("POST", ["api", "v1", "projects"], input);
-  }
-  async listProjects() {
-    return this.#json("GET", ["api", "v1", "projects"]);
-  }
-  async listArchitectureSources(project) {
-    try {
-      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
-    } catch (error) {
-      if (!isNoRoute(error))
-        throw error;
-    }
-    try {
-      const source = await this.#json("GET", [
-        "api",
-        "v1",
-        "projects",
-        project,
-        "architecture-source"
-      ]);
-      return source === null ? [] : [source];
-    } catch (error) {
-      if (error instanceof DispatchServiceError && error.status === 404 && error.code === "SOURCE_NOT_FOUND") {
-        return [];
-      }
-      throw error;
-    }
-  }
-  async syncArchitectureSources(project) {
-    try {
-      return await this.#json("POST", [
-        "api",
-        "v1",
-        "projects",
-        project,
-        "architecture-sources",
-        "sync"
-      ]);
-    } catch (error) {
-      if (!isNoRoute(error))
-        throw error;
-    }
-    const source = await this.#json("POST", [
-      "api",
-      "v1",
-      "projects",
-      project,
-      "architecture-source",
-      "sync"
-    ]);
-    return [source];
-  }
-  async syncArchitectureSource(project, repo) {
-    const [owner, name, ...rest] = repo.split("/");
-    if (!owner || !name || rest.length > 0) {
-      throw new Error(`repository must be owner/name, got ${JSON.stringify(repo)}`);
-    }
-    return this.#json("POST", [
-      "api",
-      "v1",
-      "projects",
-      project,
-      "architecture-sources",
-      owner,
-      name,
-      "sync"
-    ]);
-  }
-  async resolveAsk(id, input) {
-    return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
-  }
-  async requestApproval(artifactID, input) {
-    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
-    return { ...answer.payload, recorded: answer.status === 201 };
-  }
-  async editAsk(id, input) {
-    return this.#json("PATCH", ["api", "v1", "asks", id], input);
-  }
-  async comment(issue, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], input);
-  }
-  async listIssueAsks(issue, state) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], undefined, state === undefined ? undefined : { state });
-  }
-  async getArtifactAsks(id, state) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "asks"], undefined, state === undefined ? undefined : { state });
-  }
-  async artifactAsk(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
-  }
-  async suggest(issue, input) {
-    const { replace_with, ...comment } = input;
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], {
-      ...comment,
-      suggestion: { replace_with }
-    });
-  }
-  async getArtifactComments(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
-  }
-  async artifactComment(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
-  }
-  async artifactSuggest(id, input) {
-    const { replace_with, ...comment } = input;
-    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
-      ...comment,
-      suggestion: { replace_with }
-    });
-  }
-  async message(issue, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"], input);
-  }
-  async messageReply(id, input, options = {}) {
-    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
-  }
-  async getMessage(issue, id) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "messages",
-      id
-    ]);
-  }
-  async getMessageThread(id, session) {
-    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
-  }
-  async acceptMessageDelivery(id, attempt, input) {
-    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
-  }
-  async artifact(issue, input) {
-    return this.#upload(["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"], input);
-  }
-  async getArtifact(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id]);
-  }
-  async docRead(id, version) {
-    return version === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version)]);
-  }
-  async fileVersion(id, version) {
-    const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
-    const response = await this.fetchImpl(url, {
-      method: "GET",
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal
-    });
-    if (!response.ok)
-      return this.#response("GET", url, response);
-    return {
-      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
-      bytes: new Uint8Array(await response.arrayBuffer())
-    };
-  }
-  async artifactBlocks(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
-  }
-  async docEdit(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
-  }
-  async nameArtifactVersion(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
-  }
-  async getArtifactEvents(id, after = 0, limit = 200) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "events"], undefined, { after, limit });
-  }
-  async getArtifactReferences(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
-  }
-  async getAsk(id) {
-    return this.#json("GET", ["api", "v1", "asks", id]);
-  }
-  async followAsk(id, sessionId, actor) {
-    await this.#json("PUT", ["api", "v1", "asks", id, "followers", sessionId], { actor });
-  }
-  async unfollowAsk(id, sessionId, actor) {
-    await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
-  }
-  async getComment(id) {
-    return this.#json("GET", ["api", "v1", "comments", id]);
-  }
-  async resolveComment(id, actor) {
-    return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
-  }
-  async getComments(issue) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
-  }
-  async getIssueReferences(issue) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "references"
-    ]);
-  }
-  async getReferences(query) {
-    return this.#json("GET", ["api", "v1", "references"], undefined, {
-      ..."to" in query ? { to: query.to } : { from: query.from },
-      ...query.kind === undefined || query.kind.length === 0 ? {} : { kind: query.kind.join(",") },
-      ...query.since === undefined ? {} : { since: query.since }
-    });
-  }
-  async#resolveIssue(issueReference) {
-    if (!issueReference.includes("#"))
-      return issueReference;
-    let resolved = this.#resolvedIssues.get(issueReference);
-    if (!resolved) {
-      resolved = this.#json("GET", ["api", "v1", "issues", "resolve"], undefined, {
-        ref: issueReference
-      }).then((resolution) => resolution.key);
-      this.#resolvedIssues.set(issueReference, resolved);
-    }
-    try {
-      return await resolved;
-    } catch (error) {
-      this.#resolvedIssues.delete(issueReference);
-      throw error;
-    }
-  }
-  async#json(method, path, body, query) {
-    return (await this.#jsonAnswer(method, path, body, query)).payload;
-  }
-  async#jsonAnswer(method, path, body, query) {
-    const headers = {
-      Accept: "application/json",
-      Authorization: `Bearer ${this.token}`
-    };
-    if (body !== undefined)
-      headers["Content-Type"] = "application/json";
-    const url = this.#url(path, query);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers,
-      signal: this.#signal,
-      ...body === undefined ? {} : { body: JSON.stringify(body) }
-    });
-    return { status: response.status, payload: await this.#response(method, url, response) };
-  }
-  async#upload(path, input) {
-    if ("content" in input)
-      return this.#json("POST", path, input);
-    const form = new FormData;
-    form.set("name", input.name);
-    if (input.summary !== undefined)
-      form.set("summary", input.summary);
-    if (input.actor !== undefined)
-      form.set("actor", JSON.stringify(input.actor));
-    form.set("file", input.file, input.name);
-    return this.#form("POST", path, form);
-  }
-  async#form(method, path, body) {
-    const url = this.#url(path);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body,
-      signal: this.#signal
-    });
-    return this.#response(method, url, response);
-  }
-  #url(path, query) {
-    const url = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
-    if (query) {
-      for (const [name, value] of Object.entries(query)) {
-        if (typeof value === "string" || typeof value === "number") {
-          url.searchParams.set(name, String(value));
-        } else if (Array.isArray(value)) {
-          for (const item of value)
-            url.searchParams.append(name, String(item));
-        }
-      }
-    }
-    return url.toString();
-  }
-  async#response(method, url, response) {
-    const text = await response.text();
-    let payload = text;
-    if (text && isJson(response)) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = text;
-      }
-    }
-    if (!response.ok) {
-      const error = asErrorShape(payload);
-      if (typeof error.error === "string") {
-        throw new DispatchServiceError(error.code ?? `HTTP_${response.status}`, response.status, error.error, error.candidates, error.current, error.mismatches);
-      }
-      const quoted = excerpt(text, this.token);
-      let body;
-      if (quoted !== "") {
-        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
-      } else if (text === "") {
-        body = "an empty body";
-      } else {
-        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
-        const size = Buffer.byteLength(text).toLocaleString("en-US");
-        body = `a body of ${size} bytes and no readable text${within}`;
-      }
-      const reasonPhrase = excerpt(response.statusText, this.token);
-      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
-      throw new DispatchGatewayError(response.status, `${method} ${url} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
-    }
-    return payload;
-  }
 }
 
 // ../envoy-client/src/dispatch-picture-tools.ts
@@ -40807,6 +41255,375 @@ function searchAnswer(search, query, offset, configUrl) {
   };
 }
 
+// ../envoy-client/src/related-check.ts
+function relatedCheckLines(suggestions, context) {
+  if (suggestions === null || suggestions === undefined) {
+    return [notMadeLine("the server sent no check result", context)];
+  }
+  let lines;
+  try {
+    lines = relatedCheckForm(suggestions, context);
+  } catch (error) {
+    lines = [
+      notMadeLine(`this client could not read the check result (${messageFor(error)})`, context)
+    ];
+  }
+  try {
+    const { decision } = suggestions;
+    if (decision !== undefined && decision !== null) {
+      const when = decision.answered_at === undefined ? "" : ` on ${decision.answered_at}`;
+      lines.push(`A past decision may already answer this: ${suggestionLabel(decision)}, answered by ${decision.answered_by}${when} \u2192 ${absoluteHref(decision.href, context.configUrl)}`);
+      lines.push(...askLines(decision.ask));
+    }
+    for (const match of suggestions.title_matches ?? []) {
+      lines.push(`Title overlaps you forced past: ${match.key} [${match.status}] ${match.title} \u2192 ${absoluteHref(match.href, context.configUrl)}`);
+    }
+  } catch (error) {
+    lines.push(`The check's past decision or title overlaps could not be shown: ${messageFor(error)}`);
+  }
+  return lines;
+}
+function decisionBlockLines(advice, context) {
+  try {
+    const checks = advice?.decision_block_checks;
+    if (checks === undefined || checks === null) {
+      const added = advice?.decision_blocks_added ?? 0;
+      if (added === 0)
+        return [];
+      return [
+        `${added} new decision ${added === 1 ? "block" : "blocks"}:`,
+        notMadeLine("the server sent no check result", context)
+      ];
+    }
+    return checks.flatMap((check) => [
+      `Decision block ${check.block_id}:`,
+      ...relatedCheckLines(check.suggestions, { ...context, text: check.question ?? "" })
+    ]);
+  } catch (error) {
+    return [
+      notMadeLine(`this client could not read the decision blocks' checks (${messageFor(error)})`, context)
+    ];
+  }
+}
+function relatedCheckForm(suggestions, context) {
+  const form = relatedCheckFormOf(suggestions);
+  if (form.form === "not_made") {
+    return [notMadeLine(form.reason, context, form.searchQuery)];
+  }
+  if (form.form === "items") {
+    const header = form.mode === undefined ? "Related items:" : `Related items (searched by ${form.mode}):`;
+    return [header, ...form.related.flatMap((item) => relatedItemLines(item, context.configUrl))];
+  }
+  return [
+    form.mode === undefined ? "Related-item check searched and found nothing." : `Related-item check searched (${form.mode}) and found nothing.`
+  ];
+}
+function relatedItemLines(item, configUrl) {
+  try {
+    const lines = [`- ${suggestionLabel(item)} \u2192 ${absoluteHref(item.href, configUrl)}`];
+    if (item.kind === "ask") {
+      lines.push(...askLines(item.ask));
+    }
+    return lines;
+  } catch (error) {
+    const href = item?.href;
+    return [`- ${String(href)} (this client could not show it: ${messageFor(error)})`];
+  }
+}
+function askLines(ask) {
+  try {
+    const lines = askStateLines(ask ?? undefined);
+    if (!Array.isArray(lines))
+      throw new Error(`unknown ask state ${String(ask?.state)}`);
+    return lines;
+  } catch (error) {
+    return [`  This client could not show where the ask stands: ${messageFor(error)}`];
+  }
+}
+function suggestionLabel(item) {
+  if (item.owner.kind === "issue") {
+    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
+  }
+  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
+}
+function absoluteHref(href, configUrl) {
+  try {
+    return new URL(href, configUrl).toString();
+  } catch {
+    return String(href);
+  }
+}
+function notMadeLine(reason, context, searchQuery) {
+  const words = searchQuery?.trim() || relatedCheckSearchWords(context.text);
+  const query = words === "" ? " with two or three of its words as --query" : ` --query '${words.replaceAll("'", "'\\''")}'`;
+  return `No related-item check was made: ${reason}. Search before you rely on this being new: dispatch search --project ${context.project}${query}`;
+}
+
+// ../envoy-client/src/session-answers.ts
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "fs";
+import { join as join3 } from "path";
+var SESSION_ANSWERS_WINDOW_MS = 72 * 3600000;
+var SESSION_ANSWERS_MAX_CHARS = 8000;
+var SESSION_ANSWERS_DEADLINE_MS = 800;
+var READ_TIMEOUT_MS = 1e4;
+var NO_ROUTE_BACKOFF_MS = 5 * 60000;
+var QUESTION_MAX = 200;
+var SESSION_ANSWERS_MARKER = "[Dispatch: what people wrote to this session in the last 72 hours, newest first, word for word. Reference, not a new request.]";
+var FAILURE_MARKER = "[Dispatch: people's answers from the last 72 hours could not be read (";
+var NO_ANSWERS_ROUTE_REASON = "this Dispatch build has no answers route";
+var RELATION_PHRASES = {
+  answered_your_ask: "answered your ask",
+  replied_on_your_ask: "replied on your ask",
+  replied_in_a_comment_thread: "replied in a comment thread",
+  commented_on_a_document: "commented on a document",
+  commented_on_an_issue: "commented on an issue",
+  mentioned_you: "mentioned you",
+  sent_you_a_message: "sent you a message",
+  replied_to_your_message: "replied to your message"
+};
+function isNoAnswersRoute(error) {
+  return isNoRoute(error);
+}
+function renderSessionAnswerItem(item) {
+  const relation = `${RELATION_PHRASES[item.relation]}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
+  const head = [item.at, `user ${item.author.id}`, relation];
+  if (item.edited_at !== undefined)
+    head.push(`edited ${item.edited_at}`);
+  const owner = item.owner === null ? undefined : ownerTitle(item.owner);
+  const where = item.ref === null ? `Direct message ${item.id}, on no issue` : owner === undefined ? item.ref : `${item.ref} \xB7 ${owner}`;
+  const lines = [head.join(" \xB7 "), where];
+  if (item.ask !== undefined) {
+    const question = item.ask.question.replace(/\s+/g, " ").trim();
+    lines.push(`Question: ${question.length > QUESTION_MAX ? `${question.slice(0, QUESTION_MAX)}\u2026` : question}`);
+  }
+  if (item.kind === "answer") {
+    const selected = item.selected ?? [];
+    lines.push(`Selected: ${selected.length === 0 ? "none" : selected.join(", ")}`);
+  }
+  if (item.text !== "")
+    lines.push(item.text);
+  return lines.join(`
+`);
+}
+function withinWindow(items, now) {
+  const start = now - SESSION_ANSWERS_WINDOW_MS;
+  return items.filter((item) => Date.parse(item.at) >= start);
+}
+var MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
+function leftOutLine(count, namesCommand) {
+  const counted = `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters`;
+  return namesCommand ? `${counted}: run \`dispatch answers\` to read every one in full.` : `${counted}.`;
+}
+function renderSessionAnswers(items, options) {
+  const shown = withinWindow(items, Number(options.now));
+  const unsent = shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
+  const count = shown.length + unsent;
+  if (count === 0)
+    return;
+  const header = options.cached === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
+As read at ${options.cached.readAt}; this read failed: ${failureSentence(options.cached.reason)}`;
+  const namesCommand = options.withoutCommand !== true;
+  const blocks = [];
+  let length = header.length;
+  for (const item of shown) {
+    const block = renderSessionAnswerItem(item);
+    const after = count - blocks.length - 1;
+    const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after, namesCommand).length);
+    if (needed >= SESSION_ANSWERS_MAX_CHARS)
+      break;
+    blocks.push(block);
+    length += 2 + block.length;
+  }
+  const leftOut = count - blocks.length;
+  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]].join(`
+
+`);
+}
+function renderSessionAnswersList(items, options) {
+  const shown = withinWindow(items, Number(options.now));
+  if (shown.length === 0)
+    return "No person wrote to this session in the last 72 hours.";
+  return [
+    `${shown.length} ${shown.length === 1 ? "item" : "items"} people wrote to this session in the last 72 hours, newest first, word for word:`,
+    ...shown.map(renderSessionAnswerItem)
+  ].join(`
+
+`);
+}
+function failureSentence(reason) {
+  const text = reason.replace(/\s+/g, " ").trim();
+  return /[.?!]$/.test(text) ? text : `${text}.`;
+}
+function sessionAnswersFailureLine(reason) {
+  return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
+}
+var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v3");
+var processGlobal = globalThis;
+var state = processGlobal[STATE_KEY] ?? {
+  sessions: new Map,
+  noRouteUntil: new Map
+};
+processGlobal[STATE_KEY] = state;
+var CACHE_FILE = "answers.json";
+function readCacheFile(directory, url) {
+  try {
+    const value = JSON.parse(readFileSync2(join3(directory, CACHE_FILE), "utf-8"));
+    if (typeof value === "object" && value !== null && "dispatch_url" in value && typeof value.dispatch_url === "string" && value.dispatch_url === url && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
+      return {
+        dispatch_url: value.dispatch_url,
+        read_at: value.read_at,
+        total: value.total,
+        items: value.items
+      };
+    }
+  } catch {}
+  return;
+}
+async function settleWithin(promise, ms, signal) {
+  if (signal?.aborted === true)
+    return "aborted";
+  let timer;
+  let onAbort;
+  const stop = new Promise((resolve) => {
+    timer = setTimeout(() => resolve("deadline"), ms);
+    onAbort = () => resolve("aborted");
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, stop]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort !== undefined)
+      signal?.removeEventListener("abort", onAbort);
+  }
+}
+async function readSessionAnswers(options) {
+  const now = options.now ?? Date.now;
+  const { dispatch, session } = options;
+  if (!dispatch.enabled && dispatch.error === null) {
+    return { text: undefined, source: "off", reason: dispatch.notice };
+  }
+  let directory;
+  try {
+    directory = sessionDirectory(options.env, session);
+  } catch {}
+  const entries = state.sessions.get(session) ?? new Map;
+  state.sessions.set(session, entries);
+  const carry = (cache, reason, noRoute = false) => {
+    const text = cache === undefined ? undefined : renderSessionAnswers(cache.items, {
+      now: now(),
+      total: cache.total,
+      cached: { readAt: cache.read_at, reason },
+      withoutCommand: noRoute
+    });
+    if (cache === undefined || text === undefined) {
+      if (noRoute)
+        return { text: undefined, source: "unavailable", reason };
+      return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
+    }
+    return { text, source: "cache", readAt: cache.read_at, reason };
+  };
+  if (!dispatch.enabled) {
+    const url = options.dispatchUrl;
+    if (url === undefined)
+      return carry(undefined, dispatch.error);
+    const cache = entries.get(url)?.cache ?? (directory === undefined ? undefined : readCacheFile(directory, url));
+    return carry(cache, dispatch.error);
+  }
+  const { url } = dispatch;
+  const current = entries.get(url) ?? {
+    cache: undefined,
+    inFlight: undefined,
+    overdue: false,
+    noRouteReported: false
+  };
+  entries.set(url, current);
+  if (current.cache === undefined && directory !== undefined) {
+    current.cache = readCacheFile(directory, url);
+  }
+  const noRoute = () => {
+    const read = carry(current.cache, NO_ANSWERS_ROUTE_REASON, true);
+    if (current.noRouteReported)
+      return read;
+    current.noRouteReported = true;
+    return {
+      ...read,
+      notice: `Dispatch at ${url} has no answers route (its build is older than the route), so people's answers cannot be read from it`
+    };
+  };
+  if ((state.noRouteUntil.get(url) ?? 0) > now())
+    return noRoute();
+  if (current.inFlight !== undefined && current.overdue) {
+    return carry(current.cache, "an earlier read is still waiting on Dispatch");
+  }
+  let read = current.inFlight;
+  if (read === undefined) {
+    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch);
+    const started = client.sessionAnswers(session, {
+      maxChars: SESSION_ANSWERS_MAX_CHARS,
+      signal: AbortSignal.timeout(READ_TIMEOUT_MS)
+    }).then((response) => {
+      if (!Array.isArray(response?.items) || typeof response.total !== "number") {
+        return { failure: "Dispatch answered with something that is not an answers list" };
+      }
+      const cache = {
+        dispatch_url: url,
+        read_at: new Date(now()).toISOString(),
+        total: response.total,
+        items: response.items
+      };
+      current.cache = cache;
+      current.noRouteReported = false;
+      if (directory !== undefined) {
+        try {
+          mkdirSync2(directory, { recursive: true, mode: 448 });
+          writeAtomically(join3(directory, CACHE_FILE), JSON.stringify(cache));
+        } catch {}
+      }
+      return { cache };
+    }, (error) => {
+      if (isNoAnswersRoute(error)) {
+        state.noRouteUntil.set(url, now() + NO_ROUTE_BACKOFF_MS);
+        return { noRoute: true };
+      }
+      return { failure: messageFor(error) };
+    });
+    read = started.finally(() => {
+      if (current.inFlight === read) {
+        current.inFlight = undefined;
+        current.overdue = false;
+      }
+    });
+    current.inFlight = read;
+    current.overdue = false;
+  }
+  const deadlineMs = options.deadlineMs ?? SESSION_ANSWERS_DEADLINE_MS;
+  const outcome = await settleWithin(read, deadlineMs, options.signal);
+  if (outcome === "deadline") {
+    if (current.inFlight === read)
+      current.overdue = true;
+    return carry(current.cache, `Dispatch did not answer within ${deadlineMs} ms`);
+  }
+  if (outcome === "aborted") {
+    return carry(current.cache, "the request was cancelled before Dispatch answered");
+  }
+  if ("noRoute" in outcome)
+    return noRoute();
+  if ("failure" in outcome)
+    return carry(current.cache, outcome.failure);
+  return {
+    text: renderSessionAnswers(outcome.cache.items, {
+      now: now(),
+      total: outcome.cache.total
+    }),
+    source: "fresh",
+    readAt: outcome.cache.read_at
+  };
+}
+async function sessionAnswersSettled(session) {
+  await Promise.all(Array.from(state.sessions.get(session)?.values() ?? [], (entry) => entry.inFlight));
+}
+
 // ../envoy-client/src/dispatch-execute.ts
 function documentTopic(artifact) {
   return documentTopicOf(artifact.project, artifact.slug);
@@ -40860,37 +41677,22 @@ function renderAdvice(tool, key, advice, opts) {
       lines.push(`You still have an open ask on ${key}: "${ask.question.slice(0, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`);
     }
   }
+  const superseded = advice.superseded_approval;
+  if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
+    lines.push(`Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`);
+  }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
-    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies." : "Progress ledger or scratchpad? If so, stop.";
+    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies. Their reply ends this: post then what you held back." : "Progress ledger or scratchpad? If so, stop.";
     lines.push(`Posted. You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`);
   }
   return lines;
 }
-function renderSuggestions(suggestions, configUrl) {
-  if (suggestions === undefined)
-    return [];
-  if (suggestions.missing !== undefined) {
-    return [`Related-item search was skipped: ${suggestions.missing}.`];
+async function otherAdviceLines(render) {
+  try {
+    return await render();
+  } catch (error) {
+    return [`Other advice could not be shown: ${messageFor(error)}`];
   }
-  const lines = [];
-  if (suggestions.related.length > 0) {
-    lines.push("Possibly related, found by search:");
-    for (const item of suggestions.related) {
-      lines.push(`- ${suggestionLabel(item)} \u2192 ${new URL(item.href, configUrl).toString()}`);
-    }
-  }
-  if (suggestions.decision !== undefined) {
-    const item = suggestions.decision;
-    const when = item.answered_at === undefined ? "" : ` on ${item.answered_at}`;
-    lines.push(`A past decision may already answer this: ${suggestionLabel(item)}, answered by ${item.answered_by}${when} \u2192 ${new URL(item.href, configUrl).toString()}`);
-  }
-  return lines;
-}
-function suggestionLabel(item) {
-  if (item.owner.kind === "issue") {
-    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
-  }
-  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
 }
 function documentResultDetails(artifact) {
   return {
@@ -40943,10 +41745,12 @@ var issueFreeTools = {
   dispatch_resolve_comment: true,
   dispatch_follow: true,
   dispatch_search: true,
+  dispatch_related: true,
   dispatch_issues: true,
   dispatch_project: true,
   dispatch_projects: true,
   dispatch_open_asks: true,
+  dispatch_answers: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true
 };
@@ -41086,7 +41890,7 @@ function normalizeUUID(value) {
 }
 var askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> reference";
 var commentIdProblem = "comment must be a bare comment id or a dispatch://.../comment/<id> reference";
-var messageIdProblem = "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference";
+var messageIdProblem = "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)";
 function askId(args) {
   const ask = stringArg(args, "ask");
   return ask.startsWith("dispatch://") ? parseDispatchRef(ask)?.id ?? ask : ask;
@@ -41097,6 +41901,28 @@ function messageIdOf(value) {
     return reference?.kind === "message" ? reference.id : undefined;
   })() : value;
   return id === undefined ? undefined : normalizeUUID(id);
+}
+function itemBlockOf(value) {
+  const ref = parseDispatchRef(value);
+  return ref?.item === undefined || ref.block === undefined ? undefined : { ...ref, item: ref.item, block: ref.block };
+}
+function replyBlockProblem(field, kind, value) {
+  if (!/^dispatch:\/\/[^#]*#b-/.test(value))
+    return;
+  const form = `dispatch://KEY/${kind}/<id>#b-<block id>`;
+  const ref = parseDispatchRef(value);
+  if (ref?.kind !== "block") {
+    return `${field} ${value} names no block; a block of a ${kind} reads ${form}`;
+  }
+  const other = ref.item?.kind;
+  if (other !== kind) {
+    const answer = other === "comment" ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}` : other === "message" ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}` : "";
+    return `${field} ${value} names a block of ${other === undefined ? "a document" : `a ${other}`}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
+  }
+  if (ref.pin !== undefined) {
+    return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
+  }
+  return;
 }
 var idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
 function refOwnerName(ref) {
@@ -41207,7 +42033,20 @@ async function resolveAskArgument(tool, args, client, sessionId) {
 }
 function messageInReplyTo(args) {
   const inReplyTo = optionalString(args, "in_reply_to");
-  return inReplyTo === undefined ? undefined : messageIdOf(inReplyTo);
+  if (inReplyTo === undefined)
+    return;
+  const block = itemBlockOf(inReplyTo);
+  if (block !== undefined && block.item.kind !== "message")
+    return;
+  const id = messageIdOf(block?.item.id ?? inReplyTo);
+  return id === undefined ? undefined : { id, ...block === undefined ? {} : { block: block.block } };
+}
+function commentReplyTo(args) {
+  const replyTo = optionalString(args, "reply_to");
+  if (replyTo === undefined)
+    return;
+  const block = itemBlockOf(replyTo);
+  return block === undefined ? { id: replyTo } : { id: block.item.id, block: block.block };
 }
 function argumentProblems(tool, args) {
   const problems = [];
@@ -41242,15 +42081,21 @@ function argumentProblems(tool, args) {
       if (optionalString(args, "quote") !== undefined && optionalString(args, "artifact") === undefined) {
         problems.push("artifact is required when quote is supplied");
       }
-      if (optionalString(args, "reply_to") !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
+      const replyTo = optionalString(args, "reply_to");
+      if (replyTo !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
         problems.push("reply_to and reply_to_ask cannot both be set");
       }
+      const replyBlock = replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo);
+      if (replyBlock !== undefined)
+        problems.push(replyBlock);
       break;
     }
     case "dispatch_message": {
       const inReplyTo = optionalString(args, "in_reply_to");
-      if (inReplyTo !== undefined && messageIdOf(inReplyTo) === undefined) {
-        problems.push(messageIdProblem);
+      if (inReplyTo !== undefined) {
+        const problem = replyBlockProblem("in_reply_to", "message", inReplyTo) ?? (messageInReplyTo(args) === undefined ? messageIdProblem : undefined);
+        if (problem !== undefined)
+          problems.push(problem);
       }
       break;
     }
@@ -41330,7 +42175,7 @@ function dispatchRefFromUrl(value, serverUrl) {
   };
   const blockOf = (versionName) => {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
-    return id === undefined || url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
+    return id === undefined || versionName !== undefined && url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
@@ -41356,9 +42201,9 @@ function dispatchRefFromUrl(value, serverUrl) {
     if (ask !== undefined)
       return `dispatch://${key}/ask/${ask}`;
     if (comment !== undefined)
-      return `dispatch://${key}/comment/${comment}`;
+      return `dispatch://${key}/comment/${comment}${blockOf()}`;
     if (message !== undefined)
-      return `dispatch://${key}/message/${message}`;
+      return `dispatch://${key}/message/${message}${blockOf()}`;
     return `dispatch://${key}`;
   }
   const agentArtifactPage = url.pathname.match(/^\/agents\/([^/]+)\/artifacts\/([^/]+)\/?$/);
@@ -41381,7 +42226,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     return;
   return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
+var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " + "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " + "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " + "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " + "read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 function innerRefProblem(tool, ref, refText) {
   if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children" && ref.kind !== "block") {
@@ -41390,10 +42235,11 @@ function innerRefProblem(tool, ref, refText) {
   if (tool === "dispatch_read" || tool === "dispatch_ask")
     return;
   const owner = refOwnerName(ref);
-  const documentArgument = ref.kind === "block" && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
+  const itemKind = ref.item?.kind ?? ref.kind;
+  const documentArgument = ref.kind === "block" && ref.item === undefined && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
   const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentArgument}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
-  const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
-  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}` : `a ${ref.kind}`;
+  const fix = tool === "dispatch_comment" && itemKind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && itemKind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
+  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}${ref.item === undefined ? "" : ` of a ${ref.item.kind}`}` : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }
 var documentItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
@@ -41420,7 +42266,7 @@ function ownerConflictProblems(tool, args, parsedRef, refText) {
   const artifact = optionalString(args, "artifact");
   const version = optionalNumber(args, "version");
   const ref = tool === "dispatch_ask" && (issue !== undefined || project !== undefined) ? null : parsedRef;
-  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" ? ref.id : undefined;
+  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" && ref.item === undefined ? ref.id : undefined;
   if (ref !== null && refText !== undefined) {
     const refOwner = refOwnerName(ref);
     if (issue !== undefined && (ref.owner.kind !== "issue" || nativeIssueKeyPattern.test(issue) && issue !== ref.owner.issue)) {
@@ -41588,6 +42434,9 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
   const issue = `${repo}#${legionIssue}`;
   return { args: { ...args, issue }, ref, owner: { kind: "issue", issue } };
 }
+
+class DocumentNotFoundError extends Error {
+}
 function artifactByReference(artifacts, artifactReference, owner, canonical) {
   const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
   if (canonical && bySlug !== undefined)
@@ -41608,7 +42457,7 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   }
   const [artifact] = byName;
   if (artifact === undefined) {
-    throw new Error(documentReferenceProblem(artifactReference, artifacts, owner));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference, artifacts, owner));
   }
   return artifact;
 }
@@ -41639,9 +42488,24 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
     artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
   }
   if (!artifact) {
-    throw new Error(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue"));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue"));
   }
   return { owner, issue, artifact };
+}
+async function documentTargets(client, resolution) {
+  const refDocument = resolution.ref?.kind === "artifact" ? resolution.ref.id : resolution.ref?.artifact;
+  const owner = resolution.owner?.kind === "issue" ? { kind: "issue", issue: await resolveExistingIssue(client, resolution.owner.issue) } : resolution.owner;
+  return {
+    owner,
+    documentOwner: () => {
+      if (owner === null)
+        throw new Error("issue or project is required");
+      return owner;
+    },
+    resolveDocument: (documentOwner, reference) => resolveArtifact(client, documentOwner, reference, {
+      canonical: reference !== undefined && reference === refDocument
+    })
+  };
 }
 var documentHintLimit = 8;
 function documentReferenceProblem(reference, documents, owner, use) {
@@ -41827,9 +42691,12 @@ function referenceLines(read) {
   if (read.edges.length === 0)
     return ["- none"];
   return read.edges.map((edge) => {
+    const { node } = edge;
     const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
     const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})${block}`;
+    const item = node.kind === "block" && node.document === undefined && (node.parent?.kind === "comment" || node.parent?.kind === "message") ? node.parent : undefined;
+    const source = item === undefined ? `${node.kind} ${node.ref ?? node.id}` : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
+    return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
   });
 }
 function unavailableReason(error) {
@@ -41872,27 +42739,32 @@ function nodeLine(node) {
   const made = fact(node.made_by, node.made_at);
   const changed = fact(node.changed_by, node.changed_at);
   const { parent } = node;
-  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (version ${node.parent_version})`}`;
+  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${parent.kind === "comment" ? "revision" : "version"} ${node.parent_version})`}`;
   return [
     `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
   ];
 }
 function blockLines(node, ref) {
-  const head = [
-    `Block: ${node.block_id ?? ref.block}`,
+  const unit = ref.item === undefined ? "version" : "revision";
+  const blockID = node.block_id ?? ref.block;
+  const head = ref.item === undefined ? [
+    `Block: ${blockID}`,
     `Document: ${node.document ?? ref.document}`,
     ...node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`],
     ...node.text === undefined ? [] : ["Text:", node.text]
+  ] : [
+    `Block ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
+    ...node.text === undefined ? [] : [node.text]
   ];
   const { pin } = node;
   if (pin === undefined)
     return head;
-  const state = pin.state === "unchanged" ? `Unchanged since version ${pin.version}.` : pin.state === "changed" ? `Changed since version ${pin.version}; last changed in version ${node.changed_version}.` : `Removed in version ${pin.removed_version}.`;
+  const state = pin.state === "unchanged" ? `Unchanged since ${unit} ${pin.version}.` : pin.state === "changed" ? `Changed since ${unit} ${pin.version}; last changed in ${unit} ${node.changed_version}.` : `Removed in ${unit} ${pin.removed_version}.`;
   return [
     ...head,
-    `Pinned to version: ${pin.version}`,
+    `Pinned to ${unit}: ${pin.version}`,
     state,
-    `Text at version ${pin.version}:`,
+    `Text at ${unit} ${pin.version}:`,
     pin.text
   ];
 }
@@ -42009,12 +42881,9 @@ function openAskAge(ageSeconds) {
   const days = Math.floor(hours / 24);
   return `${days}d${hours % 24 === 0 ? "" : ` ${hours % 24}h`}`;
 }
-function openAskOwner(ask) {
-  return "issue" in ask.owner ? `${ask.owner.issue.key}: ${ask.owner.issue.title}` : `${ask.owner.document.project} / ${ask.owner.document.name}`;
-}
 function openAskLine(ask, baseUrl) {
   const priority = ask.priority === null ? "" : `P${ask.priority} \xB7 `;
-  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${openAskOwner(ask)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
+  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${ownerTitle(ask.owner)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
 }
 function formatOpenAsksSummary(response, baseUrl) {
   const scope = "active open asks you authored on open issues and project documents";
@@ -42039,11 +42908,13 @@ function commentSummary({ comment, replies }, graph) {
   const root = [
     `${comment.id} \xB7 ${actorText(comment.author)}`,
     ...anchorLines(comment),
+    ...replyBlockLines(comment),
     `Body: ${comment.body}`
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     ...anchorLines(reply),
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -42054,6 +42925,14 @@ function commentSummary({ comment, replies }, graph) {
     ...graph
   ].join(`
 `);
+}
+function replyBlockLines(record) {
+  const block = record.reply_block;
+  if (block === undefined || block === null)
+    return [];
+  return [
+    block.removed ? `Re: block ${block.block_id} (removed)` : `Re: block ${block.block_id}: ${textHead(block.text)}`
+  ];
 }
 function anchorLines(record) {
   return [
@@ -42078,9 +42957,14 @@ function positionText(block) {
   ].join(" \u203A ");
 }
 function messageSummary({ message, replies }, graph) {
-  const root = [`${message.id} \xB7 ${actorText(message.author)}`, `Body: ${message.body}`];
+  const root = [
+    `${message.id} \xB7 ${actorText(message.author)}`,
+    ...replyBlockLines(message),
+    `Body: ${message.body}`
+  ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -42203,13 +43087,11 @@ ${text}`,
 }
 var BLOCK_OPENING_CHARS = 60;
 async function listDocumentBlocks(client, artifact) {
-  const before = await client.docRead(artifact.id);
-  const blocks = await client.artifactBlocks(artifact.id);
-  const after = await client.docRead(artifact.id);
-  if (before.token !== after.token || before.markdown !== after.markdown) {
+  const live = await liveBlocks(client, artifact);
+  if (live === undefined) {
     throw new Error(`${artifact.name} changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.`);
   }
-  const bytes = new TextEncoder().encode(before.markdown);
+  const { bytes, blocks } = live;
   const decoder = new TextDecoder;
   const lines = [
     `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`
@@ -42240,7 +43122,15 @@ async function listDocumentBlocks(client, artifact) {
     holders.push(block);
   }
   return { text: lines.join(`
-`), token: before.token };
+`), token: live.token };
+}
+async function liveBlocks(client, artifact) {
+  const before = await client.docRead(artifact.id);
+  const blocks = await client.artifactBlocks(artifact.id);
+  const after = await client.docRead(artifact.id);
+  if (before.token !== after.token || before.markdown !== after.markdown)
+    return;
+  return { bytes: new TextEncoder().encode(before.markdown), token: before.token, blocks };
 }
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const artifact = resolved.artifact;
@@ -42401,7 +43291,7 @@ async function executeDispatchTool(input) {
     throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
   const pictures = checked.pictures;
-  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
@@ -42414,6 +43304,24 @@ async function executeDispatchTool(input) {
       throw new Error("host session id is required for dispatch open-asks");
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
+  }
+  if (input.tool === "dispatch_answers") {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId)
+      throw new Error("host session id is required for dispatch answers");
+    let response;
+    try {
+      response = await dispatchClient().sessionAnswers(sessionId);
+    } catch (error) {
+      if (isNoAnswersRoute(error)) {
+        throw new Error(`This Dispatch (${configUrl}) has no answers route yet: its build is older than the answers route.`);
+      }
+      throw error;
+    }
+    return {
+      text: renderSessionAnswersList(response.items, { now: Date.now() }),
+      details: { session: sessionId, since: response.since, total: response.total }
+    };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
@@ -42432,14 +43340,7 @@ async function executeDispatchTool(input) {
   const args = checked.args;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
-  const refDocument = ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
-  const resolveDocument = (documentOwner, reference) => resolveArtifact(client, documentOwner, reference, {
-    canonical: reference !== undefined && reference === refDocument
-  });
-  const owner = ownerArguments.owner?.kind === "issue" ? {
-    kind: "issue",
-    issue: await resolveExistingIssue(client, ownerArguments.owner.issue)
-  } : ownerArguments.owner;
+  const { owner, documentOwner, resolveDocument } = await documentTargets(client, ownerArguments);
   const issueArgument = optionalString(input.args, "issue");
   const refText = optionalString(ownerArguments.args, "ref");
   if (input.tool !== "dispatch_ask" && owner?.kind === "issue" && issueArgument !== undefined && refText !== undefined && ownerArguments.ref?.owner.kind === "issue" && owner.issue !== ownerArguments.ref.owner.issue) {
@@ -42452,12 +43353,11 @@ async function executeDispatchTool(input) {
       throw new Error("issue is required");
     return owner.issue;
   };
-  const documentOwner = () => {
-    if (owner === null)
-      throw new Error("issue or project is required");
-    return owner;
-  };
-  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, upload, actor);
+  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, (picture) => upload(picture).catch((error) => {
+    if (!(error instanceof DispatchWriteLandedError))
+      throw error;
+    throw new Error(`${error.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`, { cause: error });
+  }), actor);
   const writePictures = (resolved, text, limit) => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
@@ -42498,20 +43398,27 @@ async function executeDispatchTool(input) {
           ...Array.isArray(labels) ? { labels } : {},
           actor
         });
-        refuseUnsavedRepository("created", created, repo);
-        const componentGuidance = await architectureGuidance(client, created.project, created.components);
-        const adviceLines = [
-          ...renderAdvice(input.tool, created.key, created.advice, {
-            isPrimarySpec: spec !== undefined
-          }),
-          ...componentGuidance === undefined ? [] : [componentGuidance],
-          ...renderSuggestions(created.advice?.suggestions, linkBase)
-        ];
+        refuseUnsavedRepository(created.created ? "created" : "already holds", created, repo);
+        const adviceLines = await otherAdviceLines(async () => {
+          const componentGuidance = await architectureGuidance(client, created.project, created.components);
+          return [
+            ...renderAdvice(input.tool, created.key, created.advice, {
+              isPrimarySpec: spec !== undefined
+            }),
+            ...componentGuidance === undefined ? [] : [componentGuidance]
+          ];
+        });
         const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
         const assigned = created.assignee === undefined ? "" : created.assignee === null ? "; unassigned" : `; assigned to ${created.assignee}`;
+        const suffixes = `${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
+            created.created ? `Created ${created.key}: ${created.title} \u2192 ${href}${suffixes}` : `Dispatch already holds ${created.key}: ${created.title} \u2192 ${href}; nothing was created${suffixes}`,
+            ...created.created ? relatedCheckLines(created.advice?.suggestions, {
+              project: created.project,
+              text: title,
+              configUrl: linkBase
+            }) : [],
             ...adviceLines
           ].join(`
 `),
@@ -42569,6 +43476,9 @@ async function executeDispatchTool(input) {
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
           };
         } catch (error) {
+          if (error instanceof DispatchWriteLandedError) {
+            throw new Error(`${error.message} That was the closing reason, so the close was not sent: read the issue's messages for it, then close with a reason that points at it, since retrying this call posts its reason again.`, { cause: error });
+          }
           const told = writeMayHaveLanded(error) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
           if (error instanceof DispatchServiceError)
             throw refusalWithCode(error, told);
@@ -42599,6 +43509,8 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error) {
+        if (error instanceof DispatchWriteLandedError)
+          throw error;
         const taken = dispatchAnswered(error, 500) && newLinks.length > 0 ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error, taken);
@@ -42693,6 +43605,29 @@ async function executeDispatchTool(input) {
         ...offset === undefined ? {} : { offset }
       });
       return searchAnswer(search, query, offset, linkBase);
+    }
+    case "dispatch_related": {
+      const project = stringArg(args, "project");
+      const title = optionalString(args, "title");
+      const text = optionalString(args, "text");
+      const excludeIssue = optionalString(args, "exclude_issue");
+      const keywordsOnly = optionalBoolean(args, "keywords_only");
+      const suggestions = await client.related(project, {
+        ...title === undefined ? {} : { title },
+        ...text === undefined ? {} : { text },
+        ...excludeIssue === undefined ? {} : { exclude_issue: excludeIssue },
+        ...keywordsOnly === undefined ? {} : { keywords_only: keywordsOnly }
+      });
+      return {
+        text: relatedCheckLines(suggestions, {
+          project,
+          text: [title, text].filter((part) => part !== undefined).join(`
+`),
+          configUrl: linkBase
+        }).join(`
+`),
+        details: { project, suggestions }
+      };
     }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
@@ -42856,14 +43791,17 @@ async function executeDispatchTool(input) {
       };
       const ask = resolved?.owner.kind === "project" ? await client.artifactAsk(resolved.artifact.id, askInput) : await client.ask(issue(), askInput);
       const askOwner = ask.issue_key !== null ? issueTopic(ask.issue_key) : resolved === undefined ? issueTopic(issue()) : documentTopic(resolved.artifact);
-      const adviceLines = [
-        ...renderSuggestions(ask.advice?.suggestions, linkBase),
-        ...renderAdvice(input.tool, askOwner.label, ask.advice, {})
-      ];
+      const checkLines = relatedCheckLines(ask.advice?.suggestions, {
+        project: resolved?.artifact.project ?? (ask.issue_key ?? "").replace(/-[0-9]+$/, ""),
+        text: stringArg(args, "question"),
+        configUrl: linkBase
+      });
+      const adviceLines = await otherAdviceLines(() => renderAdvice(input.tool, askOwner.label, ask.advice, {}));
       return {
         text: [
-          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}
-${await followsAsk(askOwner, input.subscriptions)}`,
+          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}`,
+          ...checkLines,
+          await followsAsk(askOwner, input.subscriptions),
           ...adviceLines
         ].join(`
 `),
@@ -42896,7 +43834,7 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const owner = documentOwner();
       const resolved = owner.kind === "project" || artifactReference === undefined ? owner.kind === "project" ? await resolveDocument(owner, artifactReference) : undefined : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
-      const replyTo = optionalString(args, "reply_to");
+      const replyTo = commentReplyTo(args);
       const replyToAskReference = optionalString(args, "reply_to_ask");
       const replyToAsk = replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
       if (replyToAskReference !== undefined && replyToAsk === undefined) {
@@ -42913,7 +43851,8 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const commentInput = {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
-        ...replyTo === undefined ? {} : { reply_to: replyTo },
+        ...replyTo === undefined ? {} : { reply_to: replyTo.id },
+        ...replyTo?.block === undefined ? {} : { reply_to_block: replyTo.block },
         ...replyToAsk === undefined ? {} : { ask_id: replyToAsk },
         ...requestedTurn === undefined ? {} : { turn: requestedTurn },
         actor
@@ -42973,7 +43912,8 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       };
     }
     case "dispatch_message": {
-      const inReplyTo = messageInReplyTo(args);
+      const target = messageInReplyTo(args);
+      const inReplyTo = target?.id;
       const written = stringArg(args, "body");
       const bodyLimit = {
         cap: DISPATCH_BODY_MAX,
@@ -43020,6 +43960,7 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
+        ...target?.block === undefined ? {} : { in_reply_to_block: target.block },
         actor
       });
       const messageRef = dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id);
@@ -43060,11 +44001,18 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const lostOps = edited.lost_ops;
       const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
-      const adviceLines = renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {});
+      const editAskText = ops.map((operation) => /^:{3,}ask\{.*\n([\s\S]*)/mu.exec(operation.markdown ?? operation.with ?? "")?.[1]).find((text) => text !== undefined) ?? resolved.issue?.title ?? "";
+      const checkLines = decisionBlockLines(edited.advice, {
+        project: resolved.artifact.project,
+        text: editAskText,
+        configUrl: linkBase
+      });
+      const adviceLines = await otherAdviceLines(() => renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {}));
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
       return {
         text: [
           `${applied}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
+          ...checkLines,
           ...tokenTrailer,
           ...adviceLines
         ].join(`
@@ -43307,10 +44255,11 @@ Document token: ${listed.token}`,
       if (ownerArguments.ref?.kind === "block") {
         const ref = ownerArguments.ref;
         const blockRef = stringArg(args, "ref");
+        const holder = blockRef.slice(0, blockRef.indexOf("#"));
         const [incoming, outgoing] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
-              throw new Error(`No block ${ref.block} in ${ref.document}.`);
+              throw new Error(`No block ${ref.block} in ${holder}.`);
             }
             throw error;
           }),
@@ -43409,9 +44358,8 @@ function asObject(value) {
 }
 
 // ../envoy-client/src/dispatch-session-state.ts
-var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 var PRIVATE_DIR = 448;
-var PRIVATE_FILE = 384;
+var PRIVATE_FILE2 = 384;
 var IDLE_SESSION_MS = 14 * 86400000;
 var PRUNE_INTERVAL_MS = 86400000;
 var PRUNED_STAMP = ".pruned";
@@ -43421,40 +44369,23 @@ var PICTURE_EXTENSIONS = {
   "image/gif": "gif",
   "image/webp": "webp"
 };
-function sessionStateRoot(env) {
-  const stateDir = env["DISPATCH_STATE_DIR"];
-  if (stateDir)
-    return stateDir;
-  return join2(env["XDG_STATE_HOME"] || join2(homedir(), ".local", "state"), "dispatch");
-}
-function sessionDirectory(env, sessionId) {
-  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
-    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
-  }
-  return join2(sessionStateRoot(env), "sessions", sessionId);
-}
 function ensureDirectory(dir) {
-  mkdirSync2(dir, { recursive: true, mode: PRIVATE_DIR });
+  mkdirSync3(dir, { recursive: true, mode: PRIVATE_DIR });
 }
 function readIfPresent(path) {
   try {
-    return readFileSync2(path, "utf-8");
+    return readFileSync3(path, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return;
     throw error;
   }
 }
-function writeAtomically(path, text) {
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync2(temporary, text, { mode: PRIVATE_FILE });
-  renameSync2(temporary, path);
-}
 function stringList(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function loadSessionMemory(dir, sessionId) {
-  const path = join2(dir, "state.json");
+  const path = join4(dir, "state.json");
   const text = readIfPresent(path);
   if (text === undefined)
     return new Set;
@@ -43478,7 +44409,7 @@ function writeMemory(dir, sessionId, follows) {
     pictures: [...shownPictures(sessionId)],
     follows: [...follows]
   };
-  writeAtomically(join2(dir, "state.json"), `${JSON.stringify(state)}
+  writeAtomically(join4(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
 function appendResult(dir, entry) {
@@ -43487,8 +44418,8 @@ function appendResult(dir, entry) {
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
-  appendFileSync(join2(dir, "results.jsonl"), `${JSON.stringify(line)}
-`, { mode: PRIVATE_FILE });
+  appendFileSync(join4(dir, "results.jsonl"), `${JSON.stringify(line)}
+`, { mode: PRIVATE_FILE2 });
 }
 function recordOutcome(dir, sessionId, follows, entry) {
   ensureDirectory(dir);
@@ -43498,11 +44429,11 @@ function recordOutcome(dir, sessionId, follows, entry) {
 function writePicture(dir, image) {
   const bytes = Buffer.from(image.data, "base64");
   const name = createHash2("sha256").update(bytes).digest("hex").slice(0, 16);
-  const pictures = join2(dir, "pictures");
-  const path = join2(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  const pictures = join4(dir, "pictures");
+  const path = join4(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
   ensureDirectory(pictures);
   try {
-    writeFileSync2(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
+    writeFileSync3(path, bytes, { mode: PRIVATE_FILE2, flag: "wx" });
   } catch (error) {
     if (!hasErrnoCode(error, "EEXIST"))
       throw error;
@@ -43510,21 +44441,21 @@ function writePicture(dir, image) {
   return { path, bytes: bytes.length };
 }
 function writeLongOutput(dir, text) {
-  const out = join2(dir, "out");
+  const out = join4(dir, "out");
   ensureDirectory(out);
-  const path = join2(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
-  writeFileSync2(path, text, { mode: PRIVATE_FILE });
+  const path = join4(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  writeFileSync3(path, text, { mode: PRIVATE_FILE2 });
   return path;
 }
 function writeSessionTitle(dir, title) {
   ensureDirectory(dir);
-  writeAtomically(join2(dir, "title"), title);
+  writeAtomically(join4(dir, "title"), title);
 }
 function readSessionTitle(dir) {
-  return readIfPresent(join2(dir, "title")) || undefined;
+  return readIfPresent(join4(dir, "title")) || undefined;
 }
 function pruneSessions(root, now) {
-  const stamp = join2(root, PRUNED_STAMP);
+  const stamp = join4(root, PRUNED_STAMP);
   try {
     if (now - statSync2(stamp).mtimeMs < PRUNE_INTERVAL_MS)
       return;
@@ -43532,7 +44463,7 @@ function pruneSessions(root, now) {
     if (!hasErrnoCode(error, "ENOENT"))
       throw error;
   }
-  const sessions = join2(root, "sessions");
+  const sessions = join4(root, "sessions");
   let entries = [];
   try {
     entries = readdirSync2(sessions, { withFileTypes: true });
@@ -43543,10 +44474,10 @@ function pruneSessions(root, now) {
   for (const entry of entries) {
     if (!entry.isDirectory())
       continue;
-    const dir = join2(sessions, entry.name);
+    const dir = join4(sessions, entry.name);
     try {
       if (now - statSync2(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
-        rmSync2(dir, { recursive: true, force: true });
+        rmSync3(dir, { recursive: true, force: true });
       }
     } catch (error) {
       if (!hasErrnoCode(error, "ENOENT"))
@@ -43555,7 +44486,7 @@ function pruneSessions(root, now) {
   }
   sweepStores(root, now);
   ensureDirectory(root);
-  writeFileSync2(stamp, "", { mode: PRIVATE_FILE });
+  writeFileSync3(stamp, "", { mode: PRIVATE_FILE2 });
 }
 
 // ../envoy-client/src/nats-auth.ts
@@ -43577,6 +44508,22 @@ function natsAuthOptions(seed) {
   return { authenticator: import_nats.nkeyAuthenticator(bytes) };
 }
 
+// ../envoy-client/src/nats-connection.ts
+var NATS_PING_INTERVAL_MS = 1e4;
+var NATS_MAX_PINGS_OUT = 2;
+function natsConnectionOptions(input) {
+  return {
+    servers: [...input.servers],
+    name: input.name,
+    ...natsAuthOptions(input.seed),
+    reconnect: true,
+    maxReconnectAttempts: -1,
+    reconnectTimeWait: 2000,
+    pingInterval: NATS_PING_INTERVAL_MS,
+    maxPingOut: NATS_MAX_PINGS_OUT
+  };
+}
+
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
@@ -43585,9 +44532,9 @@ import {
   lstatSync,
   mkdtempSync,
   openSync as openSync3,
-  readFileSync as readFileSync4,
+  readFileSync as readFileSync5,
   readlinkSync,
-  rmSync as rmSync3,
+  rmSync as rmSync4,
   statSync as statSync3
 } from "fs";
 import { homedir as homedir2, tmpdir } from "os";
@@ -43680,14 +44627,14 @@ function jsonErrorPosition(text) {
 }
 
 // ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync3 } from "fs";
+import { readFileSync as readFileSync4 } from "fs";
 function sendable(value) {
   return !/[\s\p{Cc}]/u.test(value);
 }
 function readSecretFile(variable, filePath) {
   let contents;
   try {
-    contents = readFileSync3(filePath, "utf8");
+    contents = readFileSync4(filePath, "utf8");
   } catch (error) {
     throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error)}`);
   }
@@ -43822,7 +44769,7 @@ function danglingLink(filePath) {
 function parseFile(filePath, schema, checkout) {
   let raw;
   try {
-    raw = readFileSync4(filePath, "utf-8");
+    raw = readFileSync5(filePath, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
       return { kind: "absent", link: danglingLink(filePath) };
@@ -43853,9 +44800,9 @@ function parseFile(filePath, schema, checkout) {
 }
 var FAILURE_KEPT_MS = 60000;
 var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
-var processGlobal = globalThis;
-var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
-processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
+var processGlobal2 = globalThis;
+var commandOutcomes = processGlobal2[COMMAND_OUTCOMES] ?? new Map;
+processGlobal2[COMMAND_OUTCOMES] = commandOutcomes;
 function runCommand(command, env, cwd) {
   const childEnv = {};
   for (const [name, variable] of Object.entries(env)) {
@@ -43898,7 +44845,7 @@ function runCommand(command, env, cwd) {
         timedOut: false
       };
     }
-    const value = readFileSync4(output, "utf-8").trim();
+    const value = readFileSync5(output, "utf-8").trim();
     if (value.length === 0)
       return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
@@ -43909,10 +44856,10 @@ function runCommand(command, env, cwd) {
     }
     return { value };
   } finally {
-    rmSync3(directory, { recursive: true, force: true });
+    rmSync4(directory, { recursive: true, force: true });
   }
 }
-function fileValue(value, field, filePath, env) {
+function fileValue(value, field, filePath, env, commands = "run") {
   if (!value.startsWith("!")) {
     if (!sendable(value)) {
       throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
@@ -43923,7 +44870,11 @@ function fileValue(value, field, filePath, env) {
   const cwd = path.dirname(path.resolve(filePath));
   const key = JSON.stringify([command, filePath, cwd]);
   let outcome = commandOutcomes.get(key);
-  if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+  if (commands === "kept") {
+    if (outcome === undefined) {
+      throw new Error(`${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`);
+    }
+  } else if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
     outcome = { ...runCommand(command, env, cwd), at: Date.now() };
     commandOutcomes.set(key, outcome);
   }
@@ -44033,7 +44984,7 @@ function bearerSource(env, section, written) {
   const bearer = written();
   return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
 }
-function fileBearer(bearer, url, section, env) {
+function fileBearer(bearer, url, section, env, commands = "run") {
   const named = httpUrl2(url)?.origin;
   const paired = httpUrl2(bearer.server)?.origin;
   if (named !== paired) {
@@ -44045,7 +44996,7 @@ function fileBearer(bearer, url, section, env) {
   if (bearer.token === "") {
     throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
   }
-  return fileValue(bearer.token, bearer.field, bearer.path, env);
+  return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
 }
 
 // ../envoy-client/src/envoy-settings.ts
@@ -44185,7 +45136,9 @@ var SessionWireSchema = object({
   roles: array(string2()).optional(),
   capabilities: array(string2()).optional(),
   self_subscribed: boolean2(),
-  last_seen: number2().int().optional()
+  last_seen: number2().int().optional(),
+  plugin: string2().optional(),
+  plugin_version: string2().optional()
 });
 var RoleWireSchema = object({
   role: string2(),
@@ -44332,7 +45285,9 @@ function createEnvoyClient(config) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
-      host: machineID()
+      host: machineID(),
+      plugin: input.plugin.name,
+      plugin_version: input.plugin.version
     }))),
     unsubscribe: async (input) => {
       await post("/v1/interests/unsubscribe", {
@@ -45013,9 +45968,10 @@ function createReplayEngine(options) {
 function replaySuppressed(rendered) {
   return rendered.skip || rendered.malformedDelivery === true;
 }
+var REPLAYED_SUFFIX = "while this session's connection was down.";
 function replayedText(content, publishedAt) {
   return `${content}
-Published at ${publishedAt} while this session's connection was down.`;
+Published at ${publishedAt} ${REPLAYED_SUFFIX}`;
 }
 function failureNoticeFields(notice) {
   const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
@@ -45205,7 +46161,34 @@ function writtenToken(config, checkout) {
     checkout: false
   };
 }
-function dispatchSettings(env, config) {
+function dispatchSettings(env, config, options = {}) {
+  const target = dispatchTarget(env, config);
+  if (!target.enabled)
+    return target;
+  const { url, source } = target;
+  let token;
+  try {
+    token = source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env, options.commands);
+  } catch (error) {
+    return offWithError(messageFor(error));
+  }
+  const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
+  const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
+  if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
+    return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
+  }
+  return {
+    enabled: true,
+    url,
+    token,
+    ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
+  };
+}
+function dispatchUrl(env, config) {
+  const target = dispatchTarget(env, config);
+  return target.enabled ? target.url : undefined;
+}
+function dispatchTarget(env, config) {
   if (config.kind === "failed")
     return offWithError(config.error);
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
@@ -45228,27 +46211,17 @@ function dispatchSettings(env, config) {
   if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
     return offWithError("DISPATCH_URL must be an http or https URL");
   }
+  let source;
   try {
-    const source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
-    if (source.kind === "none") {
-      return offWithError(explicitUrl === undefined ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`);
-    }
-    const url = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
-    const token = source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env);
-    const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
-    const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
-    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
-      return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
-    }
-    return {
-      enabled: true,
-      url,
-      token,
-      ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
-    };
+    source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
   } catch (error) {
     return offWithError(messageFor(error));
   }
+  if (source.kind === "none") {
+    return offWithError(explicitUrl === undefined ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`);
+  }
+  const url = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
+  return { enabled: true, url, source };
 }
 
 // ../envoy-client/src/session-settings.ts
@@ -45324,10 +46297,15 @@ function sessionDispatchSettings(file, env, options) {
     return { dispatch: offWithError(file.error), warnings: [], missing: null };
   const config = readEnvoyConfig(file.path, env, options);
   return {
-    dispatch: dispatchSettings(env, config),
+    dispatch: dispatchSettings(env, config, { commands: options.commands }),
     warnings: config.kind === "read" ? config.warnings : [],
     missing: config.kind === "read" ? config.missing : null
   };
+}
+function sessionDispatchUrl(file, env, options) {
+  if (file.path === null)
+    return;
+  return dispatchUrl(env, readEnvoyConfig(file.path, env, options));
 }
 function sessionEnvoySettings(file, env, options) {
   if (file.path === null)
@@ -45704,7 +46682,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) is live only: it reaches every session subscribed to it when you publish, and is not retained. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -45993,7 +46971,17 @@ var legionRepositories = strictObject({
     cache: legionCacheView.optional()
   })),
   refused: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  withoutWebhookApp: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
   caches: array(legionCacheView)
+});
+var legionConsumerLag = strictObject({
+  name: nonEmptyString,
+  waiting: number2().int().nonnegative(),
+  oldestAt: timestamp.nullable(),
+  oldestAgeSeconds: number2().int().nullable(),
+  lastHandledAt: timestamp.nullable(),
+  stalled: boolean2(),
+  unavailable: nonEmptyString.optional()
 });
 var LegionStateResponse = strictObject({
   daemon: daemonInfo,
@@ -46006,7 +46994,8 @@ var LegionStateResponse = strictObject({
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: array(legionCapabilityState),
   repositories: legionRepositories,
-  settings: legionSettings
+  settings: legionSettings,
+  consumers: array(legionConsumerLag)
 });
 var LegionRegisterResponse = strictObject({
   claimToken: nonEmptyString,
@@ -46302,11 +47291,14 @@ function parseStrictly(schema, body) {
 }
 function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
   const endpoint = baseUrl.replace(/\/+$/, "");
-  const call = async (method, path, body) => {
-    const response = await fetchFn(`${endpoint}${path}`, body === undefined ? undefined : {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+  const call = async (method, path, body, signal) => {
+    const response = await fetchFn(`${endpoint}${path}`, {
+      ...body === undefined ? {} : {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      },
+      ...signal === undefined ? {} : { signal }
     });
     const text = await response.text();
     if (response.ok)
@@ -46318,8 +47310,8 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     }
     throw new LegionDaemonApiError(method, path, response.status, undefined, `${JSON.stringify(text)} is not the daemon's refusal shape (${refusal.problem})`);
   };
-  const read = async (method, path, schema, body) => {
-    const { status, text } = await call(method, path, body);
+  const read = async (method, path, schema, body, signal) => {
+    const { status, text } = await call(method, path, body, signal);
     const parsed = parseStrictly(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path, status, parsed.problem);
@@ -46334,7 +47326,7 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     }
   };
   return {
-    state: () => read("GET", "/legion/v1/state", LegionStateResponse),
+    state: (options) => read("GET", "/legion/v1/state", LegionStateResponse, undefined, options?.signal),
     register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
     registerController: (input) => read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
@@ -48832,10 +49824,12 @@ class StdioServerTransport {
 
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
+
 // package.json
+var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 41
+  daemonApiVersion: 43
 };
 
 // src/channel-forwarder.ts
@@ -48965,9 +49959,9 @@ function createChannelForwarder(connection, options) {
 
 // src/claude-channel.ts
 import { spawnSync } from "child_process";
-import { readdirSync as readdirSync3, readFileSync as readFileSync5, readlinkSync as readlinkSync2 } from "fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync6, readlinkSync as readlinkSync2 } from "fs";
 import { homedir as homedir3 } from "os";
-import { basename as basename2, join as join4, resolve as resolve3, sep } from "path";
+import { basename as basename2, join as join6, resolve as resolve3, sep } from "path";
 var PLUGIN_SERVER = "envoy";
 var CHANNEL_FLAGS = {
   "--channels": false,
@@ -49205,7 +50199,7 @@ function claudeChannelGate(input) {
     why: `${asked} is not on Claude Code's approved channels allowlist (allowedChannelPlugins in ${MANAGED_SETTINGS_HINT})`
   };
 }
-var MANAGED_SETTINGS_HINT = `${join4(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`;
+var MANAGED_SETTINGS_HINT = `${join6(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`;
 function cacheDirectoryName(marketplace) {
   return marketplace.replace(/[^a-zA-Z0-9\-_]/g, "-");
 }
@@ -49248,7 +50242,7 @@ function processCommandLine(pid, executable = processExecutable) {
   let commandLine;
   if (process.platform === "linux") {
     try {
-      const pieces = readFileSync5(`/proc/${pid}/cmdline`, "utf8").split("\x00");
+      const pieces = readFileSync6(`/proc/${pid}/cmdline`, "utf8").split("\x00");
       let trailing = 0;
       while (pieces.length > 0 && pieces.at(-1) === "") {
         pieces.pop();
@@ -49285,7 +50279,7 @@ function processCommandLine(pid, executable = processExecutable) {
 function parentProcess(pid) {
   try {
     if (process.platform === "linux") {
-      const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync6(`/proc/${pid}/stat`, "utf8");
       const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent) && parent > 0 ? parent : undefined;
     }
@@ -49314,13 +50308,19 @@ function claudeCommandLine(pid, read = processCommandLine, parent = parentProces
   }
   return;
 }
-function installedMarketplace(bundlePath) {
+function pluginCacheSegments(bundlePath) {
   const parts = bundlePath.split(sep);
-  for (let index = 0;index + 2 < parts.length; index++) {
+  for (let index = 0;index + 1 < parts.length; index++) {
     if (parts[index] === "plugins" && parts[index + 1] === "cache")
-      return parts[index + 2];
+      return parts.slice(index + 2);
   }
   return;
+}
+function installedMarketplace(bundlePath) {
+  return pluginCacheSegments(bundlePath)?.[0];
+}
+function installedPluginVersion(bundlePath) {
+  return pluginCacheSegments(bundlePath)?.[2];
 }
 var INLINE_MARKETPLACE = "inline";
 function loadedMarketplace(pluginRoot, bundlePath, commandLine) {
@@ -49375,7 +50375,7 @@ var COMPOSITION_KEYS = new Set([
 ]);
 function readChannelSettings(file, asSource = false) {
   try {
-    const value = JSON.parse(readFileSync5(file, "utf8"));
+    const value = JSON.parse(readFileSync6(file, "utf8"));
     if (typeof value !== "object" || value === null || Array.isArray(value))
       return;
     if (asSource && Object.keys(value).every((key) => COMPOSITION_KEYS.has(key)))
@@ -49391,15 +50391,15 @@ function readChannelSettings(file, asSource = false) {
   }
 }
 function channelAllowlist(directories) {
-  const remote = readChannelSettings(join4(directories.configDirectory, "remote-settings.json"), true);
-  const dropIns = join4(directories.managedDirectory, "managed-settings.d");
+  const remote = readChannelSettings(join6(directories.configDirectory, "remote-settings.json"), true);
+  const dropIns = join6(directories.managedDirectory, "managed-settings.d");
   let dropInFiles = [];
   try {
-    dropInFiles = readdirSync3(dropIns).filter((name) => name.endsWith(".json") && !name.startsWith(".")).sort().map((name) => join4(dropIns, name));
+    dropInFiles = readdirSync3(dropIns).filter((name) => name.endsWith(".json") && !name.startsWith(".")).sort().map((name) => join6(dropIns, name));
   } catch {
     dropInFiles = [];
   }
-  const files = [join4(directories.managedDirectory, "managed-settings.json"), ...dropInFiles].map((file) => readChannelSettings(file)).filter((settings) => settings !== undefined);
+  const files = [join6(directories.managedDirectory, "managed-settings.json"), ...dropInFiles].map((file) => readChannelSettings(file)).filter((settings) => settings !== undefined);
   const lists = files.map((settings) => settings.list).filter((list) => list !== undefined);
   const fileList = lists.length === 0 ? undefined : lists.flat();
   const behavior = remote?.behavior ?? files.find((settings) => settings.behavior)?.behavior;
@@ -49413,7 +50413,7 @@ function detectClaudeChannel(input) {
     return { loaded: true };
   if (override === "0")
     return { loaded: false, why: "ENVOY_CHANNEL_LOADED=0" };
-  const configDirectory = input.environment["CLAUDE_CONFIG_DIR"]?.trim() || join4(homedir3(), ".claude");
+  const configDirectory = input.environment["CLAUDE_CONFIG_DIR"]?.trim() || join6(homedir3(), ".claude");
   const commandLine = claudeCommandLine(input.claudePid);
   const pluginRoot = input.environment["CLAUDE_PLUGIN_ROOT"]?.trim();
   const plugin = pluginRoot ? {
@@ -49443,12 +50443,12 @@ function claudeProjectDirectory(environment, fallback) {
 
 // src/session-identity.ts
 import { readFile } from "fs/promises";
-import { basename as basename3, join as join6 } from "path";
+import { basename as basename3, join as join8 } from "path";
 
 // src/session-state.ts
-import { readFileSync as readFileSync6 } from "fs";
+import { readFileSync as readFileSync7 } from "fs";
 import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
-import { dirname as dirname2, join as join5 } from "path";
+import { dirname as dirname2, join as join7 } from "path";
 async function writeAtomicStateFile(file, contents) {
   await mkdir(dirname2(file), { recursive: true, mode: 448 });
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -49466,7 +50466,7 @@ async function pruneStateDirectory(directory, isStale) {
     throw error;
   });
   for (const entry of entries) {
-    const file = join5(directory, entry);
+    const file = join7(directory, entry);
     if (!await isStale(file))
       continue;
     await rm(file, { recursive: true, force: true });
@@ -49481,7 +50481,7 @@ async function writtenLongAgo(file) {
 }
 var TITLES_DIRECTORY = "titles";
 function sessionTitleFile(stateDirectory, sessionId) {
-  return join5(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
+  return join7(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
 }
 async function writeChosenTitle(file, title) {
   await writeAtomicStateFile(file, `${title}
@@ -49492,7 +50492,7 @@ async function removeChosenTitle(file) {
 }
 function readChosenTitleSync(file) {
   try {
-    return readFileSync6(file, "utf8");
+    return readFileSync7(file, "utf8");
   } catch {
     return;
   }
@@ -49509,7 +50509,7 @@ async function recordChosenTitle(sessionId, title) {
     await writeChosenTitle(file, chosen);
 }
 async function pruneStaleSessionTitles(stateDirectory) {
-  await pruneStateDirectory(join5(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
+  await pruneStateDirectory(join7(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
 }
 
 // src/session-identity.ts
@@ -49530,14 +50530,14 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join6(stateDirectory, "sessions", String(claudePid));
+  return join8(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join6(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join8(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
 var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
-  return join6(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
+  return join8(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
 }
 
 class UnparseableRoleRecordError extends Error {
@@ -49588,14 +50588,14 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  await pruneStateDirectory(join6(stateDirectory, "sessions"), (file) => {
+  await pruneStateDirectory(join8(stateDirectory, "sessions"), (file) => {
     const pid = basename3(file);
     return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
 }
 async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
   const own = roleStateFile(stateDirectory, currentSessionId);
-  await pruneStateDirectory(join6(stateDirectory, ROLES_DIRECTORY), async (file) => file !== own && await writtenLongAgo(file));
+  await pruneStateDirectory(join8(stateDirectory, ROLES_DIRECTORY), async (file) => file !== own && await writtenLongAgo(file));
 }
 
 // src/envoy-off.ts
@@ -49645,7 +50645,7 @@ async function serveEnvoyOff(serverInfo, refusal) {
 
 // src/legion-claim.ts
 import { readdir as readdir2, stat as stat2 } from "fs/promises";
-import { join as join7 } from "path";
+import { join as join9 } from "path";
 import { setTimeout as delay } from "timers/promises";
 
 // ../pi-shared/src/legion-claim-core.ts
@@ -49719,7 +50719,8 @@ function legionPane(env) {
   return {
     daemonUrl: required("LEGION_DAEMON_URL"),
     configDir: required("CLAUDE_CONFIG_DIR"),
-    bootToken: pointer === undefined ? required("LEGION_BOOT_TOKEN") : readSecretFile("LEGION_BOOT_TOKEN_FILE", pointer)
+    bootToken: pointer === undefined ? required("LEGION_BOOT_TOKEN") : readSecretFile("LEGION_BOOT_TOKEN_FILE", pointer),
+    launcherSaves: configuredValue(env["LEGION_CLAUDE_SESSION_ID"]) !== undefined
   };
 }
 function logLegion(line) {
@@ -49734,23 +50735,39 @@ function stopPane(why) {
   endPane();
 }
 async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
-  const projects = join7(configDir, "projects");
+  const projects = join9(configDir, "projects");
   const name = `${sessionID}.jsonl`;
   for (;; ) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
-      const file = join7(projects, directory, name);
-      if (await stat2(file).then((info) => info.isFile(), () => false))
+      const file = join9(projects, directory, name);
+      if (await isFile(file))
         return file;
     }
     await delay(pollMs, undefined, { signal });
   }
+}
+var SAVED_MARKER_SUFFIX = ".legion-saved";
+async function waitForSavedTranscript(transcript, signal, pollMs = 100) {
+  const marker = `${transcript}${SAVED_MARKER_SUFFIX}`;
+  for (;; ) {
+    signal.throwIfAborted();
+    if (await isFile(marker))
+      return;
+    await delay(pollMs, undefined, { signal });
+  }
+}
+function isFile(file) {
+  return stat2(file).then((info) => info.isFile(), () => false);
 }
 function startLegionClaim(deps) {
   let capability;
   const { sessionID } = deps;
   const boot = async () => {
     const transcript = await waitForTranscript(deps.pane.configDir, sessionID, deps.signal, deps.pollMs);
+    if (deps.pane.launcherSaves) {
+      await waitForSavedTranscript(transcript, deps.signal, deps.pollMs);
+    }
     await bootLegionClaim({
       daemon: deps.daemon,
       registration: {
@@ -49785,7 +50802,7 @@ function startLegionClaim(deps) {
 }
 
 // src/legion-inbox.ts
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 import { createConnection } from "net";
 var INBOX_VARIABLE = "LEGION_CLAUDE_INBOX";
 var INBOX_CAPABILITIES = [
@@ -49844,12 +50861,601 @@ function createInboxNotifier(socketPath) {
   };
   return {
     notification(notification) {
-      const id = notification.params.meta["event_id"] ?? randomUUID();
+      const id = notification.params.meta["event_id"] ?? randomUUID2();
       const settle = Promise.withResolvers();
       waiting.push({ id, settle });
       connected().write(`${JSON.stringify({ id, content: notification.params.content })}
 `);
       return settle.promise;
+    }
+  };
+}
+
+// src/legion-phase-hook.ts
+import { randomUUID as randomUUID4 } from "crypto";
+import { readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync5, writeFileSync as writeFileSync4 } from "fs";
+import { dirname as dirname3, join as join10 } from "path";
+
+// ../pi-shared/src/phase-reminder.ts
+import { randomUUID as randomUUID3 } from "crypto";
+
+// ../pi-shared/src/phase-stall.ts
+var WAITING_REPLY = /^\W*WAITING\b/m;
+var TOOL_CALL_SHAPED = /<(?:[\w-]+:)?(?:function_calls\b|invoke\s+name\s*=|parameter\s+name\s*=)/;
+var REMINDER = "Your turn ended with your Legion phase still open: the `legion` tool's `handoff_complete` has " + "not succeeded since your assignment. If your phase's work is done, call the `legion` tool now " + "with op `handoff_complete` and the fields your role's instructions give. If you are waiting on " + "something (CI, a review, a person), reply with a line starting WAITING that names what you are " + "waiting on: that buys a quiet wait, and then this reminder comes again. This reminder repeats " + "at the end of every turn for as long as your phase is open.";
+var TEXT_TOOL_CALL = "Your last message holds a tool call written as text, so it did not run: make it a real tool call. ";
+function reminderText(lastAssistantText) {
+  return TOOL_CALL_SHAPED.test(lastAssistantText) ? TEXT_TOOL_CALL + REMINDER : REMINDER;
+}
+function stepPhaseStall(state, input) {
+  switch (input.kind) {
+    case "assignment":
+      return { state: { state: "open", count: 0 } };
+    case "phase-closed":
+      return { state: { state: "closed", count: 0 } };
+    case "inbound-event":
+      return state.state === "closed" ? { state } : { state: { state: "open", count: 0 } };
+    case "tool-call":
+      return { state: { state: state.state, count: 0 } };
+    case "reminded":
+      return state.state === "closed" ? { state } : { state: { state: "open", count: state.count + 1 } };
+    case "settle": {
+      if (state.state !== "open")
+        return { state };
+      if (WAITING_REPLY.test(input.lastAssistantText)) {
+        return { state: { state: "waiting", count: state.count } };
+      }
+      return { state, reminder: reminderText(input.lastAssistantText) };
+    }
+  }
+}
+function phaseStallFrom(data) {
+  if (!("state" in data) || typeof data.state !== "string")
+    return;
+  const recorded = "count" in data ? data.count : undefined;
+  const count = typeof recorded === "number" && Number.isInteger(recorded) && recorded >= 0 ? recorded : 0;
+  switch (data.state) {
+    case "closed":
+    case "open":
+    case "waiting":
+      return { state: data.state, count };
+    case "quiet":
+    case "text-call":
+      return { state: "open", count: 0 };
+    default:
+      return;
+  }
+}
+var LAST_MESSAGE_LIMIT = 500;
+function phaseStallReportFrom(data) {
+  const reported = "reported" in data && data.reported === true;
+  const key = "reportKey" in data && typeof data.reportKey === "string" ? data.reportKey : undefined;
+  return { reported, reportKey: key };
+}
+function phaseStallEntryFrom(data) {
+  if (data === undefined)
+    return;
+  const stall = phaseStallFrom(data);
+  if (stall === undefined)
+    return;
+  const report = phaseStallReportFrom(data);
+  const lastMessage = "lastMessage" in data && typeof data.lastMessage === "string" ? data.lastMessage.slice(0, LAST_MESSAGE_LIMIT) : "";
+  return {
+    state: stall.state,
+    count: stall.count,
+    reported: report.reported,
+    ...report.reportKey === undefined ? {} : { reportKey: report.reportKey },
+    ...lastMessage === "" ? {} : { lastMessage }
+  };
+}
+
+// ../pi-shared/src/phase-reminder.ts
+var RECORD_READ_BOUND_MS = 5000;
+function roleUnheld(error) {
+  if (!(error instanceof EnvoyApiError) || error.details.status !== 404)
+    return false;
+  let body;
+  try {
+    body = JSON.parse(error.details.responseBody);
+  } catch {
+    return false;
+  }
+  if (typeof body !== "object" || body === null || !("reason" in body))
+    return false;
+  return body.reason === "unclaimed" || body.reason === "holder_lapsed";
+}
+async function withBound(work, ms) {
+  const controller = new AbortController;
+  const deadline = Promise.withResolvers();
+  const timer = setTimeout(() => {
+    const late = new Error(`no answer within ${ms}ms`);
+    deadline.reject(late);
+    controller.abort(late);
+  }, ms);
+  try {
+    return await Promise.race([work(controller.signal), deadline.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function createPhaseReminder(deps) {
+  const boundMs = deps.recordBoundMs ?? RECORD_READ_BOUND_MS;
+  let stall = { state: "closed", count: 0 };
+  let reported = false;
+  let reportKey;
+  let generation = 0;
+  let turnRunning = false;
+  let continued = false;
+  let lastMessage = "";
+  let recorded = "";
+  const entryOf = () => ({
+    state: stall.state,
+    count: stall.count,
+    reported,
+    ...reportKey === undefined ? {} : { reportKey },
+    ...lastMessage === "" ? {} : { lastMessage }
+  });
+  const writeEntry = () => {
+    const entry = entryOf();
+    const written = JSON.stringify(entry);
+    if (written === recorded)
+      return;
+    recorded = written;
+    deps.saveEntry(entry);
+  };
+  recorded = JSON.stringify(entryOf());
+  const advance = (input) => {
+    const step = stepPhaseStall(stall, input);
+    stall = step.state;
+    if (stall.count === 0) {
+      reported = false;
+      reportKey = undefined;
+    }
+    writeEntry();
+    return step.reminder;
+  };
+  const recordCheck = async () => {
+    const claim = deps.claim();
+    if (claim === undefined)
+      return { reminds: true };
+    let record;
+    try {
+      record = (await withBound(deps.readState, boundMs)).issues[claim.issue];
+    } catch (error) {
+      deps.log.debug("legion: the daemon did not answer the phase reminder's record check", {
+        issue: claim.issue,
+        error: messageFor(error)
+      });
+      return { reminds: true };
+    }
+    if (record === undefined) {
+      deps.log.debug("legion: the daemon holds no record for this phase reminder's issue", {
+        issue: claim.issue
+      });
+      return { reminds: true };
+    }
+    if (roleForPhase(record.phase) !== claim.role) {
+      deps.log.debug("legion: this role no longer works this phase; no reminder is sent", {
+        issue: claim.issue,
+        phase: record.phase,
+        role: claim.role
+      });
+      return { reminds: false, record };
+    }
+    return { reminds: true, record };
+  };
+  const tellArchitect = async (record) => {
+    const claim = deps.claim();
+    if (claim === undefined)
+      return;
+    const publish = deps.publisher();
+    if (publish === undefined) {
+      deps.log.debug("legion: Envoy is off for this session; the architect is not told", {
+        issue: claim.issue,
+        reminders: stall.count
+      });
+      return;
+    }
+    reportKey ??= randomUUID3();
+    const key = reportKey;
+    writeEntry();
+    const phase = record?.phase ?? "unknown";
+    const reminders = stall.count;
+    try {
+      const live = record?.architect !== undefined && record.architect.state !== "retired" && record.architect.state !== "failed";
+      const topic = ROLE_TOPIC_PREFIX + roleToken(deps.project ?? "", live ? claim.issue : claim.tree, "architect");
+      await publish({
+        topic,
+        message: `The ${claim.role} of ${claim.issue} has let ${reminders} phase reminders go unanswered: ` + `its turns keep ending with the phase ${phase} still open and no successful ` + `handoff_complete, and nothing it does clears the reminder. ` + `What it last said was: ${lastMessage}`,
+        payload: JSON.stringify({
+          issue: claim.issue,
+          role: claim.role,
+          phase,
+          reminders,
+          lastMessage
+        }),
+        idempotencyKey: key,
+        sourceSessionID: claim.sessionID
+      });
+      if (reportKey !== key)
+        return;
+      reported = true;
+      writeEntry();
+    } catch (error) {
+      if (roleUnheld(error)) {
+        deps.log.debug("legion: no live session holds the architect role; telling it again later", {
+          issue: claim.issue,
+          reminders
+        });
+        return;
+      }
+      deps.log.warn("legion: the architect was not told its worker is stalled", {
+        issue: claim.issue,
+        reminders,
+        error: messageFor(error)
+      });
+    }
+  };
+  const deliver = async (reminder, record) => {
+    const uncounted = stall;
+    advance({ kind: "reminded" });
+    const counted = stall;
+    generation += 1;
+    const sentAt = generation;
+    try {
+      await deps.sendReminder(reminder);
+    } catch (error) {
+      deps.log.warn("legion: a phase reminder did not reach this worker; it comes again later", {
+        error: messageFor(error)
+      });
+      if (stall === counted) {
+        stall = uncounted;
+        writeEntry();
+      }
+      if (generation === sentAt)
+        armReminder(reminder, deps.limits.reminderMs);
+      return;
+    }
+    if (reported || stall.count < deps.limits.architectAfter)
+      return;
+    await tellArchitect(record);
+  };
+  const armReminder = (reminder, delayMs) => {
+    const armedAt = generation;
+    deps.armTimer(async () => {
+      if (generation !== armedAt || stall.state === "closed" || turnRunning)
+        return;
+      const check = await recordCheck();
+      if (!check.reminds)
+        return;
+      if (generation !== armedAt || turnRunning)
+        return;
+      await deliver(reminder, check.record);
+    }, delayMs);
+  };
+  return {
+    restore: (entry) => {
+      stall = entry === undefined ? { state: "closed", count: 0 } : { state: entry.state, count: entry.count };
+      reported = entry?.reported ?? false;
+      reportKey = entry?.reportKey;
+      lastMessage = entry?.lastMessage ?? "";
+      recorded = JSON.stringify(entryOf());
+    },
+    armResumeReminder: () => {
+      if (stall.state === "closed")
+        return;
+      armReminder(reminderText(""), deps.limits.resumeMs);
+    },
+    turnStarted: () => {
+      generation += 1;
+      turnRunning = true;
+    },
+    apply: (input) => {
+      if (input.kind === "phase-closed")
+        generation += 1;
+      advance(input);
+    },
+    settle: async (text, options) => {
+      turnRunning = false;
+      generation += 1;
+      if (stall.state !== "closed")
+        lastMessage = text.slice(0, LAST_MESSAGE_LIMIT);
+      const before = stall.count;
+      const reminder = advance({ kind: "settle", lastAssistantText: text });
+      if (stall.state === "waiting") {
+        continued = false;
+        armReminder(reminderText(text), deps.limits.waitingMs);
+        return;
+      }
+      if (reminder === undefined) {
+        continued = false;
+        return;
+      }
+      if (before !== 0 || continued || options?.canContinue === false) {
+        continued = false;
+        armReminder(reminder, deps.limits.reminderMs);
+        return;
+      }
+      if (!(await recordCheck()).reminds) {
+        continued = false;
+        return;
+      }
+      advance({ kind: "reminded" });
+      generation += 1;
+      continued = true;
+      return reminder;
+    },
+    sessionChanged: () => {
+      generation += 1;
+    }
+  };
+}
+
+// ../pi-shared/src/stall-limits.ts
+var DEFAULT_STALL_LIMITS = {
+  reminderMs: 300000,
+  waitingMs: 900000,
+  resumeMs: 120000,
+  architectAfter: 3
+};
+function integerSetting(env, log, name, fallback, least) {
+  const raw = env[name];
+  if (raw === undefined)
+    return fallback;
+  const value = raw.trim() === "" ? Number.NaN : Number(raw);
+  if (!Number.isInteger(value) || value < least) {
+    log.warn(`legion: ${name} is not an integer of ${least} or more; using ${fallback}`, {
+      value: raw
+    });
+    return fallback;
+  }
+  return value;
+}
+function stallLimits(env, log) {
+  return {
+    reminderMs: integerSetting(env, log, "LEGION_STALL_REMINDER_MS", DEFAULT_STALL_LIMITS.reminderMs, 0),
+    waitingMs: integerSetting(env, log, "LEGION_STALL_WAITING_MS", DEFAULT_STALL_LIMITS.waitingMs, 0),
+    resumeMs: integerSetting(env, log, "LEGION_STALL_RESUME_MS", DEFAULT_STALL_LIMITS.resumeMs, 0),
+    architectAfter: integerSetting(env, log, "LEGION_STALL_ARCHITECT_AFTER", DEFAULT_STALL_LIMITS.architectAfter, 2)
+  };
+}
+
+// ../pi-shared/src/workspace-recreated.ts
+var WORKSPACE_RECREATED_VARIABLE = "LEGION_WORKSPACE_RECREATED";
+function workspaceRecreated(environment) {
+  return environment[WORKSPACE_RECREATED_VARIABLE] === "true";
+}
+function workspaceRecreatedNotice(environment, issue) {
+  if (!workspaceRecreated(environment))
+    return;
+  return {
+    id: crypto.randomUUID(),
+    content: `Your workspace was recreated since your last turn: it holds what was pushed to legion/${issue} ` + "(the repository's default branch if nothing was), and anything you had not pushed is gone. " + "Before you continue, check the workspace against what you remember doing and re-read your " + "last handoff."
+  };
+}
+
+// src/legion-phase-hook.ts
+var PHASE_HOOK_TOOL_NAME = "legion_phase_hook";
+var PHASE_HOOK_REFUSAL = "legion_phase_hook is Claude Code's hook endpoint for Legion's phase reminder: Claude Code's " + "own hooks call it with the event they fire for, and it does nothing for a call the model " + "makes. Do not call it.";
+var HOOK_EVENTS = [
+  "Stop",
+  "StopFailure",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "UserPromptSubmit"
+];
+var WRITTEN_LINES_KEPT = 32;
+var hookArguments = object({
+  event: _enum2(HOOK_EVENTS),
+  lastAssistantMessage: string2().optional(),
+  stopHookActive: string2().optional(),
+  toolName: string2().optional(),
+  agentId: string2().optional(),
+  prompt: string2().optional()
+});
+function phaseHookToolDefinition() {
+  return {
+    name: PHASE_HOOK_TOOL_NAME,
+    description: PHASE_HOOK_REFUSAL,
+    inputSchema: toJSONSchema(hookArguments)
+  };
+}
+function phaseStallFile(configDir, sessionID) {
+  return join10(configDir, `legion-phase-stall-${sessionID}.json`);
+}
+function paneReminderLog(write) {
+  const line = (level, message, context) => {
+    write(context === undefined ? `${level}: ${message}` : `${level}: ${message} ${JSON.stringify(context)}`);
+  };
+  return {
+    debug: (message, context) => line("debug", message, context),
+    warn: (message, context) => line("warn", message, context)
+  };
+}
+var NO_RECORD = { entry: undefined, recreatedNoticeSent: false };
+function readPhaseStallRecord(file, log) {
+  let raw;
+  try {
+    raw = readFileSync8(file, "utf8");
+  } catch (error) {
+    const missing = typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+    if (!missing) {
+      log.warn("legion: the phase-stall state could not be read; this session starts afresh", {
+        file,
+        error: messageFor(error)
+      });
+    }
+    return NO_RECORD;
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (error) {
+    log.warn("legion: the phase-stall state is not JSON; this session starts afresh", {
+      file,
+      error: messageFor(error)
+    });
+    return NO_RECORD;
+  }
+  if (typeof data !== "object" || data === null) {
+    log.warn("legion: the phase-stall state is not an object; this session starts afresh", { file });
+    return NO_RECORD;
+  }
+  const entry = phaseStallEntryFrom(data);
+  if (entry === undefined) {
+    log.warn("legion: the phase-stall state holds no state this build knows; starting afresh", {
+      file
+    });
+    return NO_RECORD;
+  }
+  return {
+    entry,
+    recreatedNoticeSent: "recreatedNoticeSent" in data && data.recreatedNoticeSent === true
+  };
+}
+function writePhaseStallRecord(file, entry, recreatedNoticeSent, log) {
+  const temporary = join10(dirname3(file), `.legion-phase-stall-${randomUUID4()}`);
+  try {
+    writeFileSync4(temporary, JSON.stringify({ ...entry, ...recreatedNoticeSent ? { recreatedNoticeSent } : {} }), { mode: 384 });
+    renameSync3(temporary, file);
+  } catch (error) {
+    rmSync5(temporary, { force: true });
+    log.warn("legion: the phase-stall state is not recorded for a relaunch", {
+      file,
+      error: messageFor(error)
+    });
+  }
+}
+function createPhaseHookEndpoint(deps) {
+  const limits = stallLimits(deps.env, deps.log);
+  const restored = readPhaseStallRecord(deps.stateFile, deps.log);
+  let entry = restored.entry ?? { state: "closed", count: 0, reported: false };
+  let recreatedNoticeSent = restored.recreatedNoticeSent;
+  const saveRecord = (next) => {
+    entry = next;
+    writePhaseStallRecord(deps.stateFile, next, recreatedNoticeSent, deps.log);
+  };
+  if (recreatedNoticeSent && !workspaceRecreated(deps.env)) {
+    recreatedNoticeSent = false;
+    saveRecord(entry);
+  }
+  let timer;
+  const dropTimer = () => {
+    if (timer === undefined)
+      return;
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  const armTimer = (callback, delayMs) => {
+    dropTimer();
+    timer = setTimeout(() => {
+      timer = undefined;
+      callback();
+    }, delayMs);
+  };
+  let lastReminder;
+  const written = new Set;
+  const noteWritten = (content) => {
+    written.add(content);
+    for (const oldest of written) {
+      if (written.size <= WRITTEN_LINES_KEPT)
+        break;
+      written.delete(oldest);
+    }
+  };
+  const writeToSession = async (text, what) => {
+    const { inbox } = deps;
+    if (inbox === undefined) {
+      deps.log.warn(`legion: ${what} has no way to reach this worker: this session has no inbox`, {
+        text
+      });
+      return;
+    }
+    await inbox(text);
+  };
+  const sendReminder = (text) => {
+    lastReminder = text;
+    return writeToSession(text, "a phase reminder");
+  };
+  const reminder = createPhaseReminder({
+    sendReminder,
+    armTimer,
+    saveEntry: saveRecord,
+    claim: deps.claim,
+    readState: deps.readState,
+    publisher: () => deps.publish,
+    project: configuredValue(deps.env["LEGION_PROJECT"]),
+    limits,
+    log: deps.log
+  });
+  reminder.restore(restored.entry);
+  const sendRecreatedNotice = (issue) => {
+    if (recreatedNoticeSent)
+      return;
+    const notice = workspaceRecreatedNotice(deps.env, issue);
+    if (notice === undefined)
+      return;
+    recreatedNoticeSent = true;
+    saveRecord(entry);
+    noteWritten(notice.content);
+    writeToSession(notice.content, "the recreated-workspace notice").catch((error) => {
+      deps.log.warn("legion: the recreated-workspace notice did not reach this worker", {
+        error: messageFor(error)
+      });
+    });
+  };
+  deps.booted.then(() => {
+    const claim = deps.claim();
+    if (claim === undefined)
+      return;
+    sendRecreatedNotice(claim.issue);
+    if (claim.role !== "architect")
+      reminder.armResumeReminder();
+  });
+  return {
+    deliveryWritten: noteWritten,
+    phaseClosed: () => reminder.apply({ kind: "phase-closed" }),
+    stop: dropTimer,
+    handle: async (input) => {
+      const parsed = hookArguments.safeParse(input);
+      if (!parsed.success)
+        return { error: PHASE_HOOK_REFUSAL };
+      const event = parsed.data;
+      const claim = deps.claim();
+      if (claim === undefined || claim.role === "architect")
+        return {};
+      switch (event.event) {
+        case "Stop": {
+          deps.log.debug("legion: a Claude Code phase worker's turn is settling", {
+            issue: claim.issue,
+            role: claim.role,
+            stopHookActive: event.stopHookActive ?? ""
+          });
+          const reminded = await reminder.settle(event.lastAssistantMessage ?? "");
+          return reminded === undefined ? {} : { decision: "block", reason: reminded };
+        }
+        case "StopFailure": {
+          await reminder.settle(event.lastAssistantMessage ?? "", { canContinue: false });
+          return {};
+        }
+        case "PostToolUse":
+        case "PostToolUseFailure": {
+          if ((event.agentId ?? "") !== "")
+            return {};
+          reminder.apply({ kind: "tool-call" });
+          return {};
+        }
+        case "UserPromptSubmit": {
+          reminder.turnStarted();
+          dropTimer();
+          const prompt = event.prompt ?? "";
+          if (prompt === lastReminder)
+            return {};
+          const delivered = written.delete(prompt);
+          reminder.apply({ kind: delivered ? "inbound-event" : "assignment" });
+          return {};
+        }
+      }
     }
   };
 }
@@ -49911,7 +51517,7 @@ var PHASE_OP_SENTENCES = {
   requestBackwardMove: "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " + "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. "
 };
 function legionToolDescription(host) {
-  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
+  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), the implementer's " + "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " + "naming a closed pull request is the architect's to decide) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
 }
 async function mintClaimGrant(daemon, claim) {
   const { grantId } = await daemon.grant({
@@ -50028,9 +51634,9 @@ async function executeLegionTool(runtime, input, signal) {
 
 // src/replay-state.ts
 import { readFile as readFile2 } from "fs/promises";
-import { join as join8 } from "path";
+import { join as join11 } from "path";
 function replayStateFile(stateDirectory, sessionId) {
-  return join8(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
+  return join11(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
 }
 async function readReplayState(file) {
   let text;
@@ -50059,7 +51665,7 @@ async function writeReplayState(file, snapshot) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync7 } from "fs";
+import { readFileSync as readFileSync9 } from "fs";
 import { basename as basename4 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
@@ -50082,7 +51688,7 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat = readFileSync7(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync9(`/proc/${pid}/stat`, "utf8");
       const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent) ? parent : undefined;
     }
@@ -50105,21 +51711,45 @@ function isAncestor(candidate, pid = process.pid) {
   }
   return false;
 }
-function queryTmux(socket, pane, format) {
+async function queryTmux(socket, pane, format) {
+  let child;
   try {
-    const answer = execFileSync("tmux", ["-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: TMUX_TIMEOUT_MS,
-      killSignal: "SIGKILL"
+    child = Bun.spawn(["tmux", "-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore"
     });
-    return answer.trim() === "" ? undefined : answer;
   } catch {
     return;
   }
+  const reader = child.stdout.getReader();
+  const expired = Promise.withResolvers();
+  const timer = setTimeout(() => {
+    child.kill("SIGKILL");
+    reader.cancel().catch(() => {
+      return;
+    });
+    expired.resolve(undefined);
+  }, TMUX_TIMEOUT_MS);
+  const answered = (async () => {
+    const decoder = new TextDecoder;
+    let answer = "";
+    for (let chunk = await reader.read();!chunk.done; chunk = await reader.read()) {
+      answer += decoder.decode(chunk.value, { stream: true });
+    }
+    answer += decoder.decode();
+    return await child.exited === 0 && answer.trim() !== "" ? answer : undefined;
+  })().catch(() => {
+    return;
+  });
+  try {
+    return await Promise.race([answered, expired.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
-function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
-  const fields = query(socket, pane, TMUX_PANE_FORMAT)?.replace(/\r?\n$/, "").split("\t");
+async function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
+  const fields = (await query(socket, pane, TMUX_PANE_FORMAT))?.replace(/\r?\n$/, "").split("\t");
   if (fields === undefined || fields.length < 6)
     return;
   const [name = "", window2 = "", automaticRename, group = "", pid, panePid = ""] = fields.map(oneLine);
@@ -50133,7 +51763,7 @@ function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
   }
   return /^[0-9]+$/.test(session) ? undefined : session;
 }
-function sessionTitle(environment, directory, sources = {}) {
+async function sessionTitle(environment, directory, sources = {}) {
   const {
     query = queryTmux,
     ownPane = (panePid) => isAncestor(panePid),
@@ -50149,7 +51779,7 @@ function sessionTitle(environment, directory, sources = {}) {
   const serverPid = parts.at(-2) ?? "";
   const pane = configuredValue(environment.TMUX_PANE)?.trim();
   const directoryName = oneLine(basename4(directory) || directory);
-  const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
+  const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : await tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
   return (sessionId) => {
     const own = oneLine(chosen(sessionId) ?? "");
     return visible(own) ? own : `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
@@ -50261,7 +51891,7 @@ function createChannelDelivery(input) {
         content,
         meta: sanitizeChannelMetadata({
           producer: envelope?.source ?? "unknown",
-          topic: subject,
+          topic: envelope?.topic || subject,
           event_id: envelope?.event_id,
           dedupe_key: envelope?.dedupe_key,
           urgency: envelope?.urgency,
@@ -50473,7 +52103,8 @@ async function startChannelSession(options) {
       title,
       capabilities: options.capabilities,
       driving: false,
-      selfSubscribed: true
+      selfSubscribed: true,
+      plugin: { name, version: options.pluginVersion }
     });
   };
   const restoreRole = async (previousSessionID = identity.id) => {
@@ -50698,8 +52329,12 @@ async function startChannelSession(options) {
   const heartbeatTimer = setInterval(() => {
     heartbeat();
   }, options.heartbeatMs);
+  const handoffFileChanged = (current) => {
+    if (current.ino !== 0)
+      requestHeartbeat();
+  };
   if (handoffFile !== undefined) {
-    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, requestHeartbeat);
+    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, handoffFileChanged);
     requestHeartbeat();
   }
   (async () => {
@@ -50762,7 +52397,7 @@ async function startChannelSession(options) {
       shuttingDown = true;
       clearInterval(heartbeatTimer);
       if (handoffFile !== undefined)
-        unwatchFile(handoffFile, requestHeartbeat);
+        unwatchFile(handoffFile, handoffFileChanged);
       await forwarder.close();
       await serialized(() => options.client.unregisterSession(identity.id)).catch((error) => {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error)}
@@ -50876,7 +52511,7 @@ async function runEnvoyChannelServer() {
 `);
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
   const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
-  const title = sessionTitle({
+  const title = await sessionTitle({
     ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
     TMUX: process.env["TMUX"],
     TMUX_PANE: process.env["TMUX_PANE"]
@@ -50917,9 +52552,11 @@ async function runEnvoyChannelServer() {
   }), directory);
   const stateDirectory = pluginStateDirectory();
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
+  const bundlePath = process.argv[1] ?? "";
+  const inbox = inboxSocket === undefined ? undefined : createInboxNotifier(inboxSocket);
   const channel = inboxSocket === undefined ? detectClaudeChannel({
     claudePid: process.ppid,
-    bundlePath: process.argv[1] ?? "",
+    bundlePath,
     environment: process.env
   }) : { loaded: true };
   if (!channel.loaded) {
@@ -50938,25 +52575,52 @@ async function runEnvoyChannelServer() {
   let runtime;
   let claim;
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl);
+  const phaseLog = paneReminderLog(logLegion);
+  const claimBooted = Promise.withResolvers();
+  const phaseHook = pane === undefined || daemon === undefined ? undefined : createPhaseHookEndpoint({
+    stateFile: phaseStallFile(pane.configDir, identity.id),
+    claim: () => claim?.capability(),
+    booted: claimBooted.promise,
+    readState: (signal) => daemon.state({ signal }),
+    inbox: inbox === undefined ? undefined : (text) => inbox.notification({
+      method: CHANNEL_NOTIFICATION_METHOD,
+      params: { content: text, meta: {} }
+    }),
+    publish: client.publish,
+    env: process.env,
+    log: phaseLog
+  });
   const toolDefinitions = [
     ...channelToolDefinitions(),
-    ...daemon === undefined ? [] : [legionToolDefinition()]
+    ...daemon === undefined ? [] : [legionToolDefinition(), phaseHookToolDefinition()]
   ];
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    if (phaseHook !== undefined && request.params.name === PHASE_HOOK_TOOL_NAME) {
+      return mcpResult(await phaseHook.handle(request.params.arguments));
+    }
     if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
       const legionRuntime = {
         daemon,
         claim: () => claim?.capability(),
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env })
       };
-      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments, extra.signal));
+      const answer = await executeLegionTool(legionRuntime, request.params.arguments, extra.signal);
+      const op = request.params.arguments?.["op"];
+      if (op === "handoff_complete" || op === "request_backward_move")
+        phaseHook?.phaseClosed();
+      return mcpResult(answer);
     }
     if (runtime === undefined)
       throw new Error("Envoy channel server is still starting");
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments));
   });
-  const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket);
+  const notifier = inbox === undefined ? server : phaseHook === undefined ? inbox : {
+    notification: async (notification) => {
+      phaseHook.deliveryWritten(notification.params.content);
+      await inbox.notification(notification);
+    }
+  };
   const capabilities = inboxSocket !== undefined ? INBOX_CAPABILITIES : channel.loaded ? CHANNEL_CAPABILITIES : [];
   const booting = new AbortController;
   const stopped = Promise.withResolvers();
@@ -50967,6 +52631,7 @@ async function runEnvoyChannelServer() {
       return;
     stopping = true;
     booting.abort();
+    phaseHook?.stop();
     if (session === undefined) {
       stopped.resolve();
       return;
@@ -50988,14 +52653,11 @@ async function runEnvoyChannelServer() {
       stampOnce(() => identity.id);
       session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off });
     } else {
-      connection = await import_nats2.connect({
-        servers: [...inbound.natsUrls],
+      connection = await import_nats2.connect(natsConnectionOptions({
+        servers: inbound.natsUrls,
         name: `claude-envoy-channel-${identity.id}`,
-        ...natsAuthOptions(inbound.natsSeed),
-        reconnect: true,
-        maxReconnectAttempts: -1,
-        reconnectTimeWait: 2000
-      });
+        seed: inbound.natsSeed
+      }));
       session = await startChannelSession({
         identity,
         connection,
@@ -51006,6 +52668,7 @@ async function runEnvoyChannelServer() {
         configFile,
         stateDirectory,
         title,
+        pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...stamping ? { stampTitle } : {},
         ...configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}
       });
@@ -51022,6 +52685,7 @@ async function runEnvoyChannelServer() {
         log: logLegion,
         stop: endPane
       });
+      claim.booted.then(claimBooted.resolve);
     }
     if (stopping)
       await session.shutdown();

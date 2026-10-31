@@ -247,8 +247,8 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// An edit credited to authors names its latest edit source, none included when no one
 	// peer made it; an update no one is credited with keeps the row's. The row is taken here, with
 	// the write, so a route that goes on to append an event (an upload, issue creation) holds it
-	// before the events' commit-order lock, as an answer marking this document a copy owed does
-	// (owedCopiesOf); Ledger.Commit's later recordLatestEditSource then waits on nothing.
+	// before its event, as an answer marking this document a copy owed does (owedCopiesOf), and
+	// Ledger.Commit's later recordLatestEditSource waits on nothing.
 	if include && (len(authors) > 0 || lastActor != nil) {
 		if err := markUpdateOwedBy(ctx, tx, room, lastActor, anyPerson(authors)); err != nil {
 			return 0, err
@@ -832,10 +832,10 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // does not export. TestUploadRefusesADocumentTooLargeToStore (api) holds the two together: a
 // document encoding to more than this is refused by ygo and answered as CAP_EXCEEDED with the count.
 // No single upload reaches it: the heaviest document pmdoc's element limit admits encodes to about
-// 131,000 items. Repeated versions can take a live state to it, so every joined write (applyLive)
-// decodes its state before appending once its clocks pass this cap (refuseUndecodable, growth.go)
-// - not settlement's own repairs, which write outside applyLive and never reach it (growth.go's
-// own doc comment names the three).
+// 131,000 items. Repeated versions can take a live state to it, so every joined write (applyLive
+// and applyMargin, through recordLiveOperation) decodes its state before appending once its clocks
+// pass this cap (refuseUndecodable, growth.go) - not settlement's own repairs, which write outside
+// both and never reach it (growth.go's own doc comment names the three).
 //
 // It is also the pending queue every decode of document bytes takes, whether the service builds
 // the decoder (newDocumentCopy) or ygo builds it for the service (Server.MaxPendingItems: the

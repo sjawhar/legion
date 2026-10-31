@@ -41,8 +41,8 @@ versions. Never add the module to the root `go.work`.
 | `nats/` | The schema types every NATS component shares, whatever its cloud, importing no cloud package: `RulesArgs`, `nats:Rules`, one direction's permissions of a NATS user, which `aws:User` and `gcp:Permissions` take (`rules.go`). A type shared by components of more than one cloud lives here, never in one cloud's package, so a single-cloud consumer's SDK shows no other cloud's types; `gcp/imports_test.go` fails if the `gcp` package compiles any `aws` package. |
 | `aws/` | `aws:NatsService` (`natsservice.go`) and `aws:WebhookListener` (`webhooklistener.go`): their resources, refusals and outputs, with the goldens of their container definitions in `testdata/`. `fargate.go` holds what both register identically: each child's options, its tags, the log group and the task definition's base. |
 | `aws/rendering/` | What the AWS components render, with no Pulumi in it: the container definitions, the NATS start script, the listener's environment and read policy, the metric filters and the alarms' text. Its own tests hold `ListenerEnv.Check`'s refusals; `aws/`'s pin its texts, building each component from one example. |
-| `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the secret fetcher's, the listener's seed script's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`); `gcp:Dispatch` (`dispatch.go`, `dispatch_cloud.go`, `dispatch_kube.go`) and its Kubernetes and Serve renderings, golden-tested in `testdata/dispatch-*.golden`. |
-| `docs/` | Each component's operator document beside the module's README: `nats-hub.md` for `gcp:NatsHub`. It lives outside the component's package so that an edit to it cuts no release, which a file in a package the plugin compiles does (see Release contract). |
+| `gcp/` | `gcp:NatsHub` (`natshub.go`, which also holds `authorization`, the users rendering both hubs share) and its VM's cloud-config, with the secret fetcher's, the listener's seed script's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`); `gcp:Dispatch` (`dispatch.go`, `dispatch_cloud.go`, `dispatch_kube.go`; `dispatch.go` also holds `podPriorityClass`, the priority-class rule `gcp:ClusteredNatsHub` shares) and its Kubernetes and Serve renderings, golden-tested in `testdata/dispatch-*.golden`; `gcp:ClusteredNatsHub`: its inputs, refusals and sizing (`clusteredhub.go`, with its pods' Autopilot size rule in `clusteredhub_autopilot.go`), its Kubernetes provider, the `nats` chart with the transform that protects its StatefulSet, its NetworkPolicy and its PodMonitoring (`clusteredhub_kube.go`), and its tailnet hosts (`clusteredhub_tailnet.go`, golden-tested in `testdata/clustered-hub-*.golden`), with the chart's archive vendored for its render test (`testdata/nats-2.15.1.tgz`); and `tailnet_service.go`, a Tailscale Service host's parts (the tailscale container's environment, the serve configs, the advertiser and preStop scripts, the probes), functions of the Service's name and ports, which every multi-pod Tailscale Service host reuses rather than writing its own. |
+| `docs/` | Each component's operator document beside the module's README: `nats-hub.md` for `gcp:NatsHub`, and for how `gcp:ClusteredNatsHub` runs, updates and is watched beside it. It lives outside the component's package so that an edit to it cuts no release, which a file in a package the plugin compiles does (see Release contract). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The tests' harness: the mock engine a component's unit tests run on (`Mocks`, `Construct`, `mocks.go`), and the live tests' plugin build and pulumi CLI. |
 
@@ -69,8 +69,25 @@ versions. Never add the module to the root `go.work`.
 
 - **Component-built Kubernetes providers.** `gcp:Dispatch` requires the consumer's `gcp` and
   `random` providers before registering anything, then builds a Kubernetes provider from its
-  cluster's exec-plugin kubeconfig. Every Kubernetes child uses that explicit provider and depends
-  on the cluster; none falls back to a default Kubernetes provider.
+  cluster's exec-plugin kubeconfig; with `clusterOnly` it requires the `gcp` provider alone and
+  builds no Kubernetes provider, since it registers no `RandomPassword` and no Kubernetes object.
+  Every Kubernetes child uses that explicit provider and depends on the cluster; none falls back
+  to a default Kubernetes provider. `gcp:ClusteredNatsHub` takes
+  the cluster's `kubeconfig` as a secret input and builds its own provider, `<name>-kubernetes`,
+  with `enableServerSideApply` and `enableConfigMapMutable` on, and calls no `providers.Require`,
+  since it creates every resource through that provider (the chart through `pulumi.Providers`).
+  Mutable ConfigMaps are the reason it builds its own: pulumi-kubernetes otherwise replaces a
+  ConfigMap whose data changes, deleting it first, so a users change would delete the hub's
+  configuration under its running pods, and only a provider the component builds can promise the
+  setting (`TestClusteredNatsHubBuildsItsOwnKubernetesProvider` pins both settings and that every
+  child runs on it). Its resolver is `gcp.ResolveClusteredNatsHub`, through `export_test.go`.
+- **Chart children under the mocks.** A `kubernetes:helm.sh/v4:Chart` renders its objects in the
+  Kubernetes provider, which the mocks do not run, so `pulumi.WithMocks` registers the chart and
+  none of its children. `gcp:ClusteredNatsHub`'s unit tests therefore pin the chart's inputs, its
+  `values` among them, and call its transform (`ProtectClusteredHubStatefulSet`) directly; what
+  those values render is the `natslive` render test's to prove (`TestClusteredNatsHubChart`, under
+  Tests), at the chart version the component names, against the vendored archive. A values change
+  is tested in both.
 - **Refusals.** Every refusal names the input. `core.CheckMachineID` is the one machine-id rule
   shared by `core.ListenerConfig.Check` and the hub's users. It refuses an empty id; leading or
   trailing whitespace; `.`, `*`, `>`, `/` or `\`; control characters; and whitespace other than
@@ -147,11 +164,15 @@ versions. Never add the module to the root `go.work`.
   (`TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial`,
   `TestDispatchGrantsTheAzureKeyAccessorOnlyWithTheKeyForm`); the GitHub App's four inputs come
   together, each missing one named, and the Azure inputs come with `azureEmbedEndpoint`, its quota
-  and exactly one credential form (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is checked
-  inside the `ApplyT` that renders the listener container's environment, where core's `Env`
-  refusals — which name core's own inputs, `natsUrls` and `socks5Proxy` — are mapped onto
+  and exactly one credential form (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is
+  checked inside the `ApplyT` that renders the listener container's environment, where core's
+  `Env` refusals — which name core's own inputs, `natsUrls` and `socks5Proxy` — are mapped onto
   `natsUrl`, each a `core.InputError` naming it, wrapped with the component's type and name and
-  never a panic (`gcp.dispatchListenerEnv`, `TestDispatchRefusesABadNatsURLOnceItResolves`).
+  never a panic. With `natsInCluster` there is no proxy whose refusal to map, and core refuses a
+  local URL only beside one, so the component refuses a local `natsUrl` itself
+  (`bus.LocalNATSURL`) before core's `Env` is reached, naming `natsUrl` there too, since the pods
+  dial the URL themselves and a loopback URL would have them dial themselves
+  (`gcp.dispatchListenerEnv`, `TestDispatchRefusesABadNatsURLOnceItResolves`).
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
@@ -228,7 +249,10 @@ versions. Never add the module to the root `go.work`.
   exported name gets one in `bus`, and the code that sends it moves onto that name, so the client
   and its grant share one spelling.
   `core/permissions_test.go` writes each set out by hand, as a check independent of those names. A
-  change to a set changes every hub's rendered authorization, and so replaces every hub's VM.
+  change to a set changes every hub's rendered authorization, and so replaces every hub's VM and
+  rewrites every clustered hub's `auth.conf`, which its reloader applies without a restart: both
+  hubs render their users through one function, `gcp.authorization`
+  (`TestClusteredNatsHubRendersTheVMHubsAuthorization`).
 - **One source for a rendering.** What an AWS component writes into a resource and a program may
   need outside Pulumi lives in `aws/rendering`, which imports neither Pulumi nor the AWS provider's
   SDK, so `envoy-infra` links neither. The component and the `render` subcommand call the same
@@ -338,14 +362,44 @@ both delivery durables (each binds and acknowledges a message), the outbox's own
 publish, the agent stream relay, Dispatch creating the redelivery bucket, which the test client
 then reads and writes, and that Dispatch's own user is refused a publish to a session's frames; its
 negative control removes the delivery durable's filtered create permission and receives that server
-violation alone. The `envoy-infra-go` job in
-`.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
+violation alone.
+
+`gcp/clusteredhub_live_test.go` carries the `natslive` tag too, but starts no container and needs
+no Docker: it installs each tool it runs with `go install`, into a temporary `GOBIN` with
+`GOWORK=off`, at a pinned version, and a tool that does not install fails the test, never skips
+it. The tools are helm v3.20.2 (`helm.sh/helm/v3/cmd/helm`), the helm pulumi-kubernetes v4.34.2's
+provider renders charts with, and the versions chart 2.15.1 runs: nats-server v2.15.1, the config
+reloader v0.24.0 (`github.com/nats-io/nack/cmd/nats-server-config-reloader`) and
+prometheus-nats-exporter v0.20.2. `TestClusteredNatsHubChart` checks the vendored
+`gcp/testdata/nats-2.15.1.tgz` against the SHA-256 the chart index publishes, runs the hub under
+the mocks, writes its chart registration's `values` to a file and runs `helm template` on the
+archive: exactly the StatefulSet, the two Services, the ConfigMap and the budget render, with the
+replicas, zone spread, claim template, images, reloader arguments, session annotation, priority
+class, `auth.conf`, `nats.conf` blocks and selector labels the values give. A chart version bump
+vendors the new archive with its published SHA-256. `TestClusteredNatsHubCluster` runs three
+nats-server processes on the `nats.conf` and `auth.conf` that render gave, with command-line
+overrides only for what a pod fixes (each process's ports, routes, PID file and server name, and
+the store directory in its copy of `nats.conf`) and with no NetworkPolicy, which nothing enforces
+on loopback: the three form one cluster and serve the users; a three-copy stream keeps every
+acknowledged message exactly once across a SIGKILL of its leader; the exporter, run with the
+chart's arguments, serves one `nats_stream_last_seq` series per server holding a copy; the real
+reloader, run with the chart's arguments, applies a users change with no server restart and no
+client reconnect; and every server's reload refuses a session-user change
+(`config reload not supported for NoAuthUser`), which takes effect only on a restart. Installing
+the tools takes minutes on a cold module cache, which is why CI runs the `natslive` packages with
+`-timeout 30m`. To run them alone, from `packages/envoy/infra`:
+
+```sh
+go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)' -v -timeout 20m ./gcp/
+```
+
+The `envoy-infra-go` job in `.github/workflows/ci.yaml` runs, from `packages/envoy/infra`:
 
 ```sh
 test -z "$(gofmt -l .)"
 go vet -tags pulumilive,natslive ./...
 go test ./...
-go test -tags natslive ./core/ ./seed/
+go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/
 ```
 
 The `envoy-infra-go` job runs only when a file its `envoy_infra_go` filter in that workflow names
@@ -353,8 +407,8 @@ changes. That filter includes every package `cmd/dispatch` and `cmd/listener` im
 `core/permissions_live_test.go:298-299` builds them; `packages/envoy/AGENTS.md` (Critical
 conventions) says what keeps it current.
 
-The release workflow's `build` job runs vet and the unit tests again before it builds. The required
-`lint` job of `.github/workflows/pr-and-main.yaml` compiles the module's commands for every release
+The release workflow's `build` job runs vet and the unit tests again before it builds. The
+`lint` job of `.github/workflows/ci.yaml` compiles the module's commands for every release
 target. Run those steps from those jobs after changing what they cover.
 
 A component's tests run on `pulumitest.Mocks`, which records every registration and answers with
@@ -412,3 +466,7 @@ then checks that `pulumi package get-schema` reports the version the plugin was 
 `gcp:NatsHub` has no live test here, since it needs Google Cloud and a tailnet: what only a real
 deployment proves is listed under "What a first Google Cloud deployment proves" in
 `packages/envoy/infra/docs/nats-hub.md`.
+
+`gcp:ClusteredNatsHub` has no Pulumi live test here either: GKE, the NetworkPolicy, Google Managed
+Prometheus and the Tailscale Service need a real cluster and tailnet. Its `natslive` tests run what
+can run on this machine, the chart's rendering and the servers, reloader and exporter it runs.

@@ -15,8 +15,9 @@ It derives role and gate state from Dispatch issue events plus GitHub PR/CI arti
 The daemon (`packages/daemon`, Go) runs every root architect and phase worker as a headless `omp --mode rpc` process bridged through `legion worker-shim`:
 one pane of its private tmux server per process under `runtime: tmux`, or, under `runtime: kubernetes`, one Agent Sandbox pod per issue running the published worker image, with one container whose `legion launcher` runs every resident role (`docs/kubernetes.md`;
 `scripts/e2e/stage4a-sandbox-runtime.sh` is that runtime's live proof).
-Under `runtime: tmux`, a phase worker whose role `legion.yaml`'s `worker_backends` puts on `claude` runs Claude Code in Oh My Pi's place:
-the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's Oh My Pi RPC frames on one side and Claude Code's stream-json on the other (`packages/daemon/internal/claudebridge`), with `packages/claude-envoy` as the pane's MCP server and plugins.
+A phase worker whose role `legion.yaml`'s `worker_backends` puts on `claude` runs Claude Code in Oh My Pi's place under either runtime:
+the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's Oh My Pi RPC frames on one side and Claude Code's stream-json on the other (`packages/daemon/internal/claudebridge`, transport only), with `packages/claude-envoy` as the worker's MCP server and plugins
+— a built checkout of it under tmux, the worker image's copy in a pod.
 
 - **Daemon** — Dispatch and GitHub intake, the fixed workflow table, the durable issue record in Postgres, admission, process supervision under either runtime, each role's GitHub App credential, session grants, and recovery.
 
@@ -33,8 +34,9 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 ## Tech Stack
 
 - **TypeScript** on **Bun** runtime — the version `.bun-version` pins.
-  Every job installs it through `.github/actions/setup-bun`, and the two Dockerfile `ARG BUN_VERSION` defaults (`packages/envoy/docker/Dockerfile`, `packages/daemon/docker/worker.Dockerfile`) must equal it, since no build passes `--build-arg`.
-  Raising Bun is those three edits together; `.github/scripts/check-bun-version.sh` fails the build until they agree
+  Every job installs it through `.github/actions/setup-bun`, and `packages/daemon/docker/worker.Dockerfile`'s `ARG BUN_VERSION` default must equal it, since no build passes `--build-arg` and its notices stage fetches Bun's licence at that version.
+  Raising Bun is two commits: first the new version's row in `.github/ci-images.yaml`, which `ci.yaml`'s `ci-images` job copies, then `.bun-version`, that ARG and every `FROM` on the row it leaves.
+  `.github/scripts/check-bun-version.sh` fails the build until they agree
 
 - **Go** for the Legion daemon and its `legion` CLI (`packages/daemon`) and for Envoy (`packages/envoy`), the two modules the root `go.work` binds
 
@@ -48,7 +50,23 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
 - **jj (Jujutsu)** for version control, native **Dispatch** for issue tracking
 
-- **Container images** from Docker Hub are pulled through Google's mirror `mirror.gcr.io` (`mirror.gcr.io/library/<name>` for an official image, same tags and digests) in Dockerfiles, workflows and tests, because GitHub-hosted runners hit Docker Hub's anonymous pull rate limit;
+- **Container images** a CI job fetches are copies in one package this repository publishes, `ghcr.io/sjawhar/legion/ci`.
+  Every workflow, Dockerfile and test names its copy by digest.
+  `.github/ci-images.yaml` holds one row per image (`upstream`, `tag`, `digest`), and `.github/scripts/mirror-ci-images.sh` copies the rows the package does not hold yet with `crane copy`, which keeps the digest.
+  That copy names the row's upstream at the row's digest, and crane drops a tag written before that digest, so a floating upstream tag decides no byte of a copy.
+  For every `library/golang` row whose upstream names a tag, that script also reads the image's own `GOLANG_VERSION` (`crane config`) and refuses a row whose upstream tag names another Go.
+  No read of a floating upstream tag can do that work, because it cannot tell a row labelled wrongly now from one labelled rightly long ago.
+  An `oven/bun` image declares its version nowhere, so the two builds that run those bytes refuse any Bun but the one `.bun-version` pins.
+  Each row's tag is the upstream repository's last path element, then the upstream tag when the row names one, then the first eight characters of the digest, so one tag names one digest.
+  `ci.yaml`'s `ci-images` job runs that copy and then the package half of the gate, in that order, and it is the one copy path:
+  it runs on a pull request, on a merge group and on a push to main, and a failed copy is re-run with `gh run rerun`.
+  Adding an image is one edit of that file.
+  Moving one to a new version is two commits:
+  the new version's row first, which that job copies while nothing pulls it yet, then the pin and every `FROM` onto it with the row they leave deleted
+  — in one commit a consumer job, which waits on `changes` alone, can pull the new digest while that same run's copy is still landing it.
+  `.github/scripts/check-ci-images.sh` is the gate, and it takes one mode:
+  `lint` runs its `tree` mode on every change, which refuses a reference to any other source and a Go `FROM` on a `library/golang` row that `ARG GO_VERSION` does not name, and the `ci-images` job runs its `package` mode, which reads ghcr.io.
+  The devbox live proofs under `scripts/e2e/` and the deployment examples, which no CI job runs, keep Google's mirror `mirror.gcr.io`.
   CI jobs that run testcontainers set `TESTCONTAINERS_RYUK_DISABLED`, so its Ryuk image is never pulled
 
 ## Commands
@@ -66,16 +84,16 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
   Type check one package against its own tsconfig.
   The root has no tsconfig.json, so a bare `bunx tsc --noEmit` there checks nothing: it prints tsc's help and exits 1.
-  CI runs this command in each of these, in a job that runs when a change touches its paths:
-  packages/contracts, envoy-client, envoy-plugin, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch (envoy-and-contracts.yaml), and docs/site (docs.yaml)
+  CI runs this command in each of these, in a job of ci.yaml that runs when a change touches a file it reads:
+  packages/contracts, envoy-client, envoy-plugin, claude-envoy, pi-shared, pi-envoy, pi-legion, proof-editor and dispatch, and docs/site
 
 - `bunx tsc --noEmit -p scripts/dispatch && bunx tsc --noEmit -p scripts/github-apps`
 
-  Type check the two script directories that are no workspace, as pr-and-main.yaml's `test` job does
+  Type check the two script directories that are no workspace, as ci.yaml's `test` job does
 
 - `(cd packages/daemon && go vet -tags e2e ./...)`
 
-  What main's required `typecheck` check runs (pr-and-main.yaml): vet of the Go daemon, its e2e-tagged live proofs included
+  What ci.yaml's `typecheck` job runs: vet of the Go daemon, its e2e-tagged live proofs included
 
 - `bun test`
 
@@ -142,9 +160,10 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
 - `legion claude-bridge -- <claude argv…>`
 
-  What `legion worker-shim` runs in Oh My Pi's place for a phase worker whose role `worker_backends` puts on claude (tmux only;
-  the daemon builds the argv, `claude -p --input-format stream-json --output-format stream-json …` with `--session-id <new id>` on a fresh launch or `--resume <id>` on a relaunch):
-  turns the daemon's prompt, abort, get_state and negotiate_protocol frames into Claude Code's stream-json and its results into agent_start/agent_end, seeds a fresh session with `/rename` so its transcript exists before registration, sends pi-legion's phase-stall follow-up, takes Envoy deliveries as user turns from the unix socket it exports as LEGION_CLAUDE_INBOX, and exits with Claude Code's status
+  What `legion worker-shim` runs in Oh My Pi's place for a phase worker whose role `worker_backends` puts on claude, under either runtime (the daemon builds the argv, `claude -p --input-format stream-json --output-format stream-json …` with `--session-id <new id>` on a fresh launch or `--resume <id>` on a relaunch;
+  one definition of it, `packages/daemon/internal/claudelaunch`):
+  turns the daemon's prompt, abort, get_state and negotiate_protocol frames into Claude Code's stream-json and its results into agent_start/agent_end, seeds a fresh session with `/rename` so its transcript exists before registration, takes Envoy deliveries as user turns from the unix socket it exports as LEGION_CLAUDE_INBOX, and exits with Claude Code's status.
+  It is transport: the phase reminder runs in the worker's own MCP server (`packages/claude-envoy`), driven by Claude Code's hooks
 
 - `legion launcher --connect tcp://<host>:<port> --sandbox <name> --roles-dir <dir> --role <r>… [--pod-uid <uid>] [--stop-grace <d>] [--session-instance <project:region:instance> --session-database <name> --session-user <login>] | legion launcher --connect tcp://<host>:<port> --token-file <path> --sandbox <name> --role <role> [--pod-uid <uid>] [--stop-grace <d>] [--session-instance <project:region:instance> --session-database <name> --session-user <login>] --private-dir <dir>`
 
@@ -306,7 +325,16 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
 
   The Claude Code backend's devbox-only live proof:
   an implementer `worker_backends` puts on claude registers its transcript, completes its phase through the `legion` MCP tool's handoff_complete with a pushed handoff commit, and resumes the same Claude Code session after its pane is killed;
-  LEGION_E2E_MODEL_ROUTE=key-file `LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file>` instead, for a devbox with no Hawk gateway, where that one key file serves the Claude Code pane too (scripts/e2e/README.md)
+  LEGION_E2E_MODEL_ROUTE=key-file `LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file>` instead, for a devbox with no Hawk gateway, where that one key file serves the Claude Code pane too;
+  with `LEGION_E2E_MODEL_BASE_URL=<gateway base URL>` as well, the key file holds a gateway key and both the Claude Code pane and (under key-file) the Oh My Pi agents call that Anthropic-compatible gateway, so no Anthropic key is needed (scripts/e2e/README.md)
+
+- `LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_STORAGE_CLASS=<StorageClass> LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_CLAUDE_MODEL=<model id> LEGION_E2E_POD_REACHABILITY=aws-private-ip LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_SESSION_DB_PORT=<port> bash scripts/e2e/claude-backend-sandbox.sh`
+
+  The same backend's devbox-only live proof under the Kubernetes runtime:
+  the implementer runs `legion claude-bridge -- claude -p …` in its issue pod on the Claude Code its generation's start script installed from the worker image's pin (the image carries the pin and no Claude Code), resumes its own transcript in a replacement pod that installs its own copy, and is reminded when a turn ends with its phase open;
+  this is the aws-private-ip/gateway shape
+  — LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file (no LEGION_E2E_MODEL_GATEWAY_URL/AUDIENCE) proves the same backend against a cluster whose pods cannot reach the devbox at all, and needs docker;
+  `LEGION_E2E_MODEL_BASE_URL=<gateway base URL>` with a gateway key in the key file puts the pod's Claude Code and (under key-file) its Oh My Pi roles on that Anthropic-compatible gateway, so no Anthropic key is needed, and `LEGION_E2E_MODEL_PREFLIGHT_BASE_URL=<the same gateway as the devbox reaches it>` serves a gateway the pods reach at a cluster-only address (scripts/e2e/README.md names every required port and input)
 
 - `LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role LEGION_E2E_PLATFORM=eks LEGION_E2E_POD_REACHABILITY=aws-private-ip LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_STORAGE_CLASS=<StorageClass> LEGION_E2E_SESSION_DB_PORT=<port> LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> LEGION_E2E_PREVIOUS_IMAGE=<worker image of main at contract 37 or 38, before one container@sha256> bash scripts/e2e/stage4a-sandbox-runtime.sh`
 
@@ -401,18 +429,20 @@ Each item below names a task and where its code is, then notes on it.
   its daemon client, claim boot and phase ops are `@legion/pi-shared`'s.
   See `packages/pi-legion/AGENTS.md`
 
-- Agent harnesses (`worker_backends`) — `packages/daemon/internal/runtime/backend.go` (the table), `packages/daemon/internal/runtime/tmux/launcher.go` and `claude.go` (Launchers), `packages/daemon/internal/daemon/launchers.go` (boot resolvers), `packages/daemon/internal/claudebridge/`, `packages/claude-envoy/`
+- Agent harnesses (`worker_backends`) — `packages/daemon/internal/runtime/backend.go` (the table), `packages/daemon/internal/claudelaunch/` (the launch shapes both runtimes build), `packages/daemon/internal/runtime/tmux/launcher.go` and `claude.go` (Launchers), `packages/daemon/internal/daemon/launchers.go` (boot resolvers), `packages/daemon/internal/runtime/sandbox/` (the pod lane), `packages/daemon/internal/claudebridge/`, `packages/claude-envoy/`
 
   `runtime.Backends` says which roles each harness runs, which runtimes launch it and its extra prompt part;
   a tmux `Launcher` builds its pane command and names the marker `verifyPane` checks; a boot resolver finds it on the host.
-  A phase worker's role on `claude` runs `legion claude-bridge -- claude -p …` in its tmux pane, with claude-envoy's `dist/envoy-channel.js` (the `legion` MCP tool, its claim, Envoy) as its one MCP server and claude-envoy plus its generated `legion/` plugin as its plugins.
-  Boot resolves `LEGION_CLAUDE_PATH`, `LEGION_BUN_PATH` and `LEGION_CLAUDE_PLUGIN_DIR`;
-  `docs/deployment.md` "How a harness plugs in"; live proof `scripts/e2e/claude-backend-tmux.sh`
+  A phase worker's role on `claude` runs `legion claude-bridge -- claude -p …` under either runtime, with claude-envoy's `dist/envoy-channel.js` (the `legion` MCP tool, its claim, Envoy, the phase reminder's hook endpoint) as its one MCP server and claude-envoy plus its generated `legion/` plugin as its plugins.
+  Under tmux boot resolves `LEGION_CLAUDE_PATH`, `LEGION_BUN_PATH` and `LEGION_CLAUDE_PLUGIN_DIR`;
+  a pod takes bun and the plugin from the worker image, which carries Claude Code's pin and no Claude Code (its licence grants no redistribution), and its start script installs the pinned release at every launch and verifies it, failing the launch when the fetch fails or does not verify (`claudeCodeBlock`, `packages/daemon/internal/runtime/sandbox/plugins.go`).
+  `docs/deployment.md` "How a harness plugs in", `docs/kubernetes.md`; live proofs `scripts/e2e/claude-backend-tmux.sh` and `claude-backend-sandbox.sh`
 
 - Shared plugin interface — `packages/pi-shared/`
 
   `@legion/pi-shared`: the versioned in-process interface between the two plugins and the modules both bundle, among them the Legion modules pi-legion and claude-envoy's MCP server share:
-  the daemon client (`src/daemon-client.ts`), the claim boot (`src/legion-claim-core.ts`), the `legion` tool's phase ops (`src/legion-phase-ops.ts`) and the handoff-commit lookup.
+  the daemon client (`src/daemon-client.ts`), the claim boot (`src/legion-claim-core.ts`), the `legion` tool's phase ops (`src/legion-phase-ops.ts`), the handoff-commit lookup, and the endless reminder a phase worker whose turn ends with its phase open gets
+  — its machine (`src/phase-stall.ts`), its runner (`src/phase-reminder.ts`) and the four `LEGION_STALL_*` numbers (`src/stall-limits.ts`), one copy for both harnesses.
   See `packages/pi-shared/AGENTS.md`
 
 - Worker image (Kubernetes) — `packages/daemon/docker/worker.Dockerfile`, `.github/workflows/worker-image.yaml`
@@ -474,7 +504,9 @@ Each item below names a task and where its code is, then notes on it.
 
 - Documentation site — `docs/site/`
 
-  Astro Starlight, published to GitHub Pages by `.github/workflows/docs.yaml`.
+  Astro Starlight.
+  `.github/workflows/docs-site.yaml` holds the build steps once, and two callers run it:
+  the `docs` job of `.github/workflows/ci.yaml` on pull requests and merge groups, and the `build` job of `.github/workflows/docs-pages.yaml` on every docs-selecting push to main, in push order, which then publishes the site to GitHub Pages.
   See `docs/site/README.md`; generated reference pages come from `docs/site/generators/`
 
 ## Conventions
@@ -503,13 +535,18 @@ Each item below names a task and where its code is, then notes on it.
   `.github/scripts/check-release-credentials.sh` fails the build otherwise
 
 - **Changelog entries are fragment files**
-  — a change that earns a changelog line adds `packages/<pkg>/.changes/unreleased/<ISSUE KEY>-<slug>.yaml` to each package it changes.
-  With no Dispatch issue, use the branch name, with each `/` written as `-`, in place of the key.
-  Give each fragment of one pull request for one package its own slug.
+  — a change that earns a changelog line adds a fragment to each package it changes that has a `.changie.yaml`:
+  the seven packages `.github/workflows/changelog-fold.yaml` lists in `CHANGELOG_PACKAGES` (`pi-legion`, `pi-envoy`, `envoy-plugin`, `envoy`, `claude-envoy`, `contracts`, `envoy-client`).
+  A package without one, such as `packages/daemon`, has no fold.
+  Write it with `go run github.com/miniscruff/changie@v1.26.0 new --kind <kind> --body '<text>' --custom Issue=pr<number>` from the package directory, `<number>` being this pull request's own number.
+  Every `.changie.yaml` sets `fragmentFileFormat: '{{.Custom.Issue}}-{{.Kind}}-{{.Time.Format "20060102-150405"}}'`, so the file lands at `packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`.
+  The number exists only once the pull request is open, so open the pull request first and add the fragment in a later commit on the same branch.
+  No Dispatch issue key goes in the file name, in the `Issue` field or in the body.
+  Two `changie new` calls for one package and one kind inside the same second write the same name, and the first entry is lost with nothing reported.
+  So run them at least a second apart and count the files against the entries you meant, or write the fragment by hand as `pr<number>-<slug>.yaml`.
   The file holds `kind:` (`Added`, `Changed`, `Removed` or `Fixed`) and `body:`, the entry's markdown as plain text.
   For an entry of more than one line, write `body:` as a `|-` block.
   The fold indents the continuation lines under the bullet.
-  Write it by hand, or run `go run github.com/miniscruff/changie@v1.26.0 new --kind <kind> --body '<text>' --custom Issue=<KEY>` from the package directory.
   Never edit a `CHANGELOG.md`: `.github/workflows/changelog-fold.yaml` writes it.
   The fold puts a released package's entry under the release that first shipped it.
   It puts an entry of `claude-envoy`, `contracts` or `envoy-client`, which have no release, under `main@<commit>` at its next run.
@@ -548,9 +585,9 @@ Each item below names a task and where its code is, then notes on it.
   The private repository Legion is deployed from and the company that runs it are named nowhere either
   — not the repository, its Dispatch project key or issue keys, the company or its hostnames, and not in a file or directory name, a pull request title, body, branch name, commit message, comment or review, or a release note:
   write "the deployment repository" or `<deployment repo>`, and a neutral project key such as `ACME` in a fixture or example.
-  `.github/scripts/check-private-names.sh` fails the build on any text file or path that names either, and on any text that names a private internal host or a Tailscale MagicDNS host, and `docs.yaml` runs it over the built site too.
-  `.github/scripts/check-pr-text.sh` runs it over a pull request's title, body, branch name, commits (each one's message, author and committer), issue comments, reviews and review comments, in the required lint job (`pr-and-main.yaml` says when it runs), and in `pr-title.yaml` at every push, draft or not, and when the pull request is opened, reopened or edited or a review is submitted or edited:
-  with this repository's squash settings a commit subject or the title becomes main's subject and the commit messages its body, the generated release notes list merged titles, and a comment is public on the pull request's page once posted.
+  `.github/scripts/check-private-names.sh` fails the build on any text file or path that names either, and on any text that names a private internal host or a Tailscale MagicDNS host, and the `docs` job of `ci.yaml` runs it over the built site too.
+  `.github/scripts/check-pr-text.sh` runs it over a pull request's title, body, branch name, commits (each one's message, author and committer), issue comments, reviews and review comments, in the lint job of `ci.yaml` (that file says when it runs), and in `pr-title.yaml` at every push, draft or not, and when the pull request is opened, reopened or edited or a review is submitted or edited:
+  a merge a person makes by hand takes this repository's squash defaults, so a lone commit's subject or the title becomes main's subject and every commit message of the branch its body (a merge the daemon submits writes the title and number as the subject, as they stood when it merged or armed the pull request, and an empty body), the generated release notes list merged titles, and a comment is public on the pull request's page once posted.
   Only a comment from a trusted author counts:
   one posted as a Bot (an App installed on this repository, such as Legion's role Apps, or github-actions) or by the repository's owner, a member of its organization or a collaborator.
   Anyone else's is skipped, with a `skipped <kind>:<id>` line naming its author and not its text, because anyone signed in can comment on a public pull request and the check is required.
@@ -688,13 +725,13 @@ The mark is a label rather than the issue's `route` because Dispatch publishes e
 The daemon keeps a mirror of Dispatch's state of every ask of a root (`root_asks`:
 open or closed, whose turn, who closed it, the newest person's act on it), written from the ask events, a registration's read of the approval request and the boot catch-up, and decides from the record alone on every admission pass (a live fact, a tick, the boot read), so the same record gives the same decision.
 The mirror is the same whatever order the events arrive in, but a decision acts on the record as each event leaves it, so some orders differ (listed below).
-A root enters `awaiting_person` — gives up its slot at once, and its architect's session is suspended after its current turn, kept for the resume
+A root enters `awaiting_person` — gives up its slot at once, and its architect stays live and idle until the answer's task
 — when all of these hold: its architect handed something to the person since the daemon last gave it work (a question a session of its tree opened on the root, a tree session's reply leaving such a question, or an approval request of the closed gate's document, with the person, or a registration of a closed gate whose request waits on the person;
 `declared_seq`, the newest such hand-back, and `declared_at`, Dispatch's time of it);
 something is still with the person (an open tree question on the person's turn, or an approval request of the closed, armed gate's document on the person's turn);
 no other issue of its tree is in a phase;
 it could resume (its label is on, and no person or session outside the tree holds its Dispatch claim);
-and its architect has taken the work it was last given (no start queued, its claim not still starting, its task confirmed), so a suspension never cancels a resume before its turn runs.
+and its architect has taken the work it was last given (no start queued, its claim not still starting, its task confirmed).
 The wait begins at that hand-back and names the design gate at its latest version when its request is with the person, else the oldest question that is.
 When nothing it handed back is still with the person, the hand-back is taken in (`declared_seq` cleared), so an answer the running architect already had never starts or ends a later wait.
 When a person already acted after that hand-back, the root keeps its slot and its architect is given the resume task where it stands.
@@ -736,11 +773,11 @@ Its tree stays live while it waits, so its children do not become orphans;
 no child of it starts while it waits, even once its design gate is open, and they start with its resume, each once.
 Taking the `legion` label off a waiting root, or a person or a session outside the tree claiming it, takes it out of the workflow with an `unslotted` notice;
 it is never resumed under another owner.
-A session outside the tree writing a lifecycle status on a waiting root is set back, as on a root holding its slot, and its architect is told when it resumes.
+A session outside the tree writing a lifecycle status on a waiting root is set back, as on a root holding its slot, and its live architect is told.
 A root whose Dispatch claim a person or outside session already holds keeps its slot at `admitted` while its architect asks that holder to release it, and so does an admitted root whose label was taken off, since only a labelled root is resumed.
 Deliveries out of Dispatch's order can decide otherwise than the same events in order, each decision being right for the record it read:
 a person's act around the hand-back — say the architect's request that a person release the root's claim, the person's answer, then the release
-— applied in the order release, then answer, suspends the root and resumes it, where in order the answer is taken in and the slot kept;
+— applied in the order release, then answer, starts the wait and gives the live architect its answer task, where in order the answer is taken in and the slot kept;
 a tree session's hand-back reply applied before its question's opening declares nothing, so the root keeps its slot until the architect's next hand-back;
 and a person's answer of an approval request applied before the gate is registered on its document answers a waiting root as an act on an ask, where after the registration it is a review.
 Between boots nothing re-reads a waiting root's asks:
@@ -827,7 +864,7 @@ No lifecycle labels carry worker state.
 - Plans: `docs/plans/YYYY-MM-DD-<slug>.md` — human-authored design history, not a Legion artifact.
   A Legion planner's plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document on Dispatch; no Legion role commits a plan or spec file here.
 
-- Learnings: `docs/solutions/<category>/<slug>.md`
+- Learnings: `docs/solutions/<category>/<slug>-pr<number>.md`, `<number>` being the pull request's number (`skills/legion-retro/references/learnings.md`)
 
 > Many docs in `docs/plans/` and `docs/solutions/` predate the TypeScript rewrite and contain Python-era references.
 > These are marked with `[HISTORICAL]` headers.

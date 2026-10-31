@@ -25,7 +25,7 @@ related_issues:
 
 ## Evidence
 
-- `.github/workflows/pr-and-main.yaml`, `typecheck` job: the only `tsc` steps name
+- `.github/workflows/ci.yaml`, `test` job: the only `tsc` steps name
   `-p scripts/dispatch` and `-p scripts/github-apps`.
 - sjawhar/legion#2422 added `scripts/semantic-line-breaks.ts` and its two test files. The reviewer
   and the implementer type-checked them by hand with the command above in each round. At e6f60222,

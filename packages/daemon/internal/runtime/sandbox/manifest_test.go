@@ -12,7 +12,9 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -215,7 +217,12 @@ func TestARequestBelowItsLimitRendersABurstablePod(t *testing.T) {
 const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
 
 // manifestCases are the Sandboxes the goldens pin: the root; a worker; a resume; the root enrolled
-// with the secrets broker; and the project controller's pod, launched fresh and resuming.
+// with the secrets broker; the project controller's pod, launched fresh and resuming; and a worker
+// on Claude Code, a case of its own so every Oh My Pi one keeps pinning that pod unchanged by the
+// Claude backend. The Claude worker's Sandbox is the Oh My Pi worker's byte for byte: its lane is
+// the launcher's start command (launcherCommand), which
+// TestAClaudeLaunchCarriesItsMCPDocumentAsALauncherFile holds, so a pod change made for Claude
+// Code alone shows in its golden and leaves worker's.
 // agentSecrets, set for root-enrolled alone, is the runtime's enrollment for that one case
 // (TestManifestGoldens, TestManifestMatchesTheSandboxCRD apply it to the shared runtime before
 // building that case's manifest, and restore nil after — every other case runs unenrolled).
@@ -234,6 +241,7 @@ func manifestCases(t *testing.T) map[string]struct {
 	}{
 		"root":              {rootSpec(t), nil},
 		"worker":            {workerSpec(t), nil},
+		"claude-worker":     {claudeWorkerSpec(t), nil},
 		"resume":            {resume, nil},
 		"controller":        {controllerSpec(t), nil},
 		"controller-resume": {controllerResume, nil},
@@ -1151,7 +1159,6 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 		"provisioning secret": {func(s *runtime.SpawnSpec) { s.Secrets[provisionTokenKey] = "x" }, "a key the runtime writes itself"},
 		"dispatch secret":     {func(s *runtime.SpawnSpec) { s.Secrets[dispatchTokenKey] = "x" }, "DISPATCH_TOKEN_FILE is a variable the runtime sets itself"},
 		"prompt too large":    {func(s *runtime.SpawnSpec) { s.Prompt.Addressing = strings.Repeat("x", maxArgBytes) }, "the value of --append-system-prompt"},
-		"claude backend":      {func(s *runtime.SpawnSpec) { s.Backend = runtime.BackendClaude }, "its role runs on claude, which the worker image does not carry"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := workerSpec(t)
@@ -1248,11 +1255,11 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	}
 }
 
-// runtimeOwned is exactly what the worker container is told by the runtime itself, a tree agent's
-// and the controller's together: every name mainEnvironment sets with Env empty and no secret of the
-// spec's, every optional value configured. A name added to the environment and not to runtimeOwned
-// is one a spec could override; a name left in runtimeOwned that the environment no longer sets is
-// one a spec is refused for nothing.
+// runtimeOwned is exactly what the worker container is told by the runtime itself, a tree agent's,
+// a Claude Code worker's and the controller's together: every name mainEnvironment sets with Env
+// empty and no secret of the spec's, every optional value configured. A name added to the
+// environment and not to runtimeOwned is one a spec could override; a name left in runtimeOwned
+// that the environment no longer sets is one a spec is refused for nothing.
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
@@ -1262,7 +1269,7 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	told := map[string]bool{}
-	for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
+	for _, spec := range []runtime.SpawnSpec{workerSpec(t), claudeWorkerSpec(t), controllerSpec(t)} {
 		spec.Env, spec.Secrets = nil, nil
 		for name := range envOf(workerOf(t, r, spec)) {
 			told[name] = true
@@ -1271,6 +1278,32 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	if !maps.Equal(told, runtimeOwned) {
 		t.Errorf("the worker container is told %v by the runtime, and runtimeOwned is %v",
 			slices.Sorted(maps.Keys(told)), slices.Sorted(maps.Keys(runtimeOwned)))
+	}
+}
+
+// The four stall limits a phase worker's reminder runs on reach a pod as ordinary entries of the
+// worker process's environment: the daemon merges the ones it holds into the spec's Env (the
+// daemon package's workerSpawnSpec), and Env travels verbatim as plain pairs of the generation's
+// start command (launchEnvironment), so nothing of them is this runtime's own — they are no part
+// of runtimeOwned, which a spec may not set.
+func TestTheWorkerContainersEnvCarriesTheStallLimits(t *testing.T) {
+	r, err := configure(testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := map[string]string{
+		"LEGION_STALL_REMINDER_MS":     "45000",
+		"LEGION_STALL_WAITING_MS":      "900000",
+		"LEGION_STALL_RESUME_MS":       "15000",
+		"LEGION_STALL_ARCHITECT_AFTER": "3",
+	}
+	spec := workerSpec(t)
+	maps.Copy(spec.Env, limits)
+	env := envOf(workerOf(t, r, spec))
+	for name, want := range limits {
+		if env[name] != want {
+			t.Errorf("the worker container's %s = %q, want %q", name, env[name], want)
+		}
 	}
 }
 
@@ -1534,16 +1567,17 @@ func TestNewRefusesAnAgentSecretsOptionNoPodCouldRun(t *testing.T) {
 	}
 }
 
-// operatorPod is an operator's runtime.kubernetes.pod: a variable, a Secret volume, a ConfigMap
-// volume mounted by sub_path into the profile's agent directory, a projected ServiceAccount token
-// alone in its volume, an existing share by its PersistentVolumeClaim mounted read-only, an NFS
-// export mounted writable, and the account the pods run as.
+// operatorPod is an operator's runtime.kubernetes.pod: a variable, a Secret volume at mode 0440
+// (default_mode), a ConfigMap volume mounted by sub_path into the profile's agent directory, a
+// projected ServiceAccount token alone in its volume, an existing share by its
+// PersistentVolumeClaim mounted read-only, an NFS export mounted writable, and the account the pods
+// run as.
 func operatorPod() Pod {
 	expiry := int64(3600)
 	return Pod{
 		Env: map[string]string{"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml"},
 		Volumes: []corev1.Volume{
-			{Name: "operator-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-operator-creds"}}},
+			{Name: "operator-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-operator-creds", DefaultMode: new(int32(0o440))}}},
 			{Name: "operator-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator"},
 				Items:                []corev1.KeyToPath{{Key: "models.yml", Path: "models.yml"}},
@@ -1765,8 +1799,10 @@ func TestNewRefusesAProvidersSecretThatIsNoLaunchSecret(t *testing.T) {
 // pod — are exactly what Legion's own pods carry: every volume of every pod a launch or
 // the image probe runs, and every mount and variable of the containers the operator's pieces join
 // (the agent's and the probe's), with every optional piece the runtime adds configured and nothing
-// of a spec's or the operator's. A piece added to a pod and not to its list is one an operator
-// could collide with unrefused; one left in a list that no pod carries is refused for nothing.
+// of a spec's or the operator's. Among the goldens' cases is a Claude Code worker, which alone is
+// told three of the variables. A piece added to a pod and not to its list is one an
+// operator could collide with unrefused; one left in a list that no pod carries is refused for
+// nothing.
 func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts := goldenOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
@@ -1828,12 +1864,14 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 
 // imageOwnedPaths covers every path in the image a pod runs or loads from, which an operator's
 // mount there would hide: Oh My Pi, the Envoy and Legion plugins the agent loads, the Go legion
-// every container runs, the profile's installed plugins, and the databases Oh My Pi keeps in the
-// profile's agent directory.
+// every container runs, the profile's installed plugins, the databases Oh My Pi keeps in the
+// profile's agent directory, and a Claude role's bun, claude-envoy root and the Claude Code pin its
+// start script installs from. Claude Code itself is not one: the image carries none.
 func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
 	for _, used := range []string{
 		defaultAgent, envoyPlugin, legionPlugin, testOptions().Tools.Legion,
 		ompProfileDir + "/plugins/node_modules", ompAgentDir + "/agent.db", ompAgentDir + "/models.db",
+		claudeBun, claudePluginDir, claudeCodePin + "/package.json", claudeCodePin + "/package-lock.json",
 	} {
 		if !slices.ContainsFunc(imageOwnedPaths(), func(owned string) bool {
 			return used == owned || strings.HasPrefix(used, owned+"/")
@@ -2028,5 +2066,176 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 	}
 	if !strings.Contains(l.prompt, literal) {
 		t.Fatalf("the system prompt does not carry the instructions as written: %q", l.prompt)
+	}
+}
+
+// uuid is the form a Claude Code session id takes (claudelaunch.NewSessionID), the only word of a
+// Claude launch's agent command that is not fixed.
+var uuid = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// A Claude Code role's pod runs Claude Code under `legion claude-bridge`, word for word: the
+// Claude Code this generation's start script installed under the role's state home on the issue's
+// volume (the image carries none, only the pin it is installed from), the image's claude-envoy
+// root, every permission granted, only the MCP document this generation's launcher writes into its
+// private directory, the claude-envoy plugin and the generated Legion plugin, a fresh session, and
+// the one system prompt word — the same text the Oh My Pi branch of the same launch inlines, since
+// a pod cannot read the daemon's prompt files whichever harness it runs. A launch with no recorded
+// session starts a session of its own, which is what the fresh uuid here says; one that resumes
+// names the transcript's id instead (TestAResumingClaudePodContinuesItsTranscriptByItsID). The
+// binary's path is the generation's own, so a later generation names its own install, never the
+// one its start script has just removed.
+func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
+	opts := goldenOptions()
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := workerSpec(t)
+	omp := launchOf(t, r, spec)
+	spec.Backend = runtime.BackendClaude
+	l := launchOf(t, r, spec)
+	argv := l.agentArgv(r.agent)
+	if l.prompt != omp.prompt {
+		t.Fatalf("the Claude launch's system prompt is %q, want the Oh My Pi launch's %q", l.prompt, omp.prompt)
+	}
+	session := ""
+	if at := slices.Index(argv, "--session-id"); at < 0 || at+1 == len(argv) {
+		t.Fatalf("the agent command %q names no --session-id", argv)
+	} else if session = argv[at+1]; !uuid.MatchString(session) {
+		t.Errorf("the session is %q, want a version 4 uuid", session)
+	}
+	claude := func(generation uint64) string {
+		return "/legion/scratch/state/" + string(spec.Role) + "/legion-claude-code/g" + strconv.FormatUint(generation, 10) +
+			"/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+	}
+	want := []string{
+		"/opt/legion/bin/legion", "claude-bridge", "--", claude(spec.Generation),
+		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"--permission-mode", "bypassPermissions",
+		"--strict-mcp-config", "--mcp-config", generationDir(spec.Generation) + "/claude-mcp.json",
+		"--plugin-dir", "/opt/legion/claude-envoy",
+		"--plugin-dir", "/opt/legion/claude-envoy/legion",
+		"--session-id", session,
+		"--append-system-prompt", omp.prompt,
+	}
+	if !slices.Equal(argv, want) {
+		t.Errorf("the Claude pod's agent command is %q, want %q", argv, want)
+	}
+	later := spec
+	later.Generation, later.BootToken = spec.Generation+1, "boot-later"
+	if got := launchOf(t, r, later).agentArgv(r.agent); !slices.Contains(got, claude(later.Generation)) || slices.Contains(got, claude(spec.Generation)) {
+		t.Errorf("generation %d's agent command is %q, want it to name %s and not generation %d's install", later.Generation, got, claude(later.Generation), spec.Generation)
+	}
+	// Options.Agent is the Oh My Pi override and nothing else: a Claude role's command is the
+	// runtime's, as the tmux lane's is the host's boot-resolved one.
+	opts.Agent = []string{"/opt/omp/bin/omp", "--operator"}
+	overriding, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overridden := launchOf(t, overriding, spec).agentArgv(overriding.agent)
+	if slices.Contains(overridden, "--operator") {
+		t.Errorf("with Options.Agent set the Claude pod's command is %q, want the generation's Claude Code alone", overridden)
+	}
+}
+
+// A Claude Code role is told where Claude Code keeps its state and that nothing of Claude Code's
+// own may run after a turn's last result — the harness's analogue of the turn scoping
+// `--pod-safety` writes for Oh My Pi — and an Oh My Pi role is told none of the three. The
+// directory is the role's own under its state home, so it is no sibling role's.
+func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := claudeWorkerSpec(t)
+	claude := envOf(workerOf(t, r, spec))
+	for name, want := range map[string]string{
+		"CLAUDE_CONFIG_DIR":                    scratchRoot + "/state/" + string(spec.Role) + "/claude",
+		"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+		"CLAUDE_CODE_DISABLE_CRON":             "1",
+	} {
+		if claude[name] != want {
+			t.Errorf("a Claude worker is told %s=%q, want %q", name, claude[name], want)
+		}
+		if omp := envOf(workerOf(t, r, workerSpec(t))); omp[name] != "" {
+			t.Errorf("an Oh My Pi worker is told %s=%q, want nothing", name, omp[name])
+		}
+		if !runtimeOwned[name] {
+			t.Errorf("%s is not runtimeOwned: a spec or an operator could set it", name)
+		}
+	}
+}
+
+// A Claude Code role's relaunch continues the transcript its replaced pod left: the agent command
+// ends `--resume <uuid>`, the id parsed from the recorded path, and names neither a --session-id
+// nor the path itself — Claude Code resumes by id alone. The recorded path still reaches the role
+// launcher, which looks it up in the session table and restores it from its row before the child
+// starts (internal/launcher). prepare is where the rule is applied, so a Claude claim still
+// recording an Oh My Pi session is refused there, naming the backend change that left it recorded.
+func TestAResumingClaudePodContinuesItsTranscriptByItsID(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := claudeResumeSpec(t)
+	l := launchOf(t, r, spec)
+	argv := l.agentArgv(r.agent)
+	want := []string{"--resume", claudeTranscriptID, "--append-system-prompt", l.prompt}
+	if got := argv[max(len(argv)-4, 0):]; !slices.Equal(got, want) {
+		t.Errorf("the resuming Claude command ends %q, want %q", got, want)
+	}
+	if slices.Contains(argv, "--session-id") {
+		t.Errorf("the resuming Claude command %q names --session-id, want the recorded session continued", argv)
+	}
+	for _, arg := range argv {
+		if strings.Contains(arg, spec.ResumeSessionFile) {
+			t.Errorf("the resuming Claude command carries the recorded path in %q, want its session id alone", arg)
+		}
+	}
+	if start := launcherCommand(l, r); start.ResumeFile != spec.ResumeSessionFile {
+		t.Errorf("the start command resumes %q, want the recorded transcript %s", start.ResumeFile, spec.ResumeSessionFile)
+	}
+	stale := claudeWorkerSpec(t)
+	stale.Generation, stale.BootToken, stale.ResumeSessionFile = 2, "boot-g2", resumeSession
+	if _, err := r.prepare(stale); err == nil || !strings.Contains(err.Error(), "the role's backend changed since it was recorded") {
+		t.Errorf("prepare of a Claude claim recording the Oh My Pi session %s = %v, want a refusal naming the backend change", resumeSession, err)
+	}
+}
+
+// A Claude claim's recorded session is held to its harness's rule, where the launch resolves it: a
+// transcript of the pod's own Claude Code directory and nothing else, which prepare reads through
+// claudelaunch.ResumeSession as the tmux lane's resume does: one of another role's directory, an
+// Oh My Pi session file, or a name that is no session id is refused, and a session of the other
+// harness is refused naming the backend change that left it recorded.
+func TestARecordedSessionIsHeldToItsHarnesssRule(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resuming := func(file string) (launch, error) {
+		spec := claudeResumeSpec(t)
+		spec.ResumeSessionFile = file
+		return r.prepare(spec)
+	}
+	transcript := claudeTranscript(claim.RoleTester)
+	l, err := resuming(transcript)
+	if err != nil || l.claude.session != claudeTranscriptID || !l.claude.resume {
+		t.Fatalf("prepare resuming %s = %q (resume %v), %v; want the transcript's session id %s",
+			transcript, l.claude.session, l.claude.resume, err, claudeTranscriptID)
+	}
+	for name, file := range map[string]string{
+		"a transcript of another role's directory": claudeTranscript(claim.RolePlanner),
+		"an Oh My Pi session file":                 resumeSession,
+	} {
+		if _, err := resuming(file); err == nil || !strings.Contains(err.Error(), file) ||
+			!strings.Contains(err.Error(), "the role's backend changed since it was recorded") {
+			t.Errorf("prepare of a Claude claim resuming %s (%s) = %v, want a refusal naming it and the backend change", name, file, err)
+		}
+	}
+	named := claudeConfigDir(claim.RoleTester) + "/projects/--cwd--/2026-09-23T12-00-00-000Z_0198.jsonl"
+	if _, err := resuming(named); err == nil ||
+		!strings.Contains(err.Error(), "not named for a Claude Code session id") {
+		t.Errorf("prepare of a Claude claim resuming %s = %v, want it refused as no session id", named, err)
 	}
 }

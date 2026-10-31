@@ -8,6 +8,7 @@ import {
   gatedWrite,
   operandPath,
 } from "./askgate-marker";
+import { newAsks } from "./askgate-new-asks";
 import {
   commandHelp,
   commandName,
@@ -18,6 +19,8 @@ import {
 import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
 import { checkDispatchCall, dispatchServerUrls, executeDispatchTool } from "./dispatch-execute";
+import { DispatchWriteLandedError } from "./dispatch-http";
+import { sessionDirectory, sessionStateRoot } from "./dispatch-session-directory";
 import {
   appendResult,
   loadSessionMemory,
@@ -25,8 +28,6 @@ import {
   type ResultInput,
   readSessionTitle,
   recordOutcome,
-  sessionDirectory,
-  sessionStateRoot,
   writeLongOutput,
   writePicture,
 } from "./dispatch-session-state";
@@ -357,6 +358,20 @@ export async function runDispatchCli(
           if (file.flag === "--path" && file.operand === parsed.args.path) uploadBytes = bytes;
         }
         const spent = consumeMarker(gate.stores, argv, parsed.args, files, Date.now());
+        // The asks this write would open for a person, counted from the write's own text: the
+        // one number pi-envoy's record of an unmarked write carries, so a session holding a
+        // Dispatch token alone can count the asks that went out, or were refused, unreviewed.
+        // The ledger carries the count and never the ask text. An upload's asks are in its file,
+        // whose bytes are already read above, and which the dry run's arguments name only by
+        // path. A re-upload's blocks are counted again: the write carries them.
+        const asksCarried = spent.ok
+          ? 0
+          : newAsks(
+              parsed.tool,
+              uploadBytes === undefined
+                ? parsed.args
+                : { ...parsed.args, content: new TextDecoder().decode(uploadBytes) }
+            ).length;
         if (!spent.ok && gate.mode === "block") {
           return refuse(
             spent.changed === undefined
@@ -364,7 +379,7 @@ export async function runDispatchCli(
               : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`,
             REFUSED,
             parsed.tool,
-            { mode: "block", why: spent.why }
+            { mode: "block", why: spent.why, asksCarried }
           );
         }
         if (!spent.ok) {
@@ -372,7 +387,10 @@ export async function runDispatchCli(
           // the write is sent, on its own: a ledger that cannot take it stops the write here, so
           // no unreviewed write posts unrecorded.
           try {
-            appendResult(dir, { tool: parsed.tool, askgate: { mode: "warn", why: spent.why } });
+            appendResult(dir, {
+              tool: parsed.tool,
+              askgate: { mode: "warn", why: spent.why, asksCarried },
+            });
           } catch (error) {
             return refuse(
               `${notCalled} AskGate is on for this session in warn mode, and ${spent.why}. A write that posts unreviewed is first recorded in this session's ledger, and the ledger could not be written: ${messageFor(error)}.`,
@@ -473,8 +491,16 @@ export async function runDispatchCli(
     code = OK;
   } catch (error) {
     text = messageFor(error);
-    entry = { tool, error: text };
-    code = REFUSED;
+    // The command's write landed but its answer was lost: it is done, so the call succeeded, and
+    // its one line says to read back what it made. The executor turns a landing of a write that
+    // was only a step of its command (a picture, a closing reason) into a failure of its own.
+    if (error instanceof DispatchWriteLandedError) {
+      entry = { tool, details: { landed_without_answer: error.code } };
+      code = OK;
+    } else {
+      entry = { tool, error: text };
+      code = REFUSED;
+    }
   }
   try {
     recordOutcome(dir, sessionId, follows, entry);

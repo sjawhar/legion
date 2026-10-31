@@ -55,6 +55,16 @@ A Dispatch that reaches NATS only through a SOCKS5 proxy, such as a tailnet side
 `ENVOY_NATS_SOCKS5_PROXY` to the proxy's `host:port` (for example `127.0.0.1:1055`) with
 `ENVOY_ALLOW_REMOTE_NATS=1`, and every NATS connection then goes through the proxy, which is
 handed each server's host name unresolved.
+Dispatch's server creates and updates the `ENVOY_NOTIFICATIONS` stream as the Envoy listener
+does, so give it the listener's `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES`
+([Running the listener](/legion/dispatch/envoy/#running-the-listener)): it creates the stream and
+its webhook redelivery bucket with that many copies, raises one it finds with fewer, raises a
+smaller byte limit, or none, to its own, never lowers either, and with no byte limit of its own
+keeps the one the stream has. The stream holds the most copies and the largest limit any Envoy
+program of the deployment carries, so a clustered deployment sets both alike in every listener and
+in Dispatch's server. Like the listener, it reads the stream again every 30 seconds and raises
+copies and a limit a start with other settings lowered
+([Keeping the stream](/legion/dispatch/envoy/#keeping-the-stream)).
 
 People sign in through a Cognito sign-in pool or with Google directly by default, and Dispatch
 names each person by their lowercase email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request header instead; it is for
@@ -302,6 +312,31 @@ balancer's or Kubernetes' readiness probe at it.
 A check that needs NATS, the bucket or sign-in asserts `nats: true`, `files: true` or `signin: true`
 itself.
 
+## Metrics
+
+`GET /metrics` needs no credential either, so whoever reaches the server's HTTP port can read it.
+It answers in the Prometheus text format with one counter,
+`envoy_dispatch_outbox_publish_failures_total`: one count for each destination of an event
+publish that did not reach NATS, labelled `reason`. `denied` is a publish NATS refused under the
+server's own grant, `refused` one NATS refuses however often it is retried, and `failed` any other
+failure. A denied publish also logs `dispatch outbox: publish event` at ERROR, naming the subject.
+
+## Behind a proxy
+
+A page's live updates ride one WebSocket per tab, `GET /ws/live`. A browser keeps WebSockets apart
+from the six connections it opens to a host for ordinary requests, so a socket that stays open
+never takes one of them. That holds only while the load balancer or proxy in front of Dispatch
+does not advertise HTTP/2 extended CONNECT (`SETTINGS_ENABLE_CONNECT_PROTOCOL`): a browser that
+sees it runs the socket inside its HTTP/2 connection instead, and pages can hang until the tab is
+reloaded. From a checkout of this repository with `bun install` run,
+`bun scripts/e2e/lib/h2-settings.ts https://<dispatch>` prints the settings the proxy sends and
+exits 1 when it advertises extended CONNECT, 0 when it does not or speaks no HTTP/2, and 2 when it
+gets no answer. Run it after any change to the proxy.
+
+An open document keeps a second WebSocket, `GET /ws/doc/<id>`, for as long as it is open. Dispatch
+writes to each socket at least every 15 seconds however quiet the page is, so a proxy whose idle
+timeout is longer than 15 seconds never closes either one.
+
 ## Running more than one copy
 
 Dispatch runs as more than one server against one database, so a new version rolls out without
@@ -338,13 +373,14 @@ one. Three things have to be true first; Dispatch checks the first for you.
   rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 64 connections for requests, up to 12 for the periodic work it runs once across the servers, up
-to 4 for loading documents, one for the health check, and one for the events outbox, and it holds
+to 64 connections for requests, up to 13 for the periodic work it runs once across the servers, up
+to 4 for loading documents, one for the health check, one for the events outbox, and up to 2 for
+reading where the event log is safe to stream from (the event horizon), and it holds
 four more open for as long as it runs: one each for the three things that wait on Postgres
-notifications, which are delivery, the live event stream, and closing a document session another
-server has written to, and one for its entry in the list of running servers, which it renews every
-five seconds. That is 86 connections for one server at its ceiling, and twice that for two, past a
-default Postgres's limit of 100. Check the database's connection
+notifications, which are delivery, the live socket's event-feed relay, and closing a document
+session another server has written to, and one for its entry in the list of running servers, which
+it renews every five seconds. That is 89 connections for one server at its ceiling, and twice that
+for two, past a default Postgres's limit of 100. Check the database's connection
 limit before you start the second server: a limit sized for one server, with whatever else uses
 that database counted in, is the thing that runs out.
 
@@ -409,6 +445,30 @@ never happening: the one that adds each issue's repository (migration `0113`) ho
 32 links below its root in its API alone, and an issue an older server puts deeper fails to load
 until you clear the parent of an ancestor that still loads. That release was deployed with the
 running server stopped first, and no server older than it has run against the database since.
+
+The release that moves live updates onto one WebSocket per tab and keys every write (INFRA-258)
+is one of those changes: deploy it with no server of the earlier version running. An earlier
+server ignores a write's `Idempotency-Key`, so while both run a write whose answer was lost can be
+run once by each: the page and the `dispatch` command both retry such a write, and its retry can
+reach the other version. At one replica the Deployment's `Recreate` already stops the old pod
+first; above one replica, scale to zero before the new version starts. Releases after it roll
+again. Rolling it back brings the hazard back the other way: a tab still open, and a `dispatch`
+client that saw this version keep keys in the last five minutes, retry a write whose answer was
+lost against the earlier server, which runs it again. So fix it forward, as above; if you must roll
+back, stop this version first, knowing a write in flight at that moment may land twice. Once a
+later release has dropped the broadcast send's old key table (migration `0141`), rolling back past
+this version also stops broadcasts: the earlier version's broadcast send reads and writes that
+table, so every broadcast send fails while the rest of that version keeps working. A tab opened
+before the deploy needs a reload: its event route is gone and it shows
+**Live updates unavailable**, and its broadcast body still carries a field the new server refuses.
+
+From that release on, every page write that could otherwise happen twice carries an
+`Idempotency-Key`, and Dispatch keeps each key's answer for 24 hours, so a change tried again after
+a lost answer, a timeout or an outage is made once. `PUT`, `DELETE`, and the sign-out
+(`POST /auth/logout`) carry no key; the first two are already idempotent and sign-out cannot create
+content twice. The `dispatch` command keys every `POST` and `PATCH` it makes. A page that has not
+heard back keeps trying and says so, and a script that calls the API itself can send a key of its
+own ([For agents](/legion/dispatch/for-agents/#the-http-api)).
 
 The release that lets a project import its components from several repositories (migration
 `0117`) is deployed the same way: stop every server of the earlier version, or scale it to zero,

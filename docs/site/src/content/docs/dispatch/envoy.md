@@ -13,7 +13,10 @@ Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions
   session's inbox for 72 hours, while role messages and team topics travel live and are not kept.
   Envoy also keeps its own state in JetStream key-value buckets: which session is subscribed to
   what (`envoy_interests`), which sessions are live (`envoy_sessions`), who holds each role
-  (`envoy_roles`), and pull request check results (`envoy_ci_state`).
+  (`envoy_roles`), and pull request check results (`envoy_ci_state`). The stream and every bucket
+  are kept in at least as many copies as the deployment's `ENVOY_NATS_REPLICAS` says, when every
+  Envoy program of the deployment carries the same value
+  ([Keeping the stream](#keeping-the-stream)).
 - **The listener** is an HTTP service in front of it. It takes webhooks in, publishes them as
   events, and delivers events to the agent sessions that subscribed to them. Agents and Legion
   call its `/v1` API to subscribe, publish, claim roles, and send messages, and a session that
@@ -139,21 +142,25 @@ published still gets it when it reconnects
 | Topic | What it is |
 | --- | --- |
 | `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies in threads it wrote in, comments on documents it wrote, a person's answers, comments and messages on an issue it has claimed, comments on an issue with no route and no session claim whose spec it wrote, and claim changes arrive here. |
-| `notifications.role.<role>` | A role, held by one live session at a time. You publish to it; the listener hands each message to the current holder. |
+| `notifications.role.<role>` | A role, held by one live session at a time. You publish to it; the listener hands each message to the current holder and answers once the holder confirmed it. |
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
-| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. Live only: it reaches every session subscribed to it when it is published, and is not retained, so a session whose connection was down when it was published never gets it. A session that holds its own NATS connection receives it directly, its own publish included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. A session that holds its own NATS connection receives it directly, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A session the listener delivers to over a serve port, such as an OpenCode agent, is not waited for: it receives the topic through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
 request's `.>` gets its lifecycle events as well as its comments and checks.
 
-A role message is not stored for later. If no live session holds the role, a publish through the
-API is refused with `404`. If the holder does not take a message, the listener publishes an
-exception naming the reason: `no_holder`, `delivery_failed`, or `receipt_timeout`.
+A role message is not stored for later. A publish through the API waits for the holder to confirm
+the message and answers `200` naming the holder. If no live session holds the role, it is refused
+with `404`; if the holder does not take the message's delivery mode, with `403`; and if the holder
+has not confirmed it within four seconds, with `504` and the reason, `receipt_timeout` or
+`delivery_failed`. A role message published straight onto NATS, not through the API, is forwarded
+once, and if the holder does not take it the listener publishes an exception naming the reason:
+`no_holder`, `delivery_failed`, or `receipt_timeout`.
 
 ## Messages a session missed
 
@@ -172,10 +179,12 @@ under it freezes, is left within 30 seconds and redialed, and the session asks o
 - **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
   and on the topics it follows that the stream keeps, such as an issue's
   `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old.
-- **What does not:** role messages and team topics, which are live only; anything from before the
-  session existed, before it followed the topic, or before it first ran a plugin version that
-  recovers; anything older than 72 hours. When the stream was recreated, or the session read it
-  too late to find everything still there, it is told once that messages may be missing.
+- **What does not:** role messages, which are live only; team topics, except the copy the listener
+  hands a session registered on the topic, which comes back on its inbox topic; anything from
+  before the session existed, before it followed the topic, or before it first ran a plugin
+  version that recovers; anything older than 72 hours. When the stream was recreated, or the
+  session read it too late to find everything still there, it is told once that messages may be
+  missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The
   session does not take it as the person's turn and does not answer a BTW. A BTW that comes back
@@ -236,10 +245,12 @@ read from its row:
 
 ## The NATS grant a Legion daemon needs
 
-Legion's daemon reads Dispatch and GitHub events from the stream through two durable consumers
-per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.issue.>`) and
-`legion-go-<project>-github` (filtering each of the project's repositories). It sends its own
-notices to roles and to the controller through the listener's HTTP API, not over NATS.
+Legion's daemon reads Dispatch and GitHub events from the stream through three durable consumers
+per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.issue.>` and the
+project's repository-mapping subject), `legion-go-<project>-dispatch-server` (filtering
+Dispatch's own start, `notifications.dispatch.server.started`) and `legion-go-<project>-github`
+(filtering each of the project's repositories). It sends its own notices to roles and to the
+controller through the listener's HTTP API, not over NATS.
 
 So the NATS user the daemon connects as needs these permissions:
 
@@ -249,16 +260,22 @@ When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `tru
 | Publish | Subscribe |
 | --- | --- |
 | `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS` | `notifications.envoy.exceptions.notifications.role.>` |
-| `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>` | `_INBOX.>` |
+| `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` | `_INBOX.>` |
+| `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>` | |
 | `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>` | |
 | `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` | |
 | `$JS.ACK.ENVOY_NOTIFICATIONS.>` | |
 
 The last row is the subject a consumer acknowledges a message on. Replies to the API requests come
-back on `_INBOX.>`.
+back on `_INBOX.>`. The stored-message get (`STREAM.MSG.GET`) is how `legion state` reads each
+consumer's oldest waiting message, whose time is the consumer's lag; it only reads, one message at
+a time. A daemon whose user lacks it still runs. NATS does not answer a request it refuses, so the
+daemon's state shows each consumer with messages waiting as `unavailable: read the oldest waiting
+message: context deadline exceeded`, its waiting count still shown and the other consumers
+unchanged, and the daemon's log names the refused subject.
 
 The consumer subjects end in `>`, so the grant reaches every consumer of `ENVOY_NOTIFICATIONS`,
-not just the daemon's two: a holder of the daemon's seed can read, recreate with another filter,
+not just the daemon's three: a holder of the daemon's seed can read, recreate with another filter,
 and drain any consumer of the stream, every host's listener consumer and another project's daemon
 consumers included. It can also create a push consumer whose delivery subject is any subject at
 all, so it can send the stream's messages to subjects it may not publish to itself: role lanes,
@@ -270,11 +287,11 @@ included, such as the listener's `envoy_roles` and `envoy_sessions` watchers.
 When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
 `core.DaemonPermissions()` instead of a host's or an explicit user's grant.
 
-The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same two
+The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same three
 consumers written against another client library ask for different ones. So a grant is proven by
 running the daemon's consumers under exactly that grant, against a real server, and watching for a
-refusal: create both consumers, restart onto them, and have Dispatch and GitHub events
-acknowledged. The daemon logs every refusal at error as
+refusal: create the three consumers, restart onto them, have Dispatch and GitHub events
+acknowledged, and read their lag as `legion state` does. The daemon logs every refusal at error as
 `NATS refused the daemon a permission: its NATS user lacks that grant`, with the operation and the
 subject. `packages/daemon/internal/daemon/nats_permissions_test.go` in the repository runs that
 proof against the server images the hub runs, and `docs/kubernetes.md` says how the daemon's
@@ -298,6 +315,8 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 | `ENVOY_ALLOWED_HOSTS` | Comma-separated host names or addresses, with no port, that a listener with no bearer serves `/v1` to besides loopback. Set it to each name clients reach such a listener by, such as a forward to it. |
 | `ENVOY_HOST_BRIDGE` | Where the listener reaches a session on its own machine that registered a serve port: one registered through it, or one whose recorded host is the listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on that machine and re-registered through another listener records. Unset, it uses the host the session registered with, then `host.docker.internal`. A session that re-registered through another listener and records another host is reached at that host, else that listener's machine id, never through the bridge. A listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; any other session is its owner's to deliver. |
 | `ENVOY_SUBSCRIBE_ALL_TOPICS` | Set to `1` to have the listener also deliver every topic the stream does not store, such as a team topic, to the sessions on its machine that registered a serve port. Only a NATS user allowed to subscribe to `notifications.>` (a host's own user) may set it; under any other the listener exits at start with an error naming the variable. |
+| `ENVOY_NATS_REPLICAS` | The deployment's replica count, a whole number from 1 to 5; default `1`. The listener creates the `ENVOY_NOTIFICATIONS` stream and its buckets with this many copies and raises one it finds with fewer, at start and every 30 seconds after ([Keeping the stream](#keeping-the-stream)). More than 1 needs a clustered NATS: a single server refuses it, and the listener then exits at start with an error naming the variable. Any other value refuses startup. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
+| `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes. Once the stream holds that much it refuses every new message and keeps every one it holds, which leaves only when it is 72 hours old, and the sender gets an error it can retry: the listener answers a GitHub webhook `503`, which Dispatch's redelivery sweep has GitHub send again (five times, over about half an hour); Dispatch's outbox retries its event; an agent's send or publish fails with `stream ENVOY_NOTIFICATIONS is full`. Size the limit above what the stream takes in 72 hours at its busiest, with room to spare. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; set, it raises a smaller limit, or none, to its own at start and every 30 seconds, and never lowers one ([Keeping the stream](#keeping-the-stream)). A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |
 | `ENVOY_REVIEWER_APP_ID` | Required with `github`: the id of the GitHub App that posts reviews. |
@@ -310,14 +329,67 @@ address or a name in `ENVOY_ALLOWED_HOSTS`, and answers any other `Host` with a 
 page that rebinds its own name to the listener's address cannot use the API.
 Keep the API private: only `/webhook/...` needs to be reachable from GitHub and Slack.
 
+Raising a bucket to `ENVOY_NATS_REPLICAS` copies is an update of the bucket's stream, so the
+listener's NATS user needs `$JS.API.STREAM.UPDATE.KV_<bucket>` for each of its buckets beside the
+info and create it already holds; the `envoy-infra` grant for a listener includes it. Under a grant
+without it, a start that finds a bucket with fewer copies waits 10 seconds and exits with an error
+naming the bucket and the variable:
+`raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline exceeded`.
+
+### Keeping the stream
+
+Every Envoy program of a deployment carries `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES`, so
+a clustered deployment sets both in every listener and in Dispatch's server. A start never writes
+fewer copies or a smaller limit than it found, so an operator's raise of either stands, and
+programs with different values do not fight: the most copies and the largest limit stand. But
+JetStream's stream update has no compare-and-swap: a start with other settings, or none, or
+another subject list, that reads the stream before another start writes it and writes after puts
+the old subjects, copies, limit and metadata back.
+
+So every program that owns the stream, each listener and Dispatch's server, reads it again every
+30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a limit below its
+`ENVOY_STREAM_MAX_BYTES` or none (when set), a missing `envoy_stream_id`, and the 72-hour age and
+duplicate window and the discard policy (the same in every release), and adds back each subject
+its own build carries that the stream lacks, unless it overlaps a subject the stream has or is a
+role lane. It logs a WARN line `envoy nats keeper restored the stream` with, for example,
+`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+It never lowers the copies or the limit, so raising the limit of a full stream with
+`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` takes effect at once and stays. It only
+adds subjects and never removes or replaces one, so two releases with different subject
+lists do not switch the stream back and forth, and a subject a concurrent write dropped comes
+back within 30 seconds from the keeper of the release that carries it. A stream that still
+carries a role-lane subject is left to a start, which moves the role lanes off. It also raises
+the buckets its program opens back to `ENVOY_NATS_REPLICAS` (`envoy nats keeper raised a bucket`,
+with `replicas="1 -> 3"`). A pass that fails logs `envoy nats keeper could not restore the stream`
+or `envoy nats keeper could not raise a bucket` and is tried again 30 seconds later; it never
+stops the program.
+
+During a rollout with mixed settings the stream can therefore sit below the setting for up to 30
+seconds after the last start. To lower the copies, or to lower or remove the limit, change the
+setting in every program first, then run `nats stream edit <stream> --replicas=<n>` or
+`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` (`-1` for none); otherwise the next pass
+puts it back.
+
+On a clustered NATS (nats-server v2.10.29 among them), the server keeps the id of a message the
+full stream refused on the stream's leader for 72 hours, a purge notwithstanding, and
+acknowledges every retry under that id as a duplicate it does not hold. Envoy then publishes the
+same message once more without its id, so the retry is stored as soon as the stream has room,
+with no operator step. While the stream is still full, that publish is refused too, and the
+retry fails with `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not
+hold, and its publish without its id failed: stream ENVOY_NOTIFICATIONS is full: nats: maximum
+bytes exceeded`, which is retried as a full stream is. The stream drops no repeat of a message
+stored without its id, so a later publish under the same id stores another copy, which the
+stream's consumers see.
+
 ### With Pulumi
 
 The `envoy-infra` Pulumi plugin runs the listener on a Docker host from a Pulumi program in any
 language, as the component `envoy-infra:host:Listener`, and a NATS server for it on Google Cloud,
-as `envoy-infra:gcp:NatsHub`. It also deploys Dispatch on Google Cloud as
-`envoy-infra:gcp:Dispatch`, which creates an Autopilot cluster, private Cloud SQL, and the
-tailnet-served Dispatch workloads. A hub user with `dispatchMachineId` renders the NATS user
-`envoy-dispatch` shares with its listener. Its
+as `envoy-infra:gcp:NatsHub` on one VM or as `envoy-infra:gcp:ClusteredNatsHub`, three NATS
+servers on a GKE cluster whose optional tailnet hosts also run the listener. It also deploys
+Dispatch on Google Cloud as `envoy-infra:gcp:Dispatch`, which creates an Autopilot cluster, private
+Cloud SQL, and the tailnet-served Dispatch workloads. A hub user with `dispatchMachineId` renders
+the NATS user `envoy-dispatch` shares with its listener. Its
 [README](https://github.com/sjawhar/legion/blob/main/packages/envoy/infra/README.md) says how to
 install it, what each component deploys and which settings it sets.
 
@@ -329,8 +401,17 @@ install it, what each component deploys and which settings it sets.
 | --- | --- |
 | `200` `starting` | The listener is still binding its durable consumer. |
 | `200` `healthy` | Everything answers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
-| `200` `degraded` | A passing key-value failure the listener is retrying. |
+| `200` `degraded` | A passing key-value failure the listener is retrying, or a role claim view that answers no read: its watcher's first scan has not delivered every claim, so `GET /v1/sessions` and `GET /v1/registry/<session_id>` answer the bus-unavailable `503` until it has. Both repair themselves, so the answer stays `200`. A key-value failure's body carries `status` and `error` alone, and the listener checks nothing after it, so it can stand in front of a lost durable consumer. The role claim view is checked last, after every check that can answer `unhealthy`, and its body keeps the `healthy` body's fields. Also `KV watch rebuild unavailable` when the listener has not rebuilt its key-value watches for a minute after a NATS reconnect: its caches serve what they last held, and the answer stays a `200` because the container health check and the readiness probe both read `/healthz`, so refusing would take out the one listener still serving those caches and replace it with one that rebuilds into the same failure with empty caches. |
 | `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
+
+After a NATS reconnect the listener rebuilds the key-value watches its caches read through. A
+rebuild that fails is tried again within seconds, so one that fails and then succeeds inside that
+minute leaves the listener `healthy` and logs a warning rather than an error; only a rebuild that
+has not succeeded for a minute is logged as an error and makes `/healthz` answer `200` `degraded`,
+naming the rebuild and how long it has gone without succeeding. Page on that error line, not on
+the health check: the health check and the readiness probe act on `/healthz` themselves, so a
+listener taken out for a stalled rebuild is replaced by one that rebuilds into the same failure
+with caches that warm up empty and drop the messages the running one still delivers.
 
 `/v1` opens before `/healthz` leaves `starting`: as soon as NATS is connected and the session and
 subscription caches are loaded. Until then `/v1` answers `503` `service starting`. During a rolling

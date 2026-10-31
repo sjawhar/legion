@@ -13,7 +13,7 @@ import {
 } from "./api";
 import { expectConsecutiveLinksClear, expectUncovered } from "./layout";
 import { resetDatabase } from "./seed";
-import { navigateInApp, refusePosts } from "./sends";
+import { MESSAGE_REFUSED, navigateInApp, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 /**
@@ -302,12 +302,12 @@ async function expectNewestTurnAboveComposer(page: Page): Promise<void> {
     .toBe(true);
 }
 
-/** A rebuild of the whole transcript, the way a reader meets one. The live stream carries no
- *  cursor, so the only thing that rebuilds it is a reconnect: the relay drops this session's
- *  viewers the way a lost connection does, and the browser asks the session for its replay
- *  again. `publishAgentStreamFrame` sets what the NEXT connection is answered with rather than
- *  pushing into the open one, so `next` is in place before the stream is dropped. */
-async function rebuildThroughReconnect(sessionID: string, next: object): Promise<void> {
+/** A rebuild of the whole transcript, the way a reader meets one. The agent subscription carries
+ * no cursor, so its dropped relay viewer ends as `dropped`; the page resubscribes that view on the
+ * same live socket and asks the session for its replay again. `publishAgentStreamFrame` sets what
+ * that next subscription is answered with rather than pushing into the open one, so `next` is in
+ * place before the viewer is dropped. */
+async function rebuildThroughResubscribe(sessionID: string, next: object): Promise<void> {
   await publishAgentStreamFrame(sessionID, next, "replay");
   await dropAgentStreamViewers(sessionID);
 }
@@ -1177,20 +1177,30 @@ test("sending a message from the live view while scrolled back takes the reader 
     const input = page.getByTestId("agent-composer").locator("textarea");
     await input.fill("try the other branch");
     await page.getByRole("button", { name: "Send" }).click();
-    await expect(page.getByText("try the other branch")).toBeVisible();
+    // The transcript's own turn, not the held line above it, which shows while the send is out.
+    await expect(
+      page.getByTestId("agent-thread").getByText("try the other branch", { exact: true })
+    ).toBeVisible();
+    await expect(page.getByTestId("agent-send-held")).toHaveCount(0);
     await expectNewestTurnAboveComposer(page);
     await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
 
     // The session never took this one: the reader keeps their line, and the refusal is on screen
     // for them to read where they are.
     await scrollThreadTo(page, 1_200);
-    const refuse = await refusePosts(page, `**/api/v1/agents/${sender.session_id}/messages`);
+    const refuse = await refusePosts(
+      page,
+      `**/api/v1/agents/${sender.session_id}/messages`,
+      MESSAGE_REFUSED
+    );
     await input.fill("and this one is refused");
     await page.getByRole("button", { name: "Send" }).click();
     refuse();
     await expect(page.getByTestId("agent-send-error")).toBeVisible();
-    // A refused message is not lost: it is back in the box, to send again.
-    await expect(input).toHaveValue("and this one is refused");
+    // A refused message is not lost: it is held on screen, with Retry, to send again.
+    await expect(page.getByTestId("agent-send-held")).toContainText(
+      "Your message: “and this one is refused”"
+    );
     expect((await liveViewLayout(page)).threadScrollTop).toBe(1_200);
   } finally {
     await context.close();
@@ -1377,7 +1387,7 @@ test("a rebuilt transcript keeps a scrolled-back reader on the turn they were re
     // The connection drops and the reconnect is answered with a shorter history: the session's
     // budget no longer reaches Turn 0 through Turn 7, and two turns it wrote while this viewer
     // was away are behind the forty.
-    await rebuildThroughReconnect(
+    await rebuildThroughResubscribe(
       kept.session_id,
       rebuiltReplay(kept.session_id, 8, [
         liveTurn(1, 41, "Written while they were away.", false),
@@ -1426,7 +1436,7 @@ test("a rebuilt transcript that dropped the reader's turn lands them at the newe
     // This reconnect is answered with an entirely later window - Turn 20 on - which still
     // scrolls, so landing at its end is a place the view had to go to, not the only place there
     // was.
-    await rebuildThroughReconnect(dropped.session_id, rebuiltReplay(dropped.session_id, 20));
+    await rebuildThroughResubscribe(dropped.session_id, rebuiltReplay(dropped.session_id, 20));
     await expect(page.getByText("Turn 12:")).toHaveCount(0);
     await expectNewestTurnAboveComposer(page);
     await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
@@ -1456,7 +1466,7 @@ test("a rebuilt transcript leaves a reader who was at the live end at the live e
     await expectNewestTurnAboveComposer(page);
     await expect(jump).toHaveCount(0);
 
-    await rebuildThroughReconnect(
+    await rebuildThroughResubscribe(
       held.session_id,
       rebuiltReplay(held.session_id, 8, [
         liveTurn(1, 41, "Written while they were away.", false),

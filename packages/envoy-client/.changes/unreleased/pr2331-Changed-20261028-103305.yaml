@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    **Breaking:** `subscribe()` takes a required `plugin: { name, version }` and sends it on every
-    registration as `plugin` and `plugin_version`, so the listener's session list names the plugin
-    and build each session runs. `SessionWireSchema` (and so `listSessions` and `envoy_sessions`)
-    keeps both as optional strings, so a row from an older listener or plugin still parses.
-time: 2026-10-28T10:33:05.158723711Z
-custom:
-    Issue: pr2331

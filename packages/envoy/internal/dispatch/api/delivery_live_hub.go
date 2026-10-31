@@ -15,44 +15,56 @@ import (
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
-// The delivery hub's side of GET /ws/delivery (LEGION-690). The socket keeps no view state of its
-// own. It hands each subscribe and unsubscribe frame to the hub (Subscribe, Unsubscribe), calls
-// Close however it ends, and writes every frame the hub sends it through its deliveryLiveConn.
+// The delivery hub's side of GET /ws/live (LEGION-690). The socket keeps no view state of its own.
+// It hands each subscribe frame for a delivery view and each unsubscribe of one to the hub
+// (Subscribe, Unsubscribe), calls Close however it ends, and writes every frame the hub sends it
+// through its deliveryLiveConn.
 
 // deliveryLiveConn is one socket as the hub sees it. Send queues one frame (a DeliveryLiveSnapshot,
-// DeliveryLiveDelta, DeliveryLiveFreshness or DeliveryLiveError) and never blocks: false means the
+// DeliveryLiveDelta, DeliveryLiveFreshness or LiveError) and never blocks: false means the
 // socket's queue is full, and the socket then closes itself (1013), so the page reconnects and
 // resumes.
 type deliveryLiveConn interface {
 	Send(frame any) bool
 }
 
-// Subscribe answers one subscribe frame on conn. A view the matching GET route would refuse is an
-// INVALID_QUERY error frame naming the sub, a malformed view or a resume seq that is not a decimal
-// change position INVALID_FRAME. Otherwise conn's sub follows the view from now on: it is answered
-// a snapshot, or, on a resume, the delta against the revisions the page holds (a snapshot when the
-// page applied nothing since before the oldest kept change, OldestChangeSeq() - 1), and later only
-// the deltas. While delivery is not configured the sub is told DELIVERY_NOT_CONFIGURED once and
-// stays open, and the settings' first save answers its snapshot. A sub id conn already holds is
-// replaced.
-func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame DeliveryLiveSubscribe) {
-	if frame.Sub == "" {
-		conn.Send(deliveryLiveRefusal("", "INVALID_FRAME", "a subscribe frame names its sub"))
-		return
-	}
+// deliverySubscription is a subscribe frame for a delivery view as the socket hands it to the hub,
+// its resume decoded as a delivery view's.
+type deliverySubscription struct {
+	Sub    string
+	View   DeliveryLiveView
+	Resume *DeliveryLiveResume
+}
+
+// Subscribe answers one subscribe frame on conn, and reports whether conn's sub now follows the
+// frame's view. The socket has refused a frame with no sub (subscribeLive). A view the matching GET
+// route would refuse is an INVALID_QUERY error frame naming the sub, a malformed view or a resume
+// seq that is not a decimal change position INVALID_FRAME, and a sub id conn already holds is then
+// left as it was. Otherwise conn's sub follows the view from now on: it is answered a snapshot, or,
+// on a resume, the delta against the revisions the page holds (a snapshot when the page applied
+// nothing since before the oldest kept change, OldestChangeSeq() - 1), and later only the deltas.
+// Right after that first answer, or where it would be for a resume with nothing to catch up, conn
+// is sent the freshness verdict the hub knows: the hub sends its open pages a verdict only when it
+// changes, and a page keeps the last one it was sent, so a socket that was down at a change, or a
+// page that held no delivery view then, would otherwise show the old one for good. Nothing follows
+// before the hub knows a verdict: the first is set silently, from the read that answers the first
+// snapshot (recompute).
+// While delivery is not configured the sub is told DELIVERY_NOT_CONFIGURED once and stays open,
+// and the settings' first save answers its snapshot. A sub id conn already holds is replaced.
+func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame deliverySubscription) bool {
 	spec, refusal := parseDeliveryLiveView(frame.View)
 	if refusal != nil {
 		refusal.Sub = frame.Sub
 		conn.Send(*refusal)
-		return
+		return false
 	}
 	h.start()
 	var held *DeliveryLiveRevs
 	if frame.Resume != nil {
 		seq, err := strconv.ParseInt(frame.Resume.Seq, 10, 64)
 		if err != nil || seq < 0 {
-			conn.Send(deliveryLiveRefusal(frame.Sub, "INVALID_FRAME", "resume.seq must be a decimal change position"))
-			return
+			conn.Send(liveRefusal(frame.Sub, "INVALID_FRAME", "resume.seq must be a decimal change position"))
+			return false
 		}
 		// Read before the hub's lock, which no database read is made under.
 		oldest, err := delivery.OldestChangeSeq(h.readContext(), h.server.deps.Store.Pool)
@@ -75,7 +87,7 @@ func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame DeliveryLiveSubscri
 		view = &deliveryView{spec: spec, subs: map[*deliverySub]struct{}{}}
 		h.views[spec.key] = view
 	}
-	sub := &deliverySub{id: frame.Sub, conn: conn, view: view, needsSnapshot: held == nil}
+	sub := &deliverySub{id: frame.Sub, conn: conn, view: view, needsSnapshot: held == nil, needsVerdict: true}
 	if held != nil {
 		sub.revs = *held
 	}
@@ -94,6 +106,7 @@ func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame DeliveryLiveSubscri
 	default:
 		h.markDirtyLocked(view, now, deliveryCauseSubscribe)
 	}
+	return true
 }
 
 // Unsubscribe drops conn's sub; a view's last sub drops the view.
@@ -103,8 +116,8 @@ func (h *deliveryHub) Unsubscribe(conn deliveryLiveConn, sub string) {
 	h.dropLocked(conn, sub)
 }
 
-// Close drops every sub conn holds. The socket calls it however it ends: shutdown (1012), its
-// caller no longer resolving (1008), a full queue (1013), a read error.
+// Close drops every sub conn holds. The socket calls it however it ends: its age (4001), shutdown
+// (1012), its caller no longer resolving (1008), a full queue (1013), a read error.
 func (h *deliveryHub) Close(conn deliveryLiveConn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -150,13 +163,16 @@ const (
 //
 // Three goroutines start on the first Subscribe and run until lifetime ends: the listener; the
 // intake, which alone moves the two cursors (the delivery change log's and the event log's) and
-// marks views dirty; and the worker, which alone recomputes, so one recompute runs at a time.
+// marks views dirty; and the worker, which alone recomputes, so one recompute runs at a time. The
+// intake resolves the event cursor, which waits for a safe horizon, on a fourth that ends once it
+// has (seedEvents), at the start and after a reset of the event log.
 type deliveryHub struct {
 	server   *server
 	clock    hubClock
 	lifetime context.Context
 	// dial, listenIdle, pingTimeout and backoff are the listener's (pglisten.Listener); dial is the
-	// shared pool's Listener, and a test sets them otherwise before the first Subscribe.
+	// shared pool's Listener, read from the server when the listener dials, and a test sets them
+	// otherwise before the first Subscribe.
 	dial                    func(ctx context.Context) (*pgx.Conn, error)
 	listenIdle, pingTimeout time.Duration
 	backoff                 func(attempt int) time.Duration
@@ -165,11 +181,19 @@ type deliveryHub struct {
 
 	once    sync.Once
 	running sync.WaitGroup
-	// ready closes once the intake has read where both logs stand, which the worker waits for.
+	// ready closes once the intake has read where the delivery change log stands, which the worker
+	// waits for. The event cursor is resolved apart (seedEvents), so neither waits on the horizon.
 	ready chan struct{}
 	// Each wake holds at most one pending signal: what it asks for covers every signal before it.
 	wakeWork, wakeChanges, wakeEvents, connected chan struct{}
 	barrier                                      chan chan struct{}
+	// seeds hands the intake the event cursor seedEvents resolved; one slot, as one runs at a time.
+	seeds chan hubEventSeed
+	// seeded is whether the intake holds an event cursor, false while seedEvents resolves one; and
+	// gaps schedules the re-read of an event gap left open above the safe horizon (readEvents).
+	// Only the intake goroutine touches them.
+	seeded bool
+	gaps   eventGapReread
 
 	mu    sync.Mutex
 	views map[string]*deliveryView // by canonical view key
@@ -180,6 +204,8 @@ type deliveryHub struct {
 	changeAt  time.Time
 	epoch     int64
 	// eventCursor and eventAt are the last event id scanned and its created_at, to tell a reset log.
+	// Every event at or below eventCursor is final (catchUpEvents, receive); both mean nothing
+	// while the intake holds no cursor (seeded false).
 	eventCursor int64
 	eventAt     time.Time
 	// p0 is the open P0 issues (OpenP0Keys), kept current from issue event payloads.
@@ -251,10 +277,12 @@ type deliverySub struct {
 	id   string
 	conn deliveryLiveConn
 	view *deliveryView
-	// revs is what the page holds; needsSnapshot is set until its first answer; told is set once
-	// it was told delivery is not configured, so it is told once.
+	// revs is what the page holds; needsSnapshot is set until its first answer; needsVerdict is set
+	// until its first answer too, which the verdict the hub knows follows; told is set once it was
+	// told delivery is not configured, so it is told once.
 	revs          DeliveryLiveRevs
 	needsSnapshot bool
+	needsVerdict  bool
 	told          bool
 }
 
@@ -288,7 +316,7 @@ type deliveryFreshnessVerdict struct {
 
 // deliveryHubNote is one thing the hub did, for a test's observe.
 type deliveryHubNote struct {
-	what          string // "recompute begin", "recompute end", "events caught up", "connected", "broker dropped"
+	what          string // "recompute begin", "recompute end", "events caught up", "events seeded", "connected", "broker dropped"
 	view          string // the view's key
 	cause         string
 	sent          int
@@ -325,11 +353,14 @@ var deliveryReconciledSources = []string{"prs", "runs", "ci"}
 func newDeliveryHub(s *server, lifetime context.Context, clock hubClock) *deliveryHub {
 	return &deliveryHub{
 		server: s, clock: clock, lifetime: lifetime,
-		dial:     s.deps.Store.Pool.Listener,
+		dial: func(ctx context.Context) (*pgx.Conn, error) {
+			return s.deps.Store.Pool.Listener(ctx)
+		},
 		ready:    make(chan struct{}),
 		wakeWork: make(chan struct{}, 1), wakeChanges: make(chan struct{}, 1),
 		wakeEvents: make(chan struct{}, 1), connected: make(chan struct{}, 1),
 		barrier: make(chan chan struct{}),
+		seeds:   make(chan hubEventSeed, 1),
 		views:   map[string]*deliveryView{},
 		conns:   map[deliveryLiveConn]map[string]*deliverySub{},
 		p0:      map[string]struct{}{},
@@ -392,7 +423,8 @@ func (h *deliveryHub) onNotify(channel, payload string) {
 	}
 }
 
-// catchUpNow catches both logs up and returns once it has, or once the hub's lifetime ended.
+// catchUpNow catches both logs up and returns once it has, or once the hub's lifetime ended. The
+// event log is caught up only once the intake holds an event cursor (applySeed).
 func (h *deliveryHub) catchUpNow() {
 	done := make(chan struct{})
 	select {
@@ -402,9 +434,9 @@ func (h *deliveryHub) catchUpNow() {
 	}
 }
 
-// deliveryLiveRefusal is the error frame refusing sub with code.
-func deliveryLiveRefusal(sub, code, message string) DeliveryLiveError {
-	return DeliveryLiveError{Type: "error", Sub: sub, Code: code, Message: message}
+// liveRefusal is the error frame refusing sub with code.
+func liveRefusal(sub, code, message string) LiveError {
+	return LiveError{Type: "error", Sub: sub, Code: code, Message: message}
 }
 
 func timeOrZero(t *time.Time) time.Time {

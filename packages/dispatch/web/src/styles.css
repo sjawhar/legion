@@ -421,8 +421,9 @@ a {
    nothing can be edited (a read-only render) or once the decision is no longer open. In a body
    the list folds only where the app mounts the card's rows (`useRenderedMarkdown` sets
    `data-dispatch-ask-options`), and it never shows, since nothing there is edited. The child
-   combinators keep a decision's rules to its own content, never a typed block inside a reply or
-   answer note its card renders. */
+   combinators keep an outer decision's rules to its own list, off the list of a typed block nested
+   inside it; a decision inside a reply or answer note its card renders is matched by these rules
+   itself, through that reply's or note's own `.dispatch-markdown` body. */
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask[data-dispatch-ask-options="rows"]
   > [data-proof-block-content]
@@ -445,8 +446,10 @@ a {
    option, so it shows no bullet where nothing is edited: in a body (`.dispatch-markdown`, a reply
    under a document's decision included) and in a read-only document. In an editable document the
    blank item is where the caret is, the option a human is typing (Enter after the question, then
-   `- `), so it shows there and the typed text lands in it. The child combinators keep the rule to
-   the decision's own list, never a typed block inside a reply or answer note its card renders. */
+   `- `), so it shows there and the typed text lands in it. The child combinators keep an outer
+   decision's rule to its own list, off the list of a typed block nested inside it; a decision
+   inside a reply or answer note its card renders is matched by the rule itself, through that
+   reply's or note's own `.dispatch-markdown` body. */
 :is(.dispatch-markdown, .dispatch-doc[data-read-only="true"])
   .proof-typed-block-ask[data-dispatch-ask-malformed="true"]
   > [data-proof-block-content]

@@ -53,8 +53,9 @@ func engineReadings(t *testing.T, markdowns []string) []*Node {
 
 // A document the browser editor holds is stored as its rendering, so the rendering must read back,
 // in Go and in the browser editor's engine alike, as what the editor shows - where markdown has a
-// form for it. Each row is a tree the editor can hold whose rendering main misreads, and the
-// markdown whose reading both parsers must give the rendering back as.
+// form for it. Each row is a tree the editor can hold whose rendering the reader before
+// sjawhar/legion#1563 misreads, and the markdown whose reading both parsers must give the
+// rendering back as.
 func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 	parsed := func(markdown string) *Node {
 		doc, err := Parse(markdown)
@@ -197,7 +198,28 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 		// as an autolink, whose text neither parser unescapes.
 		{"bare URL holding a backtick", bareURL("https://x.com/a`b"), "<https://x.com/a`b> b\n"},
 		{"bare URL holding a backtick and a reference", bareURL("https://x.com/a&amp;`b"), "<https://x.com/a&amp;`b> b\n"},
-		// 10. A `|` in a cell's code after an odd run of backslashes has no spelling in a cell, where
+		// 10. A link destination is written so that both parsers, which decode its backslash
+		// escapes, read back its href: `<` and `>` escaped between angle brackets, and a backslash
+		// escaped before ASCII punctuation or at its end.
+		{"link destination holding a parenthesis and `>`", bareURL("https://x.com/(a)>"), "[https://x.com/(a)>](<https://x.com/(a)\\>>) b\n"},
+		{"link destination ending in a backslash", bareURL("https://x.com/a>b\\"), "[https://x.com/a>b\\\\](https://x.com/a>b\\\\) b\n"},
+		{"link destination holding a backslash before punctuation", bareURL("https://x.com/a\\@b>"), "[https://x.com/a\\\\@b>](https://x.com/a\\\\@b>) b\n"},
+		{"link destinations holding escapes", parsed("[a](<x\\>y\\\\>) [b](x\\_y) [c](<\\<z>)\n"), "[a](x>y\\\\) [b](x_y) [c](\\<z)\n"},
+		// A control character a destination's reference decodes to is written as that reference
+		// again: raw, a tab or line feed ends the destination and a form feed is no destination
+		// character to the engine.
+		{"link destination holding a decoded line feed", parsed("[x](https://a.b/?q=a&#10;b)\n"), "[x](https://a.b/?q=a&#10;b)\n"},
+		{"link destination holding a decoded tab", parsed("[x](a&#9;b)\n"), "[x](a&#9;b)\n"},
+		{"link destination holding a decoded form feed", parsed("[x](a&#12;b)\n"), "[x](a&#12;b)\n"},
+		{"image address holding a decoded tab", parsed("![a](u&#9;v)\n"), "![a](u&#9;v)\n"},
+		{"cell link destination holding a decoded line feed", parsed("| h |\n| --- |\n| [x](a&#10;b) |\n"), "| h |\n| --- |\n| [x](a&#10;b) |\n"},
+		// 11. Plain text whose www domain an underscore in its last two parts spoils reads as text,
+		// but the backslash the writer escapes that underscore with ends the domain before it,
+		// which then reads as a www URL; the dot after `www` is escaped as well, so neither reads one.
+		{"heading text with a www domain spoiled by underscores", texts("# a\n", "_www.1.2.3.4__;b"), "# \\_www.1.2.3.4__;b\n"},
+		{"paragraph text with a www domain spoiled by a trailing underscore", texts("a\n", "www.a.b_;x"), "www.a.b_;x\n"},
+		{"cell text with a www domain spoiled by an underscore before its last dot", cellText(table, "www.a_.b"), "| h |\n| --- |\n| www.a_.b |\n"},
+		// 12. A `|` in a cell's code after an odd run of backslashes has no spelling in a cell, where
 		// `\\|` ends the cell, so it is written as text after the code: the cell keeps every
 		// character, that one no longer code.
 		{"code holding a backslash before a pipe in a body cell", cells(table, cellChange{row: 1, inline: "`a\\|b`\n"}), "| h |\n| --- |\n| `a\\`\\|`b` |\n"},
@@ -282,14 +304,23 @@ func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
 	}
 }
 
-// A www link is written as its bare text only where the browser editor's tokenizer and Go's guard
-// both read it from that text: right after a line's head, a space, a tab, `(`, `*`, `_`, `[`, `]`
-// or `~`, and only when its text opens with no email address. Anywhere else - after a quote, a code
-// span, inline HTML or a link - it is written as an explicit link, which both parsers read back as
-// the tree, where the bare text would read in the editor as a longer link or an email.
+// A www link is written as its bare text wherever the browser editor's engine and Go both read it
+// back from that text: after a line's head, whitespace, punctuation or a symbol
+// (renderer.wwwMayFollow) - a quote, a code span's fence and inline HTML among them - where its
+// text opens no email and the text written after it does not run on into it. It is written as an
+// explicit link, which both read back as the tree, after a letter or a digit, where neither reads a
+// www URL; where its text opens with an email, which the tokenizer tries first (isBareWWWLink); and
+// in a run whose bare writing does not read back as written, because what follows it continues it -
+// a letter outside ASCII, a backslash, another www link's label - where the run is written again
+// with every www link explicit (runSpelling.angleURLs). Where what follows it is plain text opening
+// with an address only the tokenizer reads (`http://localhost`), the run is written again with
+// every bare URL explicit and that address's colon escaped, a scheme's URL as an autolink.
 func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 	link := func(text string) *Node {
 		return &Node{Type: "text", Text: text, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://" + text, "title": nil}}}}
+	}
+	urlLink := func(url string) *Node {
+		return &Node{Type: "text", Text: url, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": url, "title": nil}}}}
 	}
 	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
 	code := func(value string) *Node { return &Node{Type: "text", Text: value, Marks: []Mark{{Type: "inlineCode"}}} }
@@ -299,16 +330,22 @@ func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 		inline []*Node
 		want   string
 	}{
-		{"after a quote, and after a space", []*Node{text(`see "`), link("www.a.test"), text(`" and `), link("Www.b.test"), text(".")},
-			"see \"[www.a.test](http://www.a.test)\" and Www.b.test.\n"},
+		{"after a quote and after a space, both bare", []*Node{text(`see "`), link("www.a.test"), text(`" and `), link("Www.b.test"), text(".")},
+			"see \"www.a.test\" and Www.b.test.\n"},
+		{"after a letter", []*Node{text("ab"), link("www.a.test"), text(" c")},
+			"ab[www.a.test](http://www.a.test) c\n"},
 		{"text opening with an email", []*Node{text("see "), link("www.x@y.com"), text(" b")},
 			"see [www.x@y.com](http://www.x@y.com) b\n"},
-		{"after inline HTML, before a letter outside ASCII", []*Node{html("<b>"), link("www.a.test"), text("é")},
+		{"after inline HTML, before a letter outside ASCII it runs on into", []*Node{html("<b>"), link("www.a.test"), text("é")},
 			"<b>[www.a.test](http://www.a.test)é\n"},
-		{"after a code span, before a backslash", []*Node{code("c"), link("www.a.test"), text(`\b`)},
+		{"after a code span, before a backslash it runs on into", []*Node{code("c"), link("www.a.test"), text(`\b`)},
 			"`c`[www.a.test](http://www.a.test)\\b\n"},
-		{"after a link", []*Node{link("www.a.test"), link("www.b.test"), text("|x")},
+		{"before another www link's label it runs on into", []*Node{link("www.a.test"), link("www.b.test"), text("|x")},
 			"[www.a.test](http://www.a.test)[www.b.test](http://www.b.test)|x\n"},
+		{"before plain text opening with a URL only the tokenizer reads", []*Node{link("www.a.test"), text("http://localhost x")},
+			"[www.a.test](http://www.a.test)http\\://localhost x\n"},
+		{"a scheme's URL before plain text opening with a URL only the tokenizer reads", []*Node{urlLink("https://a.test"), text("http://localhost x")},
+			"<https://a.test>http\\://localhost x\n"},
 	}
 	rendered := make([]string, len(tests))
 	docs := make([]*Node, len(tests))
@@ -334,38 +371,23 @@ func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 	}
 }
 
-// The first spelling of a run, the one inlineWithEscapes falls back to when no respelling reads
-// back, closes a code span before a www link it writes as an explicit link: rolling back the bare
-// writing of the link restores the open code fence its marks closed.
-func TestTheFirstSpellingClosesACodeSpanBeforeAWWWLinkAfterIt(t *testing.T) {
-	nodes := []*Node{
-		{Type: "text", Text: "c", Marks: []Mark{{Type: "inlineCode"}}},
-		{Type: "text", Text: "www.a.test", Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://www.a.test", "title": nil}}}},
-	}
-	r := &renderer{}
-	r.writeInlineRun(nodes, "", inlineContext{startsLine: true}, runSpelling{})
-	if got, want := r.b.String(), "`c`[www.a.test](http://www.a.test)"; got != want {
-		t.Fatalf("writeInlineRun = %q, want %q", got, want)
-	}
-}
-
-// The browser editor's parser links a URL in decoded text, after an escape or a character
-// reference, which Go's parser, reading markdown, does not. Each row is markdown and whether Go and
-// the engine read it alike, so a change to either reading shows here: the divergences that remain
-// (a URL after a letter and `;`, `#` or `&`, after an escaped character, at a line opening with a
-// quote, a lowercase scheme written `http\:`, and a URL inside a www URL the transform reads) are
-// recorded as differing, and the writer keeps a plain-text `www.` and an uppercase scheme
-// unescaped, so they read as links in both, where an escape would leave Go reading text and the
-// engine a link.
-func TestURLReadingsBesideEscapesAgreeWhereRecorded(t *testing.T) {
+// Go reads every bare web address as the browser editor's engine reads it: remark-gfm's tokenizer
+// where the tokenizer starts an address in the markdown, and its transform over the decoded text
+// it leaves - after an escape or a character reference, after any punctuation, a letter outside
+// ASCII or a digit, at a line or a table cell opening with punctuation. Each row is markdown both
+// must read alike, the rows where the two engine readers end an address differently among them;
+// a row marked writtenAsIs is also written back exactly as it is, with no backslash before a
+// scheme's colon. The plain texts a person types in the browser editor, which has no autolink
+// input rule, are written and read back alike by both too.
+func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 	tests := []struct {
-		markdown string
-		agree    bool
+		markdown    string
+		writtenAsIs bool
 	}{
 		{"see www\\.x.test b\n", false},
 		{"see HTTP\\://x.test b\n", false},
 		{"see http\\://x.test b\n", false},
-		{"x;https://x.test b\n", false},
+		{"x;https://x.test b\n", true},
 		{"x#https://x.test b\n", false},
 		{"x&https://x.test b\n", false},
 		{"\\*https://x.test b\n", false},
@@ -375,37 +397,156 @@ func TestURLReadingsBesideEscapesAgreeWhereRecorded(t *testing.T) {
 		{"see \"https://x.test\" and 'https://y.test'.\n", true},
 		{"see www.x.test b\n", true},
 		{"see HTTP://x.test b\n", true},
+		// The tokenizer and the transform end these addresses differently.
+		{"x;https://x.test/a_ b\n", false},
+		{"x;https://x.test/a<b c\n", false},
+		{"x;https://a.test/*b* c\n", false},
+		{"see http\\://x.test/a_ b\n", false},
+		{"see http\\://x.test/a<b c\n", false},
+		// Each position the engine starts an address at.
+		{"éhttps://x.test b\n", false},
+		{"x—https://x.test b\n", false},
+		{"x;www.x.test b\n", false},
+		{"x]https://x.test b\n", false},
+		{"x|https://x.test b\n", false},
+		{"x!https://x.test b\n", false},
+		{"&amp;https://x.test b\n", false},
+		{"x\"https://x.test\" b\n", false},
+		{"[https://x.test b\n", false},
+		{"x1https://x.test b\n", false},
+		{"| a | b |\n| --- | --- |\n| x | \"https://x.test\" b |\n", false},
+		{"`c`;https://x.test b\n", false},
+		{"foo;\nhttps://x.test b\n", false},
+		// INFRA-172's wider comparison.
+		{"See <http://e.test/a\\\\b now.\n", false},
+		{"www.e.test*b*\n", false},
+		{"`www.e.test_\n", false},
+		// A www address inside a link label that never forms a link (INFRA-534's corpus).
+		{"y [.a www.a.com/x]\\(u) z\n", false},
+		// An explicit link's destination, its escapes and character references decoded.
+		{"[a](<x\\>y\\\\>) [b](x\\_y) [c](<\\<z>) d\n", false},
+		{"[x](https://x.test/one&amp;amp;two) [y](u&copy;v) [z](u\\&amp;v)\n", false},
+		// A www address in a link label that does not close where the label first seems to.
+		{"[[www.a.com/~x[\\![ *.](u)\n", false},
+		{"[_~www.a.com/~x\\![**www.a.com/~x](u)\n", false},
+		// A name that is a character reference only with its `;` (`&copy`, `&amp`) is text to the
+		// engine, inside an address the transform reads as anywhere else (INFRA-531 testing).
+		{"see http\\://x.test/?a=1&copy=2 b\n", false},
+		{"x;www.x.test/?a=1&amp=2 b\n", false},
 	}
 	plain := func(text string) *Node {
 		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}}}
 	}
-	written := map[string]string{}
-	for _, text := range []string{"see www.x.test b", "see HTTP://x.test b"} {
+	typed := []string{"see www.x.test b", "see HTTP://x.test b", "see http://x.test b"}
+	markdowns := make([]string, 0, len(tests)+len(typed))
+	for _, test := range tests {
+		markdowns = append(markdowns, test.markdown)
+	}
+	for _, text := range typed {
 		markdown, err := Render(plain(text))
 		if err != nil {
 			t.Fatal(err)
 		}
-		written[text] = markdown
-	}
-	markdowns := make([]string, 0, len(tests)+len(written))
-	for _, test := range tests {
-		markdowns = append(markdowns, test.markdown)
-	}
-	for _, text := range []string{"see www.x.test b", "see HTTP://x.test b"} {
-		markdowns = append(markdowns, written[text])
+		markdowns = append(markdowns, markdown)
 	}
 	readings := engineReadings(t, markdowns)
 	for index, markdown := range markdowns {
-		agree := true
-		if index < len(tests) {
-			agree = tests[index].agree
-		}
 		doc, err := Parse(markdown)
 		if err != nil {
 			t.Fatalf("Parse(%q) = %v", markdown, err)
 		}
-		if got := readings[index] != nil && doc.Equal(readings[index]); got != agree {
-			t.Errorf("%q: Go reads %s, the engine %s; recorded as agreeing: %v", markdown, inlineSummary(doc.Children[0]), inlineSummary(readings[index].Children[0]), agree)
+		if readings[index] == nil || !doc.Equal(readings[index]) {
+			t.Errorf("%q: Go reads %s, the engine %s", markdown, readingSummary(doc), readingSummary(readings[index]))
+		}
+		if index < len(tests) && tests[index].writtenAsIs {
+			if rendered, err := Render(doc); err != nil || rendered != markdown {
+				t.Errorf("%q is written back as %q (%v), want it as it is", markdown, rendered, err)
+			}
+		}
+	}
+}
+
+// A link Go reads from a bare address at a position the engine starts one is written back as Go
+// read it and the engine reads that writing alike, so a document holding it is stored rather than
+// refused (INFRA-531 testing): an address holding `>` after a closing parenthesis, one ending in a
+// backslash before an escaped character, and one between a text `<` and a later `>`. A text `<`
+// a task item's text opens with is escaped only where the engine opens an HTML block at it, and
+// those rows are also written back exactly as they are.
+func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
+	markdowns := []string{
+		"x;https://x.test/(a)> b\n",
+		"\\(http://x.test/a>b\\_\n",
+		// A text `<` whose `>` comes after an address in a later text node is escaped, so the two
+		// never form one autolink around the address's link.
+		"&lt;mailto:x;a@b.cc>\n",
+		"&lt;javascript:alert(1);'a@b.cc'>\n",
+		"&lt;javascript:void(0);www.a.b>\n",
+		"&lt;javascript:void(a@b.cc)>\n",
+		// So is one whose later markdown closes it into inline raw HTML: an open tag, a comment
+		// or a processing instruction around an address's link.
+		"Set \\<input value=me@x.cc> in the form.\n",
+		"Use \\<a href=https://x.cc/> here.\n",
+		"x &lt;!-- see x;https://a.bc/ --> y\n",
+		"x &lt;?php x;a@b.cc ?> y\n",
+		"x &lt;!-- a@b.cc --> y\n",
+		// So is one that only CommonMark and the engine close into raw HTML, not goldmark: a
+		// declaration after a lowercase letter, and a tag whose unquoted value holds a control
+		// character.
+		"Set \\<!doctype x;a@b.cc> now\n",
+		"Set \\<!x;a@b.cc> now\n",
+		"\\<!x;a@b.cc>\n",
+		"\\<a b=\x01;a@b.cc>\n",
+		// At a block's first character the engine also opens an HTML block (micromark's html-flow),
+		// whose start conditions accept more than inline raw HTML: a complete tag alone on its line
+		// whose unquoted value ends at `=` and reads another one, and a declaration, a comment, a
+		// processing instruction, a CDATA section, a raw or a block tag name with no closer at all.
+		"\\<span title=a=b;a@b.cc>\n",
+		"\\<a href=x?a=1&b=me@x.cc>\n",
+		"\\<a b=x=*y*>\n",
+		"\\<script x;a@b.cc\n",
+		"\\<!-- x;a@b.cc\n",
+		"\\<?x x;a@b.cc\n",
+		"\\<!x x;a@b.cc\n",
+		"\\<![CDATA[ x;a@b.cc\n",
+		"\\<div x;a@b.cc\n",
+		"> \\<span title=a=b;a@b.cc>\n",
+		"- \\<span title=a=b;a@b.cc>\n",
+	}
+	asIs := []string{
+		// A continuation line of a task item, and a later paragraph of one, start a block, where
+		// the engine opens an HTML block as at any other.
+		"- [ ] a\\\n  \\<!-- todo later\n",
+		"- [ ] a\n\n  \\<div class=x\n",
+		// Text written right after a task item's checkbox is read inside the item's paragraph,
+		// where no HTML block opens: its `<` is written as it is.
+		"- [ ] <!-- todo later\n",
+		"- [ ] <div class=x\n",
+		"- [x] <!doctype html\n",
+		"1. [ ] <script x\n",
+		"> - [ ] </div\n",
+	}
+	markdowns = append(markdowns, asIs...)
+	docs := make([]*Node, len(markdowns))
+	rendered := make([]string, len(markdowns))
+	for index, markdown := range markdowns {
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q) = %v", markdown, err)
+		}
+		docs[index] = doc
+		if rendered[index], err = Render(doc); err != nil {
+			t.Fatalf("Render(Parse(%q)) = %v", markdown, err)
+		}
+	}
+	readings := engineReadings(t, rendered)
+	for index, markdown := range markdowns {
+		back, err := Parse(rendered[index])
+		if err != nil || !back.Equal(docs[index]) || readings[index] == nil || !readings[index].Equal(back) {
+			t.Errorf("%q reads in Go as %s, is written as %q, which reads back in Go as %s (%v) and in the engine as %s",
+				markdown, readingSummary(docs[index]), rendered[index], readingSummary(back), err, readingSummary(readings[index]))
+		}
+		if index >= len(markdowns)-len(asIs) && rendered[index] != markdown {
+			t.Errorf("%q is written back as %q, want it as it is", markdown, rendered[index])
 		}
 	}
 }

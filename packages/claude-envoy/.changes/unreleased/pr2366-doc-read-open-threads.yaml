@@ -1,7 +1,0 @@
-kind: Changed
-body: |-
-  The `dispatch` command (`dist/dispatch.js`) prints every open thread anchored on a document
-  `dispatch doc-read` reads in full: an open ask with its question and every reply under it, and
-  a comment thread with its root and every reply's author, time and text, in place of the one line
-  of ask and comment ids that never showed a reply. The bundled `dispatch_doc_read` description
-  says so, since `dist/` was regenerated (#2366).

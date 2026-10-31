@@ -49,7 +49,7 @@ test("ProofDocument keeps transport active without cursor decorations in the com
               owner={{ key: "CORE-1", kind: "issue" }}
               onVersionChange={() => {}}
               showDiff={false}
-              user={{ kind: "user", login: "alice" }}
+              user={{ event_head: "0", kind: "user", login: "alice" }}
             />
           </MarginProvider>
         </DocumentRuntime.Provider>

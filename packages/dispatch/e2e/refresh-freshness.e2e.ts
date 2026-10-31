@@ -1,7 +1,6 @@
 import { type APIResponse, expect, type Page, type Route, test } from "@playwright/test";
 
 import {
-  baseUrl,
   createArtifactComment,
   createAsk,
   createComment,
@@ -14,7 +13,6 @@ import {
   putArchitectureSource,
   snoozeAsk,
   syncArchitectureSource,
-  userHeaders,
 } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
@@ -24,21 +22,26 @@ import { asUser } from "./users";
 // refreshes only what it can change. Each test writes as another party through the API while
 // alice's page stays open, and expects the change on the page within 2 s, with no reload.
 const bob = { actor: { id: "bob", kind: "session" as const }, as: "agent" as const };
-const eventStreamUrl = /\/api\/v1\/events(\?|$)/;
 const live = { timeout: 2_000 };
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-/** Opens `path` and returns once the page's event stream answered: the server subscribes the
- *  stream before it answers, so every write after this reaches the page. */
+/** Opens `path` and returns once Dispatch has started the page's event feed on its live socket
+ *  (`events_start`): it subscribes the feed to its event relay before it sends that frame, so every
+ *  write after this reaches the page. */
 async function openLive(page: Page, path: string): Promise<void> {
-  const stream = page.waitForResponse(
-    (response) => eventStreamUrl.test(response.url()) && response.status() === 200
-  );
+  const started = Promise.withResolvers<void>();
+  page.on("websocket", (socket) => {
+    if (new URL(socket.url()).pathname !== "/ws/live") return;
+    socket.on("framereceived", ({ payload }) => {
+      const frame = JSON.parse(String(payload)) as { readonly type?: string };
+      if (frame.type === "events_start") started.resolve();
+    });
+  });
   await page.goto(path);
-  await stream;
+  await started.promise;
 }
 
 /** The next GET matching `pattern` is fetched from the server at once, so its body is composed
@@ -324,11 +327,8 @@ test("budget: a document in another project citing 25 documents reads no issue d
     const gets: string[] = [];
     page.on("request", (request) => {
       const url = new URL(request.url());
-      if (
-        request.method() === "GET" &&
-        url.pathname.startsWith("/api/") &&
-        !eventStreamUrl.test(request.url())
-      ) {
+      // The live socket is `/ws/live`, outside `/api/`, so no read below is the event feed.
+      if (request.method() === "GET" && url.pathname.startsWith("/api/")) {
         gets.push(url.pathname);
       }
     });
@@ -355,34 +355,37 @@ test("budget: a document in another project citing 25 documents reads no issue d
   }
 });
 
-test("snooze: another person's event stream carries nothing that names the ask alice snoozed", async () => {
+test("snooze: another person's event feed carries nothing that names the ask alice snoozed", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Private triage" });
-  const ask = await createAsk(issue.key, { question: "Snoozed in private" }, bob);
-  await snoozeAsk(ask.id, new Date(Date.now() + 3_600_000).toISOString(), { login: "alice" });
 
-  // Bob's browser session replays the whole log, as a reconnecting tab of his would.
-  const controller = new AbortController();
-  const response = await fetch(new URL("/api/v1/events?since=0", baseUrl), {
-    headers: await userHeaders("bob"),
-    signal: controller.signal,
-  });
-  expect(response.status).toBe(200);
-  const reader = response.body?.getReader();
-  let replay = "";
-  const deadline = Date.now() + 2_000;
-  while (reader !== undefined && Date.now() < deadline) {
-    const chunk = await Promise.race([
-      reader.read(),
-      new Promise<undefined>((resolve) => setTimeout(resolve, 250)),
-    ]);
-    if (chunk?.value !== undefined) replay += new TextDecoder().decode(chunk.value);
-    if (chunk?.done === true) break;
+  // Bob's open tab: every event frame its live socket carries.
+  const bobContext = await asUser(browser, "bob");
+  try {
+    const page = await bobContext.newPage();
+    const frames: string[] = [];
+    page.on("websocket", (socket) => {
+      if (new URL(socket.url()).pathname !== "/ws/live") return;
+      socket.on("framereceived", ({ payload }) => {
+        const frame = String(payload);
+        if ((JSON.parse(frame) as { readonly type?: string }).type === "event") frames.push(frame);
+      });
+    });
+    await openLive(page, "/");
+
+    const ask = await createAsk(issue.key, { question: "Snoozed in private" }, bob);
+    await snoozeAsk(ask.id, new Date(Date.now() + 3_600_000).toISOString(), { login: "alice" });
+    const aliceFrames = () =>
+      frames.filter(
+        (frame) => frame.includes("user_state.updated") && frame.includes('"login":"alice"')
+      );
+    // The snooze's event reaches bob's feed, as it reaches every signed-in one, and names no ask.
+    await expect.poll(() => aliceFrames().length, live).toBeGreaterThan(0);
+    expect(frames.some((frame) => frame.includes(ask.id))).toBe(true);
+    expect(aliceFrames().filter((frame) => frame.includes(ask.id))).toEqual([]);
+  } finally {
+    await bobContext.close();
   }
-  controller.abort();
-  const aliceFrames = replay
-    .split("\n\n")
-    .filter((frame) => frame.includes("user_state.updated") && frame.includes('"login":"alice"'));
-  expect(replay).toContain(ask.id);
-  expect(aliceFrames.filter((frame) => frame.includes(ask.id))).toEqual([]);
 });

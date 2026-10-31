@@ -6,6 +6,7 @@ import type {
   ArchitectureSource,
   ArchitectureTree,
   Artifact,
+  ArtifactBlock,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
@@ -31,6 +32,7 @@ import type {
   Issue,
   IssueDetails,
   IssueSummary,
+  ItemBlocks,
   Message,
   MessageDelivery,
   MessageRead,
@@ -46,6 +48,7 @@ import type {
   UserAgentStateInput,
   UserAgentStates,
   UserIssueState,
+  UserState,
   Version,
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
@@ -68,6 +71,9 @@ const seedActor: Actor = { kind: "session", id: "e2e-seed" };
 interface ApiOptions {
   actor?: Actor;
   as?: "agent" | "user";
+  /** The `Idempotency-Key` header the write carries, naming one intent: a repeat under it is
+   *  answered what the first was answered. None when absent, which Dispatch handles unkeyed. */
+  idempotencyKey?: string;
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
@@ -158,6 +164,9 @@ async function request<T>(
     headers.Authorization = `Bearer ${options.token ?? e2eAgentToken}`;
   } else {
     Object.assign(headers, await userHeaders(options.login));
+  }
+  if (options.idempotencyKey !== undefined) {
+    headers["Idempotency-Key"] = options.idempotencyKey;
   }
   if (options.process !== undefined) Object.assign(headers, pinnedTo(options.process));
 
@@ -528,6 +537,29 @@ export function getComment(
   return request(`/api/v1/comments/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
 
+/** `GET /api/v1/comments/{id}/blocks`: the comment's current blocks in body order, each with its
+ *  span in the stored body, its revision, and whether the blocks are indexed from that body. */
+export function getCommentBlocks(id: string, options: ApiOptions = {}): Promise<ItemBlocks> {
+  return request<ItemBlocks>(
+    `/api/v1/comments/${encodeURIComponent(id)}/blocks`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** A reply to comment `comment` of `issue` that answers its block `block` (`b2`): `reply_to`
+ *  with `reply_to_block`. */
+export function replyToCommentBlock(
+  issue: string,
+  comment: string,
+  block: string,
+  input: Omit<CreateCommentInput, "reply_to" | "reply_to_block">,
+  options: ApiOptions = {}
+): Promise<Comment> {
+  return createComment(issue, { ...input, reply_to: comment, reply_to_block: block }, options);
+}
+
 export function getAsk(id: string, options: ApiOptions = {}): Promise<AskRead> {
   return request<AskRead>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
@@ -553,6 +585,16 @@ export function followAsk(id: string, sessionID: string, actor: Actor): Promise<
 export function getArtifactText(id: string, options: ApiOptions = {}): Promise<ArtifactText> {
   return request<ArtifactText>(
     `/api/v1/artifacts/${encodeURIComponent(id)}/text`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** The blocks of the document's current version, each with the span of markdown it covers. */
+export function getArtifactBlocks(id: string, options: ApiOptions = {}): Promise<ArtifactBlock[]> {
+  return request<ArtifactBlock[]>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/blocks`,
     "GET",
     undefined,
     options
@@ -664,6 +706,7 @@ export function createMessage(
   );
 }
 
+/** Sends one message to a session as a human; `options.idempotencyKey` keys it. */
 export function createAgentMessage(
   sessionID: string,
   input: CreateAgentMessageInput,
@@ -677,18 +720,13 @@ export function createAgentMessage(
   );
 }
 
-/** Sends one broadcast as a human. Every send carries an `idempotency_key`; this mints one unless
- *  the caller names its own, as a row that replays a request the page made does. */
+/** Sends one broadcast as a human; `options.idempotencyKey` keys it, as a row that repeats a
+ *  request the page made does. */
 export function createBroadcast(
-  input: Omit<CreateBroadcastInput, "idempotency_key"> & { readonly idempotency_key?: string },
+  input: CreateBroadcastInput,
   options: ApiOptions = {}
 ): Promise<BroadcastCreated> {
-  return request<BroadcastCreated>(
-    "/api/v1/broadcasts",
-    "POST",
-    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
-    options
-  );
+  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
 }
 
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {
@@ -724,6 +762,33 @@ export function getMessage(
     `/api/v1/issues/${encodeURIComponent(issue)}/messages/${encodeURIComponent(messageID)}`,
     "GET",
     undefined,
+    options
+  );
+}
+
+/** `GET /api/v1/messages/{id}/blocks`: the message's blocks in body order, each with its span in
+ *  the stored body, and whether they are indexed from that body. */
+export function getMessageBlocks(id: string, options: ApiOptions = {}): Promise<ItemBlocks> {
+  return request<ItemBlocks>(
+    `/api/v1/messages/${encodeURIComponent(id)}/blocks`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** A reply to message `message` of `issue` that answers its block `block` (`b2`): `in_reply_to`
+ *  with `in_reply_to_block`. */
+export function replyToMessageBlock(
+  issue: string,
+  message: string,
+  block: string,
+  input: Omit<CreateMessageInput, "in_reply_to" | "in_reply_to_block">,
+  options: ApiOptions = {}
+): Promise<{ id: string }> {
+  return createMessage(
+    issue,
+    { ...input, in_reply_to: message, in_reply_to_block: block },
     options
   );
 }
@@ -797,15 +862,33 @@ export function putIssueState(
   );
 }
 
+/** `login`'s own state on every issue, `GET /api/v1/me/state`: each issue's pin and its pinned
+ *  items (`dismissed`), as the page reads them. */
+export function getMyState(login = "alice"): Promise<UserState> {
+  return request<UserState>("/api/v1/me/state", "GET", undefined, { login });
+}
+
 /**
- * Forces every open SSE connection on the server closed, as if it had restarted.
+ * Forces every open live socket on the server closed, as if it had restarted.
  * Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh) that
- * proves the client's reconnect-from-lastId path without seeding thousands of
- * events to trip the real replay cap.
+ * proves the page resumes every subscription after an unplanned gap.
  */
-export function disconnectAllStreams(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+export function disconnectLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(
-    "/api/v1/events/_test/disconnect",
+    "/api/v1/live/_test/disconnect",
+    "POST",
+    {},
+    {
+      as: "agent",
+      ...options,
+    }
+  );
+}
+
+/** Forces every open live socket closed with 4001, as its bounded age does. */
+export function rotateLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/live/_test/rotate",
     "POST",
     {},
     {
@@ -830,6 +913,29 @@ export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolea
       as: "agent",
       ...options,
     }
+  );
+}
+
+/**
+ * Makes every keyed `method` request to `path` (the exact request path) take `delayMs` longer on
+ * the server: once Dispatch has claimed its key, the run waits that long on the handler's own
+ * context before the handler runs, so a write Dispatch is slow to finish is slow server-side
+ * rather than held in the browser; a context that ends during the wait answers
+ * `503 SLOW_WRITE_CUT_OFF` and the handler never runs. Each call replaces the delay for that
+ * method and path, and `delayMs` 0 removes it. Test-only endpoint (mounted when
+ * DISPATCH_TEST_HOOKS=1, see run-server.sh), called as a person: its body takes no `actor`.
+ */
+export function slowWrites(
+  method: "PATCH" | "POST",
+  path: string,
+  delayMs: number,
+  options: ApiOptions = {}
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/writes/_test/slow",
+    "POST",
+    { delay_ms: delayMs, method, path },
+    options
   );
 }
 
@@ -959,10 +1065,10 @@ export function publishAgentStreamFrame(
   );
 }
 
-/** Ends every open viewer stream for a session, as a connection lost on the way to the browser
- *  does. The live stream carries no cursor, so the browser's reconnect asks the session for its
- *  replay again and rebuilds its whole transcript from it: this is how a test gets a second
- *  replay into a page that is already open, which a published frame alone cannot do. */
+/** Ends every open agent viewer for a session. The page resubscribes its dropped view on the live
+ * socket, which asks the session for its replay again and rebuilds the transcript: this is how a
+ * test gets a second replay into a page that is already open, which a published frame alone
+ * cannot do. */
 export function dropAgentStreamViewers(
   sessionID: string,
   options: ApiOptions = {}

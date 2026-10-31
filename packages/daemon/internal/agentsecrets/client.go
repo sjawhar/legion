@@ -60,23 +60,55 @@ var (
 // read at every login so the kubelet's rotation is always picked up; Log is where each login's
 // outcome is reported, nil for slog's default.
 //
-// cred is the launcher credential the latest login won, cleared only when the broker refuses it
-// (doProof). Every login proves the same key again, minting a new one only when no credential is
-// held (the first login, or after a refusal), so a renewal never moves the broker to another key
-// and a proof in flight during one stays valid: nothing makes an Enroll or a Revoke wait for a
-// login. failure is why no live credential is held — the latest login's failure, or the broker's
-// refusal of the credential — nil once a login wins. changed wakes the login loop (Start) when a
-// call finds no live credential or the broker refuses it.
+// state is the login as one snapshot (loginState), so a reader never sees the credential from one
+// moment and the failure from another. Its credential is the one the latest login won, cleared
+// only when the broker refuses it (doProof). Every login proves the same key again, minting a new
+// one only when no credential is held (the first login, or after a refusal), so a renewal never
+// moves the broker to another key and a proof in flight during one stays valid: nothing makes an
+// Enroll or a Revoke wait for a login. changed wakes the login loop (Start) when a call finds no
+// live credential or the broker refuses it.
 type Client struct {
 	URL       string
 	HTTP      *http.Client
 	TokenFile string
 	Log       *slog.Logger
 
-	cred        atomic.Pointer[credential]
-	failure     atomic.Pointer[string]
+	state       atomic.Pointer[loginState]
 	changed     chan struct{}
 	changedOnce sync.Once
+}
+
+// loginState is one snapshot of the login: cred is the held launcher credential, nil before the
+// first login wins and after the broker refuses it; failure is why no live credential is held —
+// the latest login's failure, or the broker's refusal of the credential — "" once a login wins.
+// A snapshot is never changed after it is stored; each change stores a new one.
+type loginState struct {
+	cred    *credential
+	failure string
+}
+
+// snapshot is the login as it stands: the zero loginState before any login finished.
+func (c *Client) snapshot() loginState {
+	if s := c.state.Load(); s != nil {
+		return *s
+	}
+	return loginState{}
+}
+
+// update stores next(the snapshot as it stands), loading it again when another store lands
+// between the load and the swap; next answering false leaves the snapshot as it is.
+func (c *Client) update(next func(loginState) (loginState, bool)) {
+	for {
+		old := c.state.Load()
+		var cur loginState
+		if old != nil {
+			cur = *old
+		}
+		changed, ok := next(cur)
+		if !ok || c.state.CompareAndSwap(old, &changed) {
+			return
+		}
+	}
 }
 
 // credential is a won launcher credential: the key it is bound to (which never leaves process
@@ -177,14 +209,15 @@ func (c *Client) Login(ctx context.Context) (time.Time, error) {
 	cred, err := c.tokenLogin(ctx)
 	if err != nil {
 		reason := "token login failed: " + err.Error()
-		c.failure.Store(&reason)
+		c.update(func(cur loginState) (loginState, bool) {
+			return loginState{cred: cur.cred, failure: reason}, true
+		})
 		if ctx.Err() == nil {
 			c.log().Error("agent-secrets: the token login failed; retrying", "error", err)
 		}
 		return time.Time{}, err
 	}
-	c.failure.Store(nil)
-	c.cred.Store(cred)
+	c.state.Store(&loginState{cred: cred})
 	c.log().Info("agent-secrets: logged in with the daemon's ServiceAccount token", "expires_at", cred.expires.UTC().Format(time.RFC3339))
 	return cred.expires, nil
 }
@@ -202,7 +235,7 @@ func (c *Client) tokenLogin(ctx context.Context) (*credential, error) {
 		return nil, fmt.Errorf("agent-secrets login: the ServiceAccount token file %s is empty", c.TokenFile)
 	}
 	var key *ecdsa.PrivateKey
-	if held := c.cred.Load(); held != nil {
+	if held := c.snapshot().cred; held != nil {
 		key = held.key
 	} else if key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
 		return nil, fmt.Errorf("agent-secrets login: generate key: %w", err)
@@ -238,16 +271,16 @@ func (c *Client) tokenLogin(ctx context.Context) (*credential, error) {
 	return &credential{key: key, id: answer.CredentialID, expires: answer.ExpiresAt, renewAt: now.Add(answer.ExpiresAt.Sub(now) / 2)}, nil
 }
 
-// LoginStatus reports the login as LoginState describes it.
+// LoginStatus reports the login as LoginState describes it, from one snapshot.
 func (c *Client) LoginStatus() LoginState {
-	cred := c.cred.Load()
-	if cred.live(time.Now()) {
+	s := c.snapshot()
+	if s.cred.live(time.Now()) {
 		return LoginState{State: "issued"}
 	}
-	if reason := c.failure.Load(); reason != nil {
-		return LoginState{State: "failed", reason: *reason}
+	if s.failure != "" {
+		return LoginState{State: "failed", reason: s.failure}
 	}
-	if cred != nil {
+	if s.cred != nil {
 		return LoginState{State: "failed", reason: "the launcher credential expired before a login renewed it"}
 	}
 	return LoginState{State: "none"}
@@ -288,7 +321,7 @@ func (c *Client) keepLoggedIn(ctx context.Context, retry loginRetry, retryAt tim
 // expired one, retryAt; and never before now.
 func (c *Client) nextDue(now, retryAt time.Time) time.Time {
 	due := retryAt
-	if cred := c.cred.Load(); cred.live(now) && cred.renewAt.After(due) {
+	if cred := c.snapshot().cred; cred.live(now) && cred.renewAt.After(due) {
 		due = cred.renewAt
 	}
 	if due.Before(now) {
@@ -387,7 +420,7 @@ func (c *Client) Revoke(ctx context.Context, id string) error {
 // login loop, and answers NO_MACHINE_CREDENTIAL; a 401 on a credential a login already replaced
 // clears nothing.
 func (c *Client) doProof(ctx context.Context, method, path string, body any) (int, []byte, error) {
-	cred := c.cred.Load()
+	cred := c.snapshot().cred
 	if !cred.live(time.Now()) {
 		c.wake()
 		return 0, nil, c.noCredentialError()
@@ -403,10 +436,9 @@ func (c *Client) doProof(ctx context.Context, method, path string, body any) (in
 		return 0, nil, err
 	}
 	if status == http.StatusUnauthorized {
-		if c.cred.CompareAndSwap(cred, nil) {
-			reason := "the broker refused the daemon's launcher credential; logging in again"
-			c.failure.Store(&reason)
-		}
+		c.update(func(cur loginState) (loginState, bool) {
+			return loginState{failure: "the broker refused the daemon's launcher credential; logging in again"}, cur.cred == cred
+		})
 		c.wake()
 		return 0, nil, c.noCredentialError()
 	}

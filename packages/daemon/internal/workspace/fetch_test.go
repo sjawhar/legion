@@ -1090,16 +1090,30 @@ func TestFetchKeepsAFeedHoldingAKilledRepacksServerInfoFiles(t *testing.T) {
 
 // A feed can be garbage-collected between pod starts. A completed gc and one killed while its
 // repack is running leave only files Git owns, so the next fetch keeps the feed instead of replacing
-// it.
+// it. A gc killed earlier, while it packs refs, also leaves packed-refs.lock: Fetch removes that
+// stale lock before it judges the feed, so it keeps that feed too, and only Fetch judges it.
 func TestFetchKeepsAFeedAfterGitGC(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		gc   func(t *testing.T, feed string)
+		// leftLock is set when the gc leaves a lock only Fetch's stale-lock sweep removes, so the
+		// feed is judged through Fetch alone and never by foreignFeed first.
+		leftLock bool
 	}{
 		{name: "completed", gc: func(t *testing.T, feed string) {
 			runSetup(t, feed, "git", "--git-dir="+feed, "gc", "--prune=now")
 		}},
 		{name: "killed during repack", gc: killGitGC},
+		{name: "killed during pack-refs", leftLock: true, gc: func(t *testing.T, feed string) {
+			// git gc writes gc.pid, then packs refs under packed-refs.lock before it repacks; a pod
+			// that ends there leaves both behind.
+			if err := os.WriteFile(filepath.Join(feed, "gc.pid"), []byte("4242 killed-pod"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(feed, "packed-refs.lock"), []byte("# pack-refs with: peeled fully-peeled sorted \n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newLocalRunner(t)
@@ -1111,8 +1125,10 @@ func TestFetchKeepsAFeedAfterGitGC(t *testing.T) {
 				t.Fatalf("first Fetch: %v", err)
 			}
 			tc.gc(t, first.Feed)
-			if why, err := foreignFeed(first.Feed); err != nil || why != "" {
-				t.Fatalf("foreignFeed after git gc = %q, %v; want the feed trusted", why, err)
+			if !tc.leftLock {
+				if why, err := foreignFeed(first.Feed); err != nil || why != "" {
+					t.Fatalf("foreignFeed after git gc = %q, %v; want the feed trusted", why, err)
+				}
 			}
 			before := len(run.Calls())
 
@@ -1127,12 +1143,18 @@ func TestFetchKeepsAFeedAfterGitGC(t *testing.T) {
 					t.Errorf("Fetch replaced the feed after git gc: %q", call.Argv)
 				}
 			}
+			if _, err := os.Lstat(filepath.Join(first.Feed, "packed-refs.lock")); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("Fetch left the killed gc's packed-refs.lock: %v", err)
+			}
 		})
 	}
 }
 
-// killGitGC runs a large, real repack and kills its process group after git wrote gc.pid. The kill
-// is deliberate: a pod can end at this point, leaving gc.pid.
+// killGitGC runs a large, real repack and kills its process group once the repack is writing its
+// pack, a tmp_pack_* entry under objects/pack. The kill is deliberate: a pod can end at this point,
+// leaving gc.pid and the partial pack. git gc writes gc.pid before it packs refs and expires the
+// reflog, both of which come before the repack, so a kill at gc.pid could land in pack-refs instead;
+// that kill is the "killed during pack-refs" case.
 func killGitGC(t *testing.T, feed string) {
 	t.Helper()
 	slowGitGC(t, feed)
@@ -1154,7 +1176,11 @@ func killGitGC(t *testing.T, feed string) {
 	poll := time.NewTicker(time.Millisecond)
 	defer poll.Stop()
 	for {
-		if _, err := os.Stat(filepath.Join(feed, "gc.pid")); err == nil {
+		packs, err := os.ReadDir(filepath.Join(feed, "objects", "pack"))
+		if err != nil {
+			t.Fatalf("read the feed's packs during git gc: %v", err)
+		}
+		if slices.ContainsFunc(packs, func(entry os.DirEntry) bool { return strings.HasPrefix(entry.Name(), "tmp_pack_") }) {
 			if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil {
 				t.Fatalf("kill git gc: %v", err)
 			}
@@ -1167,14 +1193,14 @@ func killGitGC(t *testing.T, feed string) {
 		case <-deadline.C:
 			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 			_ = command.Wait()
-			t.Fatal("git gc did not write gc.pid during its repack")
+			t.Fatal("git gc did not start writing a pack during its repack")
 		case <-poll.C:
 		}
 	}
 }
 
 // slowGitGC adds a large incompressible loose object, keeping git gc's repack live long enough to
-// kill at the same point a pod shutdown can leave its gc.pid.
+// kill while it writes its pack.
 func slowGitGC(t *testing.T, feed string) {
 	t.Helper()
 	blob, err := os.Create(filepath.Join(t.TempDir(), "large-blob"))

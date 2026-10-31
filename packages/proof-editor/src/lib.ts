@@ -22,6 +22,7 @@
  */
 
 import { BLOCK_ID_DOM_ATTR, blockIdOf, blockIdPlugins } from './editor/schema/block-ids';
+import { withoutLeafMarks } from './editor/schema/leaf-marks';
 import { blockSchemaPlugins, type BlockSchema, type HostBlockRenderer } from './block-schema';
 import { createTypedBlockCommands, type TypedBlockCommands } from './typed-block-commands';
 import {
@@ -50,14 +51,17 @@ import { collabCursorPlugin } from './collab-cursor-plugin';
 import type { Awareness } from 'y-protocols/awareness';
 import type * as Y from 'yjs';
 import type { EditorView } from '@milkdown/kit/prose/view';
+import type { Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 import type { Ctx, MilkdownPlugin } from '@milkdown/ctx';
 
 import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-marks';
 import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-block-ext';
 import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
-import { libraryRemarkDirectivePlugin, typedBlockRemarkPlugin } from './lib-remark-directive-plugin';
-import { unfitTypedBlocksRemarkPlugin } from './typed-block-drawing';
+import { libraryRemarkDirectivePlugin } from './lib-remark-directive-plugin';
+import { libraryRemarkNestedLinksPlugin } from './nested-links';
+import { liveTypedBlocksRemarkPlugin } from './read-only-directives';
+import { brokenAskInputGuards, keepUnselectedAskBlocks, relaxAskContentCheck } from './ask-content';
 import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/remark-proof-marks-plugin';
 import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks';
 
@@ -71,7 +75,8 @@ import { markPopoverPlugin } from 'proof-sdk-upstream/src/editor/plugins/mark-po
 import { arrowCommentPlugin } from 'proof-sdk-upstream/src/editor/plugins/arrow-comment';
 import { findHighlightsPlugin } from 'proof-sdk-upstream/src/editor/plugins/find-highlights';
 import { markdownLinkClickPlugin } from 'proof-sdk-upstream/src/editor/plugins/markdown-link-click';
-import { mermaidDiagramsPlugin } from 'proof-sdk-upstream/src/editor/plugins/mermaid-diagrams';
+import { mermaidCodeBlockPlugin } from './mermaid-code-block-view';
+import type { MermaidDrawer } from './mermaid-svg';
 import { taskCheckboxesPlugin } from 'proof-sdk-upstream/src/editor/plugins/task-checkboxes';
 import { tableKeyboardPlugin } from 'proof-sdk-upstream/src/editor/plugins/table-keyboard';
 import { placeholderPlugin } from 'proof-sdk-upstream/src/editor/plugins/placeholder';
@@ -151,6 +156,9 @@ export interface CreateProofEditorOptions {
   blockSchema?: BlockSchema;
   /** Renders a host-owned typed block node when the schema declares `render: "host"`. */
   renderBlock?: HostBlockRenderer;
+  /** The host's Mermaid renderer, which draws each mermaid code block's diagram. Without one a
+   *  document's mermaid blocks show their source. */
+  drawMermaid?: MermaidDrawer;
 }
 
 export interface ProofEditorHandle extends TypedBlockCommands {
@@ -261,19 +269,23 @@ function cssEscapeAttrValue(value: string): string {
  * passes it, so it heals the same way. The wrapper itself never changes once installed: it
  * rebuilds its own closed-over parser from the schema and remark processor the broken one used,
  * keeps the fresh one for the next call, and rethrows the original error, so the one refused
- * parse still fails exactly as it did before and only the shared state is what recovers.
+ * parse still fails exactly as it did before and only the shared state is what recovers. Every
+ * document it returns is read through `withoutLeafMarks` first, so no inline leaf of a paste or
+ * an editor parse carries a mark (./editor/schema/leaf-marks.ts).
  */
 function installSelfHealingParser(ctx: Ctx): void {
   const schema = ctx.get(schemaCtx);
   const remark = ctx.get(remarkCtx);
   let parse = ctx.get(parserCtx);
   ctx.set(parserCtx, (markdown) => {
+    let parsed: ProseMirrorNode;
     try {
-      return parse(markdown);
+      parsed = parse(markdown);
     } catch (error) {
       parse = ParserState.create(schema, remark);
       throw error;
     }
+    return withoutLeafMarks(parsed);
   });
 }
 
@@ -298,7 +310,6 @@ export async function createProofEditor(
     // Frontmatter and typed directives register before their node schemas claim their AST nodes.
     .use(libraryRemarkFrontmatterPlugin)
     .use(libraryRemarkDirectivePlugin)
-    .use(opts.blockSchema ? typedBlockRemarkPlugin(opts.blockSchema) : [])
     .use(frontmatterSchema)
     // `use` flattens its argument twice, so an array of composed schemas — each of them a pair
     // of plugins — is an argument Milkdown accepts but its own signature cannot express.
@@ -317,8 +328,14 @@ export async function createProofEditor(
     // Register remark plugins for proof marks and dispatchAsk parsing
     .use(remarkProofMarksPlugin)
     .use(remarkDispatchMarksPlugin)
+    // Last of the remark plugins that shape inline content, so the links it splits are every link
+    // the tree holds: a link inside a link label (an autolink, the only nesting CommonMark allows)
+    // is hoisted beside the runs around it (./nested-links.ts). `$remark` puts it in `remarkCtx`,
+    // which is the processor behind both the shared `parserCtx` and the `ParserState`
+    // `setMarkdown` builds, and `stringify` runs no transformer, so the editor's output is as it was.
+    .use(libraryRemarkNestedLinksPlugin)
     // After the mark plugins, so a block-level mark span is a mark node when the fit check reads it.
-    .use(opts.blockSchema ? unfitTypedBlocksRemarkPlugin : [])
+    .use(opts.blockSchema ? liveTypedBlocksRemarkPlugin(opts.blockSchema) : [])
     // Register contexts
     .use(heatmapCtx)
     .use(agentCursorCtx)
@@ -342,7 +359,7 @@ export async function createProofEditor(
     .use(dispatchActionBarPlugin({ by: opts.user.name, onMarkAction: opts.onMarkAction }))
     .use(findHighlightsPlugin)
     .use(taskCheckboxesPlugin)
-    .use(mermaidDiagramsPlugin)
+    .use(mermaidCodeBlockPlugin(opts.drawMermaid))
     .use(markdownLinkClickPlugin)
     // Register unified marks plugin
     .use(marksPlugins)
@@ -354,6 +371,7 @@ export async function createProofEditor(
     .use(recordMarkHistoryPlugin)
     .use(editorHighlightsPlugin)
     .use(placeholderPlugin)
+    .use(keepUnselectedAskBlocks) // no read-back edit drops an unselected block of an off-rule ask (./ask-content.ts)
     .config((ctx) => {
       ctx.update(remarkStringifyOptionsCtx, (prev) => ({
         ...prev,
@@ -376,6 +394,7 @@ export async function createProofEditor(
 
   let currentReadOnly = Boolean(opts.readOnly);
   view.setProps({ editable: () => !currentReadOnly });
+  view.setProps(brokenAskInputGuards); // no input throws in an off-rule ask (./ask-content.ts)
   const setReadOnly = (readOnly: boolean) => {
     currentReadOnly = readOnly;
     view.setProps({ editable: () => !currentReadOnly });
@@ -389,6 +408,9 @@ export async function createProofEditor(
   // mapping is populated.
   editor.action((ctx) => {
     const collabService = ctx.get(collabServiceCtx);
+    // Before the shared document renders: an ask two collaborators left off its content rule
+    // must not be deleted from it (see ./ask-content.ts).
+    relaxAskContentCheck(ctx.get(schemaCtx));
     collabService.bindDoc(opts.ydoc);
     collabService.mergeOptions({
       yCursorOpts: { cursorBuilder: collabCursorBuilder, selectionBuilder: collabSelectionBuilder },
@@ -433,7 +455,9 @@ export async function createProofEditor(
         editor.ctx.get(schemaCtx),
         editor.ctx.get(remarkCtx)().use(remarkSoftBreakAsSpace),
       );
-      const parsed = importParser(markdown);
+      // This parser is its own, so the shared parserCtx's rule is applied here too: no inline
+      // leaf of an imported document carries a mark (./editor/schema/leaf-marks.ts).
+      const parsed = withoutLeafMarks(importParser(markdown));
       const { state } = view;
       view.dispatch(state.tr.replaceWith(0, state.doc.content.size, parsed.content));
     },

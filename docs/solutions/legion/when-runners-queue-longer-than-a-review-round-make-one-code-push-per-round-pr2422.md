@@ -16,7 +16,7 @@ related_issues:
 
 Extends docs/solutions/legion/an-implement-handoff-push-runs-ci-in-full-and-cancels-the-code-heads-runs-cite-the-tips-runs-and-give-the-lane-the-code-heads-image-LEGION-631.md.
 
-- A code push cancels the queued `Tests` run of the push before it, as a handoff push without the
+- A code push cancels the queued `CI` run of the push before it, as a handoff push without the
   trailer does. When runners queue longer than a review round, every run is cancelled before it
   starts, and no required check ever completes.
 - Put each round's fixes and any merge of main into one code push: commit the fix, merge main on
@@ -27,9 +27,9 @@ Extends docs/solutions/legion/an-implement-handoff-push-runs-ci-in-full-and-canc
 
 ## Evidence
 
-- `.github/workflows/pr-and-main.yaml` sets `concurrency.group: tests-<pull request number>` with
+- `.github/workflows/ci.yaml` sets `concurrency.group: ci-<pull request number>` with
   `cancel-in-progress` on `pull_request`.
-- sjawhar/legion#2422: every `Tests` run on the branch up to 0c77df5c was cancelled before a
+- sjawhar/legion#2422: every `Tests` run (the workflow before `ci.yaml`) on the branch up to 0c77df5c was cancelled before a
   runner took it, because the next code push cancelled it. The
   architect then required one code push per round: 0c77df5c (fix faeb4057 and main 8b4a862b), and
   e6f60222 (fix fc24d837 and main e82b013b), each followed only by skip-checks handoffs.

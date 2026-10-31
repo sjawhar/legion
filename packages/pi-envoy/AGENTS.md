@@ -22,11 +22,120 @@ it launches, handing it instead the `legion-pane` seed file it holds as `NATS_NK
 it has one. `@legion/envoy-client/delivery` is the sole inbound
 renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
 Dispatch **BTW** frame runs the host's side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on) and
-posts its body or error to the correlated delivery attempt; **Aside** and **Steer** call
-`pi.sendMessage` with their respective delivery mode, except a person's direct Send or Aside
-(below). A BTW side turn still running when the handler that subscribed the agent subject
-(`session_start`, a session switch, or a Legion handler re-establishing through the claim bridge)
-reaches the host's 30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
+posts its body or error to the correlated delivery attempt. Every other frame that is not a
+person's direct Send or Aside (below) is a card, which `pi.sendMessage` delivers with `triggerTurn`:
+an aside while a turn runs, and a steer on an idle session unless the frame is a targeted Aside,
+which is an aside in both states. Which state the session is in is the host's `ctx.isIdle()`, read
+when the card is sent; a context without it gets every card but a targeted Aside as a steer, as
+before. The rules live in `src/card-wake.ts` (`CardWake`), tested there without NATS. The host drains
+its steering queue one message per step, first in, first out (`steeringMode` one-at-a-time), so a
+card there would hold a person's Send back a step; an aside is folded in at the next step, after
+any steer, without ending the running tool batch. An aside still queued at an interrupt (an Esc, or
+the RPC `abort` a Legion daemon sends) is folded into the context with no run and read at the next
+turn, where an Esc dropped a queued steer and an RPC `abort` resumed the run on it.
+The host also folds an aside with no turn when it lands after the run's last step (during the
+run's `agent_end` handlers or an automatic compaction) while an interrupt since the last user
+prompt is still in effect (a card-started run does not end it) or plan mode is on, and an aside
+that reaches an idle session in either state, where the steer it replaced started a turn. So every
+card carries a marker in its `details` (`EnvoyCardMarker`), and its `message_end` arms one check on
+the host's timer: when the session is idle, no run has started since the card, no interrupt is in
+effect and no assistant message follows the card in the branch, the check sends one hidden wake for
+every card it found unread, `deliverAs: "nextTurn"` with `triggerTurn` and `LOCAL_ENVOY_NOTICE`,
+which starts a turn on an idle host and, on one that turned busy, waits in the hidden next-turn
+queue rather than ahead of a person's Send. The branch decides, not the order of events, since the
+host emits an extension's `agent_end` unawaited and a fold's `message_end` can reach the extension
+before or after it. An interrupt shows to an extension only as the interrupted run's aborted
+assistant message (`Interrupted by user`), an aborted automatic compaction, or a retry cancelled in
+its backoff (`auto_retry_end`, `Retry cancelled`); each holds the wake off until the next run
+starts, so the cards an interrupt finds wait for the next turn. An interrupt while the host sets up
+a prompt (busy, before the run's `agent_start`) shows as nothing at all, so a card sent while the
+host is busy and no run has started, or after the run's `agent_end` while the host still settles,
+is never woken: the run that starts reads it, or the host folds it and the next turn reads it. A
+run the host drops with no `agent_end` for extensions, as a switch to a new or resumed session and
+a manual or extension compaction do (they disconnect from the agent before they abort it), ends
+once the host is seen idle: by a card or a check that finds it idle, or at a `session_switch`, a
+`session_compact` or a typed input (the `input` event an RPC prompt, a terminal Enter and
+`sendUserInput` emit before they prompt) that finds `isIdle` true (`CardWake.noteIfIdle`). The
+abort leaves the host idle at the switch's or the compaction's event, and a prompt sent from idle
+is typed while the host is idle, while an automatic compaction runs with the host busy and leaves a
+live run going, whatever order its `session_compact` and `auto_compaction_end` arrive in. A folded
+targeted Aside gets no wake, since it was an aside before too and the host folded it with no turn
+under the latch or in plan mode just the same.
+A card that reaches an RPC session while Oh My Pi starts must not start a turn there: the host
+settles every extension send of its startup before it returns from `initializeExtensions`, and RPC
+mode reads no command until then, while an idle card with `triggerTurn` is a send that lasts its
+whole run, so such a card held the daemon's `get_state` and task back until that turn ended. The
+host gives an extension no event once that drain is over, so the card is its own witness: in the
+startup phase (`ctx.mode` "rpc": RPC mode, and ACP, which initialises extensions in it too and whose
+bridge defers a turn the agent starts, so there the wake is hidden next-turn context, as main's idle
+steer was) a card that finds the host idle, a targeted Aside included, goes as a `followUp` with
+no `triggerTurn`, which the host appends with no turn only once its startup hold has settled, and
+the check its `message_end` arms runs on the host's timer, when an idle host has no startup send
+pending; it sends the wake outside the drain and ends the phase. A card the host has not yet
+emitted holds the check back for up to 30 s (`STARTUP_CARD_CAP_MS`), and a busy check leaves the
+startup cards to the running turn and checks again at its `agent_end`. Print and json mode prompt
+right after their own startup awaits, where a wake's turn would make that prompt fail as busy, and
+the terminal reads its input on its own, so in every other mode an idle card is a steer from the
+first, unless the start-turn mark holds.
+The start-turn mark (`EnvoyPluginInterface.startupTurn`, which `@sjawhar/pi-legion` sets for its
+controller's start and clears at that session's first `agent_start`) keeps that start the session's
+first turn. The operator's controller in a terminal is marked at its `session_start` with the start
+unsent (`sentAt` undefined), since it sends the start message only from `/legion-controller-start`,
+which Oh My Pi runs after its startup, and that send marks it sent; the daemon's controller in RPC
+mode is marked sent right before its `claims/ready`, after which the daemon writes the start prompt.
+Without the mark, a terminal's idle card would start its turn ahead of the start command, and in
+RPC mode a card's wake would fire once the host is idle after its startup, which can be before the
+daemon's prompt arrives. While the mark names this session (the instance's own and the host's live
+one) and its start was sent less than 30 s ago (`STARTUP_TURN_CAP_MS`), or is unsent and pi-envoy
+first read that unsent mark less than 30 s ago, the startup phase holds whatever `ctx.mode` is: an
+idle card goes as a `followUp` with no turn, and an idle check sends no wake, keeps the phase and
+checks again at the sent mark's cap, or every second while the start is unsent
+(`STARTUP_TURN_POLL_MS`, since no event tells pi-envoy of the send, nor of a start claim refused
+before the send, which clears the mark), until that mark's cap. The unsent mark's cap is not
+renewed, so a start that never comes (a start claim that never answers, a session started with no
+`/legion-controller-start`) holds the cards back for 30 s once, and a refused start claim releases
+them at the next poll. Every startup card seen while the mark held is owed the one wake the check
+sends once the hold ends (after the start turn's `agent_end`, or at the release), unless a reply
+after the start turn read it: the start turn's own replies, its tool calls' included, ran the
+start procedure and do not count, but any assistant message after the first one after the card
+that ends a model turn (one that called no tool and did not error) does, whether a later run or
+the start turn's run going on for an aside it took at the model's stop wrote it; the branch's
+order decides, as for every other card. An interrupt that stopped the start turn (its aborted
+reply, an aborted automatic compaction, a cancelled retry) leaves the owed cards folded for the
+person's next turn with no wake, which would start the turn the person stopped. A sent mark past
+its cap (a start the host failed) or a mark naming another session (a `task` subagent's, a
+session switched away from) changes nothing, and a session change drops the owed cards with the
+rest. A card that reaches the session before
+the Legion entry's `session_start` has set the unsent mark (inside the Envoy entry's own
+`session_start`, when Oh My Pi runs that first) finds no mark.
+The limits: a card sent as a session turns busy, before the host has marked it busy, is a steer,
+can wait in that queue and is dropped by an Esc, and an Esc puts a person's queued Sends back in the
+input box merged and without their Dispatch ids, until the session runs an Oh My Pi release with
+dispatch://INFRA-498; an interrupt during a run's post-run steps other than compaction and a retry
+backoff (its goal and usage bookkeeping, the todo check, a `session_stop` hook, which the Legion
+plugin registers) shows to no extension, so the cards it folds get one wake; a card sent while a
+prompt is set up, or after a run's `agent_end` while a continuation follows (`willContinue`), that
+the host then folds with no interrupt an extension sees gets no wake: that fold needs plan mode or
+a latch an earlier interrupt still holds (a prompt refused before its run, a continuation the host
+skips), and pi-envoy cannot tell it apart at the pinned Oh My Pi, which needs a host signal (the
+interrupt latch, the setup's abort signal, or the prompt's refusal), Oh My Pi work like
+dispatch://INFRA-498, which dispatch://INFRA-577 tracks for pi-envoy; a run the host drops with
+no `agent_end` still counts as running until the
+host is seen idle, so a card sent in a later prompt's setup before that, and an Esc there, gets a
+wake. That takes a failure path and then a prompt the host is not seen idle before: a manual
+compaction that fails or is cancelled after aborting the run, or a switch that fails between its
+abort and its `session_switch`, then a prompt sent while the host is busy, or one that reaches it
+with no `input` event (another extension's `sendUserMessage` or triggered message, an ACP prompt,
+a wake of the host's own); or a run another sender starts with no wait while a manual compaction
+has the agent disconnected (`agent-session.ts` `#promptAgentInitiatedMessage`, ~9083-9095), which
+leaves the host busy at that `session_compact`. Another extension's startup send
+still loading its pictures on an idle host can let the startup wake join the host's startup drain;
+the drain of `/reload-plugins` is not covered; a startup targeted Aside in plan mode gets a wake an
+aside never got; and an RPC session that receives no card while it starts stays in the startup
+phase until its first idle card, which gets its turn through the wake. A BTW
+side turn still running when the handler that subscribed the agent subject (`session_start`, a
+session switch, or a Legion handler re-establishing through the claim bridge) reaches the host's
+30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
 A card whose text embeds Dispatch pictures (`RenderInboundResult.pictures`) carries them as image
 blocks after the text (`src/delivery-pictures.ts`, the same bounds as `dispatch read`), and so does
 a person's turn (below): `sendUserMessage` takes the blocks with the text, and `sendUserInput`, which
@@ -64,8 +173,14 @@ transcript entry (`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), re
 entry of the session file (`sessionManager.getEntries()`) on each restore, and a frame naming a
 recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
 a Send that arrived as a card, and one forged after a restart are each a card, while a person's
-retry, a new attempt, can still be their turn. Every refusal, error and timeout (10 s), a Dispatch
-configuration that no longer resolves included, keeps the card and posts nothing.
+retry, a new attempt, can still be their turn. The accept is keyed like every Dispatch write: it
+carries one `Idempotency-Key` and asks again under it after a transport failure, a 5xx, a 408, a
+429 or a `409 KEY_IN_FLIGHT` inside its 10 s bound (at 0, 1, 3 and 7 s), so an accept whose 200
+was lost becomes the person's turn on the replay rather than a card, against a Dispatch that runs
+the keyed layer, which the client proves by Dispatch's own echo of the key or by its `/healthz`
+(`packages/envoy-client/README.md`); against an older one it is a single attempt, then the card.
+Every refusal, every error and the timeout (10 s), a Dispatch configuration that no longer
+resolves included, keeps the card and posts nothing.
 
 On a host with `pi.sendUserInput` (our Oh My Pi fork, can1357/oh-my-pi#14323) the body runs as if
 typed at the session's terminal (`runTypedInput`), with the Dispatch message id as the host's `tag`
@@ -167,7 +282,7 @@ its `seq` beats the one it applied, and a page held open while the session is re
 `--resume` holds the earlier process's numbers, so every later process must count above them.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
-(every authenticated caller's event stream carries it, and Dispatch publishes it before its own
+(every authenticated caller's event feed carries it, and Dispatch publishes it before its own
 frame goes out) and names the attempt first spends it. If the accept answers 200, the person's
 stored body is the turn, and Dispatch's frame then arrives as a duplicate card when the forger used
 a key of its own, or is dropped by the session's dedupe when it used Dispatch's own idempotency key
@@ -182,22 +297,28 @@ Role claims are routed by the listener: this extension receives a receipt-backed
 direct agent subject instead of subscribing to a role subject itself. The agent pump replies the
 moment the envelope is decoded — before the inbox update, any Dispatch call, or the session
 injection — so the listener's two-second receipt window measures decoding, not the host's turn: a
-claimed-but-deaf holder still becomes a `delivery_failed` exception, and a busy one does not
-(LEGION-101). The receipt goes only to a role-lane frame — one whose envelope `topic` is not the
-direct subject, the shape the listener forwards to the holder. Every other frame carrying a reply
-inbox on the direct subject (a Dispatch author route, a peer `envoy_send`) is a JetStream publish
-whose inbox belongs to the server's PubAck; an empty receipt there fails the publisher with
+claimed-but-deaf holder still misses the receipt, and a busy one does not (LEGION-101). The
+listener's publish route (`POST /v1/messages/publish`) forwards the message again after a miss
+until its four-second window ends, then answers the sender 504 `receipt_timeout`; the role lane (a
+role topic published straight onto NATS) forwards once and reports a miss as a `receipt_timeout`
+exception. The same route forwards an ad-hoc topic's message to each self-subscribed session
+registered on the topic, so such a frame waits for this receipt too, and a session that misses it
+is named in the sender's 504. The receipt goes only to a forwarded frame — one whose envelope
+`topic` is not the direct subject, the shape the listener forwards. Every other frame carrying a
+reply inbox on the direct subject (a Dispatch author route, a peer `envoy_send`) is a JetStream
+publish whose inbox belongs to the server's PubAck; an empty receipt there fails the publisher with
 `nats: invalid jetstream publish response`. A frame that cannot be decoded is still never
 acknowledged, and a receipt that fails to publish is logged while delivery continues. Nor is a
 frame on the agent subject of a session the host has replaced (a `/new` or resume) that arrives
 once the host has moved its session manager but before a pass closes that subject: it is logged and
-left undelivered (`replacedSessionTopic`), as on the closed subject, so a role lane counts a failed
-delivery and the daemon re-sends to the role's holder. Any other such frame stays in the
-notification stream instead of being lost: when that session id is resumed within the stream's
-72 hours, its first sweep shows it ("Missed messages" below). A fork's or branch's parent's frames
-still arrive, and so do notices on a subject the replaced session's role holds, which are
-addressed to the role until a pass ends it: the controller claims its role again for the session
-its pane is left on when the switch's event runs, and a wake dropped there would be lost.
+left undelivered (`replacedSessionTopic`), as on the closed subject, so the forward draws no
+receipt: the publish route forwards again to the role's holder it resolves then, and a role lane
+counts a failed delivery and the daemon re-sends to the role's holder. Any other such frame stays
+in the notification stream instead of being lost: when that session id is resumed within the
+stream's 72 hours, its first sweep shows it ("Missed messages" below). A fork's or branch's
+parent's frames still arrive, and so do notices on a subject the replaced session's role holds,
+which are addressed to the role until a pass ends it: the controller claims its role again for the
+session its pane is left on when the switch's event runs, and a wake dropped there would be lost.
 
 Every registration (`registerSession`, at the first and on every heartbeat) names the plugin the
 session runs: `plugin` `@sjawhar/pi-envoy` and `plugin_version` the `version` of this package's
@@ -306,17 +427,24 @@ up to 6 minutes.
 What is replayed: the frames the stream keeps on the agent subject and on the topics the session
 follows (the issue topics, and any other topic the deployed stream captures). What is not: role
 messages, which stay live only (a frame whose dedupe key starts `envoy.role.forward.` or whose
-topic is a role lane is passed over); team and other ad-hoc topics, which the stream does not keep
-(the listener answers them `not_retained`) and which stay live only; anything published before
+topic is a role lane is passed over); team and other ad-hoc topics on their own subjects, which the
+stream does not keep (the listener answers them `not_retained`), except the copy the listener's
+publish route forwards to the agent subject of a session registered on the topic, which the stream
+keeps there and a sweep of that subject replays like any of its frames; anything published before
 the session followed the subject; and anything older than the stream's 72 hours. A replayed frame
-(`showReplayed`) is rendered by `renderInbound` and shown as an `envoy-message` card
-(`deliverAs: "steer"`, `triggerTurn: true`) whose last line says when it was published while the
-session's connection was down. A replayed targeted frame (BTW, Aside, Steer, a person's Send) is
-that card and nothing more: it runs no side turn, asks Dispatch to accept no user turn and posts no
-Dispatch reply, since a person's stale input run late could act on an old instruction. Dispatch
+(`showReplayed`) is rendered by `renderInbound` and shown as an `envoy-message` card, sent as a live
+card is (`CardWake`, above: an aside with `triggerTurn` while a turn runs, a steer with
+`triggerTurn` on an idle session, a `followUp` with no turn in the RPC startup phase), whose last
+line says when it was published while the session's connection was down. A replayed targeted frame
+(BTW, Aside, Steer, a person's Send) is that card and nothing more: it runs no side turn, asks
+Dispatch to accept no user turn and posts no Dispatch reply, since a person's stale input run late
+could act on an old instruction. Dispatch
 recorded that attempt as sent when the listener stored it, and nothing later accepts or answers
-it. A frame the renderer skips (`notify: false`, the session's own event, another session's
-follow) records nothing, so an eligible copy of it on another subject still shows. A replayed
+it. A frame the renderer skips (an event Dispatch marks `quiet` on an owner topic, the session's
+own event, another session's follow) records nothing, so an eligible copy of it on another
+subject still shows. An agent's comment, document or ask on an issue is not quiet, so a session
+that followed that issue's topic is shown it, where a renderer skipping every `notify: false`
+frame showed it none of them. A replayed
 `subscription.removed` closes a topic only when it was stored after the session started following
 that topic (the cursor's `since`), and takes it out of the listener's registry as
 `envoy_unsubscribe` does (`client.unsubscribe`), both by the engine's shared rule
@@ -397,7 +525,8 @@ live proof (`scripts/README.md`).
 ## AskGate
 
 AskGate (`extensions/askgate/`) reviews each Dispatch write of a main agent before it posts. The
-README's "AskGate" section says what it reviews, the switch, the modes and the model role.
+README's "AskGate" section says what it reviews, the switch, the modes, the model role, the rules
+check and the record.
 `envoy.ts` binds it only in a session that has Dispatch: it reads the session's own envoy.json
 with the variables over it (`readEnvoyConfig` and `dispatchSettings`, with `checkout: null`), or
 the session's settings with its checkout's file, so a checkout can turn the gate on (its own
@@ -415,15 +544,23 @@ Each call waits for the load. Once the modules load, the core binds to a `pi` th
 so no call passes between the load and the binding. A load that fails (a module, an
 `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler ceiling too short for a verdict)
 is no off switch: `loadFailureGate` refuses each write the gate would review, in both modes, naming
-the error and `askgate.enabled`, and records a `load-failed` entry. A session with no envoy.json
+the error and `askgate.enabled`, and records a `load-failed` entry. The ceiling is too short under
+15,000 ms (`MIN_DEADLINE_MS` plus `CEILING_MARGIN_MS` in `askgate-core.ts`), so a session's
+`extensionHandlers.toolCallTimeoutMs` set below that loses every Dispatch write the gate would
+have reviewed. A session with no envoy.json
 location has no Dispatch either, since its `dispatch` command works the file out by the same rule,
 so nothing binds there. `session_start` waits for the
 load and shows a load failure, a switch that does not parse or a location it could not work out as
-a notice. `askgate-core.ts` holds
-every rule of the gate and takes the host through its dependencies, so `askgate.test.ts` drives it
-with fakes. The reader takes one form, the literal grammar of one `dispatch` call
-(`dispatchCommandHead`, the README's "The form the gate reads"), and refuses no call by reading
-any other: a call in another form runs, and an `eval` cell is not read.
+a notice. `askgate-core.ts` holds the gate and takes the host through its dependencies, so
+`askgate.test.ts` drives it with fakes. The reader takes one form, the literal grammar of one
+`dispatch` call (`dispatchCommandHead`, the README's "The form the gate reads"), which takes the
+override comment the gate hands a rebutted command back with (`keepOverrideVisible`) as those
+overrides, so a resend of that command is the same rebuttal and `commandArgv` never holds the
+comment. That comment stands where the command's line ends, after its last word and every `2>&1`,
+here-document opener and `head` or `tail` stage, which is the one place bash reads a comment;
+each of its words is quoted, and the gate reads the commented command back as the same call
+before it hands it over, else it hands it back without the comment. It refuses no call by reading
+any other form: a call in another form runs, and an `eval` cell is not read.
 
 Enforcement is the `dispatch` CLI's (`@legion/envoy-client/askgate-marker`, the README's
 "Everything else runs"). While the gate is bound, `envoy.ts`'s top-level instance writes one
@@ -447,7 +584,15 @@ the default for these checks, the CLI writes the ledger line before it posts. Th
 checks' mode into the session's own record for the CLI (`checkMode`: block only when the session
 chose it; `setRecordMode` keys it per session, so a switch never changes another session's mode),
 apart from the verdict's mode (`sessionMode`, block by default); `envoy.ts` turns each write the
-CLI logged as unmarked into an `unmarked` entry, and the gate appends a cause note
+CLI logged as unmarked into an `unmarked` entry, and, where the CLI's own line says the write
+carried asks for a person (`asksCarried`, counted with `newAsks` in
+`@legion/envoy-client/askgate-new-asks`), publishes one decision record for it through the
+recorder `registerAskGate` returns, which runs until Dispatch answers it or the shutdown cut ends it.
+The entry is appended before that record starts and the tool result awaits none of it — a session's
+records are written one at a time, each with the client's own deadline, so awaiting one there
+stalled the write past the host's handler limit — and a record that fails appends its own
+`advisor-gate-record` entry, named by the `recordId` (`<toolCallId>#<ledger line>`) the entry
+carries. The gate appends a cause note
 (`nonLiteralCause`, `causeNote`) to the result of a call outside the literal form that the CLI
 refused. A gate that did not load refuses each literal call at the hook (`loadFailureGate`) and
 mints nothing; it writes no mode, so a write that reaches the CLI — one outside the literal form,
@@ -456,13 +601,39 @@ which `bindDispatchSession` writes into the record at the bind. Precision comes 
 refuses no call that holds no Dispatch write. Every other way a write passes
 unreviewed records its outcome and tells the agent so (`renderUnreviewed`), and each one runs the
 agent's own command as written (`UNREVIEWED_OUTCOMES`): a gate that fails breaks no valid write.
-The model walk (`askModel` in `createAskGate`) is the one path a review takes to the
-model. The review's deadline is held 5 s under `extensionHandlers.toolCallTimeoutMs`, so at that
-key's 30 s default a review often times out and the write posts unreviewed: a session that loads
-this plugin sets the key to 120000 or more (the README's "The time limit"), and a deadline under
-30 s logs one warning at bind.
-`rules.md`, `askgate-system.md`, `askgate-request.md` and `askgate-upload.md` (the instruction an
-upload of a markdown document gets: failure 10 alone) are the prompts, imported as text.
+Beside the core, `@legion/envoy-client/askgate-new-asks` finds the new asks a call opens, and
+reads markdown as the Dispatch server does; the CLI reads it too. `rules-check.ts` runs the rules
+check through the model walk and the Dispatch client that the core passes in, so it never imports
+`askgate-core.ts`. `breaker.ts` holds the breaker and its keys. `decision-record.ts` publishes
+each rule decision, each override and each unmarked write that carries an ask to a Dispatch
+project document of the session's own, through the same Dispatch client, reading that document
+by name (`getProjectArtifact`) and uploading only on a 404, and with no ask text in it; it too is
+free of the core, reading the entry's fields structurally, and a write that fails changes no
+decision. Each record carries an `id` — the gated call's tool call id, and for an unmarked write
+the CLI ledger line's place in its tool call — so the reader counts one (session, id) once. The
+core starts a gated call's record as its handler returns, never inside it, and holds it in a
+pending set: a record that fails or is cut at shutdown writes one line to `runtimeLogger` and
+appends one `advisor-gate-record` entry (`ADVISOR_GATE_RECORD_ENTRY_TYPE`, carrying `toolCallId`,
+`tool`, `recordError` and, from the host, `recordId`), since the call's `advisor-gate` entry was
+written before the record began; `askgate-report.ts` counts each of those as a decision record the
+session could not confirm, joining a gated call's follow-up by tool call id and an unmarked
+write's by `recordId`, since one tool call can carry both. Once the session is shutting
+down, the one `session_shutdown` handler `registerAskGate` binds owns the cut and its delay
+(`RECORD_CUT_DELAY_MS`, whether or not the gate loaded), and the core's handler waits for its own
+handlers and then for those records, so a record still lands, and the entry of one that could
+not, before the session is sealed. `text.ts` is the leaf that holds the text helpers
+both checks share. The model
+walk (`walk` in `createAskGate`) is the one path either check takes to the model. The review's
+deadline is held 5,000 ms under `extensionHandlers.toolCallTimeoutMs` (`CEILING_MARGIN_MS`, the
+room the handler still needs for the aborted call's usage report and for the entry; the decision
+record is no part of it), so at that key's 30 s default the deadline is 25,000 ms, a review of a
+long session can still time out and the
+write posts unreviewed: a session that loads this plugin sets the key to 120000 or more (the
+README's "The time limit"), and a deadline under 30 s logs one warning at bind. `rules.md`,
+`askgate-system.md`, `askgate-request.md` and `askgate-upload.md` (the instruction an upload of a
+markdown document gets: failure 10 alone) are the charter check's prompts, and
+`rule-check-system.md`, `rule-check.md` and `rule-check-request.md` are the rules check's. The
+modules import each prompt `with { type: "text" }`.
 
 AskGate reviews the writes of a cooperating agent. It is no sandbox, and nothing in it is
 designed as one: a process that runs as the same user defeats it. That process can turn the gate
@@ -640,6 +811,94 @@ every request as a session without it, plus the skill's own tokens. `src/dispatc
 holds the insertion rules, and `extensions/dispatch-first-omp.test.ts` checks turn 1, turn 2, after
 a compaction, and without Dispatch on the real binary.
 
+The same `context` handler appends, after the last message of each main-loop request, what
+people wrote to the session in the last 72 hours: `readSessionAnswers`
+from `@legion/envoy-client/session-answers` over `GET /api/v1/agents/{session_id}/answers`, as a
+separate user message (`src/session-answers-context.ts`), never merged into the last message and
+never at the head. The session is the one `replyAddress` names: the top-level one's
+`getSessionId()`, and for a `task` subagent its parent's, resolved through `resolveEnvoySession`,
+which is also the session it writes to Dispatch as (`DISPATCH_SESSION_ID`); a subagent this
+process cannot place carries no list. Dispatch is resolved per request with `commands: "kept"`,
+so no `!` token command runs on the request path, and `readSessionAnswers` works out the cache's
+directory from `process.env`. Position: Oh My Pi marks every message a `context` handler adds as
+per-call, and its Anthropic placement puts no `cache_control` on a per-call message, so the
+anchors stay on the conversation's own last messages and a change in the list re-reads none of
+the cached prefix; at the head, every change would invalidate everything after it.
+
+The pinned host (18.12.2) runs a `context` handler on every conversion of messages for a model,
+not only on the main loop's requests, and `withSessionAnswers` adds no list, and starts no read,
+on the others, each recognized by what the binary builds: a side turn
+(`AgentSession.runEphemeralTurn`: a Dispatch BTW, the stop-time self-check, `/btw`, the idle
+recap) converts `[...conversation, developer notice, .../btw history, user prompt]`, the notice
+and the prompt `attribution: "agent"`, the notice the host's `side-channel-no-tools.md`; the
+handoff converts `[...conversation, user prompt]`, the prompt `attribution: "agent"` and opening
+with the host's `handoff-document.md`; Anthropic remote compaction (`buildLiveProviderContext`)
+converts the conversation up to its cut, counts the result and keeps that many messages of the
+whole conversation's conversion, so the request that ends at a message the session's branch
+(`getBranch`) holds with a later one after it gets no list (a failed or aborted reply, which a
+retry drops from the context but not from the branch, does not count as later). The branch's
+messages are those the compaction builds its conversation from (`MI`): a `message` entry's
+message, a `custom_message` entry as role `custom` (every Envoy delivery with `triggerTurn` is
+one, and the cut can fall right after it) and a `branch_summary` entry as role `branchSummary`,
+each timestamped `new Date(entry.timestamp).getTime()`, matched by role and timestamp; a
+`compaction` entry becomes none there, since the earlier summary heads the conversion. The whole
+conversation's conversion carries the list at its end, past the cut. A compaction that keeps no
+tail converts the same messages twice, both ending at the branch's last message, so nothing on
+the branch tells either from a main-loop request: the second is a repeat of the conversion
+before it in the same session (`sessionManager`), ending at the same branch tip with the same
+messages' roles and timestamps, while the live `AgentSession` reads `isCompacting` (an automatic
+or manual compaction, the main loop paused) or `compactionSpeculation === "running"`, and it gets
+no list, so the compaction keeps none whatever the first carried. A repeat right after a cut
+keeps its list: that is the main loop's next request beside a speculative compaction with a tail,
+matching its whole conversion. Each session's last conversion lives in a process-wide `WeakMap`
+(on `globalThis` under `Symbol.for("legion.pi-envoy.session-answers-conversions.v1")`). Left
+open: a speculative compaction that keeps no tail (its kept turn right after a failed reply the
+branch still holds) beside the main loop's request matching it, which can lose that request's
+list; and a `task` subagent, which the host's registry does not list, so its compaction that
+keeps no tail carries the list. The dispatch-first skill goes on all of them as before. Not
+covered: OpenAI live steering (`providers.openaiLiveSteering`, a Codex WebSocket stream) converts
+the queued steers alone through the same handler, which no message tells apart from a first
+turn, so the skill and the list go out with a live steer there.
+
+Two copies of the extension run their handlers in turn on one request. The list's first line is
+`SESSION_ANSWERS_MARKER` (the failure line has its own), and only the last message is checked for
+it, so a second copy appends no second list. A copy that read no text appends nothing, so each
+copy also records the messages array it decided in a process-wide `WeakSet` (on `globalThis`
+under `Symbol.for("legion.pi-envoy.session-answers-requests.v1")`): the host hands the next
+handler that same array when one returns nothing, and the second copy neither reads nor waits.
+Bounds, all in the shared module: under 8,000 characters (at most 7,999) for the whole message, items newest first as a
+strict prefix with a left-out line naming `dispatch answers`; one read in flight per session and
+Dispatch URL for the whole process, the parent's and every subagent's requests joining it; each
+request waits at most `SESSION_ANSWERS_DEADLINE_MS` (800 ms), then carries the last list read
+from that Dispatch (memory, then `answers.json` in the session's state directory) with its read
+time and why this read failed, or, when that renders nothing, the failure line naming why; a
+Dispatch that answers its own `404 NOT_FOUND` "no route for …" (`isNoAnswersRoute`; a proxy's 404
+page or a 200 with no answers list is a failed read like any other) carries no line then
+(`source: "unavailable"`), since the failure line's `dispatch answers` fails there too, carries a
+list read before from it with a left-out line naming no command, gives a `notice` once per session
+and URL that `sessionAnswersText` logs with `logger.warn`, and is not asked again for 5 minutes; a
+read that already passed its deadline is not waited on again. The pinned host hands a `context`
+handler no abort signal: it races the handler against the run's own and drops an aborted
+handler's result. A handler that throws loses
+everything it returns, the skill included, so a read that throws rather than answering carries
+the failure line naming the error. `src/session-answers-context.test.ts` holds the insertion
+rules, the requests that carry no list and the two-copy cases, `extensions/envoy.test.ts` the
+handler, a subagent reading its parent's id, a Dispatch that answers no list (the failure line)
+and one with no answers route (no line, one warning for two requests), and
+`extensions/session-answers-omp.test.ts` the real binary: a new answer in the next turn, after a
+compaction and in a subagent's first request; every kind of item word for word; the cap; a route
+that never answers costing a request under one second; a route that answers 404 (no line); the cache
+prefix byte for byte with no `cache_control` on the list; a `/btw` side turn and the handoff
+ending with their own prompts, with no list and no read; a remote compaction request ending at
+its cut, after a question and after a delivered message, and one that keeps no tail carrying no
+list (the stand-in model claims `supportsServerCompaction` and `bedrockMessagesApi`, which the
+binary takes for a first-party endpoint; a test-only extension sends the delivered messages as
+`extensions/envoy.ts` does, since pi-envoy reads deliveries off NATS); and two copies with an
+empty list making one read.
+The timed cases run against a profile whose model catalog is already built: a fresh profile
+builds it beside its first turn, holding the host's event loop for one to two seconds whatever
+the extension does.
+
 `before_agent_start` injects nothing into the conversation; its open-asks query arms the run-end
 nudge only for a turn carrying the user's own text, its snapshot `as_of` becoming the period's first
 window. It runs only for a session the stop could actually nudge — the host awaits this handler, so
@@ -696,7 +955,9 @@ session's state directory, one line per call: the tool and its result's details)
 `tool_result` from the offset it last reached, under the id in `DISPATCH_SESSION_ID`; the offset
 starts at the ledger's end on `session_start`, `session_switch`, `session_branch` and the
 heartbeat's drift heal, so an earlier run's calls never count. A `bash` result whose command is one
-`dispatch` command (`dispatchCommandHead` in `src/shell-command.ts`), or an `eval` result, during
+`dispatch` command (`dispatchCommandHead` in `src/shell-command.ts`, which drops a comment that
+ends the first line, as bash does, so the command AskGate hands back with its override as that
+comment still counts), or an `eval` result, during
 which the ledger grew owes nothing; a `bash` command that ran `dispatch` beside anything else
 (`dispatch … && make`) is work. A `task` subagent's `dispatch` calls land in the parent's ledger (it
 carries the parent's id), so an `eval` that runs while a subagent writes to Dispatch can count as
@@ -744,7 +1005,7 @@ state never nudges.
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry publishes (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check (`subagent-session`), the host types, `toolSuccess`/`toolFailure`, and `shell-command`; inlined into `dist/envoy.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH`, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
 | Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no Dispatch or Envoy section and turns AskGate off (its "AskGate" tests turn it on, with the host modules stood in) with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
-| AskGate | `extensions/askgate/` | `askgate.ts` the entry, `askgate-core.ts` the gate, `rules.md` and the three prompt files, `askgate.test.ts` the core's tests with fakes, `askgate-omp.test.ts` one reviewed `dispatch ask` on the real binary (`LEGION_TEST_OMP`), and `scripts/askgate-report.ts` the report over the `advisor-gate` entries |
+| AskGate | `extensions/askgate/` | `askgate.ts` the entry, `askgate-core.ts` the gate, `rules-check.ts`, `breaker.ts`, `decision-record.ts` (the Dispatch record of each rule decision, each override and each unmarked write that carries an ask) and `text.ts` its modules, the seven prompt files (`*.md`), `askgate.test.ts` the core's tests with fakes, `askgate-omp.test.ts` one reviewed `dispatch ask` on the real binary (`LEGION_TEST_OMP`), and the report: `scripts/askgate-report.ts` over the `advisor-gate` entries on disk (`--sessions`), which also reads the command line of both modes, `scripts/askgate-report-dispatch.ts` over a project's decision documents (`--dispatch-project`), and `scripts/askgate-report-common.ts` what the two count with. The gate's own Dispatch, like the extension's, is built by `src/dispatch-session.ts` |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The five skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-legion` |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
@@ -756,7 +1017,7 @@ state never nudges.
 ## Critical conventions
 
 - Register every schema through the injected `pi.zod`. Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load (`undefined is not an object (evaluating 'e.ir.desc')`). `envoy.test.ts` proves every registered field came from the injected instance. |
-- Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when the host has a side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on; pi-envoy wraps the question in the /btw prompt itself, since the host sends the prompt as given) and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver targeted **Aside** / **Steer** with `triggerTurn: true`; reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address. Once the host wrote a live frame to the transcript (the `message_end` of its card or user turn), record it in the replay ledger (`recordDelivered`) before its claim settles, never sooner, and drop a live frame the ledger already holds; a replayed frame (`showReplayed`) is a card and runs nothing, whatever it carries ("Missed messages").
+- Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when the host has a side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on; pi-envoy wraps the question in the /btw prompt itself, since the host sends the prompt as given) and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver every card but an inert one (a replayed BTW and its failure notices, which start no turn: `CardDelivery` in `src/unwritten-frames.ts`) with `triggerTurn: true`, live or replayed and handed again alike (`handCard`), as an aside while a turn runs and a steer on an idle session (a targeted **Aside** stays an aside, and a host context without `isIdle` gets a steer), so a running turn's cards do not wait in the steering queue ahead of a person's Send; in the startup phase of a session whose `ctx.mode` is "rpc", and in any mode while the start-turn mark (`EnvoyPluginInterface.startupTurn`) names this session within its cap, a card that finds the host idle goes as a `followUp` with no `triggerTurn` instead, so no card's turn runs inside the host's startup drain or ahead of the Legion controller's start turn. A card the host folds with no turn gets one wake (`nextTurn` with `triggerTurn`, `LOCAL_ENVOY_NOTICE`) unless an interrupt is in effect, decided by the branch's order and never by the order of events, and a startup card seen while the start-turn mark held gets it after the start turn whatever the branch shows (the rules and limits are under "Overview"; the code is `src/card-wake.ts`). `extensions/card-delivery-omp.test.ts` proves all of it on the pinned Oh My Pi in RPC mode with a real NATS server: `LEGION_TEST_OMP=<omp> LEGION_TEST_NATS_URL=nats://127.0.0.1:<port> bun test extensions/card-delivery-omp.test.ts`, where a pod without Docker runs `GOBIN="$TMPDIR/gobin" go install github.com/nats-io/nats-server/v2@<the version packages/envoy/go.mod pins>` and `"$TMPDIR/gobin/nats-server" -a 127.0.0.1 -p <port>`; it skips without either variable and refuses on GitHub Actions, whose pi-envoy job runs NATS as a service container. The start-turn mark's own real-binary cases are `packages/pi-legion/extensions/controller-start-omp.test.ts`'s, which run the controller with both plugins. Run the package's whole suite with `bun run test`, never a plain `bun test`: `extensions/envoy.test.ts` replaces the `nats` module for its whole process (`mock.module`), so the `test` script runs `extensions/card-delivery-omp.test.ts` in a process of its own after the rest (keep it so), and a plain `bun test` with both variables set can load that mock into the real-binary file's process, where the file fails at once naming `bun run test`. Reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address. Once the host wrote a live frame to the transcript (the `message_end` of its card or user turn), record it in the replay ledger (`recordDelivered`) before its claim settles, never sooner, and drop a live frame the ledger already holds; a replayed frame (`showReplayed`) is a card and runs nothing, whatever it carries ("Missed messages").
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
 - Session state converges in one serialized pass (`reconcile`), which every session event (`session_start`, `session_switch`, `session_branch`, `session_tree`), every registration heartbeat tick (`ensureHeartbeat`, `ENVOY_HEARTBEAT_MS`, default 90 s) and every bridge call for a session not yet established runs. Both serial queues (`passes` and `roleMoves`) give each task a deadline (`passDeadlineMs`, `ENVOY_PASS_DEADLINE_MS`, default `max(heartbeatMs, 30 s)` and never shorter than `heartbeatMs`, since a deadline under one tick abandons every pass before the next and so disables the registration backstop, which runs inside the heartbeat's `healing` latch; an explicit value below the heartbeat is raised to it): past it the caller's promise rejects with `AbandonedTaskError`, the queue starts the next task, and the abandoned task is fenced, so its late continuation writes nothing. The heartbeat tick also re-posts the registration itself, outside both queues, when a pass is still running and the last accepted registration is a whole refresh interval old; a stall counts as a failed registration, so the next healthy tick re-asserts the role and fires the regain hook with reason `"reregistered"`, and it is said once per episode — one `context.ui.notify` and one `logger.warn`. A pass reads what is true now: the host's session id (`sessionManager.getSessionId()`, which Oh My Pi moves before it dispatches a switch's event), that session's own records (the last `envoy-role-claim` entry on its branch), and the one hold this process owns at the listener (`claimedRoleTopic` under `claimedRoleSessionID`). It converges to them idempotently: the host session's agent subject open and registered and Dispatch bound to it (refreshing the shell's environment when no event did), every other agent subject this process opened closed, and, in its turn of the role moves (`roleMoves`, `settleRole`), the role that session should hold held for it — the role its records name; else the role this process holds when its hold is under that session or one it continues; else, until a pass has decided for it, the listener's rows for it and for the sessions it continues; none of them while the listener has refused that role to that session (`refusedRoles`, below) — with any other role handed back at the listener. Only opening the agent subject needs NATS: the registration and the role go over HTTP, so an outage of the plugin's own NATS connection stops neither, a Legion claim through the bridge included; the pass throws `InboundError` once both are settled, the session's start or switch warns of the outage, and the next pass opens the subject and starts a sweep, which shows what the stream stored for the session while it was closed ("Missed messages"; the sweep runs on its own chain, never in either queue). What a session continues is how it was born (`continues`, `noteMove`): a fork or branch continues the session it left, learned from `session_before_switch` or `session_before_branch` or else the switch's event; a `/new` or resume continues nothing; a move with no word to an id never seen here carries the session on, as the drift heal always has; a move back to a session seen before (a resume Oh My Pi rolled back) changes nothing. An announcement lasts until a pass sees the host move, the next session event wherever it lands (a `/reload` lands on its own session), or the end, with a reply not aborted, of a run that started under it on the session it announced leaving: a switch that goes ahead aborts a run still going, and one another extension cancelled does not (a run that starts and ends while another extension's announcement handler still runs reads the same, and no host event tells the two apart). Every automatic claim is soft, naming the hold it may supersede — this process's own, wherever the listener names it, or whichever session the claimant continues the listener names — and the listener decides. A pass that finds the host moved after any await stops, and the pass the move queues converges, so the order of host events never matters; a claim the move outran stays this process's hold for that pass to keep or hand back. A switch's event also ends at once a role the new session's records rule out, so a `/new` never takes the old role's notices while an earlier pass finishes; the next pass hands that hold back whether or not its registration succeeds (`pendingHandBacks`), unless the hold is under the session open here, read at that moment (`sessionOpen`), and that session wants its role, whose hold it is again (a resume Oh My Pi rolled back) — unconfirmed until a soft claim naming it checks it at the listener (`holdUnconfirmed`) — and a claim of the role drops such a hand-back. A hold under a session this process has left is never its own again, since another process may run that session now. One the listener does not take back is abandoned (`abandonedHolds`), whatever session it is under, and waits for the listener's reaping until this process registers that session again; a claim the listener refuses naming it records no refusal while the listener's `last_seen` for that session stands still, so a pass claims again once the listener has reaped it. A `last_seen` that moved means another process registers that session, which is then the newer holder; any registration of that session by this process, in a pass or not and answered or not, first takes the hold back as its own, a pending hand-back under that id (`registerSession`). A heartbeat pass whose session already holds its role reads `GET /v1/roles/<role>` and claims softly only when the listener does not name it, so a healthy tick writes nothing and appends no transcript entry. A 409 to any automatic claim (a different live holder) drops the local claim, since the newer holder is correct, and no pass claims that role for that session again — each session's refusal its own — until a session event lands on it, the model or a plugin claims a role for it, or the process restarts and reads its records afresh. A regain — or the first pass that decides after a failed registration, when a surviving claim may still have been unresolvable — fires `onEnvoyRoleRegained` detached from the heartbeat chain (a slow daemon never blocks the next re-registration), which re-runs a claim's `claims/ready` with bounded retries; a pass the host overtook keeps that regain for the next. A role end after a move no session event announced is one no plugin heard: it warns, naming the role and who claims it again (the plugin that opened its notices, on its next session switch or restart, or the model with `envoy_role_set`), and a pass that claims or takes back a role whose plugin notices are still closed says they stay closed. A carried switch tells the agent its id changed once, from the pass that converges to it, in the session the notice names. The controller re-runs nothing, since the daemon holds nothing for it. `packages/pi-legion/src/claim-session.ts` registers that listener on the shared interface's `roleClaim.regained` slot (`@legion/pi-shared/interface`, `packages/pi-shared/AGENTS.md`) only once it holds a Legion identity, since a `task` subagent's re-bound instance shares the process and would otherwise replace it.
 - A `task` subagent's session shares its parent's identity in both plugins (`subagentSessionCheck` in `@legion/pi-shared/subagent-session`): in a Legion process it claims no role, calls no daemon route, and never exits (`packages/pi-legion/extensions/legion.ts`), and in every process `extensions/envoy.ts` skips its `session_start` and switch events entirely — no listener registration, no agent-subject subscription, no heartbeat — so `envoy ps` lists only top-level sessions and a finished subagent leaves no row heartbeating for the life of the parent process. Both entries ask the host's own roster first (`registeredSubagent`: `AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`, where `createAgentSession` registers every session as `main`, `sub`, or `advisor` before `session_start` fires), which needs no transcript and no write, so it also covers a subagent under `OMP_SESSION_STORAGE=sql` or of a `--no-session` parent, and stays per session rather than per process (an ACP host runs several top-level sessions in one process). The roster's answer outranks the transcript layout. Only where the roster gives no opinion (a host build without the export, or a session the global roster does not list) does the transcript decide, once `ensureOnDisk` has published it; that publish stays, since the transcript is then the only signal and has to be on disk to read as top-level. It fails while another writer holds the transcript's publish lock (Oh My Pi's `SessionLockError`); the check then answers that one call from the transcript as it is on disk, logs a warning, and asks again at the next call, so a lost race never fails a hook or the tool call it gates. Each hook calls the check once and passes the answer on, and each extension instance keeps only a settled answer, for its life. The transcript check is recognised by either of two signals: the process-local one — the claim session's boot and a launched controller's claim (`packages/pi-legion/src/claim-session.ts`, `packages/pi-legion/src/controller-session.ts`) record the bootstrapped session's transcript path on the shared interface (`bootstrappedSession` in `@legion/pi-shared/interface`), and any later `session_start` in the same process with a different transcript path is a subagent — or OMP's on-disk layout for file storage (the parent's `.jsonl` sits beside the subagent's transcript directory). The process-local signal is what holds when the transcript is a SQL row rather than a file (LEGION-80: `OMP_SESSION_STORAGE=sql`); the on-disk check stays as the fallback for a process that has not bootstrapped anything. The identity it shares is its reply address. Every top-level instance publishes its own session on `globalThis` under `Symbol.for("legion.pi-envoy.envoy-session")` (`src/envoy-session.ts`), keyed by its transcript path, at the one chokepoint that moves the module id — `restoreLocalSessionState`, which a start, a switch and the heartbeat's drift heal all run — and deletes its previous key when its id or transcript path changes, so a retired session leaves no entry to resolve. A session is recorded from its `session_start`, before the host has minted its id — under its transcript path, with the empty id it has — so a fresh TUI's subagent resolves that session and reports no address until the drift heal fills the id in, rather than falling through to another live session; and `session_shutdown` deletes the entry, since a deregistered session is not an address a reply reaches. It is a map, not one slot, because an ACP host runs several top-level sessions in one process: one slot would hand a subagent whichever of them last started. A subagent, whose module `sessionID` stays empty, resolves its own by walking OMP's layout up — `dirname(<own transcript>) + ".jsonl"`, repeated for a nested subagent — until a recorded session matches, and `envoy_whoami`, the `/whoami` command, and the `source_session` of `envoy_send` and `envoy_publish` all name that session. `envoy_whoami` reports it as `session_id` and the subagent's own host id under `subagent`. Where the walk matches nothing, one recorded session is used only when it is the only one in the process; otherwise there is no reply address at all — `session_id` is empty, the `subagent` note says so, and `packages/envoy-client/src/transport.ts` omits `source_session` rather than send an empty one, which the listener's `omitempty` erases on the way out, costing the recipient both the sender label and the reply hint. Naming an unrelated live session is never the answer. A subagent's `envoy_publish` never reaches its own parent: the listener delivers nothing to the session an envelope names as its source — `roleTopicDelivery` skips the resolved holder and `fanoutDelivery` skips any interest whose session is the source — so a publish to a role the parent holds, or to any topic it subscribes to, is accepted and delivered to nobody. The publish tool result says so for the role case, where the answer names the holder; the hop a subagent actually has to its parent is a `write` to the parent's `agent://` address. A direct `envoy_send` is unaffected, the agent-subject lane having no such skip. The host's own `AgentRegistry` carries a `parentId`, but it is undocumented and a host upgrade could change it silently; the published record is this package's own.

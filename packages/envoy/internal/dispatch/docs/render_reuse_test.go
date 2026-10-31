@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The tests here hold the reuse of renderings (renderedReplica.changedBy, warmFork's forkMarkdown,
@@ -56,30 +57,32 @@ func renderReuseDocument() string {
 
 // renderPaths is a reading of the service's renderPathCounts.
 type renderPaths struct {
-	observerReused, observerInRoom, observerRendered   uint64
-	beforeFromReplica, beforeFromWrite, beforeRendered uint64
+	observerReused, observerInRoom, observerRendered, observerMarginOnly uint64
+	beforeFromReplica, beforeFromWrite, beforeRendered                   uint64
 }
 
 func readRenderPaths(service *Service) renderPaths {
 	counts := &service.renderPaths
 	return renderPaths{
-		observerReused:    counts.observerReused.Load(),
-		observerInRoom:    counts.observerInRoom.Load(),
-		observerRendered:  counts.observerRendered.Load(),
-		beforeFromReplica: counts.beforeFromReplica.Load(),
-		beforeFromWrite:   counts.beforeFromWrite.Load(),
-		beforeRendered:    counts.beforeRendered.Load(),
+		observerReused:     counts.observerReused.Load(),
+		observerInRoom:     counts.observerInRoom.Load(),
+		observerRendered:   counts.observerRendered.Load(),
+		observerMarginOnly: counts.observerMarginOnly.Load(),
+		beforeFromReplica:  counts.beforeFromReplica.Load(),
+		beforeFromWrite:    counts.beforeFromWrite.Load(),
+		beforeRendered:     counts.beforeRendered.Load(),
 	}
 }
 
 func (p renderPaths) minus(base renderPaths) renderPaths {
 	return renderPaths{
-		observerReused:    p.observerReused - base.observerReused,
-		observerInRoom:    p.observerInRoom - base.observerInRoom,
-		observerRendered:  p.observerRendered - base.observerRendered,
-		beforeFromReplica: p.beforeFromReplica - base.beforeFromReplica,
-		beforeFromWrite:   p.beforeFromWrite - base.beforeFromWrite,
-		beforeRendered:    p.beforeRendered - base.beforeRendered,
+		observerReused:     p.observerReused - base.observerReused,
+		observerInRoom:     p.observerInRoom - base.observerInRoom,
+		observerRendered:   p.observerRendered - base.observerRendered,
+		observerMarginOnly: p.observerMarginOnly - base.observerMarginOnly,
+		beforeFromReplica:  p.beforeFromReplica - base.beforeFromReplica,
+		beforeFromWrite:    p.beforeFromWrite - base.beforeFromWrite,
+		beforeRendered:     p.beforeRendered - base.beforeRendered,
 	}
 }
 
@@ -451,7 +454,7 @@ func (m renderMeasure) expect(t *testing.T, want renderPaths, recovered int) {
 	m.sh.mu.Lock()
 	logged, aligned := m.sh.loggedLocked()-m.updates, m.sh.aligned-m.aligned
 	m.sh.mu.Unlock()
-	if observed := int(got.observerReused + got.observerInRoom + got.observerRendered); observed+recovered != logged {
+	if observed := int(got.observerReused + got.observerInRoom + got.observerRendered + got.observerMarginOnly); observed+recovered != logged {
 		t.Errorf("the observers classified %d updates and recovered %d, of %d logged", observed, recovered, logged)
 	}
 	if aligned != logged-recovered {
@@ -613,9 +616,12 @@ func TestRenderReuseAWarmReplaceRendersOnlyItsResult(t *testing.T) {
 	}
 }
 
-// E2. An anchored root comment is MarkQuote then ProjectMark in one transaction: the first takes
-// the replica's rendering, the second its predecessor's, and the observer reuses both, which
-// change no content.
+// E2. An anchored root comment is MarkQuote then ProjectMark in one transaction. MarkQuote takes
+// the replica's rendering as its before-rendering, and the observer reuses the rendering it
+// published. ProjectMark is a margin write (applyMargin), which renders nothing before it writes,
+// so it takes no before-rendering at all, not even its predecessor's (no beforeFromWrite), and its
+// publish into the room its fork was warm-built from is classified by the margin-only path. Neither
+// changes content.
 func TestRenderReuseAnAnchoredCommentRendersNothingTwice(t *testing.T) {
 	service, artifactID, sh := newWarmRenderReuseRoom(t)
 	m := sh.measure()
@@ -631,7 +637,7 @@ func TestRenderReuseAnAnchoredCommentRendersNothingTwice(t *testing.T) {
 		},
 	)
 	sh.check(t)
-	m.expect(t, renderPaths{beforeFromReplica: 1, beforeFromWrite: 1, observerReused: 2}, 0)
+	m.expect(t, renderPaths{beforeFromReplica: 1, observerReused: 1, observerMarginOnly: 1}, 0)
 	if stored := sh.versions(t, write); len(stored) != 2 || stored[0] || stored[1] {
 		t.Errorf("content_changed = %v, want [false false]", stored)
 	}
@@ -1063,9 +1069,7 @@ func TestRenderReuseADocumentOutsideTheSchema(t *testing.T) {
 	const updatedOutside = "updated document outside Proof schema"
 	captureWarnings := func(t *testing.T) *storetest.LockedLog {
 		logs := &storetest.LockedLog{}
-		previous := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
-		t.Cleanup(func() { slog.SetDefault(previous) })
+		logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 		return logs
 	}
 	replaceWhole := func(service *Service, artifactID string) func(ctx context.Context) error {
@@ -1140,9 +1144,9 @@ func TestRenderReuseACommittedWriteKeepsNoRendering(t *testing.T) {
 		applyOps(service, artifactID, reuseAgent, model.EditOp{Op: "replace", Find: "Paragraph 24 opens", With: "Paragraph 24 now opens"}),
 		applyOps(service, artifactID, reuseAgent, model.EditOp{Op: "replace", Find: "Paragraph 25 opens", With: "Paragraph 25 now opens"}),
 	)
-	if write.fork != nil || write.tree != nil || write.updates != nil || write.renderings != nil || write.forkMarkdown != nil {
-		t.Errorf("the committed write kept fork=%t tree=%t updates=%d renderings=%d forkMarkdown=%t",
-			write.fork != nil, write.tree != nil, len(write.updates), len(write.renderings), write.forkMarkdown != nil)
+	if write.fork != nil || write.tree != nil || write.updates != nil || write.renderings != nil || write.marginRooms != nil || write.forkMarkdown != nil {
+		t.Errorf("the committed write kept fork=%t tree=%t updates=%d renderings=%d marginRooms=%d forkMarkdown=%t",
+			write.fork != nil, write.tree != nil, len(write.updates), len(write.renderings), len(write.marginRooms), write.forkMarkdown != nil)
 	}
 	sh.check(t)
 	m.expect(t, renderPaths{beforeFromReplica: 1, beforeFromWrite: 1, observerReused: 2}, 0)

@@ -828,6 +828,54 @@ func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *test
 	}
 }
 
+// Re-entering a child creates a new generation, so a completion or production-check report from
+// the generation it left cannot apply to the new run. Its live claims stay live: re-entry queues
+// no suspension for the interrupted phase worker or for an open production-check look.
+func TestReenteringAnOpenChildDoesNotSuspendItsLiveClaims(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase phase.Phase
+		check *record.ProductionCheck
+	}{
+		{name: "an interrupted phase worker", phase: phase.Testing},
+		{name: "an implementer in an open production-check look", phase: phase.Done,
+			check: &record.ProductionCheck{Project: testProject, Tree: "LEGION-1", Repo: "acme/widgets", Number: 1,
+				MergeSHA: "merged", OpenedAt: fixedNow, BoundAt: fixedNow.Add(time.Hour), Looks: 1, LookOpen: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Clock: func() time.Time { return fixedNow }}, nil)
+			const root, child = "LEGION-1", "LEGION-2"
+			seedSlotted(t, pool, root, "A")
+			liveRoot := issue(t, pool, root)
+			liveRoot.Phase = phase.Implementing
+			putIssue(t, pool, liveRoot)
+			parent := root
+			putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+				Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: tc.phase, Generation: 1, Status: "in_progress", Rank: "B"})
+			if tc.check != nil {
+				check := *tc.check
+				check.Issue = child
+				inTx(t, pool, func(tx pgx.Tx) {
+					if err := record.NewStore().PutProductionCheck(context.Background(), tx, check); err != nil {
+						t.Fatalf("seed production check: %v", err)
+					}
+				})
+			}
+
+			apply(t, pool, admission, "child-reentered", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 2,
+				Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B"}, engine)
+
+			for _, effect := range effects(t, pool) {
+				if request, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == child && request.Op == "suspend" {
+					t.Fatalf("outbox effect = %#v, want no suspension when the child remains in the workflow", request)
+				}
+			}
+		})
+	}
+}
+
 // The boot read re-admits only a root: a signed-off child the human reopened while the daemon was
 // down keeps its tree and takes no slot.
 func TestReconcileNeverReadmitsAChildAsARoot(t *testing.T) {
@@ -976,13 +1024,13 @@ func TestCapturedDispatchTodoEventAdmitsAndProjectsActiveSlot(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	js := testJetStream(t)
-	consumers, err := intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	consumers, err := intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(ctx, pool, engineStub{}, admission) }()
+	go func() { done <- consumers.Run(ctx, engineStub{}, admission) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {

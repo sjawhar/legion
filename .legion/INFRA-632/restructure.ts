@@ -98,6 +98,7 @@ const TABLE_INTROS: Record<string, string> = {
     "Each item below names a check, then what it holds, with 4b.5's acceptance item in parentheses.",
   "checkpoint | what it holds":
     "Each item below names a checkpoint, then what it holds; an item that names no checkpoint continues the one above it.",
+  "input | what it names": "Each item below names an input, then what it names.",
   "observation | judges":
     "Each item below names an observation, then what it judges; an item that names no observation continues the one above it.",
   "step | driven by | read back as":
@@ -164,13 +165,15 @@ const ENUMERATIONS: Enumeration[] = [
   {
     id: "enum-e2e-sourced-libs",
     guide: "e2e",
-    old: "and the files they source ([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh), [`lib/github-apps.sh`](#libgithub-appssh), [`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login.sh`](#libbox-loginsh)), which `shellcheck` follows from this directory through `scripts/e2e/.shellcheckrc`.",
+    old: "and the files they source ([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh), [`lib/github-apps.sh`](#libgithub-appssh), [`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/session-db.sh`](#libsession-dbsh), [`lib/claude-transcript.sh`](#libclaude-transcriptsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh), [`lib/box-login.sh`](#libbox-loginsh)), which `shellcheck` follows from this directory through `scripts/e2e/.shellcheckrc`.",
     new: `and the files they source, which \`shellcheck\` follows from this directory through \`scripts/e2e/.shellcheckrc\`:\n\n${items(
       [
         "[`lib/rig.sh`](#librigsh)",
         "[`lib/workflow.sh`](#libworkflowsh)",
         "[`lib/github-apps.sh`](#libgithub-appssh)",
         "[`lib/namespace-rig.sh`](#libnamespace-rigsh)",
+        "[`lib/session-db.sh`](#libsession-dbsh)",
+        "[`lib/claude-transcript.sh`](#libclaude-transcriptsh)",
         "[`lib/kind-sandbox.sh`](#libkind-sandboxsh)",
         "[`lib/omp-home.sh`](#libomp-homesh)",
         "[`lib/box-login.sh`](#libbox-loginsh)",
@@ -312,8 +315,8 @@ const ENUMERATIONS: Enumeration[] = [
   {
     id: "enum-k8s-probe-path-tools",
     guide: "kubernetes",
-    old: "and `go`, `gcc`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq`, `ssh-keygen`, `flock`, `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` on `PATH` with `go version` running — and prints the table,",
-    new: `and these on \`PATH\` with \`go version\` running:\n\n${items([
+    old: "`go`, `gcc`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq`, `ssh-keygen`, `flock`, `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` on `PATH` with `go version` running, and the `claude-code` row's claude-envoy root and Claude Code pin, as the Claude lane held them, with the `npm` that installs from the pin and the `node` that checks the installed version on `PATH` — and prints the table,",
+    new: `the tools listed below on \`PATH\` with \`go version\` running, and the \`claude-code\` row's claude-envoy root and Claude Code pin, as the Claude lane held them, with the \`npm\` that installs from the pin and the \`node\` that checks the installed version on \`PATH\`.\nThe tools on \`PATH\` are these:\n\n${items([
       "`go`",
       "`gcc`",
       "`curl`",
@@ -332,16 +335,16 @@ const ENUMERATIONS: Enumeration[] = [
       "`nc`",
       "`dig`",
     ])}\n\nIt then prints the table,`,
-    leadIn: "“these”, `:`, “It then” in place of “— and”; the separators dropped",
+    leadIn: "“the tools listed below”, “The tools on `PATH` are these:”, “It then” in place of “— and”; the list moves from inside its sentence to just after it, the separators dropped",
     reason: "two conflicting merges added different tools to this list",
   },
   {
     id: "enum-k8s-toolchain-step-commands",
     guide: "kubernetes",
-    old: "and trixie's `python3`, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`, `sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn into a scratch directory the step removes. `ssh-keygen` takes",
+    old: "and trixie's `python3` with `python3 -c \"import yaml\"` for its PyYAML, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`, `sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn into a scratch directory the step removes. `ssh-keygen` takes",
     new: `and trixie's commands included — the corepack shims fetching their shipped default pnpm and yarn into a scratch directory the step removes.\nTrixie's commands are these:\n\n${items(
       [
-        "`python3`",
+        '`python3` with `python3 -c "import yaml"` for its PyYAML',
         "`curl`",
         "`wget`",
         "`jq --version`",
@@ -676,13 +679,6 @@ const SPLITS: Split[] = [
     anchor: "The agent's `/proc/<pid>/environ` is read for two things.",
     reason:
       "the `second-owner` observation runs 55 screen rows; what is read from the agent stands alone",
-  },
-  {
-    id: "split-k8s-build-push-trigger-paths",
-    guide: "kubernetes",
-    anchor: "The files the image builds from are every context source",
-    reason:
-      "the `docker/build-push-action` item runs 53 screen rows; the trigger paths stand alone",
   },
   {
     id: "split-k8s-fetch-fresh-feed",

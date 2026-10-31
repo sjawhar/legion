@@ -1,8 +1,0 @@
-kind: Changed
-body: |-
-    The `legion-controller` skill's daily-report reference and the `legion-worker` skill's findings
-    reference this plugin ships say a closed issue's close withdrew its open asks and a reopen brings
-    them back, where they said Dispatch hides them or takes them out of the Inbox.
-time: 2026-10-28T10:08:57.652939794Z
-custom:
-    Issue: pr2233

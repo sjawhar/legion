@@ -1,4 +1,4 @@
-import { unwatchFile, watchFile } from "node:fs"
+import { type Stats, unwatchFile, watchFile } from "node:fs"
 import { rm } from "node:fs/promises"
 import {
   agentSubject,
@@ -15,10 +15,8 @@ import {
   type RenderInboundResult,
   renderInbound,
 } from "@legion/envoy-client/delivery"
-import {
-  sessionDirectory as dispatchSessionDirectory,
-  writeSessionTitle,
-} from "@legion/envoy-client/dispatch-session-state"
+import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
+import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
@@ -88,6 +86,13 @@ import {
   stopPane,
 } from "./legion-claim"
 import { createInboxNotifier, INBOX_CAPABILITIES, INBOX_VARIABLE } from "./legion-inbox"
+import {
+  createPhaseHookEndpoint,
+  PHASE_HOOK_TOOL_NAME,
+  paneReminderLog,
+  phaseHookToolDefinition,
+  phaseStallFile,
+} from "./legion-phase-hook"
 import {
   executeLegionTool,
   LEGION_TOOL_NAME,
@@ -405,7 +410,9 @@ export function createChannelDelivery(input: {
         // <channel> tag, so the Envoy producer travels under `producer`.
         meta: sanitizeChannelMetadata({
           producer: envelope?.source ?? "unknown",
-          topic: subject,
+          // A forward on the agent subject (a role message, or an ad-hoc topic's copy the
+          // publish route confirms with this session) carries the topic it was published to.
+          topic: envelope?.topic || subject,
           event_id: envelope?.event_id,
           dedupe_key: envelope?.dedupe_key,
           urgency: envelope?.urgency,
@@ -1131,8 +1138,17 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // at the next heartbeat minutes later. The hook replaces the file by rename,
   // which a directory watch reports only as its temporary file, so the file is
   // polled by path; the first tick picks up a file written before polling began.
+  //
+  // `watchFile` also calls the listener, with every stat field zeroed, when the file
+  // is missing as polling begins and when it is removed. A missing file names no id
+  // to adopt, and the request below already covers startup: a tick there would be a
+  // second one for the same moment, and in an outage one more attempt than the
+  // bounded retry allows.
+  const handoffFileChanged = (current: Stats): void => {
+    if (current.ino !== 0) requestHeartbeat()
+  }
   if (handoffFile !== undefined) {
-    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, requestHeartbeat)
+    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, handoffFileChanged)
     requestHeartbeat()
   }
   // nats.js resubscribes by itself after a reconnect; what was published while it was away is in
@@ -1195,7 +1211,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       if (shuttingDown) return
       shuttingDown = true
       clearInterval(heartbeatTimer)
-      if (handoffFile !== undefined) unwatchFile(handoffFile, requestHeartbeat)
+      if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       await forwarder.close()
       await serialized(() => options.client.unregisterSession(identity.id)).catch(
         (error: unknown) => {
@@ -1349,7 +1365,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // that throws when it is unset and runs only after the Envoy-off return: a session with Envoy
   // off and no plugin data must still serve.
   const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"])
-  const title = sessionTitle(
+  const title = await sessionTitle(
     {
       ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
       TMUX: process.env["TMUX"],
@@ -1408,6 +1424,9 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE])
   // The plugin's own bundle, which Claude Code runs from its plugin cache when installed.
   const bundlePath = process.argv[1] ?? ""
+  // One connection to the bridge carries every line this server writes into the session: each
+  // Envoy delivery, and the reminders and notices the phase endpoint writes.
+  const inbox = inboxSocket === undefined ? undefined : createInboxNotifier(inboxSocket)
   // Claude Code drops a notification from a channel it did not load without telling this server,
   // so such a session advertises no delivery mode and Dispatch refuses a message to it rather than
   // reporting it delivered. The bridge's inbox needs no channel.
@@ -1439,12 +1458,42 @@ export async function runEnvoyChannelServer(): Promise<void> {
   let runtime: ChannelToolRuntime | undefined
   let claim: LegionClaim | undefined
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl)
+  // INFRA-220: the phase reminder's Claude Code host (`./legion-phase-hook`), which Claude Code's
+  // own hooks drive through the `legion_phase_hook` tool. It is started here, beside the claim it
+  // gates on, and restores this session's record as it starts, before any hook can be answered.
+  const phaseLog = paneReminderLog(logLegion)
+  // The claim's boot, for the endpoint's resume reminder and its recreated-workspace notice: both
+  // need the claim, and the claim starts further down, once the channel session exists.
+  const claimBooted = Promise.withResolvers<void>()
+  const phaseHook =
+    pane === undefined || daemon === undefined
+      ? undefined
+      : createPhaseHookEndpoint({
+          stateFile: phaseStallFile(pane.configDir, identity.id),
+          claim: () => claim?.capability(),
+          booted: claimBooted.promise,
+          readState: (signal) => daemon.state({ signal }),
+          inbox:
+            inbox === undefined
+              ? undefined
+              : (text) =>
+                  inbox.notification({
+                    method: CHANNEL_NOTIFICATION_METHOD,
+                    params: { content: text, meta: {} },
+                  }),
+          publish: client.publish,
+          env: process.env,
+          log: phaseLog,
+        })
   const toolDefinitions = [
     ...channelToolDefinitions(),
-    ...(daemon === undefined ? [] : [legionToolDefinition()]),
+    ...(daemon === undefined ? [] : [legionToolDefinition(), phaseHookToolDefinition()]),
   ]
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    if (phaseHook !== undefined && request.params.name === PHASE_HOOK_TOOL_NAME) {
+      return mcpResult(await phaseHook.handle(request.params.arguments))
+    }
     if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
       const legionRuntime: LegionToolRuntime = {
         daemon,
@@ -1453,14 +1502,32 @@ export async function runEnvoyChannelServer(): Promise<void> {
       }
       // The request's signal aborts on the client's notifications/cancelled, which ends a wait
       // for a restarting daemon.
-      return mcpResult(
-        await executeLegionTool(legionRuntime, request.params.arguments, extra.signal),
-      )
+      const answer = await executeLegionTool(legionRuntime, request.params.arguments, extra.signal)
+      // A call that returned without throwing: a completion, and a backward move, which hands the
+      // issue to another phase. Either way this session's phase is no longer open, and the
+      // reminder must stop — the same two operations the Oh My Pi host closes its phase on
+      // (`createLegionTool` in `packages/pi-legion/src/tools.ts`).
+      const op = request.params.arguments?.["op"]
+      if (op === "handoff_complete" || op === "request_backward_move") phaseHook?.phaseClosed()
+      return mcpResult(answer)
     }
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments))
   })
-  const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket)
+  // The endpoint is told every line this server writes for a delivery: the `UserPromptSubmit`
+  // that carries one back is that delivery's turn, not a fresh assignment, and this server, which
+  // writes them all, is the only place that knows.
+  const notifier: ChannelNotifier =
+    inbox === undefined
+      ? server
+      : phaseHook === undefined
+        ? inbox
+        : {
+            notification: async (notification) => {
+              phaseHook.deliveryWritten(notification.params.content)
+              await inbox.notification(notification)
+            },
+          }
   // A session whose deliveries are channel notifications Claude Code did not load shows the model
   // nothing, so it advertises no delivery mode at all.
   const capabilities =
@@ -1474,6 +1541,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
     if (stopping) return
     stopping = true
     booting.abort()
+    // A reminder waiting on a 15-minute WAITING wait holds no shutting-down server open.
+    phaseHook?.stop()
     if (session === undefined) {
       stopped.resolve()
       return
@@ -1536,6 +1605,10 @@ export async function runEnvoyChannelServer(): Promise<void> {
         log: logLegion,
         stop: endPane,
       })
+      // What `claimSession.bootstrap` returning is to the Oh My Pi host: the point the phase
+      // endpoint may read the claim, arm its resume reminder and tell the worker its workspace
+      // was recreated.
+      void claim.booted.then(claimBooted.resolve)
     }
     if (stopping) await session.shutdown()
     await stopped.promise

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
@@ -20,7 +19,9 @@ import (
 // begin - a thematic break or setext underline, a fence, a directive, an HTML block, a table
 // delimiter row, indented code, a rule a list marker completes - depend on the whole line as
 // written, markers and hard break included, and a setext underline or delimiter row on the line
-// before as well. Those are left to the parser once the line is written (lineReadsAsText).
+// before as well. Those are left to the parser once the line is written (lineReadsAsText), and an
+// HTML block the browser editor's engine opens where the parser reads a paragraph to the engine's
+// start conditions (htmlBlockStart).
 
 // escapeContext is what one character's escape depends on beyond the text itself.
 type escapeContext struct {
@@ -35,9 +36,17 @@ type escapeContext struct {
 	textLineStart int
 	// tableCell reports whether pipes are cell syntax here.
 	tableCell bool
-	// urlSchemes reports whether a URL scheme's colon would autolink: outside a link, and not in
-	// a bare URL, which must stay as written for the parser to linkify it again.
-	urlSchemes bool
+	// schemeColons, wwwDots and ats report whether the colon after each `http` or `https`, in any
+	// case, the dot after each `www`, in any case, and each `@` are escaped in text outside a link,
+	// because the run does not read back with them as written (inlineWithEscapes): an address only
+	// the tokenizer reads - a URL whose host has no dot, such as `http://localhost`, an email after a
+	// letter outside ASCII - or one an escape the rules write makes, as `a@b.test\_` ends its domain
+	// before the `\`, then reads as text to both readers. The tokenizer reads a domain an underscore
+	// in its last two parts spoils (`www.a.b_;x`) as no address, but its domain ends at the
+	// backslash the rules write before that underscore (`www.a.b\_;x`), which leaves a correct one:
+	// with its `www\.` escaped, the tokenizer reads no www URL, and the transform, which reads the
+	// decoded text, finds the same spoiled domain.
+	schemeColons, wwwDots, ats bool
 	// label is the verdict on the brackets of the link label the text belongs to.
 	label labelBrackets
 	// followed reports whether something follows the text in its block, so that a trailing
@@ -45,13 +54,12 @@ type escapeContext struct {
 	// link's `]`, a hard break's backslash, the next node's first character. A block-final
 	// backslash reads back as itself and is left as written.
 	followed bool
+	// beforeLabel reports whether a `[` is written right after the text, a link's or a footnote
+	// reference's, which a `!` ending the text would open an image with.
+	beforeLabel bool
 	// delimiters is which of the text's delimiter characters are escaped beyond the rules, because
 	// the run they are in does not read back with them as written (inlineWithEscapes).
 	delimiters delimiterEscapes
-	// afterBareURL reports whether the text is written right after a bare URL, which linkify would
-	// continue into its first character, because the run does not read back with that character
-	// as written (inlineWithEscapes).
-	afterBareURL bool
 	// heading reports whether the text is a heading's.
 	heading bool
 	// marked reports whether the text is written inside a mark's syntax, where the parser keeps
@@ -66,20 +74,15 @@ type escapeContext struct {
 	// flankFirst and flankLast report whether the text's first and last character are written as
 	// character references, for the delimiter run beside each to open or close (runSpelling).
 	flankFirst, flankLast bool
-}
-
-// endsBareURL reports whether the character is ASCII punctuation opening text written right after
-// a bare URL, which linkify would continue the URL into unless a backslash stops it.
-func endsBareURL(offset int, char rune, context escapeContext) bool {
-	return offset == 0 && context.afterBareURL && char < utf8.RuneSelf && isASCIIPunctuation(byte(char))
+	// pairBackslash reports whether a literal backslash right before a flanking character
+	// reference is written `\\`, and tildeBackslash whether an escaped tilde is written `\~`
+	// (runSpelling).
+	pairBackslash, tildeBackslash bool
 }
 
 // needsInlineEscape decides one character from the text alone.
 func needsInlineEscape(value string, offset int, char rune, context escapeContext) bool {
 	textLineStart := context.textLineStart
-	if endsBareURL(offset, char, context) {
-		return true
-	}
 	switch char {
 	case '\\':
 		// Before whitespace written as a reference, a backslash would escape its `&`; before a
@@ -99,6 +102,8 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		return true
 	case '~':
 		return context.delimiters >= delimitersTildes
+	case '!':
+		return offset+1 == len(value) && context.beforeLabel
 	case '[':
 		// A label whose brackets cannot pair as written escapes them all: a stray `]` closes it
 		// early, and a `[` left raw would then pair with its own closer.
@@ -122,7 +127,9 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	case '|':
 		return context.tableCell
 	case ':':
-		return context.urlSchemes && urlSchemeColon(value, offset)
+		return context.schemeColons && urlSchemeColon(value, offset)
+	case '@':
+		return context.ats
 	case ' ', '\t':
 		// The parser trims whitespace that begins a line of a textblock's text, ends one before a
 		// line ending (where two spaces are a hard break) or ends the textblock, and a delimiter
@@ -135,7 +142,7 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 			offset == 0 && context.opener != 0 ||
 			offset+1 == len(value) && context.closer != 0
 	case '.', ')':
-		return orderedListMarkerPunctuation(value, offset, textLineStart)
+		return orderedListMarkerPunctuation(value, offset, textLineStart) || char == '.' && context.wwwDots && wwwDot(value, offset)
 	default:
 		return false
 	}
@@ -157,18 +164,14 @@ func escaped(char rune) string {
 }
 
 // textEscape is how the text writer spells an escaped character: a tilde as its numeric reference,
-// and anything else as escaped spells it - except the character that ends a bare URL
-// (endsBareURL), which is always a backslash, since linkify continues a URL through the `&` that
-// opens either reference. Both delimiter rules read a `~` run after the reference as they read one
-// after any punctuation, where a run right after `\~` may open or close by the browser editor's
-// rules and is text by goldmark's, and the writer takes first a spelling both read back
-// (inlineWithEscapes). The writer has also always written the reference, and writing anything else
-// would change the bytes of every stored document that holds an escaped tilde.
-func textEscape(char rune, endsBareURL bool) string {
-	if endsBareURL {
-		return "\\" + string(char)
-	}
-	if char == '~' {
+// and anything else as escaped spells it - except a tilde in a spelling that writes it `\~`
+// (tildeBackslash, lastResorts). Both delimiter rules read a `~` run after the reference as they
+// read one after any punctuation, where a run right after `\~` may open or close by the browser
+// editor's rules and is text by goldmark's, and the writer takes first a spelling both read back
+// (inlineWithEscapes). The writer has also always written the reference, and writing anything
+// else would change the bytes of every stored document that holds an escaped tilde.
+func textEscape(char rune, tildeBackslash bool) string {
+	if char == '~' && !tildeBackslash {
 		return numericEntity(char)
 	}
 	return escaped(char)
@@ -189,22 +192,36 @@ const (
 // delimitersInText is the first escape a run's text could need: delimitersTildes when a text node
 // outside a code span holds a tilde; delimitersAll when asterisks or underscores could pair - two
 // free runs of one of them, or one free run of asterisks beside bold or italic text, whose markers
-// are asterisks too; and delimitersAsRuled otherwise, when nothing is read back.
-func delimitersInText(nodes []*Node) delimiterEscapes {
-	stars, underscores := 0, 0
+// are asterisks too; and delimitersAsRuled otherwise, when nothing is read back. held counts the
+// text alone; lastHeld counts a bold or italic code span as such text too.
+func delimitersInText(nodes []*Node) (held, lastHeld delimiterEscapes) {
+	stars, codeStars, underscores := 0, 0, 0
 	for _, node := range nodes {
-		if node.Type != "text" || nodeHasMark(node, "inlineCode") {
+		if node.Type != "text" {
+			continue
+		}
+		marked := nodeHasMark(node, "strong") || nodeHasMark(node, "emphasis")
+		if nodeHasMark(node, "inlineCode") {
+			if marked {
+				codeStars++
+			}
 			continue
 		}
 		if strings.ContainsRune(node.Text, '~') {
-			return delimitersTildes
+			return delimitersTildes, delimitersTildes
 		}
 		stars += freeDelimiterRuns(node.Text, '*')
 		underscores += freeDelimiterRuns(node.Text, '_')
-		if nodeHasMark(node, "strong") || nodeHasMark(node, "emphasis") {
+		if marked {
 			stars++
 		}
 	}
+	return delimitersPairing(stars, underscores), delimitersPairing(stars+codeStars, underscores)
+}
+
+// delimitersPairing is delimitersAll where two of the free delimiter runs counted could pair, and
+// delimitersAsRuled where none can.
+func delimitersPairing(stars, underscores int) delimiterEscapes {
 	if stars >= 2 || underscores >= 2 {
 		return delimitersAll
 	}
@@ -328,6 +345,140 @@ func taskCheckboxText(value string, offset int) bool {
 	return len(rest) >= 3 && rest[0] == '[' && strings.ContainsRune(" xX", rune(rest[1])) && rest[2] == ']' &&
 		(len(rest) == 3 || strings.IndexByte(" \t\n", rest[3]) >= 0)
 }
+
+// htmlBlockStart reports whether the browser editor's engine (micromark's html-flow, CommonMark
+// 0.31) opens an HTML block at the `<` line begins with, line being the markdown written from that
+// `<` to its line's end, where the `<` is the first character after its line's container prefix.
+// goldmark reads one of those as a paragraph: a complete tag whose unquoted attribute value ends
+// at an `=`, after which the engine reads another value (`<span title=a=b;x>`). A declaration whose
+// letter is lowercase is not one of them: this package's reader opens an HTML block there too
+// (declarationBlockParser), by the rule this arm asks as well (opensDeclaration). interrupt
+// reports whether the line would go on a paragraph, which only a complete tag (kind 7) cannot
+// interrupt. Each byte is read at most once.
+func htmlBlockStart(line string, interrupt bool) bool {
+	if end := strings.IndexAny(line, "\r\n"); end >= 0 {
+		line = line[:end]
+	}
+	switch {
+	case strings.HasPrefix(line, "<!--"), strings.HasPrefix(line, "<?"), strings.HasPrefix(line, "<![CDATA["),
+		opensDeclaration(line):
+		return true
+	}
+	closing := len(line) > 1 && line[1] == '/'
+	nameStart := 1
+	if closing {
+		nameStart = 2
+	}
+	if nameStart >= len(line) || !isASCIILetter(line[nameStart]) {
+		return false
+	}
+	nameEnd := nameStart + 1
+	for nameEnd < len(line) && (isASCIIAlphaNumeric(line[nameEnd]) || line[nameEnd] == '-') {
+		nameEnd++
+	}
+	if nameEnd < len(line) && !strings.ContainsRune(" \t/>", rune(line[nameEnd])) {
+		return false
+	}
+	name := line[nameStart:nameEnd]
+	slash := nameEnd < len(line) && line[nameEnd] == '/'
+	switch {
+	case !slash && !closing && slices.ContainsFunc(htmlRawNames, nameIs(name)):
+		return true
+	case slices.ContainsFunc(htmlBlockNames, nameIs(name)):
+		return !slash || strings.HasPrefix(line[nameEnd:], "/>")
+	case interrupt:
+		return false
+	}
+	end := htmlCompleteTagEnd(line, nameEnd, closing)
+	return end >= 0 && strings.Trim(line[end:], " \t") == ""
+}
+
+// htmlCompleteTagEnd is where the complete tag the engine's html-flow reads on line ends, after its
+// `>`, from its name's end at at, or -1 where it reads none. An unquoted attribute value ends at
+// `=`, `/` or a quote as well as at whitespace, `<`, `>` or a backtick, and what ends it is read
+// as what may follow an attribute name, so `=` opens another value; a quoted value ends at its
+// quote, which a space, `/` or `>` must follow.
+func htmlCompleteTagEnd(line string, at int, closing bool) int {
+	isSpace := func() bool { return at < len(line) && (line[at] == ' ' || line[at] == '\t') }
+	for closing && isSpace() {
+		at++
+	}
+	for !closing && at < len(line) && line[at] != '>' {
+		// Before an attribute name.
+		switch char := line[at]; {
+		case char == '/':
+			at++
+			return htmlTagEnd(line, at)
+		case char == ' ' || char == '\t':
+			at++
+			continue
+		case char != ':' && char != '_' && !isASCIILetter(char):
+			return -1
+		}
+		at++
+		for at < len(line) && (isASCIIAlphaNumeric(line[at]) || strings.IndexByte("-.:_", line[at]) >= 0) {
+			at++
+		}
+		// After an attribute name or value: each `=` reads a value.
+		for {
+			for isSpace() {
+				at++
+			}
+			if at == len(line) || line[at] != '=' {
+				break
+			}
+			at++
+			for isSpace() {
+				at++
+			}
+			if at == len(line) || strings.IndexByte("<=>`", line[at]) >= 0 {
+				return -1
+			}
+			if quote := line[at]; quote == '"' || quote == '\'' {
+				closer := strings.IndexByte(line[at+1:], quote)
+				if closer < 0 {
+					return -1
+				}
+				at += closer + 2
+				if at < len(line) && line[at] != '/' && line[at] != '>' && !isSpace() || at == len(line) {
+					return -1
+				}
+				break
+			}
+			for at < len(line) && strings.IndexByte("\"'/<=>` \t", line[at]) < 0 {
+				at++
+			}
+		}
+	}
+	return htmlTagEnd(line, at)
+}
+
+// htmlTagEnd is after the `>` at at that ends a complete tag, or -1 where none stands there.
+func htmlTagEnd(line string, at int) int {
+	if at < len(line) && line[at] == '>' {
+		return at + 1
+	}
+	return -1
+}
+
+// nameIs matches a tag name in any case.
+func nameIs(name string) func(string) bool {
+	return func(known string) bool { return strings.EqualFold(known, name) }
+}
+
+// htmlRawNames and htmlBlockNames are the tag names that open an HTML block of kind 1 and of kind
+// 6 to the engine (micromark-util-html-tag-name), which reads them in any case (nameIs).
+var (
+	htmlRawNames   = []string{"pre", "script", "style", "textarea"}
+	htmlBlockNames = []string{
+		"address", "article", "aside", "base", "basefont", "blockquote", "body", "caption", "center",
+		"col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset",
+		"figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5",
+		"h6", "head", "header", "hr", "html", "iframe", "legend", "li", "link", "main", "menu",
+		"menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param", "search", "section",
+		"summary", "table", "tbody", "td", "tfoot", "th", "thead", "title", "tr", "track", "ul",
+	}
+)
 
 // closesTypedBlock reports whether line, written at prefix within the reach of the typed block
 // around it (typedFenceReach), is the lone `:::` that closes the block, which the line read on its
@@ -750,8 +901,18 @@ func linkLabel(nodes []*Node, index int, link Mark) string {
 	return label.String()
 }
 
+// opensAngleConstruct reports whether char, the byte written right after a `<`, is one an
+// autolink or inline raw HTML can begin with: an ASCII letter or digit, `/`, `!` or `?`.
+// angleConstruct asks it of one node's text, rawHTMLScan.opensAt of the markdown a run wrote.
+func opensAngleConstruct(char byte) bool {
+	return isASCIIAlphaNumeric(char) || char == '/' || char == '!' || char == '?'
+}
+
+// angleConstruct reports whether the `<` at offset opens an autolink or HTML with a `>` later in
+// its own text; one a later node's markdown closes is judged once the run is written
+// (writeInlineRun).
 func angleConstruct(value string, offset int, scan *forwardScan) bool {
-	if offset+1 >= len(value) || !isASCIIAlphaNumeric(value[offset+1]) && value[offset+1] != '/' && value[offset+1] != '!' && value[offset+1] != '?' {
+	if offset+1 >= len(value) || !opensAngleConstruct(value[offset+1]) {
 		return false
 	}
 	return scan.indexFrom(offset+1, '>') >= 0
@@ -767,8 +928,15 @@ func entityReference(value string, offset int) bool {
 	return end < len(value) && value[end] == ';'
 }
 
+// urlSchemeColon reports whether the colon at offset ends `http` or `https`, in any case.
 func urlSchemeColon(value string, offset int) bool {
-	return strings.HasSuffix(value[:offset], "http") || strings.HasSuffix(value[:offset], "https")
+	return offset >= len("http") && strings.EqualFold(value[offset-len("http"):offset], "http") ||
+		offset >= len("https") && strings.EqualFold(value[offset-len("https"):offset], "https")
+}
+
+// wwwDot reports whether the dot at offset ends `www`, in any case.
+func wwwDot(value string, offset int) bool {
+	return offset >= len("www") && strings.EqualFold(value[offset-len("www"):offset], "www")
 }
 
 func isASCIIAlphaNumeric(value byte) bool {
@@ -801,17 +969,15 @@ func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool 
 // character. That is kept only if it reads back, so an alt that fails for another
 // reason keeps the bytes it had, as inlineWithEscapes does.
 //
-// It reads back where Parse reads it so (altReadsBack), and it is kept first where storedMarkdown
-// reads it so as well: the written alt if it reads back under both, else the escaped one if that
-// does, else the written alt if it reads back under Parse, else the escaped one if that does, else
-// the written alt. Main wrote the written alt if it read back under its Parse, which read by
-// storedRules, else the escaped one if that did, else the written alt; each of those steps is a
-// step here with Parse added to what an alt must read back under, so wherever the alt main wrote
-// reads back under Parse it is written here too, as inlineWithEscapes argues for a run.
+// An alt's depth is 0 where Parse does not read it back, 1 where Parse alone does, and 2 where
+// storedMarkdown does too (altReadsBack); the escaped alt is written only where its depth is greater
+// than the written alt's, so the earlier of the two at the greater depth is kept. Each depth asks
+// more than the writer before the tilde pairing (sjawhar/legion#2360) asked at that step, so
+// wherever its choice reads back under Parse this writer makes it too.
 func imageAlt(alt string, context inlineContext) string {
 	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), context.tableCell)
-	writtenReads, writtenStored := altReadsBack(written, alt, context)
-	if writtenStored {
+	writtenDepth := altReadsBack(written, alt, context)
+	if writtenDepth == 2 {
 		return written
 	}
 	var out strings.Builder
@@ -827,28 +993,22 @@ func imageAlt(alt string, context inlineContext) string {
 		}
 	}
 	fallback := escapeTablePipes(out.String(), context.tableCell)
-	fallbackReads, fallbackStored := altReadsBack(fallback, alt, context)
-	switch {
-	case fallbackStored:
-		return fallback
-	case writtenReads:
-		return written
-	case fallbackReads:
+	if altReadsBack(fallback, alt, context) > writtenDepth {
 		return fallback
 	}
 	return written
 }
 
-// altReadsBack reports whether an image label written as written reads back as the alt text alt
-// under Parse (reads), and if so whether it also does under storedMarkdown (stored). Parse reads it
-// in the block it is written in: a table cell, where the cell takes its escaped pipes first and a
-// line ending ends the row; a heading, which a line ending ends; or a paragraph, where a line of
-// the label can open a block. storedMarkdown reads the image alone, as inline markdown: once Parse
-// reads the block as one holding only the image, the block is the same block under storedRules,
-// which change only how delimiter runs pair, and the cell's pipes come out as inline markdown
-// reads their escapes. `![\~b\~\~](u)`, written while Dispatch read by storedRules, stays as it
-// was, where `![~b~~](u)` reads back only under Parse.
-func altReadsBack(written, alt string, context inlineContext) (reads, stored bool) {
+// altReadsBack is how far an image label written as written reads back as the alt text alt: 0
+// where Parse does not read it so, 1 where Parse does, and 2 where storedMarkdown does as well.
+// Parse reads it in the block it is written in: a table cell, where the cell takes its escaped
+// pipes first and a line ending ends the row; a heading, which a line ending ends; or a paragraph,
+// where a line of the label can open a block. storedMarkdown reads the image alone, as inline
+// markdown: once Parse reads the block as one holding only the image, the block is the same block
+// under storedRules, which change only how delimiter runs pair, and the cell's pipes come out as
+// inline markdown reads their escapes. `![\~b\~\~](u)`, written while Dispatch read by
+// storedRules, stays as it was, where `![~b~~](u)` reads back only under Parse.
+func altReadsBack(written, alt string, context inlineContext) int {
 	image := "![" + written + "](u)"
 	var markdown string
 	switch {
@@ -861,20 +1021,22 @@ func altReadsBack(written, alt string, context inlineContext) (reads, stored boo
 	}
 	doc, err := Parse(markdown)
 	if err != nil || len(doc.Children) != 1 {
-		return false, false
+		return 0
 	}
 	block := doc.Children[0]
 	if context.tableCell {
 		if block.Type != "table" || len(block.Children) != 2 {
-			return false, false
+			return 0
 		}
 		block = block.Children[1].Children[0].Children[0]
 	}
 	if !isAlt(block.Children, alt) {
-		return false, false
+		return 0
 	}
-	nodes, err := readInline(image, storedMarkdown.run, parser.NewContext(), nil)
-	return true, err == nil && isAlt(nodes, alt)
+	if nodes, err := readInline(image, storedMarkdown.run, parser.NewContext(), nil); err == nil && isAlt(nodes, alt) {
+		return 2
+	}
+	return 1
 }
 
 // isAlt reports whether nodes are only an image whose alt text is alt.

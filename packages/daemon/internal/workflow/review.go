@@ -27,10 +27,12 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	// that stands for the head can be of the code head it replaced, arriving after it. A
 	// settlement is for the commit it names, never the head by default. While a head run is open
 	// the settlement is recorded in it whether it stands or not (classify.ApplyCheckSettlement).
+	// The listener's duplicate of a settlement the pass built gives the record its fence and
+	// decides nothing: no run and no outcome changed.
 	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
-	settled, applied := classify.ApplyCheckSettlement(*pr, candidate)
+	settled, applied, adopted := classify.ApplyCheckSettlement(*pr, candidate)
 	if !applied {
-		if pr.Run == nil {
+		if pr.Run == nil && !adopted {
 			return intake.Result{}, nil
 		}
 		return intake.Result{}, e.store.PutPullRequest(ctx, tx, settled)
@@ -440,10 +442,11 @@ func (r round) stuckAs(other round) bool {
 // reads no CI verdict: CI is the daemon's separate rule, which sends a red head back to implementing
 // from reviewing as from any phase before READY, on the fact that makes the red stand (decideChecks,
 // standingRed), and the reviewer reads the code commit's checks on GitHub before it approves. A
-// round whose reviewer never completes is not ended by the decision alone: the reviewer's pane gets
-// a follow-up turn when a turn ends with its phase open (pi-legion's phase-stall check, at most two
-// a stall), and past that the issue stays in reviewing, as a tester's that never completes stays
-// in testing. A completed round that nothing on its way would end is stuck, its reason naming the
+// round whose reviewer never completes is not ended by the decision alone: the reviewer's worker
+// gets a reminder at the end of every turn that ends with its phase open (the phase reminder in
+// @legion/pi-shared, driven by each harness's own hooks), and past that the issue stays in
+// reviewing, as a tester's that never completes stays in testing. A completed round that nothing
+// on its way would end is stuck, its reason naming the
 // head, since the decision it needs is of the head: no review decided it (stuckUndecided), or its
 // approval is of other code than the head's (stuckApprovedOtherCode). An approval of the head a
 // push that may change code is still on its way from (classify.CodeOnItsWay) keeps the round open:
@@ -600,14 +603,15 @@ func (e *Engine) stampRun(pr *record.PullRequest) {
 }
 
 // implementationReady moves issue from implementing to testing on the implementer's completion of
-// the round that row records, once the pull request pr is known (TriggerImplementationReady), and
-// then applies the CI rule to the head it hands on (standingRed). A red in implementing sends
-// nothing back, since the implementer is at work there, so a required check that settled red after
-// the implementer's push and before its completion stands for the head with nothing acted on it:
-// the implementer pushes and completes without waiting for CI, and the settlement does not come
-// again. The completion is the fact that lets that red stand in testing, so the work goes back to
-// implementing at once, as a settlement arriving in testing would send it, rather than through a
-// tester round on code CI has already found broken.
+// the round that row records, once the pull request pr is recorded open or merged
+// (TriggerImplementationReady: a record closed without merging, or none, moves nothing), and then
+// applies the CI rule to the head it hands on
+// (standingRed). A red in implementing sends nothing back, since the implementer is at work there,
+// so a required check that settled red after the implementer's push and before its completion
+// stands for the head with nothing acted on it: the implementer pushes and completes without
+// waiting for CI, and the settlement does not come again. The completion is the fact that lets that
+// red stand in testing, so the work goes back to implementing at once, as a settlement arriving in
+// testing would send it, rather than through a tester round on code CI has already found broken.
 //
 // The rule is applied only when the record's head is the commit the completion reports
 // (row.HandoffCommit). The completion waits on no

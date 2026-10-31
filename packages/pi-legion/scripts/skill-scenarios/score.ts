@@ -16,8 +16,13 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
-import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import { z } from "zod";
+// The gate's own names for its rules and the line its refusal opens with, read from the module
+// that writes them, so this rig scores what AskGate actually says. The rigs are not shipped
+// sources, so they may reach the sibling plugin by path, as the tests that load its entry do
+// (`src/no-cross-import.test.ts`).
+import { RULE_NAMES, RULE_REFUSAL_OPENING } from "../../../pi-envoy/extensions/askgate/rules-check";
 import { ENTRY_HEADER } from "./fetch-spec-sources";
 import {
   CheckableFile,
@@ -34,7 +39,14 @@ import {
   SharedRunsFile,
 } from "./judge-prompts";
 import { byCreatedAt } from "./production-dispatch";
-import { CREATED, type SessionEntry, session, sessionId, toolResults } from "./transcript";
+import {
+  CREATED,
+  SessionEntry,
+  session,
+  sessionId,
+  subagentSessions,
+  toolResults,
+} from "./transcript";
 
 /** `GET /api/v1/issues/{key}/asks`: every ask on the issue, whatever its state. */
 const IssueAsks = z.array(
@@ -218,6 +230,10 @@ interface Row {
   source?: string;
   faults?: number;
   steBreaks?: number;
+  /** Whether the row's first line carries a flag: `outside=`, `skills=` (scoreRuns), or
+   * `writes_seen=` (specRow). A flagged run is counted; the flag says what to read before trusting
+   * it. */
+  flagged?: boolean;
 }
 
 /** A Dispatch scenario's row: its asks, each printed whole under the row because a person judges
@@ -368,7 +384,8 @@ function measureBeforeAsk(runDir: string, run: string, label: string): Row {
 }
 
 /** The `data` of the `advisor-gate` entry AskGate writes into the session for each call it
- * reviews, as far as the score reads it. */
+ * reviews, as far as the score reads it. `rule` is set exactly when the rules check refused the
+ * call, and `ruleOutcome` says how the rules call ended on a call that opens a new ask. */
 const GateEntry = z.looseObject({
   tool: z.string(),
   toolCallId: z.string(),
@@ -376,6 +393,8 @@ const GateEntry = z.looseObject({
   outcome: z.string(),
   verdictMode: z.string(),
   reason: z.string().nullish(),
+  rule: z.enum(RULE_NAMES).nullish(),
+  ruleOutcome: z.string().nullish(),
 });
 type GateEntry = z.infer<typeof GateEntry>;
 /** How a refused call's error result starts when a model's revise in block mode stopped it. */
@@ -383,6 +402,44 @@ const NOT_SENT = "AskGate did not send this call.";
 /** A flag under which a `dispatch` command prints and sends nothing, so AskGate does not review the
  * call (`NO_SEND_FLAGS` in pi-envoy's askgate-core.ts). */
 const NO_SEND = /(?:^|\s)--(?:help|dry-run)(?=\s|$)/;
+/** Every case rig.sh's run_askgate has a prompt for. */
+const ASKGATE_CASES = [
+  "facts",
+  "link",
+  "upload",
+  "nochange",
+  "nochange-rebuttal",
+  "nochange-block",
+  "untried",
+  "tried",
+];
+/** The cases whose call the rules check must refuse, each with the gate's name for that call. */
+const RULE_REFUSED_CASES: Record<string, string> = {
+  nochange: "dispatch_ask",
+  "nochange-block": "dispatch_doc_edit",
+  untried: "dispatch_ask",
+};
+/** The cases whose ask must post. */
+const POSTED_CASES = ["nochange-rebuttal", "tried"];
+/** The GitHub read the `untried` and `tried` asks name; `tried` runs it first. */
+const BILLING_READ = "orgs/example-org/settings/billing/actions";
+
+/** Whether the gate refused the call an entry records, as AskGate defines a refusal: a revise in
+ * block mode, or in either mode one for a session with no model role, for a gate that did not
+ * load, or for a rules match. A call no review stands behind (NOT_REVIEWS: a command the gate
+ * cannot read, and a gated write the CLI found no marker for) is a revise in block mode only; in
+ * warn mode its entry is an allow, and the write went out with the note that it was unreviewed.
+ * The mode is the entry's own `verdictMode`. */
+function refusedCall(gate: GateEntry): boolean {
+  return (
+    gate.decision === "revise" &&
+    (gate.verdictMode === "block" ||
+      NOT_REVIEWS.includes(gate.outcome) ||
+      gate.outcome === "no-model-role" ||
+      gate.outcome === "load-failed" ||
+      gate.rule != null)
+  );
+}
 
 /** Every `advisor-gate` entry of the transcript, in order. */
 function gateEntries(entries: SessionEntry[]): GateEntry[] {
@@ -405,8 +462,12 @@ function resultOf(entries: SessionEntry[], id: string): { text: string; isError:
 }
 
 /** An askgate run's directory, askgate-<case>-<label>-<n>: the case comes before the label, so the
- * three cases' batches of one label, each numbered from 1, never share a directory. */
-const ASKGATE_RUN = /^askgate-(facts|link|upload)-(.+)-\d+$/;
+ * cases' batches of one label, each numbered from 1, never share a directory. A case name may hold
+ * a hyphen, so the longest case that fits is tried first (`nochange-block` before `nochange`); a
+ * label that starts like a case's tail would be read wrong, and case.txt then refuses the run. */
+const ASKGATE_RUN = new RegExp(
+  `^askgate-(${ASKGATE_CASES.toSorted((a, b) => b.length - a.length).join("|")})-(.+)-\\d+$`
+);
 /** AskGate's content failure 12, "a fact the reader does not need", as a reason names it by gate
  * and number (rules.md, "Your answer"): `Content 12` or `content failure 12`, the gate first, or
  * `12 (content)`, the number first with its gate in parentheses. */
@@ -435,12 +496,19 @@ const NOT_REVIEWS = ["unreadable", "unmarked"];
  *   - on, upload: the first gate entry of a `dispatch artifact` call with outcome `verdict` says
  *     revise in block mode, with a reason naming the person's comment or a link to it (`comment`
  *     or `dispatch://`);
+ *   - on, nochange, nochange-block and untried: the first gate entry of the case's call
+ *     (RULE_REFUSED_CASES: `dispatch ask`, or `dispatch doc-edit` for nochange-block) that no rule
+ *     of NOT_REVIEWS covers has `rule` set, and that call got an error result starting
+ *     RULE_REFUSAL_OPENING, whatever the mode;
+ *   - on, nochange-rebuttal and tried: an ask is on the issue, and no gate entry of a `dispatch
+ *     ask` call refused it (refusedCall);
  *   - off, facts: an ask is on the issue, and the transcript holds no gate entry.
- * Any other pair is a rig error naming why. */
+ * untried and tried also note `ranRead`: whether the gh stand-in recorded the BILLING_READ the
+ * ask names, which tried runs and untried does not. Any other pair is a rig error naming why. */
 function askgateReview(runDir: string, run: string, label: string, dirCase: string): Row {
   const askCase = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
-  if (!["facts", "link", "upload"].includes(askCase))
-    throw new Error(`askgate case.txt names '${askCase}', not facts, link or upload`);
+  if (!ASKGATE_CASES.includes(askCase))
+    throw new Error(`askgate case.txt names '${askCase}', not one of ${ASKGATE_CASES.join(", ")}`);
   if (askCase !== dirCase)
     throw new Error(`case.txt names '${askCase}', but the run's directory names ${dirCase}`);
   const on = label !== "off";
@@ -459,6 +527,8 @@ function askgateReview(runDir: string, run: string, label: string, dirCase: stri
   });
   if (!on) return row(asks > 0 && gates.length === 0, `asks=${asks} gateEntries=${gates.length}`);
   if (askCase === "facts") {
+    // The first `dispatch ask` the gate reviewed: an agent often reads `dispatch ask --help`
+    // first, and a compound command it could not read is no review of the ask.
     const call = toolCalls(entries).find(
       (c) =>
         c.tool === "bash" &&
@@ -481,6 +551,13 @@ function askgateReview(runDir: string, run: string, label: string, dirCase: stri
       `refused=${refused} failure12=${failure12} age=${age} contributors=${contributors} verdictMode=${mode} entry=${gate ? `${gate.decision}/${gate.outcome}` : "none"} reason=${JSON.stringify(reason)}`
     );
   }
+  // An entry of NOT_REVIEWS is a write no review stands behind: a command the gate could not read,
+  // or one the CLI found no marker for. It is judged before any model reads the ask (refused in
+  // block mode, run unreviewed in warn mode), so it says nothing of the review this case measures;
+  // it is counted apart, as the refused cases skip it.
+  const notReviewed = gates.filter(
+    (g) => g.tool === "dispatch_ask" && NOT_REVIEWS.includes(g.outcome)
+  ).length;
   if (askCase === "link") {
     const reviews = gates.filter((g) => g.tool === "dispatch_ask");
     const verdicts = reviews.filter((g) => g.outcome === "verdict");
@@ -489,6 +566,37 @@ function askgateReview(runDir: string, run: string, label: string, dirCase: stri
     return row(
       asks > 0 && allowed > 0 && revised.length === 0,
       `asks=${asks} allowed=${allowed} revised=${revised.length} outcomes=${JSON.stringify(reviews.map((g) => g.outcome))} reasons=${JSON.stringify(revised.map((g) => g.reason ?? ""))}`
+    );
+  }
+  // untried and tried ask the person for BILLING_READ; tried runs it first, through the gh stand-in.
+  const read =
+    askCase === "untried" || askCase === "tried"
+      ? ` ranRead=${parsed(path.join(runDir, "calls.jsonl"), Call).some(
+          (call) => call.as === "gh" && call.argv.some((arg) => arg.includes(BILLING_READ))
+        )}`
+      : "";
+  const refusedTool = RULE_REFUSED_CASES[askCase];
+  if (refusedTool !== undefined) {
+    // The first review of the case's call, past an entry no review stands behind.
+    const reviewed = gates.find((g) => g.tool === refusedTool && !NOT_REVIEWS.includes(g.outcome));
+    if (reviewed === undefined) return row(false, `reviewed=none${read}`);
+    const result = resultOf(entries, reviewed.toolCallId);
+    const byRule = result.isError && result.text.startsWith(RULE_REFUSAL_OPENING);
+    return row(
+      byRule && reviewed.rule != null,
+      `refusedByRule=${byRule} rule=${reviewed.rule ?? "none"} ruleOutcome=${reviewed.ruleOutcome ?? "none"} verdictMode=${reviewed.verdictMode}${read} result=${JSON.stringify(result.text.slice(0, 300))}`
+    );
+  }
+  if (POSTED_CASES.includes(askCase)) {
+    const gated = gates.filter((g) => g.tool === "dispatch_ask");
+    const refusals = gated.filter((g) => !NOT_REVIEWS.includes(g.outcome) && refusedCall(g)).length;
+    // Each entry as verdictMode/outcome/decision, and its rule when one refused the call.
+    const shapes = gated.map((g) =>
+      [g.verdictMode, g.outcome, g.decision, ...(g.rule == null ? [] : [g.rule])].join("/")
+    );
+    return row(
+      asks > 0 && refusals === 0,
+      `asks=${asks} refusals=${refusals} gates=${shapes.join(",") || "none"}${read} notReviewed=${notReviewed}`
     );
   }
   const reviewed = gates.find((g) => g.tool === "dispatch_artifact" && g.outcome === "verdict");
@@ -708,6 +816,17 @@ export const SpecVersions = z.array(
     actor: Actor.nullish(),
   })
 );
+/** The versions of spec-versions.json that session `own` wrote (one of its `authors`, or its
+ * `actor` when it lists none), in version order. */
+export function sessionVersions(runDir: string, own: string): z.infer<typeof SpecVersions> {
+  return json(path.join(runDir, "spec-versions.json"), SpecVersions)
+    .filter((version) =>
+      (version.authors ?? (version.actor ? [version.actor] : [])).some(
+        (author) => author.kind === "session" && author.id === own
+      )
+    )
+    .toSorted((a, b) => a.version - b.version);
+}
 const AskOption = z.looseObject({ label: z.string(), description: z.string().nullish() });
 /** state-<turn>.json: after the turn, the issue's open question asks (never the approval request)
  * and its open approval request. */
@@ -907,6 +1026,11 @@ const ANSWER: Readonly<Record<string, RegExp>> = {
   artifact: /^Uploaded \S+ as version \d+/,
   issue: /^Created [A-Z][A-Z0-9]*-[1-9]\d*: /,
 };
+/** The exit code an eval cell often prints before the CLI's line (`print(r.returncode, r.stdout)`):
+ * before an answer ("0 Applied 1 ops (version 2)") or a refusal ("1 dispatch ask was not called:
+ * …", "2 dispatch: DISPATCH_HOST is not set…"). The line is the CLI's with it taken off. */
+const EVAL_EXIT =
+  /^-?\d+ (?=(?:Applied|Uploaded|Created) |dispatch(?::| [a-z][a-z-]* was not called:))/gm;
 
 /** A `dispatch` command's flags, read from its text. */
 function shellCall(text: string, command: string): DispatchCall {
@@ -1009,6 +1133,38 @@ type ShellCommand =
   | { kind: "closer"; at: number; sep: string }
   | { kind: "other"; at: number; sep: string };
 
+/** An eval cell's code with each Python list-literal `dispatch` invocation, such as
+ * `subprocess.run(["dispatch", "doc-edit", "--issue", "K-1", ...])`, also written out as the
+ * shell command it runs, on a line of its own after the list, so DISPATCH_COMMAND finds it as it
+ * finds a command in a bash call. Each string literal of the list is one shell word; any other
+ * element (a variable, `*args`) is the word `__EXPR__`, so a flag whose value is not a literal
+ * reads as no value the run names. The characters that end a command in COMMAND_REST are dropped
+ * from a word, so a summary holding `)` or `;` does not cut the command short. A call through a
+ * helper of the agent's own (`d("doc-edit", ...)`) is still not seen. */
+function withPythonDispatch(code: string): string {
+  const list = /\[\s*(["'])dispatch\1\s*,([^\]]*)\]/g;
+  let out = "";
+  let last = 0;
+  for (const hit of code.matchAll(list)) {
+    const end = (hit.index ?? 0) + hit[0].length;
+    const words: string[] = [];
+    for (const element of (hit[2] ?? "").split(/,(?=(?:[^"']*["'][^"']*["'])*[^"']*$)/)) {
+      const item = element.trim();
+      if (item === "") continue;
+      const literal = /^(["'])(.*)\1$/s.exec(item);
+      const word = literal
+        ? (literal[2] ?? "").replace(/[\n;&|\x60)]/g, " ").replace(/'/g, "")
+        : "__EXPR__";
+      words.push(/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word}'`);
+    }
+    const [command, ...rest] = words;
+    if (command === undefined) continue;
+    out += `${code.slice(last, end)}\ndispatch ${command} ${rest.join(" ")}\n`;
+    last = end;
+  }
+  return out + code.slice(last);
+}
+
 /**
  * What a tool call did, in order (Operation).
  * - A `task` call does nothing here, and a `read` of a skill:// target or of a file under
@@ -1052,7 +1208,7 @@ function operationsOf(step: Step, outcome: Outcome | undefined): Operation[] {
   }
   const text = outcome?.text ?? "";
   const output = text.replace(/\s*Command exited with code \d+\s*$/, "");
-  const lines = output.split("\n");
+  const lines = (step.tool === "eval" ? output.replace(EVAL_EXIT, "") : output).split("\n");
   const failed =
     outcome?.failed === true && (step.tool !== "bash" || outcome.exit === 1 || outcome.exit === 2);
   const native = /^dispatch_([a-z_]+)$/.exec(step.tool)?.[1];
@@ -1066,9 +1222,8 @@ function operationsOf(step: Step, outcome: Outcome | undefined): Operation[] {
     const target = new RegExp(SKILL_PATH.source).exec(strings(step.args).join("\n"))?.[0];
     return target === undefined ? [] : [{ kind: "read", step, target }];
   }
-  const source = (step.tool === "bash" ? strings(step.args.command) : strings(step.args)).join(
-    "\n"
-  );
+  const raw = (step.tool === "bash" ? strings(step.args.command) : strings(step.args)).join("\n");
+  const source = step.tool === "eval" ? withPythonDispatch(raw) : raw;
   const { code, bodies } = withoutBodies(source);
   const spans = [...code.matchAll(DISPATCH_COMMAND)].map((hit) => ({
     at: hit.index ?? 0,
@@ -1373,21 +1528,29 @@ function refusalBlocks(
       const call = callOf(op.step);
       return [{ where: op.call.text, text: op.refusal, call, op: place, at: call?.start ?? 0 }];
     }),
-    // An `eval` cell runs `dispatch` through its own language, which no shell parse reads, and Oh
-    // My Pi gives its kernel an environment of allowlisted names alone, with no session id in it,
-    // so the CLI knows no session and logs nothing. Such a cell's refusals are in its output
-    // alone, and each counts once, for the cell.
+    // An `eval` cell runs `dispatch` through its own language, and Oh My Pi gives its kernel an
+    // environment of allowlisted names alone, with no session id in it, so the CLI knows no
+    // session and logs nothing. withPythonDispatch reads a list-literal call as a command, but its
+    // refusal is attributed to that command only when refusalAt finds it; otherwise the cell's
+    // refusals are in its output alone, and each counts once, for the cell.
     ...calls.flatMap((call) => {
       if (call.step.tool !== "eval") return [];
       if (lines.some((entry) => entry.call === call)) return [];
-      if (ops.some((op) => op.kind === "dispatch" && op.step.id === call.step.id)) return [];
-      return cliRefusals(results.get(call.step.id)?.text ?? "").map((found) => ({
-        where: `eval cell ${call.step.id}, which the CLI logged no call of`,
-        text: found.line,
-        call: call as Call | undefined,
-        op: undefined as number | undefined,
-        at: call.start,
-      }));
+      if (
+        ops.some(
+          (op) => op.kind === "dispatch" && op.step.id === call.step.id && op.refusal !== undefined
+        )
+      )
+        return [];
+      return cliRefusals((results.get(call.step.id)?.text ?? "").replace(EVAL_EXIT, "")).map(
+        (found) => ({
+          where: `eval cell ${call.step.id}, which the CLI logged no call of`,
+          text: found.line,
+          call: call as Call | undefined,
+          op: undefined as number | undefined,
+          at: call.start,
+        })
+      );
     }),
   ].sort((a, b) => a.at - b.at || (a.op ?? 0) - (b.op ?? 0));
 
@@ -1431,28 +1594,46 @@ const readsSkill = (target: string, name: string) =>
     target
   );
 
-/** A spec-only check that counts for a spec write: a `task` call whose every task completed with a
- * report that came back before the write (checkOutcome). `assignment` is every string of its
- * arguments, `report` each task's report, and `write` the place of the write in SpecWork.writes. */
+/** A spec-only check that counts for a spec write (specWork): a `task` call whose every task
+ * completed with a report that came back before the write (checkOutcome), or a subagent of the
+ * session started some other way, such as from an eval cell, whose transcript holds its report
+ * (subagentCheck). `assignment` is every string of the call's arguments, or the first user message
+ * of the subagent's transcript; `report` each task's report, or the subagent's; and `write` the
+ * place of the write in SpecWork.writes. */
 export interface SpecCheck {
   assignment: string;
   report: string;
   write: number;
 }
-/** A spec-only check that counts for no spec write: its tasks, its call's id, the place of the
- * write after it, and why. */
+/** A spec-only check that counts for no spec write: its tasks, where the scorer found it (`call
+ * <id>`, or `transcript <name>.jsonl`), the place of the write after it, and why. */
 export interface RejectedCheck {
   tasks: string;
-  call: string;
+  via: string;
   write: number;
   problem: string;
 }
 export interface SpecWork {
-  /** Each spec write the tool accepted, in order, and whether a spec-only check that counts came
-   * after the write before it (or the session's start) and before it. */
+  /** Each spec write, in order, and whether a spec-only check that counts came after the write
+   * before it (or the session's start) and before it: each write the transcript shows Dispatch
+   * accepted, and each version Dispatch recorded for the session that none of those made
+   * (`unseen`), at its place in time. */
   writes: { index: number; at: string; text: string; checked: boolean }[];
   checks: SpecCheck[];
+  /** Spec-only checks that count for a write's `checked` but whose findings are not judged: the
+   * assignment pastes the run's own spec and a sibling issue's spec together (in one assignment,
+   * or in one task of a call), so a finding of its report cannot be told to be about this spec. A
+   * call's tasks that review only the run's own spec stay in `checks`, with their reports alone. */
+  unjudged: RejectedCheck[];
   rejected: RejectedCheck[];
+  /** The spec writes the transcript shows, and the versions spec-versions.json records for the
+   * session. */
+  seen: number;
+  versions: number;
+  /** The recorded versions no write the transcript shows made, each at the first entry after its
+   * time (`index`), and the texts of the writes it shows that no recorded version matches. */
+  unseen: { version: number; at: string; index: number }[];
+  unmatched: string[];
 }
 /** The opening tag of Oh My Pi's envelope of one task's end (prompts/tools/task-summary.md). Its
  * attributes give the task's id. taskNames reads the opening tags alone, so a closing tag that a
@@ -1551,7 +1732,9 @@ function checkOutcome(
   entries: SessionEntry[],
   step: Step,
   own: Outcome | undefined,
-  before: number
+  before: number,
+  /** The tasks whose reports make the check's report; every task of the call must still end. */
+  only?: string[]
 ): { report: string } | { problem: string } {
   if (own === undefined) return { problem: "the task call has no result" };
   if (own.index > before) return { problem: "the task call's result arrived after the spec write" };
@@ -1647,61 +1830,395 @@ function checkOutcome(
       );
     else if (end.status !== "completed") problems.push(`task ${name} ended ${end.status}`);
     else if (end.report === "") problems.push(`the report of task ${name} is empty`);
-    else reports.push(end.report);
+    else if (only === undefined || only.includes(name)) reports.push(end.report);
   }
   return problems.length > 0 ? { problem: problems.join("; ") } : { report: reports.join("\n\n") };
 }
-/** The spec writes of a transcript (writesSpec, against the run's fixture.json) and the spec-only
- * checks before them. A spec-only check is a `task` call whose assignment holds the seven outline
- * headings as `##` lines and names no path under a checkout in `reach`. It counts for the first
- * spec write after it when its tasks' reports came back before that write (checkOutcome); either
- * way it counts for no later write. Each `dispatch` command of a call is a write of its own
- * (operationsOf), so two writes in one call with no check between them leave the second
- * unchecked. Places are transcript order, never timestamps. */
-export function specWork(entries: SessionEntry[], reach: string[], fixture: SpecFixture): SpecWork {
+/** A `task` call's tasks, each with the assignment it was given: the call's shared arguments (its
+ * `context`) and the task's own. Undefined for a call of one task, or one whose every task does not
+ * carry a name, since a task's report is found by its name. */
+function namedTasks(step: Step): { name: string; assignment: string }[] | undefined {
+  const tasks = step.args.tasks;
+  if (!Array.isArray(tasks) || tasks.length < 2) return undefined;
+  const shared = strings(
+    Object.fromEntries(Object.entries(step.args).filter(([key]) => key !== "tasks"))
+  );
+  const parts: { name: string; assignment: string }[] = [];
+  for (const task of tasks) {
+    const name = field(task, "name");
+    if (typeof name !== "string" || name === "") return undefined;
+    parts.push({ name, assignment: [...shared, ...strings(task)].join("\n\n") });
+  }
+  return parts;
+}
+/** Whether a check's assignment is a spec-only check's: it holds the seven outline headings as `##`
+ * lines and names no path under a checkout in `reach`. */
+function specOnly(assignment: string, reach: string[]): boolean {
+  const outlined = OUTLINE.every((heading) =>
+    new RegExp(`^[ \\t]*## ${escaped(heading)}[ \\t]*$`, "m").test(assignment)
+  );
+  const local = reach.some((dir) => new RegExp(`${escaped(dir)}(?![\\w.-])`).test(assignment));
+  return outlined && !local;
+}
+/** A subagent's run as its own transcript records it: its assignment (the first user message) and
+ * when that came, and its report and when that came. The report is the subagent's last assistant
+ * message: the arguments of the `yield` call it ends with, else its text. A `yield` that carries
+ * nothing but its `type` (`{"type":"result"}`) hands back the text the subagent wrote before it, so
+ * the report is then the text of the last assistant message that has text. A last message that is
+ * neither (the subagent never finished) is no report. */
+function subagentRun(
+  entries: SessionEntry[]
+): { assignment: string; started: number; report: string; reported: number } | undefined {
+  const first = entries.find((entry) => entry.message?.role === "user");
+  if (first === undefined) return undefined;
+  const assistant = entries.filter((entry) => entry.message?.role === "assistant");
+  const last = assistant.at(-1);
+  const textOf = (entry: SessionEntry | undefined) =>
+    (entry?.message?.content ?? [])
+      .flatMap((part) => (part.type === "text" ? [part.text ?? ""] : []))
+      .join("");
+  const ending = (last?.message?.content ?? []).find(
+    (part) => part.type === "toolCall" && part.name === "yield"
+  );
+  let report = textOf(last);
+  if (ending !== undefined) {
+    const { type: _type, ...carried } =
+      typeof ending.arguments === "object" && ending.arguments !== null
+        ? (ending.arguments as Record<string, unknown>)
+        : {};
+    report = strings(carried).join("\n\n");
+    if (report.trim() === "")
+      report = textOf(assistant.findLast((entry) => textOf(entry).trim() !== ""));
+  }
+  return {
+    assignment: (first.message?.content ?? [])
+      .flatMap((part) => (part.type === "text" ? [part.text ?? ""] : []))
+      .join(""),
+    started: Date.parse(first.timestamp ?? ""),
+    report: report.trim(),
+    reported: Date.parse(last?.timestamp ?? ""),
+  };
+}
+/** The 5-word runs of a text, lowercased, its words its runs of letters and digits. */
+function wordRuns(text: string): Set<string> {
+  const words = text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  const runs = new Set<string>();
+  for (let start = 0; start + 5 <= words.length; start++)
+    runs.add(words.slice(start, start + 5).join(" "));
+  return runs;
+}
+/** Each spec an assignment pastes: from a `## Summary` line to the end of the `## Acceptance`
+ * section after it (the next `#` or `##` heading, or the end), or to the next `## Summary` line.
+ * What the assignment adds after a spec (instructions, the person's messages, the answered asks)
+ * is in no slice, so it neither lowers nor raises a spec's share. */
+function specSlices(assignment: string): string[] {
+  const lines = assignment.split("\n");
+  const summary = /^[ \t]*## Summary[ \t]*$/;
+  const slices: string[] = [];
+  for (let start = 0; start < lines.length; start++) {
+    if (!summary.test(lines[start] ?? "")) continue;
+    let end = start + 1;
+    let acceptance = false;
+    for (; end < lines.length; end++) {
+      const line = lines[end] ?? "";
+      if (summary.test(line)) break;
+      if (/^[ \t]*## Acceptance[ \t]*$/.test(line)) acceptance = true;
+      else if (acceptance && /^[ \t]*#{1,2} /.test(line)) break;
+    }
+    slices.push(lines.slice(start, end).join("\n"));
+    start = end - 1;
+  }
+  return slices;
+}
+/** The least share of a version the run's session wrote that a pasted spec covers, for the check
+ * to be of this run's spec. An agent that splits out a sibling issue can send the sibling's spec
+ * for review, alone or after its own spec in one assignment; that spec holds the seven headings
+ * too, but the report's findings on it are about another spec. Each spec of an assignment is
+ * measured on its own (specWork's kindOf), and one that pastes both is `mixed`. The share is
+ * recall over the written version (how much of the version's 5-word runs the pasted spec holds,
+ * the best over the versions), not over the pasted text: text pasted after the spec, with no
+ * heading to end its slice, cannot lower it, and a sibling spec that borrows a few of the parent's
+ * sections covers little of the parent. On the 67 spec runs of the dispatch skills' acceptance
+ * measurement, each of the 9 sibling specs sent for review (7 alone, 2 after the run's own)
+ * covered at most 0.01 of any version, and each of the run's own specs at least 0.24, a draft the
+ * agent rewrote in plain words after the check included. */
+const OWN_SPEC = 0.1;
+/** Each pasted spec's best share, over the versions the session wrote (each version's 5-word
+ * runs), of a version's runs that the spec holds, in order. */
+function ownSpecShares(assignment: string, versions: Set<string>[]): number[] {
+  return specSlices(assignment).map((slice) => {
+    const pasted = wordRuns(slice);
+    if (pasted.size === 0) return 1;
+    return Math.max(
+      0,
+      ...versions.map((version) =>
+        version.size === 0 ? 0 : [...version].filter((run) => pasted.has(run)).length / version.size
+      )
+    );
+  });
+}
+/** The spec writes of the run's session (writesSpec, against the run's fixture.json) and the
+ * spec-only checks before them: the one list of checks that both specRow's `checked` and the
+ * findings judge (judgeInputs, judge.ts) read. A spec-only check's assignment holds the seven
+ * outline headings as `##` lines and names no path under a checkout in `reach` (specOnly). A check
+ * is either of:
+ * - a `task` call of the session's transcript. It counts for the first spec write after it when its
+ *   tasks' reports came back before that write (checkOutcome); either way it counts for no later
+ *   write. Places are transcript order.
+ * - a subagent transcript beside the session's (subagentSessions) that no `task` call of the
+ *   session names, as a subagent started from an eval cell (`tool.task(…)`, `agent(…)`) is. Its
+ *   assignment is its first user message and its report its last assistant message
+ *   (subagentRun). It counts for the first spec write after its report when it started after the
+ *   write before that one, by the transcripts' timestamps. A subagent that a `task` call names is
+ *   that call's check alone, so a call rejected for its path or its failed task stays rejected.
+ * Each spec a check pastes is the run's own or a sibling issue's (ownSpecShares). A check of only
+ * a sibling's spec counts for no write. One that pastes both, in one assignment or in one task of
+ * a call, counts for `checked`, since the run's own spec was reviewed, but is in `unjudged`, not
+ * `checks`: no finding of its report can be told to be about this spec. A call's tasks are taken
+ * one by one, so its tasks that review only the run's own spec stay in `checks`, their reports
+ * alone.
+ * Each `dispatch` command of a call is a write of its own (operationsOf), so two writes in one
+ * call with no check between them leave the second unchecked.
+ *
+ * A write the transcript cannot show, as one through a helper function of the agent's own, a list
+ * built in a variable, or an answer line `>/dev/null` hid, still made a version, and
+ * spec-versions.json records each version with its session and time. So the writes the
+ * transcript shows are matched to the versions recorded for the session (sessionVersions): each to
+ * the version its answer names, else to the first one left that Dispatch made at or after the
+ * write's call. A recorded version no shown write matches (`unseen`) is a spec write too, at its
+ * recorded time and at the place in the transcript that time falls, and is checked only when a
+ * check above counts for it. A shown write no recorded version matches (`unmatched`) is still a
+ * write; specRow flags both. The checks are in the order of the writes they count for, and of when
+ * each started. */
+export function specWork(runDir: string, reach: string[], fixture: SpecFixture): SpecWork {
+  const entries = session(runDir);
   const results = outcomes(entries);
-  const writes: SpecWork["writes"] = [];
-  const checks: SpecCheck[] = [];
-  const rejected: RejectedCheck[] = [];
-  let pending: { step: Step; assignment: string }[] = [];
-  for (const step of steps(entries)) {
-    if (step.tool === "task") {
-      const assignment = strings(step.args).join("\n\n");
-      const outlined = OUTLINE.every((heading) =>
-        new RegExp(`^[ \\t]*## ${escaped(heading)}[ \\t]*$`, "m").test(assignment)
+  const own = sessionId(entries);
+  // Each call of the session with the spec writes it shows, apart from the checks below, so the
+  // writes are known before they are matched to the recorded versions.
+  const calls = steps(entries).map((step) => ({
+    step,
+    shown:
+      step.tool === "task"
+        ? []
+        : operationsOf(step, results.get(step.id)).flatMap((operation) =>
+            operation.kind === "dispatch" && writesSpec(operation.call, fixture, operation.answer)
+              ? [{ text: operation.call.text, answer: operation.answer }]
+              : []
+          ),
+  }));
+  const recorded = (own === undefined ? [] : sessionVersions(runDir, own)).map((version) => ({
+    version: version.version,
+    at: version.created_at,
+    matched: false,
+  }));
+  const unmatched: string[] = [];
+  for (const { step, shown } of calls)
+    for (const write of shown) {
+      const named = Number(/\bversion (\d+)\b/.exec(write.answer)?.[1]);
+      const match =
+        recorded.find((version) => !version.matched && version.version === named) ??
+        recorded.find(
+          (version) => !version.matched && Date.parse(version.at) >= Date.parse(step.at)
+        );
+      if (match === undefined) unmatched.push(write.text);
+      else match.matched = true;
+    }
+  // Each unseen version at the first entry after its time: a call whose message came later cannot
+  // have checked it.
+  const unseen = recorded
+    .filter((version) => !version.matched)
+    .map((version) => {
+      const after = entries.findIndex(
+        (entry) => Date.parse(entry.timestamp ?? "") > Date.parse(version.at)
       );
-      const local = reach.some((dir) => new RegExp(`${escaped(dir)}(?![\\w.-])`).test(assignment));
-      if (outlined && !local) pending.push({ step, assignment });
+      return { ...version, index: after < 0 ? entries.length : after };
+    });
+  // The 5-word runs of each version the session wrote: each spec a check pastes must cover enough
+  // of one of them to be this run's spec, not a sibling issue's (ownSpecShares, OWN_SPEC).
+  const versionRuns: Set<string>[] = [];
+  for (const { version } of recorded) {
+    const file = path.join(runDir, "spec-versions", `${version}.md`);
+    if (existsSync(file)) versionRuns.push(wordRuns(readFileSync(file, "utf8")));
+  }
+  // What the specs an assignment pastes are: `own` when each is the run's own (or it pastes none),
+  // `sibling` when none is, `mixed` when it pastes both. Only `own` gives findings a judge can tell
+  // to be about this spec; `mixed` still shows the run's own spec was reviewed before the write.
+  const kindOf = (assignment: string): { kind: "own" | "sibling" | "mixed"; note: string } => {
+    const shares = ownSpecShares(assignment, versionRuns);
+    const low = shares.findIndex((share) => share < OWN_SPEC);
+    if (low < 0) return { kind: "own", note: "" };
+    return {
+      kind: shares.some((share) => share >= OWN_SPEC) ? "mixed" : "sibling",
+      note: `spec ${low + 1} of ${shares.length} it pastes covers at most ${Math.round((shares[low] ?? 0) * 100)}% of the 5-word runs of any version the session wrote`,
+    };
+  };
+  const notOwn = (note: string) => `its spec is not this issue's: ${note}`;
+  const notJudged = (kind: "sibling" | "mixed", note: string) =>
+    kind === "mixed"
+      ? `its findings are not judged: it pastes a sibling issue's spec beside this one (${note})`
+      : `its findings are not judged: it pastes a sibling issue's spec only (${note})`;
+
+  const writes: SpecWork["writes"] = [];
+  const checks: (SpecCheck & { started: number })[] = [];
+  const unjudged: RejectedCheck[] = [];
+  const rejected: RejectedCheck[] = [];
+  const named = new Set<string>();
+  interface Pending {
+    step: Step;
+    assignment: string;
+    /** The tasks whose reports are the check's report, when the call's other tasks are left out. */
+    only?: string[];
+    /** Why the check counts for no write (no spec of the run's own), or why its findings are not
+     * judged; `judged` false with no `reject` means it counts for `checked` alone. */
+    reject?: string;
+    judged: boolean;
+    /** The call's tasks left out of the findings, each with what it pastes and why. */
+    dropped?: { tasks: string; kind: "sibling" | "mixed"; note: string }[];
+  }
+  let pending: Pending[] = [];
+  // A write at entry `index`: each pending `task` call's check counts for it, or is rejected.
+  const record = (index: number, at: string, text: string) => {
+    let checked = false;
+    for (const check of pending) {
+      const result = results.get(check.step.id);
+      const tasks = taskNames(check.step, result).join(", ") || "(unnamed)";
+      const via = `call ${check.step.id}`;
+      const outcome =
+        check.reject === undefined
+          ? checkOutcome(entries, check.step, result, index, check.only)
+          : { problem: check.reject };
+      if ("problem" in outcome) {
+        rejected.push({ tasks, via, write: writes.length, problem: outcome.problem });
+        continue;
+      }
+      checked = true;
+      for (const left of check.dropped ?? [])
+        unjudged.push({
+          tasks: left.tasks || tasks,
+          via,
+          write: writes.length,
+          problem: notJudged(left.kind, left.note),
+        });
+      if (check.judged)
+        checks.push({
+          assignment: check.assignment,
+          report: outcome.report,
+          write: writes.length,
+          started: Date.parse(check.step.at),
+        });
+    }
+    writes.push({ index, at, text, checked });
+    pending = [];
+  };
+  let next = 0;
+  for (const { step, shown } of [...calls, { step: undefined, shown: [] }]) {
+    for (; next < unseen.length; next++) {
+      const version = unseen[next];
+      if (version === undefined || (step !== undefined && version.index > step.index)) break;
+      record(
+        version.index,
+        version.at,
+        `version ${version.version} (recorded ${version.at}; no command of the transcript shows it)`
+      );
+    }
+    if (step === undefined) break;
+    if (step.tool === "task") {
+      for (const name of taskNames(step, results.get(step.id))) named.add(name);
+      const assignment = strings(step.args).join("\n\n");
+      if (!specOnly(assignment, reach)) continue;
+      // A call of several named tasks is judged task by task, each on its own assignment (the
+      // call's shared context and the task's own text): a task that is not itself a spec-only check
+      // (specOnly), as a fact check given no spec is, is no part of the check, even when the call's
+      // other tasks carry the outline. Of the rest, a task that reviews only the run's own spec is
+      // the check, with its report alone; one that pastes a sibling's spec too, or only a
+      // sibling's, is left out of the findings. The call counts for `checked` when any task
+      // reviews the run's own spec.
+      const tasks = namedTasks(step);
+      const parts = (tasks ?? [{ name: "", assignment }])
+        .filter((part) => specOnly(part.assignment, reach))
+        .map((part) => ({ ...part, ...kindOf(part.assignment) }));
+      if (parts.length === 0) continue;
+      const own = parts.filter((part) => part.kind === "own");
+      const left = parts.filter((part) => part.kind !== "own");
+      const first = left[0];
+      const whole = tasks === undefined || own.length === tasks.length;
+      if (first === undefined)
+        pending.push(
+          whole
+            ? { step, assignment, judged: true }
+            : {
+                step,
+                assignment: own.map((part) => part.assignment).join("\n\n"),
+                only: own.map((part) => part.name),
+                judged: true,
+              }
+        );
+      else if (!parts.some((part) => part.kind === "mixed") && own.length === 0)
+        pending.push({ step, assignment, judged: false, reject: notOwn(first.note) });
+      else
+        pending.push({
+          step,
+          assignment: own.map((part) => part.assignment).join("\n\n"),
+          only: own.length > 0 ? own.map((part) => part.name) : undefined,
+          judged: own.length > 0,
+          dropped: left.map((part) => ({
+            tasks: part.name,
+            kind: part.kind === "mixed" ? "mixed" : "sibling",
+            note: part.note,
+          })),
+        });
       continue;
     }
-    for (const operation of operationsOf(step, results.get(step.id))) {
-      if (operation.kind !== "dispatch" || !writesSpec(operation.call, fixture, operation.answer))
-        continue;
-      let checked = false;
-      for (const check of pending) {
-        const own = results.get(check.step.id);
-        const outcome = checkOutcome(entries, check.step, own, step.index);
-        if ("problem" in outcome)
-          rejected.push({
-            tasks: taskNames(check.step, own).join(", ") || "(unnamed)",
-            call: check.step.id,
-            write: writes.length,
-            problem: outcome.problem,
-          });
-        else {
-          checks.push({
-            assignment: check.assignment,
-            report: outcome.report,
-            write: writes.length,
-          });
-          checked = true;
-        }
-      }
-      writes.push({ index: step.index, at: step.at, text: operation.call.text, checked });
-      pending = [];
-    }
+    for (const write of shown) record(step.index, step.at, write.text);
   }
-  return { writes, checks, rejected };
+  const writeTimes = writes.map((write) => Date.parse(write.at));
+  for (const { name, entries: subagent } of subagentSessions(runDir)) {
+    if (named.has(name)) continue;
+    const run = subagentRun(subagent);
+    if (run === undefined || !specOnly(run.assignment, reach)) continue;
+    const write = writeTimes.findIndex((at) =>
+      run.report === "" ? at > run.started : at > run.reported
+    );
+    if (write < 0) continue;
+    const before = writeTimes[write - 1];
+    const { kind, note } = kindOf(run.assignment);
+    const problem =
+      run.report === ""
+        ? "its transcript holds no report"
+        : before !== undefined && run.started <= before
+          ? `it started before spec write ${write}, so it checked an earlier version`
+          : kind === "sibling"
+            ? notOwn(note)
+            : undefined;
+    if (problem !== undefined) {
+      rejected.push({ tasks: name, via: `transcript ${name}.jsonl`, write, problem });
+      continue;
+    }
+    const counted = writes[write];
+    if (counted !== undefined) counted.checked = true;
+    if (kind === "mixed")
+      unjudged.push({
+        tasks: name,
+        via: `transcript ${name}.jsonl`,
+        write,
+        problem: notJudged("mixed", note),
+      });
+    else
+      checks.push({ assignment: run.assignment, report: run.report, write, started: run.started });
+  }
+  return {
+    writes,
+    checks: checks
+      .toSorted((a, b) => a.write - b.write || a.started - b.started)
+      .map(({ assignment, report, write }) => ({ assignment, report, write })),
+    unjudged: unjudged.toSorted((a, b) => a.write - b.write),
+    rejected: rejected.toSorted((a, b) => a.write - b.write),
+    seen: calls.reduce((sum, call) => sum + call.shown.length, 0),
+    versions: recorded.length,
+    unseen: unseen.map(({ version, at, index }) => ({ version, at, index })),
+    unmatched,
+  };
 }
 
 /** Each `**R<n>.**` or `**A<n>.**` paragraph of a spec: its mark and its text, up to a blank line,
@@ -1938,8 +2455,9 @@ export function sharedRuns(runDir: string): SharedRun[] {
  *   precision (Dispatch writes `…:00.5Z` before `…:00.51Z`, which text order reverses);
  * - `texts`: agent-texts.json less the seeded asks;
  * - `documents`: each file of documents/, as `documents/<file>`;
- * - `checks`: how many spec-only checks count for a spec write (specWork): with none, no findings
- *   judge runs and findings.json has no row. */
+ * - `checks`: how many spec-only checks count for a spec write, from specWork, the one list of
+ *   checks specRow's `checked` reads too: with none, no findings judge runs and findings.json has
+ *   no row. */
 export interface JudgeInputs {
   requirements: string[];
   asks: z.infer<typeof AgentAsks>;
@@ -1995,7 +2513,10 @@ function covered(what: string, given: string[], named: string[], exact: boolean)
  * - proposal.json: each `ask` a row names is one given;
  * - preamble.json: each `source` is spec.md, a given document, or agent-texts.json#<given id>;
  * - faults.json: each row's count is the number of its items;
- * - findings.json: each `check` is 1 to the number of checks given. */
+ * - findings.json: each check 1 to the number of checks given has a row or is in `clean`, never
+ *   both, and no row or `clean` entry names another number. A file with neither for a check is one
+ *   judged before that check was known (judge.ts writes an empty file only when there is no
+ *   check), or one whose judge skipped the check, so it is a rig error too. */
 export function coverage(file: string, answer: unknown, inputs: JudgeInputs): string[] {
   const asks = inputs.asks.map((ask) => ask.id);
   const texts = inputs.texts.map((text) => text.id);
@@ -2044,13 +2565,24 @@ export function coverage(file: string, answer: unknown, inputs: JudgeInputs): st
           : [`faults["${row}"] is ${faults.faults[row]}, but ${items} items name that row`];
       });
     }
-    case "findings.json":
-      return covered(
-        "check",
-        Array.from({ length: inputs.checks }, (_, index) => String(index + 1)),
-        FindingsOutput.parse(answer).rows.map((row) => String(row.check)),
-        false
-      );
+    case "findings.json": {
+      const { rows, clean } = FindingsOutput.parse(answer);
+      const given = Array.from({ length: inputs.checks }, (_, index) => String(index + 1));
+      const found = new Set(rows.map((row) => String(row.check)));
+      const cleanIds = clean.map(String);
+      return [
+        ...given.flatMap((id) =>
+          found.has(id) && cleanIds.includes(id)
+            ? [`check ${id} has rows and is in clean`]
+            : !found.has(id) && !cleanIds.includes(id)
+              ? [`no row for check ${id}, and it is not in clean`]
+              : []
+        ),
+        ...covered("check", given, [...found], false),
+        ...covered("clean check", given, cleanIds, false),
+        ...(new Set(cleanIds).size < cleanIds.length ? ["a check is in clean twice"] : []),
+      ];
+    }
     default:
       return [];
   }
@@ -2088,9 +2620,16 @@ const indented = (text: string, depth = 6) =>
  *   - checked: the transcript holds at least one spec write (writesSpec: a write Dispatch made of
  *     the run's own primary spec, each `dispatch` command of a call apart), a spec-only check
  *     (specWork) counts for every one, the first included, and findings.json has no `neither`
- *     row. A check counts for a write when its task call and every task's completed, non-empty
- *     report came after the write before it and before this write, in transcript order
- *     (checkOutcome). Each check that counts for no write is printed with why.
+ *     row. A `task` call's check counts for a write when its task call and every task's completed,
+ *     non-empty report came after the write before it and before this write, in transcript order
+ *     (checkOutcome); a subagent started another way, as from an eval cell, counts from its own
+ *     transcript when it started after the write before and reported before this one. A version
+ *     Dispatch recorded for the session that no write the transcript shows made is a write too
+ *     (specWork), and the row is flagged `writes_seen=N versions=M` with each gap under it. Each
+ *     check that counts for no write is printed with why. A check that counts but whose findings
+ *     are not judged (SpecWork.unjudged: it pastes a sibling issue's spec) is printed with why, and
+ *     the row is flagged `unjudged=N`: a write whose only check is one of these has no answer to
+ *     whether the agent acted on what came back.
  *   - refusals: every refused `dispatch` call (refusalBlocks: an `error` line of the CLI's ledger,
  *     or a refusal a call's output shows that the ledger holds no line of: an `eval` cell's, whose
  *     kernel knows no session, or one the CLI made with no session) is followed by a call
@@ -2099,8 +2638,9 @@ const indented = (text: string, depth = 6) =>
  *     fixed the call from the refusal alone. Each failing refusal is printed with its text.
  *   - plan: the person approved the spec, the issue holds plan.md (capture-spec runs after the
  *     approval), and the transcript read skill://writing-plans.
- *   - routed: the transcript read skill://dispatch-writing-specs before its first spec write, and
- *     never read REMOVED_SKILL. `ref` is the first half.
+ *   - routed: the transcript read skill://dispatch-writing-specs before its first spec write (a
+ *     version no write it shows made included), and never read REMOVED_SKILL. `ref` is the first
+ *     half.
  *   - chat: no call of the interactive `ask` tool (surfaceOf's chat), and every state-<turn>.json
  *     but the last lists an open approval request, or an open ask whose id is not in seeded.json.
  *   - quoted: every run sharedRuns finds has the verdict `names` in shared-runs.json. Each run is
@@ -2127,15 +2667,17 @@ function specRow(
   const fixture = json(path.join(runDir, "fixture.json"), SpecFixture);
   const { approved, version, turns } = approval(runDir);
   const all = steps(entries);
-  const work = specWork(entries, reach, fixture);
+  const work = specWork(runDir, reach, fixture);
   const ops = operations(entries);
   // Places in `ops`, so a read and a write of one call keep their order.
   const firstWrite = ops.findIndex(
     (op) => op.kind === "dispatch" && writesSpec(op.call, fixture, op.answer)
   );
   const reads = ops.flatMap((op, place) =>
-    op.kind === "read" ? [{ place, target: op.target }] : []
+    op.kind === "read" ? [{ place, index: op.step.index, target: op.target }] : []
   );
+  // A version no write the transcript shows made is a spec write at its own place too.
+  const firstUnseen = work.unseen[0]?.index ?? Number.POSITIVE_INFINITY;
   const details: string[] = [];
 
   const outline = outlineProblems(spec);
@@ -2146,7 +2688,19 @@ function specRow(
   const neither = findings.rows.filter((row) => row.verdict === "neither");
   const unchecked = work.writes.filter((write) => !write.checked);
   const checked = work.writes.length > 0 && unchecked.length === 0 && neither.length === 0;
-  if (work.writes.length === 0) details.push("checked: the transcript holds no spec write");
+  if (work.writes.length === 0) details.push("checked: the session made no spec write");
+  // Dispatch's record of the session's versions against the writes the transcript shows.
+  const disagree =
+    work.seen !== work.versions || work.unseen.length > 0 || work.unmatched.length > 0;
+  if (disagree)
+    details.push(
+      `versions: Dispatch recorded ${work.versions} versions of the spec by the run's session, and the transcript shows ${work.seen} spec writes`,
+      ...work.unseen.map(
+        (version) =>
+          `  version ${version.version} (${version.at}): no write the transcript shows made it; scored as a spec write, unchecked unless a check counts for it`
+      ),
+      ...work.unmatched.map((text) => `  no recorded version matches the write: ${text}`)
+    );
   if (unchecked.length > 0)
     details.push(
       `unchecked writes: ${unchecked.length} of ${work.writes.length}`,
@@ -2156,7 +2710,11 @@ function specRow(
     details.push(`finding of check ${row.check} neither fixed nor recorded: ${row.finding}`);
   for (const check of work.rejected)
     details.push(
-      `check ${check.tasks} (call ${check.call}) for spec write ${check.write + 1} does not count: ${check.problem}`
+      `check ${check.tasks} (${check.via}) for spec write ${check.write + 1} does not count: ${check.problem}`
+    );
+  for (const check of work.unjudged)
+    details.push(
+      `check ${check.tasks} (${check.via}) for spec write ${check.write + 1} counts, but ${check.problem}`
     );
 
   const id = sessionId(entries);
@@ -2169,6 +2727,7 @@ function specRow(
   const routedRead = reads.some(
     (read) =>
       (firstWrite < 0 || read.place < firstWrite) &&
+      read.index < firstUnseen &&
       readsSkill(read.target, "dispatch-writing-specs")
   );
   const removed = reads.filter(
@@ -2271,6 +2830,8 @@ function specRow(
       proposals.map((row) => row.verdict)
     )}`,
     `writes=${work.writes.length} shared=${shared.length} copies=${copies}`,
+    ...(disagree ? [`writes_seen=${work.seen} versions=${work.versions}`] : []),
+    ...(work.unjudged.length > 0 ? [`unjudged=${work.unjudged.length}`] : []),
   ].join(" ");
   return {
     run,
@@ -2282,6 +2843,7 @@ function specRow(
     source,
     faults: faultCount,
     steBreaks: faults.ste_breaks,
+    flagged: disagree || work.unjudged.length > 0,
   };
 }
 
@@ -2305,20 +2867,27 @@ function median(values: number[]): number {
  *     the profile's gateway key command ran past its budget. The key command's own record of each
  *     call, which scripts/e2e/lib/model-gateway-unserved.sh reads, is a better signal this rig does
  *     not set up;
- *   - it compared the wrong text: a tool call's arguments name the other label's checkout, or a
- *     skill file (a path to skills/dispatch, skills/dispatch-first, skills/dispatch-writing-specs
- *     or skills/legion-worker)
- *     anywhere but its own run directory (its HOME is there) or its label's profile or checkout.
- *     An agent reads the whole filesystem, and `legion` on its PATH resolves into the checkout
- *     rig.sh runs from.
- * A record missing or malformed is a rig error too, thrown by the scenario's function. */
+ *   - it compared the wrong text: a tool call of the run (its own or a subagent's) read a file under
+ *     the other label's checkout, or a skill file (a path to skills/dispatch, skills/dispatch-first,
+ *     skills/dispatch-writing-specs or skills/legion-worker) anywhere but `allowed`: its own run
+ *     directory (its HOME is there) and its label's profile and checkout. A read is a `read` call
+ *     of such an absolute path, a command of READERS in a `bash` call or an eval cell that names
+ *     one (here-document bodies left out), or a file an eval cell opens in its own language
+ *     (OPENED). An agent reads the whole filesystem, and `legion` on its PATH resolves into the
+ *     checkout rig.sh runs from.
+ * A run whose tool calls only name such a file or checkout (in a check's pasted spec, a plan, a
+ * command's text) is scored, and flagged (skillReaches), as is one that names a path outside its
+ * sandbox (outsideReaches). A record missing or malformed is a rig error too, thrown by the
+ * scenario's function. */
 function unscored(
   runDir: string,
   scenario: string,
   dispatch: string | undefined,
   label: string,
   labels: Map<string, string>,
-  sharing: Map<string, string[]>
+  sharing: Map<string, string[]>,
+  calls: RunCall[],
+  allowed: string[]
 ): string | undefined {
   if (dispatch === undefined) {
     if (!BATCH_DISPATCH[scenario]) return "it records no Dispatch of its own (no dispatch.json)";
@@ -2334,21 +2903,231 @@ function unscored(
   const entries = session(runDir);
   if (!entries.some((entry) => entry.message?.role === "assistant"))
     return "the agent got no model turn: no transcript, or one with no assistant message";
-  const profile = path.join(path.dirname(path.dirname(runDir)), "profiles", label);
-  const allowed = [runDir, profile, labels.get(label) ?? profile].map((dir) => `${dir}/`);
-  for (const call of toolCalls(entries)) {
-    for (const [other, checkout] of labels)
-      if (other !== label && call.args.includes(checkout))
-        return `a ${call.tool} call names ${other}'s checkout: ${call.args.slice(0, 200)}`;
-    for (const [skillPath] of call.args.matchAll(
-      /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch-writing-specs|dispatch|legion-worker)\b/g
-    ))
-      if (!allowed.some((dir) => skillPath.startsWith(dir)))
-        return `a ${call.tool} call names a skill outside ${label}'s own: ${skillPath}`;
+  for (const call of calls) {
+    const named: string[] = [];
+    if (call.tool === "read") named.push(strings(field(call.args, "path")).join(""));
+    if (call.tool === "bash" || call.tool === "eval") {
+      const source = strings(call.tool === "bash" ? field(call.args, "command") : call.args).join(
+        "\n"
+      );
+      for (const hit of withoutBodies(source).code.matchAll(SHELL_COMMAND))
+        if (READERS[hit[1] ?? ""] === true)
+          named.push(...[...(hit[2] ?? "").matchAll(ABSOLUTE_PATH)].map(([found]) => found));
+      if (call.tool === "eval")
+        named.push(...[...source.matchAll(OPENED)].map((hit) => hit[2] ?? ""));
+    }
+    for (const target of named) {
+      if (!target.startsWith("/")) continue;
+      const read = path.posix.normalize(target);
+      for (const [other, checkout] of labels)
+        if (other !== label && (read === checkout || read.startsWith(`${checkout}/`)))
+          return `a ${call.tool} call reads ${other}'s checkout: ${read}`;
+      if (new RegExp(SKILL_NAMED.source).test(read) && !allowed.some((dir) => read.startsWith(dir)))
+        return `a ${call.tool} call reads a skill outside ${label}'s own: ${read}`;
+    }
   }
   return undefined;
 }
+/** Commands that print or copy a file they name: the ones a `bash` call reads a file with. */
+const READERS: Record<string, true> = Object.fromEntries(
+  "cat head tail sed awk less more bat nl view grep rg cp diff"
+    .split(" ")
+    .map((word) => [word, true])
+);
+/** A file an eval cell opens in its own language: Python's `open(…)` or `Path(…)`, Bun's
+ * `Bun.file(…)`, given a literal path. */
+const OPENED = /\b(?:open|Path|Bun\.file)\(\s*[rbf]?(["'`])([^"'`\n]+)\1/g;
 
+/** Where a run's tools may name an absolute path without reaching outside its sandbox, besides the
+ * work directory and the label's checkout. */
+const SYSTEM_DIRS = [
+  "/usr",
+  "/bin",
+  "/sbin",
+  "/lib",
+  "/lib64",
+  "/etc",
+  "/tmp",
+  "/proc",
+  "/sys",
+  "/dev",
+  "/var",
+  "/opt",
+  "/run",
+];
+/** An absolute path in text: a `/` that starts no URL, ref (`dispatch://…/spec`) or relative path. */
+const ABSOLUTE_PATH = /(?<![\w:/.~-])\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._@+-]+)*/g;
+/** Argument fields that carry the text a write puts in a file: a path inside that text is no access. */
+const FILE_CONTENT = new Set([
+  "content",
+  "input",
+  "ops",
+  "body",
+  "text",
+  "new_string",
+  "old_string",
+]);
+function argumentStrings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(argumentStrings);
+  if (typeof value !== "object" || value === null) return [];
+  return Object.entries(value).flatMap(([key, field]) =>
+    FILE_CONTENT.has(key) ? [] : argumentStrings(field)
+  );
+}
+/** Where a path a run named sits in a tool call: a command or path the agent ran (`ran`), text it
+ * wrote into a file (`wrote`: FILE_CONTENT), or a subagent's assignment (`assigned`: a `task`
+ * call). Only `ran` comes close to a reach; the other two are prose. */
+type ReachKind = "ran" | "wrote" | "assigned";
+interface Reach {
+  kind: ReachKind;
+  tool: string;
+  path: string;
+  context: string;
+}
+/** One tool call of the run, its own or a subagent's (every transcript under sessions/): its tool,
+ * its arguments, and its text by where it sits (ReachKind). */
+interface RunCall {
+  tool: string;
+  args: unknown;
+  texts: [ReachKind, string][];
+}
+function runCalls(runDir: string): RunCall[] {
+  const transcripts = (dir: string): string[] =>
+    existsSync(dir)
+      ? readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+          entry.isDirectory()
+            ? transcripts(path.join(dir, entry.name))
+            : entry.name.endsWith(".jsonl")
+              ? [path.join(dir, entry.name)]
+              : []
+        )
+      : [];
+  const contentStrings = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.flatMap(contentStrings)
+      : typeof value === "object" && value !== null
+        ? Object.entries(value).flatMap(([key, field]) =>
+            FILE_CONTENT.has(key) ? strings(field) : contentStrings(field)
+          )
+        : [];
+  const calls: RunCall[] = [];
+  for (const file of transcripts(path.join(runDir, "sessions")))
+    for (const line of lines(file)) {
+      let entry: unknown;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const parsed = SessionEntry.safeParse(entry);
+      if (!parsed.success || parsed.data.message?.role !== "assistant") continue;
+      for (const part of parsed.data.message.content ?? []) {
+        if (part.type !== "toolCall") continue;
+        const tool = part.name ?? "tool";
+        calls.push({
+          tool,
+          args: part.arguments,
+          texts:
+            tool === "task"
+              ? [["assigned", strings(part.arguments).join("\n")]]
+              : [
+                  ["ran", argumentStrings(part.arguments).join("\n")],
+                  ["wrote", contentStrings(part.arguments).join("\n")],
+                ],
+        });
+      }
+    }
+  return calls;
+}
+/** A hit at `at` in `text`, with the text around it on one line. */
+function reachAt(kind: ReachKind, tool: string, target: string, text: string, at: number): Reach {
+  const context = text.slice(Math.max(0, at - 80), at + target.length + 60);
+  return { kind, tool, path: target, context: context.replace(/\s+/g, " ") };
+}
+/** Every absolute path the run's tool calls name outside `allowed` and SYSTEM_DIRS, whose top-level
+ * directory exists on this machine (so a route such as `/v1/messages` is no path), normalized
+ * (`/../tmp` is /tmp), with the call's text around it. Nothing isolates an agent from the
+ * operator's files (rig.sh runs it with no filesystem sandbox), so such a run may have drawn on
+ * them; but tool-call arguments carry the agent's prose as well as its reaches, and no rule over
+ * them can tell the two apart in every case. So a run is flagged, never unscored, and the flag
+ * prints enough to judge each hit. A path a call reaches without naming it, as a glob from `/`
+ * does, is not caught. */
+function outsideReaches(calls: RunCall[], allowed: string[]): Reach[] {
+  const inside = (target: string) =>
+    [...allowed, ...SYSTEM_DIRS].some((dir) => target === dir || target.startsWith(`${dir}/`));
+  return calls.flatMap((call) =>
+    call.texts.flatMap(([kind, text]) =>
+      [...text.matchAll(ABSOLUTE_PATH)].flatMap((hit) => {
+        const target = path.posix.normalize(hit[0]);
+        const top = `/${target.split("/")[1] ?? ""}`;
+        if (top === "/" || !existsSync(top) || inside(target)) return [];
+        return [reachAt(kind, call.tool, target, text, hit.index ?? 0)];
+      })
+    )
+  );
+}
+/** A path to one of the Dispatch and worker skills whose versions the labels compare. */
+const SKILL_NAMED =
+  /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch-writing-specs|dispatch|legion-worker)\b/g;
+/** Every name in the run's tool calls of another label's checkout, or of one of those skills (any
+ * path to it, a relative one too) outside `allowed`, the label's own. A spec about the Dispatch
+ * skills names them in every check of it, and a plan names the files it changes, so a name is
+ * flagged, never unscored; a read of one is a rig error (unscored). */
+function skillReaches(
+  calls: RunCall[],
+  allowed: string[],
+  label: string,
+  labels: Map<string, string>
+): Reach[] {
+  return calls.flatMap((call) =>
+    call.texts.flatMap(([kind, text]) => [
+      ...[...labels]
+        .filter(([other]) => other !== label)
+        .flatMap(([, checkout]) =>
+          [...text.matchAll(new RegExp(escaped(checkout), "g"))].map((hit) =>
+            reachAt(kind, call.tool, checkout, text, hit.index ?? 0)
+          )
+        ),
+      ...[...text.matchAll(SKILL_NAMED)]
+        .filter(([named]) => !allowed.some((dir) => named.startsWith(dir)))
+        .map((hit) => reachAt(kind, call.tool, hit[0], text, hit.index ?? 0)),
+    ])
+  );
+}
+/** A flag for a run's reaches: a count of each kind on the row's first line (` <name>=ran:N,…`),
+ * then up to three hits of each kind, each with its call's text, and what the flag does not
+ * establish (`note`). */
+function flagOf(name: string, reaches: Reach[], note: string): { inline: string; lines: string[] } {
+  const kinds: ReachKind[] = ["ran", "wrote", "assigned"];
+  const count = (kind: ReachKind) => reaches.filter((reach) => reach.kind === kind).length;
+  return {
+    inline: ` ${name}=${kinds.map((kind) => `${kind}:${count(kind)}`).join(",")}`,
+    lines: [
+      ...kinds.flatMap((kind) =>
+        reaches
+          .filter((reach) => reach.kind === kind)
+          .slice(0, 3)
+          .map(
+            (reach) =>
+              `${name} (${kind}): a ${reach.tool} call names ${reach.path}: …${reach.context}…`
+          )
+      ),
+      `${name}: ${note}`,
+    ],
+  };
+}
+
+/** The directory a run had when it ran. rig.sh starts every agent in `<run dir>/cwd`, and its
+ * session's header records that cwd, so a run scored from a copy (another work directory) still
+ * reads its own paths as its own. A header whose cwd is not `…/runs/<this run's name>/cwd`, or no
+ * header, gives `dir` itself. */
+function ranAt(dir: string, entries: SessionEntry[]): string {
+  const cwd = entries.find((entry) => entry.type === "session")?.cwd;
+  return typeof cwd === "string" && cwd.endsWith(`/runs/${path.basename(dir)}/cwd`)
+    ? path.dirname(cwd)
+    : dir;
+}
 function scoreRuns(runsDir: string, only: string | undefined) {
   const rows: Row[] = [];
   const errors: { run: string; key: string; reason: string }[] = [];
@@ -2414,9 +3193,49 @@ function scoreRuns(runsDir: string, only: string | undefined) {
           "the directory names no case: an askgate run's directory is askgate-<case>-<label>-<n>"
         );
       const dispatch = dispatchOf(dir);
-      reason = unscored(dir, scenario, dispatch, label, labels, sharing);
+      const calls = runCalls(dir);
+      // The paths the run had when it ran, which its transcripts name, never those of a copy
+      // scored elsewhere (ranAt).
+      const ran = ranAt(dir, session(dir));
+      const work = path.dirname(path.dirname(ran));
+      const profile = path.join(work, "profiles", label);
+      // The run's own skills: its HOME (in its directory), its label's profile and checkout.
+      const own = [ran, profile, labels.get(label) ?? profile].map((place) => `${place}/`);
+      reason = unscored(dir, scenario, dispatch, label, labels, sharing, calls, own);
       if (reason === undefined) {
-        const row = score(dir, run, label, askCase);
+        const scored = score(dir, run, label, askCase);
+        const outside = outsideReaches(calls, [work, labels.get(label) ?? work]);
+        const skills = skillReaches(calls, own, label, labels);
+        const flags = [
+          ...(outside.length === 0
+            ? []
+            : [
+                flagOf(
+                  "outside",
+                  outside,
+                  "the run named a path outside its work directory, its label's checkout and the system locations. That does not show it read the path, nor that its result is wrong."
+                ),
+              ]),
+          ...(skills.length === 0
+            ? []
+            : [
+                flagOf(
+                  "skills",
+                  skills,
+                  "the run named another label's checkout, or a skill file outside its label's own, without reading it (a read is a rig error). That does not show it drew on the file."
+                ),
+              ]),
+        ];
+        const [first = "", ...rest] = scored.notes.split("\n");
+        const row = {
+          ...scored,
+          flagged: scored.flagged === true || flags.length > 0,
+          notes: [
+            `${first}${flags.map((flag) => flag.inline).join("")}`,
+            ...rest,
+            ...flags.flatMap((flag) => flag.lines.map((line) => `  ${line}`)),
+          ].join("\n"),
+        };
         rows.push(
           dispatch === undefined ? { ...row, notes: `${row.notes}\n  ${BATCH_DISPATCH_NOTE}` } : row
         );
@@ -2428,7 +3247,7 @@ function scoreRuns(runsDir: string, only: string | undefined) {
   }
   for (const row of rows) console.log(`${row.run}\tpass=${row.pass}\tref=${row.ref}\t${row.notes}`);
   for (const error of errors) console.log(`${error.run}\trig error: ${error.reason}`);
-  console.log("\nscenario\tlabel\tpass\tpass+ref\trig errors");
+  console.log("\nscenario\tlabel\tpass\tpass+ref\trig errors\tflagged");
   const keys = [
     ...new Set([
       ...rows.map((row) => `${row.scenario}\t${row.label}`),
@@ -2440,8 +3259,9 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     const passed = group.filter((row) => row.pass);
     const withRef = passed.filter((row) => row.ref);
     const failed = errors.filter((error) => error.key === key).length;
+    const flagged = group.filter((row) => row.flagged).length;
     console.log(
-      `${key}\t${passed.length}/${group.length}\t${withRef.length}/${group.length}\t${failed}`
+      `${key}\t${passed.length}/${group.length}\t${withRef.length}/${group.length}\t${failed}\t${flagged}`
     );
   }
   // For each source and label, the median fault count of its spec runs (faults.json): the count
@@ -2454,11 +3274,11 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     ),
   ];
   if (specKeys.length > 0) {
-    console.log("\nsource\tscenario\tlabel\truns\tmedian faults\tmedian ste breaks");
+    console.log("\nsource\tscenario\tlabel\truns\tmedian faults\tmedian ste breaks\tflagged");
     for (const key of specKeys) {
       const group = rows.filter((row) => `${row.source}\t${row.scenario}\t${row.label}` === key);
       console.log(
-        `${key}\t${group.length}\t${median(group.map((row) => row.faults ?? 0))}\t${median(group.map((row) => row.steBreaks ?? 0))}`
+        `${key}\t${group.length}\t${median(group.map((row) => row.faults ?? 0))}\t${median(group.map((row) => row.steBreaks ?? 0))}\t${group.filter((row) => row.flagged).length}`
       );
     }
   }
@@ -2476,6 +3296,9 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "           askgate: the rule for the run's label and case (askgateReview)",
       "pass+ref   passed, and the agent read the file the rule is in (askgate: never counted)",
       "rig errors runs the rig could not score (unscored), left out of both counts",
+      "flagged    counted runs whose row carries a flag (outside=, skills=, writes_seen=,",
+      "           unjudged=): each is",
+      "           in the counts and medians, and its notes say what to read before trusting it",
       "ran=false  a tester-proof run the bun stand-in saw no greet.ts run in: read its transcript",
       "           before believing it, since the stand-in sees only a bun reached through PATH",
     ].join("\n")

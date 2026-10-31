@@ -191,21 +191,28 @@ async function expectPicked(page: Page, model: string, level: string): Promise<v
   await expect(shownThinking).toHaveText(level);
 }
 
-/** The stored id of the switch whose body is `body`, once Dispatch has stored it, with its author. */
+/** The switch whose body is `body` once Dispatch has stored it and sent it: its stored id, its
+ *  author, and the delivery attempt the fake Envoy's frame carries. Dispatch stores the message,
+ *  then records the attempt, and sends the frame only once that attempt is committed, so a reply
+ *  naming the frame's attempt finds it, as a real session's reply to the frame it received does;
+ *  a reply sent as soon as the message is listed can arrive before its attempt exists. */
 async function storedSwitch(
   sessionID: string,
   body: string
-): Promise<{ id: string; author: { kind: string; id: string } }> {
-  let found: { id: string; author: { kind: string; id: string } } | undefined;
+): Promise<{ id: string; attempt: number; author: { kind: string; id: string } }> {
+  let found: { id: string; attempt: number; author: { kind: string; id: string } } | undefined;
   await expect
     .poll(async () => {
+      const frame = (await getSentMessages()).find((sent) => sent.message === body);
       const read = (await listAgentMessages(sessionID)).find((row) => row.message.body === body);
-      found = read === undefined ? undefined : read.message;
-      return found !== undefined;
+      if (frame === undefined || read === undefined) return false;
+      const { delivery } = JSON.parse(String(frame.payload)) as { delivery: { attempt: number } };
+      found = { attempt: delivery.attempt, author: read.message.author, id: read.message.id };
+      return true;
     })
     .toBe(true);
-  if (found === undefined) throw new Error(`no stored ${body}`);
-  return { author: found.author, id: found.id };
+  if (found === undefined) throw new Error(`no sent ${body}`);
+  return found;
 }
 
 /** What the fake Envoy was asked to send, with each delivery frame decoded. */
@@ -231,11 +238,16 @@ async function sentSwitches(): Promise<
   });
 }
 
-/** The session answers a switch the way pi-envoy posts the host's printed answer. */
-function answer(sessionID: string, messageID: string, body: string): Promise<unknown> {
+/** The session answers the delivery it was sent, the way pi-envoy posts the host's printed
+ *  answer. */
+function answer(
+  sessionID: string,
+  delivery: { id: string; attempt: number },
+  body: string
+): Promise<unknown> {
   return replyToMessageDelivery(
-    messageID,
-    { attempt: 1, body },
+    delivery.id,
+    { attempt: delivery.attempt, body },
     { id: sessionID, kind: "session" }
   );
 }
@@ -446,7 +458,7 @@ test("a model picked in the header is the viewer's own Send of /model, holds Sen
       .filter({ hasText: "/model anthropic/model-b" });
     await expect(own).toBeVisible();
 
-    await answer(id, stored.id, "Model set to anthropic/model-b.");
+    await answer(id, stored, "Model set to anthropic/model-b.");
     await publishAgentStreamFrame(id, reported(3, "anthropic/model-b", "auto"));
     await expect(status).toHaveText("The session answered: Model set to anthropic/model-b.");
     await expectPicked(page, "anthropic/model-b", "auto");
@@ -504,7 +516,7 @@ test("a thinking level picked in the header sends /effort, and the session's ans
       page.getByTestId("agent-message-user").filter({ hasText: "/effort high" })
     ).toBeVisible();
 
-    await answer(id, stored.id, "Thinking set to high.");
+    await answer(id, stored, "Thinking set to high.");
     await publishAgentStreamFrame(id, reported(3, "anthropic/model-a", "high"));
     await expect(status).toHaveText("The session answered: Thinking set to high.");
     await expectPicked(page, "anthropic/model-a", "high");
@@ -533,7 +545,7 @@ test("a switch the session refuses shows its reason and leaves the header on the
     await model.selectOption("openai/model-c");
     await expect(status).toHaveText("Switching model to openai/model-c…");
     const stored = await storedSwitch(id, "/model openai/model-c");
-    await answer(id, stored.id, "Failed to set model: No API key for openai/model-c");
+    await answer(id, stored, "Failed to set model: No API key for openai/model-c");
     await expect(status).toBeVisible();
     await expect(status).toHaveText(
       "The session answered: Failed to set model: No API key for openai/model-c"
@@ -676,7 +688,7 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
     await expect(send).toBeEnabled();
     await expectNoSidewaysScroll(page, testInfo);
 
-    await answer(id, stored.id, "Model set to anthropic/model-b.");
+    await answer(id, stored, "Model set to anthropic/model-b.");
     await expect(status).toHaveText("The session answered: Model set to anthropic/model-b.");
 
     // The send itself fails: Dispatch answers with a failed attempt, and the page says so with no
@@ -715,7 +727,7 @@ test("a switch's answer and the session's frame land in either order, and an ear
     await model.selectOption("anthropic/model-b");
     await expect(status).toHaveText("Switching model to anthropic/model-b…");
     const toModelB = await storedSwitch(id, "/model anthropic/model-b");
-    await answer(id, toModelB.id, "Model set to anthropic/model-b.");
+    await answer(id, toModelB, "Model set to anthropic/model-b.");
     await expect(status).toHaveText("The session answered: Model set to anthropic/model-b.");
     await expect(model).toBeEnabled();
     await expectPicked(page, "anthropic/model-a", "auto");
@@ -731,7 +743,7 @@ test("a switch's answer and the session's frame land in either order, and an ear
     await expectPicked(page, "anthropic/model-b", "high");
     await expect(status).toHaveText("Switching thinking level to high…");
     await expect(thinking).toBeDisabled();
-    await answer(id, toHigh.id, "Thinking set to high.");
+    await answer(id, toHigh, "Thinking set to high.");
     await expect(status).toHaveText("The session answered: Thinking set to high.");
     await expect(thinking).toBeEnabled();
 
@@ -748,7 +760,7 @@ test("a switch's answer and the session's frame land in either order, and an ear
     await thinking.selectOption("low");
     await expect(status).toHaveText("Switching thinking level to low…");
     const toLow = await storedSwitch(id, "/effort low");
-    await answer(id, toModelA.id, "Model set to anthropic/model-a.");
+    await answer(id, toModelA, "Model set to anthropic/model-a.");
     await expect(
       page
         .getByTestId("agent-dispatch-reply")
@@ -758,7 +770,7 @@ test("a switch's answer and the session's frame land in either order, and an ear
     await expect(thinking).toBeDisabled();
 
     await publishAgentStreamFrame(id, reported(5, "anthropic/model-a", "low"));
-    await answer(id, toLow.id, "Thinking set to low.");
+    await answer(id, toLow, "Thinking set to low.");
     await expect(status).toHaveText("The session answered: Thinking set to low.");
     await expectPicked(page, "anthropic/model-a", "low");
     await expect(model).toBeEnabled();

@@ -12,7 +12,7 @@ import {
   patchIssue,
   requestApproval,
 } from "./api";
-import { connectedDot, documentEditor } from "./editor";
+import { connectedDot, countDocumentSockets, documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -73,6 +73,8 @@ interface Opened {
   decision: Locator;
   inbox: Page;
   page: Page;
+  /** The document sockets the issue page has opened for the issue's spec, open or closed. */
+  sockets: () => number;
 }
 
 /** Opens alice's Inbox and the issue page, and waits until both show every ask open. */
@@ -84,12 +86,13 @@ async function openIssueAndInbox(browser: Browser, seeded: Seeded): Promise<Open
     await expect(inbox.getByTestId(`ask-${id}`)).toBeVisible();
   }
   const page = await alice.newPage();
+  const sockets = countDocumentSockets(page, seeded.artifactId);
   await page.goto(`/issues/${seeded.key}`);
   const decision = documentEditor(page).locator('[data-dispatch-ask-block="decision"]');
   await expectOpenDecision(decision);
   await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (3)");
   await expect(page.getByRole("button", { name: "Awaiting approval" })).toBeVisible();
-  return { decision, inbox, page };
+  return { decision, inbox, page, sockets };
 }
 
 /** The block hosts the open, answerable card. */
@@ -128,7 +131,7 @@ test("a person's Close withdraws the issue's asks, an earlier version keeps its 
 }) => {
   const seeded = await seedIssue("CLOSE");
   const opened = await openIssueAndInbox(browser, seeded);
-  const { decision, inbox, page } = opened;
+  const { decision, inbox, page, sockets } = opened;
   try {
     await page.getByRole("button", { name: "Close issue" }).click();
     await expectWithdrawn(opened, seeded, "alice");
@@ -152,19 +155,36 @@ test("a person's Close withdraws the issue's asks, an earlier version keeps its 
     await expect(saved).not.toContainText("Resolved");
     await page.getByRole("combobox", { name: "Version" }).selectOption("");
 
+    // The close dropped the document's socket, and its reconnect is admitted read-only while the
+    // issue is closed: the page a person who reopens more than 2 s after the close holds, which the
+    // Reopen below must make writable. The document socket's first reconnect is a uniform draw from
+    // [0, 2 s) (#2323), so a row must wait for the state the page settles in and never depend on
+    // which side of the draw a run lands. A reload cannot make a closed issue's document editable,
+    // so the page names none.
+    await expect.poll(sockets).toBe(2);
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect(documentEditor(page)).toHaveAttribute("contenteditable", "false");
+    await expect(page.getByText("Reload to edit.")).toHaveCount(0);
     await page.getByRole("button", { name: "Reopen" }).click();
     await expect(page.getByRole("button", { name: "Close issue" })).toBeVisible();
     await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (3)");
-    // The reopen wrote the block back to open, so the record is gone at once.
+    // The reopen wrote the block back to open, so the record is gone at once, and it dropped the
+    // document's socket again, so its reconnect, a draw of its own, is admitted writable: the row
+    // waits for the page that settles, editable, with the block hosting the open, answerable card,
+    // and no reload.
     await expect(decision.getByTestId("ask-resolution-badge")).toHaveCount(0);
     await expect(decision).not.toContainText("Withdrawn");
-    await expect(decision.locator('ul[aria-label="Options"] li')).toHaveCount(2);
+    await expect.poll(sockets).toBe(3);
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect(documentEditor(page)).toHaveAttribute("contenteditable", "true");
+    await expect(page.getByText("Reload to edit.")).toHaveCount(0);
+    await expectOpenDecision(decision);
+    await expect(decision.getByRole("radio", { name: "Hold Wait for review" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Awaiting approval" })).toBeVisible();
     for (const id of seeded.askIds) {
       await expect(inbox.getByTestId(`ask-${id}`)).toBeVisible();
     }
-    // The page admitted its document read-only while the issue was closed, and keeps that
-    // admission until a reload; reloaded, the block hosts the open, answerable card again.
+    // Reloaded, the block still hosts the open, answerable card.
     await page.reload();
     await expectOpenDecision(decision);
   } finally {

@@ -8,6 +8,7 @@ import {
   createIssue,
   createProject,
   createProjectDocument,
+  disconnectLiveSockets,
   getAsk,
   getInbox,
   getIssue,
@@ -182,7 +183,9 @@ test("an ask thread shows its newest two replies, expands older replies, and put
   }
 });
 
-test("an SSE reply refreshes a thread hydrated by the Inbox response", async ({ browser }) => {
+test("a reply on the live event feed refreshes a thread hydrated by the Inbox response", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Live Inbox thread" });
   const ask = await createAsk(issue.key, { question: "Which thread should refresh?" }, session);
@@ -229,8 +232,9 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
   const page = await alice.newPage();
   const listRequested = Promise.withResolvers<void>();
   const releaseList = Promise.withResolvers<void>();
-  const streamResponse = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === "/api/v1/events"
+  const streamResponse = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
   // Only the first response is held on the pre-event snapshot; a refresh the client issues
   // after the event reaches the real server, exactly as a browser's would.
@@ -303,26 +307,37 @@ test("a later Inbox response clears a hidden ask's pending refresh @phone", asyn
   });
 
   try {
-    const streamResponse = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/api/v1/events"
-    );
-    const reloaded = page.reload();
-    // A reload is a cold client: the server starts its stream at the current head and replays
-    // nothing. Posting the hidden reply before that stream is open means the frame never
-    // reaches the page, no pending marker is ever set, and everything below passes without
-    // testing anything. Wait for the stream as the sibling above does.
-    await Promise.all([listRequested.promise, streamResponse]);
+    // Every event frame for the hidden issue the reloaded page's live socket carries.
+    let hiddenFrames = 0;
+    page.on("websocket", (socket) => {
+      if (new URL(socket.url()).pathname !== "/ws/live") return;
+      socket.on("framereceived", ({ payload }) => {
+        const frame = JSON.parse(String(payload)) as {
+          readonly type?: string;
+          readonly event?: { readonly issue_key?: string };
+        };
+        if (frame.type === "event" && frame.event?.issue_key === hiddenIssue.key) hiddenFrames += 1;
+      });
+    });
     const pinnedRead = (request: { method(): string; url(): string }) =>
       request.method() === "GET" &&
       new URL(request.url()).pathname === "/api/v1/issues" &&
       new URL(request.url()).searchParams.get("pinned") === "true";
+    // The desktop sidebar reads pins during load. Start watching before reload so it cannot be
+    // mistaken for the post-reply pin refresh below.
+    const firstPinnedRead = page.waitForRequest(pinnedRead);
+    const reloaded = page.reload();
+    // A reload's first subscription resumes from its sign-in check's `event_head`, and the page
+    // reads the Inbox only once that check has answered, so the hidden reply, posted once the
+    // held Inbox read is out, is replayed to the page whenever its live socket opens: no wait for
+    // the socket.
+    await listRequested.promise;
     const isPhone = testInfo.project.name === "iphone";
     if (isPhone) {
       // The phone mounts the sidebar's reads, the pinned list among them, with its drawer.
-      const firstPinnedRead = page.waitForRequest(pinnedRead);
       await page.getByRole("button", { name: "Open navigation" }).click();
-      await firstPinnedRead;
     }
+    await firstPinnedRead;
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
@@ -340,6 +355,9 @@ test("a later Inbox response clears a hidden ask's pending refresh @phone", asyn
     if (isPhone) {
       await page.getByRole("button", { name: "Close navigation" }).click();
     }
+    // So the hidden reply reached the page before the held response lands: what follows tests its
+    // pending refresh rather than passing without one.
+    expect(hiddenFrames).toBeGreaterThan(0);
     releaseList.resolve();
     await reloaded;
 
@@ -867,7 +885,7 @@ test("a pending credential request alone is listed, counted, and keeps the empty
         requested_at: new Date().toISOString(),
       },
     ]);
-    // The broker publishes nothing to Dispatch's event stream, so the list is read on load.
+    // The broker publishes nothing to Dispatch's event feed, so the list is read on load.
     await page.reload();
     const requests = page.getByRole("region", { name: "Credential requests" });
     await expect(requests.getByRole("link")).toHaveCount(1);
@@ -1029,12 +1047,13 @@ test("a pending credential request naming only the request's session id shows it
 // No Dispatch event names a credential request (the broker holds no Dispatch credential by
 // design), so an Inbox already open can only learn of one, or that one is gone, from the
 // credential list's own poll (`CREDENTIAL_POLL_INTERVAL_MS`, `features/credentials/pending.ts`).
-// `page.clock` fast-forwards past that interval without disturbing the event stream: its watchdog
-// is 45 s (`WATCHDOG_MS`, `api/sse.ts`), well past the 15.5 s advanced here, so the stream never
-// reconnects and the poll is the only thing that could have surfaced the change. This repeats the
-// test above's setup rather than sharing a helper: this file's own convention is self-contained
-// tests, and the two prove different mechanisms (an initial load via reload vs. a live poll that
-// both shows and clears a request with no reload at all).
+// `page.clock` fast-forwards past that interval without disturbing the event feed: its socket is
+// replaced only after 45 s with no frame (`LIVE_SOCKET_SILENT_MS`, `api/live-socket.ts`), well
+// past the 15.5 s advanced here, so the feed never has a gap and the poll is the only thing that
+// could have surfaced the change. This repeats the test above's setup rather than sharing a
+// helper: this file's own convention is self-contained tests, and the two prove different
+// mechanisms (an initial load via reload vs. a live poll that both shows and clears a request
+// with no reload at all).
 test("a credential request seeded after the Inbox loads appears, and counts, without a reload; clearing it leaves the same way", async ({
   browser,
 }) => {
@@ -1073,16 +1092,17 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
   }
 });
 
-// With nothing waiting, "Nothing needs you" stays on screen through a window focus, which refetches
-// what has gone stale and reopens the event stream, whose reconnect refreshes every query (the page
-// has received no event, so it reopens with no `since`, which the server never answers
-// `X-Dispatch-Event-Replay: complete`), and through leaving the Inbox and coming back. Every
-// credential-list call after the page's first is held, so a refetch of that list, had one put it
-// back to loading, would take the empty state off the screen for as long as the hold lasts. A
-// Dispatch with no secrets broker answers the list `null` and is asked again only when the stream
-// reconnects, over the held answer, so the held second call leaves the empty state on screen; with
-// the fake broker the list keeps its empty answer on screen while a refetch runs. Neither page may
-// log a failed request.
+// With nothing waiting, "Nothing needs you" stays on screen through a window focus, through a gap
+// in the live socket that refreshes every query, and through leaving the Inbox and coming back. The
+// gap is one whose replay cannot cover it: the socket drops (1012) and the page's resume is
+// rewritten on its way to Dispatch to an id above the log's head, as after a reset log, so
+// Dispatch starts the feed at its head with `replay_complete: false` and the page refreshes every
+// query it holds. Every credential-list call after the page's first is held, so a refetch of that
+// list, had one put it back to loading, would take the empty state off the screen for as long as
+// the hold lasts. A Dispatch with no secrets broker answers the list `null` and is asked again only
+// after such a gap, over the held answer, so the held second call leaves the empty state on screen;
+// with the fake broker the list keeps its empty answer on screen while the refresh refetches it.
+// Neither page may log a failed request.
 test("Nothing needs you stays on screen through a focus and a return to the Inbox", async ({
   browser,
 }) => {
@@ -1102,9 +1122,48 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
       if (credentialCalls > 1) await held.promise;
       await route.continue();
     });
+    // Every live socket reaches Dispatch; once `forceGap` is set, the event feed's resume on a
+    // socket opened after it names an id far above the log's head.
+    let forceGap = false;
+    let opens = 0;
+    await page.routeWebSocket(/\/ws\/live$/u, (route) => {
+      opens += 1;
+      const rewrite = forceGap && opens > 1;
+      const server = route.connectToServer();
+      route.onMessage((message) => {
+        const frame = JSON.parse(String(message)) as {
+          readonly type?: string;
+          readonly view?: { readonly kind?: string };
+          readonly resume?: { readonly since?: string };
+        };
+        if (
+          rewrite &&
+          frame.type === "subscribe" &&
+          frame.view?.kind === "events" &&
+          frame.resume?.since !== undefined
+        ) {
+          server.send(JSON.stringify({ ...frame, resume: { since: "999999999999" } }));
+          return;
+        }
+        server.send(message);
+      });
+    });
+    // Each `replay_complete` an events_start carried to the page.
+    const starts: boolean[] = [];
+    page.on("websocket", (socket) => {
+      if (new URL(socket.url()).pathname !== "/ws/live") return;
+      socket.on("framereceived", ({ payload }) => {
+        const frame = JSON.parse(String(payload)) as {
+          readonly type?: string;
+          readonly replay_complete?: boolean;
+        };
+        if (frame.type === "events_start") starts.push(frame.replay_complete === true);
+      });
+    });
     const empty = page.getByText("Nothing needs you");
     await page.goto("/");
     await expect(empty).toBeVisible();
+    await expect.poll(() => starts).toEqual([true]);
     expect(credentialCalls).toBe(1);
     await page.evaluate(() => {
       const record = window as Window & { emptyStateGone?: number };
@@ -1116,15 +1175,21 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
       }).observe(document.body, { characterData: true, childList: true, subtree: true });
     });
 
-    // The stream's whole-cache refresh refetches the inbox list; once that has answered, every
-    // refetch the focus started is on the wire.
-    const refreshed = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/api/v1/inbox"
-    );
     await page.evaluate(() =>
       document.dispatchEvent(new Event("visibilitychange", { bubbles: true }))
     );
+    // The gap's whole-cache refresh refetches the inbox list; once that has answered, and the held
+    // credential list has been asked again, every refetch the gap started is on the wire.
+    const refreshed = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/inbox"
+    );
+    forceGap = true;
+    await disconnectLiveSockets();
+    // The first start resumed from the sign-in check's head, which the log holds; the one after
+    // the gap resumed above the head, so Dispatch could not replay what the page missed.
+    await expect.poll(() => starts).toEqual([true, false]);
     await refreshed;
+    await expect.poll(() => credentialCalls).toBeGreaterThanOrEqual(2);
     await page.evaluate(() => {
       const frames = Promise.withResolvers<void>();
       requestAnimationFrame(() => requestAnimationFrame(() => frames.resolve()));
@@ -1592,7 +1657,7 @@ test("a stale Inbox body landing inside the debounce seeds a later card's thread
       session
     );
     // ... and the pre-event body lands before the 100 ms flush. This hold is shorter than the
-    // batch window (`BATCH_WINDOW_MS` in `web/src/api/sse.ts`) by design and has no client-visible
+    // batch window (`BATCH_WINDOW_MS` in `web/src/api/event-feed.ts`) by design and has no client-visible
     // signal to wait on: a failure here means the window slipped, not that the marker regressed.
     await page.waitForTimeout(30);
     releaseSecond.resolve();

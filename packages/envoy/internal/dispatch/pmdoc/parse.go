@@ -38,7 +38,7 @@ var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
 			util.Prioritized(elementBlockCounter{}, -1),
-			util.Prioritized(nestingGuard{BlockParser: &typedDirectiveParser{}}, 950),
+			util.Prioritized(frontmatterAttempt{nestingGuard{BlockParser: &typedDirectiveParser{}}}, 950),
 			util.Prioritized(&unsupportedDirectiveParser{}, 900),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
 		),
@@ -55,7 +55,8 @@ var blockReader = markdownReader{md: goldmark.New(
 // quote parsers recording where their containers' lines end (endsContainers), its list and quote
 // parsers opening nothing at the document's level after an unclosed front-matter opener
 // (frontmatterAttempt), its list parser closing a list once a write's markdown has passed the
-// element guard (elementListGuard), and every one placing the block it opens where its text starts
+// element guard (elementListGuard), its HTML block parser opening a declaration block at any ASCII
+// letter (declarationBlockParser), and every one placing the block it opens where its text starts
 // (tabIndented).
 func blockParsers() []util.PrioritizedValue {
 	parsers := parser.DefaultBlockParsers()
@@ -65,6 +66,7 @@ func blockParsers() []util.PrioritizedValue {
 	fenceParser := reflect.TypeOf(parser.NewFencedCodeBlockParser())
 	quoteParser := reflect.TypeOf(parser.NewBlockquoteParser())
 	codeParser := reflect.TypeOf(parser.NewCodeBlockParser())
+	htmlParser := reflect.TypeOf(parser.NewHTMLBlockParser())
 	for index, prioritized := range parsers {
 		block := prioritized.Value.(parser.BlockParser)
 		switch reflect.TypeOf(block) {
@@ -80,6 +82,8 @@ func blockParsers() []util.PrioritizedValue {
 			parsers[index].Value = tabIndented{fenceClosure{block}, fenceStart}
 		case codeParser:
 			parsers[index].Value = tabIndented{codeColumns{block}, nil}
+		case htmlParser:
+			parsers[index].Value = tabIndented{declarationBlockParser{block}, nil}
 		default:
 			parsers[index].Value = tabIndented{block, nil}
 		}
@@ -97,6 +101,22 @@ func Parse(markdown string) (*Node, error) {
 // tree's: its padding spends a budget of its own (readBackBudget), not a caller write's.
 func ParseRendering(markdown string) (*Node, error) {
 	return parseStamped(markdown, readBackBudget())
+}
+
+// ParseWithSourceStarts parses markdown as Parse does and also answers, for each of the tree's
+// top-level children, the byte offset in markdown where the goldmark block it was converted from
+// starts (startOf): a paragraph's first line, and every other block's recorded position, so a
+// fenced code block starts at its opening fence. Front matter starts at 0. A child converted from
+// no goldmark block (the empty paragraph of a document with no blocks), or from one that records
+// no position, answers -1.
+func ParseWithSourceStarts(markdown string) (*Node, []int, error) {
+	var starts []int
+	doc, err := parseMarkdown(markdown, fromStart, true, NewWriteBudget(), &starts)
+	if err != nil {
+		return nil, nil, err
+	}
+	EnsureBlockIDs(doc)
+	return doc, starts, nil
 }
 
 func parseStamped(markdown string, budget *WriteBudget) (*Node, error) {
@@ -118,10 +138,11 @@ func parseStampedAt(markdown string, at origin, budget *WriteBudget) (*Node, err
 // markdown names on two blocks is refused (ErrSchema) instead of repaired, since the repair would
 // silently give the id to whichever block comes first. live is the document the markdown replaces
 // whole, or nil for a fragment or a new document: a repeat live already carries is not refused
-// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. A block id
-// of any length is written; one longer than text.MaxBlockIDBytes is simply no graph node
-// (refs.IndexBlocks). A document whose rendering, the markdown it is stored as, reads back
-// otherwise is refused (RefuseMisreadDocument).
+// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. Each untyped
+// block of live the markdown leaves unchanged keeps its id (carryBlockIDs), which the markdown
+// cannot name, so the write leaves it as it was. A block id of any length is written; one longer
+// than text.MaxBlockIDBytes is simply no graph node (refs.IndexBlocks). A document whose rendering,
+// the markdown it is stored as, reads back otherwise is refused (RefuseMisreadDocument).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	doc, err := parseForWrite(markdown, live, true, NewWriteBudget())
 	if err != nil {
@@ -142,6 +163,10 @@ func ParseFragment(markdown string, opensDocument bool, budget *WriteBudget) (*N
 	return parseForWrite(markdown, nil, opensDocument, budget)
 }
 
+// parseForWrite is the parse ParseForWrite and ParseFragment share. The markdown's tree is judged
+// for repeated ids (RepeatedBlockID) with only the ids it names, then takes the ids of the blocks
+// of live it leaves unchanged (carryBlockIDs), and only then is an id minted for each block still
+// without one (EnsureBlockIDs), so the refusal and the carry see only the ids the markdown named.
 func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *WriteBudget) (*Node, error) {
 	doc, err := parseUnstamped(LineFeeds(markdown), fromStart, readFrontmatter, budget)
 	if err != nil {
@@ -150,6 +175,7 @@ func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *Wr
 	if err := RepeatedBlockID(live, doc, doc); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSchema, err)
 	}
+	carryBlockIDs(doc, live)
 	EnsureBlockIDs(doc)
 	return doc, nil
 }
@@ -205,13 +231,19 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 // block that names none has none yet. Without readFrontmatter a closed front-matter block is read
 // as the blocks its lines make. at is where markdown stands in what the caller wrote, which a
 // refusal's line number counts from.
-func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (doc *Node, err error) {
+func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (*Node, error) {
+	return parseMarkdown(markdown, at, readFrontmatter, budget, nil)
+}
+
+// parseMarkdown is parseUnstamped that, given starts, also sets it to where each of the tree's
+// top-level children starts in markdown (sourceStarts).
+func parseMarkdown(markdown string, at origin, readFrontmatter bool, budget *WriteBudget, starts *[]int) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(markdown)
 	var front *Node
 	unclosedFrontmatter := false
+	rest := 0
 	if readFrontmatter {
-		var rest int
 		front, rest, unclosedFrontmatter = parseFrontmatterBlock(source)
 		at.line += bytes.Count(source[:rest], []byte("\n"))
 		at.server = max(0, at.server-rest)
@@ -242,7 +274,43 @@ func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *Wr
 	if err := doc.Validate(); err != nil {
 		return nil, err
 	}
+	if starts != nil {
+		*starts = sourceStarts(doc, root, front != nil, rest)
+	}
 	return doc, nil
+}
+
+// sourceStarts is where each of doc's top-level children starts in the markdown parsed: front
+// matter at 0, and every other child where the block of root it was converted from starts
+// (sourceStart), past the front matter's offset bytes. Each of root's blocks converts to one child
+// (parseBlocks); a child past root's last block, the empty paragraph of a document with no blocks,
+// answers -1.
+func sourceStarts(doc *Node, root ast.Node, front bool, offset int) []int {
+	starts := make([]int, len(doc.Children))
+	index := 0
+	if front {
+		index = 1
+	}
+	for block := root.FirstChild(); index < len(starts); index++ {
+		starts[index] = -1
+		if block == nil {
+			continue
+		}
+		if start := sourceStart(block); start >= 0 {
+			starts[index] = offset + start
+		}
+		block = block.NextSibling()
+	}
+	return starts
+}
+
+// sourceStart is startOf, or -1 for a block that records neither the position nor the line startOf
+// reads.
+func sourceStart(block ast.Node) int {
+	if (isParagraph(block) || block.Pos() < 0) && block.Lines().Len() == 0 {
+		return -1
+	}
+	return startOf(block)
 }
 
 // inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
@@ -257,8 +325,8 @@ func inlineParserOptions(rules delimiterRules) []parser.Option {
 		parser.WithInlineParsers(inlineParsers(rules)...),
 		parser.WithInlineParsers(
 			util.Prioritized(elementInlineCounter{}, -1),
-			util.Prioritized(newLinkifyGuard(), 999),
 		),
+		parser.WithInlineParsers(linkifyParsers()...),
 	}
 }
 
@@ -804,7 +872,7 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 			// refuseBlocks refuses every block outside convertedBlocks, and goldmark builds a row of cells.
 			panic(fmt.Sprintf("conversion reached a table row holding a %s block, which parseTableRow does not convert", child.Kind()))
 		}
-		content, err := parseTableCellInline(cell, source, nil, footnotes)
+		content, err := parseInline(cell, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
@@ -830,9 +898,19 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 }
 
 // parseImage converts image. Its alt text is its label's plain text as the browser editor's parser
-// takes it (mdast-util-to-string): every text in the label, marked or not, and the alt text of an
-// image in it. inlineNesting holds images within maxInlineNesting of one another, so each alt
-// text is copied into at most that many others.
+// takes it (mdast-util-to-string): every text in the label, marked or not, the alt text of an
+// image in it, and the value of a literal node, which that function writes before it looks at an
+// alt or at children — its `one` returns `value.value` for any node carrying a `value` field. Raw
+// HTML is such a literal node: mdast reads `<b>`, `</b>`, a comment, a declaration, a processing
+// instruction and CDATA each into one `html` node, and mdast's `html` is a literal, so the one
+// `html` arm here covers every kind of raw HTML a label can hold, writing its characters as
+// written from the node's `value` attribute. A `<span data-proof=…>` and its `</span>` are that
+// arm's too: parseInlineMarks reads them as the anchor mark on the text between them everywhere
+// but in an image's label, where they are the raw HTML they are (insideImage), since a label is
+// alt text and holds no mark, so an anchored label's characters reach this builder as the
+// browser editor's reader holds them in its alt.
+// inlineNesting holds images within maxInlineNesting of one another, so each alt text is copied
+// into at most that many others.
 func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Node, error) {
 	alt, err := parseInline(image, source, nil, footnotes)
 	if err != nil {
@@ -846,6 +924,9 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 		case "image":
 			nested, _ := child.Attrs["alt"].(string)
 			text.WriteString(nested)
+		case "html":
+			value, _ := child.Attrs["value"].(string)
+			text.WriteString(value)
 		}
 	}
 	return &Node{Type: "image", Attrs: Attrs{
@@ -855,16 +936,8 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 	}}, nil
 }
 
-func parseTableCellInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
-	return parseInlineWithTableCellLinks(parent, source, initial, footnotes, true)
-}
-
 func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
-	return parseInlineWithTableCellLinks(parent, source, initial, footnotes, false)
-}
-
-func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) ([]*Node, error) {
-	children, _, err := parseInlineMarks(parent, source, initial, footnotes, tableCell)
+	children, _, err := parseInlineMarks(parent, source, initial, footnotes)
 	return children, err
 }
 
@@ -874,7 +947,7 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 // opened it, whose own close would have ended it. So `*x *y* z*` is `x y` in emphasis and ` z`
 // without, and `****a****` is strong once. ended is the marks of initial such a close inside parent
 // ended, which the text after parent does not carry either.
-func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) (children []*Node, ended []Mark, err error) {
+func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) (children []*Node, ended []Mark, err error) {
 	trimLineSuffixes(parent, source)
 	active := append([]Mark(nil), initial...)
 	// within reads a mark node's content under active and marks, then ends for the text after it
@@ -886,7 +959,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 				next = append(next, mark)
 			}
 		}
-		content, inner, err := parseInlineMarks(node, source, next, footnotes, tableCell)
+		content, inner, err := parseInlineMarks(node, source, next, footnotes)
 		if err != nil {
 			return nil, err
 		}
@@ -963,23 +1036,27 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			}
 			children = append(children, content...)
 		case *ast.Link:
-			href := string(current.Destination)
-			if tableCell {
-				href = string(util.UnescapePunctuations(current.Destination))
-			}
+			// A destination's escapes and character references are decoded, as the browser editor's
+			// parser decodes them (escapeLinkDestination writes it back).
+			href := decodeMarkdownText(current.Destination)
 			content, err := within(current, Mark{Type: "link", Attrs: Attrs{"href": href, "title": titleOrNil(current.Title)}})
 			if err != nil {
 				return nil, nil, err
 			}
 			children = append(children, content...)
 		case *ast.AutoLink:
-			// goldmark gives an email autolink the bare address as its URL; the browser editor's
-			// engine, like a comment's renderer, links it to the address's mailto: URL.
-			href := string(current.URL(source))
-			if current.AutoLinkType == ast.AutoLinkEmail {
-				href = "mailto:" + href
-			}
-			children = appendTextPiece(children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
+			// The autolink's own link takes the place of a link the label around it opened, on the
+			// autolink's text alone: a text carries one link, as ProseMirror's Mark.addToSet holds
+			// it, where a mark excludes another of its own type, so the label's link leaves the set
+			// the autolink's enters. The label's link is not ended by it, so the text after the
+			// autolink carries it again, as the text before it does. Stacking the two would write a
+			// text under two links, a tree ProseMirror cannot hold and a rendering that does not
+			// read back as itself, so ParseForWrite would refuse a document a person can write in a
+			// comment. withoutMark filters in place, so it is given a copy and active is left as it
+			// is.
+			label, href := autolinkText(current, source)
+			link := Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}
+			children = appendTextPiece(children, label, append(withoutMark(slices.Clone(active), "link"), link))
 		case *extensionast.Strikethrough:
 			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {
@@ -1017,17 +1094,26 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": decoded}})
 		case *ast.RawHTML:
 			value := segmentsText(current.Segments, source)
-			if strings.EqualFold(strings.TrimSpace(value), "</span>") {
-				var removed bool
-				active, removed = closeAnchorMark(active)
-				if removed {
+			// An anchor mark reaches nothing inside an image's label: the label is the alt text,
+			// an attribute, which carries no mark, so reading a `<span data-proof=…>` as a mark
+			// there would leave the document without the mark and the alt without the span's
+			// characters. The browser editor's reader keeps them, since
+			// mdast-util-from-markdown builds the alt with resume() as the label closes, before
+			// remarkProofMarks turns such a span into a mark, so the alt it writes holds the
+			// span's bytes. Here the span is the raw HTML it is, which parseImage writes into the
+			// alt; everywhere else it is the anchor mark on the text up to its `</span>`.
+			if !insideImage(current) {
+				if strings.EqualFold(strings.TrimSpace(value), "</span>") {
+					var removed bool
+					active, removed = closeAnchorMark(active)
+					if removed {
+						continue
+					}
+				}
+				if anchor, ok := parseAnchorMark(value); ok {
+					active = append(active, anchor)
 					continue
 				}
-			}
-			anchor, ok := parseAnchorMark(value)
-			if ok {
-				active = append(active, anchor)
-				continue
 			}
 			children = append(children, &Node{Type: "html", Attrs: Attrs{"value": value}})
 		default:

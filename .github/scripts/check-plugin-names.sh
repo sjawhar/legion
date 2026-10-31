@@ -21,8 +21,8 @@
 # non-zero exits are hits (1) and a search that failed (2).
 #
 # Run from anywhere: .github/scripts/check-plugin-names.sh
-# CI runs it over the repository in the lint job of pr-and-main.yaml, beside check-private-names.sh,
-# and its tests (check-plugin-names.test.sh) in that workflow's test job.
+# CI runs it over the repository in ci.yaml's lint job, beside check-private-names.sh, and its
+# tests (check-plugin-names.test.sh) in ci.yaml's test job.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

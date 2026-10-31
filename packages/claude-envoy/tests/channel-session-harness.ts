@@ -190,16 +190,97 @@ export function settled(): Promise<void> {
 }
 
 /**
- * Polls `condition` every 5 ms until it holds; fails naming `what` after 5 s.
+ * Polls `condition` every 5 ms until it holds; fails after 5 s naming `what`, followed by what
+ * `state` reports at that moment (an `observedClient`'s `describe`, the test's own fakes).
  * Real time on purpose: the awaited conditions are filesystem writes the
  * server's own heartbeat performs, which no fake clock can advance. The
  * deadline is read from the monotonic clock, which `setSystemTime` leaves alone.
+ *
+ * The package's `test` script gives each test 60 s (`--timeout=60000`), above the longest chain of
+ * waits one test makes: a wait that succeeds can take up to its 5 s, so a stuck wait names its step
+ * only once every wait before it has had its time. The longest is eleven, counting the waits of
+ * `boot` and `reconnect` (envoy-channel-replay.test.ts, "a stored frame the channel never takes is
+ * named in one notice…"): 11 × 5 s, and 5 s more covers startup and shutdown. A test that chains
+ * more raises it. Under bun's default of 5 s its own timeout fired first, and a stuck wait never
+ * said which step it was.
  */
-export async function waitFor(condition: () => Promise<boolean>, what: string): Promise<void> {
+export async function waitFor(
+  condition: () => Promise<boolean>,
+  what: string,
+  state?: () => string,
+): Promise<void> {
   const deadline = performance.now() + 5_000
   while (!(await condition())) {
-    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    if (performance.now() > deadline) {
+      throw new Error(`timed out waiting for ${what}${state === undefined ? "" : ` (${state()})`}`)
+    }
     await Bun.sleep(5)
+  }
+}
+
+/**
+ * `client` with a record of what the session asked of it, for a `waitFor` that times out to
+ * report: how each role claim ended, the holder the last `getRole` answered, the calls still
+ * awaited, and when the last registration began. The server keeps whether a heartbeat tick is in
+ * flight to itself; from here a tick shows as its calls, since every tick starts by registering,
+ * so a call still awaited is the tick stuck on it, and none awaited with no registration for
+ * many heartbeats is a tick stuck between calls, or no tick starting at all.
+ */
+export function observedClient(client: FakeClient): {
+  readonly client: FakeClient
+  describe(): string
+} {
+  const claims: string[] = []
+  let answeredHolder: string | undefined
+  const awaited = new Set<{ readonly call: string; readonly at: number }>()
+  let lastRegistration: number | undefined
+  const observe = async <T>(call: string, run: () => Promise<T>): Promise<T> => {
+    const entry = { call, at: Date.now() }
+    awaited.add(entry)
+    try {
+      return await run()
+    } finally {
+      awaited.delete(entry)
+    }
+  }
+  return {
+    client: {
+      subscribe: (input) => {
+        lastRegistration = Date.now()
+        return observe(`subscribe ${input.sessionID}`, () => client.subscribe(input))
+      },
+      unsubscribe: (input) =>
+        observe(`unsubscribe ${input.sessionID}`, () => client.unsubscribe(input)),
+      unregisterSession: (sessionID) =>
+        observe(`unregister ${sessionID}`, () => client.unregisterSession(sessionID)),
+      setRole: (input) =>
+        observe(`setRole ${input.sessionID} ${input.role}`, async () => {
+          try {
+            const result = await client.setRole(input)
+            claims.push(result.claimed ? "claimed" : "refused")
+            return result
+          } catch (error) {
+            claims.push(`threw ${error instanceof Error ? error.message : String(error)}`)
+            throw error
+          }
+        }),
+      getRole: (role) =>
+        observe(`getRole ${role}`, async () => {
+          const info = await client.getRole(role)
+          answeredHolder = info.holder
+          return info
+        }),
+      getInterest: (sessionID) =>
+        observe(`getInterest ${sessionID}`, () => client.getInterest(sessionID)),
+      replay: (...args) => observe("replay", () => client.replay(...args)),
+    },
+    describe: () =>
+      [
+        `claims [${claims.join(", ")}]`,
+        `getRole last answered ${answeredHolder === undefined ? "never" : `holder "${answeredHolder}"`}`,
+        `calls awaited [${[...awaited].map(({ call, at }) => `${call} for ${Date.now() - at} ms`).join(", ")}]`,
+        `last registration ${lastRegistration === undefined ? "never" : `${Date.now() - lastRegistration} ms ago`}`,
+      ].join("; "),
   }
 }
 

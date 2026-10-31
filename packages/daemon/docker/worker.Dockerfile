@@ -1,9 +1,8 @@
-# syntax=mirror.gcr.io/docker/dockerfile:1.7
 # Legion worker image: every Legion agent process under `runtime: kubernetes` runs from this image.
 # Build context: the repo root. Built by .github/workflows/worker-image.yaml on the GitHub-hosted runner
 # (called from release.yaml beside its publish job, build only, then attested by a second call after
-# publish; on every head of a pull request against main that touches a file it builds from; or
-# dispatched post-merge). Never build it on a workstation — no `docker build`,
+# publish; from ci.yaml's worker-image job on every head of a pull request that touches a file it
+# builds from; or dispatched post-merge). Never build it on a workstation — no `docker build`,
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
 # Contents: pinned Bun; the Go `legion` (packages/daemon) compiled from this checkout at go.work's
@@ -16,21 +15,39 @@
 # packages/pi-legion at /opt/legion/pi-envoy and /opt/legion/pi-legion, the two roots a pod names as
 # Oh My Pi's explicit extensions with discovery on, linked into no profile (a plugin both linked and
 # explicit loads twice; the pod lane's probe refuses an image whose pi-envoy does), and
-# @bopstack/pi-codegraph (from npm, pinned), the one plugin linked into the isolated OMP profile
-# `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
-# /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
+# @bopstack/pi-codegraph (installed at /opt/omp-plugins from the committed lockfile at
+# packages/daemon/docker/omp-plugins), the one plugin linked into the isolated OMP profile
+# `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph,
+# installed from the committed lockfile at packages/daemon/docker/codegraph) at
+# /opt/codegraph/bin; @sjawhar/claude-envoy built from this checkout's packages/claude-envoy at
+# /opt/legion/claude-envoy, the plugin root a phase worker on the `claude` backend loads (its
+# dist/envoy-channel.js is that worker's one MCP server, its legion/ the generated Legion plugin
+# Claude Code loads beside it), which the plugin stage builds from source; the pin of Claude Code
+# and nothing else of it — packages/daemon/docker/claude-code's
+# package.json and package-lock.json, which pin @anthropic-ai/claude-code exactly with the npm
+# integrity of every tarball, at /opt/legion/claude-code. The image carries no Claude Code: its
+# license reserves every right and grants no redistribution, and this image is public, so a pod
+# whose role runs on the `claude` backend installs that pinned release from npm at every launch,
+# verified against the lockfile's integrity and the pinned version, and fails the launch if it
+# cannot (claudeCodeBlock, packages/daemon/internal/runtime/sandbox/plugins.go) — the pin is in
+# every image, whatever a deployment's worker_backends names; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
 # git backend requires it); gh; trixie's socat, which carries a connection over `kubectl exec` to a
 # loopback port inside the pod (the runtime-base stage says why); what the capability check
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
 # toolchain at go.work's version (go and gofmt, /opt/go) with trixie's gcc and libc6-dev, the C
 # compiler and headers Go's cgo and race detector need (cgo stays off by default), gopls,
 # typescript-language-server with TypeScript's tsc and tsserver, pyright with its pyright-langserver,
-# and trixie's python3, curl, wget, jq, openssh-client (ssh-keygen), util-linux (flock),
-# postgresql-client (psql), redis-tools (redis-cli), sqlite3, netcat-openbsd (nc), bind9-dnsutils
-# (dig) and chromium (the browser Oh My Pi finds on PATH); and a generic toolchain for the
+# and trixie's python3 with PyYAML (python3-yaml), curl, wget, jq, openssh-client (ssh-keygen),
+# util-linux (flock), postgresql-client (psql), redis-tools (redis-cli), sqlite3,
+# netcat-openbsd (nc), bind9-dnsutils (dig) and chromium (the browser Oh My Pi finds on PATH);
+# and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and
 # corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
-# each of these on PATH at /usr/local/bin or /usr/bin; and the license of every third-party piece of
+# each of these on PATH at /usr/local/bin or /usr/bin; the warm Go module cache of the two modules
+# go.work binds, at /home/legion/go/pkg/mod/cache/download, which /opt/go/go.env names first in
+# GOPROXY, and which carries no version list, so a version query falls through to the public
+# proxy (the go stage and the toolchain stage say why);
+# and the license of every third-party piece of
 # all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage; its Debian list comes from
 # the image's own dpkg database).
 # The last three RUNs gate the publish, as the runtime user: the first checks every binary runs on
@@ -39,9 +56,11 @@
 # runs every toolchain command, the language servers', Python's and the browser's included; the last
 # runs `legion version` and `legion probe-image`, which runs the three launch probes (the daemon's two
 # plus the session-storage probe), holds the Legion plugin to the daemon API contract and proves it
-# loads with the Envoy plugin, checks every image-site capability and TLS client against this image,
-# and prints their results before the OK line the daemon's probe Sandbox reads. A broken image never
-# publishes.
+# loads with the Envoy plugin, holds the claude-envoy root the same way — its built channel server,
+# its generated Legion plugin and the daemon API contract its manifest declares — and holds Claude
+# Code's pin to one a pod can install and verify, checks every image-site capability and TLS client
+# against this image, and prints their results before the OK line the daemon's probe Sandbox reads.
+# A broken image never publishes.
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
 # (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
@@ -110,14 +129,21 @@ ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c
 # apt packages carry no version pin (hadolint DL3008, ignored at each `apt-get install`): Debian's
 # archive serves only a suite's current version of a package, so a pinned version stops resolving at
 # the suite's next update. The base image's suite is the pin.
-# CodeGraph CLI and the Oh My Pi tool that wraps it, pinned to the
-# versions the devbox runs (`@colbymchenry/codegraph --version`, `omp/plugins/package.json`).
-ARG CODEGRAPH_VERSION=1.5.0
-ARG PI_CODEGRAPH_VERSION=0.1.1
+# The CodeGraph CLI and the Oh My Pi tool that wraps it are pinned to the versions the devbox runs
+# (`codegraph --version`, `omp/plugins/package.json`). Each one installs from a committed lockfile
+# in the plugin stage: the tool, @bopstack/pi-codegraph, from packages/daemon/docker/omp-plugins,
+# and the CLI, @colbymchenry/codegraph, from packages/daemon/docker/codegraph. Each package.json
+# pins its one package, and each bun.lock pins everything Bun installs beside it, so, as for the
+# language servers, there is no ARG pin to keep in step with them. An ARG cannot be that one place
+# for the CLI: a lockfile is committed, so it names the version too, and the ARG would be a second
+# name to keep in step. The notices stage reads the CLI's version out of that package.json, the way
+# it reads the language servers' versions out of theirs.
 
 # ------------------------------------------------------------------------------------------------
-# plugin: workspace install, the CodeGraph CLI, and the two packed plugins.
-FROM mirror.gcr.io/oven/bun:${BUN_VERSION}-slim AS plugin
+# plugin: workspace install, the Oh My Pi plugins' frozen install, the CodeGraph CLI's frozen
+# install, and the two packed plugins.
+# ghcr.io/sjawhar/legion/ci, the copy of oven/bun:1.4.4-slim (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4 AS plugin
 WORKDIR /repo
 # jq: the same omp.extensions rewrite release.yaml's pi_envoy_build and pi_legion_build jobs run.
 # python3/make/g++: native devDependencies in the workspace lockfile (mirrors
@@ -125,22 +151,6 @@ WORKDIR /repo
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
-ARG CODEGRAPH_VERSION
-# CodeGraph CLI (@colbymchenry/codegraph): `bin.codegraph` in the main npm package is a thin
-# `#!/usr/bin/env node` launcher shim that locates and execs the per-platform optionalDependency
-# (`@colbymchenry/codegraph-linux-x64`) — but this stage's base image has no system `node` (only
-# bun's own fallback shim, which the final runtime stage does not copy over), so the shim itself
-# cannot start. The platform package's own `bin/codegraph` is a `#!/bin/sh` wrapper that execs a
-# *bundled* Node 24 runtime sitting beside it — fully self-contained, no system node required
-# anywhere — so this copies that platform package alone, as `/opt/codegraph` in the runtime stage.
-# Installed before any application-source COPY: it depends on nothing this checkout builds, so a
-# source change to the plugin this stage packs never invalidates this layer. The bundled Node's
-# version goes to /out/codegraph-node-version, for the notices stage to fetch that release's LICENSE.
-RUN mkdir -p /out \
-    && bun add -g "@colbymchenry/codegraph@${CODEGRAPH_VERSION}" \
-    && cp -a /root/.bun/install/global/node_modules/@colbymchenry/codegraph-linux-x64 /out/codegraph \
-    && /out/codegraph/bin/codegraph --version \
-    && /out/codegraph/node --version > /out/codegraph-node-version
 COPY package.json bun.lock ./
 COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -155,6 +165,38 @@ COPY packages/dispatch/package.json packages/dispatch/package.json
 COPY packages/envoy/internal/dispatch/pmdoc/gen/package.json packages/envoy/internal/dispatch/pmdoc/gen/package.json
 COPY docs/site/package.json docs/site/package.json
 RUN bun install --frozen-lockfile
+# The Oh My Pi plugins the runtime stage links into the `legion` profile (its step 3), installed with
+# `bun install --frozen-lockfile` from the committed lockfile at packages/daemon/docker/omp-plugins, a
+# project of its own (no root workspace), into its own prefix, /opt/omp-plugins, which the runtime
+# stage copies whole. The tree is the lockfile's whatever the registry has published since, and a
+# package.json the lockfile does not match fails the install instead of resolving afresh; lifecycle
+# scripts stay off, as for the language servers. It follows the workspace install because every
+# frozen Bun install in this file comes after the root workspace manifests
+# (.github/scripts/check-bun-workspace-manifests.sh).
+WORKDIR /opt/omp-plugins
+COPY packages/daemon/docker/omp-plugins/package.json packages/daemon/docker/omp-plugins/bun.lock ./
+RUN bun install --frozen-lockfile --ignore-scripts
+# CodeGraph CLI (@colbymchenry/codegraph), installed the same way, from the committed lockfile at
+# packages/daemon/docker/codegraph, a project of its own. `bin.codegraph` in the main npm package
+# is a thin `#!/usr/bin/env node` launcher shim that locates and execs the per-platform
+# optionalDependency (`@colbymchenry/codegraph-linux-x64`) — but this stage's base image has no
+# system `node` (only bun's own fallback shim, which the final runtime stage does not copy over),
+# so the shim itself cannot start. The platform package's own `bin/codegraph` is a `#!/bin/sh`
+# wrapper that execs a *bundled* Node 24 runtime sitting beside it — fully self-contained, no
+# system node required anywhere — so this copies that platform package alone, as `/opt/codegraph`
+# in the runtime stage. The lockfile pins that bundle too, which the unlocked global install this
+# replaced resolved afresh at every build. The install precedes every application-source COPY, so
+# a source change to the plugins this stage packs never invalidates its layer. The bundled Node's
+# version goes to /out/codegraph-node-version, for the notices stage to fetch that release's
+# LICENSE.
+WORKDIR /opt/codegraph-cli
+COPY packages/daemon/docker/codegraph/package.json packages/daemon/docker/codegraph/bun.lock ./
+RUN mkdir -p /out \
+    && bun install --frozen-lockfile --ignore-scripts \
+    && cp -a node_modules/@colbymchenry/codegraph-linux-x64 /out/codegraph \
+    && /out/codegraph/bin/codegraph --version \
+    && /out/codegraph/node --version > /out/codegraph-node-version
+WORKDIR /repo
 COPY packages/contracts packages/contracts
 COPY packages/envoy-client packages/envoy-client
 COPY packages/pi-shared packages/pi-shared
@@ -183,12 +225,34 @@ RUN jq '.omp.extensions = ["dist/legion.js"]' package.json > tmp.json \
     && mkdir -p /out/pi-legion \
     && tar xzf ./*.tgz -C /out/pi-legion --strip-components=1
 
+# claude-envoy ships as a build of this checkout's source rather than a pack: no workflow releases
+# it, its skills/ are relative symlinks into the repository's skills/ that its package.json `files`
+# does not list, and a Claude Code marketplace install takes the git tree itself. That tree's dist/
+# and legion/ are no input here: a pull request never commits them, and main's Rebuild Claude Envoy
+# plugin workflow commits them only after each merge, so they lag the source they were built from.
+# `scripts/build.ts --out` writes /out/claude-envoy from the source instead: the plugin's own files
+# with its skills symlinks resolved, since the image carries no repository root for them to point
+# into, and a fresh dist/ and legion/. It refuses any Bun but the one .bun-version pins, which this
+# stage's base image carries (ARG BUN_VERSION; .github/scripts/check-bun-version.sh holds the ARG,
+# the pin and that base's row in .github/ci-images.yaml equal).
+# The copy drops group and other write, which a checkout's umask may have left, since the runtime
+# stage's final step refuses a plugin file anyone but root can write.
+COPY .bun-version /repo/.bun-version
+COPY packages/claude-envoy /repo/packages/claude-envoy
+WORKDIR /repo/packages/claude-envoy
+RUN set -eu; \
+    bun scripts/build.ts --out /out/claude-envoy; \
+    chmod -R go-w /out/claude-envoy; \
+    test -f /out/claude-envoy/dist/envoy-channel.js; \
+    test -f /out/claude-envoy/legion/.claude-plugin/plugin.json
+
 # ------------------------------------------------------------------------------------------------
 # tools: mise resolves the pinned OMP fork build, jj, and gh — the same backend and pin string the
 # daemon hands to `mise where` on a tmux host. mise itself is checked against MISE_SHA256 before
 # anything extracts or runs it, the same shape the toolchain stage below uses for uv, Node and the AWS
 # CLI; .github/actions/install-jj reads the same pair for the CI runner's own mise.
-FROM mirror.gcr.io/library/debian:bookworm-slim AS tools
+# ghcr.io/sjawhar/legion/ci, the copy of debian:bookworm-slim (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS tools
 ARG MISE_VERSION
 ARG MISE_SHA256
 ARG JJ_TOOL
@@ -230,8 +294,15 @@ RUN --mount=type=secret,id=github_token \
 # base. LEGION_REVISION is the commit the workflow builds; it is linked in so `legion version` names
 # it, and the build refuses without it.
 # The same toolchain builds gopls (static too) for the runtime stage's /usr/local/bin/gopls.
-FROM mirror.gcr.io/library/golang:${GO_VERSION}-alpine AS go
+# ghcr.io/sjawhar/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS go
 WORKDIR /src
+
+# A `|` between proxy entries makes a go command fall through to the next source after any error,
+# where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+# go.sum holds each module's hash either way, so this is a second path, not a weaker check
+# (sjawhar/legion#2512).
+ENV GOPROXY=https://proxy.golang.org|direct
 # The notices stage's Go part: go-licenses (pinned in go-third-party-notices.sh) is built in a layer of
 # its own, before the module files, so neither a source change nor a dependency bump rebuilds it.
 COPY scripts/go-third-party-notices.sh /usr/local/bin/
@@ -243,10 +314,29 @@ ARG GOPLS_VERSION
 RUN set -eu; \
     mkdir -p /out; \
     CGO_ENABLED=0 GOBIN=/out go install "golang.org/x/tools/gopls@v${GOPLS_VERSION}"
+# The module files and their download, in a layer above every source COPY, so a commit rebuilds
+# neither. GOMODCACHE moves to /gomodcache here, after the gopls and go-licenses layers. That
+# keeps the modules of those two tools out of this cache. The runtime stage ships
+# /gomodcache/cache/download to the workers as their warm module cache. One download serves the
+# build and the workers. A module-cache stage of its own would read the same 380 MiB from
+# proxy.golang.org a second time on every build that rebuilds this layer. This image's change
+# (sjawhar/legion#2512) counts every such read.
+ENV GOMODCACHE=/gomodcache
 COPY go.work go.work.sum ./
 COPY packages/daemon/go.mod packages/daemon/go.sum packages/daemon/
 COPY packages/envoy/go.mod packages/envoy/go.sum packages/envoy/
-RUN go mod download
+# The download writes an `@v/list` file for each module. That file names the versions this cache
+# holds, and no other. A file proxy answers a list request from it with no error, and a `|` in
+# GOPROXY falls through to the next source on an error alone, so proxy.golang.org would never be
+# asked. In every repository a role opens, `go get X@latest`, `go get -u`, `go list -m -u all`,
+# `go list -m -versions` and a `go mod tidy` that adds an import of a cached module would then
+# stop at the versions this build pinned, and nothing would tell the role. The RUN therefore
+# deletes every list file and every `@latest` file from the cache it ships. A version query gets
+# a 404 from the file proxy and falls through to the public proxy, while the `.info`, `.mod` and
+# `.zip` of a pinned version still come from the cache. The final stage's toolchain step refuses
+# an image that ships one of these files again.
+RUN go mod download \
+    && find /gomodcache/cache/download \( -path '*/@v/list' -o -name '@latest' \) -delete
 COPY packages/daemon packages/daemon
 COPY packages/envoy packages/envoy
 WORKDIR /src/packages/daemon
@@ -298,7 +388,25 @@ RUN test -n "$LEGION_REVISION" \
 # starts with an allowlisted environment that drops CGO_ENABLED, and a test may build with go under an
 # environment it constructs. It is only a default: a role's `CGO_ENABLED=1` overrides it, as the final
 # stage's ENV comment says.
-FROM mirror.gcr.io/library/debian:trixie-slim AS toolchain
+# The same RUN points /opt/go/go.env's GOPROXY at the warm module cache the runtime stage copies,
+# before the public proxy:
+# `file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct`.
+# A `|` between entries makes a go command fall through to the next source after any error. A
+# module the image's cache does not hold therefore still comes from proxy.golang.org, and an image
+# whose cache was deleted still builds. A version query falls through for the same reason: the go
+# stage deletes every `@v/list` and `@latest` file from the cache, so the file proxy answers
+# `go get X@latest` or `go list -m -versions` with a 404 and proxy.golang.org answers with the
+# releases it has (that stage says more). The line replaces the GOPROXY line stock go.env carries,
+# and the RUN fails if that line is absent. go.env is the place for it, not an `ENV` of the final
+# stage. Two facts decide that. First, a pod tells every role `GOMODCACHE=/legion/go/mod`, the
+# issue volume (roleEnvironment, packages/daemon/internal/runtime/sandbox/manifest.go). That
+# volume is empty in a fresh pod and dies with it (docs/kubernetes.md, "The disk dies with its
+# pod"), so the image's cache reaches a role as a proxy and not as its GOMODCACHE. Second, a
+# variable the final stage's ENV sets is one `runtime.kubernetes.pod.env` may not set
+# (sandbox/operatorpod.go imageEnv). A go.env default leaves GOPROXY to an operator, a role or a
+# command that names its own. The process environment outranks go.env, so each of those wins.
+# ghcr.io/sjawhar/legion/ci, the copy of debian:trixie-slim (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS toolchain
 ARG UV_VERSION
 ARG UV_SHA256
 ARG NODE_VERSION
@@ -343,6 +451,9 @@ RUN set -eu; \
     done; \
     tar -xzf "$t/go.tar.gz" -C /opt --no-same-owner; \
     printf 'CGO_ENABLED=0\n' >> /opt/go/go.env; \
+    goproxy='GOPROXY=file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct'; \
+    sed -i "s#^GOPROXY=.*#$goproxy#" /opt/go/go.env; \
+    grep -qxF "$goproxy" /opt/go/go.env; \
     for tool in go gofmt; do ln -s "/opt/go/bin/$tool" "/out/bin/$tool"; done; \
     unzip -q "$t/awscli.zip" -d "$t"; \
     "$t/aws/install" --install-dir /opt/aws-cli --bin-dir /out/bin; \
@@ -362,7 +473,8 @@ RUN set -eu; \
 # WORKDIR belong in the final stage, not here:
 # TestImageEnvIsWhatTheWorkerImageSets (packages/daemon/internal/runtime/sandbox/operatorpod_test.go)
 # reads the last stage's ENV only.
-FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
+# ghcr.io/sjawhar/legion/ci, the copy of debian:trixie-slim (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS runtime-base
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
 # chromium, python3, curl, wget, jq, openssh-client (for ssh-keygen), util-linux (for flock),
 # postgresql-client (for psql), redis-tools (for redis-cli), sqlite3, netcat-openbsd (for nc) and
@@ -428,6 +540,14 @@ FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
 # because it is only a Recommends of gcc-14, and Recommends stay out here as everywhere. cgo stays off
 # by default all the same (the final stage's `ENV CGO_ENABLED=0` and the toolchain stage's go.env line
 # say how).
+# python3-yaml: Debian's PyYAML for the image's python3, so `python3 -c "import yaml"` answers in a
+# pod. Six of this repository's own gates run python3 with `import yaml`:
+# .github/scripts/check-action-pins.sh, check-bun-version.sh, check-ci-images.sh,
+# check-image-trigger-paths.sh, check-release-credentials.sh, and check-ci-filters.sh through
+# ci_filter_coverage.py. A Legion role runs those gates on its own change before it returns the
+# work. apt is the one install route here. This stage's apt RUN is the only one the image allows
+# (the paragraph at the top of the stage says why), and trixie marks its python3 externally
+# managed (PEP 668), which refuses a pip install into it.
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
 # creates a missing parent with its own --chown, so a runtime-user copy into /opt/legion would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
@@ -439,7 +559,7 @@ FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
 # volumes over the same paths, as it always has. The final step refuses an image where any is not
 # root's or is not empty.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
+RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-client python3 python3-yaml redis-tools socat sqlite3 util-linux wget \
     && rm -rf /var/lib/apt/lists/* \
     && chmod u-s /usr/lib/openssh/ssh-keysign \
     && chmod g-s /usr/bin/ssh-agent \
@@ -488,11 +608,11 @@ ARG GH_TOOL
 ARG UV_VERSION
 ARG AWS_CLI_VERSION
 ARG KUBECTL_VERSION
-ARG CODEGRAPH_VERSION
 ARG GO_VERSION
 ARG GOPLS_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
 COPY packages/daemon/docker/language-servers/package.json /in/language-servers/package.json
+COPY packages/daemon/docker/codegraph/package.json /in/codegraph/package.json
 # The seventeen reads below (thirteen LICENSE/NOTICE fetches, four HEAD checks) are independent
 # of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
 # the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds
@@ -504,11 +624,12 @@ RUN set -eu; \
     jj_repo="${JJ_TOOL#github:}"; jj_repo="${jj_repo%@*}"; jj_tag="v${JJ_TOOL##*@}"; \
     gh_tag="v${GH_TOOL#gh@}"; \
     codegraph_node_tag="$(cat /in/codegraph-node-version)"; \
-    pin() { sed -n "s/^ *\"$1\": \"\([^\"]*\)\".*/\1/p" /in/language-servers/package.json; }; \
-    typescript_version=$(pin typescript); tsls_version=$(pin typescript-language-server); pyright_version=$(pin pyright); \
-    : "${typescript_version:?typescript pin not read from /in/language-servers/package.json}"; : "${tsls_version:?typescript-language-server pin not read from /in/language-servers/package.json}"; : "${pyright_version:?pyright pin not read from /in/language-servers/package.json}"; \
-    printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\ntypescript_version=%s\ntsls_version=%s\npyright_version=%s\n' \
-      "$omp_repo" "$omp_tag" "$jj_repo" "$jj_tag" "$gh_tag" "$codegraph_node_tag" \
+    pin() { sed -n "s|^ *\"$2\": \"\([^\"]*\)\".*|\1|p" "/in/$1/package.json"; }; \
+    typescript_version=$(pin language-servers typescript); tsls_version=$(pin language-servers typescript-language-server); pyright_version=$(pin language-servers pyright); \
+    codegraph_version=$(pin codegraph @colbymchenry/codegraph); \
+    : "${typescript_version:?typescript pin not read from /in/language-servers/package.json}"; : "${tsls_version:?typescript-language-server pin not read from /in/language-servers/package.json}"; : "${pyright_version:?pyright pin not read from /in/language-servers/package.json}"; : "${codegraph_version:?@colbymchenry/codegraph pin not read from /in/codegraph/package.json}"; \
+    printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\ncodegraph_version=%s\ntypescript_version=%s\ntsls_version=%s\npyright_version=%s\n' \
+      "$omp_repo" "$omp_tag" "$jj_repo" "$jj_tag" "$gh_tag" "$codegraph_node_tag" "$codegraph_version" \
       "$typescript_version" "$tsls_version" "$pyright_version" > /in/tags.env; \
     gh_raw_url() { printf 'https://raw.githubusercontent.com/%s/%s/%s' "$1" "$2" "$3"; }; \
     fetch() { curl -fsSL "$(gh_raw_url "$1" "$2" "$3")" -o "/in/$4"; }; \
@@ -521,7 +642,7 @@ RUN set -eu; \
     fetch astral-sh/uv "$UV_VERSION" LICENSE-MIT uv-LICENSE-MIT; \
     fetch aws/aws-cli "$AWS_CLI_VERSION" LICENSE.txt aws-cli-LICENSE.txt; \
     fetch kubernetes/kubernetes "v${KUBECTL_VERSION}" LICENSE kubectl-LICENSE; \
-    fetch colbymchenry/codegraph "v${CODEGRAPH_VERSION}" LICENSE codegraph-LICENSE; \
+    fetch colbymchenry/codegraph "v${codegraph_version}" LICENSE codegraph-LICENSE; \
     fetch nodejs/node "$codegraph_node_tag" LICENSE codegraph-node-LICENSE; \
     fetch golang/go "go${GO_VERSION}" LICENSE go-LICENSE; \
     fetch golang/tools "gopls/v${GOPLS_VERSION}" LICENSE gopls-LICENSE; \
@@ -540,6 +661,7 @@ COPY --from=debian-packages /debian-packages /in/debian-packages
 COPY --from=go /out/go-notices /in/go-notices
 COPY --from=plugin /out/pi-envoy/dist/THIRD_PARTY_NOTICES /in/pi-envoy-notices
 COPY --from=plugin /out/pi-legion/dist/THIRD_PARTY_NOTICES /in/pi-legion-notices
+COPY --from=plugin /out/claude-envoy/dist/THIRD_PARTY_NOTICES /in/claude-envoy-notices
 COPY --from=toolchain /opt/node/LICENSE /in/node-LICENSE
 COPY --from=toolchain /out/licenses/aws-cli-THIRD_PARTY_LICENSES /in/aws-cli-THIRD_PARTY_LICENSES
 COPY --from=toolchain /opt/language-servers/node_modules/typescript/LICENSE.txt /in/typescript-LICENSE.txt
@@ -549,11 +671,12 @@ COPY --from=toolchain /opt/language-servers/node_modules/pyright/LICENSE.txt /in
 COPY --from=toolchain /opt/language-servers/node_modules/pyright/dist/typeshed-fallback/LICENSE /in/pyright-typeshed-LICENSE
 RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
-      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs, listed in the first section below, carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
+      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs, listed in the first section below, carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /opt/omp-plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
       "Debian packages installed in the image, one per line, each with its terms in /usr/share/doc/<package>/copyright" /in/debian-packages \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
       "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
+      "npm packages inlined into the claude-envoy plugin, /opt/legion/claude-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/claude-envoy-notices \
       "Bun ${BUN_VERSION}, /usr/local/bin/bun: LICENSE.md of github.com/oven-sh/bun at bun-v${BUN_VERSION}" /in/bun-LICENSE.md \
       "Oh My Pi, /opt/omp and the native module it extracted into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
       "Oh My Pi: THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-THIRD-PARTY-NOTICES.txt \
@@ -569,7 +692,7 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "AWS CLI v2: the THIRD_PARTY_LICENSES its installer archive ships" /in/aws-cli-THIRD_PARTY_LICENSES \
       "kubectl v${KUBECTL_VERSION}, /usr/local/bin/kubectl: LICENSE of github.com/kubernetes/kubernetes at v${KUBECTL_VERSION}" /in/kubectl-LICENSE \
       "kubectl: the Go modules it links" /in/kubectl-modules \
-      "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${CODEGRAPH_VERSION}" /in/codegraph-LICENSE \
+      "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${codegraph_version}" /in/codegraph-LICENSE \
       "Go ${GO_VERSION}, /opt/go (go and gofmt at /usr/local/bin): LICENSE of github.com/golang/go at go${GO_VERSION}" /in/go-LICENSE \
       "gopls v${GOPLS_VERSION}, /usr/local/bin/gopls: LICENSE of github.com/golang/tools at gopls/v${GOPLS_VERSION}" /in/gopls-LICENSE \
       "gopls: the Go modules it links" /in/gopls-modules \
@@ -583,14 +706,13 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
 # runtime: the final stage, the image itself, on runtime-base.
 FROM runtime-base AS runtime
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
-ARG PI_CODEGRAPH_VERSION
-# Pinned Bun: the binary the plugin stage packed with (oven/bun:${BUN_VERSION}-slim).
+# Pinned Bun: the binary the plugin stage packed with (the copy of oven/bun:${BUN_VERSION}-slim).
 COPY --from=plugin /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s bun /usr/local/bin/bunx
 COPY --from=tools /opt/omp /opt/omp
 COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
-# The two plugins are root's like the rest of /opt/legion: every role of an issue pod that does not
+# The three plugins are root's like the rest of /opt/legion: every role of an issue pod that does not
 # install the plugins loads them from here, one container's filesystem, so a role that could write
 # them could change the plugin code its siblings load. A launch that installs the plugins loads them
 # from the role's state home on the issue volume instead, which every role of the issue can write;
@@ -598,9 +720,18 @@ COPY --from=tools /opt/tools/gh /usr/local/bin/gh
 # root's or is writable by anyone else.
 COPY --from=plugin /out/pi-envoy /opt/legion/pi-envoy
 COPY --from=plugin /out/pi-legion /opt/legion/pi-legion
+# claude-envoy, the plugin root a phase worker on the `claude` backend loads: its package root
+# beside the two Oh My Pi roots (names.go's claudePluginDir), holding the build of this checkout
+# the plugin stage made — `dist/envoy-channel.js`, the worker's one MCP server, and `legion/`, the
+# generated Legion plugin Claude Code loads as a second --plugin-dir (claudelaunch).
+# Every Claude role of an issue pod loads this one copy, so it is root's too.
+COPY --from=plugin /out/claude-envoy /opt/legion/claude-envoy
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
+# The Oh My Pi plugins' frozen install (the plugin stage's), root's like the two plugins above, so no
+# role can change the CodeGraph plugin code the profile's link (step 3 below) resolves to.
+COPY --from=plugin /opt/omp-plugins /opt/omp-plugins
 # OMP_PROFILE=legion: the isolated profile the CodeGraph plugin is linked into (plugins resolve to
 # /home/legion/.omp/profiles/legion/plugins/node_modules); the Envoy and Legion plugins stay unlinked,
 # named by path (step 3 below). LEGION_OMP_PATH: how `legion probe-image`
@@ -632,8 +763,12 @@ WORKDIR /home/legion
 #    container, with no network. A git older than 2.42 fails it (`Git does not recognize required
 #    option: porcelain`), which is how bookworm's 2.39.5 shipped in an image that passed every probe:
 #    `legion probe-image` never runs jj, and the daemon host's own git is newer.
-# 3. Link the CodeGraph plugin from npm into the legion profile (omp-plugins.lock.json records it
-#    enabled), and nothing else: /opt/legion/pi-envoy and /opt/legion/pi-legion are the two roots a
+# 3. Link the CodeGraph plugin's frozen install, /opt/omp-plugins/node_modules/@bopstack/pi-codegraph,
+#    into the legion profile: `omp plugin link` symlinks that directory into the profile's
+#    plugins/node_modules and records it enabled in omp-plugins.lock.json, resolving nothing from a
+#    registry (an npm spec given to `omp plugin install` runs `bun install` in the profile with no
+#    lockfile, which is how a dependency published moments before a build once failed it). Link it
+#    and nothing else: /opt/legion/pi-envoy and /opt/legion/pi-legion are the two roots a
 #    pod names as Oh My Pi's explicit extensions (--extension, discovery on;
 #    packages/daemon/internal/runtime/sandbox/manifest.go agentArgv), and must never be linked into
 #    the profile too. Oh My Pi loads an installed plugin and an explicit one by their own paths, so a
@@ -644,7 +779,7 @@ WORKDIR /home/legion
 #    from the profile instead, as a pane does, would stop the image probe certifying the two roots by
 #    path (bootgate.go's pod lane reads the explicit root's manifest for the contract and holds
 #    pi-envoy to its root): explicit roots and an unlinked profile are one decision. This is OMP's
-#    first run in the image, so the CodeGraph install also extracts OMP's native module from the
+#    first run in the image, so the CodeGraph link also extracts OMP's native module from the
 #    binary (no network) into /home/legion/.omp/natives/<version>/ — the build's success is the
 #    check. From 18.11.0 OMP writes only the variant the CPU selects, so this is the build runner's
 #    (ubuntu-24.04, AVX2), 111 MiB; this layer ships it, so a pod whose node selects the same
@@ -658,7 +793,7 @@ RUN set -eu; \
     git init --quiet --bare "$scratch/origin.git"; \
     jj git clone "$scratch/origin.git" "$scratch/clone"; \
     rm -rf "$scratch"; \
-    omp plugin install "@bopstack/pi-codegraph@${PI_CODEGRAPH_VERSION}"; \
+    omp plugin link /opt/omp-plugins/node_modules/@bopstack/pi-codegraph; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The toolchain goes in after the probe layer, so a new toolchain pin never rebuilds that layer and its
 # natives, and before `legion`, which changes on every commit. It lands outside HOME, in /opt and
@@ -673,6 +808,19 @@ COPY --from=toolchain /opt/go /opt/go
 COPY --from=toolchain /opt/aws-cli /opt/aws-cli
 COPY --from=toolchain /out/bin/ /usr/local/bin/
 COPY --from=go /out/gopls /usr/local/bin/gopls
+# The warm Go module cache: the download cache the go stage filled from go.work's module files
+# (its zips, .mod and .info files and their hashes). It lands at the module cache a go with no
+# GOMODCACHE in its environment reads, /home/legion/go/pkg/mod: HOME is /home/legion, and GOPATH is
+# its default, $HOME/go. The extracted module trees stay out of the image. go extracts what a build
+# needs from these zips, and a role's GOMODCACHE is the issue volume anyway (the toolchain stage's
+# go.env paragraph), so the image carries the one form both uses read: 380 MiB of download cache,
+# 419 module zips with their .mod, .info and hash files, rather than the 2.2 GiB of the whole
+# module cache, which is that download cache and the extracted trees together.
+# --chown makes the cache the runtime user's. Its files are mode 0644 in mode 0755 directories,
+# which is what lets a role add a module the cache does not hold. The read-only 0444 files and 0555
+# directories of a module cache are in the extracted trees, which this is not. The COPY sits in the
+# toolchain group for the toolchain group's reason: it changes only with go.work's module files.
+COPY --from=go --chown=1000:1000 /gomodcache/cache/download /home/legion/go/pkg/mod/cache/download
 USER root
 COPY --from=toolchain /out/chromium /opt/chromium
 COPY packages/daemon/docker/tls-roots /usr/share/legion/tls-roots
@@ -704,13 +852,22 @@ ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=
 # XDG_CONFIG_HOME in a scratch directory the step removes, so the layer keeps nothing (go, gofmt and
 # gopls write Go telemetry counters under the user config directory on every run, local mode being
 # Go's default; XDG_CONFIG_HOME is where they look for it). The image's own Python is checked here,
-# python3 --version; uv still installs each project's own at run time. `go version` alone would pass
+# python3 --version, and so is the PyYAML the gates import, `python3 -c 'import yaml'`;
+# uv still installs each project's own at run time. `go version` alone would pass
 # with a GOROOT go cannot find, and every `go build` would then fail, so the step requires GOROOT to
 # resolve to /opt/go through the /usr/local/bin/go symlink. gcc answers --version and is checked beside
 # go, whose cgo (and so whose race detector) needs it. The step then reads cgo's default with
 # CGO_ENABLED removed from the environment (XDG_CONFIG_HOME in scratch, so no `go env -w` file is
 # read), where only /opt/go/go.env's line holds it at 0, so the build fails if that line, the default
-# a scrubbed environment depends on, is ever lost. gofmt takes no --version; formatting a
+# a scrubbed environment depends on, is ever lost. It reads GOPROXY the same way, with GOPROXY
+# removed from the environment, and requires the line the toolchain stage wrote into the same
+# go.env: the warm module cache reaches a role through that line alone. It then requires the cache
+# to carry no `@v/list` and no `@latest` file. One of those files would answer every version query
+# of every repository a role opens with the versions this image pinned, and the fall-through to
+# proxy.golang.org happens on an error alone (the go stage says more). It then holds the cache
+# itself to the runtime user and to a writable download directory. A role that cannot write there
+# cannot add a module the cache does not hold. The step prints how many modules the cache carries.
+# gofmt takes no --version; formatting a
 # line from stdin is its check. pyright-langserver takes none either (it opens its LSP connection
 # first and refuses without --stdio), so `pyright --version`, the same package's CLI, answers for it.
 # Being its own layer above `legion`, it reruns only when the toolchain or a layer before it changes,
@@ -737,14 +894,28 @@ RUN set -eu; \
     pnpx --help > "$scratch/pnpx-help"; sed -n 1p "$scratch/pnpx-help"; \
     go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; gcc --version; \
     test "$(env -u CGO_ENABLED go env CGO_ENABLED)" = 0; \
+    test "$(env -u GOPROXY go env GOPROXY)" = 'file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct'; \
+    modcache=/home/legion/go/pkg/mod/cache/download; \
+    test -z "$(find "$modcache" \( -path '*/@v/list' -o -name '@latest' \) -print -quit)"; \
+    test "$(stat -c '%U' "$modcache")" = legion; test -w "$modcache"; \
+    printf 'go module cache: %s modules\n' "$(find "$modcache" -name '*.zip' | wc -l)"; \
     printf 'package main\n' | gofmt; gopls version; \
     typescript-language-server --version; tsc --version; pyright --version; \
-    python3 --version; curl --version; wget --version; jq --version; chromium --version; \
+    python3 --version; python3 -c 'import yaml'; curl --version; wget --version; jq --version; chromium --version; \
     socat -V > "$scratch/socat-V"; sed -n '/^socat version/p' "$scratch/socat-V"; \
     ssh-keygen -q -t ed25519 -N '' -f "$scratch/probe-key"; ssh-keygen -l -f "$scratch/probe-key.pub"; \
     flock --version; \
     psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; \
     rm -rf "$scratch"
+# Claude Code's pin, packages/daemon/docker/claude-code's package.json and package-lock.json, at
+# /opt/legion/claude-code (claudeCodePin, packages/daemon/internal/runtime/sandbox/names.go):
+# root's, under the root-owned /opt/legion the final step checks, and all of Claude Code this
+# image carries. A Claude role's start script copies both into its generation's directory on the
+# issue's volume and runs `npm ci --ignore-scripts --omit=dev` from them there, then holds the
+# installed binary's --version to this package.json's pin (claudeCodeBlock,
+# packages/daemon/internal/runtime/sandbox/plugins.go). After the toolchain step, so a pin bump
+# reruns no layer above it.
+COPY packages/daemon/docker/claude-code/package.json packages/daemon/docker/claude-code/package-lock.json /opt/legion/claude-code/
 # The notices stage's file, after the toolchain step so a notices change never reruns it, and before
 # `legion`, which changes on every commit while the notices change only with a dependency, a pin, or
 # runtime-base's package set.
@@ -765,8 +936,9 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # directory holds (packages/daemon/internal/runtime/workerbin).
 COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
-# neither rename nor replace what they hold; everything under /opt/legion/pi-envoy and
-# /opt/legion/pi-legion is root's and writable by no one else, so no role changes the image's copy
+# neither rename nor replace what they hold; everything under /opt/legion/pi-envoy,
+# /opt/legion/pi-legion and /opt/legion/claude-envoy is root's and writable by no one else, so no
+# role changes the image's copy
 # of the plugin code (a launch that installs the plugins loads them instead from the role's state
 # home on the issue volume, which every role of the issue can write); the role mount points under
 # /var/run/legion are root's, mode 0755 and empty;
@@ -778,12 +950,15 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # other path, so git's absolute path is as fixed as jj's and the real gh's (/usr/local/bin, copied
 # above) and a pod environment can name all three; gh resolves to the /opt/legion/bin/gh script and
 # the real gh behind it runs. flock is pinned the same way, and for a reason the other gates do not
-# cover: the install Legion renders for an installing launch calls it as /usr/bin/flock
-# (installBlock, packages/daemon/internal/runtime/sandbox/plugins.go), while the apt line, the
-# toolchain check above and the toolchain capability row all ask only that `flock` be on PATH — so
-# a base that kept flock and moved it would pass every one of those and fail every installing
-# launch. The declaration and the use have to agree on the path, and this is where they are held
-# to it. nc is pinned for the neighbouring reason: it is the one name here the alternatives system
+# cover: the installs Legion renders call it as /usr/bin/flock — the plugin pair's for an
+# installing launch (installBlock) and Claude Code's for every Claude launch (claudeCodeBlock), both
+# packages/daemon/internal/runtime/sandbox/plugins.go — while the apt line, the toolchain check
+# above and the toolchain capability row all ask only that `flock` be on PATH, so a base that kept
+# flock and moved it would pass every one of those and fail every such launch. The declaration and
+# the use have to agree on the path, and this is where they are held to it. npm is pinned at
+# /usr/local/bin/npm for the same reason: claudeCodeBlock calls it by that path, while the
+# toolchain check asks only that `npm` be on PATH.
+# nc is pinned for the neighbouring reason: it is the one name here the alternatives system
 # supplies rather than its own package (netcat-openbsd ships /usr/bin/nc.openbsd), so the
 # alternatives link is what the name resolves through and a base that changed it would pass every
 # other gate. The Envoy plugin's `dispatch` shim runs its bundled CLI under
@@ -798,12 +973,26 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # task agent and skill Legion's prompts name (shipped in the Legion plugin's agents/ and the two
 # plugins' dist/skills directories). It leaves those agents' models unresolved
 # (--skip-agent-models): the build has none of the operator's model configuration, which the pod
-# brings. It then checks every image-site capability as a worker's Oh My Pi would find each:
+# brings. --claude-root and --claude-code-pin name the Claude lane's two paths — the image's own,
+# which they default to, named here so this line says what it checks: the claude-envoy root's
+# built channel server (dist/envoy-channel.js) and generated Legion plugin
+# (legion/.claude-plugin/plugin.json), each a regular file, and that root's manifest held to the
+# same daemon API contract the Legion plugin is; and Claude Code's pin at /opt/legion/claude-code,
+# which must pin one exact version and lock it and its linux-x64 package with the sha512 integrity
+# `npm ci` holds each tarball to — so an image whose Claude worker could not start fails here
+# rather than at a pod's first claim. The image carries no Claude Code, and this step fetches none:
+# what it proves is that the image is self-consistent, and the fetch itself is proved where it
+# happens, by every Claude launch's start script, which fails that launch when the fetch fails or
+# does not verify (verifyClaude, packages/daemon/internal/daemon/bootgate.go, says why the probe
+# reads the pin rather than installing from it). Then it checks every image-site capability as a
+# worker's Oh My Pi would find each:
 # `omp setup python --check`; the chromium on PATH (or the browser a PUPPETEER_EXECUTABLE_PATH names)
 # with --version; gopls, typescript-language-server and pyright-langserver on PATH; the CodeGraph CLI
 # on PATH with its plugin enabled in the profile's lock; and go, gcc, curl, wget, python3, node, bun,
 # uv, kubectl, jq, ssh-keygen, flock, psql, redis-cli, sqlite3, nc and dig on PATH with `go version`
-# running (packages/daemon/internal/capabilities/image.go). It then has node, bun, omp's embedded bun,
+# running, and the claude-code row's claude-envoy root and Claude Code pin as the lane held them
+# with npm and node on PATH (packages/daemon/internal/capabilities/image.go). It then has node, bun,
+# omp's embedded bun,
 # CodeGraph's Node, uv, the AWS CLI, curl, Python, gh and Chromium refuse each compromised chain while
 # reaching the control. It
 # prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, every TLS
@@ -829,7 +1018,7 @@ RUN set -eu; \
     for dir in /var/run/legion/gh /var/run/legion/private /var/run/legion/state /var/run/legion/agent-secrets; do \
       test -z "$(ls -A "$dir")"; \
     done; \
-    plugins="$(find /opt/legion/pi-envoy /opt/legion/pi-legion \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print)"; \
+    plugins="$(find /opt/legion/pi-envoy /opt/legion/pi-legion /opt/legion/claude-envoy \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print)"; \
     echo "plugin files not root's alone: ${plugins:-none}"; test -z "$plugins"; \
     stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
     setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
@@ -838,6 +1027,7 @@ RUN set -eu; \
     nc="$(command -v nc)"; echo "nc: $nc"; test "$nc" = /usr/bin/nc; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     gh="$(command -v gh)"; echo "gh: $gh"; test "$gh" = /opt/legion/bin/gh; /usr/local/bin/gh --version; \
+    npm="$(command -v npm)"; echo "npm: $npm"; test "$npm" = /usr/local/bin/npm; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \
       /opt/legion/pi-envoy/bin/dispatch --help > /tmp/dispatch-help; \
     echo "dispatch: $(sed -n 1p /tmp/dispatch-help)"; grep -q '^Usage: dispatch ' /tmp/dispatch-help; \
@@ -849,7 +1039,7 @@ RUN set -eu; \
       expected="$(printf '%s\nplugins @sjawhar/pi-legion %s @sjawhar/pi-envoy %s' "$expected" "$PI_LEGION_VERSION" "$PI_ENVOY_VERSION")"; \
     fi; \
     test "$version" = "$expected"; \
-    legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models; \
+    legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --claude-root /opt/legion/claude-envoy --claude-code-pin /opt/legion/claude-code --skip-agent-models; \
     agent-secrets --help >/dev/null; \
     rm -rf /home/legion/.omp/profiles/legion/logs /home/legion/.config/go
 # The Kubernetes runtime sets every container's command explicitly
@@ -858,5 +1048,6 @@ RUN set -eu; \
 # worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … -- omp --mode rpc …`.
 # This ENTRYPOINT therefore only makes `docker run <image> version` and `docker run <image>
 # probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy
+# --claude-root /opt/legion/claude-envoy --claude-code-pin /opt/legion/claude-code
 # --skip-agent-models` work.
 ENTRYPOINT ["legion"]

@@ -22,8 +22,15 @@ parsed event under `dispatch: { issue_key, type, actor, payload }` with `payload
 type; a payload whose shape disagrees with its event type's schema is preserved as its raw parsed
 value under `dispatch`, never dropped or reduced to prose. A dispatch envelope with no payload at
 all falls back to the same `summary` field every other source gets and marks `unrecognised:
-payload`. The renderer skips Dispatch events marked `notify: false` on an issue topic before a host
-can steer or record them in its inbox, as well as events authored by the reader's own session.
+payload`. On a `notifications.dispatch.*` topic, which carries every event of its owner, the
+renderer skips the events Dispatch marks `quiet` — a delivery receipt, an anchor refresh,
+settings or per-viewer bookkeeping, a targeted message its session already had, an ask edit that
+only moved a version, or a version nobody named — before a host can steer or record them in its
+inbox, as well as events authored by the reader's own session. It does not skip on `notify`,
+which answers whether to wake the owner's route and is false for every event an agent wrote: a
+session that subscribed to an issue's topic subscribed for exactly that activity. A frame with no
+`quiet` was published before Dispatch stated it and is judged by `notify`, so a replay of the 72
+hours the stream still holds shows no receipts.
 
 ## Missed messages
 
@@ -132,10 +139,11 @@ redials. `patches/nats@2.29.3.patch` (root `package.json`'s `patchedDependencies
 at install and so carried by both plugins' bundles) makes `NodeTransport` keep the socket from the
 moment it dials and destroy it when a transport that never connected is closed, and makes the
 stale-connection close skip the flush (`transport.close()` in place of `transport.disconnect()`
-in `ProtocolHandler.disconnect()`; a client-initiated `reconnect()` still flushes);
-`src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a `patchedDependencies` entry
-for a version that is not installed without a word, so moving nats means carrying the patch to
-the new version.
+in `ProtocolHandler.disconnect()`, which the stale-connection close after two unanswered pings and
+`handleAuthError` with no `connectError` handler both call, while a client-initiated `reconnect()`
+still flushes); `src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a
+`patchedDependencies` entry for a version that is not installed without a word, so moving nats
+means carrying the patch to the new version.
 
 `@legion/envoy-client/test/stall-proxy`, `@legion/envoy-client/test/envoy-stack` and
 `@legion/envoy-client/test/stall-scenario` (Bun only, not built, in `test/`) are what the stall
@@ -362,7 +370,11 @@ Dispatch alone, now: `{ dispatch, warnings, missing }`, Dispatch's resolution be
 read found and did not read and the missing-file record, for a command, which says the `warnings`
 itself, and for a plugin whose Dispatch calls follow a file that changes. `activeDispatchSettings`
 turns its `dispatch` into the configuration a caller uses, null when nothing configures Dispatch,
-or a `dispatch config: <reason>` throw. `sessionEnvoySettings(file, env, { cwd, nats })` reads
+or a `dispatch config: <reason>` throw. `sessionDispatchUrl(file, env, { cwd })` is the URL alone
+(`dispatchUrl`), resolved without reading the token, so no `!` command runs, or undefined when
+Dispatch is off before its token is read: what a caller on a deadline names to
+`readSessionAnswers` as `dispatchUrl` while a kept resolution is off with an error, so only the list
+read from that URL stands in. `sessionEnvoySettings(file, env, { cwd, nats })` reads
 Envoy alone, for a command such as `envoy-send`.
 
 ## Dispatch
@@ -379,6 +391,42 @@ them, covers the issue; with Envoy off or no answer from the listener it names n
 `dispatch-subscribe.ts` turns `details.follows` into the one-time host notice.
 `dispatch-first.ts` reads the `dispatch-first` skill from a plugin's staged `skills/` and wraps it in
 `DISPATCH_FIRST_MARKER`, the text pi-envoy and claude-envoy inject into a session with Dispatch.
+
+Every write `DispatchClient` makes carries one key. `#send`, which every JSON, multipart and file
+call goes through, mints a `crypto.randomUUID()` `Idempotency-Key` per `POST` and `PATCH` call and
+sends it on every attempt of that call, so Dispatch runs the write once however many attempts
+reach it and answers a repeat with the first answer (`packages/envoy/cmd/dispatch/README.md`,
+"Keyed writes"); a `GET`, `PUT` or `DELETE` carries none and is sent once. The body is encoded once
+for the whole call, a multipart form under a boundary of its own, since a retry whose bytes differ
+from the first attempt's is a different request to Dispatch and its key is refused. A transport
+failure, any 5xx, a 408, a 429 and Dispatch's `409 KEY_IN_FLIGHT` (`retriesUnderKey`, the rule
+the page shares from `@legion/contracts`) are asked again under that key, `DISPATCH_WRITE_RETRY`'s
+pace: at most five attempts, 1, 2, 4 and 8 s apart, a longer `Retry-After` waited instead, and no
+attempt started more than 30 s after the first. An attempt that goes 20 s without progress before
+its answer begins (`silenceMs`) is cut off and asked again the same way, so a write Dispatch is
+slow to finish is answered `409 KEY_IN_FLIGHT` and then replayed rather than waited on for the
+whole deadline. Progress is the connection taking the body: a body of a megabyte or more goes out
+as a stream read 64 KiB at a time, with its `Content-Length`, and each read restarts the bound, so
+an upload on a slow line is never cut off while it is still going out; a smaller body leaves in
+one write. All of it sits inside the call's own 60 s deadline, so a Dispatch that is down holds a
+`dispatch` command, and the session waiting on it, no longer than that. The call's deadline and
+its cancellation end the write at once and are never retried. Any other answer - a 2xx, a replay,
+`422 KEY_REUSED`, another 4xx - is the answer, at once.
+
+A write is asked again only against a Dispatch this process has lately seen run the keyed layer,
+since an earlier Dispatch ignores the header and would run a retried write a second time. A
+failing answer that echoes the request's key (`Idempotency-Key: <key>`) is that proof itself, so
+one of Dispatch's 5xx, 429 or `409 KEY_IN_FLIGHT` is resent at once. A transport failure, a
+silence cut and a gateway's answer carry no echo, so they rely on what an echo, or a
+`GET /healthz` answering `idempotency_keys: true`, showed for that origin within the last five
+minutes (`KEYED_LAYER_MEMORY_MS`), and otherwise read `/healthz` before the first resend, bounded
+at 5 s. Its status is not read, since Dispatch answers 503 while its database or NATS is down and
+still says `idempotency_keys`; a probe that fails, times out, answers no JSON or lacks the field
+means no resend, and the attempt's own failure is the call's. Only a yes is remembered, and only
+for those five minutes, so a rollback to a Dispatch without the layer is noticed within that
+bound. Dispatch's own refusal that carries no echo says its layer did not judge the request, so
+it sets the memory aside and `/healthz` decides afresh. The probe runs only after a write has
+already failed, so the ordinary path makes no request of its own.
 
 A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
 `error`, is the error's message under its `code` (`HTTP_<status>` when the server set none), with
@@ -400,6 +448,31 @@ Dispatch, so the advice is to check whether it took effect before retrying. The 
 request, such as `dispatch issue-update`'s close path, give its own advice instead. The executor
 reads a status as Dispatch's meaning (a 404 as no linked issue, no such document, or a server
 without the route) only when `fromDispatch` is true.
+
+A write whose attempts run out is thrown as the last attempt's own error, with its usual message,
+except where that last answer alone would say the write never took effect while an earlier attempt
+may have reached Dispatch: a gateway's 408 or 429, Dispatch's own 429, and `409 KEY_IN_FLIGHT`.
+Those are a `DispatchWriteUnsettledError`, deliberately not a `DispatchServiceError`, since a
+caller reads one as a refusal Dispatch decided: its message is the last answer, the number of
+attempts, whether an earlier attempt may have reached Dispatch or Dispatch was still running one,
+and that the write may or may not have taken effect, so check before running it again - a new
+command is a new key. A write that ends with no answer at all is one too, naming the request: its
+last attempt cut off for silence ("made no progress for 20 s, so it was cut off"), or the call's
+deadline ending it while an attempt was out or after one that may have reached Dispatch ("had no
+definitive answer when its deadline ended it"); `last` is the cut or the timeout. A write Dispatch
+made whose answer is gone is a `DispatchWriteLandedError` (`code`, an `IdempotencyLandedCode`, and
+`status`): `409 KEY_COMMITTED`, a write that landed before its answer was lost, which Dispatch will
+not run again, or a replayed 2xx (`Idempotency-Replayed: ?1`) reading `ANSWER_NOT_KEPT`, a first
+answer larger than Dispatch keeps (`answerNotKept`, shared with the page). It is no refusal and no
+`DispatchServiceError`, and it is never asked again. Its message is the one line the session
+reads: the method and URL were made, why the answer is gone, and to read what it made back with
+`dispatch read` or the matching list. The `dispatch` command exits 0 on one and records
+`landed_without_answer: <code>` in its ledger entry. A step before the
+command's own write that lands this way fails the command (exit 1) with that line and what it
+means: a picture upload (nothing else was written: run the call again, which uploads it as its
+next version), or the closing reason of `issue-update --status done` (the close was not sent: read
+the issue's messages for the reason, then close with one that points at it). The close's own
+`PATCH` landing this way is the command's write, and exits 0.
 
 Successful write responses may include `advice`. The executor preserves that object as
 `details.advice` and appends short pointers after the subscription/follow suffix: a primary spec

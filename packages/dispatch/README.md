@@ -10,8 +10,8 @@ suggestions, artifacts, and durable event history. The Go server in
 `AuthGate` requests `GET /auth/whoami` and sends unauthenticated visitors to the
 Google sign-in flow. All application requests are same-origin. React Router serves
 the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the human-only
-repository-to-project settings page at `/settings`; TanStack Query and SSE keep
-the issue, Inbox, documents, and sidebar current.
+repository-to-project settings page at `/settings`; TanStack Query and the live socket's events
+feed keep the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Issue content has Spec,
 Conversation, Children, Artifacts, and Activity tabs; the Conversation lists one card per
@@ -213,9 +213,17 @@ block's changed version, every block `part_of` its document, a link in a list it
 every node carries (`made_by`, `made_at`, `changed_by`, `changed_at`, `parent`, `parent_version`)
 for an issue, a document, a file, a picture, a block, a removed pinned block, an ask, a comment, a
 message, a session and a component, read by its own reference, as an edge's other end and on the
-`Node:` line of `dispatch read`, and the older `GET /api/v1/artifacts/{id}/references` route. Each
-passing check prints `PASS: <section> <what>`; the first failure prints
-`FAIL: <section> <what>: <observed>` and exits 1. Its inputs:
+`Node:` line of `dispatch read`, and the older `GET /api/v1/artifacts/{id}/references` route. It
+also covers the blocks of comments and messages: a mention in a comment starts at the comment's
+block holding it, a node of kind `block`, id `comment/<uuid>#b<n>`, whose `parent` is the comment
+(A10);
+a comment or message reply that names a block (`--reply-to <comment>#b-b2`,
+`--in-reply-to <message>#b-b2`) is a `replies_to` edge to that block, and `dispatch read` quotes it
+(A7); the facts of a comment's and a message's block (A11); a block's id kept through a person's
+move, reword, split, deletion and restore over `PATCH /api/v1/comments/{id}` with carried ids, and
+a body holding block HTML read back byte for byte (A13); and a link pinned to a comment's block that
+reads `changed`, then `removed` (A15). Each passing check prints `PASS: <section> <what>`; the first
+failure prints `FAIL: <section> <what>: <observed>` and exits 1. Its inputs:
 
 - `DISPATCH_URL`, the server;
 - `DISPATCH_TOKEN`, an agent bearer, or `DISPATCH_TOKEN_FILE`, a file holding one, which the script
@@ -234,16 +242,23 @@ passing check prints `PASS: <section> <what>`; the first failure prints
   - `none` proves `GET /api/v1/settings/architecture-sources` is `[]` and prints
     `PASS: R12 component: this server has no architecture source, so it holds no component node`;
     a source present is a `FAIL` naming `COMPONENT_SOURCE=existing`.
+- `DEV_SIGNIN_LOGIN`, optional, a login the server's dev sign-in route (`/auth/_dev/signin`) signs
+  in: `bun run dispatch:local` has the route, a deployed server does not. Editing a comment is a
+  person's write, by its author alone, so the A13 and A15 comment sections sign that person in with a
+  cookie jar, write the comments that person edits, and send each edit with the dashboard's origin.
+  Unset, each of those two sections prints one
+  `SKIP: … PATCH /api/v1/comments/{id} is human-only and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; …`
+  line, and every other section runs.
 
-It writes two issues in `PROJECT`: the first holds the spec, comments and the documents `cites.md`,
-`decisions.md`, `changes.md` and `list.md`; the second is its child, retitled, holding an ask the
-script rewords, a comment on a quote of its spec and a reply, a message and a reply, and the
+It writes two issues in `PROJECT`: the first holds the spec, comments, messages and the documents
+`cites.md`, `decisions.md`, `changes.md` and `list.md`; the second is its child, retitled, holding an
+ask the script rewords, a comment on a quote of its spec and a reply, a message and a reply, and the
 uploads `notes.txt` and `pixel.png`. It resolves the ask and closes both issues, also when a check
 fails. Against `bun run dispatch:local`:
 
 ```bash
 DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \
-  COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 \
+  COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 DEV_SIGNIN_LOGIN=alice \
   bash packages/dispatch/e2e/acceptance/block-graph.sh
 ```
 
@@ -323,7 +338,10 @@ local proxy), a plain-HTTP origin that is not loopback and so not a secure conte
 forwards to the dev sign-in server at its loopback origin. The project proves a document takes a
 new paragraph and a comment renders formatted there, where `crypto.randomUUID` does not exist, and
 that the proxy refuses any other `Host` as the server's own fence does and keeps no request open
-upstream once a page has closed.
+upstream once a page has closed. `chromium-plain-http-sign-out` runs the sign-out rows of
+`e2e/keyed-writes.e2e.ts` on that same origin, where the browser has no `navigator.locks`, so a
+tab holds the person's writes for another tab's sign-out on a renewed lease rather than on that
+tab's lock.
 `bun run e2e:install` installs all three browsers.
 
 ## Phone check

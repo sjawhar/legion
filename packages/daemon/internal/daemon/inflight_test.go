@@ -472,6 +472,16 @@ func quietStop(t *testing.T, stopLog string) {
 	}
 }
 
+// bootSwept waits for the liveness sweep's first verdict, which a daemon with no controller
+// registered logs at WARN once per worker boot timeout: a test that requires a quiet stop calls it
+// before the stop marks its log, so the boot's line is never read as the stop's.
+func bootSwept(t *testing.T, logs *syncBuffer) {
+	t.Helper()
+	testwait.Eventually(t, "the liveness sweep's first verdict", func() bool {
+		return strings.Contains(logs.String(), `"msg":"`+controllerNotRegistered)
+	})
+}
+
 // storedClaim is token's claim as the store holds it, as the next boot reads it.
 func storedClaim(t *testing.T, cfg config.Config, token claim.Token) supervise.Claim {
 	t.Helper()
@@ -541,6 +551,7 @@ func TestRunEndsAnOperatorSpawnInFlightWithTheDrainAndNamesIt(t *testing.T) {
 		t.Fatalf("the operator's spawn never reached the runtime; log:\n%s", logs)
 	}
 
+	bootSwept(t, logs)
 	took, stopLog := stopWithin(t, d, logs, stopBound(o.stopBudget))
 
 	t.Logf("stopped in %s with the operator's spawn of %s waiting in the runtime; it was answered %d", took, spawning, <-answered)
@@ -589,6 +600,7 @@ func TestRunRecordsAnOperatorSuspensionWhoseProcessExitsWithinTheDrain(t *testin
 		t.Fatalf("the operator's suspension never reached the runtime; log:\n%s", logs)
 	}
 
+	bootSwept(t, logs)
 	d.stopped = true
 	d.transport.CloseIdleConnections()
 	mark := len(logs.String())
@@ -692,6 +704,7 @@ func TestAFrameAShimWritesDuringTheDrainWaitsInItsBacklogForTheNextDaemon(t *tes
 		t.Fatalf("the operator's suspension never reached the runtime; log:\n%s", logs)
 	}
 
+	bootSwept(t, logs)
 	d.stopped = true
 	d.transport.CloseIdleConnections()
 	mark := len(logs.String())
@@ -829,6 +842,7 @@ func TestAnOperatorsTreeCloseInFlightAtTheStopStopsTheTreesClaimsOverTheirConnec
 		t.Fatalf("the root's release never reached the runtime; log:\n%s", logs)
 	}
 
+	bootSwept(t, logs)
 	d.stopped = true
 	d.transport.CloseIdleConnections()
 	mark := len(logs.String())

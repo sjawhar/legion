@@ -44,6 +44,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/redact"
 	"github.com/sjawhar/envoy/listenfd"
@@ -83,7 +84,12 @@ type bootConfig struct {
 	SignInGroup        string
 	SignInDomain       string
 	NATSDisabled       bool
-	TestHooksEnabled   bool
+	// NATSReplicas is ENVOY_NATS_REPLICAS, the deployment's replica count for the stream and the
+	// webhook redelivery bucket, and StreamMaxBytes is ENVOY_STREAM_MAX_BYTES, the stream's byte
+	// limit or 0 for none set (bus.ParseNATSReplicas, bus.ParseStreamMaxBytes).
+	NATSReplicas     int
+	StreamMaxBytes   int64
+	TestHooksEnabled bool
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
@@ -208,7 +214,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverClient(dispatchStreamOptions(boot, env)...)...)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -246,6 +252,17 @@ func main() {
 	if err := database.Migrate(ctx); err != nil {
 		slog.Error("dispatch: migrate database", "error", explainMigrateError(err))
 		os.Exit(1)
+	}
+
+	// asks_anchor_artifact_id (migration 0148) indexes the anchors whose artifact_id is a
+	// lower-case document id, the form every server-written anchor carries. A row an earlier
+	// release stored with another spelling is left out, and settlement records no mark for it:
+	// the migration refuses no such row, so the log is where its count is visible. A count that
+	// fails is a log line too, never a boot that stops: the server serves without it.
+	if outside, err := database.AsksOutsideAnchorArtifactIndex(ctx); err != nil {
+		slog.Warn("dispatch: count the anchored asks left out of asks_anchor_artifact_id", "error", err)
+	} else if outside > 0 {
+		slog.Warn("dispatch: anchored asks left out of asks_anchor_artifact_id: their anchor's artifact_id is not a lower-case document id, so settlement records no mark for them", "count", outside)
 	}
 
 	if err := validateDefaultProject(ctx, database, boot.DefaultProject); err != nil {
@@ -405,6 +422,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The registry /metrics serves (dispatchHandler), built whether or not NATS is configured:
+	// the probe answers from the moment the server does, and a process with no bus simply leaves
+	// the outbox's counter at zero.
+	met := metrics.New()
+	outboxPublishFailures := met.NewCounter(
+		"envoy_dispatch_outbox_publish_failures_total",
+		"Destinations of an outbox publish attempt that did not reach NATS, by reason: one per destination denied, refused or otherwise failed",
+	)
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
 		if err != nil {
@@ -412,11 +437,12 @@ func main() {
 			os.Exit(1)
 		}
 		go outbox.Run(ctx, outbox.Deps{
-			Store:     &store.Store{Pool: outboxPool},
-			Publisher: natsClient,
-			Broker:    broker,
-			Docs:      documentService,
-			Leases:    leases,
+			Store:           &store.Store{Pool: outboxPool},
+			Publisher:       natsClient,
+			Broker:          broker,
+			Docs:            documentService,
+			Leases:          leases,
+			PublishFailures: outboxPublishFailures,
 		})
 	}
 	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: the server's
@@ -442,8 +468,9 @@ func main() {
 	// Postgres, and the room this process holds for it closes within that round trip, so its
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
-	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
+	// The related-item check's keyword statistics (each project's df and N), rebuilt at
+	// boot and every ten minutes.
+	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone
@@ -466,7 +493,7 @@ func main() {
 	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
 	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, leases)
 
-	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
+	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase, boot.NATSReplicas)
 	if err != nil {
 		slog.Error("dispatch: open webhook redelivery", "error", err)
 		os.Exit(1)
@@ -518,8 +545,13 @@ func main() {
 	}
 	announcer := startup.New(startup.Deps{Pool: database.Pool, Publisher: announcements})
 
-	routesHandler, waitDelivery := routes.New(appCtx)
-	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
+	routesHandler, background := routes.New(appCtx)
+	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule; the
+	// same pass deletes the Idempotency-Keys past their 24 hours and sends every delivery a process
+	// that died left owed (INFRA-258), which is why it starts once the API server it resumes them
+	// through is built.
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases, background.ResumeDeliveries)
+	handler := dispatchHandler(routesHandler, met, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
 	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
@@ -550,7 +582,7 @@ func main() {
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery,
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, background.Wait,
 		deregisterAfterDrain(registration), registration.Lost()); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
@@ -642,6 +674,24 @@ func loadAppCredentials(env settingValues, dataDir string) (*auth.AppConfig, app
 	return cfg, appCredentialSource{Path: path}, nil
 }
 
+// dispatchStreamOptions are the options the Dispatch server's publisher connects with, the
+// stream's other owner (bus.ConnectOwningStream): its name, the settings table's lookup for NATS's
+// reach and nkey, the deployment's replica count and byte limit from boot, and the webhook
+// redelivery bucket, the one bucket Dispatch opens at that count (webhookSweeper) and its NATS
+// grant covers, which the client's keeper raises back to it when a concurrent start or an
+// operator lowered it (bus.WithKeptBuckets). A server with no App key opens no such bucket, and
+// the keeper skips one that does not exist. main and the tests that start Dispatch's stream both
+// take them from here.
+func dispatchStreamOptions(boot bootConfig, env settingValues) []bus.ConnectOption {
+	return []bus.ConnectOption{
+		bus.WithEnvironment(env.lookup),
+		bus.WithName("dispatch"),
+		bus.WithReplicas(boot.NATSReplicas),
+		bus.WithStreamMaxBytes(boot.StreamMaxBytes),
+		bus.WithKeptBuckets(bus.WebhookRedeliveryBucket),
+	}
+}
+
 // resolveBootConfig is the server's configuration from what the settings table read (env),
 // checked before anything connects. It holds the settings main hands on as values; three groups
 // reach their readers from env instead, through the table's lookup: the GitHub App credentials
@@ -696,6 +746,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.PprofAddr = pprofAddr
+	if boot.NATSReplicas, err = bus.ParseNATSReplicas(env.get(bus.ReplicasEnvVar)); err != nil {
+		return bootConfig{}, err
+	}
+	if boot.StreamMaxBytes, err = bus.ParseStreamMaxBytes(env.get(bus.StreamMaxBytesEnvVar)); err != nil {
+		return bootConfig{}, err
+	}
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
 		if !boot.TestHooksEnabled {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
@@ -743,9 +799,9 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 
 	switch mode := identityMode; {
 	case mode == "" || mode == "cookie":
-		if err := requireCookieSignIn(boot, devSignIn); err != nil {
-			return bootConfig{}, err
-		}
+		// Cookie identity takes no sign-in setting: with none set, and no DISPATCH_DEV_SIGNIN,
+		// Dispatch asks nobody to sign in, refuses every cookie an earlier sign-in minted (requestIdentityFor), and serves
+		// its agent-token API alone.
 	case strings.HasPrefix(mode, "header:"):
 		boot.IdentityHeader = strings.TrimSpace(strings.TrimPrefix(mode, "header:"))
 		if boot.IdentityHeader == "" {
@@ -1174,15 +1230,19 @@ func serverClient(extra ...bus.ConnectOption) []bus.ConnectOption {
 	return extra
 }
 
-// dispatchHandler mounts the one /healthz the process serves, and /livez, above every dashboard
-// and API route, so each probe is answered whatever the router is doing. Go's ServeMux prefers
-// the longer pattern, so "GET /healthz" and "GET /livez" win over the router's "/". /livez
-// answers 204 and touches nothing: it says only that the process answers, for a liveness or
-// startup probe, which must not wait on or fail with Postgres, NATS or the file store.
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
+// dispatchHandler mounts the three probes the process serves - /healthz, /livez and /metrics -
+// above every dashboard and API route, so each is answered whatever the router is doing. Go's
+// ServeMux prefers the longer pattern, so "GET /healthz", "GET /livez" and "GET /metrics" win
+// over the router's "/", which is also what keeps a scrape of /metrics from falling through to
+// the SPA shell the router answers an unknown path with. /livez answers 204 and touches nothing:
+// it says only that the process answers, for a liveness or startup probe, which must not wait on
+// or fail with Postgres, NATS or the file store. /metrics is unauthenticated like the other two,
+// so whoever reaches Dispatch's HTTP port can read it, and registry serves it.
+func dispatchHandler(handler http.Handler, registry *metrics.Registry, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer, issuers))
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	mux.Handle("GET /metrics", registry.Handler())
 	mux.Handle("/", handler)
 	return mux
 }
@@ -1247,6 +1307,11 @@ func serviceTokenVerifier(boot bootConfig) *oidc.LazyVerifier {
 // compares commit and schema_version with the commit its image pin names and that commit's
 // migrations, so neither is ever filled with a guess; the Legion daemon reads fleet_commit, since
 // mid-roll whichever process answers it may serve a build the rest do not.
+//
+// `idempotency_keys` is true on every build that judges a write's Idempotency-Key (INFRA-258,
+// api/request_keys.go): the agents' client reads it before it retries a write under its key, since
+// an earlier Dispatch ignores the header and would run a retried write again. It is a fact of the
+// binary, never of the probe, so it is true whatever the database or NATS answer.
 func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
@@ -1306,16 +1371,21 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(struct {
-			OK            bool    `json:"ok"`
-			DB            bool    `json:"db"`
-			NATS          *bool   `json:"nats"`
-			Files         *bool   `json:"files"`
-			SignIn        *bool   `json:"signin"`
-			ServiceTokens *bool   `json:"service_tokens"`
-			Commit        *string `json:"commit"`
-			FleetCommit   *string `json:"fleet_commit"`
-			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK, Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion})
+			OK              bool    `json:"ok"`
+			DB              bool    `json:"db"`
+			NATS            *bool   `json:"nats"`
+			Files           *bool   `json:"files"`
+			SignIn          *bool   `json:"signin"`
+			ServiceTokens   *bool   `json:"service_tokens"`
+			Commit          *string `json:"commit"`
+			FleetCommit     *string `json:"fleet_commit"`
+			SchemaVersion   *int    `json:"schema_version"`
+			IdempotencyKeys bool    `json:"idempotency_keys"`
+		}{
+			OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK,
+			Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion,
+			IdempotencyKeys: true,
+		})
 	}
 }
 

@@ -14,7 +14,7 @@ import { useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
-import type { Project, SearchAsk, SearchResult, SearchResultKind } from "../../api/types";
+import type { Project, SearchResult, SearchResultKind } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   backdrop50,
@@ -36,15 +36,14 @@ import {
   textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
 import { statusText } from "../project/board-model";
-import { AskResolutionLine } from "../refs/AgentName";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
-import { markdownHead, searchSnippetMarkdown } from "../refs/markdown-fragment";
+import { searchSnippetMarkdown } from "../refs/markdown-fragment";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildProjectPath, type DispatchReferenceRoute, nodeRouteFromHref } from "../refs/routes";
-import { Timestamp } from "../refs/Timestamp";
 import { appKeymap, DIALOG_SCOPE, type KeymapAction, useKeymap } from "../shell/keymap";
 import { KeyHints } from "../shell/ShortcutHelp";
 import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
+import { AskHitStatus } from "./AskHitStatus";
 import { groupResults, kindLabel, optionId, stepActive } from "./search-model";
 
 const emptyResults: SearchResult[] = [];
@@ -233,60 +232,6 @@ function ResultOption({
       />
       {result.ask === undefined ? null : <AskHitStatus ask={result.ask} muted={muted} />}
     </PaletteOption>
-  );
-}
-
-function askStateLabel(ask: SearchAsk): string {
-  if (ask.state === "open") return "Open";
-  if (ask.state === "answered") return "Answered";
-  return ask.answer === undefined ? "Closed, no answer" : "Closed after an answer";
-}
-
-/** How much of an ask's answer an ask hit carries: about three lines of the palette's widest row,
- *  on the scale of the excerpt's 24-word window. The three-line clamp is CSS only, so an answer
- *  left whole (up to 1 MiB) would sit inside the option, which a screen reader then reads as the
- *  option's name from start to end. */
-export const ANSWER_PREVIEW_CHARS = 280;
-
-/** Where an ask hit stands, under its excerpt: a badge for its state, who closed it and when,
- *  and its latest answer - who gave it, when, the options chosen and the start of its text
- *  (`ANSWER_PREVIEW_CHARS`), clamped to three lines. Every part wraps inside the row, so a long
- *  label or name never widens the palette. */
-function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean }): ReactNode {
-  const answer = ask.state === "open" ? undefined : ask.answer;
-  return (
-    <div
-      className={`mt-1 min-w-0 text-xs ${muted ? textMutedOnSelectedCard : textSecondaryOnSurface}`}
-    >
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
-        <span className={`rounded-full px-2 py-0.5 font-medium ${badgeLow.bg} ${badgeLow.text}`}>
-          {askStateLabel(ask)}
-        </span>
-        {ask.state === "resolved" ? (
-          <span className="min-w-0 [overflow-wrap:anywhere]">
-            <AskResolutionLine agent="static" resolution={ask.resolution} /> ·{" "}
-            <Timestamp at={ask.resolution.at} />
-          </span>
-        ) : null}
-        {answer === undefined ? null : (
-          <span
-            className={`min-w-0 [overflow-wrap:anywhere] ${ask.state === "resolved" ? "basis-full" : ""}`}
-          >
-            {answer.user} · <Timestamp at={answer.at} /> ·{" "}
-            {answer.selected.length === 0
-              ? "No option chosen"
-              : `Chose ${answer.selected.join(", ")}`}
-          </span>
-        )}
-      </div>
-      {answer === undefined || answer.text === null || answer.text === "" ? null : (
-        <MarkdownPreview
-          className={`mt-1 ${muted ? textMutedOnSelectedCard : textPrimaryOnSurface}`}
-          lines={3}
-          markdown={markdownHead(answer.text, ANSWER_PREVIEW_CHARS)}
-        />
-      )}
-    </div>
   );
 }
 

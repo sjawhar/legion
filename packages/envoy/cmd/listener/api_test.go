@@ -640,7 +640,7 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
 			registry, sessions := setupSessionsTest(t, nil, nil)
-			handler := tc.handler(&listenerDeps{client: client, registry: registry, sessions: sessions})
+			handler := tc.handler(withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions}))
 
 			unclaimedRecorder := httptest.NewRecorder()
 			handler.ServeHTTP(unclaimedRecorder, tc.request())
@@ -702,7 +702,7 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 	}
 }
 
-func TestResolveLiveRoleHolderReresolvesSupersededClaim(t *testing.T) {
+func TestResolveRoleHolderReresolvesSupersededClaim(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	if _, err := registry.SetRole("ses_lapsed", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set lapsed holder: %v", err)
@@ -722,7 +722,7 @@ func TestResolveLiveRoleHolderReresolvesSupersededClaim(t *testing.T) {
 		},
 	}
 
-	result, err := resolveLiveRoleHolder(context.Background(), resolver, sessions, "reviewer")
+	result, err := resolveRoleHolder(context.Background(), resolver, sessions, "reviewer", registered)
 	if err != nil {
 		t.Fatalf("resolve superseded role holder: %v", err)
 	}
@@ -749,7 +749,7 @@ func TestRoleHolderLapsedResponseDoesNotClaimConcurrentRemoval(t *testing.T) {
 		},
 	}
 
-	result, err := resolveLiveRoleHolder(context.Background(), resolver, sessions, role)
+	result, err := resolveRoleHolder(context.Background(), resolver, sessions, role, registered)
 	if err != nil {
 		t.Fatalf("resolve concurrently removed role holder: %v", err)
 	}
@@ -800,6 +800,9 @@ func TestRoleHolderLapsedResponseDoesNotInventLastSeen(t *testing.T) {
 // claimant just wrote: either way the observer's cache answers from what it last applied, while a
 // role claim is read from the role bucket itself. During a rolling deploy the old task is the
 // observer of every claim the replacement accepts.
+// Each listener's interest and role claim caches are waited for (waitForRegistry) before the
+// observer stops following the session bucket, so a route either of them serves reports the
+// session's roles rather than the bus-unavailable 503 an incomplete claims view earns.
 func trailingListeners(t *testing.T) (claimant, observer *listenerDeps) {
 	t.Helper()
 	client := setupPublishTestClient(t)
@@ -809,6 +812,7 @@ func trailingListeners(t *testing.T) (claimant, observer *listenerDeps) {
 		if err != nil {
 			t.Fatalf("open the %s's interest registry: %v", name, err)
 		}
+		waitForRegistry(t, registry)
 		sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 		if err != nil {
 			t.Fatalf("open the %s's session registry: %v", name, err)
@@ -1071,8 +1075,11 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set holder: %v", err)
 	}
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	handler := publishHandler(state, logging.New("test"))
+	// Each subtest is a test of its own to testnats.URL, with an account of its own, so the holder
+	// stand-in connects with the parent's.
+	uri := testnats.URL(t)
 
 	t.Run("unheld role returns 404 without publishing", func(t *testing.T) {
 		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
@@ -1114,6 +1121,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	})
 
 	t.Run("live holder is returned", func(t *testing.T) {
+		startStandIn(t, uri, "ses_holder", always)
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`))
 		handler.ServeHTTP(recorder, request)
@@ -1496,6 +1504,73 @@ func TestSubscribeHandlerWarnsWhenGitHubWiringLookupFails(t *testing.T) {
 	const want = "could not verify GitHub wiring for example-org/example-repo: nats unavailable"
 	if len(response.Warnings) != 1 || response.Warnings[0] != want {
 		t.Fatalf("warnings = %#v, want [%q]", response.Warnings, want)
+	}
+}
+
+// Identical subscribe calls inside store.InterestRefreshAge (a session's heartbeats) write its
+// interest row once: the first creates it, and each later call answers with that stored row,
+// updated_at included, without a write. The session row is still written on every call.
+func TestSubscribeHandlerWritesAnUnchangedInterestOnce(t *testing.T) {
+	const calls = 5
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	state := &listenerDeps{registry: registry, sessions: sessions}
+	conn := testnats.Connect(t, testnats.URL(t))
+	t.Cleanup(conn.Close)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	interests, err := js.KeyValue(bus.InterestBucket)
+	if err != nil {
+		t.Fatalf("interest bucket: %v", err)
+	}
+	sessionRows, err := js.KeyValue(bus.SessionBucket)
+	if err != nil {
+		t.Fatalf("session bucket: %v", err)
+	}
+	revision := func(kv nats.KeyValue) uint64 {
+		t.Helper()
+		entry, err := kv.Get("ses_steady")
+		if err != nil {
+			t.Fatalf("get ses_steady from %s: %v", kv.Bucket(), err)
+		}
+		return entry.Revision()
+	}
+
+	var first store.Interest
+	var interestRevision, sessionRevision uint64
+	for call := range calls {
+		recorder := httptest.NewRecorder()
+		subscribeHandler(state, "test-machine", logging.NewWithWriter("test", io.Discard)).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
+			"session_id":"ses_steady",
+			"dir":"/work/steady",
+			"self_subscribed":true,
+			"topics":["notifications.team.steady"]
+		}`)))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("subscribe %d: status %d, body %s", call, recorder.Code, recorder.Body.String())
+		}
+		var got store.Interest
+		if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode subscribe %d: %v", call, err)
+		}
+		if call == 0 {
+			first, interestRevision, sessionRevision = got, revision(interests), revision(sessionRows)
+			continue
+		}
+		if !reflect.DeepEqual(got, first) {
+			t.Fatalf("subscribe %d answered %+v, want the stored row %+v", call, got, first)
+		}
+		if got := revision(interests); got != interestRevision {
+			t.Fatalf("subscribe %d moved the interest row from revision %d to %d", call, interestRevision, got)
+		}
+		if got := revision(sessionRows); got <= sessionRevision {
+			t.Fatalf("subscribe %d left the session row at revision %d, want a write past %d", call, got, sessionRevision)
+		}
+		sessionRevision = revision(sessionRows)
+	}
+	if want := []string{contracts.AgentSubject("ses_steady"), "notifications.team.steady"}; !reflect.DeepEqual(first.Topics, want) || first.MachineID != "test-machine" || first.Dir != "/work/steady" {
+		t.Fatalf("stored interest = %+v, want topics %v on test-machine in /work/steady", first, want)
 	}
 }
 
@@ -2042,7 +2117,7 @@ func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 		t.Fatalf("register ses_live: %v", err)
 	}
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	registerV1Routes(mux, withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions}), "test-machine", logging.New("test"))
 
 	long := strings.Repeat("s", 5000)
 	longRole := strings.Repeat("r", 4100)

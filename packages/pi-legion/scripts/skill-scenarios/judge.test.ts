@@ -607,7 +607,59 @@ test("a run with no spec-only check runs no findings judge and writes findings.j
   const ran: Seen[] = [];
   await judgeRun(dir, { runner: fakeRunner(ran) });
   expect(ran.map((judge) => path.basename(judge.dir))).not.toContain("findings");
-  expect(JSON.parse(readFileSync(path.join(dir, "findings.json"), "utf8"))).toEqual({ rows: [] });
+  expect(JSON.parse(readFileSync(path.join(dir, "findings.json"), "utf8"))).toEqual({
+    rows: [],
+    clean: [],
+  });
+});
+
+// A check the agent started from an eval cell has no `task` call in the transcript, only a transcript
+// of its own beside the session's. The findings judge reads it as it reads a `task` call's check.
+test("a check started from an eval cell reaches the findings judge, from its own transcript", async () => {
+  const unchecked = transcript.filter(
+    (entry) =>
+      !JSON.stringify(entry).includes('"c1"') &&
+      !JSON.stringify(entry).includes('"c2"') &&
+      entry.type !== "custom_message"
+  );
+  const name = "spec-writing-head-10";
+  const subagents = path.join(work, "runs", name, "sessions", "2026-10-24T10-00-00-000Z_01a16640");
+  mkdirSync(subagents, { recursive: true });
+  // It started after the first write (10:02:00) and reported before the second (10:06:00).
+  const message = (at: string, role: string, text: string) => ({
+    type: "message",
+    timestamp: at,
+    message: { role, content: [{ type: "text", text }] },
+  });
+  writeFileSync(
+    path.join(subagents, "EvalCheck.jsonl"),
+    [
+      { type: "session", id: "01a16641", cwd: "/rig/cwd" },
+      message("2026-10-24T10:04:00.000Z", "user", `Read this spec alone.\n\n${v3}`),
+      message("2026-10-24T10:05:00.000Z", "assistant", "R2 names no owner."),
+    ]
+      .map((entry) => `${JSON.stringify(entry)}\n`)
+      .join("")
+  );
+  const dir = runDir(name, {}, unchecked);
+  const ran: Seen[] = [];
+  // One check, so the findings answer names check 1 alone.
+  const answer = (judgeDir: string): [string, unknown] =>
+    path.basename(judgeDir) === "findings"
+      ? ["findings.json", { rows: [{ check: 1, finding: "R2 names no owner.", verdict: "fixed" }] }]
+      : answerFor(judgeDir);
+  await judgeRun(dir, { runner: fakeRunner(ran, answer) });
+  const findings = ran.find((judge) => path.basename(judge.dir) === "findings");
+  expect(findings?.files).toEqual([
+    "check-1/assignment.md",
+    "check-1/report.md",
+    "check-1/spec-after.md",
+    "prompt.txt",
+  ]);
+  const read = (file: string) => readFileSync(path.join(findings?.dir ?? "", file), "utf8");
+  expect(read("check-1/assignment.md")).toContain(v3);
+  expect(read("check-1/report.md")).toBe("R2 names no owner.\n");
+  expect(read("check-1/spec-after.md")).toBe(v3);
 });
 
 test("answer runs the stand-in once for each open ask and writes its answers", async () => {

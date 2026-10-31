@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 const copiedAsksDocument = "Context\n\n" +
@@ -492,9 +493,7 @@ func askEditsOf(t *testing.T, service *Service, ask string) int {
 // writes the decided wording back into the block beside its decision, logging that it did.
 func TestADocumentEditOfADecidedAsksWordingIsWrittenBackAndLeavesItsRow(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	writes := map[string]func(t *testing.T, service *Service, document string){
 		"live edit": func(t *testing.T, service *Service, document string) {
 			editLiveTree(t, service, document, func(tree *pmdoc.Node) *pmdoc.Node {
@@ -586,9 +585,7 @@ func rewordAsAnEarlierRelease(t *testing.T, service *Service, document string, a
 // the boot's restoration then finds nothing left to restore.
 func TestASettlementRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	for _, closing := range []string{"answered", "resolved"} {
 		t.Run(closing, func(t *testing.T) {
 			service, original := newTestService(t)
@@ -758,9 +755,7 @@ func TestTheBootsRestorationSettlesTheRestoredAsksOwnDocument(t *testing.T) {
 // again.
 func TestASettlementLogsEachBlockItTakesForACopyOnce(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	service, original := newTestService(t)
 	service.settle = time.Hour
 	asks := copiedAskSource(t, service, original)
@@ -1120,8 +1115,10 @@ func TestThreeProjectCopiesOfARetractedAskSettlingAtOnceShareOneAsk(t *testing.T
 // pending row, then the source's block, then the ask.answered event), and the copy's settlement,
 // whose block the copy no longer holds, takes no copy lock and so runs beside it. The settlement
 // deletes its own pending row before it appends an event, so it waits for the answer holding no
-// lock the answer needs, and both finish. Deleting the row after its events would hold the events'
-// commit-order lock, which the answer's event waits for, while waiting on the row the answer holds.
+// lock the answer needs, and both finish. Its events lock only the copy's own row, which the
+// answer, appending on its source's owner, never takes, so a settlement that deleted the row after
+// them would wait for the answer too; what fails this test is a lock the two come to share in
+// opposite orders.
 func TestACopySettlingWhileItsSourceIsAnsweredWaitsForTheAnswerAndNeitherFails(t *testing.T) {
 	service, _ := newTestService(t)
 	service.settle = time.Hour

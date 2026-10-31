@@ -16,6 +16,7 @@ import {
   type Request,
   serveStandin,
   spawnInteractive,
+  spawnRpc,
   writeStandinProfile,
 } from "@legion/pi-shared/test/omp-harness";
 import { connect, StringCodec } from "nats";
@@ -34,12 +35,14 @@ import { z } from "zod";
 // a pseudo-terminal whose screen the cases read (`spawnInteractive`), against one stand-in that is
 // the model gateway — each Messages request held until the case answers it — the daemon, Dispatch
 // and the Envoy listener, and the real NATS server the Envoy role claim needs, over which the
-// cases also send the controller cards and notices. LEGION_TEST_OMP names the binary and
-// LEGION_TEST_NATS_URL the NATS server, as in pi-envoy's real-binary tests. A run without both
-// skips, except on GitHub Actions, where the pi-legion job supplies both (GITHUB_ACTIONS, not CI:
-// agent harnesses on the devbox export CI=true). The file imports the real `nats` module, which
-// extensions/legion.test.ts replaces for its whole process, so it runs in a process of its own
-// (the package's `test` script).
+// cases also send the controller cards and notices. The controller the daemon launches, which runs
+// Oh My Pi in RPC mode and gets its start message as the daemon's prompt, runs against the same
+// stand-in (`startDaemonController`). LEGION_TEST_OMP names the binary and LEGION_TEST_NATS_URL the
+// NATS server, as in pi-envoy's real-binary tests. A run without both skips, except on GitHub
+// Actions, where the pi-legion job supplies both (GITHUB_ACTIONS, not CI: agent harnesses on the
+// devbox export CI=true). The file imports the real `nats` module, which extensions/legion.test.ts
+// replaces for its whole process, so it runs in a process of its own (the package's `test`
+// script).
 const omp = process.env.LEGION_TEST_OMP;
 const natsUrl = process.env.LEGION_TEST_NATS_URL;
 const onActions = process.env.GITHUB_ACTIONS === "true";
@@ -77,8 +80,24 @@ const CONTROLLER_ARGS = [
   START_COMMAND,
 ] as const;
 
-/** The project the cases' controller serves: the daemon state fixture's `legion`. */
+/** The project the cases' controller serves: the daemon state fixtures' `legion`. */
 const PROJECT = "legion";
+
+/**
+ * The extensions every controller loads. The Envoy entry is the sibling plugin's: the controller
+ * loads both, and the Legion entry refuses to run without it.
+ */
+const CONTROLLER_EXTENSIONS = [
+  path.resolve(import.meta.dir, "../../pi-envoy/extensions/envoy.ts"),
+  path.resolve(import.meta.dir, "legion.ts"),
+];
+
+/**
+ * What pi-envoy's wake (src/card-wake.ts, `CardWake`) says, in any count, and for the one card the
+ * startup cases send.
+ */
+const WAKE_TEXT = /Envoy messages? above arrived with no turn to read (it|them)/;
+const WAKE_ONE = "1 Envoy message above arrived with no turn to read it";
 
 /** The TUI's busy row while a turn runs (`⎋ Working…`). */
 const BUSY = "Working…";
@@ -138,11 +157,59 @@ interface ControllerSession {
   transcriptLines(): Promise<string[]>;
   /** The transcript's message entries, in order. */
   messages(): Promise<MessageEntry[]>;
-  /** Polls `probe` until it returns a value, failing at the deadline or when omp exits. */
-  until<T>(what: string, probe: () => T | undefined | Promise<T | undefined>): Promise<T>;
+  /**
+   * Polls `probe` until it returns a value, failing at the deadline (`withinMs` from now, when a
+   * case's own bound is the property under test) or when omp exits.
+   */
+  until<T>(
+    what: string,
+    probe: () => T | undefined | Promise<T | undefined>,
+    withinMs?: number
+  ): Promise<T>;
   /** Resolves once the screen shows all of `texts` at once; fails on `what` at the deadline. */
   shows(what: string, ...texts: readonly string[]): Promise<void>;
 }
+
+/** A request the stand-in holds, the first of its kind, until the case releases it. */
+interface Hold {
+  /** Whether the request has reached the stand-in, which holds it now. */
+  reached(): boolean;
+  /** Lets the stand-in answer it. */
+  release(): void;
+  /** The stand-in's side: marks the request reached and resolves once the case releases it. */
+  wait(): Promise<void>;
+}
+
+function newHold(): Hold {
+  let reached = false;
+  const released = Promise.withResolvers<void>();
+  return {
+    reached: () => reached,
+    release: () => released.resolve(),
+    wait() {
+      reached = true;
+      return released.promise;
+    },
+  };
+}
+
+/** The stand-in route `STARTUP_HOLD_EXTENSION` requests. */
+const STARTUP_HOLD_ROUTE = "/test/startup-hold";
+
+/**
+ * A stand-in for whatever of Oh My Pi's startup runs after the Legion entry's `session_start`,
+ * loaded after both plugins: its own `session_start` awaits the stand-in's `STARTUP_HOLD_ROUTE`,
+ * which a case holds (`StandinHooks.startupHold`). Oh My Pi runs each extension's `session_start`
+ * in load order, awaiting each, so while it is held the Envoy entry has opened the session's agent
+ * subject and the Legion entry has marked the start turn, and Oh My Pi is still inside its startup:
+ * `/legion-controller-start` has not run.
+ */
+const STARTUP_HOLD_EXTENSION = `export default function startupHold(pi) {
+  pi.on("session_start", async () => {
+    await fetch(process.env.LEGION_TEST_STARTUP_HOLD_URL);
+  });
+}
+`;
 
 /** What a case's stand-in does beyond answering the controller's claim. */
 interface StandinHooks {
@@ -160,26 +227,55 @@ interface StandinHooks {
   /**
    * Called with the session's id as the first listener registration after that role claim
    * arrives (`/v1/interests/subscribe`): the one envoy.ts sends right after it opens the
-   * controller topic's NATS subscription (`subscribeNotice`).
+   * controller topic's NATS subscription (`subscribeNotice`), which the claim awaits. A promise
+   * holds that registration until it settles.
    */
-  readonly onNoticeInterest?: (sid: string) => void;
+  readonly onNoticeInterest?: (sid: string) => void | Promise<void>;
   /** Called with the session id each Envoy listener request names, as it arrives. */
   readonly onListener?: (sid: string) => void;
   /** Oh My Pi's `keybindings.yml` for the session, written into its agent directory. */
   readonly keybindings?: string;
+  /**
+   * Loads `STARTUP_HOLD_EXTENSION` after both plugins and holds its request until the case
+   * releases this hold.
+   */
+  readonly startupHold?: Hold;
+  /**
+   * Holds the daemon-launched controller's `POST /legion/v1/claims/ready`, the last step of its
+   * claim in `session_start`, sent once it holds the role and the controller topic, with the
+   * start-turn mark set sent right before it.
+   */
+  readonly ready?: Hold;
+}
+
+/** A controller's scratch root, and the stand-in it runs against. */
+interface ControllerStandin {
+  readonly binary: string;
+  readonly nats: string;
+  readonly root: string;
+  readonly home: string;
+  readonly workspace: string;
+  readonly sessions: string;
+  /** The controller's LEGION_STATE_DIR. */
+  readonly state: string;
+  readonly base: string;
+  /** Every Messages request so far, in arrival order. */
+  readonly turns: Turn[];
 }
 
 /**
- * Starts the controller as `legion controller start` does: interactive Oh My Pi with the Envoy and
- * Legion extensions from this checkout, the controller's environment (LEGION_CONTROLLER, its
- * capability file, its start message, the daemon, Envoy and its NATS server) and
- * `CONTROLLER_ARGS`, against one stand-in: the gateway holds each Messages request until the case
- * answers it; the daemon answers its state and the controller's registration from the contract
- * fixtures (or `hooks.register`'s answer) and mints grants; Dispatch is unavailable; and the Envoy
- * listener records the session that sets a role and names it as that role's holder, calling
- * `hooks`' role-claim and notice-interest callbacks as those requests arrive.
+ * Serves the controller's stand-in and writes the profile that points Oh My Pi at it: the gateway
+ * holds each Messages request until the case answers it; the daemon answers its state from
+ * `stateFixture` and the controller's registration from the contract fixtures (or
+ * `hooks.register`'s answer), acknowledges a ready and mints grants; Dispatch is unavailable; and
+ * the Envoy listener records the session that sets a role and names it as that role's holder,
+ * calling `hooks`' role-claim and notice-interest callbacks as those requests arrive. `hooks`'
+ * holds hold the requests they name.
  */
-async function startController(hooks: StandinHooks = {}): Promise<ControllerSession> {
+async function serveController(
+  stateFixture: string,
+  hooks: StandinHooks
+): Promise<ControllerStandin> {
   const { binary, nats } = setup();
   const { root, home, workspace, sessions } = await ompRoot(
     binary,
@@ -190,15 +286,13 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
   // The daemon's golden answers (packages/daemon/internal/api): its state, whose project is
   // `legion`, and the controller's registration, whose claim token is `legion-legion-controller`.
   const daemonState: unknown = JSON.parse(
-    await readFile(path.join(fixtures, "state.json"), "utf8")
+    await readFile(path.join(fixtures, stateFixture), "utf8")
   );
   const registered = z
     .looseObject({ claimToken: z.string() })
     .parse(JSON.parse(await readFile(path.join(fixtures, "register-controller.json"), "utf8")));
   const state = path.join(root, "state");
   await mkdir(state, { recursive: true, mode: 0o700 });
-  const secretFile = path.join(root, "controller-secret");
-  await writeFile(secretFile, "controller-start-capability\n", { mode: 0o600 });
 
   const turns: Turn[] = [];
   let roleHolder = "";
@@ -219,9 +313,17 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
       });
     }
     if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
+    if (url.pathname === STARTUP_HOLD_ROUTE) {
+      await hooks.startupHold?.wait();
+      return new Response(null, { status: 204 });
+    }
     if (url.pathname === "/legion/v1/state") return Response.json(daemonState);
     if (url.pathname === "/legion/v1/claims/register") {
       return hooks.register?.(body) ?? Response.json(registered);
+    }
+    if (url.pathname === "/legion/v1/claims/ready") {
+      await hooks.ready?.wait();
+      return new Response(null, { status: 204 });
     }
     if (url.pathname === "/legion/v1/grants") {
       grants += 1;
@@ -248,7 +350,7 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
     }
     if (url.pathname === "/v1/interests/subscribe" && noticeInterestDue) {
       noticeInterestDue = false;
-      hooks.onNoticeInterest?.(sid);
+      await hooks.onNoticeInterest?.(sid);
     }
     if (url.pathname === `/v1/roles/${registered.claimToken}`) {
       return Response.json({ role: registered.claimToken, holder: roleHolder, last_seen: 1 });
@@ -263,22 +365,42 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
   // A request still held at the end (an interrupted one among them) is answered, so the server
   // stops at once.
   cleanup.push(async () => {
+    hooks.startupHold?.release();
+    hooks.ready?.release();
     for (const turn of turns) turn.reply("Case over.");
   });
   await writeStandinProfile(home, base);
   if (hooks.keybindings !== undefined) {
     await writeFile(path.join(home, ".omp", "agent", "keybindings.yml"), hooks.keybindings);
   }
+  return { binary, nats, root, home, workspace, sessions, state, base, turns };
+}
+
+/**
+ * Starts the controller as `legion controller start` does: interactive Oh My Pi with the Envoy and
+ * Legion extensions from this checkout (and `STARTUP_HOLD_EXTENSION` after them, for a case that
+ * holds the startup), the controller's environment (LEGION_CONTROLLER, its capability file, its
+ * start message, the daemon, Envoy and its NATS server) and `args` (`CONTROLLER_ARGS` unless a
+ * case drops the start word), against the controller's stand-in (`serveController`) with `hooks`.
+ */
+async function startController(
+  hooks: StandinHooks = {},
+  args: readonly string[] = CONTROLLER_ARGS
+): Promise<ControllerSession> {
+  const { binary, nats, root, home, workspace, sessions, state, base, turns } =
+    await serveController("state.json", hooks);
+  const secretFile = path.join(root, "controller-secret");
+  await writeFile(secretFile, "controller-start-capability\n", { mode: 0o600 });
+  const startupHold = path.join(root, "startup-hold.ts");
+  if (hooks.startupHold !== undefined) await writeFile(startupHold, STARTUP_HOLD_EXTENSION);
 
   const spawnedAt = Date.now();
   const terminal = spawnInteractive(
     binary,
     {
       extensions: [
-        // The Envoy entry is the sibling plugin's: the controller loads both, and the Legion
-        // entry refuses to run without it.
-        path.resolve(import.meta.dir, "../../pi-envoy/extensions/envoy.ts"),
-        path.resolve(import.meta.dir, "legion.ts"),
+        ...CONTROLLER_EXTENSIONS,
+        ...(hooks.startupHold === undefined ? [] : [startupHold]),
       ],
       home,
       workspace,
@@ -293,8 +415,9 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
         LEGION_CONTROLLER_START_MESSAGE: START_MESSAGE,
         ENVOY_URL: base,
         ENVOY_NATS_URL: nats,
+        LEGION_TEST_STARTUP_HOLD_URL: `${base}${STARTUP_HOLD_ROUTE}`,
       },
-      args: CONTROLLER_ARGS,
+      args,
       cols: COLUMNS,
     },
     cleanup
@@ -306,11 +429,16 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
 
   const until = async <T>(
     what: string,
-    probe: () => T | undefined | Promise<T | undefined>
+    probe: () => T | undefined | Promise<T | undefined>,
+    withinMs?: number
   ): Promise<T> => {
     // A wait gets its own step, and one that starts before Oh My Pi's startup could be over gets
-    // until the startup deadline: the first wait of every case spans that startup.
-    const deadline = Math.max(Date.now() + STEP_DEADLINE_MS, spawnedAt + STARTUP_DEADLINE_MS);
+    // until the startup deadline: the first wait of every case spans that startup. A case's own
+    // bound replaces both.
+    const deadline =
+      withinMs === undefined
+        ? Math.max(Date.now() + STEP_DEADLINE_MS, spawnedAt + STARTUP_DEADLINE_MS)
+        : Date.now() + withinMs;
     for (;;) {
       if (exitCode !== undefined) {
         throw new Error(
@@ -363,6 +491,126 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
         return texts.every((text) => screen.includes(text)) ? true : undefined;
       });
     },
+  };
+}
+
+/** The fields of `get_state`'s answer (the pin's `RpcSessionState`) the cases read. */
+const RpcStateSchema = z.looseObject({ isStreaming: z.boolean(), isSettled: z.boolean() });
+
+/** The controller the daemon launched, over its RPC stream, and what it sent the stand-in. */
+interface DaemonController {
+  /** Every Messages request so far, in arrival order. */
+  readonly turns: readonly Turn[];
+  /** The next Messages request after the ones already taken, once it arrives. */
+  nextTurn(what: string): Promise<Turn>;
+  /**
+   * Writes the daemon's delivery of `message` as the shim writes it to Oh My Pi's stdin: one RPC
+   * `prompt` (packages/daemon/internal/shimwire `Prompt`). Its response is not awaited, as the
+   * daemon's delivery reads only the turn it starts.
+   */
+  deliver(message: string): void;
+  /** Answers one RPC `get_state`, which Oh My Pi reads only once its startup is over. */
+  state(): Promise<z.infer<typeof RpcStateSchema>>;
+  /** Sends one RPC `abort`, as a Legion daemon interrupts a turn, and resolves on its answer. */
+  abort(): Promise<void>;
+  /** Polls `probe` until it returns a value, failing at the deadline or when omp exits. */
+  until<T>(what: string, probe: () => T | undefined | Promise<T | undefined>): Promise<T>;
+}
+
+/**
+ * Starts the controller as the daemon launches it (`controller: daemon`): `omp --mode rpc` with
+ * both extensions and the pod's environment — its boot token's file in place of a capability, the
+ * project's Slack channels (none), and no LEGION_CONTROLLER_START_MESSAGE, since the daemon
+ * delivers the start message itself once the controller reports ready — against the controller's
+ * stand-in (`serveController`), which answers the daemon's state while the daemon holds the
+ * controller's claim (internal/projection's golden), with `hooks`.
+ */
+async function startDaemonController(hooks: StandinHooks): Promise<DaemonController> {
+  const { binary, nats, root, home, workspace, sessions, state, base, turns } =
+    await serveController("state-controller-claim.json", hooks);
+  const bootFile = path.join(root, "LEGION_BOOT_TOKEN");
+  await writeFile(bootFile, "launch-boot-token\n", { mode: 0o600 });
+
+  const responses = new Map<string, PromiseWithResolvers<Record<string, unknown>>>();
+  const closed: { error?: unknown } = {};
+  const spawnedAt = Date.now();
+  const rpc = spawnRpc(
+    binary,
+    {
+      extensions: CONTROLLER_EXTENSIONS,
+      home,
+      workspace,
+      sessions,
+      env: {
+        LEGION_CONTROLLER: "1",
+        LEGION_ROLE: "controller",
+        LEGION_BOOT_TOKEN_FILE: bootFile,
+        LEGION_SLACK_CHANNELS: "",
+        LEGION_DAEMON_URL: base,
+        LEGION_PROJECT: PROJECT,
+        LEGION_STATE_DIR: state,
+        ENVOY_URL: base,
+        ENVOY_NATS_URL: nats,
+      },
+      onFrame: (frame) => {
+        if ("type" in frame && frame.type === "response" && "id" in frame) {
+          responses.get(String(frame.id))?.resolve(frame as Record<string, unknown>);
+        }
+      },
+    },
+    cleanup
+  );
+  rpc.closed.catch((error: unknown) => {
+    closed.error = error;
+  });
+
+  const until = async <T>(
+    what: string,
+    probe: () => T | undefined | Promise<T | undefined>
+  ): Promise<T> => {
+    // As in `startController`: the first wait spans Oh My Pi's startup.
+    const deadline = Math.max(Date.now() + STEP_DEADLINE_MS, spawnedAt + STARTUP_DEADLINE_MS);
+    for (;;) {
+      if (closed.error !== undefined) throw closed.error;
+      const value = await probe();
+      if (value !== undefined) return value;
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      // As in `startController`: what the cases wait on has no event the test can await.
+      await Bun.sleep(25);
+    }
+  };
+
+  // One RPC command, answered by its response frame; a refusal throws.
+  const command = async (body: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const id = randomUUID();
+    const waiting = Promise.withResolvers<Record<string, unknown>>();
+    responses.set(id, waiting);
+    rpc.send({ ...body, id });
+    const response = await Promise.race([waiting.promise, rpc.closed]);
+    if (response.success !== true) {
+      throw new Error(`omp refused ${String(body.type)}: ${JSON.stringify(response)}`);
+    }
+    return response;
+  };
+
+  let taken = 0;
+  return {
+    turns,
+    async nextTurn(what) {
+      const turn = await until(what, () => turns[taken]);
+      taken += 1;
+      return turn;
+    },
+    deliver(message) {
+      rpc.send({ type: "prompt", id: randomUUID(), message });
+    },
+    async state() {
+      return RpcStateSchema.parse((await command({ type: "get_state" })).data);
+    },
+    async abort() {
+      await command({ type: "abort" });
+    },
+    until,
   };
 }
 
@@ -904,3 +1152,343 @@ test.skipIf(skip)(
   },
   CASE_TIMEOUT_MS
 );
+
+// The start command's claim sends the start message, marking the start turn sent, then claims the
+// role and subscribes to the controller topic, so a card the listener forwards on the role's lane
+// and a daemon notice on the topic reach the session while the start turn runs. The stand-in holds
+// the registration that follows the topic's subscription, which the claim awaits, and the start
+// turn's model request, until both have reached the session: the card's receipt shows the session
+// took it, and the repeat's receipt that its connection took the notice published before it. The
+// start turn's first request carries the start message alone; the card and the notice wait for it
+// and each reaches the model in a request after it, behind the start message.
+test.skipIf(skip)(
+  "a card and a Legion notice that arrive while the start command's claim runs wait for the start turn, and each still gets a turn after it",
+  async () => {
+    const noticeRegistration = newHold();
+    let sid: string | undefined;
+    const session = await startController({
+      onRoleClaim: (claimed) => {
+        sid = claimed;
+      },
+      onNoticeInterest: () => noticeRegistration.wait(),
+    });
+    await session.until("the registration after the controller topic's subscription", () =>
+      noticeRegistration.reached() ? true : undefined
+    );
+    const claimed = await session.until("the controller role's claim", () => sid);
+    const start = await session.nextTurn("the start turn's model request");
+    const inbound = await controllerInbound(setup().nats);
+    const { card, receipt } = inbound.card(claimed, "claim");
+    await receipt;
+    const notice = inbound.notice();
+    await inbound.repeat(claimed, card);
+    expect(session.turns).toHaveLength(1);
+    noticeRegistration.release();
+
+    const startMessages = Array.isArray(start.request.body.messages)
+      ? start.request.body.messages
+      : [];
+    expect(startMessages).toHaveLength(1);
+    expect(lastMessage(start.request)).toContain(START_MESSAGE_JSON);
+    let reply = "Start procedure done.";
+    start.reply(reply);
+
+    // Every later request is answered, in order, until the session settles on the last reply with
+    // both having reached the model.
+    const reached = (): boolean =>
+      session.turns.some(({ request }) => conversation(request).includes(card.summary)) &&
+      session.turns.some(({ request }) => conversation(request).includes(notice));
+    for (let answered = 1; ; answered += 1) {
+      const next = await session.until(
+        "the next model request, or the session settled with the card and the notice read",
+        async () => {
+          if (session.turns.length > answered) return "request";
+          return reached() && (await isSettledOn(session, reply)) ? "settled" : undefined;
+        }
+      );
+      if (next === "settled") break;
+      reply = `Reply ${answered + 1}.`;
+      (await session.nextTurn(`model request ${answered + 1}`)).reply(reply);
+    }
+
+    for (const { request } of session.turns.slice(1)) {
+      const held = conversation(request);
+      const startAt = held.indexOf(START_MESSAGE_JSON);
+      expect(startAt).toBeGreaterThanOrEqual(0);
+      for (const text of [card.summary, notice]) {
+        if (held.includes(text)) expect(held.indexOf(text)).toBeGreaterThan(startAt);
+      }
+    }
+    expect(reached()).toBe(true);
+  },
+  CASE_TIMEOUT_MS
+);
+
+// The daemon's controller reports ready once it holds the role and the controller topic, and the
+// daemon writes its start prompt then, which RPC mode reads only once Oh My Pi's startup is over. A
+// card that reached the session during that startup is a follow-up that starts no turn, and the
+// wake for it fired once the host was idle after the startup, which can be before the prompt
+// arrives, so the wake's turn was the first. The claim marks the start turn sent right before its
+// ready (src/controller-session.ts), which holds the wake behind the start turn. The stand-in holds
+// that ready, inside the claim `session_start` awaits, while the card arrives. RPC mode answers
+// its first command only once its startup drain has returned, when the card's follow-up is in the
+// context and the check its `message_end` armed is on the host's 0 ms timer; the second
+// `get_state`, written after that answer, is read on a later turn of omp's event loop, after that
+// timer ran, so a wake that check sent has started its turn by then. Only then does the case
+// deliver the start prompt.
+test.skipIf(skip)(
+  "the daemon-launched controller's start prompt is its first turn, and a startup card's wake runs after it",
+  async () => {
+    const ready = newHold();
+    let sid: string | undefined;
+    const session = await startDaemonController({
+      ready,
+      onRoleClaim: (claimed) => {
+        sid = claimed;
+      },
+    });
+    await session.until("the controller's ready", () => (ready.reached() ? true : undefined));
+    const claimed = await session.until("the controller role's claim", () => sid);
+    const inbound = await controllerInbound(setup().nats);
+    const { card, receipt } = inbound.card(claimed, "daemon-startup");
+    await receipt;
+    await inbound.repeat(claimed, card);
+    expect(session.turns).toHaveLength(0);
+    ready.release();
+
+    await session.state();
+    expect((await session.state()).isStreaming).toBe(false);
+    expect(session.turns).toHaveLength(0);
+    session.deliver(START_MESSAGE);
+
+    const start = await session.nextTurn("the first model request");
+    expect(lastMessage(start.request)).toContain(START_MESSAGE_JSON);
+    const first = conversation(start.request);
+    expect(first).not.toMatch(WAKE_TEXT);
+    expect(first.indexOf(card.summary)).toBeGreaterThanOrEqual(0);
+    expect(first.indexOf(card.summary)).toBeLessThan(first.indexOf(START_MESSAGE_JSON));
+    start.reply("Start procedure done.");
+
+    const wake = await session.nextTurn("the startup wake's model request");
+    expect(lastMessage(wake.request)).toContain(WAKE_ONE);
+    wake.reply("Read the startup card.");
+    await session.until("the session to settle", async () =>
+      (await session.state()).isSettled ? true : undefined
+    );
+    expect(session.turns).toHaveLength(2);
+  },
+  CASE_TIMEOUT_MS
+);
+
+// An interrupt of the start turn: RPC `abort`, as the daemon interrupts a turn (the terminal's Esc
+// ends the run with the same "Interrupted by user" reply), while the start turn's model request is
+// held. The startup card that reached the session while its ready was held is owed a wake after
+// the start turn, and that wake, a next-turn message with `triggerTurn`, would start the turn the
+// interrupt stopped: the card stays folded for the next turn instead. So the session settles with
+// no model request after the start turn's, and a probe prompt is the next request, carrying the
+// card and no wake. A `get_state` after the settle is read once the check the start turn's
+// `agent_end` armed has run (as in the case above), so a wake that check sent is under way before
+// the probe goes.
+test.skipIf(skip)(
+  "an RPC abort of the daemon-launched controller's start turn leaves its startup card folded, with no wake",
+  async () => {
+    const ready = newHold();
+    let sid: string | undefined;
+    const session = await startDaemonController({
+      ready,
+      onRoleClaim: (claimed) => {
+        sid = claimed;
+      },
+    });
+    await session.until("the controller's ready", () => (ready.reached() ? true : undefined));
+    const claimed = await session.until("the controller role's claim", () => sid);
+    const inbound = await controllerInbound(setup().nats);
+    const { card, receipt } = inbound.card(claimed, "interrupted-start");
+    await receipt;
+    await inbound.repeat(claimed, card);
+    ready.release();
+
+    await session.state();
+    expect((await session.state()).isStreaming).toBe(false);
+    expect(session.turns).toHaveLength(0);
+    session.deliver(START_MESSAGE);
+    const start = await session.nextTurn("the start turn's model request");
+    expect(lastMessage(start.request)).toContain(START_MESSAGE_JSON);
+    expect(conversation(start.request)).toContain(card.summary);
+    await session.abort();
+
+    const noRequestAfterStart = (): undefined => {
+      const extra = session.turns[1];
+      if (extra !== undefined) {
+        throw new Error(`a model request came before the probe, on ${lastMessage(extra.request)}`);
+      }
+      return undefined;
+    };
+    await session.until("the interrupted session to settle", async () => {
+      noRequestAfterStart();
+      return (await session.state()).isSettled ? true : undefined;
+    });
+    await session.state();
+    noRequestAfterStart();
+
+    const prompt = `PROBE-${randomUUID().slice(0, 8)}`;
+    session.deliver(prompt);
+    const probe = await session.nextTurn("the probe's model request");
+    expect(lastMessage(probe.request)).toContain(prompt);
+    expect(conversation(probe.request)).toContain(card.summary);
+    expect(conversation(probe.request)).not.toMatch(WAKE_TEXT);
+    probe.reply("Probe answered.");
+    await session.until("the session to settle", async () =>
+      (await session.state()).isSettled ? true : undefined
+    );
+    expect(session.turns).toHaveLength(2);
+  },
+  CASE_TIMEOUT_MS
+);
+
+// The operator's controller claims and sends its start message only from
+// `/legion-controller-start`, after Oh My Pi's startup, while the Envoy entry opens the session's
+// agent subject at its own `session_start`. A card that reaches that subject in between found an
+// idle terminal and started its own turn, inside the startup drain, ahead of the start message.
+// The Legion entry's `session_start` marks the start turn unsent (src/controller-session.ts
+// `handleSessionStart`), so the card goes into the context with no turn and its wake waits for the
+// start turn. The stand-in holds `STARTUP_HOLD_EXTENSION`'s request, after both plugins'
+// `session_start`, while the card arrives on the session's agent subject, forwarded as the listener
+// forwards a card on the role's lane so that the session's lane receipt shows it took the card,
+// and the repeat's receipt that its delivery, one frame at a time, has handed the card to the host.
+test.skipIf(skip)(
+  "a card that reaches the operator's controller while Oh My Pi starts, before /legion-controller-start runs, waits for the start turn",
+  async () => {
+    const startupHold = newHold();
+    let sid: string | undefined;
+    const session = await startController({
+      startupHold,
+      onListener: (listened) => {
+        if (listened !== "") sid ??= listened;
+      },
+    });
+    await session.until("the startup hold", () => (startupHold.reached() ? true : undefined));
+    const opened = await session.until("the session's listener registration", () => sid);
+    const inbound = await controllerInbound(setup().nats);
+    const { card, receipt } = inbound.card(opened, "startup");
+    await receipt;
+    await inbound.repeat(opened, card);
+    expect(session.turns).toHaveLength(0);
+    startupHold.release();
+
+    const start = await session.nextTurn("the first model request");
+    expect(lastMessage(start.request)).toContain(START_MESSAGE_JSON);
+    const first = conversation(start.request);
+    expect(first).not.toMatch(WAKE_TEXT);
+    expect(first.indexOf(card.summary)).toBeGreaterThanOrEqual(0);
+    expect(first.indexOf(card.summary)).toBeLessThan(first.indexOf(START_MESSAGE_JSON));
+    start.reply("Start procedure done.");
+
+    const wake = await session.nextTurn("the startup wake's model request");
+    expect(lastMessage(wake.request)).toContain(WAKE_ONE);
+    wake.reply("Read the startup card.");
+    await settledOn(session, "Read the startup card.");
+    expect(session.turns).toHaveLength(2);
+    const delivered = (await session.transcriptLines()).filter(
+      (line) => line.includes('"custom_message"') && line.includes(card.summary)
+    );
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain('"wake":"startup"');
+  },
+  CASE_TIMEOUT_MS
+);
+
+// The start-turn mark owes every startup card one wake after the start turn, since the start
+// turn's reply ran the start procedure rather than reading the card. A turn after the start turn
+// that has the card in its context is that one turn: here, the one a card published while the
+// start turn runs gets. A wake after it would start a further turn telling the controller that
+// cards it already read "arrived with no turn to read them".
+test.skipIf(skip)(
+  "a startup card that a turn after the start turn reads gets no second wake",
+  async () => {
+    const startupHold = newHold();
+    let sid: string | undefined;
+    const session = await startController({
+      startupHold,
+      onListener: (listened) => {
+        if (listened !== "") sid ??= listened;
+      },
+    });
+    await session.until("the startup hold", () => (startupHold.reached() ? true : undefined));
+    const opened = await session.until("the session's listener registration", () => sid);
+    const inbound = await controllerInbound(setup().nats);
+    const early = inbound.card(opened, "startup");
+    await early.receipt;
+    await inbound.repeat(opened, early.card);
+    startupHold.release();
+
+    const start = await session.nextTurn("the start turn's model request");
+    expect(lastMessage(start.request)).toContain(START_MESSAGE_JSON);
+    const during = inbound.card(opened, "during-start");
+    await during.receipt;
+    await inbound.repeat(opened, during.card);
+    start.reply("Start procedure done.");
+
+    const next = await session.nextTurn("the model request that reads the card sent meanwhile");
+    const read = conversation(next.request);
+    expect(read).toContain(early.card.summary);
+    expect(read).toContain(during.card.summary);
+    next.reply("Read both cards.");
+    await settledOn(session, "Read both cards.");
+    // A real clock, as in "the operator sees a claim refusal": a wake that is not sent emits no
+    // signal to await, so only a quiet window with no further Messages request shows its absence.
+    await Bun.sleep(3_000);
+    expect(session.turns.slice(2).map(({ request }) => lastMessage(request))).toEqual([]);
+  },
+  CASE_TIMEOUT_MS
+);
+
+// The operator's controller marks its start unsent at `session_start`, and while the mark holds,
+// a startup card waits for the start turn. Two ways leave that start unsent for good: the start
+// claim's registration that never answers (the daemon unreachable mid-request), and a session
+// launched without the start word on its command line. A card that reached the idle session must
+// still get a turn of its own, without waiting for the operator to type; the bound here is three
+// times pi-envoy's STARTUP_TURN_CAP_MS (30 s).
+for (const variant of ["the start claim never answers", "the start command never runs"] as const) {
+  test.skipIf(skip)(
+    `a startup card held by an unsent start mark gets its turn when ${variant}`,
+    async () => {
+      const startupHold = newHold();
+      const registration = newHold();
+      let sid: string | undefined;
+      const session = await startController(
+        {
+          startupHold,
+          onListener: (listened) => {
+            if (listened !== "") sid ??= listened;
+          },
+          register: async () => {
+            await registration.wait();
+            return Response.json({ error: "case over" }, { status: 503 });
+          },
+        },
+        variant === "the start command never runs" ? CONTROLLER_ARGS.slice(0, -1) : CONTROLLER_ARGS
+      );
+      // Pushed after the stand-in's own cleanup, so it runs first: the stand-in's `server.stop`
+      // waits for the held register handler, which ends only on this release.
+      cleanup.push(async () => registration.release());
+      await session.until("the startup hold", () => (startupHold.reached() ? true : undefined));
+      const opened = await session.until("the session's listener registration", () => sid);
+      const inbound = await controllerInbound(setup().nats);
+      const { card, receipt } = inbound.card(opened, "held");
+      await receipt;
+      await inbound.repeat(opened, card);
+      startupHold.release();
+
+      // A real clock: the bound is the property under test.
+      const first = await session.until(
+        "the startup card's model request, within 90 s",
+        () => session.turns[0],
+        90_000
+      );
+      expect(conversation(first.request)).toContain(card.summary);
+      expect(lastMessage(first.request)).toContain(WAKE_ONE);
+    },
+    CASE_TIMEOUT_MS
+  );
+}

@@ -321,14 +321,16 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // delete set, so the later update applied first deletes what the earlier one replaced while its
 // own insertions wait for the earlier one's - a tree no transaction left.
 //
-// The observer renders the replica after an update only when it can neither reuse the rendering
-// the published live write that made the update made of it nor know the update was already in the
-// room (changedBy). Both are exact. The write's rendering (publishedRendering) is taken only on
-// the replica, epoch and foreign count the operation's own fork read found, the replica's before
-// that read's encode: a replica still at both has consumed, through that read, every commit the
-// fork was read from, and since then only published live writes' commits, which under the writer
-// slot are this write's earlier updates, which the fork holds too - so the replica after the update
-// is the fork after the operation, and rendering is deterministic over one state. ygo puts the
+// The observer renders the replica after an update only when it can neither know the update is a
+// margin write's publish into the room its fork was warm-built from (liveWriteOrigin.marginOnly
+// says why that changes no text), nor reuse the rendering the published live write that made the
+// update made of it, nor know the update was already in the room (changedBy). All three are exact.
+// The write's rendering (publishedRendering) is taken only on the replica, epoch and foreign
+// count the operation's own fork read found, the replica's before that read's encode: a replica
+// still at both has consumed, through that read, every commit the fork was read from, and since
+// then only published live writes' commits, which under the writer slot are this write's earlier
+// updates, which the fork holds too - so the replica after the update is the fork after the
+// operation, and rendering is deterministic over one state. ygo puts the
 // room's whole delete set in every update, so an update means that only on the room instance the
 // fork was read from: a cold fork, read from the store, records no rendering, and a room reloaded
 // since the read has a replica of its own at another epoch. An update already in the room
@@ -391,6 +393,10 @@ type renderPathCounts struct {
 	// observerRendered counts the logged updates the update observer applied and then rendered the
 	// replica for (updateChangesMarkdown).
 	observerRendered atomic.Uint64
+	// observerMarginOnly counts the logged updates the update observer classified as unchanged
+	// without rendering, since they were margin writes' publishes into the room instance their
+	// fork was warm-built from (liveWriteOrigin.marginOnly).
+	observerMarginOnly atomic.Uint64
 	// beforeFromReplica counts the operations whose rendering of their fork before they applied was
 	// the room replica's, which held the very state the fork was read from.
 	beforeFromReplica atomic.Uint64
@@ -399,6 +405,21 @@ type renderPathCounts struct {
 	beforeFromWrite atomic.Uint64
 	// beforeRendered counts the operations that rendered their fork before applying.
 	beforeRendered atomic.Uint64
+}
+
+// forkTreeCounts counts the trees read off a write transaction's fork, and the reads that taking
+// the write's rendering in place of one avoided, so a test can assert that a write reads its fork
+// no more often than it means to, and a measurement build can report how often the read is
+// avoided. The service keeps one (Service.forkTrees). Nothing in the service reads them.
+type forkTreeCounts struct {
+	// read counts the trees read off a write transaction's fork (readFork): an operation's reads
+	// before and after its write (applyLive), a margin write's read when the write holds no
+	// rendering of its fork (applyMargin), and the reads joined to the transaction (docTree,
+	// heldTree, captureLiveTextAndAuthors).
+	read atomic.Uint64
+	// renderingReused counts the margin writes (applyMargin) and the joined reads that took the
+	// write's rendering in place of reading the fork (reuseRendering), each a fork read avoided.
+	renderingReused atomic.Uint64
 }
 
 // observedAsks is the ask blocks a logged update left in the room's document, as the update
@@ -471,8 +492,12 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 // when a published live write made it, nil otherwise, and rendering that write's operation's
 // rendering of it: whether it changed the room's rendered markdown, and the ask blocks it left
 // when it did. It renders the replica (updateChangesMarkdown) only when nothing else tells. A
-// published live write's update can tell in two ways, tried in this order:
+// published live write's update can tell in three ways, tried in this order:
 //
+//   - it is a margin write's publish into the room instance its fork was warm-built from
+//     (liveWriteOrigin.marginOnly, which says why that changes no text), so it changed nothing,
+//     while the replica renders at all: one outside the schema renders the update, since the
+//     render is what says what the document is now;
 //   - its operation's rendering (publishedRendering), when that rendering was made on this
 //     replica's epoch and foreign count and the replica still stands at both (standsAt): the
 //     replica is then the fork the operation rendered, so the rendering is the replica's, and the
@@ -482,8 +507,12 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 //     nothing, while the replica renders at all: one outside the schema renders the update, so it
 //     still logs and counts as changed.
 //
-// renderedReplica says why each is exact. The caller holds mu.
+// renderedReplica says why the last two are exact. The caller holds mu.
 func (r *renderedReplica) changedBy(room string, published *liveWriteOrigin, rendering publishedRendering) (bool, *observedAsks) {
+	if published != nil && published.marginOnly && r.markdown != nil {
+		r.paths.observerMarginOnly.Add(1)
+		return false, nil
+	}
 	if published != nil {
 		if r.standsAt(rendering.forkReadMark) {
 			if r.markdown != nil && *r.markdown == rendering.markdown {

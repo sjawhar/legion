@@ -21,7 +21,11 @@ export function installInboxApiMocks(): InboxApiMocks {
   const mocks = {} as InboxApiMocks;
   beforeEach(() => {
     window.localStorage.clear();
-    mocks.whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+    mocks.whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+      event_head: "0",
+      kind: "user",
+      login: "alice",
+    });
     mocks.getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue({
       pending: [],
     });

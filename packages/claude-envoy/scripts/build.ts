@@ -14,10 +14,17 @@
 //                differ from it;
 //   --out <dir>  make <dir>, a new or empty directory outside the repository, a
 //                runnable copy of the plugin built from this tree.
+//
+// scripts/build-inputs.txt must name every file this build reads, since main's push job decides
+// from it alone whether a moved main changed the build. tests/build-inputs.test.ts checks it against
+// what buildBundles and buildLegionPlugin report reading; a file this script reads by path or
+// imports from outside the listed packages (.bun-version, scripts/third-party-notices.ts, the
+// scripts it runs) is listed by hand.
 import { cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { thirdPartyNotices } from "../../../scripts/third-party-notices"
+import { PHASE_HOOK_TOOL_NAME } from "../src/legion-phase-hook"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const repoRoot = resolve(packageRoot, "..", "..")
@@ -97,12 +104,70 @@ export function claudeAgent(file: string, source: string): string {
   return `---\n${lines.join("\n")}\n---\n${source.slice(match[0].length)}`
 }
 
+/** The phase reminder's hook entries (INFRA-220): the events Claude Code fires at a phase
+ *  worker, each an `mcp_tool` hook on the pane's own Legion MCP server, which `claude` registers
+ *  as the bare name `legion` (packages/daemon/internal/runtime/tmux/claude.go), and on the tool
+ *  `legion_phase_hook` that server offers (packages/claude-envoy/src/legion-phase-hook.ts).
+ *  Claude Code substitutes each `${…}` as a string, which the endpoint parses.
+ *
+ *  They belong to the Legion plugin alone, never to `hooks/hooks.json`: `@sjawhar/claude-envoy`
+ *  is also installed as a plain Claude Code plugin, where `--mcp-config` registers no `legion`
+ *  server and every one of these would be a hook error on every turn. A Legion pane loads both
+ *  plugin directories, so its worker still gets them. */
+// biome-ignore-start lint/suspicious/noTemplateCurlyInString: Claude Code substitutes each `${…}`
+// into the hook's input before it calls the tool; they are its syntax, not this file's.
+const LEGION_HOOKS: readonly {
+  readonly event: string
+  readonly input: Readonly<Record<string, string>>
+  readonly timeout: number
+}[] = [
+  {
+    event: "Stop",
+    input: {
+      event: "Stop",
+      lastAssistantMessage: "${last_assistant_message}",
+      stopHookActive: "${stop_hook_active}",
+    },
+    // The `Stop` answer waits on the reminder's record check, which bounds its own daemon read at
+    // 5 s (RECORD_READ_BOUND_MS, packages/pi-shared/src/phase-reminder.ts); the others answer from
+    // memory and the state file alone.
+    timeout: 30,
+  },
+  {
+    event: "StopFailure",
+    input: { event: "StopFailure", lastAssistantMessage: "${last_assistant_message}" },
+    timeout: 10,
+  },
+  {
+    event: "PostToolUse",
+    input: { event: "PostToolUse", toolName: "${tool_name}", agentId: "${agent_id}" },
+    timeout: 10,
+  },
+  {
+    event: "PostToolUseFailure",
+    input: { event: "PostToolUseFailure", toolName: "${tool_name}", agentId: "${agent_id}" },
+    timeout: 10,
+  },
+  {
+    event: "UserPromptSubmit",
+    input: { event: "UserPromptSubmit", prompt: "${prompt}" },
+    timeout: 10,
+  },
+]
+// biome-ignore-end lint/suspicious/noTemplateCurlyInString: the hook inputs end here.
+
 /** `legion/`, the Legion plugin a Claude Code pane loads with `--plugin-dir` beside this one
  *  (packages/daemon/internal/runtime/tmux/claude.go): its manifest, named `legion`, so Claude Code
  *  names its skills and agents `legion:<name>`; the skills pi-legion ships, staged by the one script
- *  that partitions them (scripts/pi-plugin-prepack.sh --stage-skills); and pi-legion's task agents
- *  in Claude Code's format (`claudeAgent`). Generated, never edited by hand. */
-export async function buildLegionPlugin(outdir: string): Promise<void> {
+ *  that partitions them (scripts/pi-plugin-prepack.sh --stage-skills); pi-legion's task agents
+ *  in Claude Code's format (`claudeAgent`); and the phase reminder's hooks (`LEGION_HOOKS`).
+ *  Generated, never edited by hand.
+ *
+ *  Returns, as `buildBundles` does, the absolute path of every repository file it read: each agent
+ *  file, and the source each staged skill file was copied from. tests/build-inputs.test.ts checks
+ *  the input list against it, so a source added here is one the list must name rather than one the
+ *  test can miss. Callers that only want the output ignore the result. */
+export async function buildLegionPlugin(outdir: string): Promise<string[]> {
   await mkdir(join(outdir, ".claude-plugin"), { recursive: true })
   await writeFile(
     join(outdir, ".claude-plugin", "plugin.json"),
@@ -116,22 +181,68 @@ export async function buildLegionPlugin(outdir: string): Promise<void> {
       2,
     )}\n`,
   )
+  const stagedSkills = join(outdir, "skills")
   const staged = Bun.spawnSync([
     "bash",
     join(repoRoot, "scripts", "pi-plugin-prepack.sh"),
     "--stage-skills",
     "@sjawhar/pi-legion",
-    join(outdir, "skills"),
+    stagedSkills,
   ])
   if (staged.exitCode !== 0) {
     throw new Error(`staging pi-legion's skills failed: ${staged.stderr.toString().trim()}`)
+  }
+  // Each staged file is a copy of skills/<the same path>, since stage_skills copies whole skill
+  // directories (`cp -R "$root/skills/$skill" "$dest/$skill"`), so the file read is that source and
+  // not the copy written here. A source that is not there means this mapping, not a skill, is wrong.
+  const reads: string[] = []
+  for (const entry of await readdir(stagedSkills, { recursive: true, withFileTypes: true })) {
+    if (entry.isDirectory()) continue
+    const relativePath = relative(stagedSkills, join(entry.parentPath, entry.name))
+    const source = join(repoRoot, "skills", relativePath)
+    if (!(await Bun.file(source).exists())) {
+      throw new Error(`staged skill file ${relativePath} does not come from ${source}`)
+    }
+    reads.push(source)
   }
   const agents = join(repoRoot, "packages", "pi-legion", "agents")
   await mkdir(join(outdir, "agents"))
   for (const name of (await readdir(agents)).filter((file) => file.endsWith(".md")).sort()) {
     const source = await readFile(join(agents, name), "utf8")
     await writeFile(join(outdir, "agents", name), claudeAgent(name, source))
+    reads.push(join(agents, name))
   }
+  await mkdir(join(outdir, "hooks"))
+  await writeFile(
+    join(outdir, "hooks", "hooks.json"),
+    `${JSON.stringify(
+      {
+        description:
+          "Legion: tell a phase worker whose turn ends with its phase still open, through the legion_phase_hook tool on the pane's own Legion MCP server.",
+        hooks: Object.fromEntries(
+          LEGION_HOOKS.map(({ event, input, timeout }) => [
+            event,
+            [
+              {
+                hooks: [
+                  {
+                    type: "mcp_tool",
+                    server: "legion",
+                    tool: PHASE_HOOK_TOOL_NAME,
+                    input,
+                    timeout,
+                  },
+                ],
+              },
+            ],
+          ]),
+        ),
+      },
+      null,
+      2,
+    )}\n`,
+  )
+  return reads
 }
 
 /** Each file under `fresh` or `committed` that is missing from the other or differs in bytes,
@@ -193,24 +304,25 @@ export function assertPinnedBun(running: string, pinned: string): void {
   )
 }
 
-/** The bundles and their notices, built into `outdir`. Bun writes each inlined module's path into
- *  the bundle relative to the working directory (`// ../envoy-client/bin/dispatch.ts` from the
- *  package, `// packages/envoy-client/...` from the repository root), so the build runs from the
- *  package root whatever the caller's directory: main's committed bytes and every check of them
- *  then agree. */
-export async function buildBundles(outdir: string): Promise<void> {
+/** The bundles and their notices, built into `outdir`; returns the absolute path of every file the
+ *  bundles read (the metafile's inputs), which tests/build-inputs.test.ts checks the input list
+ *  against. Bun writes each inlined module's path into the bundle relative to the working
+ *  directory (`// ../envoy-client/bin/dispatch.ts` from the package, `// packages/envoy-client/...`
+ *  from the repository root), so the build runs from the package root whatever the caller's
+ *  directory: main's committed bytes and every check of them then agree. */
+export async function buildBundles(outdir: string): Promise<string[]> {
   assertPinnedBun(Bun.version, pinnedBunVersion)
   const target = resolve(outdir)
   const callerDirectory = process.cwd()
   process.chdir(packageRoot)
   try {
-    await bundleFromPackageRoot(target)
+    return await bundleFromPackageRoot(target)
   } finally {
     process.chdir(callerDirectory)
   }
 }
 
-async function bundleFromPackageRoot(outdir: string): Promise<void> {
+async function bundleFromPackageRoot(outdir: string): Promise<string[]> {
   const result = await Bun.build({
     entrypoints: Object.values(BUNDLE_ENTRYPOINTS).map((entry) => join(packageRoot, entry)),
     outdir,
@@ -239,10 +351,10 @@ async function bundleFromPackageRoot(outdir: string): Promise<void> {
     throw new AggregateError(result.logs, "bundle build failed")
   }
   if (!result.metafile) throw new Error("Bun.build returned no metafile")
-  await writeFile(
-    join(outdir, "THIRD_PARTY_NOTICES"),
-    await thirdPartyNotices(Object.keys(result.metafile.inputs), packageRoot),
-  )
+  // The metafile's keys are relative to the working directory, the package root.
+  const inputs = Object.keys(result.metafile.inputs)
+  await writeFile(join(outdir, "THIRD_PARTY_NOTICES"), await thirdPartyNotices(inputs, packageRoot))
+  return inputs.map((input) => resolve(packageRoot, input))
 }
 
 async function checkBundles(distDirectory: string): Promise<string[]> {

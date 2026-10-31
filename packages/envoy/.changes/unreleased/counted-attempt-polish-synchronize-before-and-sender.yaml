@@ -1,7 +1,0 @@
-kind: Added
-body: |-
-  A pull request's `synchronize` payload carries `before`, the head GitHub's webhook says the
-  branch moved from, beside `head_sha`, and every pull request and push payload carries `sender`,
-  the login of the account GitHub says triggered the event. The Legion daemon reads the move a
-  head arrives by from `before`, and which push made it from `sender`; a listener without them
-  publishes none, and the daemon then judges that arrival as it did before.

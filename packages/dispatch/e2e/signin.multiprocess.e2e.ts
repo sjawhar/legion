@@ -71,7 +71,12 @@ test("a sign-in started on Dispatch A completes on Dispatch B", async ({ browser
     });
     return { body: await response.json(), status: response.status() };
   };
-  const signedIn = { body: { kind: "user", login: oidcSignIn.person }, status: 200 };
+  // Every answer carries the event log's head as a decimal id, the cursor a page's event feed
+  // starts from (`AuthenticatedUser.event_head`).
+  const signedIn = {
+    body: { event_head: expect.stringMatching(/^\d+$/), kind: "user", login: oidcSignIn.person },
+    status: 200,
+  };
   expect(await whoami(), "GET /auth/whoami").toEqual(signedIn);
   expect(await whoami("a"), "GET /auth/whoami pinned to Dispatch A").toEqual(signedIn);
   expect(await whoami("b"), "GET /auth/whoami pinned to Dispatch B").toEqual(signedIn);

@@ -40,8 +40,9 @@ func JudgementChanged(before, after record.PullRequest) bool {
 		b.WorkflowsHead != a.WorkflowsHead
 }
 
-// runStep applies step to pr's open run and replays it.
-func runStep(pr record.PullRequest, step record.RunStep) record.PullRequest {
+// runStep applies step to pr's open run and replays it, and says whether step, a settlement,
+// adopted the fence (ApplySettlement).
+func runStep(pr record.PullRequest, step record.RunStep) (record.PullRequest, bool) {
 	run := *pr.Run
 	run.Steps = append(clone(run.Steps), step)
 	pr.Run = &run
@@ -60,8 +61,9 @@ func runStep(pr record.PullRequest, step record.RunStep) record.PullRequest {
 // waiting for what its synchronize named, its anchor the judgement before that head, and closes
 // when there is none; past maxRunSteps its oldest steps fold into the anchor too. The pull request
 // keeps its own pushes. BlockedAttempts is what was reported, so it stays, unless the count it
-// reported is no longer reached, as when a count is taken back.
-func replayRun(pr record.PullRequest) record.PullRequest {
+// reported is no longer reached, as when a count is taken back. It says whether the run's last
+// step, a settlement, adopted the fence (ApplySettlement).
+func replayRun(pr record.PullRequest) (record.PullRequest, bool) {
 	run, live := pr.Run, pr.Pushes
 	blocked := pr.BlockedAttempts
 	at := withJudgement(pr, run.Anchor)
@@ -84,10 +86,11 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 	names, since := clone(run.Names), run.Since
 	before := make([]state, len(run.Steps))
 	var unchained []int
+	var adopted bool
 	for i, step := range run.Steps {
 		before[i] = state{judgementOf(at), withoutApprovalCarriers(at.Pushes), names, since}
 		var chained bool
-		at, chained, names = applyStep(at, step, names, since)
+		at, chained, names, adopted = applyStep(at, step, names, since)
 		if step.Head != "" {
 			since = step.SyncedAt
 			if !chained {
@@ -110,7 +113,7 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 	if at.FixAttempts < blocked {
 		at.BlockedAttempts = 0
 	}
-	return at
+	return at, adopted
 }
 
 // withoutApprovalCarriers is pushes without those that carry an approval across.
@@ -126,13 +129,16 @@ func withoutApprovalCarriers(pushes []record.ClassifiedPush) []record.Classified
 
 // applyStep applies one step of a head run with the run's named moves and GitHub's clock of the
 // head before it (since), says, for a head, whether a chain of pushes led to it with nothing left to
-// wait for (advance) - any other step is chained - and returns the named moves the step left.
-func applyStep(pr record.PullRequest, step record.RunStep, names []record.Named, since time.Time) (record.PullRequest, bool, []record.Named) {
+// wait for (advance) - any other step is chained - returns the named moves the step left, and says,
+// for a settlement, whether it adopted the fence (ApplySettlement).
+func applyStep(pr record.PullRequest, step record.RunStep, names []record.Named, since time.Time) (record.PullRequest, bool, []record.Named, bool) {
+	var adopted bool
 	switch {
 	case step.Head != "":
-		return advance(pr, Arrival{Before: step.Before, Sender: step.Sender, At: step.SyncedAt, Since: since}, step.Head, names)
+		advanced, chained, left := advance(pr, Arrival{Before: step.Before, Sender: step.Sender, At: step.SyncedAt, Since: since}, step.Head, names)
+		return advanced, chained, left, false
 	case step.Settlement != nil:
-		pr, _ = settle(pr, candidateOf(*step.Settlement))
+		pr, _, adopted = settle(pr, candidateOf(*step.Settlement))
 	case step.Required != nil:
 		pr.Required = clone(step.Required.Names)
 		pr.Workflows = clone(step.Required.Workflows)
@@ -142,15 +148,16 @@ func applyStep(pr record.PullRequest, step record.RunStep, names []record.Named,
 	case step.Reopened:
 		pr.CheckedHead, pr.Failing, pr.Cancelled, pr.CheckRuns, pr.Generation, pr.Snapshot = "", []string{}, nil, nil, 0, ""
 	}
-	return pr, true, names
+	return pr, true, names, adopted
 }
 
 // withStep applies s to pr: as a step of its head run while one is open, and on its own otherwise.
 func withStep(pr record.PullRequest, s record.RunStep) record.PullRequest {
 	if pr.Run != nil {
-		return runStep(pr, s)
+		pr, _ = runStep(pr, s)
+		return pr
 	}
-	pr, _, _ = applyStep(pr, s, nil, time.Time{})
+	pr, _, _, _ = applyStep(pr, s, nil, time.Time{})
 	return pr
 }
 
@@ -170,18 +177,20 @@ func Reopen(pr record.PullRequest, head string) record.PullRequest {
 // stands or not: a push the run is waiting for can make it stand. The pull request then changed
 // either way, and the judgement changed when the replay with it differs. A redelivery is no new
 // step (redundantSettlement), so the listener's redeliveries do not use up the run's bound
-// (maxRunSteps).
-func ApplyCheckSettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
+// (maxRunSteps). Its third result says the settlement adopted the fence: the listener's duplicate
+// of the pass's settlement changes only the fence (adoptsFence), the pull request it returns
+// carries it, and the judgement did not change, so nothing is decided again.
+func ApplyCheckSettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool, bool) {
 	if pr.Run == nil {
 		return settle(pr, candidate)
 	}
 	step := record.Settlement{Head: candidate.Head, CheckRuns: clone(candidate.CheckRuns), Generation: candidate.Generation,
 		Snapshot: candidate.Snapshot, Failing: clone(candidate.Failing), Cancelled: clone(candidate.Cancelled)}
 	if redundantSettlement(pr.Run.Steps, step) {
-		return pr, false
+		return pr, false, false
 	}
-	replayed := runStep(pr, record.RunStep{Settlement: &step})
-	return replayed, JudgementChanged(pr, replayed)
+	replayed, adopted := runStep(pr, record.RunStep{Settlement: &step})
+	return replayed, JudgementChanged(pr, replayed) && !adopted, adopted
 }
 
 // redundantSettlement is whether settlement, appended to steps, would replay as nothing in every
@@ -225,17 +234,15 @@ func ClearWorkflowsHead(pr record.PullRequest) record.PullRequest {
 }
 
 // settle applies candidate when it stands for the head and is newer than the recorded settlement,
-// and otherwise leaves pr as it was.
-func settle(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
+// and otherwise leaves pr as it was, but for the fence the listener's duplicate of the pass's
+// settlement gives it (adoptsFence), which it returns, saying nothing was applied and the fence
+// adopted.
+func settle(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool, bool) {
 	stood, stands := SettlementFor(pr, candidate)
 	if !stands {
-		return pr, false
+		return pr, false, false
 	}
-	applied, ok := ApplySettlement(stood, candidate)
-	if !ok {
-		return pr, false
-	}
-	return applied, true
+	return ApplySettlement(stood, candidate)
 }
 
 func candidateOf(s record.Settlement) SettlementCandidate {

@@ -1,13 +1,19 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, type Mock, spyOn, test } from "bun:test";
 import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
-import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  focusManager,
+  onlineManager,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-
+import { answerAgentStates } from "../../__tests__/send-answers";
 import { wholeText } from "../../__tests__/whole-text";
-import { api } from "../../api/client";
+import { ApiError, api, NetworkError, RequestTimeoutError } from "../../api/client";
 import type {
   Agent,
+  BroadcastCreated,
   CreateBroadcastInput,
   InboxRow,
   IssueSummary,
@@ -18,10 +24,36 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
+import { KEYED_SEND_LATE_TEXT } from "../conversation/send-request";
 import type { AgentPart } from "../refs/AgentName";
+import { KEYED_SEND_ATTEMPT_MS, SendStoppedError } from "../writes/keyed-write";
+import { resetWriteStorage } from "../writes/write-storage";
 import { orderAgents, partitionAgents } from "./AgentsPage";
 import { matchesFilters, searchWords } from "./agent-search";
 import { broadcastPlan, broadcastSendState, composedBroadcast } from "./broadcast-plan";
+
+/** What each attempt of a message to one agent, or of a broadcast, is held to, beside what it
+ *  carries: its deadline and the key that names the press (`Idempotency-Key`). */
+const keyedAttempt = expect.objectContaining({
+  deadlineMs: KEYED_SEND_ATTEMPT_MS,
+  key: expect.any(String),
+});
+
+/** The bounds a read mark's write carries: the one write path's key and deadline. */
+const markAttempt = keyedAttempt;
+
+/** The key each message to one agent went under, in order. */
+function messageKeys(createAgentMessage: Mock<typeof api.createAgentMessage>): string[] {
+  return createAgentMessage.mock.calls.map(([, , bounds]) => bounds.key);
+}
+
+/** Dispatch's refusal of a broadcast. A 4xx is the one failure a broadcast is not tried again
+ *  after under its key: a failed fetch, a 5xx or a 429 is. */
+const BROADCAST_REFUSED = "no selected session takes this broadcast";
+
+async function refuseBroadcast(): Promise<never> {
+  throw new ApiError(400, { code: "BROADCAST_EMPTY", error: BROADCAST_REFUSED });
+}
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
 // same-mode Retry while an attempt is inside the stream's duplicate window, so a
@@ -125,7 +157,11 @@ function renderAgents({
   issues?: IssueSummary[];
   messages?: MessageRead[];
 } = {}) {
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(inboxRows);
   const listAgents = spyOn(api, "listAgents").mockResolvedValue(listedAgents);
   const listAgentMessages = spyOn(api, "listAgentMessages").mockResolvedValue(messages);
@@ -164,7 +200,7 @@ function renderAgents({
     state: "sent",
   });
   const getMyAgentState = spyOn(api, "getMyAgentState").mockResolvedValue(agentState);
-  const putAgentState = spyOn(api, "putAgentState").mockImplementation(async (_session, input) => ({
+  const putAgentState = answerAgentStates().mockImplementation(async (_session, input) => ({
     ...input,
     unread_replies: 0,
   }));
@@ -279,10 +315,11 @@ test("an agent card sends a plain message in the mode the session takes", async 
     ).toBeTruthy();
     fireEvent.submit(within(reviewer).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
-      expect(page.createAgentMessage).toHaveBeenCalledWith("reviewer-session", {
-        body: "Is the review done?",
-        delivery: "aside",
-      })
+      expect(page.createAgentMessage).toHaveBeenCalledWith(
+        "reviewer-session",
+        { body: "Is the review done?", delivery: "aside" },
+        keyedAttempt
+      )
     );
 
     const silent = card(region, "Deaf");
@@ -811,10 +848,11 @@ test("Agents sends without an issue through the agent message route", async () =
     });
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
-      expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
-        body: "Check the deployment",
-        delivery: "btw",
-      })
+      expect(page.createAgentMessage).toHaveBeenCalledWith(
+        "planner-session",
+        { body: "Check the deployment", delivery: "btw" },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -870,11 +908,15 @@ test("Agents keeps selected-issue sends on the issue message route", async () =>
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
       // Planner takes Aside and BTW but not Send, so the plain message is an Aside.
-      expect(page.createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@Planner Track this under Core",
-        delivery: "aside",
-        mentions: [{ target: "session:planner-session" }],
-      })
+      expect(page.createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@Planner Track this under Core",
+          delivery: "aside",
+          mentions: [{ target: "session:planner-session" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -976,12 +1018,16 @@ test("Agents keeps an issue-attached legacy reply on its issue message route", a
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
 
     await waitFor(() =>
-      expect(page.createMessage).toHaveBeenCalledWith("CORE-1", {
-        body: "Follow up",
-        delivery: "btw",
-        in_reply_to: "message-1",
-        target: "session:planner-session",
-      })
+      expect(page.createMessage).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "Follow up",
+          delivery: "btw",
+          in_reply_to: "message-1",
+          target: "session:planner-session",
+        },
+        keyedAttempt
+      )
     );
     expect(page.createAgentMessage).not.toHaveBeenCalled();
   } finally {
@@ -1025,13 +1071,13 @@ test("Agents retain targeted-message retries and attempt history", async () => {
     expect(sameMode.hasAttribute("disabled")).toBe(false);
     fireEvent.click(retry);
     await waitFor(() =>
-      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer")
+      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer", keyedAttempt)
     );
     // The same-mode Retry re-sends the attempt's own mode, the only retry that cannot deliver
     // the message twice.
     fireEvent.click(sameMode);
     await waitFor(() =>
-      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "btw")
+      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "btw", keyedAttempt)
     );
   } finally {
     page.view.unmount();
@@ -1299,9 +1345,11 @@ test("an agent's unread reply shows on its row and in the navigation until its c
     );
     await expect(within(planner).findByText("At /dash.")).resolves.toBeTruthy();
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        read_through: "2026-09-14T01:05:00Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { read_through: "2026-09-14T01:05:00Z" },
+        markAttempt
+      )
     );
     await waitFor(() =>
       expect(within(planner).queryByRole("button", { name: /unread/ })).toBeNull()
@@ -1367,9 +1415,11 @@ test("opening a row shows an older exchange's unread follow-up instead of foldin
     expect(within(planner).queryByText("Second question")).toBeNull();
     expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        read_through: "2026-09-14T00:30:00Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { read_through: "2026-09-14T00:30:00Z" },
+        markAttempt
+      )
     );
     await waitFor(() =>
       expect(within(planner).queryByRole("button", { name: /unread/ })).toBeNull()
@@ -1451,9 +1501,11 @@ test("Agents Clear hides every exchange up to now for this viewer and persists t
     // The cutoff is the newest visible message's own timestamp, so the Clear hides exactly what
     // was on screen whatever the browser clock says.
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        cleared_before: "2026-09-14T02:00:00Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { cleared_before: "2026-09-14T02:00:00Z" },
+        keyedAttempt
+      )
     );
 
     await waitFor(() =>
@@ -1597,11 +1649,15 @@ test("a reply to an Aside-only agent after a refused Send goes as an Aside", asy
     });
     fireEvent.submit(within(reviewer).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
-      expect(page.createAgentMessage).toHaveBeenCalledWith("reviewer-session", {
-        body: "Can this ship now?",
-        delivery: "aside",
-        in_reply_to: "message-1",
-      })
+      expect(page.createAgentMessage).toHaveBeenCalledWith(
+        "reviewer-session",
+        {
+          body: "Can this ship now?",
+          delivery: "aside",
+          in_reply_to: "message-1",
+        },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -1663,11 +1719,15 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
     });
     fireEvent.submit(composer);
     await waitFor(() =>
-      expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
-        body: "Ship it.",
-        delivery: "btw",
-        in_reply_to: "message-2",
-      })
+      expect(page.createAgentMessage).toHaveBeenCalledWith(
+        "planner-session",
+        {
+          body: "Ship it.",
+          delivery: "btw",
+          in_reply_to: "message-2",
+        },
+        keyedAttempt
+      )
     );
     await waitFor(() =>
       expect(
@@ -1707,16 +1767,20 @@ test("Agents marks read and clears through the newest reply even within one mill
     );
     await expect(within(planner).findByText("First answer")).resolves.toBeTruthy();
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        read_through: "2026-09-14T03:00:00.1235Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { read_through: "2026-09-14T03:00:00.1235Z" },
+        markAttempt
+      )
     );
 
     fireEvent.click(within(planner).getByRole("button", { name: "Clear conversation" }));
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        cleared_before: "2026-09-14T03:00:00.1235Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { cleared_before: "2026-09-14T03:00:00.1235Z" },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -1777,11 +1841,15 @@ test("a reply inherits the mode of the exchange's newest attempt even within one
     });
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
-      expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
-        body: "Ship it.",
-        delivery: "btw",
-        in_reply_to: "message-2",
-      })
+      expect(page.createAgentMessage).toHaveBeenCalledWith(
+        "planner-session",
+        {
+          body: "Ship it.",
+          delivery: "btw",
+          in_reply_to: "message-2",
+        },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -1946,12 +2014,14 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
     });
     fireEvent.click(within(broadcast).getByRole("button", { name: "Send to 1" }));
     await waitFor(() =>
-      expect(page.createBroadcast).toHaveBeenCalledWith({
-        body: "Stand down and report status.",
-        delivery: "btw",
-        idempotency_key: expect.any(String),
-        session_ids: ["planner-session"],
-      })
+      expect(page.createBroadcast).toHaveBeenCalledWith(
+        {
+          body: "Stand down and report status.",
+          delivery: "btw",
+          session_ids: ["planner-session"],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -1989,12 +2059,14 @@ test("a broadcast whose selection holds an Aside-only session goes as an Aside u
     });
     fireEvent.click(within(broadcast).getByRole("button", { name: "Send to 2" }));
     await waitFor(() =>
-      expect(page.createBroadcast).toHaveBeenCalledWith({
-        body: "Report status.",
-        delivery: "aside",
-        idempotency_key: expect.any(String),
-        session_ids: ["planner-session", "reviewer-session"],
-      })
+      expect(page.createBroadcast).toHaveBeenCalledWith(
+        {
+          body: "Report status.",
+          delivery: "aside",
+          session_ids: ["planner-session", "reviewer-session"],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -2034,9 +2106,7 @@ test("a mode both recipients advertise takes the excluded one back in", async ()
 
 test("Restore draft refuses, and says why on screen, while the composer holds a message or a selection started since the refused send", async () => {
   const page = renderAgents();
-  page.createBroadcast.mockImplementationOnce(async () => {
-    throw new Error("Envoy listener unreachable");
-  });
+  page.createBroadcast.mockImplementationOnce(refuseBroadcast);
   const reason =
     "Restore draft would replace the broadcast you have started. Send it, or clear its message and selection, first.";
 
@@ -2051,7 +2121,7 @@ test("Restore draft refuses, and says why on screen, while the composer holds a 
     fireEvent.change(message(), { target: { value: "Keep this." } });
     fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
     const sends = await screen.findByRole("region", { name: "Sends" });
-    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    await within(sends).findByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`);
     const restore = within(sends).getByRole("button", { name: "Restore draft" });
     expect(restore.getAttribute("aria-disabled")).toBeNull();
 
@@ -2093,7 +2163,7 @@ test("Restore draft refuses, and says why on screen, while the composer holds a 
 /** The page's `api.createBroadcast` spy, as far as reading back what it was handed. */
 interface BroadcastSpy {
   readonly createBroadcast: {
-    readonly mock: { readonly calls: readonly (readonly [CreateBroadcastInput])[] };
+    readonly mock: { readonly calls: readonly Parameters<typeof api.createBroadcast>[] };
   };
 }
 
@@ -2104,16 +2174,22 @@ function posted(page: BroadcastSpy, index: number): CreateBroadcastInput {
   return call[0];
 }
 
+/** The key the i-th broadcast request went under (`Idempotency-Key`). */
+function postedKey(page: BroadcastSpy, index: number): string {
+  const call = page.createBroadcast.mock.calls[index];
+  if (call === undefined) throw new Error(`no broadcast request ${index}`);
+  return call[1].key;
+}
+
 // LEGION-446. A refused send's row is the only copy of its message, and Restore draft is how the
-// human sends it again. Until something is edited the request goes out word for word, key
-// included, so a send that did land behind the refusal is answered as the repeat it is; the first
-// edit makes it a new composition, under a new key.
+// human sends it again. Until something is edited the request goes out word for word; Dispatch
+// refused it, so it goes under a key of its own, since Dispatch would answer the refused key with
+// its stored refusal. The first edit makes it a new composition, under a new key too.
 test("Restore draft re-sends the refused request word for word, and the first edit drops it for a new send", async () => {
   const page = renderAgents();
-  const refuse = async () => {
-    throw new Error("Envoy listener unreachable");
-  };
-  page.createBroadcast.mockImplementationOnce(refuse).mockImplementationOnce(refuse);
+  page.createBroadcast
+    .mockImplementationOnce(refuseBroadcast)
+    .mockImplementationOnce(refuseBroadcast);
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -2125,7 +2201,7 @@ test("Restore draft re-sends the refused request word for word, and the first ed
       const sends = await screen.findByRole("region", { name: "Sends" });
       await waitFor(() =>
         expect(
-          within(sends).getAllByText("Could not send to 1 agent: Envoy listener unreachable")
+          within(sends).getAllByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`)
         ).toHaveLength(failures)
       );
       fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
@@ -2135,18 +2211,21 @@ test("Restore draft re-sends the refused request word for word, and the first ed
     fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
     const first = posted(page, 0);
-    expect(first.idempotency_key).not.toBe("");
+    const firstKey = postedKey(page, 0);
+    expect(firstKey).not.toBe("");
 
     await restoreDraft(1);
     fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
     expect(posted(page, 1)).toEqual(first);
+    expect(postedKey(page, 1)).not.toBe(firstKey);
 
     await restoreDraft(1);
     fireEvent.change(message(), { target: { value: "Keep this!" } });
     fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(3));
-    expect(posted(page, 2).idempotency_key).not.toBe(first.idempotency_key);
+    expect(postedKey(page, 2)).not.toBe(firstKey);
+    expect(postedKey(page, 2)).not.toBe(postedKey(page, 1));
     expect(posted(page, 2).body).toBe("Keep this!");
   } finally {
     page.view.unmount();
@@ -2156,9 +2235,7 @@ test("Restore draft re-sends the refused request word for word, and the first ed
 
 test("Restore draft keeps a mode the sender did not pick unpicked, so it still follows the selection", async () => {
   const page = renderAgents();
-  page.createBroadcast.mockImplementationOnce(async () => {
-    throw new Error("Envoy listener unreachable");
-  });
+  page.createBroadcast.mockImplementationOnce(refuseBroadcast);
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -2175,7 +2252,7 @@ test("Restore draft keeps a mode the sender did not pick unpicked, so it still f
     expect(mode().value).toBe("aside");
     fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
     const sends = await screen.findByRole("region", { name: "Sends" });
-    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    await within(sends).findByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`);
     fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
 
     expect(mode().value).toBe("aside");
@@ -2197,9 +2274,7 @@ test("Restore draft keeps a mode the sender did not pick unpicked, so it still f
 test("a restored broadcast shows the mode it re-sends, even after the selection's own mode changed", async () => {
   const [planner, reviewer] = agents;
   const page = renderAgents({ listedAgents: [planner, reviewer] });
-  page.createBroadcast.mockImplementationOnce(async () => {
-    throw new Error("Envoy listener unreachable");
-  });
+  page.createBroadcast.mockImplementationOnce(refuseBroadcast);
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -2220,7 +2295,7 @@ test("a restored broadcast shows the mode it re-sends, even after the selection'
     page.listAgents.mockResolvedValue([planner, { ...reviewer, capabilities: ["aside", "btw"] }]);
     await page.queryClient.refetchQueries({ queryKey: ["agents"] });
     const sends = await screen.findByRole("region", { name: "Sends" });
-    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    await within(sends).findByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`);
     fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
 
     // Held word for word, the request shows its own mode and goes in it.
@@ -2238,9 +2313,7 @@ test("a selected agent that went away does not change what Restore draft re-send
   const [planner, reviewer] = agents;
   const listening = { ...reviewer, capabilities: ["aside", "btw"] };
   const page = renderAgents({ listedAgents: [planner, listening] });
-  page.createBroadcast.mockImplementationOnce(async () => {
-    throw new Error("Envoy listener unreachable");
-  });
+  page.createBroadcast.mockImplementationOnce(refuseBroadcast);
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -2267,7 +2340,7 @@ test("a selected agent that went away does not change what Restore draft re-send
       ).toBeNull()
     );
     const sends = await screen.findByRole("region", { name: "Sends" });
-    await within(sends).findByText("Could not send to 2 agents: Envoy listener unreachable");
+    await within(sends).findByText(`Could not send to 2 agents: ${BROADCAST_REFUSED}`);
     fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
 
     // The restored request names both, so the composer counts both; the Reviewer's chip falls
@@ -2301,10 +2374,9 @@ test("a selected agent that went away does not change what Restore draft re-send
 test("a selected agent that came back is shown as not in the restored send, and the request stays as refused", async () => {
   const [planner, reviewer] = agents;
   const page = renderAgents();
-  const refuse = async () => {
-    throw new Error("Envoy listener unreachable");
-  };
-  page.createBroadcast.mockImplementationOnce(refuse).mockImplementationOnce(refuse);
+  page.createBroadcast
+    .mockImplementationOnce(refuseBroadcast)
+    .mockImplementationOnce(refuseBroadcast);
   const notInTheSend =
     "Excluded: Reviewer (not in the refused send; edit to include it). Nothing is sent to them, and no other mode is substituted.";
 
@@ -2315,7 +2387,7 @@ test("a selected agent that came back is shown as not in the restored send, and 
       const sends = await screen.findByRole("region", { name: "Sends" });
       await waitFor(() =>
         expect(
-          within(sends).getAllByText("Could not send to 1 agent: Envoy listener unreachable")
+          within(sends).getAllByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`)
         ).toHaveLength(failures)
       );
       fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
@@ -2340,6 +2412,7 @@ test("a selected agent that came back is shown as not in the restored send, and 
     fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
     const first = posted(page, 0);
+    const firstKey = postedKey(page, 0);
     expect(first.session_ids).toEqual(["planner-session"]);
 
     // The Reviewer now takes BTW: the live plan would reach it, the refused request does not.
@@ -2365,7 +2438,7 @@ test("a selected agent that came back is shown as not in the restored send, and 
     fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(3));
     expect(posted(page, 2).session_ids).toEqual(["planner-session", "reviewer-session"]);
-    expect(posted(page, 2).idempotency_key).not.toBe(first.idempotency_key);
+    expect(postedKey(page, 2)).not.toBe(firstKey);
   } finally {
     page.view.unmount();
     page.restore();
@@ -2377,11 +2450,13 @@ test("a selected agent that came back is shown as not in the restored send, and 
 test("a restored send names a selected session it leaves out by the reason an edit would keep, unless it has come back", () => {
   const [planner, reviewer] = agents;
   const restored = {
-    body: "Still here?",
-    delivery: "btw",
-    idempotency_key: "refused-key",
-    session_ids: ["planner-session"],
-  } satisfies CreateBroadcastInput;
+    input: {
+      body: "Still here?",
+      delivery: "btw",
+      session_ids: ["planner-session"],
+    } satisfies CreateBroadcastInput,
+    key: "refused-key",
+  };
   const composition = {
     delivery: "btw",
     draft: "Still here?",
@@ -2397,7 +2472,8 @@ test("a restored send names a selected session it leaves out by the reason an ed
   expect(reasons([planner, { ...reviewer, capabilities: ["aside", "btw"] }])).toEqual([
     "not in the refused send; edit to include it",
   ]);
-  expect(composedBroadcast(composition, [planner, reviewer]).input).toBe(restored);
+  expect(composedBroadcast(composition, [planner, reviewer]).input).toBe(restored.input);
+  expect(composedBroadcast(composition, [planner, reviewer]).key).toBe("refused-key");
 });
 
 // Two deliberate sends of the same words are two broadcasts: each composition carries a key of its
@@ -2405,9 +2481,7 @@ test("a restored send names a selected session it leaves out by the reason an ed
 test("each composed send carries a key of its own, even when it says the same thing", async () => {
   const page = renderAgents();
   // Refused, so each row stays on the strip and the page does not open a broadcast in between.
-  page.createBroadcast.mockImplementation(async () => {
-    throw new Error("Envoy listener unreachable");
-  });
+  page.createBroadcast.mockImplementation(refuseBroadcast);
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -2421,7 +2495,7 @@ test("each composed send carries a key of its own, even when it says the same th
       fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
       await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(count));
     }
-    const keys = [0, 1, 2].map((index) => posted(page, index).idempotency_key);
+    const keys = [0, 1, 2].map((index) => postedKey(page, index));
     expect(new Set(keys).size).toBe(3);
   } finally {
     page.view.unmount();
@@ -2430,7 +2504,8 @@ test("each composed send carries a key of its own, even when it says the same th
 });
 
 // TanStack resumes a paused mutation only while the tab is visible (`focusManager`), so a queue
-// built on a mutation `scope` would hold the second send until the reader came back to the tab.
+// built on a mutation `scope` would hold the second send until the reader came back to the tab;
+// the queue's own line waits on nothing but the send ahead.
 test("a queued broadcast goes out as soon as the one ahead is answered, with the tab hidden by then", async () => {
   const page = renderAgents();
   const held = Promise.withResolvers<void>();
@@ -2471,12 +2546,231 @@ test("a queued broadcast goes out as soon as the one ahead is answered, with the
       "Second.",
     ]);
   } finally {
-    // `lastRequest` is module state: a held request left unresolved would hold every later
-    // broadcast in this file behind it.
+    // A request left unanswered would keep its send out after the test, its line waiting behind
+    // it.
     held.resolve();
     focusManager.setFocused(undefined);
     page.view.unmount();
     page.restore();
+  }
+});
+
+/** What a broadcast's row says once it is past its deadline and still being tried. */
+const broadcastLate =
+  "Still sending to 1 agent — Dispatch has not confirmed it yet. It keeps trying, and the broadcast is made once.";
+
+/** Sends `body` to the Planner from the broadcast composer, then ticks the Planner again: a
+ *  broadcast begun since keeps the page on the strip once this one lands. */
+async function broadcastToPlanner(region: HTMLElement, body: string): Promise<void> {
+  const planner = within(region).getByRole("checkbox", { name: "Select Planner for broadcast" });
+  fireEvent.click(planner);
+  fireEvent.change(within(region).getByRole("textbox", { name: "Broadcast message" }), {
+    target: { value: body },
+  });
+  fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
+  await tick(0);
+  fireEvent.click(planner);
+}
+
+// W2. A broadcast goes under its key as a message to one session does, and is tried as one is: a
+// failed fetch, a timeout or a 5xx is no verdict, so the same request is made again after 1 s, 2 s,
+// 4 s … never more than 30 s apart, each attempt held to 15 s of silence. Past the send's 30 s
+// deadline the strip says Dispatch has not confirmed it yet, and it goes on until Dispatch does.
+test("a broadcast Dispatch has not confirmed is tried again under its key until it is", async () => {
+  const page = renderAgents();
+  const region = await screen.findByRole("region", { name: "Agents" });
+  page.createBroadcast
+    .mockRejectedValueOnce(new NetworkError("/api/v1/broadcasts", new TypeError("Failed to fetch")))
+    .mockRejectedValueOnce(new RequestTimeoutError("/api/v1/broadcasts", KEYED_SEND_ATTEMPT_MS))
+    .mockRejectedValueOnce(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }))
+    .mockRejectedValueOnce(new ApiError(504, { error: "gateway timeout" }))
+    .mockRejectedValueOnce(new ApiError(502, { error: "bad gateway" }))
+    .mockRejectedValueOnce(
+      new NetworkError("/api/v1/broadcasts", new TypeError("Failed to fetch"))
+    );
+  jest.useFakeTimers();
+
+  try {
+    await broadcastToPlanner(region, "Status?");
+    const sends = screen.getByRole("region", { name: "Sends" });
+    expect(within(sends).getByText("Sending to 1 agent…")).toBeTruthy();
+    expect(page.createBroadcast).toHaveBeenCalledTimes(1);
+
+    for (const [index, wait] of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000].entries()) {
+      await tick(wait - 1);
+      expect(page.createBroadcast).toHaveBeenCalledTimes(index + 1);
+      await tick(1);
+      expect(page.createBroadcast).toHaveBeenCalledTimes(index + 2);
+      // 1 + 2 + 4 + 8 + 16 s is past the send's 30 s deadline: still the server's, not refused.
+      if (index === 4) {
+        expect(within(sends).getByText(broadcastLate)).toBeTruthy();
+        expect(within(sends).getByRole("button", { name: "Stop trying" })).toBeTruthy();
+      }
+    }
+    expect(within(sends).getByRole("link", { name: "Sent to 1 agent" })).toBeTruthy();
+    expect(within(sends).queryByRole("button", { name: "Stop trying" })).toBeNull();
+    const request = posted(page, 0);
+    expect(page.createBroadcast.mock.calls).toEqual(
+      Array.from({ length: 7 }, () => [request, keyedAttempt])
+    );
+    expect(new Set(page.createBroadcast.mock.calls.map(([, bounds]) => bounds.key)).size).toBe(1);
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// An outage would hold a late broadcast, and every send behind it, for good. Stop trying ends it
+// between attempts: none follows, the row says it was stopped and offers Retry and Restore draft as
+// a refusal does, and Retry sends the very request again, key included.
+test("Stop trying ends a late broadcast, and Retry sends it again under the same key", async () => {
+  const page = renderAgents();
+  const region = await screen.findByRole("region", { name: "Agents" });
+  page.createBroadcast.mockRejectedValue(
+    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  );
+  jest.useFakeTimers();
+
+  try {
+    await broadcastToPlanner(region, "Status?");
+    const sends = screen.getByRole("region", { name: "Sends" });
+    expect(within(sends).queryByRole("button", { name: "Stop trying" })).toBeNull();
+    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await tick(wait);
+    expect(page.createBroadcast).toHaveBeenCalledTimes(5);
+    expect(within(sends).getByText(broadcastLate)).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(within(sends).getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    expect(
+      within(sends).getByText(`Stopped sending to 1 agent: ${new SendStoppedError().message}`)
+    ).toBeTruthy();
+    expect(within(sends).getByRole("button", { name: "Restore draft" })).toBeTruthy();
+    await tick(30 * 60_000);
+    expect(page.createBroadcast).toHaveBeenCalledTimes(5);
+
+    page.createBroadcast.mockImplementation(async (input) => ({
+      author: { id: "alice", kind: "user" },
+      body: input.body,
+      created_at: "2026-10-25T00:00:00Z",
+      delivery: input.delivery,
+      excluded: [],
+      id: "broadcast-retried",
+      recipients: [{ message: message(input.body), replies: [], session_id: "planner-session" }],
+    }));
+    await act(async () => {
+      fireEvent.click(within(sends).getByRole("button", { name: "Retry" }));
+    });
+    await tick(0);
+    expect(page.createBroadcast).toHaveBeenCalledTimes(6);
+    expect(within(sends).getByRole("link", { name: "Sent to 1 agent" })).toBeTruthy();
+    expect(new Set(page.createBroadcast.mock.calls.map(([, bounds]) => bounds.key)).size).toBe(1);
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+/** A reload, as far as kept sends go: the page's code stops, so nothing it still runs keeps
+ *  anything more, and what it kept is there for the page after it. */
+function reloadTab(): void {
+  const tab = window.sessionStorage;
+  const kept = Array.from({ length: tab.length }, (_, index) => tab.key(index)).flatMap((name) =>
+    name === null ? [] : [[name, tab.getItem(name) ?? ""] as const]
+  );
+  resetWriteStorage();
+  for (const [name, value] of kept) tab.setItem(name, value);
+}
+
+// W1. A broadcast out when the page reloads goes on after it under its key, and a refused one
+// shows again with Retry and Restore draft: the reloaded app takes both up as it signs in.
+test("a broadcast out or refused when the page reloads is there again after it", async () => {
+  const before = renderAgents();
+  before.createBroadcast
+    .mockImplementationOnce(refuseBroadcast)
+    .mockReturnValueOnce(Promise.withResolvers<BroadcastCreated>().promise);
+  let out: CreateBroadcastInput | undefined;
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    for (const body of ["Refused.", "Out."]) {
+      fireEvent.click(
+        within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+      );
+      fireEvent.change(within(region).getByRole("textbox", { name: "Broadcast message" }), {
+        target: { value: body },
+      });
+      fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
+      await screen.findByTitle(body);
+    }
+    await waitFor(() => expect(before.createBroadcast).toHaveBeenCalledTimes(2));
+    out = posted(before, 1);
+  } finally {
+    before.view.unmount();
+    before.restore();
+  }
+
+  reloadTab();
+  const after = renderAgents();
+  try {
+    const sends = await screen.findByRole("region", { name: "Sends" });
+    await within(sends).findByRole("link", { name: "Sent to 1 agent" });
+    expect(within(sends).getByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`)).toBeTruthy();
+    expect(after.createBroadcast).toHaveBeenCalledTimes(1);
+    expect(posted(after, 0)).toEqual(out ?? {});
+
+    fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+    const region = screen.getByRole("region", { name: "Agents" });
+    expect(
+      within(region).getByRole<HTMLTextAreaElement>("textbox", { name: "Broadcast message" }).value
+    ).toBe("Refused.");
+  } finally {
+    after.view.unmount();
+    after.restore();
+  }
+});
+
+// W1. A message to one session out when the page reloads is made again after it under the key it
+// was pressed with, and its live view shows it again as its own turn, Sending….
+test("a live-view send out when the page reloads is sent again under its key and shown again", async () => {
+  const before = await renderPlannerLiveView();
+  before.createAgentMessage.mockReturnValueOnce(Promise.withResolvers<Message>().promise);
+  let pressed: (typeof before.createAgentMessage.mock.calls)[number] | undefined;
+  try {
+    await sendFromLiveView("Status please");
+    expect(before.createAgentMessage).toHaveBeenCalledTimes(1);
+    pressed = before.createAgentMessage.mock.calls[0];
+  } finally {
+    before.view.unmount();
+    before.restore();
+  }
+
+  reloadTab();
+  const answer = Promise.withResolvers<Message>();
+  const after = renderAgents({ initialEntry: "/agents/planner-session/live" });
+  after.createAgentMessage.mockReturnValueOnce(answer.promise);
+  try {
+    const held = await screen.findByTestId("agent-send-held");
+    expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
+    expect(within(held).getByRole("status").textContent).toBe("Sending…");
+    expect(after.createAgentMessage.mock.calls).toEqual([
+      [
+        pressed?.[0],
+        pressed?.[1],
+        expect.objectContaining({ deadlineMs: KEYED_SEND_ATTEMPT_MS, key: pressed?.[2].key }),
+      ],
+    ]);
+
+    await act(async () => answer.resolve(message("Status please")));
+    await waitFor(() => expect(screen.queryByTestId("agent-send-held")).toBeNull());
+    expect(window.sessionStorage.getItem(`dispatch.write:${pressed?.[2].key}`)).toBeNull();
+  } finally {
+    after.view.unmount();
+    after.restore();
   }
 });
 
@@ -2693,9 +2987,7 @@ test("the header checkbox selects a folded row and the fold says how many of its
 // the only copy of a refused message, so the hover keeps every word, and never shows its syntax.
 test("a refused send's row shows its message formatted on one line, with its whole text on hover", async () => {
   const page = renderAgents();
-  page.createBroadcast.mockImplementationOnce(async () => {
-    throw new Error("Envoy listener unreachable");
-  });
+  page.createBroadcast.mockImplementationOnce(refuseBroadcast);
   const body = "**Stop** the deploy\n\n1. check `main`\n2. report back";
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -2708,7 +3000,7 @@ test("a refused send's row shows its message formatted on one line, with its who
     );
     fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
     const sends = await screen.findByRole("region", { name: "Sends" });
-    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    await within(sends).findByText(`Could not send to 1 agent: ${BROADCAST_REFUSED}`);
     await waitFor(() => expect(sends.querySelector("strong")?.textContent).toBe("Stop"));
     const preview = sends.querySelector<HTMLElement>("[data-markdown-preview]");
     if (preview === null) throw new Error("the send's row shows no preview of its message");
@@ -2770,9 +3062,11 @@ test("an open row a closed fold hides marks nothing read, and opening the fold r
 
     fireEvent.click(fold);
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("stale-session", {
-        read_through: "2026-09-14T01:05:00Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "stale-session",
+        { read_through: "2026-09-14T01:05:00Z" },
+        markAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -3016,6 +3310,436 @@ test("/ falls through to the Dispatch-wide search dialog when no agents are conn
 
     expect(screen.getByRole("dialog", { name: "Search" })).toBeTruthy();
   } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+/** Moves the fake clock `ms` on and lets every promise the move released run. */
+async function tick(ms: number): Promise<void> {
+  await act(async () => {
+    jest.advanceTimersByTime(ms);
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+  });
+}
+
+const keyedStopped = new SendStoppedError().message;
+
+/** Opens `name`'s live view from its Agents row, by the row's own live link (`AgentName`'s). */
+function openLiveView(name: string): void {
+  const region = screen.getByRole("region", { name: "Agents" });
+  fireEvent.click(
+    within(card(region, name)).getByRole("link", { name: `Open live conversation with ${name}` })
+  );
+}
+
+/** Leaves a live view for the Agents page, by the view's own link. */
+function backToAgents(): void {
+  fireEvent.click(screen.getByRole("link", { name: "← Agents" }));
+}
+
+/** The app with Planner's live view open, both lazy pages loaded once on the real clock, so every
+ *  move between them on the fake clock that follows renders at once. A message to a session is
+ *  answered 503 until a test says otherwise: Dispatch is down. `listedAgents` are the live
+ *  sessions, Planner among them. */
+async function renderPlannerLiveView(listedAgents: Agent[] = agents) {
+  const page = renderAgents({ listedAgents });
+  page.createAgentMessage.mockRejectedValue(
+    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  );
+  await screen.findByRole("region", { name: "Agents" });
+  openLiveView("Planner");
+  await screen.findByRole("combobox", { name: "Delivery mode" });
+  return page;
+}
+
+/** Sends `body` from the open live view. */
+async function sendFromLiveView(body: string): Promise<void> {
+  fireEvent.change(screen.getByPlaceholderText(/delivered as Aside/), { target: { value: body } });
+  await act(async () => {
+    fireEvent.click(
+      within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
+    );
+  });
+}
+
+// A send belongs to its session, not to the view that made it: one the live view made during an
+// outage is still being tried while the reader looks at another session and at the Agents page,
+// under the key it was pressed with, and the view shows it again on return. It ends when the
+// reader stops it.
+test("a live-view send that keeps failing outlives the view, under one key, until Stop trying", async () => {
+  const page = await renderPlannerLiveView();
+  jest.useFakeTimers();
+
+  try {
+    await sendFromLiveView("Status please");
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(1);
+    await tick(1_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
+
+    // Another session's live view holds nothing of Planner's: only its own empty box refuses Send.
+    await act(async () => backToAgents());
+    await act(async () => openLiveView("Reviewer"));
+    expect(screen.getByPlaceholderText(/^Message Reviewer/)).toBeTruthy();
+    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    expect(
+      within(screen.getByTestId("agent-composer"))
+        .getByRole("button", { name: "Send" })
+        .getAttribute("title")
+    ).toBe("Type a message first.");
+    await tick(2_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(3);
+
+    // Back on Planner: the same send, still out.
+    await act(async () => backToAgents());
+    await act(async () => openLiveView("Planner"));
+    const held = screen.getByTestId("agent-send-held");
+    expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
+    expect(within(held).getByRole("status").textContent).toBe("Sending…");
+    await tick(4_000);
+    await tick(8_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
+    await tick(15_000);
+    expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
+
+    await act(async () => {
+      fireEvent.click(within(held).getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    expect(screen.getByTestId("agent-send-error").textContent).toBe(keyedStopped);
+    await tick(30 * 60_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
+    expect(
+      new Set(
+        page.createAgentMessage.mock.calls.map(
+          ([session, input, bounds]) => `${session} ${input.body} ${bounds.key}`
+        )
+      ).size
+    ).toBe(1);
+    expect(page.createAgentMessage.mock.calls[0]?.[0]).toBe("planner-session");
+
+    fireEvent.click(within(held).getByRole("button", { name: "Discard" }));
+    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// A send to a session belongs to the session, the write's target: the session's Agents row shows
+// the send its live view made as a turn of its own, in the session's one press-order line, while
+// the row's own composer stays the reader's - empty and free. The row's Stop trying ends that
+// write, and the row's Retry sends it again under the same key, where it lands, and it leaves both
+// surfaces.
+test("the session's Agents row shows a live-view send as its own turn and can stop and retry it", async () => {
+  const page = await renderPlannerLiveView();
+  jest.useFakeTimers();
+
+  try {
+    await sendFromLiveView("Status please");
+    await tick(1_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
+
+    await act(async () => backToAgents());
+    const region = screen.getByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await act(async () => expand(planner, "Planner"));
+    const held = within(planner).getByTestId("agent-send-held");
+    expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
+    expect(within(held).getByRole("status").textContent).toBe("Sending…");
+    const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    expect(field.value).toBe("");
+    expect(field.closest("fieldset")?.disabled).toBe(false);
+
+    for (const wait of [2_000, 4_000, 8_000, 15_000]) await tick(wait);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
+    expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
+    await act(async () => {
+      fireEvent.click(within(held).getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    expect(within(planner).getByTestId("agent-send-error").textContent).toBe(keyedStopped);
+    await tick(30 * 60_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
+
+    // Retry from the row is the same message, so it goes under the same key, and lands.
+    page.createAgentMessage.mockResolvedValueOnce(message("Status please"));
+    await act(async () => {
+      fireEvent.click(
+        within(within(planner).getByTestId("agent-send-held")).getByRole("button", {
+          name: "Retry",
+        })
+      );
+    });
+    await tick(0);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(6);
+    expect(new Set(messageKeys(page.createAgentMessage)).size).toBe(1);
+    expect(within(planner).queryByTestId("agent-send-held")).toBeNull();
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// A message the live view sent in a mode the reader picked is that message, whoever retries it:
+// the Agents row's Retry of a stopped live-view send re-sends the held request as it was - its
+// body, the picked mode and its key - and not the row's own plain mode under a key of its own,
+// which would reach the session a second time as a different message.
+test("the Agents row's Retry of a live-view send re-sends it as it was", async () => {
+  const both: Agent = { ...agents[0], capabilities: ["aside", "steer"] };
+  const page = await renderPlannerLiveView([both, agents[1]]);
+  const mode = screen.getByRole("combobox", { name: "Delivery mode" }) as HTMLSelectElement;
+  await waitFor(() => expect(mode.value).toBe("steer"));
+  fireEvent.change(mode, { target: { value: "aside" } });
+  await screen.findByPlaceholderText(/delivered as Aside/);
+  jest.useFakeTimers();
+
+  try {
+    await sendFromLiveView("Status please");
+    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await tick(wait);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    const pressed = page.createAgentMessage.mock.calls[0]?.[1];
+    const pressedKey = page.createAgentMessage.mock.calls[0]?.[2].key;
+    expect(pressed).toEqual({ body: "Status please", delivery: "aside" });
+
+    await act(async () => backToAgents());
+    const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
+    await act(async () => expand(planner, "Planner"));
+    page.createAgentMessage.mockResolvedValueOnce(message("Status please"));
+    await act(async () => {
+      fireEvent.click(
+        within(within(planner).getByTestId("agent-send-held")).getByRole("button", {
+          name: "Retry",
+        })
+      );
+    });
+    await tick(0);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(6);
+    expect(page.createAgentMessage.mock.calls[5]?.[1]).toEqual(pressed);
+    // Stopped, so Dispatch gave no verdict: the Retry goes under the key the press had.
+    expect(page.createAgentMessage.mock.calls[5]?.[2].key).toBe(pressedKey);
+    expect(within(planner).queryByTestId("agent-send-held")).toBeNull();
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// The session is the write's target: a refused live-view message shows on the Agents row too, and
+// the row's Discard drops the one write, so the live view shows it no longer.
+test("a refused live-view send shows on the Agents row, and Discard there drops it from both", async () => {
+  const page = await renderPlannerLiveView();
+  try {
+    page.createAgentMessage.mockRejectedValueOnce(
+      new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
+    );
+    await sendFromLiveView("Status please");
+    await screen.findByTestId("agent-send-error");
+
+    await act(async () => backToAgents());
+    const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
+    await act(async () => expand(planner, "Planner"));
+    const held = within(planner).getByTestId("agent-send-held");
+    expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
+    expect(within(held).getByTestId("agent-send-error").textContent).toBe(
+      "Could not send: Dispatch refused the message"
+    );
+    const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    expect(field.value).toBe("");
+
+    fireEvent.click(within(held).getByRole("button", { name: "Discard" }));
+    expect(within(planner).queryByTestId("agent-send-held")).toBeNull();
+    await act(async () => openLiveView("Planner"));
+    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(1);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// A live-view send's mode is that send's own: the Agents row shows a BTW the live view sent as a
+// turn of its own, and its composer warns only about the row's own message, in the row's own
+// plain mode, before and after the reader writes there.
+test("the Agents row's composer warns about its own message, not a live-view send", async () => {
+  const page = await renderPlannerLiveView();
+  const plainNotice = /does not advertise Send/;
+  try {
+    const mode = screen.getByRole("combobox", { name: "Delivery mode" }) as HTMLSelectElement;
+    fireEvent.change(mode, { target: { value: "btw" } });
+    await screen.findByPlaceholderText(/delivered as BTW/);
+    page.createAgentMessage.mockRejectedValueOnce(
+      new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
+    );
+    fireEvent.change(screen.getByPlaceholderText(/delivered as BTW/), {
+      target: { value: "Status please" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
+      );
+    });
+    await screen.findByTestId("agent-send-error");
+    expect(page.createAgentMessage.mock.calls[0]?.[1].delivery).toBe("btw");
+
+    await act(async () => backToAgents());
+    const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
+    await act(async () => expand(planner, "Planner"));
+    expect(within(planner).getByTestId("agent-send-held")).toBeTruthy();
+    expect(within(planner).getByText(plainNotice)).toBeTruthy();
+
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "Status please, now" },
+    });
+    expect(within(planner).getByText(plainNotice)).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// W8. What the reader writes over a refusal is the only copy of that message, and a reload must
+// keep it as last typed: the composer writes it back to the held send as the page goes, so the
+// page after the reload shows the edit rather than the words the refusal was made with.
+test("an edit typed over a refused row survives a reload", async () => {
+  const before = renderAgents();
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await act(async () => expand(planner, "Planner"));
+    before.createAgentMessage.mockRejectedValueOnce(
+      new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
+    );
+    const field = within(planner).getByRole("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Status please" } });
+    await act(async () => {
+      fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
+    });
+    await within(planner).findByText("Couldn't send — Dispatch refused the message");
+
+    fireEvent.change(field, { target: { value: "Status please, now" } });
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+  } finally {
+    before.view.unmount();
+    before.restore();
+  }
+
+  reloadTab();
+  const after = renderAgents();
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await act(async () => expand(planner, "Planner"));
+    const field = within(planner).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    expect(field.value).toBe("Status please, now");
+    expect(within(planner).getByText("Couldn't send — Dispatch refused the message")).toBeTruthy();
+    expect(after.createAgentMessage).not.toHaveBeenCalled();
+  } finally {
+    after.view.unmount();
+    after.restore();
+  }
+});
+
+// W6. A kept send belongs to the person who pressed it: a tab alice left a send in, that bob
+// signs into, sends nothing of hers, shows no row for it, and drops what was kept.
+test("a send alice left behind is not resumed for bob, and is dropped", async () => {
+  const alice = renderAgents();
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await act(async () => expand(planner, "Planner"));
+    alice.createAgentMessage.mockReturnValueOnce(Promise.withResolvers<Message>().promise);
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "Status please" },
+    });
+    await act(async () => {
+      fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
+    });
+    await waitFor(() => expect(alice.createAgentMessage).toHaveBeenCalledTimes(1));
+    // Her send is kept in the tab, so the check after the reload is of something that was there.
+    expect(
+      Array.from({ length: window.sessionStorage.length }, (_, index) =>
+        window.sessionStorage.key(index)
+      ).filter((name) => name?.startsWith("dispatch.write:"))
+    ).toHaveLength(1);
+  } finally {
+    alice.view.unmount();
+    alice.restore();
+  }
+
+  reloadTab();
+  const bob = renderAgents();
+  bob.whoAmI.mockResolvedValue({ event_head: "0", kind: "user", login: "bob" });
+  bob.queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "bob" });
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await act(async () => expand(planner, "Planner"));
+    expect(bob.createAgentMessage).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    expect(screen.queryByText("Status please")).toBeNull();
+    expect(
+      within(planner).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" }).value
+    ).toBe("");
+    // Alice's kept write is gone from the tab, not merely left unshown.
+    await waitFor(() =>
+      expect(
+        Array.from({ length: window.sessionStorage.length }, (_, index) =>
+          window.sessionStorage.key(index)
+        ).filter((name) => name?.startsWith("dispatch.write:"))
+      ).toEqual([])
+    );
+  } finally {
+    bob.view.unmount();
+    bob.restore();
+  }
+});
+
+// W21. A send pressed while the browser is offline is tried, not parked: the attempt is made,
+// the composer says Dispatch has not confirmed it once the deadline passes and offers Stop
+// trying, and the message lands once the network is back. A mutation TanStack paused offline
+// would make no attempt, start no deadline and offer no way out.
+test("a send pressed offline goes late with Stop trying, and lands when the network returns", async () => {
+  const online = onlineManager.isOnline();
+  const page = await renderPlannerLiveView();
+  page.createAgentMessage.mockRejectedValue(
+    new NetworkError("/api/v1/agents/planner-session/messages", new TypeError("Failed to fetch"))
+  );
+  jest.useFakeTimers();
+
+  try {
+    onlineManager.setOnline(false);
+    await sendFromLiveView("Status please");
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(1);
+    const held = screen.getByTestId("agent-send-held");
+    expect(within(held).getByRole("status").textContent).toBe("Sending…");
+
+    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await tick(wait);
+    expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
+    expect(within(held).getByRole("button", { name: "Stop trying" })).toBeTruthy();
+    expect(page.createAgentMessage.mock.calls.length).toBeGreaterThan(1);
+
+    page.createAgentMessage.mockResolvedValueOnce(message("Status please"));
+    onlineManager.setOnline(true);
+    await tick(30_000);
+    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    expect(new Set(messageKeys(page.createAgentMessage)).size).toBe(1);
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    onlineManager.setOnline(online);
     page.view.unmount();
     page.restore();
   }

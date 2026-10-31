@@ -1,0 +1,88 @@
+{
+  "description": "Legion: tell a phase worker whose turn ends with its phase still open, through the legion_phase_hook tool on the pane's own Legion MCP server.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "legion",
+            "tool": "legion_phase_hook",
+            "input": {
+              "event": "Stop",
+              "lastAssistantMessage": "${last_assistant_message}",
+              "stopHookActive": "${stop_hook_active}"
+            },
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "legion",
+            "tool": "legion_phase_hook",
+            "input": {
+              "event": "StopFailure",
+              "lastAssistantMessage": "${last_assistant_message}"
+            },
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "legion",
+            "tool": "legion_phase_hook",
+            "input": {
+              "event": "PostToolUse",
+              "toolName": "${tool_name}",
+              "agentId": "${agent_id}"
+            },
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "legion",
+            "tool": "legion_phase_hook",
+            "input": {
+              "event": "PostToolUseFailure",
+              "toolName": "${tool_name}",
+              "agentId": "${agent_id}"
+            },
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "legion",
+            "tool": "legion_phase_hook",
+            "input": {
+              "event": "UserPromptSubmit",
+              "prompt": "${prompt}"
+            },
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

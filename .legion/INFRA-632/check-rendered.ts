@@ -42,7 +42,7 @@ const USAGE = "usage: bun .legion/INFRA-632/check-rendered.ts <base.md> <head.md
 const WORD = /[\p{L}\p{N}_]+/gu;
 const PLACEHOLDER = /<[^<>\s][^<>]*>/g;
 /** Hunks of the word diff fewer than this many base words apart are one cluster (step 1). */
-const MOVE_GAP = 40;
+const MOVE_GAP = 80;
 /** A moved run holds at least this many words, so no single word counts as moved (step 1). */
 const MOVE_RUN = 2;
 /** A dropped word is shown with this many base words on either side. */
@@ -137,8 +137,12 @@ const ALLOWED: Record<string, { words: string; reason: string }[]> = {
       reason: "enum-k8s-shipped-agents-skills",
     },
     {
-      words:
-        "redis cli sqlite3 nc [and] dig on PATH with go version running [and] prints the table",
+      words: "sqlite3 nc [and] [dig] on PATH with go version running",
+      reason:
+        "enum-k8s-probe-path-tools: `and` dropped; `dig` moved into the list as its last item, one word after the dropped `and`, so no run of MOVE_RUN takes it",
+    },
+    {
+      words: "installed version on PATH [and] prints the table",
       reason: "enum-k8s-probe-path-tools",
     },
     { words: "chromium version [and] socat V", reason: "enum-k8s-toolchain-step-commands" },

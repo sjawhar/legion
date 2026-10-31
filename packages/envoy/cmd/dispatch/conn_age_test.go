@@ -1,14 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	gws "github.com/gorilla/websocket"
 )
 
 // fakeClock is a clock the test moves by hand, so a connection ages without the test sleeping.
@@ -118,7 +124,7 @@ func TestMaxConnAgeClosesAnAgedConnectionAfterItsResponse(t *testing.T) {
 	}
 }
 
-func TestMaxConnAgeKeepsAnAgedConnectionForAnUpgrade(t *testing.T) {
+func TestMaxConnAgeClosesAnAgedConnectionAfterARejectedUpgrade(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	server := startConnAgeServer(t, clock)
 	client := server.Client()
@@ -130,16 +136,90 @@ func TestMaxConnAgeKeepsAnAgedConnectionForAnUpgrade(t *testing.T) {
 	if !reused {
 		t.Fatal("upgrade request opened a new connection; want it on the aged one")
 	}
-	if upgrade.Close {
-		t.Fatal("response to an Upgrade request on an aged connection carried Connection: close")
+	if !upgrade.Close {
+		t.Fatal("an aged request whose handler did not upgrade did not carry Connection: close")
 	}
 
-	plain, reused := getOnConn(t, client, server.URL, nil)
-	if !reused {
-		t.Fatal("the aged connection was closed after the Upgrade request's response")
+	next, reused := getOnConn(t, client, server.URL, nil)
+	if reused {
+		t.Fatal("request after an aged rejected upgrade reused the connection")
 	}
-	if !plain.Close {
-		t.Fatal("plain request on the aged connection did not carry Connection: close")
+	if next.Close {
+		t.Fatal("response on the new connection carried Connection: close")
+	}
+}
+
+// An aged connection must close after a normal response, but the age header must not reach a
+// websocket that takes the connection. The document keep-alive wrapper and /ws/live both upgrade
+// this way: the upgrader hijacks before it writes the 101 itself.
+func TestMaxConnAgeDoesNotDisturbAnAgedHijackedWebsocket(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	upgraded := make(chan struct{})
+	release := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ready" {
+			_, _ = io.WriteString(w, "ready")
+			return
+		}
+		socket, err := (&gws.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade: %v", err)
+			return
+		}
+		close(upgraded)
+		<-release
+		_ = socket.Close()
+	})
+	server := httptest.NewUnstartedServer(nil)
+	server.Config = newHTTPServer(handler, clock.Now)
+	server.Start()
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(release) })
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	reader := bufio.NewReader(conn)
+	send := func(path, headers string) *http.Request {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", path, request.Host, headers); err != nil {
+			t.Fatal(err)
+		}
+		return request
+	}
+
+	ready := send("/ready", "")
+	response, err := http.ReadResponse(reader, ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, response.Body); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	clock.advance(maxConnAge)
+
+	handshake := send("/socket", "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")
+	response, err = http.ReadResponse(reader, handshake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("websocket status = %d, want %d", response.StatusCode, http.StatusSwitchingProtocols)
+	}
+	if response.Close || strings.EqualFold(response.Header.Get("Connection"), "close") {
+		t.Fatalf("hijacked websocket carried Connection: close: %v", response.Header)
+	}
+	select {
+	case <-upgraded:
+	case <-time.After(time.Second):
+		t.Fatal("server did not hold the websocket after the handshake")
 	}
 }
 

@@ -35,6 +35,10 @@ standalone question with a blank `code` column, and a per-session table.
 A session still running an old plugin can be removed from the measurement with a repeated
 `--exclude-session <id>`. The summary prints how many asks were excluded.
 
+`--json` prints the same numbers as one JSON object on stdout and nothing else — the ask totals,
+the per-issue counts, the approval rounds, the coded standalone questions, the coding totals, the
+excluded-ask count and the per-session rows — so one day's numbers can be compared with another's.
+
 Classify each standalone question in a CSV passed with `--codes`:
 
 ```text
@@ -325,19 +329,59 @@ carries the private host while an issue title can carry a private name.
 ### Lexeme database
 
 `--lexeme-database` takes a Postgres URL (`postgres://` or `postgresql://`) or the path of a
-server's `.s.PGSQL.5432` socket. Any Postgres 16 works, as production runs 16: the check uses only
+server's `.s.PGSQL.5432` socket. Any Postgres 18 works, as production and CI run 18: the check uses only
 the built-in `english` configuration, in one statement per pair with every value bound, and
 reads or writes no table. The statement mirrors the issue row's vector
 (`migrations/0088_issues_title_lexemes.up.sql`, with `search_text` from
 `migrations/0056_search_text.up.sql`) and search's own `websearch_to_tsquery('english', q)`. A
-throwaway server that listens only on a unix socket:
+throwaway PostgreSQL 18.6, the version production runs, that listens only on a unix socket in
+`$TMPDIR/pg`, from zonky's pinned Linux x86-64 binaries on Maven Central. The block is safe to run
+again, also from a second shell at the same time: it holds a lock while it works, prints the socket
+path and starts nothing when a server answers on the socket, refuses when none answers but
+`$TMPDIR/pg/data/postmaster.pid` is left, downloads the server only when `$TMPDIR/pg/server` is
+absent, creates the cluster only when `$TMPDIR/pg/data` is absent, then starts it and prints the
+socket path:
 
 ```bash
-uvx --python 3.12 --from pgserver==0.1.4 python -c 'import pgserver; print(pgserver.get_server("<dir under $TMPDIR>", cleanup_mode=None).get_uri())'
+pg="$TMPDIR/pg" v=18.6.0 && mkdir -p "$pg" && (
+  flock 9 && cd "$pg" || exit 1
+  # Ask the socket, never pg_ctl status: each role of an issue pod has its own PID namespace, so
+  # postmaster.pid names a process only in the role that started the server.
+  if python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])' "$pg/.s.PGSQL.5432" 2>/dev/null; then
+    echo "$pg/.s.PGSQL.5432"
+    exit 0
+  fi
+  if [ -e data/postmaster.pid ]; then
+    echo "no server answers on $pg, but data/postmaster.pid is left: stop the server from the shell that started it, or remove $pg" >&2
+    exit 1
+  fi
+  if [ ! -d server ]; then
+    rm -rf server.new &&
+      curl -fsSL -o pg.jar "https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-linux-amd64/$v/embedded-postgres-binaries-linux-amd64-$v.jar" &&
+      python3 -c 'import zipfile; zipfile.ZipFile("pg.jar").extract("postgres-linux-x86_64.txz")' &&
+      python3 -c 'import lzma, tarfile; tarfile.open(fileobj=lzma.open("postgres-linux-x86_64.txz")).extractall("server.new", filter="data")' &&
+      mv server.new server ||
+      exit 1
+  fi
+  if [ ! -d data ]; then
+    rm -rf data.new &&
+      server/bin/initdb -D data.new -U postgres --auth=trust -E UTF8 -c listen_addresses= -c "unix_socket_directories=$pg" &&
+      mv data.new data ||
+      exit 1
+  fi
+  # 9>&-: the server must not inherit the lock, or every later run waits on it.
+  server/bin/pg_ctl -D data -l pg.log start 9>&- || exit 1
+  echo "$pg/.s.PGSQL.5432"
+) 9>"$pg/setup.lock"
 ```
 
-Pass it as `--lexeme-database <dir>/.s.PGSQL.5432`: Bun's `SQL` refuses the printed URL's
-`?host=<dir>` form.
+If a run fails, run `rm -rf "$TMPDIR/pg"` and run the block again.
+
+Pass it as `--lexeme-database "$TMPDIR/pg/.s.PGSQL.5432"`; the check connects as `postgres` to the
+`postgres` database. Stop it with `server/bin/pg_ctl -D data stop` from `$TMPDIR/pg`, only in the
+shell that started it: `pg_ctl` signals the PID in `postmaster.pid`, which in any other role of an
+issue pod is another process or none. When no server answers and the block refuses, remove
+`$TMPDIR/pg` and run the block again.
 
 ### The pre-registered pairs
 

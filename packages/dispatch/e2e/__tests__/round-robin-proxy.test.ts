@@ -236,7 +236,7 @@ describe("round-robin proxy", () => {
 
   test("a /_test/ request goes to both processes and answers A's, or a non-2xx of either", async () => {
     const hook = (headers: Record<string, string> = {}) =>
-      Bun.fetch(`${origin}/api/v1/events/_test/disconnect`, {
+      Bun.fetch(`${origin}/api/v1/live/_test/disconnect`, {
         body: "payload",
         headers,
         method: "POST",
@@ -245,7 +245,7 @@ describe("round-robin proxy", () => {
     expect([pinned.status, await pinned.text()]).toEqual([200, "hook on a"]);
     for (const upstream of [a, b]) {
       expect(upstream.seen.map((seen) => [seen.method, seen.path, seen.body])).toEqual([
-        ["POST", "/api/v1/events/_test/disconnect", "payload"],
+        ["POST", "/api/v1/live/_test/disconnect", "payload"],
       ]);
     }
     expect((await proxyRequests()).map((entry) => entry.upstream)).toEqual(["a", "b"]);

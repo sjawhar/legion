@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { ArchitectureSource, IssueSummary } from "@legion/contracts";
-import { DispatchClient, DispatchGatewayError } from "../dispatch-http";
+import type { ArchitectureSource, IssueSummary, ItemBlocks } from "@legion/contracts";
+import { DISPATCH_WRITE_RETRY, DispatchClient, DispatchGatewayError } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
 interface RecordedRequest {
@@ -241,6 +241,34 @@ describe("DispatchClient", () => {
     });
   });
 
+  test("reads a session's answers with since and max_chars, and the caller's signal aborts it", async () => {
+    const body = { session_id: "session-1", since: "2026-10-24T00:00:00Z", total: 0, items: [] };
+    const { fetchImpl, requests } = fakeFetch([jsonResponse(body), jsonResponse(body)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const controller = new AbortController();
+
+    await expect(
+      client.sessionAnswers("session-1", {
+        since: "2026-10-24T00:00:00Z",
+        maxChars: 8000,
+        signal: controller.signal,
+      })
+    ).resolves.toEqual(body);
+    await expect(client.sessionAnswers("session-1")).resolves.toEqual(body);
+
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/agents/session-1/answers?since=2026-10-24T00%3A00%3A00Z&max_chars=8000",
+      "/api/v1/agents/session-1/answers",
+    ]);
+    const signal = requests[0]?.init.signal;
+    expect(signal?.aborted).toBe(false);
+    controller.abort();
+    expect(signal?.aborted).toBe(true);
+    expect(requests[1]?.init.signal?.aborted).toBe(false);
+  });
+
   test("maps project document and reference routes to authenticated API requests", async () => {
     const { fetchImpl, requests } = fakeFetch(
       Array.from({ length: 14 }, () => jsonResponse({ ok: true }))
@@ -285,7 +313,7 @@ describe("DispatchClient", () => {
       "/api/v1/artifacts/artifact-1/comments",
       "/api/v1/artifacts/artifact-1/comments",
       "/api/v1/artifacts/artifact-1/events?after=0&limit=200",
-      "/api/v1/issues/CORE-1/references",
+      "/api/v1/issues/CORE-1/references?versions=latest",
       "/api/v1/artifacts/artifact-1/references",
       "/api/v1/references?to=dispatch%3A%2F%2FCORE-1%2Fask%2Fask-1",
       "/api/v1/references?from=dispatch%3A%2F%2FCORE%2Fartifact%2Frunbook-md&kind=mentions%2Cattached_to&since=918",
@@ -379,9 +407,17 @@ describe("DispatchClient", () => {
     ]);
 
     for (const request of requests) {
-      expect((request.init.headers as Record<string, string>).Authorization).toBe("Bearer secret");
-      expect((request.init.headers as Record<string, string>).Accept).toBe("application/json");
+      const headers = request.init.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer secret");
+      expect(headers.Accept).toBe("application/json");
+      // Every write carries a key of its own; no read carries one.
+      if (request.init.method === "GET") expect(headers["Idempotency-Key"]).toBeUndefined();
+      else expect(headers["Idempotency-Key"]).toBeString();
     }
+    const writeKeys = requests
+      .filter((request) => request.init.method !== "GET")
+      .map((request) => (request.init.headers as Record<string, string>)["Idempotency-Key"]);
+    expect(new Set(writeKeys).size).toBe(writeKeys.length);
     expect(requestBody(requests[0] as RecordedRequest)).toEqual({
       project: "DSP",
       title: "Issue",
@@ -400,8 +436,13 @@ describe("DispatchClient", () => {
     expect(requestBody(requests[11] as RecordedRequest)).toEqual({ ops: [], actor });
     expect(requestBody(requests[12] as RecordedRequest)).toEqual({ summary: "Named", actor });
 
-    const artifactBody = requests[7]?.init.body as FormData;
-    expect(artifactBody).toBeInstanceOf(FormData);
+    // The form is sent encoded, once, so a retry sends the bytes and boundary its first attempt did.
+    const upload = requests[7] as RecordedRequest;
+    const artifactBody = await new Response(upload.init.body, {
+      headers: {
+        "Content-Type": (upload.init.headers as Record<string, string>)["Content-Type"] as string,
+      },
+    }).formData();
     expect(artifactBody.get("name")).toBe("spec.md");
     expect(artifactBody.get("primary")).toBeNull();
     expect(artifactBody.get("summary")).toBe("Initial spec");
@@ -562,7 +603,8 @@ describe("DispatchClient", () => {
   // a retry there can post a message twice: the write is told to check what took effect. A 408 or
   // 429 is the gateway's own timeout or rate limit, sent before it forwards the request, so the
   // write never reached Dispatch and a retry may succeed. Any other status still gets the same
-  // advice as a read, since the request never got past the gateway either.
+  // advice as a read, since the request never got past the gateway either. Each status is one
+  // write's last attempt here; how the attempts before it are made is dispatch-keyed-writes.test.ts.
   test("tells a write a gateway answered whether it may have reached Dispatch", async () => {
     const page = (status: number, statusText: string) =>
       new Response(`<html><body><h1>${status} ${statusText}</h1></body></html>`, {
@@ -576,7 +618,11 @@ describe("DispatchClient", () => {
       page(429, "Too Many Requests"),
       page(404, "Not Found"),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, undefined, {
+      ...DISPATCH_WRITE_RETRY,
+      pausesMs: [],
+      withinMs: 0,
+    });
     const refusal = () =>
       client.message("DSP-1", { body: "Shipped.", actor }).then(
         () => {
@@ -963,6 +1009,32 @@ describe("DispatchClient", () => {
     expect(
       requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
     ).toEqual(["/api/v1/comments/comment-1"]);
+  });
+
+  test("maps a comment's and a message's blocks reads to the API", async () => {
+    const blocks: ItemBlocks = {
+      item: { kind: "comment", id: "comment-1" },
+      revision: 1,
+      indexed: true,
+      blocks: [{ id: "b1", type: "paragraph", text: "Alpha.", from: 0, to: 6 }],
+    };
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse(blocks),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-1" } }),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-2" } }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    expect(await client.commentBlocks("comment-1")).toEqual(blocks);
+    await client.messageBlocks("message-1");
+    await client.messageBlocks("message-2", "s1");
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/comments/comment-1/blocks",
+      "/api/v1/messages/message-1/blocks",
+      "/api/v1/messages/message-2/blocks?session=s1",
+    ]);
   });
 });
 

@@ -492,13 +492,12 @@ func otherProcessHandler(t *testing.T, database *store.Store) http.Handler {
 		ServerURL:   "https://dispatch.example",
 		Docs:        documentService,
 		Events:      broker,
-		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies for the other process: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 

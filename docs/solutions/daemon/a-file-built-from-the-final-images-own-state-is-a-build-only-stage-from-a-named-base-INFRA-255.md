@@ -34,7 +34,8 @@ related_issues:
   (`packages/daemon/internal/runtime/sandbox/operatorpod_test.go`) reads only the instructions after
   the last `FROM`, so an `ENV` moved into the named base escapes it.
 - **An `ARG` declared above a RUN is part of that RUN's cache key.** `ARG PI_CODEGRAPH_VERSION` sat
-  above the apt RUN, so a pin bump reran `apt-get`; it now sits below it, in the final stage.
+  above the apt RUN, so a pin bump reran `apt-get`; it moved below it, into the final stage (INFRA-523
+  later removed the ARG: `packages/daemon/docker/omp-plugins/package.json` is that pin now).
 - **`dpkg-query` for a name list:** `-f '${db:Status-Status} ${Package}\n'` into a file first (dash
   has no `pipefail`, so a pipe would hide its exit status), then keep `installed` rows and
   `LC_ALL=C sort -u`. `${binary:Package}` prints `name:amd64` for `Multi-Arch: same` packages (214

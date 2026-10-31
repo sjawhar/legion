@@ -46,15 +46,16 @@ export function sessionId(entries: SessionEntry[]): string | undefined {
   return typeof id === "string" ? id : undefined;
 }
 
-/** The run's own session transcript, parsed whole, or empty when it never got a model turn. A line
- * that does not parse is the rig's fault. */
-export function session(runDir: string): SessionEntry[] {
+/** The file of the run's own session transcript, or undefined when it never got a model turn. */
+function sessionFile(runDir: string): string | undefined {
   const dir = path.join(runDir, "sessions");
   const file = existsSync(dir)
     ? readdirSync(dir).find((name) => name.endsWith(".jsonl"))
     : undefined;
-  if (file === undefined) return [];
-  const full = path.join(dir, file);
+  return file === undefined ? undefined : path.join(dir, file);
+}
+/** A transcript file, parsed whole. A line that does not parse is the rig's fault. */
+function parsedSession(full: string): SessionEntry[] {
   return readFileSync(full, "utf8")
     .split("\n")
     .filter((line) => line.trim() !== "")
@@ -64,6 +65,32 @@ export function session(runDir: string): SessionEntry[] {
         throw new Error(`${full}:${index + 1} is not a record: ${result.error.message}`);
       return result.data;
     });
+}
+
+/** The run's own session transcript, parsed whole, or empty when it never got a model turn. A line
+ * that does not parse is the rig's fault. */
+export function session(runDir: string): SessionEntry[] {
+  const full = sessionFile(runDir);
+  return full === undefined ? [] : parsedSession(full);
+}
+
+/** Each subagent the run's session started, by its name, with its transcript parsed whole. Oh My Pi
+ * writes every subagent's transcript to `<session file less .jsonl>/<name>.jsonl` beside the
+ * session's own, whatever started it: a `task` tool call, or `tool.task(…)` or the `agent(…)`
+ * helper inside an eval cell. A subagent's own subagents, one directory deeper, are left out. */
+export function subagentSessions(runDir: string): { name: string; entries: SessionEntry[] }[] {
+  const full = sessionFile(runDir);
+  if (full === undefined) return [];
+  const dir = full.replace(/\.jsonl$/, "");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+    .map((entry) => entry.name)
+    .sort()
+    .map((name) => ({
+      name: name.replace(/\.jsonl$/, ""),
+      entries: parsedSession(path.join(dir, name)),
+    }));
 }
 
 /** Every tool result's text, in order: a bare `env`/`printenv` dump reaches the model only here, in
