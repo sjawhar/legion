@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { delimiter, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -594,8 +594,19 @@ const DISPATCH_FIRST_CONTEXT = readDispatchFirstContext(dispatchFirstSkillFile(S
 // layouts (`<pkg>/dist/envoy.js` packed, `<pkg>/extensions/envoy.ts` in the repository). Oh My Pi
 // snapshots `process.env` for its shell when it first runs one, after every extension has loaded,
 // so `PATH`, `DISPATCH_HOST` and `ENVOY_CONFIG_FILE` below reach every shell command.
+// The manifest's `omp.bin` has an Oh My Pi that supports it put `bin/` on `PATH` before this
+// module loads, under the plugin's installed path. This module's own location is its realpath, and
+// a realpath entry dies with its directory when a symlinked plugins root is re-pointed and the old
+// target removed, so the plugin adds `bin/` itself only when no `PATH` entry already names it.
 const PLUGIN_BIN = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin");
-if (!(process.env.PATH ?? "").split(delimiter).includes(PLUGIN_BIN)) {
+const pluginBinOnPath = (process.env.PATH ?? "").split(delimiter).some((entry) => {
+  try {
+    return entry !== "" && realpathSync(entry) === PLUGIN_BIN;
+  } catch {
+    return false;
+  }
+});
+if (!pluginBinOnPath) {
   process.env.PATH = `${PLUGIN_BIN}${delimiter}${process.env.PATH ?? ""}`;
 }
 process.env.DISPATCH_HOST = "omp";

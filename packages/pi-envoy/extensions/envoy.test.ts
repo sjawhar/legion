@@ -21,6 +21,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -3661,6 +3662,22 @@ describe("envoy OMP extension", () => {
     expect(shim.isFile()).toBe(true);
     expect(shim.mode & 0o111).toBe(0o111);
     expect(process.env.DISPATCH_HOST).toBe("omp");
+  });
+
+  test("adds nothing to PATH when another name for its bin directory is already on it", async () => {
+    // What Oh My Pi does for the manifest's `omp.bin`: the directory goes on PATH under the
+    // plugin's installed path, a name that this module's own location (its realpath) never shows.
+    const installed = mkdtempSync(join(tmpdir(), "pi-envoy-installed-"));
+    const installedBin = join(installed, "bin");
+    symlinkSync(join(import.meta.dir, "..", "bin"), installedBin);
+    try {
+      process.env.PATH = [installedBin, "/usr/bin", "/bin"].join(delimiter);
+      await import("./envoy.ts?plugin-bin-installed-path");
+
+      expect(process.env.PATH).toBe([installedBin, "/usr/bin", "/bin"].join(delimiter));
+    } finally {
+      rmSync(installed, { recursive: true, force: true });
+    }
   });
 
   test("names the top-level session in DISPATCH_SESSION_ID at start and after a switch", async () => {

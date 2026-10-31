@@ -161,10 +161,13 @@ The extension registers no Dispatch tool. Agents reach Dispatch through the `dis
 their shell: `dispatch --help` lists its commands, `dispatch <command> --help` each one's flags and
 an example, and the `dispatch` skill teaches when to use each. The package ships `bin/dispatch`, a
 shim that runs the bundled `dist/dispatch.js` (built from `@legion/envoy-client`'s
-`bin/dispatch.ts`) with `bun`. At load the extension puts that `bin/` first on `PATH`, sets
-`DISPATCH_HOST=omp` and hands the session's envoy.json on as `ENVOY_CONFIG_FILE`; each session
-start, switch and branch sets `DISPATCH_SESSION_ID` to the session's id, so a command acts as the
-session whose shell ran it and reads the file that session reads.
+`bin/dispatch.ts`) with `bun`. The manifest's `omp.bin` names that `bin/`, so an Oh My Pi that
+supports the field puts it on `PATH` under the plugin's installed path, which keeps working when a
+symlinked plugins root is re-pointed and its old target removed; under an older Oh My Pi the
+extension puts `bin/` first on `PATH` itself at load. The extension also sets `DISPATCH_HOST=omp`
+and hands the session's envoy.json on as `ENVOY_CONFIG_FILE`; each session start, switch and
+branch sets `DISPATCH_SESSION_ID` to the session's id, so a command acts as the session whose shell
+ran it and reads the file that session reads.
 
 A session reads one envoy.json, with a section for Dispatch and one for Envoy:
 
