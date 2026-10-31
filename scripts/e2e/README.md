@@ -1853,7 +1853,9 @@ that directory holds the pods' sessions alone, so no key a pod writes can take a
 A key the copy refuses (its name empty, `.` or `..`, shared with another key, or resolving outside the directory) or cannot read is named, never its bytes, and skipped while every other session is still copied, and any key left out fails the teardown check `transcripts`, as does a failure to copy the operator's controller's sessions out of the run's profile before the teardown removes it.
 No role pod runs before the session database accepts connections, so a run that stopped earlier, a refusal in `prerequisites` or `preflight` among them, has no pod session to lose:
 the teardown copies nothing from that database, says so in a `transcripts:` note, and fails no check for it.
-Until a role pod first writes a session, the database has no session table, which the copy takes as no session, as the daemon's own readers do.
+Oh My Pi's sql storage creates the session table when it starts, so a started database with no session table means no role pod's Oh My Pi ever reached it.
+Before the daemon starts, no role pod can have run, and the copy says so in a note and copies nothing;
+once the daemon has started, the copy fails the teardown check `transcripts`, naming the database.
 The directory a copy writes in is the harness's own, never a path an agent's value chooses:
 the reviewer's subagents' go under `review-pair/subagents/`, a name the harness fixes, and the launched controller's under `transcripts/daemon-controller/<pod>/`, named for the pod the daemon launched it in, as the daemon's claim locator records it.
 The session file an agent records only selects which sessions to copy;

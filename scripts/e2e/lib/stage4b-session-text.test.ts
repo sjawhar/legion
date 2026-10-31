@@ -117,7 +117,8 @@ function run(body: string, rows: Record<string, string>, dockerExit = 0): Ran {
       "bash",
       "-c",
       `set -Eeuo pipefail
-session_db_container=${container} session_db_ready=1
+session_db_container=${container} session_db_ready=1 daemon_started=1
+note() { echo "   $*"; }
 ${dockerStub}
 ${db("session_psql")}
 ${db("session_text")}
@@ -339,17 +340,36 @@ describe("session_copy", () => {
     expect(existsSync(r.out)).toBe(false);
   });
 
-  test("a database with no session table yet copies nothing, makes no directory, sends no listing, and succeeds", () => {
+  test("a database with no session table before the daemon started notes it, copies nothing, sends no listing, and succeeds", () => {
     const r = run(
-      `evidence="$OUT" SESSION_TABLE=absent\nsession_copy '${sessions}/' transcripts pods; echo copied`,
+      `evidence="$OUT" SESSION_TABLE=absent daemon_started=\nsession_copy '${sessions}/' transcripts pods; echo copied`,
       { [key]: transcript }
     );
     expect(r.code).toBe(0);
-    expect(r.stdout).toBe("copied\n");
+    expect(r.stdout).toBe(
+      `   transcripts: the session database ${container} has no session table and the daemon never started, so no role pod ran and no session under ${sessions}/ is copied\ncopied\n`
+    );
     expect(existsSync(r.out)).toBe(false);
     expect(r.sql).toContain("SELECT to_regclass(:'table') IS NOT NULL;");
     expect(r.sql).not.toContain("SELECT encode(");
     expect(r.args.at(-1)).toBe("table=omp_session_files");
+  });
+
+  // Oh My Pi's sql storage makes the table when it starts, so once the daemon has launched role
+  // pods an absent table means none of their Oh My Pi processes reached the database: a fault of
+  // the system under test, which the copy must report rather than pass in silence.
+  test("a database with no session table after the daemon started fails, saying no role pod's Oh My Pi reached it", () => {
+    const r = run(
+      `evidence="$OUT" SESSION_TABLE=absent\nsession_copy '${sessions}/' transcripts pods || echo "session_copy failed $?"`,
+      { [key]: transcript }
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("session_copy failed 1\n");
+    expect(r.stderr).toContain(
+      `the sessions under ${sessions}/ are not copied: the session database ${container} has no session table, so no role pod's Oh My Pi reached it, though the daemon started`
+    );
+    expect(existsSync(r.out)).toBe(false);
+    expect(r.sql).not.toContain("SELECT encode(");
   });
 
   test("a database that does not answer whether it has a session table fails", () => {
@@ -1003,15 +1023,37 @@ exit ${status}`,
     expect(r.stdout).toContain("stage 4b e2e: BLOCKED (check preflight)");
   });
 
-  test("a run whose session database started before any role pod opened it copies nothing and succeeds", () => {
+  test("a run stopped after its session database started and before its daemon did notes it, copies nothing, and succeeds", () => {
     const r = run(
-      `pod_sessions_dir=${sessions} evidence="$OUT" profile_agent="$OUT.profile" SESSION_TABLE=absent
+      `pod_sessions_dir=${sessions} evidence="$OUT" profile_agent="$OUT.profile" SESSION_TABLE=absent daemon_started=
 collect_transcripts && echo copied`,
       {}
     );
     expect(r.code).toBe(0);
-    expect(r.stdout).toBe("copied\n");
+    expect(r.stdout).toBe(
+      `   transcripts: the session database ${container} has no session table and the daemon never started, so no role pod ran and no session under ${sessions}/ is copied\ncopied\n`
+    );
     expect(existsSync(join(r.out, "transcripts", "pods"))).toBe(false);
+  });
+
+  test("a run whose role pods never reached the session database fails its teardown check transcripts, naming it", () => {
+    const r = teardownRun(
+      `${dockerStub}
+${db("session_psql")}
+${db("session_text")}
+${fn("session_copy")}`,
+      undefined,
+      "check=controller ok=1 session_db_ready=1 daemon_started=1 SESSION_TABLE=absent ARGS=/dev/null SQL=/dev/null ROWS=/nonexistent DOCKER_EXIT=0"
+    );
+    expect(r.code).toBe(1);
+    const named = r.stdout.indexOf(
+      `the sessions under ${sessions}/ are not copied: the session database ${container} has no session table, so no role pod's Oh My Pi reached it, though the daemon started`
+    );
+    expect(named).toBeGreaterThanOrEqual(0);
+    expect(named).toBeLessThan(r.stdout.indexOf("CHECK transcripts: FAIL"));
+    expect(r.stdout).toContain(
+      "stage 4b e2e: FAIL (check transcripts, in the teardown after check controller)"
+    );
   });
 
   // The harnesses above set session_db_ready themselves, so they cannot see the script lose the
@@ -1030,6 +1072,23 @@ collect_transcripts && echo copied`,
     const start = lines.findIndex((l) => l.startsWith("session_db_start "));
     expect(start).toBeGreaterThan(-1);
     expect(lines[start + 1]).toBe("session_db_ready=1");
+  });
+
+  // daemon_pid is cleared at every restart and at hygiene, so the absent-table rule reads a flag of
+  // its own, which the harnesses above also set themselves.
+  test("the script declares daemon_started empty before its EXIT trap, sets it where it launches the daemon, and never clears it", () => {
+    const lines = readFileSync(
+      join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"),
+      "utf8"
+    ).split("\n");
+    expect(lines.filter((l) => /^\s*daemon_started=/.test(l))).toEqual([
+      "daemon_started=",
+      "  daemon_started=1",
+    ]);
+    expect(lines.indexOf("daemon_started=")).toBeLessThan(lines.indexOf("trap cleanup EXIT"));
+    const launch = lines.indexOf("  daemon_pid=$!");
+    expect(launch).toBeGreaterThan(lines.indexOf("start_daemon() {"));
+    expect(lines[launch + 1]).toBe("  daemon_started=1");
   });
 });
 

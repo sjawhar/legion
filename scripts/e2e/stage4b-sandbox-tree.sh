@@ -300,6 +300,10 @@ locked=
 # that sets a hook of its own sets this one back after it.
 timeout_hook=limit_pending_blocked
 daemon_pid=
+# Set when start_daemon first launches the daemon, and never cleared (daemon_pid is, at every
+# restart and at hygiene). Every role pod is the daemon's, so before then none can have run
+# (session_copy).
+daemon_started=
 watch_pid=
 leaks_pid=
 events_pid=
@@ -992,11 +996,13 @@ bash_legion_commands() {
 # agent's row cannot cost the run the rest of its transcripts. Any key not copied fails the call at
 # the end, so the caller still sees the loss. The listing gives each key as hex, one line a key even
 # when the key holds a newline, decoded here byte for byte. The directory is made only once the
-# listing holds a key. A database with no session table yet holds no session: the table is made
-# when a role pod first writes a session (its Oh My Pi, or the launcher that saves a Claude Code
-# transcript), and the daemon's own readers take a missing table as no rows too
-# (internal/ompsessions), so the call copies nothing and succeeds. An answer to that question that
-# is neither yes nor no fails the call.
+# listing holds a key. Oh My Pi's sql storage creates the session table when it starts
+# (docs/kubernetes.md, "What Oh My Pi creates"; internal/ompsessions), so a database with no session
+# table means no role pod's Oh My Pi ever reached it. Before the daemon has started that is no
+# fault, since every role pod is the daemon's: a note says so, nothing is copied, and the call
+# succeeds. Once the daemon has started, the call cannot tell a role pod not launched yet from one
+# that came up and never reached the database, a fault of the system under test, so it fails,
+# naming the database. An answer to that question that is neither yes nor no fails the call too.
 session_copy() {
   local prefix=$1 area=$2 stem=$3 LC_ALL=C root table hex line path name other dest resolved i lost=
   local -a keys=() names=()
@@ -1026,7 +1032,13 @@ session_copy() {
   table=$(session_psql table omp_session_files <<<"SELECT to_regclass(:'table') IS NOT NULL;") || return 1
   case $table in
     t) ;;
-    f) return 0 ;;
+    f)
+      if [ -z "$daemon_started" ]; then
+        note "transcripts: the session database $session_db_container has no session table and the daemon never started, so no role pod ran and no session under $prefix is copied"
+        return 0
+      fi
+      echo "the sessions under $prefix are not copied: the session database $session_db_container has no session table, so no role pod's Oh My Pi reached it, though the daemon started" >&2
+      return 1 ;;
     *)
       echo "the sessions under $prefix are not copied: the session database $session_db_container answered '$table' to whether it has a session table" >&2
       return 1 ;;
@@ -1507,6 +1519,7 @@ start_daemon() {
   env -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
     "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
+  daemon_started=1
   timeout_hook=report_boot
   # A daemon that exits (a refused image probe, a config it will not run) ends the wait at once.
   until_true 900 "the Go daemon to boot and answer /healthz" daemon_answers_or_exited
