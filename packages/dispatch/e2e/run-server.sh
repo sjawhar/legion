@@ -177,6 +177,16 @@ if [ -n "${DISPATCH_E2E_FILE_STORE_ENDPOINT:-}" ]; then
   )
 fi
 
+# How long a document room waits after its last live update before it settles, read before the
+# sweep below: a settlement is when an `:::ask` block becomes an ask row and when live typing is
+# written as a version, so it is what every row that waits for one waits for. 250ms in place of
+# the document service's own 2 s default (internal/dispatch/docs/service.go), passed as
+# DISPATCH_TEST_SETTLE_DELAY under the DISPATCH_TEST_HOOKS=1 below, which the server requires with
+# it. The one class of row it changes is a row that proves a settlement did NOT happen inside a
+# window: that window must now be shorter than this delay, which the slow-row work owns. A caller
+# that set the variable itself keeps its own value, as it does for DISPATCH_E2E_SERVER_WEB_DIST.
+settle_delay="${DISPATCH_TEST_SETTLE_DELAY:-250ms}"
+
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
   case "$name" in
@@ -230,6 +240,7 @@ exec "${listen[@]}" env \
   "${port_env[@]}" \
   DISPATCH_TEST_HOOKS=1 \
   DISPATCH_TEST_ROSTER_UNCACHED=1 \
+  DISPATCH_TEST_SETTLE_DELAY="$settle_delay" \
   DISPATCH_WEB_DIST="$web_dist" \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
   HOME=/nonexistent \

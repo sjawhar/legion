@@ -1,5 +1,5 @@
 import { resetFakeEnvoy } from "./agents";
-import { forgetSessions, quiesceDocuments } from "./api";
+import { forgetSessions, quiesceDocuments, resetLogins } from "./api";
 import { resetFakeBroker } from "./fake-broker-helpers";
 import { resetFakeGithub } from "./fake-github-helpers";
 import { measured } from "./measure";
@@ -216,7 +216,17 @@ async function resetDatabaseOnce(): Promise<void> {
       END
     $$`,
     // The people the scenarios act as, as if each had signed in: the only assignable names.
-    "INSERT INTO people (email) VALUES ('alice'), ('bob')",
+    `INSERT INTO people (email) VALUES ${resetLogins.map((login) => `(${sqlLiteral(login)})`).join(", ")}`,
+    // And the session a sign-in of each would have created (PgSessionStore.EnsureSession inserts
+    // the row, whose generation column defaults to 0, and only RevokeSessions advances it), at
+    // that same generation 0. The delete above took every `user_sessions` row with it, and the
+    // server admits a cookie only at its login's current generation
+    // (identity.CookieIdentity.Login), so without this row a cookie minted before the reset would
+    // meet none and be refused; with it, the cookie e2e/api.ts kept for alice or bob
+    // authenticates again and this scenario pays no sign-in for them (forgetSessions).
+    `INSERT INTO user_sessions (login, generation) VALUES ${resetLogins
+      .map((login) => `(${sqlLiteral(login)}, 0)`)
+      .join(", ")}`,
     "COMMIT"
   );
 }
@@ -233,9 +243,11 @@ async function resetDatabaseOnce(): Promise<void> {
  * succeed against repositories it never seeded; those resets wait on nothing in the database, so
  * they run beside the quiesce and delete, which keep their order. All settle before this returns,
  * a failed one included, so a reset that fails never leaves another running into the next test's.
- * The delete takes `user_sessions` with it, so a session cookie minted before it is refused
- * until its login signs in again: e2e/api.ts forgets its cached ones here, and a browser context
- * signs in after the reset (e2e/users.ts).
+ * The delete takes `user_sessions` with it and the inserts above put alice's and bob's rows back
+ * at generation 0, so their cookies authenticate again and e2e/api.ts keeps those two
+ * (`forgetSessions`, which also forgets every other login's and every browser sign-in since the
+ * last reset); a context signing in as one of them carries the kept cookie instead of minting
+ * (e2e/users.ts).
  *
  * The two sides are the timing fixture's parts `reset-sql` and `reset-fakes` (e2e/measure.ts):
  * the three fakes are one part, settled together so one failing still lets the others finish.

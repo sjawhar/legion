@@ -1,4 +1,5 @@
 import type { EditArtifactInput } from "@legion/contracts";
+import type { Cookie } from "@playwright/test";
 import type {
   Actor,
   Agent,
@@ -99,50 +100,154 @@ export function sessionCookieFrom(response: Response): string | undefined {
     ?.split(";")[0];
 }
 
+/** The SameSite values a `Set-Cookie` carries, by their lowercased spelling, as Playwright spells
+ *  them. */
+const sameSiteValues: Record<string, Cookie["sameSite"]> = {
+  lax: "Lax",
+  none: "None",
+  strict: "Strict",
+};
+
+/** The session cookie `response` sets, as `BrowserContext.addCookies` takes one, or undefined
+ *  when it sets none: the attributes the server itself set, never invented ones. The session
+ *  cookie is `HttpOnly`, `Path=/`, `SameSite=Strict`, `Max-Age=2592000`, and `Secure` only where
+ *  the server is not under DISPATCH_INSECURE_COOKIE (auth.IssueSessionCookie). It names no
+ *  `Domain`, which makes it host-only: the host of `from`, the URL that set it, is then its
+ *  domain. Playwright dates a cookie in whole seconds, and -1 is one that lasts the context's
+ *  life, which a header with no `Max-Age` gets. */
+function sessionCookieOf(response: Response, from: URL): Cookie | undefined {
+  const setCookie = response.headers
+    .getSetCookie()
+    .find((header) => header.startsWith(`${sessionCookieName}=`));
+  if (setCookie === undefined) {
+    return undefined;
+  }
+  const [pair, ...attributes] = setCookie.split(";");
+  const assigned = pair.indexOf("=");
+  const cookie: Cookie = {
+    domain: from.hostname,
+    expires: -1,
+    httpOnly: false,
+    name: pair.slice(0, assigned),
+    path: "/",
+    sameSite: "Lax",
+    secure: false,
+    value: pair.slice(assigned + 1),
+  };
+  for (const attribute of attributes) {
+    const equals = attribute.indexOf("=");
+    const name = (equals === -1 ? attribute : attribute.slice(0, equals)).trim().toLowerCase();
+    const value = equals === -1 ? "" : attribute.slice(equals + 1).trim();
+    if (name === "domain") cookie.domain = value;
+    else if (name === "path") cookie.path = value;
+    else if (name === "max-age") cookie.expires = Math.floor(Date.now() / 1000) + Number(value);
+    else if (name === "httponly") cookie.httpOnly = true;
+    else if (name === "secure") cookie.secure = true;
+    else if (name === "samesite") cookie.sameSite = sameSiteValues[value.toLowerCase()] ?? "Lax";
+  }
+  return cookie;
+}
+
 export function devSignInError(login: string, status: number, responseText: string): Error {
   return new Error(`dev sign-in as ${login} failed: ${status} ${responseText}`);
 }
 
-const sessionCookies = new Map<string, Promise<string>>();
+/** The people the reset re-creates, each with a `user_sessions` row at generation 0
+ *  (`resetDatabaseOnce`, e2e/seed.ts): the only logins whose session cookie outlives a reset. */
+export const resetLogins: readonly string[] = ["alice", "bob"];
+
+/** One login's cached session cookie. */
+interface CachedSession {
+  cookie: Promise<Cookie>;
+  /** Whether the cookie names generation 0, which is where the reset puts `user_sessions` back
+   *  (e2e/seed.ts). A cookie minted after a sign-out names a later generation, and the server
+   *  admits only the login's current one (identity.CookieIdentity.Login), so the reset would
+   *  leave such a cookie refused rather than usable. */
+  atGenerationZero: boolean;
+}
+
+const sessionCookies = new Map<string, CachedSession>();
 
 /** The session cookie the server issues `login` at its dev sign-in route, minted once per
  *  spelling of a login and kept until something revokes it: the generation the cookie names lives
- *  in `user_sessions`, which `resetDatabase` truncates (it calls `forgetSessions`), and a browser
- *  context's Sign out as the same login advances it. A sign-in that fails, by its answer or by
- *  the request itself, is not kept, so the next call asks again. */
-function sessionCookie(login: string): Promise<string> {
+ *  in `user_sessions`, which `resetDatabase` empties and refills for `resetLogins` alone (it
+ *  calls `forgetSessions`), and a browser context's Sign out as the same login advances it. A
+ *  sign-in that fails, by its answer or by the request itself, is not kept, so the next call asks
+ *  again. */
+export function sessionCookie(login: string): Promise<Cookie> {
   const cached = sessionCookies.get(login);
   if (cached !== undefined) {
-    return cached;
+    return cached.cookie;
   }
-  const cookie = fetch(new URL(devSignInPath(login), baseUrl), { redirect: "manual" }).then(
-    async (response) => {
-      const value = sessionCookieFrom(response);
-      if (response.status !== 302 || value === undefined) {
+  const mint = new URL(devSignInPath(login), baseUrl);
+  const session: CachedSession = {
+    atGenerationZero: false,
+    cookie: fetch(mint, { redirect: "manual" }).then(async (response) => {
+      const cookie = sessionCookieOf(response, mint);
+      if (response.status !== 302 || cookie === undefined) {
         throw devSignInError(login, response.status, await response.text());
       }
-      return value;
-    }
-  );
-  sessionCookies.set(login, cookie);
-  cookie.catch(() => {
-    if (sessionCookies.get(login) === cookie) {
+      // The cookie's value is `2.<base64url email>.<generation>.<expiry>.<mac>`
+      // (auth.sessionPayload), whose generation strconv.FormatInt writes, so "0" is the only
+      // spelling of the generation the reset puts back.
+      session.atGenerationZero = cookie.value.split(".")[2] === "0";
+      return cookie;
+    }),
+  };
+  sessionCookies.set(login, session);
+  session.cookie.catch(() => {
+    if (sessionCookies.get(login) === session) {
       sessionCookies.delete(login);
     }
   });
-  return cookie;
+  return session.cookie;
 }
 
-/** Forgets every cached session cookie; `resetDatabase` calls it after truncating `user_sessions`. */
+/** The logins a browser context has signed in as since the last reset by carrying the cached
+ *  cookie rather than minting one (`signIn`, e2e/users.ts). */
+const reusedSignIns = new Set<string>();
+
+/** The cookie a context signing in as `login` can carry instead of minting one, or undefined when
+ *  that sign-in must mint, which is the sign-in every row paid before this cache.
+ *
+ *  Only a `resetLogins` login reuses: the reset re-creates no other person, so no other login's
+ *  cookie outlives it. Only the first sign-in of that login since the reset reuses: a row that
+ *  signs the same login in twice has almost always signed it out in between, which advances the
+ *  login's generation, and the cached cookie, which names the generation before it, would then be
+ *  refused. */
+export function reusableSessionCookie(login: string): Promise<Cookie> | undefined {
+  if (!resetLogins.includes(login) || reusedSignIns.has(login)) {
+    return undefined;
+  }
+  reusedSignIns.add(login);
+  return sessionCookie(login);
+}
+
+/** Forgets the cached session cookies the reset leaves unusable, and the sign-ins it undoes;
+ *  `resetDatabase` calls it after emptying the tables.
+ *
+ *  The cookies of `resetLogins`, alice and bob, are kept: the reset re-inserts their people rows
+ *  and their `user_sessions` rows at generation 0 (e2e/seed.ts), the generation a cookie minted
+ *  after the previous reset names, so those two cookies authenticate again and the next row pays
+ *  no sign-in for them. Every other login's cookie is forgotten, since the reset re-creates no
+ *  other person, and so is a kept login's cookie minted at a later generation, which a sign-out
+ *  in the row just ended leaves behind. A kept cookie carries no state of its row into the next
+ *  one: it names a login and a generation, both of which the emptied database holds again. */
 export function forgetSessions(): void {
-  sessionCookies.clear();
+  for (const [login, session] of sessionCookies) {
+    if (!resetLogins.includes(login) || !session.atGenerationZero) {
+      sessionCookies.delete(login);
+    }
+  }
+  reusedSignIns.clear();
 }
 
 /** Headers that make a plain fetch act as `login`: the session cookie, and the dashboard origin
  *  the server requires on every cookie-authenticated write (enforceCookieOrigin admits a write
  *  whose `Origin` is the dashboard's). */
 export async function userHeaders(login = "alice"): Promise<Record<string, string>> {
-  return { Cookie: await sessionCookie(login), Origin: dashboardOrigin };
+  const cookie = await sessionCookie(login);
+  return { Cookie: `${cookie.name}=${cookie.value}`, Origin: dashboardOrigin };
 }
 
 async function request<T>(
