@@ -252,7 +252,16 @@ describe("the model route's call record", () => {
     mkdirSync(stageBin, { recursive: true });
     writeFileSync(join(stageBin, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     const stages: [string, Record<string, string>][] = [
-      ["stage3-devbox-workflow.sh", { STAGE3_EVIDENCE_DIR: evidence }],
+      [
+        "stage3-devbox-workflow.sh",
+        {
+          STAGE3_EVIDENCE_DIR: evidence,
+          // Stage 3 picks its model route before anything else; the reused evidence directory is
+          // what this case is about, so the route is a valid one.
+          LEGION_E2E_MODEL_ROUTE: "key-file",
+          LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile,
+        },
+      ],
       [
         "stage3-4b13b-acceptance.sh",
         {
