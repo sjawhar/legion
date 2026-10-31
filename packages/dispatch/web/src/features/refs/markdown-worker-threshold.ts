@@ -21,7 +21,7 @@
  * own work around the draw, the floor every one of these rows carries. So the parse itself is
  * what 4,000 and 2,000 differ by - about 0.5 s of Firefox's thread against about 0.2 s - and
  * 2,000 is where the whole draw sits at half the bound in the slowest engine and a third of it
- * in the other two, where 4,000 left Firefox 126 ms of room and took WebKit over the bound
+ * in the other two, where 4,000 left Firefox 142 ms of room and took WebKit over the bound
  * outright. Every longer body is parsed in the worker.
  */
 export const markdownWorkerThreshold = 2_000;

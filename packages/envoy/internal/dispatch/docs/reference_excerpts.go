@@ -17,8 +17,9 @@ import (
 )
 
 // deferBlockIndexBlocks is the number of blocks above which a document write leaves the block
-// index to the settlement instead of paying for it in the request. Not every document defers: one
-// of this many blocks or fewer is indexed by its own write, as every document was.
+// index to the block-index reconciliation instead of paying for it in the request. Not every
+// document defers: one of this many blocks or fewer is indexed by its own write, as every
+// document was.
 //
 // The in-request index costs about 46 µs a block on a two-core pod: refs.IndexBlocks writes two
 // rows a block, one in document_blocks and one in document_block_texts. At the bound itself a
