@@ -2,65 +2,74 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-556",
-  "completed": "2026-10-31T17:45:00Z",
-  "round": 15,
-  "testedCodeHead": "ae660532cfe2",
-  "scope": "INFRA-63 architect, 2026-10-31T17:03Z: (1) fingerprint, with the merge adding only main's changes plus the frame helpers' move and each moved body byte-equal; (2) the flush-clock test and each of the three regression seeds failing with their fix reverted, run myself; (3) the generator's coverage of record, resolve, answer, heartbeat, removal, purge and flush, and each of the two room invariants broken in a scratch copy, failing with the seed printed; (4) 1,000,000 schedules; (5) -race, the two-process file and the browser coedit spec; (6) departure, departure-then-heartbeat and reconnect trials on real binaries, 24 each; ci-ok and pr-title at the code head",
+  "previousHandoff": "2411ae7c72fab0150b742a759b73ef1ac5eaf839",
+  "completed": "2026-10-31T23:08:00Z",
+  "round": 16,
+  "testedCodeHead": "09524d5c992d",
+  "scope": "INFRA-63 architect, 2026-10-31T18:18Z and 22:25Z: fingerprint, and that the merge of main efed4e4d adds only main's changes; revert the lift fix and show seed 3047 fails; break invariant (b) mid-schedule in a way the end state heals and show the per-step check catches it; 1,000,000 schedules; -race, the two-process file and the browser coedit spec; the three real-binary trials, 24 each; confirm main's three store census tests fail the same way on main; ci-ok and pr-title at the code head",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at ae660532: the flush-clock test 3 of 3, the schedule test at 1,000,000 schedules (PASS 336.18s), the -race run (ok 52.750s, 30 passed), the two-process file (ok 1178.719s) and the browser coedit spec 2 of 2. Reproduced each fix's failure by reverting it alone in a scratch copy."
+    "how": "Re-ran at 09524d5c: the schedule test at 1,000,000 schedules (PASS 315.61s), the -race run (ok 35.782s, 30 passed), the two-process file (ok 1040.202s, 136 passed) and the browser coedit spec 2 of 2. Reproduced the lift fix's failure (seed 3047) and confirmed the census failures are main's."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Each fix of round 8 is needed: the flush raises listed clocks; an older removal stands aside for a later entry; a flush raises a removal left below the state it sends; a room's flushes send one at a time",
-      "surface": "the docs package's relay, both in the two-Service race test on a real Postgres 17 and in the seeded schedule test over two relays",
-      "command": "cd packages/envoy && go test -count=3 -run 'TestAReaderLeavingAfterAFlushSentALaterClockStillLeavesTheOtherProcess|TestARoomsAwarenessFiresItsObserversWithItsLockReleased' ./internal/dispatch/docs; go test -run TestEveryInterleavingOfARoomsAwarenessSettlesOnBothProcesses ./internal/dispatch/docs",
-      "observed": "All pass at head: the flush-clock test and the guard 3 of 3; seeds 21, 3569 and 14360 pass. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6546874744",
-      "headSha": "ae660532cfe2",
-      "negativeControl": "Each fix reverted alone in a scratch copy of ae660532. Flush-clock (resolve's raise of the listed clock): TestAReaderLeavingAfterAFlushSentALaterClockStillLeavesTheOtherProcess fails 2 of 2 (:703), and the generator finds it at seed 739 (I1). record's stand-aside: seed 21 fails I1. resolve's raise of the waiting removal: seed 3569 fails I1. takeBatch's one-flush-at-a-time: seed 14360 fails I1."
+      "criterion": "A flush never raises a waiting removal for a reader who has come back (seed 3047)",
+      "surface": "the seeded schedule test over two real relays, each with a never-purging browser",
+      "command": "cd packages/envoy && go test -run TestEveryInterleavingOfARoomsAwarenessSettlesOnBothProcesses ./internal/dispatch/docs; seeds 21, 3047, 14360, 23434 each through playRelaySchedule",
+      "observed": "All four regression seeds pass at head. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6550345767",
+      "headSha": "09524d5c992d",
+      "negativeControl": "In a scratch copy of 09524d5c with only resolve's new live-client branch removed, seed 3047 fails: 'step 59: A applies the other process's relay, taking client 103 away at clock 2, though B holds it at clock 2 (b)', and at the end 'client 103 is in B's room at clock 2 and in no browser of A's (I2)'. Seeds 21, 14360 and 23434 still pass."
     },
     {
-      "criterion": "The generator drives the real relay through record, resolve, answer, heartbeat, removal, purge and flush, and its invariants catch a relay that breaks them",
-      "surface": "awareness_relay_schedule_test.go at ae660532; a coverage profile of that test alone; two scratch copies with a fault planted in send",
-      "command": "go test -run TestEveryInterleavingOfARoomsAwarenessSettlesOnBothProcesses -coverprofile=sched.cov ./internal/dispatch/docs && go tool cover -func=sched.cov; in the scratch copies, the same test with relayScheduleRegressions emptied",
-      "observed": "Coverage: record 97.6%, touched 97.4%, resolve 82.5%, answer 76.5%, received 70.0%, takeBatch 90.9%, send 71.4%, and flush, nextBatch, localRemoval, localClients, watchRoomAwareness and reclaimAwarenessSlots 100%. Every line the schedules never reach is an error or non-resident path. The draw holds every one of announce (move=false is a heartbeat), depart, echo, close, query, purge, flush and deliver.",
-      "headSha": "ae660532cfe2",
-      "negativeControl": "send dropping every removal fails I1 at seed 21, and at random seed 2 with the regression list emptied ('client 103 left B's room and is still in A's, at clock 1 (I1)'). send dropping every even-clock state fails I2 at seed 21, and at random seed 1 with the list emptied ('client 103 is map[cursor:1] on B and map[cursor:0] on A (I2)'). Each report prints its seed."
+      "criterion": "The per-step check of invariant (b) catches a removal that lands on a reader who is in the room, even when the end state heals",
+      "surface": "two scratch copies of 09524d5c with a planted fault in send: once per relay, a removal at a state's own clock sent just ahead of that state; one copy with takesAway (the per-step check) turned off",
+      "command": "playRelaySchedule for seeds 1-200 in each copy; the full schedule test in the per-step copy",
+      "observed": "With the per-step check on, 150 of 200 seeds fail, all on (b), with the step and the seed printed; the full test fails at regression seed 3047, 'step 55: … (b)'. With it off, 134 of 200 fail the end-state checks. 16 seeds, seed 25 first ('step 32: B applies the other process's relay, taking client 101 away at clock 2, though A holds it at clock 2 (b)'), fail only on the per-step check and pass every end-state check of both room and browser.",
+      "headSha": "09524d5c992d",
+      "negativeControl": "At head with no fault planted, the same test passes 1,000,000 schedules."
     },
     {
       "criterion": "One million schedules hold every invariant",
       "surface": "the schedule test, run locally",
       "command": "DISPATCH_RELAY_SCHEDULES=1000000 go test -count=1 -run TestEveryInterleavingOfARoomsAwarenessSettlesOnBothProcesses ./internal/dispatch/docs",
-      "observed": "'1000000 schedules on 2 workers, and the 3 seeds that once failed'; PASS in 336.18s",
-      "headSha": "ae660532cfe2",
-      "negativeControl": "The same test at its default 10,000 schedules fails within a second in each faulted scratch copy above."
+      "observed": "'1000000 schedules on 2 workers, and the 4 seeds that once failed'; PASS in 315.61s",
+      "headSha": "09524d5c992d",
+      "negativeControl": "The faulted scratch copies above fail within the first seeds."
     },
     {
-      "criterion": "The merge of main adds only main's changes plus the frame helpers' move, and each moved helper is byte-equal to its old body",
-      "surface": "the commits' diffs",
-      "command": "for each file, the branch's changed lines on top of main compared before the merge (cc3a30bb to 7c2de26f) and after it (ff93d6c4 to 05e20826); the bodies in keepalive.go at 7c2de26f compared with those in awareness_limit.go at 05e20826",
-      "observed": "125 of 130 files are byte-identical. keepalive.go and keepalive_test.go leave the diff, since #2526 deleted them. In the other five: awareness_limit.go gains frameHeader, frameHeaderLength, framePayloadLength and noAwarenessChange, each body byte-equal; three doc comments drop their mention of the keep-alive, and writeAwareness's comment names noAwarenessChange. websocket.go wraps w, since keepAlive is gone. One test comment changed. AGENTS.md's /ws/doc row sits on #2526's text. awareness_limit_test.go gains TestAFrameHeaderIsBuiltAndReadBackInEveryLengthForm for the moved helpers.",
-      "headSha": "ae660532cfe2",
-      "negativeControl": "A change of one line in any file's changes on top of main would change that file's comparison; only the five named files differ."
+      "criterion": "Only the lift fix and the schedule test changed since round 15, and the merge of main adds only main's changes",
+      "surface": "the commits' diffs; ygo v1.54.1-sami.3's source for the moved citations",
+      "command": "for each file, the branch's changed lines on top of main compared before the merge (ff93d6c4 to 641d8ce0) and after it (efed4e4d to 09524d5c); sed of the cited ygo lines",
+      "observed": "641d8ce0 changes resolve's lift (one code change, the rest comments) and the schedule test. Main brought 16 commits. 128 of 131 files are byte-identical. awareness_limit.go's three ygo citations moved to v1.54.1-sami.3, and each points at the code it names (peer.go 113-134, 796-801, 484-509, 511-697; server.go 2061). issue_open_test.go renames roomMarkdown to residentRoomMarkdown, since main's #2604 added its own roomMarkdown. marks.go's added sentences sit on #2548's reworded comment. No migration changed.",
+      "headSha": "09524d5c992d",
+      "negativeControl": "A change of one line in any file's changes on top of main would change that file's comparison; only the three named files differ."
     },
     {
       "criterion": "On real binaries, departure, departure-then-heartbeat and reconnect, 24 trials each",
-      "surface": "two real envoy-dispatch binaries on one Postgres, driven by document sockets (throwaway TestProbeR14* trials, not committed)",
-      "command": "go test -tags multiprocess -count=2 -run TestProbeR14 ./cmd/dispatch",
-      "observed": "Departure then heartbeat then close: 24 of 24, gone from the other process's reader in 52-54 ms, and neither reader holds bob 2 s later. Departure: 24 of 24, gone from the other process in 51-54 ms. Reconnect: 24 of 24, back after 11-19 ms and shown on both readers 2 s later.",
-      "headSha": "ae660532cfe2",
+      "surface": "two real envoy-dispatch binaries on the pod's test PostgreSQL, driven by document sockets (throwaway TestProbeR16* trials, not committed)",
+      "command": "go test -tags multiprocess -count=2 -run TestProbeR16 ./cmd/dispatch",
+      "observed": "Departure then heartbeat then close: 24 of 24, gone from the other process's reader in 52-71 ms, and neither reader holds bob 2 s later. Departure: 24 of 24, gone from the other process in 52-78 ms. Reconnect: 24 of 24, back after 10-24 ms and shown on both readers 2 s later.",
+      "headSha": "09524d5c992d",
       "negativeControl": "Each trial first requires both readers to hold bob. A departure that only the 30 s expiry clears would fail the 1 s bound, and a heartbeat that brought him back would fail the 2 s re-check."
     },
     {
       "criterion": "No regression: -race, the two-process file and the browser coedit spec",
-      "surface": "the docs package; two real envoy-dispatch binaries; Chromium on main's two-process harness",
+      "surface": "the docs package; two real envoy-dispatch binaries; Chromium on main's two-process harness; all on the pod's test PostgreSQL",
       "command": "CGO_ENABLED=1 go test -race -run 'Awareness|Relay|Reader|Interleaving' ./internal/dispatch/docs; go test -tags multiprocess -count=1 ./cmd/dispatch; cd packages/dispatch && bun run e2e:multiprocess -- coedit.multiprocess --repeat-each=2",
-      "observed": "-race: ok 52.750s, 30 passed, no data race reported. ok github.com/sjawhar/envoy/cmd/dispatch 1178.719s (135 passed). coedit.multiprocess 2 passed.",
-      "headSha": "ae660532cfe2",
+      "observed": "-race: ok 35.782s, 30 passed, no data race reported. ok github.com/sjawhar/envoy/cmd/dispatch 1040.202s (136 passed). coedit.multiprocess 2 passed.",
+      "headSha": "09524d5c992d",
       "negativeControl": "coedit.multiprocess fails on a0f877c5, the harness without this change (round 1)"
+    },
+    {
+      "criterion": "The three store census tests that fail on the pod are main's, not this PR's",
+      "surface": "internal/dispatch/store at head and at main efed4e4d, on the pod's non-superuser legion_test login",
+      "command": "go test -run Census ./internal/dispatch/store, at 09524d5c and in an archive of efed4e4d",
+      "observed": "The same three fail at both commits with the same errors: TestCensusRefusesALockHolderWhoseAgeItCannotSee (permission denied to grant role pg_read_all_stats), TestCensusRefusesAWALSenderHoldingALockInATransaction (the replication connection is refused), and TestCensusDoesNotExemptACatalogMigrationAnEventTriggerRunsOn (permission denied to create event trigger). The branch does not change census.go or census_test.go. The first test's cleanup cannot drop the roles it creates, so census_*/other_* roles are left on the pod's test PostgreSQL; 8 are there, and legion_test cannot drop them.",
+      "headSha": "09524d5c992d",
+      "negativeControl": "Every other census test passes at both commits."
     }
   ],
-  "ci": "At ae660532, read 2026-10-31T17:38Z: changes queued in run 41222395988; pr-title runs 41222514523 and 41222564519 queued, five earlier runs cancelled; ci-ok not posted yet. No lane has run, so nothing is red, TestAppendsOnDifferentIssuesDoNotWaitForEachOther included. Migrations 0150-0152 overlap #2387; the architect said not to fail the round for it."
+  "ci": "Run 41247951473 at 09524d5c, read 2026-10-31T23:04Z: changes success; pr-title success (runs 41248011101 and 41248041574, two earlier runs cancelled); typecheck skipped; lint, test and every Go and browser lane queued; ci-ok not posted. Nothing has failed. Migrations 0150-0152 overlap #2387; the architect said not to fail the round for it."
 }
