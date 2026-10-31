@@ -12,4 +12,4 @@ body: |-
     and Parent, which tell the observer which blocks an update changed.
 time: 2026-10-28T23:50:46.195796389Z
 custom:
-    Issue: INFRA-644
+    Issue: pr2485
