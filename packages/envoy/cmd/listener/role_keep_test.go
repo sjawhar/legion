@@ -240,8 +240,8 @@ func TestAKeptRoleMessageOlderThanTheKeepWindowIsDroppedAndTheCursorMovesPastIt(
 		return nil
 	})
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "kept-expired-1")
-	if err := keepRoleMessage(harness.client, role, item); err != nil {
-		t.Fatalf("keep the role message: %v", err)
+	if !keepRoleMessage(harness.client, cfg.logger, role, item) {
+		t.Fatalf("keep the role message; the listener log says why:\n%s", harness.logs.String())
 	}
 	entry := session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}
 	drain := func(now func() time.Time) {

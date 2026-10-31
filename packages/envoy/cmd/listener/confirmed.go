@@ -108,7 +108,7 @@ const (
 	// sendCapability is a role holder that cannot take the payload's delivery mode, answered 403.
 	sendCapability sendOutcome = "capability"
 	// sendKept is a role send with no live holder whose message the listener kept on the role's
-	// kept lane instead of refusing it, answered 200 (roleSend.kept).
+	// kept lane instead of refusing it, answered 202 (roleSend.kept).
 	sendKept sendOutcome = sendOutcome(roleKeptDeliveryStatus)
 	// sendFailed is a send refused as requestRecord.refuseBusUnavailable maps it (a forward or
 	// publish NATS refuses or the grant denies), or a role send whose first resolution of the
@@ -239,22 +239,15 @@ func (s *roleSend) delivered(outcome sendOutcome) {
 }
 
 // noHolder answers a role with no live claim. With keeping on it keeps the message for the role's
-// next holder and answers kept's 200; a keep that failed is logged and answered as a send that
-// kept nothing is, since the sender's own fallback must run when the message was not kept.
-// Keeping nothing, it answers writeRoleHolderError's 404 (unclaimed or holder_lapsed), which the
-// Legion daemon reads as notify.ErrNoHolder, recorded role_unclaimed or role_lapsed. The role
-// lane counts an unclaimed role skipped and a lapsed holder failed.
+// next holder and answers kept's 202; a keep that failed is logged by keepRoleMessage and
+// answered as a send that kept nothing is, since the sender's own fallback must run when the
+// message was not kept. Keeping nothing, it answers writeRoleHolderError's 404 (unclaimed or
+// holder_lapsed), which the Legion daemon reads as notify.ErrNoHolder, recorded role_unclaimed or
+// role_lapsed. The role lane counts an unclaimed role skipped and a lapsed holder failed.
 func (s *roleSend) noHolder(result roleHolderResult) {
-	if s.keep {
-		err := keepRoleMessage(s.d.client, s.role, s.item)
-		if err == nil {
-			s.kept(result)
-			return
-		}
-		s.d.delivery.logger.Error(roleKeepFailedLine,
-			slog.String("role", s.role),
-			slog.String("event_id", s.item.EventID),
-			slog.String("error", err.Error()))
+	if s.keep && keepRoleMessage(s.d.client, s.d.delivery.logger, s.role, s.item) {
+		s.kept(result)
+		return
 	}
 	s.record.refuseRoleHolder(s.w, s.role, result)
 	outcome := sendHolderLapsed
@@ -275,15 +268,11 @@ func (s *roleSend) noHolder(result roleHolderResult) {
 // whoever claims it within roleKeepWindow; 404, nothing was kept and the sender's own fallback
 // must run. INFRA-514's architect decided it on 2026-10-31.
 func (s *roleSend) kept(result roleHolderResult) {
-	reason := sendHolderLapsed
-	if result.state == roleHolderUnclaimed {
-		reason = sendUnclaimed
-	}
 	if result.holder != "" {
 		s.holder = result.holder
 	}
 	s.record.holder = s.holder
-	s.record.acceptWith(s.w, http.StatusAccepted, publishResponse{Envelope: s.item, Holder: s.holder, Kept: true, KeptReason: reason})
+	s.record.acceptWith(s.w, http.StatusAccepted, publishResponse{Envelope: s.item, Holder: s.holder, Kept: true, KeptReason: result.state})
 	s.settle(sendKept)
 }
 
@@ -369,7 +358,7 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 // sendToRole delivers a role message through the publish route, answering through record. The
 // first resolution reads the holder as an HTTP lookup does (resolveRoleHolder with registered),
 // within sendRequestBudget of arrived as GET /v1/roles/<role> reads it, and gives its answers: a
-// role with no live claim is kept and answered 200 with keep on, else the lookup's 404 unclaimed
+// role with no live claim is kept and answered 202 with keep on, else the lookup's 404 unclaimed
 // or holder_lapsed (noHolder), and a resolution that failed the lookup's 503 or 500 (unresolved),
 // so a holder that exists but has not heartbeated lately gets attempts rather than a 404. The first
 // attempt forwards to that holder when its session entry passes role delivery's freshness test

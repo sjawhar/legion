@@ -71,9 +71,12 @@ type sendResponse struct {
 // 202, nobody holds the role and the message waits for whoever claims it; 404, nothing was kept.
 type publishResponse struct {
 	contracts.Envelope
-	Holder     string      `json:"holder,omitempty"`
-	Kept       bool        `json:"kept,omitempty"`
-	KeptReason sendOutcome `json:"kept_reason,omitempty"`
+	Holder string `json:"holder,omitempty"`
+	Kept   bool   `json:"kept,omitempty"`
+	// KeptReason is the holder state the resolution found, the same two values and the same
+	// wire words the 404's own reason carries (roleHolderError.Reason): unclaimed, or
+	// holder_lapsed.
+	KeptReason roleHolderState `json:"kept_reason,omitempty"`
 }
 
 type subscribeResponse struct {
@@ -675,7 +678,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 //
 // keep is meaningful only for a role topic, and unset means true: a role message the listener
 // cannot deliver is kept on the role's kept lane and handed to the role's next holder, and the
-// send is answered 200 kept rather than 404 (roleSend.kept). A sender that holds a queue of its
+// send is answered 202 kept rather than 404 (roleSend.kept). A sender that holds a queue of its
 // own and must get today's answer passes keep: false, which keeps nothing and answers the 404.
 func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

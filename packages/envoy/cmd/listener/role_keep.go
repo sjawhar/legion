@@ -76,20 +76,27 @@ func roleKeepGuard(role string) *sync.Mutex {
 }
 
 // keepRoleMessage stores item on role's kept lane, the copy the role's next holder is handed when
-// it claims the role (drainKeptRole). It publishes under bus.KeptMsgID, the one id every listener
-// that keeps this message writes it under: each takes the same raw role publish on its own
-// role-lane subscription, so several may find the role undeliverable and keep it, and the stream's
-// duplicate window collapses their copies into the single stored one. A duplicate is therefore
-// success, not a fault, and is not reported. The envelope is stored as it is, so its topic stays
-// the role topic it was published on and the next holder is handed the message as its sender sent
-// it.
-func keepRoleMessage(client *bus.Client, role string, item contracts.Envelope) error {
+// it claims the role (drainKeptRole), and reports whether it was kept; a keep that failed is
+// logged here, the one failure line both give-up paths write (the publish route's noHolder and
+// the role lane's keepRoleLaneMessage), so neither carries a copy of it.
+//
+// It publishes under bus.KeptMsgID, the one id every listener that keeps this message writes it
+// under: each takes the same raw role publish on its own role-lane subscription, so several may
+// find the role undeliverable and keep it, and the stream's duplicate window collapses their
+// copies into the single stored one. A duplicate is therefore success, not a fault, and is not
+// reported. The envelope is stored as it is, so its topic stays the role topic it was published
+// on and the next holder is handed the message as its sender sent it.
+func keepRoleMessage(client *bus.Client, logger *logging.Logger, role string, item contracts.Envelope) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), roleKeepPublishWindow)
 	defer cancel()
 	if _, err := client.PublishStoredOn(ctx, contracts.KeptRoleSubject(role), item, bus.KeptMsgID(item.DedupeKey, role)); err != nil {
-		return fmt.Errorf("keep the role %s message on its kept lane: %w", role, err)
+		logger.Error(roleKeepFailedLine,
+			slog.String("role", role),
+			slog.String("event_id", item.EventID),
+			slog.String("error", fmt.Errorf("keep the role %s message on its kept lane: %w", role, err).Error()))
+		return false
 	}
-	return nil
+	return true
 }
 
 // keepRoleLaneMessage keeps the role lane's copy of a message it found no live holder for, and
@@ -103,11 +110,7 @@ func keepRoleMessage(client *bus.Client, role string, item contracts.Envelope) e
 // daemon, publishes through that route, which delivers a role message itself and never puts one on
 // the lane.
 func keepRoleLaneMessage(cfg listenerDeliveryHandlerConfig, role, holder string, item contracts.Envelope, state roleHolderState) bool {
-	if err := keepRoleMessage(cfg.client, role, item); err != nil {
-		cfg.logger.Error(roleKeepFailedLine,
-			slog.String("role", role),
-			slog.String("event_id", item.EventID),
-			slog.String("error", err.Error()))
+	if !keepRoleMessage(cfg.client, cfg.logger, role, item) {
 		return false
 	}
 	applyDeliveryOutcome(cfg, item, deliveryOutcome{
@@ -167,13 +170,27 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role,
 	guard.Lock()
 	defer guard.Unlock()
 
+	// The role's kept lane is read first, and a claim of a role nothing was ever kept for ends
+	// here, on one stream read rather than two: the cursor says nothing a lane with no message
+	// can act on. A lane the cursor has already been advanced past ends on the second read, as
+	// a cursor-first drain would.
+	keptSubject := contracts.KeptRoleSubject(role)
+	last, err := cfg.client.LastStoredMessage(ctx, keptSubject)
+	if errors.Is(err, nats.ErrMsgNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read role %s's kept lane: %w", role, err)
+	}
 	cursorSubject := contracts.KeptRoleCursorSubject(role)
 	cursorSeq, from, err := readRoleKeepCursor(ctx, cfg.client, cursorSubject)
 	if err != nil {
 		return fmt.Errorf("read role %s's kept-lane cursor: %w", role, err)
 	}
+	if from >= last.Sequence {
+		return nil
+	}
 
-	keptSubject := contracts.KeptRoleSubject(role)
 	subject := contracts.AgentSubject(holder)
 	storedOnly := roleForwardStoredOnly(entry)
 	kept := from
