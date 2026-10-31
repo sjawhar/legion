@@ -370,6 +370,7 @@ provider_keys:
 
 - **`pane_env`** refuses `PATH` (the runtime composes it), every name the runtime sets on a pane
   (its own `LEGION_*` names, the XDG directories, the gh variables, `PI_CONFIG_FILES`,
+  `PULUMI_BACKEND_URL`, `PULUMI_SKIP_UPDATE_CHECK`,
   `LEGION_CONTROLLER`, `LEGION_SLACK_CHANNELS`), the variables it sets on every Claude Code pane
   (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`, `CLAUDE_CODE_DISABLE_CRON`), the git
   identity a launch sets (`JJ_USER`, `GIT_AUTHOR_NAME`, …), the pointers to the secrets every launch
@@ -382,6 +383,22 @@ provider_keys:
   every process of the host, so a secret reaches a pane as a file. The loader refuses these at load
   and the runtime again at boot, naming the variable and never its value. A launch whose own
   variable or secret pointer collides with a `pane_env` name is refused.
+- **The Pulumi CLI.** A Pulumi CLI that reaches no state backend at all — no `PULUMI_BACKEND_URL`,
+  no `pulumi login`, and no `backend.url` in the project file the command reads — and recognizes a
+  coding agent around it (3.268.0 reads `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_*`, `GEMINI_CLI`,
+  `OPENCODE`, `AI_AGENT` and others) creates an ephemeral Pulumi Cloud account of its own, writes
+  the claim in `/tmp/.pulumi/agent-claim.json` and prints a claim URL. Every pane is therefore
+  told `PULUMI_SKIP_UPDATE_CHECK=true` and a backend as `-e` pairs of its own, so a pane of a tmux
+  server this daemon adopted rather than started gets them too: the daemon's own
+  `PULUMI_BACKEND_URL` where its environment names one, else a file backend under the daemon's own
+  home, `file://<state_dir>/home` — never `file://~`, which is the operator's home here, since a
+  pane's `HOME` is the daemon's. **A deployment whose panes' agents run Pulumi
+  against a real state backend exports `PULUMI_BACKEND_URL` for the daemon itself**, which the
+  pane allow-list carries; `pane_env` may name neither, since the runtime sets both.
+  `PULUMI_BACKEND_URL` outranks a repository's own `backend.url` rather than falling back to it,
+  and it outranks a `pulumi login` the daemon's `HOME` holds, so a pane left on the default reaches
+  no stack of a real backend; a command that creates a stack (`pulumi stack init`, `stack select
+  -c`) still creates one, in that file backend.
 - **`pi_config_files`** paths resolve against `legion.yaml`'s directory and may not hold `:`.
   The runtime's turn-scope overlay stays last, so its two keys outrank the operator's overlays. The
   boot plugin gate probes Oh My Pi under the same overlays and variables.

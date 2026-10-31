@@ -846,7 +846,15 @@ USER 1000:1000
 # `go env -w CGO_ENABLED=1` does not override it, since Go ranks the environment above its go env file;
 # and as image ENV a deployment's runtime.kubernetes.pod.env may not set it (sandbox/operatorpod.go
 # imageEnv).
-ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0
+# PULUMI_SKIP_UPDATE_CHECK=true stops every Pulumi CLI in this image — an agent's, a setup
+# command's — from checking pulumi.com for a newer release on each run, which no Legion agent
+# acts on. It is image ENV, not a pod variable: the value never varies, and a deployment that set
+# it in runtime.kubernetes.pod.env would collide with this one. The CLI's state backend is the
+# other half and is not here: that one a deployment must be able to name, so Legion gives it a
+# default in the pod baseline instead (packages/daemon/internal/podsafety), which an operator's
+# pod.env outranks.
+ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=0 CGO_ENABLED=0 \
+    PULUMI_SKIP_UPDATE_CHECK=true
 # The toolchain step: every toolchain command runs as the runtime user from the image PATH, the
 # corepack shims fetching their shipped default pnpm and yarn, with TMPDIR, COREPACK_HOME and
 # XDG_CONFIG_HOME in a scratch directory the step removes, so the layer keeps nothing (go, gofmt and

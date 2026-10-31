@@ -113,6 +113,14 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "Oh My Pi's session database", pod: env("OMP_SESSION_SQL_DSN_FILE", "/etc/operator/dsn"), want: envSets("OMP_SESSION_SQL_DSN_FILE", byStore)},
 		{name: "the name the session database's URL is mounted under", pod: env("OMP_SESSION_SQL_DSN", "postgres://operator.internal.example/sessions"),
 			want: envSets("OMP_SESSION_SQL_DSN", "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)")},
+		// The Pulumi CLI's update check is the image's, so an operator may not set it; its state
+		// backend is the pod baseline's default, which an operator's own value replaces — the one
+		// way a deployment whose agents run Pulumi against a real backend names it.
+		{name: "the Pulumi CLI's update check", pod: env("PULUMI_SKIP_UPDATE_CHECK", "false"),
+			want: envSets("PULUMI_SKIP_UPDATE_CHECK", byImage)},
+		{name: "an operator's Pulumi backend", pod: env("PULUMI_BACKEND_URL", "gs://example-state")},
+		{name: "a provider key for the Pulumi backend", keys: map[string]string{"PULUMI_BACKEND_URL": "backend"},
+			want: keyNames("PULUMI_BACKEND_URL", byBaseline)},
 		{name: "a variable of the App's git identity", pod: env("JJ_USER", "operator"), want: envSets("JJ_USER", byIdentity)},
 		{name: "a variable pointing at a launch secret", pod: env("ENVOY_TOKEN_FILE", "/etc/envoy"), want: envSets("ENVOY_TOKEN_FILE", byEnvoy)},
 		// The daemon names its controller's Slack channels from the project's slack_channels alone: an

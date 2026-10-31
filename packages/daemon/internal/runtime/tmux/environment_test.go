@@ -127,7 +127,8 @@ func TestParseShellEnvironmentRefusesOtherShapesWithoutQuotingThem(t *testing.T)
 
 // The pane environment is the allow-list read verbatim from the daemon's own environment, less any
 // credential-shaped name, with the four XDG base directories moved under `<state_dir>/home`
-// (environment.ts:191-294; LEGION-206 P1).
+// (environment.ts:191-294; LEGION-206 P1), and the Pulumi CLI's two variables, which a pane has no
+// image to carry.
 func TestPaneEnvironment(t *testing.T) {
 	environ := []string{
 		"HOME=/home/legion",
@@ -158,22 +159,53 @@ func TestPaneEnvironment(t *testing.T) {
 	}
 	got := PaneEnvironment(environ, "/var/lib/legion")
 	want := map[string]string{
-		"HOME":            "/home/legion",
-		"PATH":            "/var/lib/legion/bin:/usr/local/bin:/usr/bin",
-		"LANG":            "en_US.UTF-8",
-		"LC_ALL":          "C.UTF-8",
-		"TMUX_TMPDIR":     "/run/tmux",
-		"OMP_PROFILE":     "legion",
-		"MISE_DATA_DIR":   "/opt/mise",
-		"XDG_RUNTIME_DIR": "/run/user/1000",
-		"https_proxy":     "http://proxy:3128",
-		"XDG_CONFIG_HOME": "/var/lib/legion/home/.config",
-		"XDG_CACHE_HOME":  "/var/lib/legion/home/.cache",
-		"XDG_DATA_HOME":   "/var/lib/legion/home/.local/share",
-		"XDG_STATE_HOME":  "/var/lib/legion/home/.local/state",
+		"HOME":                     "/home/legion",
+		"PATH":                     "/var/lib/legion/bin:/usr/local/bin:/usr/bin",
+		"LANG":                     "en_US.UTF-8",
+		"LC_ALL":                   "C.UTF-8",
+		"TMUX_TMPDIR":              "/run/tmux",
+		"OMP_PROFILE":              "legion",
+		"MISE_DATA_DIR":            "/opt/mise",
+		"XDG_RUNTIME_DIR":          "/run/user/1000",
+		"https_proxy":              "http://proxy:3128",
+		"XDG_CONFIG_HOME":          "/var/lib/legion/home/.config",
+		"XDG_CACHE_HOME":           "/var/lib/legion/home/.cache",
+		"XDG_DATA_HOME":            "/var/lib/legion/home/.local/share",
+		"XDG_STATE_HOME":           "/var/lib/legion/home/.local/state",
+		"PULUMI_BACKEND_URL":       "file:///var/lib/legion/home",
+		"PULUMI_SKIP_UPDATE_CHECK": "true",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("PaneEnvironment =\n%v\nwant\n%v", got, want)
+	}
+}
+
+// A Pulumi CLI that reaches no backend at all and recognizes a coding agent around it creates an
+// ephemeral Pulumi Cloud account of its own and prints a claim URL (CLI 3.268.0), so every pane is
+// told one. A pane has no image to set the update check and no operator pod.env to name the
+// backend, so the backend comes from the daemon's own environment where the operator exports one —
+// the deployment whose panes' agents work a real state backend names it there, or in pane_env —
+// and from the daemon's own home otherwise, never the operator's `~`, which is a pane's HOME and
+// holds their own `pulumi login`.
+func TestPaneEnvironmentGivesThePulumiCLIABackendAndYieldsToTheOperators(t *testing.T) {
+	for name, tc := range map[string]struct{ daemon, want string }{
+		"unset":          {"", "file:///var/lib/legion/home"},
+		"empty":          {"PULUMI_BACKEND_URL=", "file:///var/lib/legion/home"},
+		"the operator's": {"PULUMI_BACKEND_URL=gs://example-state", "gs://example-state"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var environ []string
+			if tc.daemon != "" {
+				environ = append(environ, tc.daemon)
+			}
+			env := PaneEnvironment(environ, "/var/lib/legion")
+			if got := env["PULUMI_BACKEND_URL"]; got != tc.want {
+				t.Errorf("PULUMI_BACKEND_URL = %q, want %q", got, tc.want)
+			}
+			if got := env["PULUMI_SKIP_UPDATE_CHECK"]; got != "true" {
+				t.Errorf("PULUMI_SKIP_UPDATE_CHECK = %q, want \"true\"", got)
+			}
+		})
 	}
 }
 

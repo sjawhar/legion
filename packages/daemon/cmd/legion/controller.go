@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -290,6 +291,13 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // empty directory when the daemon has no GitHub App, and controllerStart points it at the default
 // owner's directory once the fetch names one; GH_TOKEN, GITHUB_TOKEN and GH_HOST are blanked so gh
 // and git read the bundle's hosts.yml rather than an inherited pointer of the operator's own.
+// PULUMI_SKIP_UPDATE_CHECK and PULUMI_BACKEND_URL are the Pulumi CLI's, as every pane and pod gets
+// them (internal/podsafety says why: a CLI that reaches no state backend at all and recognizes a
+// coding agent around it creates an ephemeral Pulumi Cloud account of its own and prints a claim
+// URL). The backend is a file backend under this state directory, and only where the operator's
+// own environment names none: an operator whose controller works a real state backend exports
+// PULUMI_BACKEND_URL before `legion controller start`, since this runs on their machine, under
+// their HOME, and the variable outranks their own `pulumi login` and a project file's backend.url.
 // Secrets travel as `<NAME>_FILE` pointers only. Later pairs replace any inherited value of the
 // same name.
 func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh string) [][2]string {
@@ -313,6 +321,10 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh
 		{"LEGION_GH_OWNERS_DIR", controllerGHDir(stateDir)},
 		{"LEGION_GH_PATH", gh},
 		{"LEGION_CONTROLLER_START_MESSAGE", daemon.ControllerStartMessage},
+		{podsafety.PulumiSkipUpdateCheck, "true"},
+	}
+	if os.Getenv(podsafety.PulumiBackend) == "" {
+		env = append(env, [2]string{podsafety.PulumiBackend, "file://" + stateDir})
 	}
 	if cfg.DispatchURL != "" {
 		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL}, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})

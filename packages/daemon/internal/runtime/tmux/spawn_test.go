@@ -137,6 +137,8 @@ func TestPanePairs(t *testing.T) {
 		"-e", "PI_SHELL_PREFIX=" + shellprefix.For("/state/bin"),
 		"-e", "PI_CONFIG_FILES=/state/" + podsafety.TurnScopeFile,
 		"-e", "GIT_TERMINAL_PROMPT=0",
+		"-e", "PULUMI_SKIP_UPDATE_CHECK=true",
+		"-e", "PULUMI_BACKEND_URL=file:///state/home",
 		"-e", "XDG_CONFIG_HOME=/state/home/.config",
 		"-e", "XDG_CACHE_HOME=/state/home/.cache",
 		"-e", "XDG_DATA_HOME=/state/home/.local/share",
@@ -185,6 +187,39 @@ func TestPanePairs(t *testing.T) {
 		if !found[name] {
 			t.Errorf("a controller pane was not told %q", name)
 		}
+	}
+}
+
+// Every pane is told the Pulumi CLI's two as -e pairs, not through the private tmux server's
+// environment alone: a daemon that adopted a running server never writes that table, so a pane of
+// one would reach no backend at all, which is where CLI 3.268.0 creates an ephemeral Pulumi Cloud
+// account of its own. The daemon's own value is told where its environment names one, and a file
+// backend under the daemon's home otherwise, never the operator's `~`, which is a pane's HOME and
+// holds their own `pulumi login`.
+func TestPanePairsTellEveryPaneThePulumiBackend(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in      PaneInputs
+		backend string
+	}{
+		"the daemon names none": {PaneInputs{StateDir: "/state"}, "file:///state/home"},
+		"the daemon's own":      {PaneInputs{StateDir: "/state", PulumiBackend: "gs://example-state"}, "gs://example-state"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := testSpec()
+			spec.Env, spec.Secrets = nil, nil
+			got := map[string]string{}
+			for _, pair := range panePairs(spec, tc.in, nil) {
+				if variable, value, ok := strings.Cut(pair, "="); ok {
+					got[variable] = value
+				}
+			}
+			if got["PULUMI_BACKEND_URL"] != tc.backend {
+				t.Errorf("PULUMI_BACKEND_URL = %q, want %q", got["PULUMI_BACKEND_URL"], tc.backend)
+			}
+			if got["PULUMI_SKIP_UPDATE_CHECK"] != "true" {
+				t.Errorf("PULUMI_SKIP_UPDATE_CHECK = %q, want \"true\"", got["PULUMI_SKIP_UPDATE_CHECK"])
+			}
+		})
 	}
 }
 

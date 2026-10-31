@@ -68,6 +68,7 @@ var runtimeOwned = map[string]bool{
 	"GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
 	"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
 	"PI_SHELL_PREFIX": true, "PI_CONFIG_FILES": true,
+	podsafety.PulumiBackend: true, podsafety.PulumiSkipUpdateCheck: true,
 }
 
 // controllerOwned are the variables a controller pane is told in place of a tree pane's
@@ -211,6 +212,10 @@ type PaneInputs struct {
 	OperatorEnv     map[string]string
 	PiConfigFiles   []string
 	RoleConfigFiles []string
+	// PulumiBackend is the Pulumi CLI's state backend every pane is told, the daemon's own value
+	// where its environment names one (PaneEnvironment); empty takes podsafety's default, which
+	// is what PaneEnvironment would have given it.
+	PulumiBackend string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
@@ -269,6 +274,20 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 	overlays := slices.Concat(in.PiConfigFiles, in.RoleConfigFiles, []string{filepath.Join(in.StateDir, podsafety.TurnScopeFile)})
 	add("PI_CONFIG_FILES", strings.Join(overlays, ":"))
 	add("GIT_TERMINAL_PROMPT", "0")
+	// The Pulumi CLI's two, the runtime's own on every pane as the image's are in every pod: a CLI
+	// that reaches no backend at all creates an ephemeral Pulumi Cloud account of its own and
+	// prints a claim URL (podsafety's baseline says the rest). They are -e pairs rather than the
+	// server environment alone (PaneEnvironment), which reaches only panes of a server this daemon
+	// started: a daemon that adopted a running server never writes that table. A deployment whose
+	// panes' agents work a real state backend exports PULUMI_BACKEND_URL for the daemon, which
+	// PaneEnvironment carries into in.PulumiBackend; runtime.tmux.pane_env may name neither, since
+	// the runtime sets both itself (runtimeOwned).
+	add(podsafety.PulumiSkipUpdateCheck, "true")
+	backend := in.PulumiBackend
+	if backend == "" {
+		backend = pulumiBackend(in.StateDir)
+	}
+	add(podsafety.PulumiBackend, backend)
 	for _, dir := range xdgDirectories(in.StateDir) {
 		add(dir[0], dir[1])
 	}
@@ -533,6 +552,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: credential.root, GHDefault: ghDefault, GH: r.gh,
 		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles, RoleConfigFiles: r.roleConfigFiles[spec.Role],
+		PulumiBackend: r.paneEnv[podsafety.PulumiBackend],
 	}, files)
 	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
 }

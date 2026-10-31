@@ -5986,6 +5986,22 @@ issue's pod (every role of it alike) and the image probe's.
   operator's overlay. The pod sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file` on the agent
   where the pod leaves them unset, which an operator's pod may not set, since they decide where Oh
   My Pi keeps the session a resume reads.
+- **The Pulumi CLI.** A Pulumi CLI that reaches no state backend at all — no `PULUMI_BACKEND_URL`,
+  no `pulumi login`, and no `backend.url` in the project file the command reads — and recognizes a
+  coding agent around it (3.268.0 reads `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_*`, `GEMINI_CLI`,
+  `OPENCODE`, `AI_AGENT` and others) creates an ephemeral Pulumi Cloud account of its own, writes
+  the claim in `/tmp/.pulumi/agent-claim.json` and prints a claim URL. A Legion agent that only
+  read a package schema would have made an account on an outside platform nobody asked for, so the
+  pod baseline sets `PULUMI_BACKEND_URL=file://~` where the pod leaves it unset. **A deployment
+  whose agents run Pulumi against a real state backend must name that backend in `pod.env`**, which
+  the baseline yields to: `PULUMI_BACKEND_URL` outranks a repository's own `backend.url` rather
+  than falling back to it, so a pod left on the default reaches no stack of a real backend; a
+  command that creates a stack (`pulumi stack init`, `stack select -c`) still creates one, in the
+  container's own home, which dies with the pod. A backend the pod's own identity cannot read
+  fails closed and mints nothing: with `PULUMI_BACKEND_URL` naming a `gs://` bucket and no Google
+  credential, `pulumi whoami` is `error: missing google credentials` and `pulumi package add`,
+  which opens no backend, still works. The CLI's update check is the worker image's
+  `PULUMI_SKIP_UPDATE_CHECK=true`, which an operator's `pod.env` may not set.
 - **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` and the planner's
   `plan-gap-analyst` as `@oracle`; both review agents and the planner's `plan-reviewer` as
   `@review`; and `deep-worker`, which writes the implementer's code, as `@deep`. The boot gate

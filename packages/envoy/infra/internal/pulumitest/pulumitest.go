@@ -135,7 +135,12 @@ func newHome() (string, error) {
 		return "", fmt.Errorf("make the tests' PULUMI_HOME: %w", err)
 	}
 	install := exec.Command("pulumi", "plugin", "install", "resource", "docker", "v"+DockerPluginVersion, "--file", tarball)
-	install.Env = append(os.Environ(), "PULUMI_HOME="+dir, "PULUMI_SKIP_UPDATE_CHECK=true")
+	// PULUMI_BACKEND_URL, as every CLI call of these tests gets it (NewCLI): a Pulumi CLI that
+	// reaches no backend at all and recognizes a coding agent around it creates an ephemeral
+	// Pulumi Cloud account of its own and prints a claim URL, so no call here is left to find
+	// one. The backend is this home's own directory and nothing is written to it.
+	install.Env = append(os.Environ(), "PULUMI_HOME="+dir, "PULUMI_BACKEND_URL=file://"+dir,
+		"PULUMI_SKIP_UPDATE_CHECK=true")
 	if out, err := install.CombinedOutput(); err != nil {
 		return dir, fmt.Errorf("install the docker plugin from %s=%s: %v\n%s", DockerPluginEnv, tarball, err, out)
 	}

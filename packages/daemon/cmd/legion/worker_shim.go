@@ -21,7 +21,8 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // go to stdout, which is what the pane shows; its exit status is OMP's. With --pod-safety, which
 // the Sandbox runtime passes and a tmux pane never does, OMP starts on the pod's baseline
 // (podsafety.Apply: the turn-scoping overlay written to LEGION_STATE_DIR and named first in
-// PI_CONFIG_FILES, under the operator's, and the two variables that place a pod's sessions where
+// PI_CONFIG_FILES, under the operator's, and the two variables that place a pod's sessions and the
+// Pulumi CLI's state backend, each where
 // the pod leaves them unset; nothing of a repository's settings held off), with the scratch
 // directories the runtime told this role to write under made (podsafety.EnsureScratch) and Oh My
 // Pi's profile directory made under the role's XDG_STATE_HOME (podsafety.EnsureStateHome). With
