@@ -25,8 +25,9 @@ const Stream = "ENVOY_NOTIFICATIONS"
 // changed after. It lives in the configuration, so a backup and restore, a reconcile and a leader
 // election all keep it. The stream's Created time is no identity: a restore changes it, and after
 // a clustered restore the servers can report different Created times (per nats-server's clustered
-// restore code), so it can change again at a later leader election. POST /v1/replay answers the
-// key's value as stream.id (cmd/listener/replay.go).
+// restore code), so it can change again at a later leader election. Every relay frame carries the
+// key's value in its Envoy-Stream-Id header (cmd/listener/session_relay.go), so a session can tell
+// a cursor of its own apart from one belonging to a stream that was restored.
 const StreamIDMetadataKey = "envoy_stream_id"
 
 // The JetStream KV buckets Envoy's stores keep, each named for what it holds.
@@ -100,9 +101,8 @@ const DeliverSubjectPrefix = NotificationTopicPrefix + "envoy.deliver."
 
 // DeliverSubject is the relay subject of session sessionID: the subject the listener that owns the
 // session publishes each message of its consumer (SessionConsumerName) on, and the session
-// subscribes to. Every message a session gets travels on it; a plain subscription of the session's
-// own carries only a lane receipt, a live ad-hoc topic and the core fallback ("Session consumers"
-// in packages/envoy/AGENTS.md).
+// subscribes to. Every message a session on NATS gets travels on it: no session takes a message
+// from a plain NATS subscription of its own ("Session consumers" in packages/envoy/AGENTS.md).
 func DeliverSubject(sessionID string) string {
 	return DeliverSubjectPrefix + sessionID
 }
@@ -151,56 +151,27 @@ var streamSubjects = []string{
 	ExceptionTopicPrefix + "notifications.team.>",
 }
 
-// Every subject of streamSubjects is classified for POST /v1/replay (cmd/listener/replay.go) by
-// whether a topic under it ever carries one agent session's private payload, read from the code
-// that publishes it. A shared subject's topics are replayed to any session that registered them as
-// interests; a private subject's never are, since a registered interest is any topic a caller
-// names, and a session replays only its own agent subject by name. Each subject is in exactly one
-// list (TestEveryStreamSubjectIsClassifiedForReplay), so a new stream subject must be classified.
-var (
-	sharedStreamSubjects = []string{
-		// Dispatch's outbox: an issue's, a document's or a project's events (internal/dispatch/outbox
-		// envelope), each readable on its owner in Dispatch, and Dispatch's start (startup.Subject); a
-		// copy for one session goes to that session's agent subject, and an issue-less message has
-		// no owner and is not published (outbox publish).
-		"notifications.dispatch.>",
-		// A repository's GitHub webhook events (internal/webhook github, contracts.GithubEnvelopes)
-		// and the CI settlements derived from them (internal/cistore).
-		"notifications.github.>",
-		// A Slack channel's or thread's messages and app mentions (internal/webhook slack,
-		// contracts.SlackEnvelopes).
-		"notifications.slack.>",
-		// A Ghost Wispr recording's events, under its recording id, not an agent session's
-		// (internal/webhook ghostwispr, contracts.GhostWisprEnvelope).
-		"notifications.ghostwispr.>",
-		// A WhatsApp chat's messages the MCP bridge relays (internal/mcpbridge BuildEnvelope).
-		"notifications.whatsapp.>",
-		// A team's own topic, published by the listener's route for whoever registered it
-		// (cmd/listener publishHandler): a group's lane carries no one session's private
-		// payload, as its sender names the team and not a session.
-		"notifications.team.>",
-	}
-	privateStreamSubjects = []string{
-		// Each session's own inbox: Dispatch's routes, follower and author copies, and every
-		// message sent to one session (contracts.AgentSubject).
-		contracts.AgentTopicPrefix + ">",
-		// The Legion daemon's notices for one project's controller (daemon notify.ControllerTopic),
-		// which its role holder hears through the role and never registers.
-		"notifications.legion.>",
-		// A failed delivery's report, carrying the undelivered message's payload and the session it
-		// was for (cmd/listener publishDeliveryException); a session's own lane included.
-		ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
-		// A failed delivery on a team topic, carrying that message's payload and the session it
-		// was for, as the agent lane above does; only the exception's own reader may have it.
-		ExceptionTopicPrefix + "notifications.team.>",
-	}
-)
-
-// SharedStreamTopic reports whether every topic subject matches lies under one shared stream
-// subject (sharedStreamSubjects), under NATS wildcard rules (SubjectContains): a topic no session's
-// private payload is ever published on.
-func SharedStreamTopic(subject string) bool {
-	return slices.ContainsFunc(sharedStreamSubjects, func(shared string) bool { return SubjectContains(shared, subject) })
+// privateStreamSubjects are the subjects of streamSubjects a topic under which ever carries one
+// agent session's private payload, read from the code that publishes it. A session may register
+// no interest reaching one but its own agent subject (ReachesPrivateStreamSubject, which
+// POST /v1/interests/subscribe applies), since a registered interest is any topic a caller names
+// and the stored topics drive both the listener's fan-out and the session's own consumer filter.
+// Every other stream subject is deliberately absent, which
+// TestEveryStreamSubjectIsClassifiedForInterestRegistration names one by one, so a new stream
+// subject carrying a session's payload cannot be added without listing it here.
+var privateStreamSubjects = []string{
+	// Each session's own inbox: Dispatch's routes, follower and author copies, and every
+	// message sent to one session (contracts.AgentSubject).
+	contracts.AgentTopicPrefix + ">",
+	// The Legion daemon's notices for one project's controller (daemon notify.ControllerTopic),
+	// which its role holder hears through the role and never registers.
+	"notifications.legion.>",
+	// A failed delivery's report, carrying the undelivered message's payload and the session it
+	// was for (cmd/listener publishDeliveryException); a session's own lane included.
+	ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
+	// A failed delivery on a team topic, carrying that message's payload and the session it
+	// was for, as the agent lane above does; only the exception's own reader may have it.
+	ExceptionTopicPrefix + "notifications.team.>",
 }
 
 // ReachesPrivateStreamSubject reports whether a topic sessionID registers as an interest reaches a

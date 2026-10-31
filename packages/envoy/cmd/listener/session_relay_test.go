@@ -224,8 +224,8 @@ func requireFrames(t *testing.T, frames []relayedFrame, want ...contracts.Envelo
 }
 
 // A session away during publishes (its connection gone) receives each on its return, when it
-// registers with a new epoch, once and in stream order, from its consumer: it asks nothing of
-// /v1/replay.
+// registers with a new epoch, once and in stream order, from its consumer: nothing it receives
+// comes from a subscription of its own.
 func TestSessionConsumerAwaySessionReceivesEachMessageOnceOnReturn(t *testing.T) {
 	rig := newRelayRig(t)
 	const sessionID = "ses_away"

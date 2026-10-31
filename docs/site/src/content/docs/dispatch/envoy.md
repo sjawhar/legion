@@ -10,9 +10,10 @@ Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions
 
 - **NATS JetStream** holds the events. Events are messages on subjects under `notifications.`;
   the `ENVOY_NOTIFICATIONS` stream keeps those of GitHub, Slack, Dispatch, Legion and each
-  session's inbox for 72 hours. Role messages and team topics travel over core NATS and are not
-  kept for a later subscriber, but the listener's forward of a role message to its current holder
-  is kept on that holder's inbox. Envoy also keeps its own state in JetStream key-value buckets:
+  session's inbox for 72 hours, and team topics (`notifications.team.<name>`) with them. Role
+  messages travel over core NATS and are not kept for a later subscriber, but the listener's
+  forward of a role message to its current holder is kept on that holder's inbox. Envoy also keeps
+  its own state in JetStream key-value buckets:
   which session is subscribed to what (`envoy_interests`), which sessions are live
   (`envoy_sessions`), who holds each role (`envoy_roles`), and pull request check results
   (`envoy_ci_state`). The stream and every bucket are kept in at least as many copies as the
@@ -156,15 +157,16 @@ An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscr
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
 request's `.>` gets its lifecycle events as well as its comments and checks.
 
-A role message is not stored for a later holder. A publish through the API waits for the holder to
-confirm the message and answers `200` naming the holder. If no live session holds the role, it is
-refused with `404`; if the holder does not take the message's delivery mode, with `403`; and if the
-holder has not confirmed it within four seconds, with `504` and the reason, `receipt_timeout` or
+A role message is not stored for a later holder. A publish through the API waits for the stream to
+store the forward to the live holder and answers `200` naming the holder. If no live session holds
+the role, it is refused with `404`; if the holder does not take the message's delivery mode, with
+`403`; and if the stream did not store the forward within four seconds, with `504` and the reason
 `delivery_failed`. A role message published straight onto NATS, not through the API, is forwarded
-once, and if the holder does not take it the listener publishes an exception naming the reason:
-`no_holder`, `delivery_failed`, or `receipt_timeout`. Either way the forward to the live holder is
-stored on the holder's inbox, and it counts as delivered only once the stream has stored it, so a
-holder that restarts or loses its connection gets the forward once when it is back.
+once, and if that forward is not stored the listener publishes an exception naming the reason:
+`no_holder` or `delivery_failed`. Either way the forward to the live holder is
+stored on the holder's inbox, and it counts as delivered once the stream has stored it, so a
+holder that restarts or loses its connection gets the forward once when it is back. No session
+answers a receipt for one.
 
 ## Messages a session missed
 
@@ -182,9 +184,9 @@ session once when it is back, up to 72 hours later.
   messages, Dispatch deliveries, and the forwards of role messages to a role it holds), and the
   topics it follows that the stream keeps, such as an issue's
   `notifications.dispatch.issue.<KEY>.>`.
-- **What does not:** team and other ad-hoc topics, which the stream does not keep and which a
-  session therefore still takes live, on its own NATS connection; and anything published on a
-  topic before the session followed it.
+- **What does not:** anything published on a topic before the session followed it. Every
+  `notifications.` topic a session may follow is one the stream keeps: the listener refuses a
+  publish to, or a subscription to, any other by name, since no session would ever receive it.
 - **When a message counts as delivered:** an Oh My Pi session answers once the message is in its
   session file. A Claude Code session under Legion's bridge answers once Claude Code took the
   message as a user message. A Claude Code session in channel mode answers once Claude Code
@@ -203,32 +205,20 @@ listener sends it what it had not answered yet, from the oldest, so what was pub
 reaches it once.
 
 The listener manages these consumers only when its NATS user may (the `envoy-infra` grant for a
-listener, `ListenerPermissions`, includes it). Any client that may subscribe to `notifications.>`,
-as every session's NATS user may, can read another session's delivery frames and answer one as
-delivered; such a client already reads every session's traffic.
+listener, `ListenerPermissions`, includes it). A registration it cannot give a consumer is refused
+by name — `503` with reason `no_grant` or `consumer_error`, `409` with `not_requested` or
+`invalid_session_id` — and nothing is registered, so a session nothing delivers to never appears
+live. There is no second path: no session receives from a plain NATS subscription.
+A session's own NATS user may subscribe to every session's delivery subject, so a client holding
+one can read another session's delivery frames and answer one as delivered; it may read no other
+notification topic.
 
-### Without session consumers
-
-While the rollout lasts, a listener whose NATS user may not manage session consumers, a listener
-of an earlier release, and a plugin of an earlier release fall back to the earlier path: the
-session receives on its own NATS subscriptions, and a message published while its connection is
-down, NATS is restarting, or the session is not running never reaches that subscription. The
-stream keeps what it captures, so the session asks its listener for it, `POST /v1/replay`, when it
-starts or resumes, when it reconnects, when a subscription comes back, and on every heartbeat. The
-listener reads the stream for the session's own inbox topic and for each topic it registered,
-after the place the session last read to, and the session shows each message it was not shown yet,
-once, marked as published while its connection was down. This fallback exists only until every
-session reads its own consumer (`dispatch://INFRA-771`), and nothing should be built on it.
-
-- **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
-  and on the topics it follows that the stream keeps, such as an issue's
-  `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old.
-- **What does not:** role messages, which this path does not recover; team topics, except the copy
-  the listener hands a session registered on the topic, which comes back on its inbox topic;
-  anything from before the session existed, before it followed the topic, or before it first ran a
-  plugin version that recovers; anything older than 72 hours. When the stream was recreated, or the
-  session read it too late to find everything still there, it is told once that messages may be
-  missing.
+- **What comes back after a break:** everything the consumer holds, in the order it was published:
+  messages on the session's inbox topic, `notifications.agent.<session_id>`, and on the topics it
+  follows, such as an issue's `notifications.dispatch.issue.<KEY>.>` or a team's
+  `notifications.team.<name>`, up to 72 hours old. When the stream was recreated, or the
+  consumer was created below the stream's oldest message, the session is told once that messages
+  may be missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The
   session does not take it as the person's turn and does not answer a BTW. A BTW that comes back
@@ -244,23 +234,6 @@ session reads its own consumer (`dispatch://INFRA-771`), and nothing should be b
   message the session fails to show three times is replaced by one notice naming it and saying
   how to read it.
 
-The listener reads the stream with one NATS permission,
-`$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, which reads one stored message at a time and can
-create, change or delete nothing; the `envoy-infra` grant for a listener includes it. A listener
-without the route answers `404`, and one whose NATS user lacks the permission answers `503` with
-code `REPLAY_UNAVAILABLE`: the session then says once, as a warning, that missed messages are not
-recovered, and live delivery goes on as before. A session on an older plugin recovers nothing.
-
-The listener trusts the session id a replay names, as it trusts it on every `/v1` route: there is
-no per-session secret, and the listener does not check that the session is live. So whoever can
-call `/v1` and knows a session's id, live or ended, can read that session's stored inbox for the
-last 72 hours. A listener that requires a bearer serves `/v1` only to a holder of its API
-credential (its shared token or an accepted service-account token). A listener with no bearer
-serves it to any request whose `Host` is loopback or a name in `ENVOY_ALLOWED_HOSTS`, so where that
-list names the hub's own tailnet name, as the GCP hub's listener does with no bearer, every tailnet
-peer the tailnet's access rules let reach the listener's port can call it. It refuses a wildcard id, another
-session's inbox reached through a registered topic, and every failed-delivery lane.
-
 ## The session list
 
 `GET /v1/sessions` lists the live sessions, and `GET /v1/registry/<session_id>` answers for one.
@@ -275,17 +248,10 @@ session registered through, which every registration sends:
 A session whose plugin predates the two fields shows neither. The `envoy_sessions` tool of the
 Oh My Pi and Claude Code plugins shows them too.
 
-Whether a session has the recovery of missed messages above and the 10-second connection check,
-read from its row:
-
-- **Oh My Pi:** it does when its `plugin_version` is at or above the first `@sjawhar/pi-envoy`
-  release cut after the change that added these fields merged (the first whose changelog lists
-  `plugin_version`).
-- **Claude Code:** it does when its commit contains that change's squash commit:
-  `gh api repos/sjawhar/legion/compare/<squash commit>...<plugin_version> --jq .status` answers
-  `ahead` or `identical`.
-- **Anything else:** `source`, a row without the fields, and an OpenCode session (whose plugin has
-  no recovery of missed messages) are checked by hand, or counted as not having it.
+Whether a session is delivered to through its own consumer, read from its row: `delivery` is
+`consumer` when its listener holds that consumer and relays it. It is the empty string for a
+session on a serving port its listener could give none, which that listener pushes to instead,
+and the key is missing altogether on a listener older than the field.
 
 ## The NATS grant a Legion daemon needs
 

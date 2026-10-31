@@ -28,7 +28,8 @@ import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
 import { askgateState } from "@legion/envoy-client/askgate-marker";
-import { RelayHeader } from "@legion/envoy-client/consumer-delivery";
+import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery";
+import { subjectsOverlap } from "@legion/envoy-client/delivery-ledger";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { forgetKeyedLayerMemory } from "@legion/envoy-client/dispatch-http";
 import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
@@ -173,9 +174,105 @@ type SubscriptionControls = {
   readonly active: () => boolean;
 };
 
+/**
+ * Every subscription this process really holds, by subject: after a registration that is its
+ * relay subject and its agent stream's control subject, and nothing else — a notification topic
+ * reaches the session only through the relay of its own consumer.
+ */
+const openSubscriptions = new Map<string, SubscriptionControls>();
+
+/** The stream sequence the next relayed frame carries. */
+let relaySeq = 0;
+
+/**
+ * The topics the listener was last told this session follows, taken from every registration this
+ * process makes. The session's consumer is filtered on exactly them, so they are the subjects a
+ * relay frame can arrive on, and they are what "the session follows this topic" means now that
+ * the plugin holds no subscription of its own on any of them.
+ */
+const registeredTopics = new Set<string>();
+
+/** Whether a registered topic reaches `subject`, under NATS wildcard rules. */
+function relayCarries(subject: string): boolean {
+  for (const topic of registeredTopics) {
+    if (subjectsOverlap(topic, subject)) return true;
+  }
+  return false;
+}
+
+/**
+ * Records every registration whatever `fetch` a row installs, so the followed topics are known
+ * centrally. A row's own fetch is kept behind this one; reading `globalThis.fetch` answers this
+ * wrapper, so a row that saves and restores it cannot install the wrapper into itself.
+ */
+let installedFetch: typeof globalThis.fetch = globalThis.fetch;
+const recordingFetch: typeof globalThis.fetch = async (input, init) => {
+  try {
+    if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
+      const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+        readonly topics?: readonly string[];
+      };
+      registeredTopics.clear();
+      for (const topic of body.topics ?? []) registeredTopics.add(topic);
+    }
+  } catch {
+    // A request that is not a registration, or a body that is not JSON, teaches nothing.
+  }
+  return installedFetch(input, init);
+};
+Object.defineProperty(globalThis, "fetch", {
+  configurable: true,
+  get: () => recordingFetch,
+  set: (next: typeof globalThis.fetch) => {
+    if (next !== recordingFetch) installedFetch = next;
+  },
+});
+
+/**
+ * Hands the session a frame published on `subject`, as the listener's relay of the session's
+ * consumer hands it over: the frame travels the relay subject with the headers that name the
+ * subject it was published on. Undefined while no relay subject is subscribed, as the controls
+ * of an unsubscribed subject were.
+ */
+function relayControls(subject: string): SubscriptionControls | undefined {
+  if (!relayCarries(subject)) return undefined;
+  for (const [on, controls] of openSubscriptions) {
+    if (!on.startsWith("notifications.envoy.deliver.")) continue;
+    return {
+      push: (data, reply, headers) => {
+        relaySeq += 1;
+        controls.push(data, reply === undefined || reply === "" ? `_INBOX.relay.${relaySeq}` : reply, {
+          [RelayHeader.subject]: subject,
+          [RelayHeader.streamSeq]: String(relaySeq),
+          [RelayHeader.streamID]: TEST_STREAM_ID,
+          [RelayHeader.delivered]: "1",
+          [RelayHeader.storedAt]: new Date().toISOString(),
+          ...headers,
+        });
+      },
+      end: controls.end,
+      fail: controls.fail,
+      active: controls.active,
+    };
+  }
+  return undefined;
+}
+
 const natsState = {
   subscriptions: new Map<string, Subscription>(),
-  controls: new Map<string, SubscriptionControls>(),
+  controls: {
+    /** The subject's own subscription, else the relay that carries it (`relayControls`). */
+    get: (subject: string): SubscriptionControls | undefined =>
+      openSubscriptions.get(subject) ?? relayControls(subject),
+    /** Whether the session takes `subject`: its own subscription, or a topic its consumer
+     *  relays (`relayCarries`). */
+    has: (subject: string): boolean => openSubscriptions.has(subject) || relayCarries(subject),
+    set: (subject: string, controls: SubscriptionControls): void => {
+      openSubscriptions.set(subject, controls);
+    },
+    clear: (): void => openSubscriptions.clear(),
+    keys: (): IterableIterator<string> => openSubscriptions.keys(),
+  },
   controlsByTopic: new Map<string, SubscriptionControls[]>(),
   published: [] as { readonly subject: string; readonly data: Uint8Array | undefined }[],
   onPublish: undefined as ((subject: string) => void) | undefined,
@@ -513,6 +610,8 @@ afterEach(async () => {
   natsState.failPublishes = 0;
   natsState.subscriptions.clear();
   natsState.controls.clear();
+  registeredTopics.clear();
+  relaySeq = 0;
   natsState.controlsByTopic.clear();
   natsState.failConnects = 0;
   natsState.connectionsClosed = false;
@@ -1039,24 +1138,25 @@ async function onTestClock<T>(pending: () => Promise<T>): Promise<T> {
   }
 }
 
+/** The stream id every registration answer and relay frame in this file names. */
+const TEST_STREAM_ID = "stream-test";
+
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
 }
 
-/** A listener that serves replay over a stream holding nothing: every subject's cursor starts. */
-function emptyReplay(init: RequestInit | undefined): Response {
-  const body = JSON.parse(init?.body?.toString() ?? "{}") as {
-    readonly subjects?: readonly { readonly subject: string }[];
+/**
+ * The delivery answer a listener gives a registration it can give a consumer: the session's
+ * relay subject, the one path a message reaches the session by. A registration answered anything
+ * else fails in the client (`parseSubscribeAnswer`), as a registration the listener refuses does.
+ */
+function consumerDelivery(sessionID: string) {
+  return {
+    mode: "consumer" as const,
+    subject: deliverSubject(sessionID),
+    stream_id: TEST_STREAM_ID,
+    gap: false,
   };
-  return response({
-    stream: { created: "2026-10-01T00:00:00Z", first_seq: 0, last_seq: 0 },
-    subjects: (body.subjects ?? []).map(({ subject }) => ({
-      subject,
-      messages: [],
-      next_after: 0,
-      more: false,
-    })),
-  });
 }
 
 function responseWithRegistration(
@@ -1065,7 +1165,6 @@ function responseWithRegistration(
   fallback: unknown
 ): Response {
   const path = new URL(input.toString()).pathname;
-  if (path === "/v1/replay") return emptyReplay(init);
   if (path !== "/v1/interests/subscribe") return response(fallback);
   const body = JSON.parse(init?.body?.toString() ?? "{}") as {
     readonly session_id: string;
@@ -1077,6 +1176,7 @@ function responseWithRegistration(
     machine_id: "test",
     dir: body.dir,
     topics: body.topics,
+    delivery: consumerDelivery(body.session_id),
   });
 }
 

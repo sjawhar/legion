@@ -3,14 +3,14 @@ import {
   ConsumerDeliverySnapshotSchema,
 } from "@legion/envoy-client/consumer-delivery";
 import {
-  type ReplayLedgerEntry,
-  ReplayLedgerEntrySchema,
-  type ReplayLedgerIdentity,
-  type ReplaySnapshot,
-  type ReplayState,
-  ReplayStateSchema,
+  type LedgerEntry,
+  LedgerEntrySchema,
+  type LedgerIdentity,
+  type LedgerSnapshot,
+  type LedgerState,
+  LedgerStateSchema,
   rememberedTopics,
-} from "@legion/envoy-client/replay";
+} from "@legion/envoy-client/delivery-ledger";
 
 /** The custom type of every card the extension shows the session. */
 const ENVOY_MESSAGE = "envoy-message";
@@ -24,7 +24,7 @@ const ENVOY_MESSAGE = "envoy-message";
 export const REPLAY_DELIVERED_ENTRY = "envoy-replay-delivered";
 
 /**
- * Transcript entry holding the replay state (`ReplayState`: `{stream_id, stream_created, subjects,
+ * Transcript entry holding the replay state (`LedgerState`: `{stream_id, stream_created, subjects,
  * notices}`), written only when it changed, and a cursor that only followed the stream's end at
  * most hourly (`REPLAY_STATE_REFRESH_MS`); the newest one is the state. Its subjects are every
  * subject the session followed, so a restart after the listener reaped its interests still follows
@@ -73,10 +73,10 @@ function customEntries(entries: readonly unknown[], customType: string): unknown
 }
 
 /** The newest `REPLAY_STATE_ENTRY` that parses, at any age. */
-function newestState(entries: readonly unknown[]): ReplayState | undefined {
+function newestState(entries: readonly unknown[]): LedgerState | undefined {
   const states = customEntries(entries, REPLAY_STATE_ENTRY);
   for (let index = states.length - 1; index >= 0; index -= 1) {
-    const parsed = ReplayStateSchema.safeParse(states[index]);
+    const parsed = LedgerStateSchema.safeParse(states[index]);
     if (parsed.success) return parsed.data;
   }
   return undefined;
@@ -87,10 +87,10 @@ function newestState(entries: readonly unknown[]): ReplayState | undefined {
  * expired ones), with every written card's frame (`writtenCardIdentity`), and the newest state. An
  * entry that does not parse is passed over.
  */
-export function replaySnapshot(entries: readonly unknown[], now = Date.now()): ReplaySnapshot {
-  const ledger: ReplayLedgerEntry[] = [];
+export function replaySnapshot(entries: readonly unknown[], now = Date.now()): LedgerSnapshot {
+  const ledger: LedgerEntry[] = [];
   for (const data of customEntries(entries, REPLAY_DELIVERED_ENTRY)) {
-    const parsed = ReplayLedgerEntrySchema.safeParse(data);
+    const parsed = LedgerEntrySchema.safeParse(data);
     if (parsed.success) ledger.push(parsed.data);
   }
   ledger.push(...writtenCards(entries, ledger, now));
@@ -145,10 +145,10 @@ function cardEventID(text: string): string | undefined {
 /**
  * The frame an `envoy-message` card shows, or names in a failure notice, read from a message the
  * host wrote or the `custom_message` entry it wrote it as: the identity its `details` carry (the
- * frame's `replayLedgerIdentity`, which the extension puts there), else the event id its rendered
+ * frame's `ledgerIdentity`, which the extension puts there), else the event id its rendered
  * text names. Undefined for anything else, the extension's own notices included.
  */
-export function writtenCardIdentity(message: unknown): ReplayLedgerIdentity | undefined {
+export function writtenCardIdentity(message: unknown): LedgerIdentity | undefined {
   if (typeof message !== "object" || message === null) return undefined;
   if (stringField(message, "customType") !== ENVOY_MESSAGE) return undefined;
   const details: unknown = "details" in message ? message.details : undefined;
@@ -173,17 +173,17 @@ export function writtenCardIdentity(message: unknown): ReplayLedgerIdentity | un
  */
 function writtenCards(
   entries: readonly unknown[],
-  recorded: readonly ReplayLedgerEntry[],
+  recorded: readonly LedgerEntry[],
   now: number
-): ReplayLedgerEntry[] {
+): LedgerEntry[] {
   const events = new Set<string>();
   const keys = new Set<string>();
-  const note = (identity: ReplayLedgerIdentity) => {
+  const note = (identity: LedgerIdentity) => {
     if (identity.event_id !== undefined) events.add(identity.event_id);
     if (identity.dedupe_key !== undefined) keys.add(identity.dedupe_key);
   };
   for (const entry of recorded) note(entry);
-  const found: ReplayLedgerEntry[] = [];
+  const found: LedgerEntry[] = [];
   for (const entry of entries) {
     if (typeof entry !== "object" || entry === null) continue;
     if (stringField(entry, "type") !== "custom_message") continue;

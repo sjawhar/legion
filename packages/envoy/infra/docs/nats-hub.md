@@ -141,10 +141,10 @@ components spell a user's key and rules alike.
 
 `ListenerPermissions`, and through it `ListenerHostPermissions`, `HostPermissions` and
 `DispatchPermissions`, holds the notification stream's stored-message get,
-`$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`: the read-only read the listener's `POST /v1/replay`
-makes to return the retained notifications a session missed while its NATS subscription was down.
-It can create, change or delete nothing. `SessionPermissions` does not hold it, so the session
-user reads what it missed only through a listener. The same sets hold, for each key-value bucket
+`$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`: a read-only read of one stored message at a time.
+It can create, change or delete nothing. `SessionPermissions` does not hold it, so no session
+reads the stream's stored messages itself; each takes its own from the consumer its listener
+relays. The same sets hold, for each key-value bucket
 they open, the update of the bucket's stream, `$JS.API.STREAM.UPDATE.KV_<bucket>`, beside its info
 and create: a start, and the program's keeper every 30 seconds after, raises a bucket with fewer
 copies than `ENVOY_NATS_REPLICAS` with that update. This hub is one server, which refuses a
@@ -160,10 +160,10 @@ at once reads instead of one info each), with which a listener keeps one pull co
 session. A NATS wildcard is a whole token, so those entries reach every consumer of the stream,
 other listeners' and Dispatch's included, which is why a user any session shares holds none:
 `HostPermissions` and `DispatchPermissions` keep their per-durable scope. A listener connecting as
-a `machineId` or a `dispatchMachineId` user therefore keeps its own durable alone and answers
-every registration that asks for consumer delivery `core` with the reason `no_grant`, and those
-sessions receive on their own NATS subscriptions and catch up through the listener's
-`POST /v1/replay`. Every set above subscribes to the role lanes in the queue group every listener
+a `machineId` or a `dispatchMachineId` user therefore keeps its own durable alone and refuses
+every registration that asks for consumer delivery `503 no_grant`, so a session registering
+through it is not registered at all and receives nothing until its listener's grant carries the
+session consumers. Every set above subscribes to the role lanes in the queue group every listener
 shares, `envoy-roles`, beside the machine's own, since each user runs a listener.
 
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
@@ -182,9 +182,10 @@ client holding its seed would only be the same session user. The rendered file, 
 VM's metadata holds it in the clear.
 
 A session user lets anything that reaches 4222 publish and subscribe as `SessionPermissions()`
-allows: it reads every notification topic, answers any reply inbox it sees there (a role
-delivery's receipt included), and publishes agent stream frames and answers stream replay requests
-for any session id, so it can fake any agent's live stream in Dispatch. With one, the tailnet's
+allows: it reads the relay subject of any session, so it can take another session's messages and
+acknowledge them away, and it publishes agent stream frames and answers stream replay requests
+for any session id, so it can fake any agent's live stream in Dispatch. It reads no other
+notification topic. With one, the tailnet's
 policy is the gate on 4222: which devices it lets reach the hub's 4222 decides who is on the bus.
 A `listener` opens a second door, port 9020, with or without a session user, and it grants far
 more ([The hub's listener](#the-hubs-listener)).
@@ -236,8 +237,8 @@ the tailnet's policy for port 9020 is the only thing that decides who may call i
 gets the whole API with no credential: it can publish to any topic outside the agent topics with
 a `source` of its choosing, under the listener's user's publish grant (Dispatch, GitHub, Slack,
 Legion and role notifications included), claim a role, list every session and delete one, and
-read any session's stored inbox for the last 72 hours by naming its id (`POST /v1/replay`: the
-listener does not check that the session is live or that the caller is that session). That holds
+read any session's row by naming its id (the listener does not check that the caller is that
+session). That holds
 whether or not the hub has a `sessionUser`, so a hub without one still has an open bus for any
 device the policy lets reach 9020: grant 9020 only to devices that may act as any agent.
 
