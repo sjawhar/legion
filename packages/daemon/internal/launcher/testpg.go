@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -13,8 +14,9 @@ import (
 // The pod's own PostgreSQL for tests, which an issue pod's launcher serves when the deployment
 // sets `runtime.kubernetes.test_postgres` (Config.TestPostgres). TestPGVariable is the variable
 // every role of such a pod is told, and TestPGDSN its value: a loopback server with no password,
-// whose user is a `createdb nosuperuser` role of the cluster rather than its superuser, so a test
-// that reaches it cannot run programs as the server's own process. TestPGDirName is the directory
+// whose user is a `createdb createrole nosuperuser` role of the cluster rather than its superuser,
+// so a test that reaches it can make the roles its own suite needs and still cannot run programs
+// as the server's process. TestPGDirName is the directory
 // the server's data and admin socket live in, under the roles directory, which every role's
 // namespace covers (role-init), so no role can edit the cluster's configuration and have the
 // launcher load it at the next start.
@@ -70,13 +72,26 @@ func serveTestPG(ctx context.Context, cfg Config, log *roleLog, guard *pidGuard)
 	}()
 }
 
+// testPGBound is how long one run of the script may take. The first `ensure` runs before the
+// launcher serves any role, and the daemon's boot timeout for a pod is 120 s by default, so an
+// `ensure` that hangs — a lock a dead holder still owns, a disk that does not answer — must not
+// take the pod's whole boot with it. `flock` inside the script waits up to 180 s of its own, which
+// this bound cuts short deliberately: a role starting without its test database and a line in the
+// log is better than a pod the daemon gives up on. A test shortens it.
+var testPGBound = 60 * time.Second
+
 // runTestPG runs one command of the image's script with the DSN it must serve and the directory it
 // must serve it from, writing its output to the container's log behind a prefix of its own, so a
 // refusal reads apart from a role's lines. Its process is held out of the reaper's pass (pidGuard)
-// until this wait has read its exit.
+// until this wait has read its exit. WaitDelay makes the kill at testPGBound final: without it a
+// child that keeps the output pipe open — the postmaster `pg_ctl` leaves running — would hold this
+// wait past the bound.
 func runTestPG(ctx context.Context, cfg Config, log *roleLog, guard *pidGuard, command string) error {
+	bounded, cancel := context.WithTimeout(ctx, testPGBound)
+	defer cancel()
 	out, _ := log.writers(testPGProgram)
-	cmd := exec.CommandContext(ctx, testPGProgram, command)
+	cmd := exec.CommandContext(bounded, testPGProgram, command)
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(),
 		TestPGVariable+"="+TestPGDSN,
 		testPGDirVariable+"="+testPGDir(cfg.RolesDir),
@@ -88,9 +103,52 @@ func runTestPG(ctx context.Context, cfg Config, log *roleLog, guard *pidGuard, c
 	}
 	defer guard.done(pid)
 	if err := cmd.Wait(); err != nil {
+		if bounded.Err() != nil && ctx.Err() == nil {
+			return fmt.Errorf("%s %s did not finish within %s", testPGProgram, command, testPGBound)
+		}
 		return fmt.Errorf("%s %s: %w", testPGProgram, command, err)
 	}
 	return nil
+}
+
+// CheckTestPostgres proves the pod's own test database where a pod runs it, before any issue pod
+// does: `legion probe-image --test-postgres <dir>`, which the daemon's probe Sandbox passes when
+// the deployment sets runtime.kubernetes.test_postgres and the image build does not. The probe pod
+// runs under the deployment's own runtime (gVisor on the Autopilot cluster), so a runtime the
+// server cannot `initdb`, start or connect under refuses the daemon's boot probe rather than every
+// pod's first Postgres test. It runs what a pod's launcher runs — check, ensure — then makes and
+// drops a database through the DSN every role is told, and stops the server it started, so the
+// probe pod leaves nothing running. dir is a directory of the probe's own volume.
+func CheckTestPostgres(dir string) error {
+	env := append(os.Environ(), TestPGVariable+"="+TestPGDSN, testPGDirVariable+"="+dir)
+	run := func(name string, argv ...string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), testPGBound)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, name, argv...)
+		cmd.WaitDelay = time.Second
+		cmd.Env = env
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("the pod's own test database: %s %s: %w: %s",
+				name, strings.Join(argv, " "), err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
+	// The database is named for the probe alone, and dropped again, so the cluster the probe
+	// leaves behind holds nothing of it; the server is stopped whatever the steps answered.
+	steps := [][]string{
+		{testPGProgram, "check"},
+		{testPGProgram, "ensure"},
+		{"psql", "-X", "-q", TestPGDSN, "-c", "create database legion_probe_testpg"},
+		{"psql", "-X", "-q", TestPGDSN, "-c", "drop database legion_probe_testpg with (force)"},
+	}
+	for _, step := range steps {
+		if err := run(step[0], step[1:]...); err != nil {
+			_ = run(testPGProgram, "stop")
+			return err
+		}
+	}
+	return run(testPGProgram, "stop")
 }
 
 // pidGuard holds the pids of the launcher's own children that are no generation's, so PID 1's

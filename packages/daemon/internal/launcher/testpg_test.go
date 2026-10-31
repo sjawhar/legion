@@ -100,3 +100,74 @@ func TestTheGuardForgetsAChildOnceItsWaitHasRead(t *testing.T) {
 		t.Errorf("the script never ran: %v", err)
 	}
 }
+
+// One run of the script is bounded, so an `ensure` that hangs — a lock a dead holder still owns —
+// costs a pod one wait and a log line, not its whole boot: the launcher's first `ensure` runs
+// before any role starts, inside the daemon's boot timeout.
+func TestATestDatabaseRunThatHangsIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nsleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, testPGProgram), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	testPGBound = 200 * time.Millisecond
+	t.Cleanup(func() { testPGBound = 60 * time.Second })
+	started := time.Now()
+	err := runTestPG(context.Background(), Config{RolesDir: t.TempDir(), TestPostgres: true}, &roleLog{}, &pidGuard{}, "ensure")
+	if err == nil || !strings.Contains(err.Error(), "did not finish within") {
+		t.Fatalf("runTestPG = %v, want the bound named", err)
+	}
+	if waited := time.Since(started); waited > 10*time.Second {
+		t.Errorf("runTestPG waited %s on a script that hangs", waited)
+	}
+}
+
+// The image probe runs what a pod's launcher runs and then proves the DSN every role is told:
+// check, ensure, a database made and dropped through it, and the server stopped, so the probe pod
+// leaves nothing running. A step that fails is answered with its output, and the server is stopped
+// all the same.
+func TestCheckTestPostgresRunsEveryStepAndStopsTheServer(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	for _, program := range []string{testPGProgram, "psql"} {
+		script := "#!/bin/sh\nprintf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> " + calls + "\nexit $(cat " + filepath.Join(dir, "exit") + ")\n"
+		if err := os.WriteFile(filepath.Join(dir, program), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "exit"), []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := CheckTestPostgres(filepath.Join(dir, "cluster")); err != nil {
+		t.Fatalf("CheckTestPostgres: %v", err)
+	}
+	ran, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		testPGProgram + " check\n", testPGProgram + " ensure\n",
+		"psql -X -q " + TestPGDSN + " -c create database legion_probe_testpg\n",
+		"psql -X -q " + TestPGDSN + " -c drop database legion_probe_testpg with (force)\n",
+		testPGProgram + " stop\n",
+	} {
+		if !strings.Contains(string(ran), want) {
+			t.Errorf("the probe ran %q, want a %q among them", ran, want)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "exit"), []byte("3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(calls); err != nil {
+		t.Fatal(err)
+	}
+	err = CheckTestPostgres(filepath.Join(dir, "cluster"))
+	if err == nil || !strings.Contains(err.Error(), "the pod's own test database") {
+		t.Fatalf("CheckTestPostgres on a failing step = %v, want the failure named", err)
+	}
+	if again, readErr := os.ReadFile(calls); readErr != nil || !strings.Contains(string(again), testPGProgram+" stop\n") {
+		t.Errorf("a failed probe ran %q (%v), want the server stopped all the same", again, readErr)
+	}
+}

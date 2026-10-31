@@ -292,6 +292,16 @@ A deployment turns it on with `runtime.kubernetes.test_postgres: true`, a key of
   DSN's port, and otherwise initialises and starts under `flock -o`. The `-o` closes the lock's
   descriptor in the child, without which the server inherits it and every later `ensure` waits on
   a lock the server holds for the pod's life.
+- Each run of the script is bounded at 60 s. The first `ensure` runs before the launcher serves
+  any role, and the daemon gives a pod 120 s to boot by default, so an `ensure` that hangs costs
+  that pod a log line and not its boot.
+- The daemon's **image probe proves it under the runtime a pod runs on**: for a deployment that
+  sets the key, the probe Sandbox's `legion probe-image` carries `--test-postgres <its own
+  volume>`, which runs `legion-testpg check` and `ensure`, makes and drops a database through the
+  DSN every role is told, and stops the server. So a gVisor the server cannot start under refuses
+  the daemon's boot probe (`legion probe-boot`, "Probing a configuration before the daemon boots
+  on it") rather than every pod's first Postgres test. The image build runs the same sequence in
+  its own toolchain self-check, under the builder's runtime.
 - `legion-testpg ensure` refuses a DSN that carries a password or names a host that is not
   loopback, so a wrong deployment line logs a refusal instead of starting a server. It does not
   stop a test from using such a DSN; the skill rule does

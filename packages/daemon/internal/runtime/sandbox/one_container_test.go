@@ -194,6 +194,30 @@ func TestAnIssuePodServesItsOwnTestPostgres(t *testing.T) {
 	}
 }
 
+// The image probe proves the server where a pod runs it: the probe pod's `legion probe-image`
+// carries --test-postgres over its own volume for a deployment that serves one, so a runtime the
+// server cannot start under refuses the daemon's boot probe rather than every pod's first
+// Postgres test. A deployment that serves none passes the flag to nothing.
+func TestTheImageProbeProvesTheTestPostgres(t *testing.T) {
+	for serves, want := range map[bool]bool{true: true, false: false} {
+		opts := goldenOptions()
+		opts.TestPostgres = serves
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
+		command := probe.Containers[0].Command
+		flag := slices.Index(command, "--test-postgres")
+		if (flag >= 0) != want {
+			t.Errorf("test_postgres %t: the probe pod runs %q", serves, command)
+		}
+		if want && command[flag+1] != RoleProbeDir+"/"+launcher.TestPGDirName {
+			t.Errorf("the probe pod serves its test database from %q, want it on its own volume under %s", command[flag+1], RoleProbeDir)
+		}
+	}
+}
+
 // envValue is name's value among env, "" when it holds none.
 func envValue(env []corev1.EnvVar, name string) string {
 	for _, entry := range env {
