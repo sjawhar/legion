@@ -16,13 +16,14 @@ import (
 
 // TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn pins A1: a person with no session is sent to
 // the provider as the broker's own client, returning to the broker's own host, with PKCE S256, a
-// nonce, a state and the record's approver as login_hint, and no offline access or forced consent;
+// nonce, a state, the record's approver as login_hint, and no offline access or forced consent;
 // signed in, the page prints the record's facts from the broker's own record, with Approve and
 // Deny, every other pending request the person may decide, and "Approve all N shown". A machine
-// login's record links Dispatch's page and offers no button; a record another person must decide
-// names who and offers only the switch; an unknown record is a 404.
+// login's record answers 303 to the broker's machine-login page; a record another person must
+// decide names who and offers only the switch; an unknown record is a 404 to a signed-in person
+// and the sign-in, naming no one, to everyone else.
 func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
-	r := newRig(t, true)
+	r := newRig(t)
 	enrollmentID, key := r.enroll(t, "ben-box", "ben-box-runtime", "enrollment-session-1")
 	lifetime := 3600
 	first := r.request(t, enrollmentID, key, "deploy the billing service", nil, "claimed-session-2", "TEST_SECRET")
@@ -107,15 +108,11 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 		t.Errorf("the page carries a script:\n%s", res.Body)
 	}
 
-	t.Run("a machine login links Dispatch's page and offers no button", func(t *testing.T) {
+	t.Run("a machine login is decided on the machine-login page", func(t *testing.T) {
 		machineRecord, _ := r.machineLogin(t, newKey(t), ada, "ada-laptop")
-		res := b.Page(t, machineRecord)
-		if !strings.Contains(pageText(t, res.Body), "Machine login for ada-laptop") ||
-			!strings.Contains(res.Body, `href="`+brokertest.MachineLoginURL+`"`) {
-			t.Errorf("the machine login's page does not link %s:\n%s", brokertest.MachineLoginURL, res.Body)
-		}
-		if decisionForm(t, res.Body, machineRecord) != nil {
-			t.Errorf("the machine login's page offers a decision form:\n%s", res.Body)
+		res := b.Get(t, "/approve/"+machineRecord)
+		if want := r.url + "/machine"; res.Status != http.StatusSeeOther || res.Header.Get("Location") != want {
+			t.Errorf("the machine login's record = %d to %q, want 303 to %s:\n%s", res.Status, res.Header.Get("Location"), want, res.Body)
 		}
 	})
 
@@ -135,9 +132,28 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 		}
 	})
 
-	t.Run("an unknown record is a 404 and a malformed id a 400", func(t *testing.T) {
-		if res := b.Get(t, "/approve/"+strings.Repeat("0", 64)); res.Status != http.StatusNotFound {
-			t.Errorf("unknown record = %d, want 404", res.Status)
+	t.Run("the session is checked before the record", func(t *testing.T) {
+		unknown := strings.Repeat("0", 64)
+		if res := b.Get(t, "/approve/"+unknown); res.Status != http.StatusNotFound {
+			t.Errorf("a signed-in person's unknown record = %d, want 404", res.Status)
+		}
+		// With no session a well-formed id starts a sign-in whether or not a record has it, and
+		// that sign-in names a person only when a record does, so a machine with no person behind
+		// it learns nothing about which records exist.
+		stranger := r.browser(t)
+		res := stranger.Get(t, "/approve/"+unknown)
+		if res.Status != http.StatusFound {
+			t.Errorf("a stranger's unknown record = %d, want 302 to sign in", res.Status)
+		}
+		auth, err := url.Parse(res.Header.Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if auth.Query().Has("login_hint") {
+			t.Errorf("an unknown record's sign-in hints %q, want no login_hint", auth.Query().Get("login_hint"))
+		}
+		if res := stranger.Get(t, "/approve/"+strings.ToUpper(first.recordID)); res.Status != http.StatusBadRequest {
+			t.Errorf("a stranger's malformed record id = %d, want 400", res.Status)
 		}
 		if res := b.Get(t, "/approve/"+strings.ToUpper(first.recordID)); res.Status != http.StatusBadRequest {
 			t.Errorf("malformed record id = %d, want 400", res.Status)
@@ -155,10 +171,11 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 // TestTheApproverApprovesWithOnePost pins A2: the approver's session approves with one POST, the
 // requesting session then receives the value, and the page says the record is granted with no
 // button left; another person's session, an expired session, a logged-out session's replayed
-// cookie and no session each write nothing; a shared secret's request is approved by any signed-in
-// member of the domain.
+// cookie and no session each write nothing, the last three answering a page that links the
+// record's own; a shared secret's request is approved by any signed-in member of the domain and
+// hints at nobody.
 func TestTheApproverApprovesWithOnePost(t *testing.T) {
-	r := newRig(t, true)
+	r := newRig(t)
 	enrollmentID, key := r.benSession(t, "ben-box")
 	p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
 
@@ -181,9 +198,7 @@ func TestTheApproverApprovesWithOnePost(t *testing.T) {
 		if _, err := r.st.Pool.Exec(t.Context(), `update browser_sessions set expires_at = now() - interval '1 second'`); err != nil {
 			t.Fatal(err)
 		}
-		if res := b.FromPage(t, "/approve", decision(form, "approve")); res.Status != http.StatusForbidden {
-			t.Errorf("POST with an expired session = %d, want 403", res.Status)
-		}
+		requireSignInLink(t, b.FromPage(t, "/approve", decision(form, "approve")), p.recordID)
 		if res := b.Get(t, "/approve/"+p.recordID); res.Status != http.StatusFound {
 			t.Errorf("the page with an expired session = %d, want 302 to sign in again", res.Status)
 		}
@@ -206,9 +221,7 @@ func TestTheApproverApprovesWithOnePost(t *testing.T) {
 		if after := r.sessions(t); after != before-1 {
 			t.Errorf("sessions after logout = %d, want %d", after, before-1)
 		}
-		if res := r.browser(t).Post(t, "/approve", decision(form, "approve"), map[string]string{"Origin": r.url}, stolen); res.Status != http.StatusForbidden {
-			t.Errorf("POST with the logged-out cookie = %d, want 403", res.Status)
-		}
+		requireSignInLink(t, r.browser(t).Post(t, "/approve", decision(form, "approve"), map[string]string{"Origin": r.url}, stolen), p.recordID)
 		r.requirePending(t, p.recordID)
 	})
 
@@ -216,8 +229,11 @@ func TestTheApproverApprovesWithOnePost(t *testing.T) {
 		approver := r.browser(t)
 		approver.SignIn(t, p.recordID, person(ada))
 		form := decisionForm(t, approver.Page(t, p.recordID).Body, p.recordID)
-		if res := r.browser(t).FromPage(t, "/approve", decision(form, "approve")); res.Status != http.StatusForbidden {
-			t.Errorf("POST with no session = %d, want 403", res.Status)
+		requireSignInLink(t, r.browser(t).FromPage(t, "/approve", decision(form, "approve")), p.recordID)
+		// A form naming no record id is linked nowhere: /approve/ is no page.
+		res := r.browser(t).FromPage(t, "/approve", url.Values{"decision": {"approve"}, "record": {"not-a-record"}})
+		if res.Status != http.StatusOK || !strings.Contains(pageText(t, res.Body), "from the Inbox") || strings.Contains(res.Body, `<a href="/approve/`) {
+			t.Errorf("a signed-out POST naming no record = %d, want 200 saying to open the request from the Inbox and linking nothing:\n%s", res.Status, res.Body)
 		}
 		r.requirePending(t, p.recordID)
 	})
@@ -266,12 +282,11 @@ func TestTheApproverApprovesWithOnePost(t *testing.T) {
 	t.Run("a shared secret's request, by anyone signed in", func(t *testing.T) {
 		shared := r.request(t, enrollmentID, key, "shared deploy", nil, "", "SHARED_SECRET")
 		b := r.browser(t)
-		auth := b.StartSignIn(t, "/approve/"+shared.recordID)
-		if auth.Query().Has("login_hint") {
+		b.SignIn(t, shared.recordID, person(carol))
+		// A shared secret's record names no person, so even the switch, which has read it, hints
+		// at nobody.
+		if auth := b.StartSignIn(t, "/approve/"+shared.recordID+"?switch=1"); auth.Query().Has("login_hint") {
 			t.Errorf("a shared secret's sign-in hints %q, want no login_hint", auth.Query().Get("login_hint"))
-		}
-		if res := b.Get(t, b.Authorize(t, auth, person(carol))); res.Status != http.StatusSeeOther {
-			t.Fatalf("callback = %d, want 303", res.Status)
 		}
 		form := decisionForm(t, b.Page(t, shared.recordID).Body, shared.recordID)
 		if form == nil {
@@ -289,7 +304,7 @@ func TestTheApproverApprovesWithOnePost(t *testing.T) {
 // TestTheTokenBindsTheSessionAndThePrintedRecords pins A3: a page's token decides only the records
 // that page printed, only for the session it was printed to, and only until it expires.
 func TestTheTokenBindsTheSessionAndThePrintedRecords(t *testing.T) {
-	r := newRig(t, true)
+	r := newRig(t)
 	enrollmentID, key := r.benSession(t, "ben-box")
 	a := r.request(t, enrollmentID, key, "first", nil, "", "TEST_SECRET")
 	b := r.browser(t)
@@ -377,7 +392,7 @@ func TestTheTokenBindsTheSessionAndThePrintedRecords(t *testing.T) {
 // information is refused and writes nothing; Sec-Fetch-Site same-origin with no Origin is
 // accepted. A logout from another origin ends no session.
 func TestOnlyTheBrokersOriginDecides(t *testing.T) {
-	r := newRig(t, true)
+	r := newRig(t)
 	enrollmentID, key := r.benSession(t, "ben-box")
 	p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
 	b := r.browser(t)
@@ -428,7 +443,7 @@ func TestOnlyTheBrokersOriginDecides(t *testing.T) {
 // session; a good one sets both cookies __Host-, Secure, HttpOnly, Path=/, SameSite=Lax, with no
 // Domain.
 func TestTheCallbackRefusesAndMakesNoSession(t *testing.T) {
-	r := newRig(t, true)
+	r := newRig(t)
 	enrollmentID, key := r.benSession(t, "ben-box")
 	p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
 	page := "/approve/" + p.recordID
@@ -568,7 +583,7 @@ func TestTheCallbackRefusesAndMakesNoSession(t *testing.T) {
 // TestMarkupRendersInert pins A9: a reason and identifiers an agent wrote, carrying markup, render
 // as text.
 func TestMarkupRendersInert(t *testing.T) {
-	r := newRig(t, true)
+	r := newRig(t)
 	reason := `<script>alert("reason")</script><b>bold</b> & more`
 	runtimeID := `<img/src=x/onerror=alert(1)>`
 	claim := `<i>claimed</i>`
@@ -595,7 +610,7 @@ func TestMarkupRendersInert(t *testing.T) {
 // grants exactly the valid one, leaves each record exactly one terminal event, and the page says
 // what became of each from the records themselves.
 func TestABatchDecidesEachRecordOnItsOwn(t *testing.T) {
-	r := newRig(t, true)
+	r := newRig(t)
 	validEnrollment, validKey := r.benSession(t, "ben-valid")
 	expiringEnrollment, expiringKey := r.benSession(t, "ben-expiring")
 	endingEnrollment, endingKey := r.benSession(t, "ben-ending")
@@ -650,57 +665,28 @@ func TestABatchDecidesEachRecordOnItsOwn(t *testing.T) {
 	})
 }
 
-// TestSignInOffAndAnUnreachableProvider pins D10: with sign-in off every route of the page answers
-// 503 naming the four settings, the stylesheet still served; with sign-in on, a provider whose
-// discovery fails is a 503 naming its issuer, and the next sign-in tries again.
-func TestSignInOffAndAnUnreachableProvider(t *testing.T) {
-	t.Run("sign-in off", func(t *testing.T) {
-		r := newRig(t, false)
-		enrollmentID, key := r.benSession(t, "ben-box")
-		p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
-		b := r.browser(t)
-		for _, res := range []brokertest.Response{
-			b.Get(t, "/approve/"+p.recordID),
-			b.FromPage(t, "/approve", url.Values{"decision": {"approve"}, "record": {p.recordID}}),
-			b.Get(t, "/signin/callback?code=x&state=y"),
-			b.FromPage(t, "/signin/logout", url.Values{}),
-		} {
-			got := pageText(t, res.Body)
-			if res.Status != http.StatusServiceUnavailable {
-				t.Errorf("answer = %d, want 503", res.Status)
-			}
-			for _, setting := range []string{"BROKER_SIGNIN_ISSUER", "BROKER_SIGNIN_CLIENT_ID", "BROKER_SIGNIN_CLIENT_SECRET_FILE", "BROKER_SIGNIN_DOMAIN"} {
-				if !strings.Contains(got, setting) {
-					t.Errorf("the 503 does not name %s:\n%s", setting, got)
-				}
-			}
-		}
-		if res := b.Get(t, "/approve/assets/approve.css"); res.Status != http.StatusOK {
-			t.Errorf("stylesheet with sign-in off = %d, want 200", res.Status)
-		}
-		r.requirePending(t, p.recordID)
-	})
-
-	t.Run("a provider whose discovery fails", func(t *testing.T) {
-		r := newRig(t, true)
-		enrollmentID, key := r.benSession(t, "ben-box")
-		p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
-		r.issuer.FailDiscovery(http.StatusInternalServerError)
-		b := r.browser(t)
-		res := b.Get(t, "/approve/"+p.recordID)
-		if res.Status != http.StatusServiceUnavailable || !strings.Contains(pageText(t, res.Body), r.issuer.URL()) {
-			t.Fatalf("sign-in with discovery failing = %d, want 503 naming %s:\n%s", res.Status, r.issuer.URL(), res.Body)
-		}
-		r.issuer.FailDiscovery(0)
-		b.SignIn(t, p.recordID, person(ada))
-	})
+// TestASignInWhoseProviderCannotBeReached: a provider whose discovery document cannot be read is
+// a 503 naming its issuer, and the next sign-in reads it again.
+func TestASignInWhoseProviderCannotBeReached(t *testing.T) {
+	r := newRig(t)
+	enrollmentID, key := r.benSession(t, "ben-box")
+	p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
+	r.issuer.FailDiscovery(http.StatusInternalServerError)
+	b := r.browser(t)
+	res := b.Get(t, "/approve/"+p.recordID)
+	if res.Status != http.StatusServiceUnavailable || !strings.Contains(pageText(t, res.Body), r.issuer.URL()) {
+		t.Fatalf("sign-in with discovery failing = %d, want 503 naming %s:\n%s", res.Status, r.issuer.URL(), res.Body)
+	}
+	r.issuer.FailDiscovery(0)
+	b.SignIn(t, p.recordID, person(ada))
+	r.requirePending(t, p.recordID)
 }
 
 // TestSwitchingAccountsReplacesTheSession pins the switch link: it starts a sign-in with the
 // provider's account chooser and the record's approver as login_hint, and the session it makes
 // replaces the one the browser held, whose cookie then signs nothing in.
 func TestSwitchingAccountsReplacesTheSession(t *testing.T) {
-	r := newRig(t, true)
+	r := newRig(t)
 	enrollmentID, key := r.benSession(t, "ben-box")
 	p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
 	b := r.browser(t)

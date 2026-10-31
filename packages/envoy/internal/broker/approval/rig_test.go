@@ -18,6 +18,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/helper"
@@ -67,8 +68,9 @@ type rig struct {
 	accountToken string
 }
 
-// newRig wires the broker as cmd/broker does. signIn false builds the page with sign-in off.
-func newRig(t *testing.T, signIn bool) *rig {
+// newRig wires the broker as cmd/broker does, its approval page signed in at a provider of the
+// test's own.
+func newRig(t *testing.T) *rig {
 	t.Helper()
 	st := storetest.Open(t)
 	local := secrets.NewLocal(
@@ -86,9 +88,6 @@ func newRig(t *testing.T, signIn bool) *rig {
 	issuer := oidctest.New(t)
 	key := issuer.PublishKey(t, "signing-key")
 	signInConfig := brokertest.SignIn(issuer, key)
-	if !signIn {
-		signInConfig = nil
-	}
 	accounts, err := oidc.New(context.Background(), issuer.URL(), dispatchAudience)
 	if err != nil {
 		t.Fatalf("oidc.New: %v", err)
@@ -352,7 +351,7 @@ func (r *rig) browser(t *testing.T) *brokertest.Browser {
 
 // pageHeaders are the headers every answer of the approval page must carry.
 var pageHeaders = map[string]string{
-	"Content-Security-Policy": "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+	"Content-Security-Policy": approval.ContentSecurityPolicy,
 	"X-Frame-Options":         "DENY",
 	"Referrer-Policy":         "same-origin",
 	"Cache-Control":           "no-store",
@@ -371,6 +370,19 @@ func checkPageHeaders(t *testing.T, req *http.Request, res brokertest.Response) 
 		if strings.HasPrefix(name, "Access-Control-") {
 			t.Errorf("%s %s answered the CORS header %s", req.Method, req.URL.Path, name)
 		}
+	}
+}
+
+// requireSignInLink fails t unless res is what a POST whose session has lapsed answers: 200
+// saying nothing was decided, linking recordID's own page, where the person signs in again. It
+// is a page rather than a redirect to the provider because the page's Content-Security-Policy
+// has form-action 'self'.
+func requireSignInLink(t *testing.T, res brokertest.Response, recordID string) {
+	t.Helper()
+	if res.Status != http.StatusOK || !strings.Contains(brokertest.PageText(t, res.Body), "nothing was decided") ||
+		!strings.Contains(res.Body, `href="/approve/`+recordID+`"`) {
+		t.Errorf("a POST with no live session = %d, want 200 saying nothing was decided and linking /approve/%s:\n%s",
+			res.Status, recordID, res.Body)
 	}
 }
 

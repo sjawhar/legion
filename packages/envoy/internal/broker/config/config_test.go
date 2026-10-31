@@ -20,15 +20,43 @@ func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
+// signInSecret is the client secret every environment's BROKER_SIGNIN_CLIENT_SECRET_FILE holds;
+// no error Load answers may carry it.
+const signInSecret = "do-not-print-this-client-secret"
+
+// signInSecretFile is the file validEnv points BROKER_SIGNIN_CLIENT_SECRET_FILE at. TestMain
+// writes it once for the package, holding signInSecret between blank lines and spaces, which
+// Load trims: every environment needs a readable secret file, since the four sign-in settings
+// are required.
+var signInSecretFile string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "broker-config-signin")
+	if err != nil {
+		panic(err)
+	}
+	signInSecretFile = dir + "/client-secret"
+	if err := os.WriteFile(signInSecretFile, []byte("\n  "+signInSecret+"  \n"), 0o600); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // validEnv is a complete, minimal valid environment: every test starts from a copy of this and
-// overrides or deletes just the variable(s) under test.
+// overrides or deletes just the variable(s) under test. BROKER_MACHINE_LOGIN_URL is not in it,
+// since the broker no longer reads it.
 func validEnv() map[string]string {
 	return map[string]string{
-		"BROKER_DATABASE_URL":        "postgres://x",
-		"BROKER_PUBLIC_URL":          "https://secrets.internal.example",
-		"BROKER_MACHINE_LOGIN_URL":   "https://dispatch.internal.example/credentials/machine",
-		"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
-		"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+		"BROKER_DATABASE_URL":              "postgres://x",
+		"BROKER_PUBLIC_URL":                "https://secrets.internal.example",
+		"BROKER_SECRETS_PREFIX":            "example/agent-secrets/",
+		"BROKER_SECRETS_KMS_KEY_ARN":       "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+		"BROKER_SIGNIN_ISSUER":             "https://accounts.example.com",
+		"BROKER_SIGNIN_CLIENT_ID":          "broker-client",
+		"BROKER_SIGNIN_CLIENT_SECRET_FILE": signInSecretFile,
+		"BROKER_SIGNIN_DOMAIN":             "example.com",
 	}
 }
 
@@ -41,32 +69,42 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
-// TestLoadRequiresMachineLoginURL: the page a person types a machine login's code into is
-// required, and must be an absolute http(s) URL, since the device grant names it to the machine.
-func TestLoadRequiresMachineLoginURL(t *testing.T) {
-	for _, v := range []string{"", "/credentials/machine", "dispatch.example/credentials/machine", "ftp://dispatch.example/x", "https:///x"} {
+// TestLoadIgnoresTheMachineLoginURLAndNeedsTheSignIn: BROKER_MACHINE_LOGIN_URL is read by
+// nothing, so a deployment that still sets it and one that does not both load, while a
+// configuration missing one of the four BROKER_SIGNIN_* settings refuses to start naming it.
+func TestLoadIgnoresTheMachineLoginURLAndNeedsTheSignIn(t *testing.T) {
+	t.Run("with BROKER_MACHINE_LOGIN_URL", func(t *testing.T) {
 		e := validEnv()
-		e["BROKER_MACHINE_LOGIN_URL"] = v
-		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_MACHINE_LOGIN_URL") {
-			t.Errorf("Load(BROKER_MACHINE_LOGIN_URL=%q) = %v, want a refusal naming it", v, err)
+		e["BROKER_MACHINE_LOGIN_URL"] = "https://dispatch.internal.example/credentials/machine"
+		if _, err := Load(env(e)); err != nil {
+			t.Fatalf("Load with BROKER_MACHINE_LOGIN_URL set = %v, want it ignored", err)
 		}
-	}
-	cfg, err := Load(env(validEnv()))
-	if err != nil || cfg.MachineLoginURL != "https://dispatch.internal.example/credentials/machine" {
-		t.Fatalf("Load = (%q, %v), want the machine login URL", cfg.MachineLoginURL, err)
-	}
+	})
+
+	t.Run("without BROKER_MACHINE_LOGIN_URL", func(t *testing.T) {
+		if _, err := Load(env(validEnv())); err != nil {
+			t.Fatalf("Load with no BROKER_MACHINE_LOGIN_URL = %v, want no error", err)
+		}
+	})
+
+	t.Run("a missing sign-in setting", func(t *testing.T) {
+		e := validEnv()
+		delete(e, "BROKER_SIGNIN_DOMAIN")
+		_, err := Load(env(e))
+		if err == nil || !strings.Contains(err.Error(), "missing BROKER_SIGNIN_DOMAIN") {
+			t.Fatalf("Load without BROKER_SIGNIN_DOMAIN = %v, want a refusal naming it", err)
+		}
+	})
 }
 
-// TestLoadRefusesAURLWithoutPrintingItsCredential: a BROKER_PUBLIC_URL or BROKER_MACHINE_LOGIN_URL
-// that carries a credential and is refused names the variable and the value as
-// redact.NotPrinted, never the user name, password or query; a clean refused value is named as
-// written.
+// TestLoadRefusesAURLWithoutPrintingItsCredential: a BROKER_PUBLIC_URL that carries a credential
+// and is refused names the variable and the value as redact.NotPrinted, never the user name,
+// password or query; a clean refused value is named as written.
 func TestLoadRefusesAURLWithoutPrintingItsCredential(t *testing.T) {
 	for _, row := range []struct{ name, value, want string }{
 		{"BROKER_PUBLIC_URL", "https://tokuser9f3:hunter2pw@secrets.example/v1?token=qtok77", redact.NotPrinted},
 		{"BROKER_PUBLIC_URL", "https://tokuser9f3:hunter2pw%zz@secrets.example", redact.NotPrinted},
 		{"BROKER_PUBLIC_URL", "https://secrets.example/v1", `"https://secrets.example/v1"`},
-		{"BROKER_MACHINE_LOGIN_URL", "ftp://tokuser9f3:hunter2pw@dispatch.example/x", redact.NotPrinted},
 	} {
 		e := validEnv()
 		e[row.name] = row.value
@@ -1217,69 +1255,40 @@ func TestLoadRefusesAHalfConfiguredGitHubIssuer(t *testing.T) {
 	}
 }
 
-// signInSecret is the client secret the sign-in tests' secret file holds; no error Load answers
-// may carry it.
-const signInSecret = "do-not-print-this-client-secret"
-
-// withSignIn is validEnv with all four of the sign-in client's settings, its secret in a file of
-// t's own holding signInSecret between blank lines and spaces, which Load trims.
-func withSignIn(t *testing.T) map[string]string {
-	t.Helper()
-	secretFile := t.TempDir() + "/client-secret"
-	if err := os.WriteFile(secretFile, []byte("\n  "+signInSecret+"  \n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	e := validEnv()
-	e["BROKER_SIGNIN_ISSUER"] = "https://accounts.example.com"
-	e["BROKER_SIGNIN_CLIENT_ID"] = "broker-client"
-	e["BROKER_SIGNIN_CLIENT_SECRET_FILE"] = secretFile
-	e["BROKER_SIGNIN_DOMAIN"] = "example.com"
-	return e
-}
-
-// signInSettings are the four sign-in settings set together or not at all.
+// signInSettings are the four sign-in settings, every one of them required.
 var signInSettings = []string{"BROKER_SIGNIN_ISSUER", "BROKER_SIGNIN_CLIENT_ID", "BROKER_SIGNIN_CLIENT_SECRET_FILE", "BROKER_SIGNIN_DOMAIN"}
 
 // TestLoadReadsTheSignInClient pins the sign-in client with all four settings: each value as
 // given, the secret read from its file and trimmed, a session of 86400 seconds by default and of
 // BROKER_SIGNIN_SESSION_SECONDS when set, and an http issuer accepted on a loopback host.
 func TestLoadReadsTheSignInClient(t *testing.T) {
-	cfg, err := Load(env(withSignIn(t)))
+	cfg, err := Load(env(validEnv()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := SignIn{Issuer: "https://accounts.example.com", ClientID: "broker-client", ClientSecret: signInSecret, Domain: "example.com", SessionLifetime: 86400 * time.Second}
-	if cfg.SignIn == nil || *cfg.SignIn != want {
+	if cfg.SignIn != want {
 		t.Fatalf("SignIn = %+v, want %+v", cfg.SignIn, want)
 	}
-	e := withSignIn(t)
+	e := validEnv()
 	e["BROKER_SIGNIN_SESSION_SECONDS"] = "600"
-	if cfg, err := Load(env(e)); err != nil || cfg.SignIn == nil || cfg.SignIn.SessionLifetime != 10*time.Minute {
+	if cfg, err := Load(env(e)); err != nil || cfg.SignIn.SessionLifetime != 10*time.Minute {
 		t.Fatalf("Load(BROKER_SIGNIN_SESSION_SECONDS=600) = (%+v, %v), want a 10-minute session", cfg.SignIn, err)
 	}
 	for _, issuer := range []string{"http://127.0.0.1:5556", "http://localhost:5556/dex", "http://[::1]:5556"} {
-		e := withSignIn(t)
+		e := validEnv()
 		e["BROKER_SIGNIN_ISSUER"] = issuer
-		if cfg, err := Load(env(e)); err != nil || cfg.SignIn == nil || cfg.SignIn.Issuer != issuer {
-			t.Errorf("Load(BROKER_SIGNIN_ISSUER=%q) = (%+v, %v), want sign-in on with that issuer", issuer, cfg.SignIn, err)
+		if cfg, err := Load(env(e)); err != nil || cfg.SignIn.Issuer != issuer {
+			t.Errorf("Load(BROKER_SIGNIN_ISSUER=%q) = (%+v, %v), want that issuer", issuer, cfg.SignIn, err)
 		}
 	}
 }
 
-// TestLoadLeavesSignInOffWhenUnset pins that a broker with none of the sign-in settings boots
-// with sign-in off.
-func TestLoadLeavesSignInOffWhenUnset(t *testing.T) {
-	cfg, err := Load(env(validEnv()))
-	if err != nil || cfg.SignIn != nil {
-		t.Fatalf("Load with no sign-in settings = (%+v, %v), want sign-in off and no error", cfg.SignIn, err)
-	}
-}
-
-// TestLoadRefusesAPartialSignIn pins the all-or-none rule over every partial set of the four
-// settings: each refuses, naming every setting it lacks.
-func TestLoadRefusesAPartialSignIn(t *testing.T) {
-	for mask := 1; mask < 1<<len(signInSettings)-1; mask++ {
-		e := withSignIn(t)
+// TestLoadRefusesAnIncompleteSignIn pins that all four settings are required: every set short of
+// all of them, the empty set included, refuses naming every setting it lacks.
+func TestLoadRefusesAnIncompleteSignIn(t *testing.T) {
+	for mask := 0; mask < 1<<len(signInSettings)-1; mask++ {
+		e := validEnv()
 		var missing []string
 		for i, name := range signInSettings {
 			if mask&(1<<i) == 0 {
@@ -1302,20 +1311,14 @@ func TestLoadRefusesAPartialSignIn(t *testing.T) {
 	}
 }
 
-// TestLoadRefusesASignInSessionOutOfRange pins BROKER_SIGNIN_SESSION_SECONDS's range, 1 to 86400,
-// and its refusal while sign-in is off, where it would set nothing.
+// TestLoadRefusesASignInSessionOutOfRange pins BROKER_SIGNIN_SESSION_SECONDS's range, 1 to 86400.
 func TestLoadRefusesASignInSessionOutOfRange(t *testing.T) {
 	for _, bad := range []string{"86401", "0", "-1", "a day"} {
-		e := withSignIn(t)
+		e := validEnv()
 		e["BROKER_SIGNIN_SESSION_SECONDS"] = bad
 		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SIGNIN_SESSION_SECONDS") || strings.Contains(err.Error(), signInSecret) {
 			t.Errorf("BROKER_SIGNIN_SESSION_SECONDS = %q: err = %v, want a refusal naming the variable", bad, err)
 		}
-	}
-	e := validEnv()
-	e["BROKER_SIGNIN_SESSION_SECONDS"] = "3600"
-	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SIGNIN_SESSION_SECONDS") {
-		t.Fatalf("BROKER_SIGNIN_SESSION_SECONDS with sign-in off: err = %v, want a refusal naming it", err)
 	}
 }
 
@@ -1329,7 +1332,7 @@ func TestLoadRefusesAnUnusableSignInSecretFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, path := range map[string]string{"absent": dir + "/absent", "a directory": dir, "blank": blank} {
-		e := withSignIn(t)
+		e := validEnv()
 		e["BROKER_SIGNIN_CLIENT_SECRET_FILE"] = path
 		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SIGNIN_CLIENT_SECRET_FILE") {
 			t.Errorf("a secret file that is %s: err = %v, want a refusal naming BROKER_SIGNIN_CLIENT_SECRET_FILE", name, err)
@@ -1341,7 +1344,9 @@ func TestLoadRefusesAnUnusableSignInSecretFile(t *testing.T) {
 // BROKER_SIGNIN_CLIENT_SECRET refuses, naming the _FILE form, whether or not the file is set too,
 // and the refusal does not carry its value.
 func TestLoadRefusesThePlainSignInSecret(t *testing.T) {
-	for name, e := range map[string]map[string]string{"with the file": withSignIn(t), "alone": validEnv()} {
+	noFile := validEnv()
+	delete(noFile, "BROKER_SIGNIN_CLIENT_SECRET_FILE")
+	for name, e := range map[string]map[string]string{"with the file": validEnv(), "without the file": noFile} {
 		e["BROKER_SIGNIN_CLIENT_SECRET"] = signInSecret
 		_, err := Load(env(e))
 		if err == nil || !strings.HasPrefix(err.Error(), "BROKER_SIGNIN_CLIENT_SECRET ") || !strings.Contains(err.Error(), "BROKER_SIGNIN_CLIENT_SECRET_FILE") || strings.Contains(err.Error(), signInSecret) {
@@ -1355,7 +1360,7 @@ func TestLoadRefusesThePlainSignInSecret(t *testing.T) {
 // loopback host.
 func TestLoadRefusesASignInIssuerThatIsNotHTTPS(t *testing.T) {
 	for _, bad := range []string{"http://accounts.example.com", "http://10.0.0.1:5556", "http://127.0.0.1.example.com", "accounts.example.com", "ftp://accounts.example.com", "https://"} {
-		e := withSignIn(t)
+		e := validEnv()
 		e["BROKER_SIGNIN_ISSUER"] = bad
 		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SIGNIN_ISSUER") || strings.Contains(err.Error(), signInSecret) {
 			t.Errorf("BROKER_SIGNIN_ISSUER = %q: err = %v, want a refusal naming it", bad, err)

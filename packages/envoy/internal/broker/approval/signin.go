@@ -14,7 +14,6 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
-	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
@@ -39,28 +38,26 @@ func validNext(next string) bool {
 	return ok && record.ValidID(id)
 }
 
-// beginSignIn sends the browser to the provider to sign in and come back to detail's page,
-// holding the sign-in in its signInCookie. login_hint names the record's approver when a person is
-// (none for a shared secret's), so a person already signed in to the provider is asked nothing;
-// selectAccount asks the provider for its account chooser, for a person switching accounts. The
-// session the browser may hold now is left alone: the callback ends it when it makes the new one.
-func (p *Page) beginSignIn(w http.ResponseWriter, r *http.Request, detail requests.RecordDetail, selectAccount bool) {
+// beginSignIn sends the browser to the provider to sign in and come back to recordID's page,
+// holding the sign-in in its signInCookie. hint is the login_hint, the record's approver when the
+// record was read and names a person, so that person is asked nothing at a provider they are
+// already signed in to; it is empty where the record was not read, since reading it is what a
+// sign-in is for. selectAccount asks the provider for its account chooser, for a person switching
+// accounts. The session the browser may hold now is left alone: the callback ends it when it
+// makes the new one.
+func (p *Page) beginSignIn(w http.ResponseWriter, r *http.Request, recordID, hint string, selectAccount bool) {
 	flow, err := p.codeFlow(r)
 	if err != nil {
 		p.writeDiscoveryFailed(w, err)
 		return
 	}
-	pending := pendingSignIn{State: randomValue(), Nonce: randomValue(), Verifier: oauth2.GenerateVerifier(), Next: approvePrefix + detail.RecordID}
+	pending := pendingSignIn{State: randomValue(), Nonce: randomValue(), Verifier: oauth2.GenerateVerifier(), Next: approvePrefix + recordID}
 	raw, err := json.Marshal(pending)
 	if err != nil {
 		writeUnavailable(w, "start the sign-in", err)
 		return
 	}
 	setCookie(w, signInCookie, base64.RawURLEncoding.EncodeToString(raw), signInMaxAge)
-	hint := ""
-	if detail.Approver != record.AnyoneApprover {
-		hint = detail.Approver
-	}
 	authURL, err := flow.OnlineAuthURL(r.Context(), p.redirectURL, oidc.OnlineSignIn{
 		State: pending.State, Nonce: pending.Nonce, Verifier: pending.Verifier, LoginHint: hint, SelectAccount: selectAccount,
 	})

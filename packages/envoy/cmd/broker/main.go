@@ -179,13 +179,9 @@ func main() {
 		signIn = "rds-iam"
 	}
 	slog.Info("database sign-in", "method", signIn)
-	// Whether a person can sign in to the approval page, logged once at boot. Its client secret is
+	// Who a person signs in to the approval page as, logged once at boot. Its client secret is
 	// never logged.
-	if cfg.SignIn == nil {
-		slog.Info("approval sign-in off: BROKER_SIGNIN_* unset; no person can approve a secret request")
-	} else {
-		slog.Info("approval sign-in on", "issuer", cfg.SignIn.Issuer, "client_id", cfg.SignIn.ClientID)
-	}
+	slog.Info("approval sign-in on", "issuer", cfg.SignIn.Issuer, "client_id", cfg.SignIn.ClientID, "domain", cfg.SignIn.Domain)
 	// The AWS config, loaded once when anything needs it: an IAM-form BROKER_DATABASE_URL, whose
 	// connections sign in with RDS IAM tokens minted from it (so it is loaded before the database
 	// is opened), and the Secrets Manager and KMS clients of the AWS store, unless the fake
@@ -450,11 +446,11 @@ func main() {
 		slog.Info("token exchange", "state", "on", "kubernetes", cfg.ExchangeK8sAudience != "", "github", cfg.ExchangeGitHubIssuer != "",
 			"accounts", len(cfg.ExchangeAccounts), "workflows", len(cfg.ExchangeWorkflows))
 	}
-	// verification_uri is Dispatch's machine-login page, where the person types the code.
+	// verification_uri is the machine-login page, where the person types the code.
 	provider, err := oauth.New(oauth.Config{
 		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL,
 		AccessLifetime:  time.Duration(cfg.AccessTokenSeconds) * time.Second,
-		RefreshLifetime: credentialLifetime, VerificationURL: cfg.MachineLoginURL,
+		RefreshLifetime: credentialLifetime, VerificationURL: cfg.PublicURL + "/machine",
 		ProofSkew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
 		Exchange:  exchangeConfig,
 	}, oauthStore)
@@ -466,10 +462,9 @@ func main() {
 		OAuth: provider, Replay: enr.Replay,
 	}
 	// The approval page signs a person in with the broker's own client and returns them to
-	// BROKER_PUBLIC_URL as resolved above; with sign-in off its routes answer 503.
+	// BROKER_PUBLIC_URL as resolved above.
 	page, err := approval.New(approval.Config{
-		SignIn: cfg.SignIn, PublicURL: cfg.PublicURL, MachineLoginURL: cfg.MachineLoginURL,
-		Store: st, Machine: reqMachine,
+		SignIn: cfg.SignIn, PublicURL: cfg.PublicURL, Store: st, Machine: reqMachine,
 	})
 	fatal(err)
 

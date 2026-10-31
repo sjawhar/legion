@@ -19,9 +19,9 @@
 <h2 class="others">Other requests waiting for you</h2>
 {{- end}}
 <article class="record" id="record-{{$r.ID}}">
-<h2>{{if $r.MachineLogin}}Machine login for {{end}}{{range $j, $name := $r.Identifiers}}{{if $j}}, {{end}}<code>{{$name}}</code>{{end}}</h2>
+<h2>{{range $j, $name := $r.Identifiers}}{{if $j}}, {{end}}<code>{{$name}}</code>{{end}}</h2>
 <dl>
-<dt>{{if $r.MachineLogin}}Host{{else}}Secrets{{end}}</dt>
+<dt>Secrets</dt>
 <dd>{{range $j, $name := $r.Identifiers}}{{if $j}}, {{end}}<code>{{$name}}</code>{{end}}</dd>
 {{- with $r.Enrollment}}
 <dt>Requested by (verified by the broker)</dt>
@@ -35,10 +35,8 @@
 <dt>Session the request names (its own unsigned claim, not verified)</dt>
 <dd><code>{{$r.RequestSession}}</code></dd>
 {{- end}}
-{{- if not $r.MachineLogin}}
 <dt>Reason</dt>
 <dd>{{if $r.Reason}}{{$r.Reason}}{{else}}none given{{end}}</dd>
-{{- end}}
 <dt>Lasts once approved</dt>
 <dd>{{$r.Lifetime}}</dd>
 <dt>Requested</dt>
@@ -50,9 +48,7 @@
 <dt>State</dt>
 <dd class="state">{{$r.State}}{{if $r.DecidedBy}} by {{$r.DecidedBy}}{{end}}{{if $r.DecidedAt}} at {{$r.DecidedAt}}{{end}}{{if $r.Detail}} ({{$r.Detail}}){{end}}</dd>
 </dl>
-{{- if $r.MachineLogin}}
-<p class="note">A machine login is approved by typing the code its machine shows on Dispatch's machine-login page: <a href="{{$.MachineLoginURL}}">{{$.MachineLoginURL}}</a></p>
-{{- else if $r.Buttons}}
+{{- if $r.Buttons}}
 <form method="post" action="/approve" class="decide">
 {{template "token" $.Form}}
 <input type="hidden" name="record" value="{{$r.ID}}">

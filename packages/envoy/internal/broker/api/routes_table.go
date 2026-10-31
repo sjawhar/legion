@@ -87,8 +87,8 @@ func accountAuth(h func(*server, http.ResponseWriter, *http.Request, string)) ro
 // the broker itself (OpenID Connect with the broker's own client, BROKER_SIGNIN_*). The handler is
 // given the session the request's __Host-broker-session cookie names, or the zero session when it
 // names none that is live, since what that means is the route's to answer: the page starts a
-// sign-in, a decision is refused. While sign-in is off every such route answers 503 naming the
-// settings that turn it on. Mounted only when the broker builds its approval page.
+// sign-in, a decision answers a page linking the record it names. Mounted only when the broker
+// builds its approval page, which every broker does.
 func signInAuth(h func(*approval.Page, http.ResponseWriter, *http.Request, approval.Session)) routeHandler {
 	return routeHandler{auth: authSignIn, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
 		h(s.deps.Approval, w, r, who.signIn)
@@ -208,10 +208,11 @@ func routes() []apiRoute {
 		// own origin: the record's secret names, the enrollment the broker verified asked, the
 		// session the request claims when it differs, the reason, the lifetime, the times, the
 		// approver and the state, then every other pending secret request the person may decide,
-		// with Approve and Deny for each the person may decide and one "Approve all N shown". A
-		// machine login's record links Dispatch's machine-login page instead. With no live session,
-		// or with ?switch=1, it redirects to the sign-in provider, with the record's approver as
-		// login_hint, and returns here.
+		// with Approve and Deny for each the person may decide and one "Approve all N shown". It
+		// checks the id's shape, then the session, then the record: a malformed id is a 400, a
+		// request with no live session, or with ?switch=1, redirects to the sign-in provider and
+		// returns here, and only a signed-in person's unknown record id is a 404. A machine
+		// login's record answers 303 to the broker's machine-login page, where one is decided.
 		{http.MethodGet, "/approve/{record}", signInAuth((*approval.Page).ServeRecord)},
 		// Decide records an approval page printed, as the signed-in person: a form from the
 		// broker's own origin only, carrying the page's token, which binds it to the session and to
@@ -226,8 +227,8 @@ func routes() []apiRoute {
 		// Sign out of the approval page, from the broker's own origin only: the session ends and
 		// its cookie is cleared, and the answer links back to the record.
 		{http.MethodPost, "/signin/logout", signInAuth((*approval.Page).ServeLogout)},
-		// The approval page's one stylesheet, embedded in the broker; served while sign-in is off
-		// too, since the page saying so links it.
+		// The approval page's one stylesheet, embedded in the broker; it needs no credential,
+		// since every page it dresses is read before anyone has signed in.
 		{http.MethodGet, "/approve/assets/approve.css", public((*server).approvalStylesheet)},
 		// Report whether the broker can reach its database. From SIGTERM onward it answers 503
 		// SHUTTING_DOWN instead (Deps.Draining) while the process goes on serving every other route,

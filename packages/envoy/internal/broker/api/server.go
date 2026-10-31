@@ -99,8 +99,9 @@ type Deps struct {
 	// TokenHooks are the broker's steps around each token the provider issues.
 	TokenHooks oauth.TokenHooks
 	// Approval is the broker's own approval page and its sign-in (internal/broker/approval),
-	// built from BROKER_SIGNIN_*, off when those are unset. Its routes, every one under /approve
-	// and /signin/, are mounted only when it is set.
+	// which cmd/broker always builds, since config.Load requires BROKER_SIGNIN_*. Its routes,
+	// every one under /approve and /signin/, are mounted only when it is set, which leaves them
+	// off the mux of a test rig that wires no page.
 	Approval *approval.Page
 	// Draining reports whether this process has begun stopping, which GET /healthz answers 503
 	// SHUTTING_DOWN for while every other route goes on being served; nil means it never does.
@@ -187,7 +188,7 @@ func Register(mux *http.ServeMux, deps Deps) {
 const oauthRoutes = "/v1/oauth/"
 
 // approvalRoutes and signInRoutes prefix the approval page's routes, which Register mounts only
-// with the page.
+// with the page: every broker has one, and a rig that wires none serves those paths not at all.
 const (
 	approvalRoutes = "/approve"
 	signInRoutes   = "/signin/"
@@ -465,8 +466,8 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
 }
 
-// approvalStylesheet serves the approval page's stylesheet (approval.ServeStylesheet), with no
-// credential and while sign-in is off too, since the page saying so links it.
+// approvalStylesheet serves the approval page's stylesheet (approval.ServeStylesheet) with no
+// credential, since every page it dresses is read before anyone has signed in.
 func (s *server) approvalStylesheet(w http.ResponseWriter, r *http.Request) {
 	approval.ServeStylesheet(w, r)
 }

@@ -32,9 +32,6 @@ const (
 // recordView is one record as the page prints it, every field from the broker's own record.
 type recordView struct {
 	ID string
-	// MachineLogin is a launcher_credential record, decided by its typed code on Dispatch's
-	// machine-login page and never here.
-	MachineLogin bool
 	// Identifiers are the secret names an agent_secret record asks for, or a machine login's host.
 	Identifiers []string
 	// Enrollment is the requesting enrollment the broker verified; nil for a machine login.
@@ -81,14 +78,20 @@ type pageView struct {
 	Unshown int
 	// Form is the decision forms' hidden fields; ApproveAll is every record Form.Printed names,
 	// in page order, for the one "Approve all N shown" form, offered when there are two or more.
-	Form            tokenFields
-	ApproveAll      []string
-	MachineLoginURL string
+	Form       tokenFields
+	ApproveAll []string
 }
 
-// ServeRecord is GET /approve/{record}: the page for one record. With no live session, or with
-// ?switch=1 (a person signing in as someone else), it starts a sign-in that returns here. The page
-// prints that record and every other pending agent_secret record the person may decide, with
+// ServeRecord is GET /approve/{record}: the page for one record. It checks the id's shape, then
+// the session, then the record, in that order: a probe from a machine with no person behind it
+// must get the sign-in redirect rather than a 404 that tells it whether a record id exists. So an
+// id that is not a record id answers 400 whatever the session; with no live session, or with
+// ?switch=1 (a person signing in as someone else), it starts a sign-in that returns here, and a
+// signed-in person's unknown record id is a 404. The sign-in names the record's approver as
+// login_hint when the record exists and names one person, and names none otherwise, an id no
+// record has included, so the redirect reads the same whether or not the id exists. A machine
+// login is decided on the broker's machine-login page, so its record answers 303 there. The page
+// prints the record and every other pending agent_secret record the person may decide, with
 // Approve and Deny for each the person may decide and one "Approve all N shown" when N is two or
 // more, and, after a decision, one outcome line per decided record, read from the broker's own
 // record now.
@@ -96,6 +99,11 @@ func (p *Page) ServeRecord(w http.ResponseWriter, r *http.Request, sess Session)
 	id := r.PathValue("record")
 	if !record.ValidID(id) {
 		writeMessage(w, http.StatusBadRequest, say("Not a request", "Credential-request record ids are lowercase-hex SHA-256 hashes."))
+		return
+	}
+	switching := r.URL.Query().Get("switch") == "1"
+	if !sess.live() {
+		p.beginSignIn(w, r, id, p.loginHint(r, id), switching)
 		return
 	}
 	detail, err := p.cfg.Machine.ReadRecord(r.Context(), id)
@@ -109,17 +117,20 @@ func (p *Page) ServeRecord(w http.ResponseWriter, r *http.Request, sess Session)
 		writeUnavailable(w, "read the request", err)
 		return
 	}
-	if switching := r.URL.Query().Get("switch") == "1"; switching || !sess.live() {
-		p.beginSignIn(w, r, detail, switching)
+	if detail.Kind != record.KindAgentSecret {
+		redirect(w, http.StatusSeeOther, p.machinePage)
+		return
+	}
+	if switching {
+		p.beginSignIn(w, r, id, approverHint(detail.Approver), true)
 		return
 	}
 
 	now := time.Now()
 	main := p.recordView(detail, sess.Login, now)
 	view := pageView{
-		chrome:          chrome{Title: "Approve a secret request", Login: sess.Login, Record: id},
-		Records:         []recordView{main},
-		MachineLoginURL: p.cfg.MachineLoginURL,
+		chrome:  chrome{Title: "Approve a secret request", Login: sess.Login, Record: id},
+		Records: []recordView{main},
 	}
 	if view.Outcomes, err = p.outcomes(r.Context(), r.URL.Query().Get("decided"), sess.Login, now, detail); err != nil {
 		writeUnavailable(w, "read the decided requests", err)
@@ -162,10 +173,34 @@ func (p *Page) ServeRecord(w http.ResponseWriter, r *http.Request, sess Session)
 	writePage(w, http.StatusOK, "record.html", view)
 }
 
-// recordView is detail as the page prints it to login at now.
+// loginHint is the login_hint a sign-in started from id's page names: the record's approver, when
+// the broker has that record and it names one person. An id no record has, a shared secret's
+// "anyone", and a read the database could not answer all name none, so a visitor with no session
+// gets the same redirect whether or not the id exists, and a sign-in is never held up by a
+// database that cannot answer.
+func (p *Page) loginHint(r *http.Request, id string) string {
+	detail, err := p.cfg.Machine.ReadRecord(r.Context(), id)
+	if err != nil {
+		return ""
+	}
+	return approverHint(detail.Approver)
+}
+
+// approverHint is approver as a login_hint: the person's own login, and nothing for a shared
+// secret, whose approver is anyone signed in.
+func approverHint(approver string) string {
+	if approver == record.AnyoneApprover {
+		return ""
+	}
+	return approver
+}
+
+// recordView is detail as the page prints it to login at now. Every record it is called for is
+// an agent_secret one: ServeRecord sends a machine login to the broker's machine-login page, and
+// the pending list holds none.
 func (p *Page) recordView(d requests.RecordDetail, login string, now time.Time) recordView {
 	v := recordView{
-		ID: d.RecordID, MachineLogin: d.Kind == record.KindLauncherCredential,
+		ID:          d.RecordID,
 		Identifiers: d.Identifiers, Enrollment: d.Enrollment,
 		EnrollmentSession: d.Session.Enrollment,
 		Reason:            d.Reason, Lifetime: "until the session ends",
@@ -186,7 +221,7 @@ func (p *Page) recordView(d requests.RecordDetail, login string, now time.Time) 
 	if d.State == "pending" && !v.Pending {
 		v.State = "expired"
 	}
-	v.Buttons = v.Pending && !v.MachineLogin && v.MayDecide
+	v.Buttons = v.Pending && v.MayDecide
 	return v
 }
 
@@ -234,7 +269,7 @@ func outcome(d requests.RecordDetail, login string, now time.Time) string {
 	what := strings.Join(d.Identifiers, ", ") + ": "
 	switch {
 	case d.Kind != record.KindAgentSecret:
-		return what + "a machine login, which is decided by typing its code on Dispatch's machine-login page."
+		return what + "a machine login, which is decided by typing its code on the machine-login page."
 	case d.Decided == nil && !record.MayDecide(d.Kind, d.Approver, d.Service, login):
 		return what + "not yours to decide; only " + approverText(d.Approver) + " may."
 	case d.Decided == nil && !d.ExpiresAt.After(now):
@@ -296,11 +331,27 @@ func recordIDs(values []string) ([]string, bool) {
 	return ids, len(ids) <= maxRecords
 }
 
+// firstRecordID is the first of a form's record ids that is one, for a link the page puts in a
+// URL, and "" when the form names none. recordIDs is the decision's own, stricter reading: this
+// one only has to find a page to send a person back to.
+func firstRecordID(values []string) string {
+	for _, id := range values {
+		if record.ValidID(id) {
+			return id
+		}
+	}
+	return ""
+}
+
 // ServeDecide is POST /approve: decide the records a page's form names. It refuses, writing
-// nothing, a POST from any other origin (sameOrigin), one with no live session, and one whose
-// token does not bind it to this session and to a printed set holding every record it names, or
-// whose token has expired. Each record is then decided on its own by requests.Machine.ApplyDecision
-// as the session's person, so who may decide, the current policy and RECORD_TERMINAL stay that
+// nothing, a POST from any other origin (sameOrigin), one whose form cannot be read, and one
+// whose token does not bind it to this session and to a printed set holding every record it
+// names, or whose token has expired. A POST whose session has lapsed decides nothing either, and
+// answers 200 with a page linking the first record the form names: the page's
+// Content-Security-Policy has form-action 'self', which forbids answering a form post with a
+// redirect to the sign-in provider, so the person follows that link and signs in from the
+// record's own page. Each record is then decided on its own by requests.Machine.ApplyDecision as
+// the session's person, so who may decide, the current policy and RECORD_TERMINAL stay that
 // function's: a replayed form decides nothing again. It answers 303 to the first record's page
 // with the decided ids, whose outcomes that page reads from the records themselves.
 func (p *Page) ServeDecide(w http.ResponseWriter, r *http.Request, sess Session) {
@@ -308,14 +359,19 @@ func (p *Page) ServeDecide(w http.ResponseWriter, r *http.Request, sess Session)
 		refuseOrigin(w)
 		return
 	}
-	if !sess.live() {
-		writeMessage(w, http.StatusForbidden, say("Not signed in",
-			"Your sign-in to the secrets broker has ended, so nothing was decided. Open the request again to sign in."))
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormBytes)
 	if err := r.ParseForm(); err != nil {
 		writeMessage(w, http.StatusBadRequest, say("Not a decision", "The form could not be read, so nothing was decided."))
+		return
+	}
+	if !sess.live() {
+		m := say("Not signed in", "Your sign-in to the secrets broker has ended, so nothing was decided.")
+		if id := firstRecordID(r.PostForm["record"]); id != "" {
+			m.Link = &link{Href: approvePrefix + id, Text: "Open the request again to sign in"}
+		} else {
+			m.Lines = append(m.Lines, "This form names no request, so open the request's page again from the Inbox to sign in.")
+		}
+		writeMessage(w, http.StatusOK, m)
 		return
 	}
 	form := r.PostForm
@@ -361,7 +417,8 @@ func (p *Page) ServeDecide(w http.ResponseWriter, r *http.Request, sess Session)
 }
 
 // decide decides one record as login and answers what became of it, for the log. A machine login
-// is never decided here, whatever a form says: its typed code is decided on Dispatch's page.
+// is never decided here, whatever a form says: its typed code is decided on the machine-login
+// page.
 func (p *Page) decide(ctx context.Context, id string, approve bool, login string) string {
 	kind, err := p.cfg.Machine.RecordKind(ctx, id)
 	switch {

@@ -31,19 +31,18 @@ const (
 // answers the sign-in configuration naming it, with sessions of an hour: what BROKER_SIGNIN_* and
 // the provider give a deployed broker. The issuer answers a code exchange with no refresh token,
 // as Google answers the broker's online sign-in.
-func SignIn(issuer *oidctest.Issuer, key *oidctest.Key) *config.SignIn {
+func SignIn(issuer *oidctest.Issuer, key *oidctest.Key) config.SignIn {
 	issuer.EnableCodeFlow(key, SignInClientID, SignInClientSecret)
 	issuer.OmitRefreshTokens()
-	return &config.SignIn{Issuer: issuer.URL(), ClientID: SignInClientID, ClientSecret: SignInClientSecret, Domain: SignInDomain, SessionLifetime: time.Hour}
+	return config.SignIn{Issuer: issuer.URL(), ClientID: SignInClientID, ClientSecret: SignInClientSecret, Domain: SignInDomain, SessionLifetime: time.Hour}
 }
 
 // NewApprovalPage builds the broker's approval page as cmd/broker/main.go does, for a broker at
-// publicURL whose records m reads and decides and whose sessions st keeps. A nil signIn builds it
-// with sign-in off.
-func NewApprovalPage(t *testing.T, signIn *config.SignIn, publicURL string, st *store.Store, m *requests.Machine) *approval.Page {
+// publicURL whose records m reads and decides and whose sessions st keeps.
+func NewApprovalPage(t *testing.T, signIn config.SignIn, publicURL string, st *store.Store, m *requests.Machine) *approval.Page {
 	t.Helper()
 	page, err := approval.New(approval.Config{
-		SignIn: signIn, PublicURL: publicURL, MachineLoginURL: MachineLoginURL, Store: st, Machine: m,
+		SignIn: signIn, PublicURL: publicURL, Store: st, Machine: m,
 	})
 	if err != nil {
 		t.Fatalf("approval.New: %v", err)

@@ -24,6 +24,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
+	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -85,7 +86,8 @@ func newApprovalFixture(t *testing.T) approvalFixture {
 }
 
 // baseEnv is a broker on databaseURL serving at publicURL (http://127.0.0.1:0 for its own bound
-// address), with no sign-in configured.
+// address). Its sign-in is productionEnv's, which f.signInEnv replaces with the fixture's own
+// issuer for a row where a person signs in.
 func (f approvalFixture) baseEnv(databaseURL, publicURL string) []string {
 	return []string{
 		"BROKER_DATABASE_URL=" + databaseURL,
@@ -245,15 +247,15 @@ func (f *front) route(t *testing.T, p *brokerProcess) {
 // HTTP alone, with one local issuer standing in for the cluster's ServiceAccount token issuer and
 // for the person's sign-in provider. A pod enrolled through a service's token login asks for ada's
 // human-tier secret and is answered pending with the record's page; a browser opening that page is
-// sent to the provider's sign-in with the broker's own client, PKCE, a nonce, a state and ada as
-// the login hint, comes back to the page, and ada's one POST of its Approve grants the request,
-// whose value the pod then reads. Against a second pending record, nothing Dispatch or another
-// person holds decides it: carol's session, even with a page token minted from her own cookie;
-// Dispatch's ServiceAccount token on the account routes; an ID token for ada minted for Dispatch's
-// own OAuth client; a callback carrying a code the broker never asked for; a session past its
-// expiry; and a logged-out session's cookie. The binary refuses a partial or over-long sign-in
-// configuration, answers 503 with sign-in off, and finishes a sign-in begun on one process on
-// another, whose session decides on a third start of the binary.
+// sent to the provider's sign-in with the broker's own client, PKCE, a nonce, a state and no login
+// hint, comes back to the page, and ada's one POST of its Approve grants the request, whose value
+// the pod then reads. Against a second pending record, nothing Dispatch or another person holds
+// decides it: carol's session, even with a page token minted from her own cookie; Dispatch's
+// ServiceAccount token on the account routes; an ID token for ada minted for Dispatch's own OAuth
+// client; a callback carrying a code the broker never asked for; a session past its expiry; and a
+// logged-out session's cookie. The binary refuses an incomplete or over-long sign-in
+// configuration, and finishes a sign-in begun on one process on another, whose session decides on
+// a third start of the binary.
 func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 	f := newApprovalFixture(t)
 	databaseURL := storetest.URL(t)
@@ -435,8 +437,8 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		b := newBrowser(t)
 		res := b.Post(t, "/approve", url.Values{"decision": {"approve"}, "record": {recordB}, "printed": {recordB}},
 			map[string]string{"Origin": base, "Authorization": "Bearer " + idToken})
-		if res.Status != http.StatusForbidden || !strings.Contains(brokertest.PageText(t, res.Body), "nothing was decided") {
-			t.Fatalf("POST /approve with ada's Dispatch ID token as a bearer = %d, want 403 deciding nothing:\n%s", res.Status, res.Body)
+		if res.Status != http.StatusOK || !strings.Contains(brokertest.PageText(t, res.Body), "nothing was decided") {
+			t.Fatalf("POST /approve with ada's Dispatch ID token as a bearer = %d, want 200 deciding nothing:\n%s", res.Status, res.Body)
 		}
 		status, answer := accountCall(t, base, http.MethodPost, "/v1/credential-requests/"+recordB+"/approve",
 			map[string]string{"Authorization": "Bearer " + idToken}, map[string]any{"approver": ada})
@@ -499,8 +501,9 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		time.Sleep(3 * time.Second)
 		replay := newBrowser(t)
 		res := replay.Post(t, "/approve", brokertest.Decision(form, "approve"), map[string]string{"Origin": base}, old)
-		if res.Status != http.StatusForbidden || !strings.Contains(brokertest.PageText(t, res.Body), "Not signed in") {
-			t.Fatalf("Approve with the expired session's cookie = %d, want 403 not signed in:\n%s", res.Status, res.Body)
+		if res.Status != http.StatusOK || !strings.Contains(brokertest.PageText(t, res.Body), "Not signed in") ||
+			!strings.Contains(res.Body, `href="/approve/`+recordB+`"`) {
+			t.Fatalf("Approve with the expired session's cookie = %d, want 200 not signed in linking the record:\n%s", res.Status, res.Body)
 		}
 		requireSignInRedirect(t, f.issuer, replay.Get(t, "/approve/"+recordB, old), "the page with the expired session's cookie")
 		requirePending(f.pods(t, base), podB, requestB, "the expired session's POST")
@@ -519,22 +522,36 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		}
 		replay := newBrowser(t)
 		res := replay.Post(t, "/approve", brokertest.Decision(form, "approve"), map[string]string{"Origin": base}, old)
-		if res.Status != http.StatusForbidden || !strings.Contains(brokertest.PageText(t, res.Body), "Not signed in") {
-			t.Fatalf("Approve with the logged-out session's cookie = %d, want 403 not signed in:\n%s", res.Status, res.Body)
+		if res.Status != http.StatusOK || !strings.Contains(brokertest.PageText(t, res.Body), "Not signed in") ||
+			!strings.Contains(res.Body, `href="/approve/`+recordB+`"`) {
+			t.Fatalf("Approve with the logged-out session's cookie = %d, want 200 not signed in linking the record:\n%s", res.Status, res.Body)
 		}
 		requirePending(f.pods(t, base), podB, requestB, "the logged-out session's POST")
 	})
 
-	t.Run("A10: sign-in is all or none, and none boots with approvals off", func(t *testing.T) {
+	t.Run("A10: a broker without all four sign-in settings does not start", func(t *testing.T) {
 		env := f.baseEnv(databaseURL, "http://127.0.0.1:0")
 		signIn := f.signInEnv()
+		// productionEnv gives every broker these tests start the four settings, so a row that
+		// leaves one out clears it rather than simply not setting it.
+		unset := func(names []string) []string {
+			cleared := make([]string, 0, len(names))
+			for _, name := range names {
+				cleared = append(cleared, name+"=")
+			}
+			return cleared
+		}
 		for _, c := range []struct {
 			name string
 			set  []string
 			want string
 		}{
-			{"the issuer alone", signIn[:1], "missing BROKER_SIGNIN_CLIENT_ID, BROKER_SIGNIN_CLIENT_SECRET_FILE, BROKER_SIGNIN_DOMAIN"},
-			{"all but the domain", signIn[:3], "missing BROKER_SIGNIN_DOMAIN"},
+			{"none of the four", unset(config.SignInSettings),
+				"missing " + strings.Join(config.SignInSettings, ", ")},
+			{"the issuer alone", append(slices.Clone(signIn[:1]), unset(config.SignInSettings[1:])...),
+				"missing BROKER_SIGNIN_CLIENT_ID, BROKER_SIGNIN_CLIENT_SECRET_FILE, BROKER_SIGNIN_DOMAIN"},
+			{"all but the domain", append(slices.Clone(signIn[:3]), unset(config.SignInSettings[3:])...),
+				"missing BROKER_SIGNIN_DOMAIN"},
 			{"all four with a session over a day", append(slices.Clone(signIn), "BROKER_SIGNIN_SESSION_SECONDS=86401"),
 				"BROKER_SIGNIN_SESSION_SECONDS must be a whole number between 1 and 86400"},
 		} {
@@ -544,28 +561,6 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 				t.Fatalf("%s: the broker refused boot without naming %q:\n%s", c.name, c.want, out)
 			}
 		}
-
-		off := f.start(t, databaseURL, "http://127.0.0.1:0")
-		offBase := "http://" + off.Addr
-		if !strings.Contains(off.Boot, "approval sign-in off: BROKER_SIGNIN_* unset; no person can approve a secret request") {
-			t.Fatalf("the broker with no sign-in did not log that approvals are off:\n%s", off.Boot)
-		}
-		res := brokertest.NewBrowser(t, offBase, http.DefaultTransport, f.issuer).Get(t, "/approve/"+recordB)
-		text := brokertest.PageText(t, res.Body)
-		if res.Status != http.StatusServiceUnavailable {
-			t.Fatalf("GET /approve/%s with sign-in off = %d, want 503:\n%s", recordB, res.Status, text)
-		}
-		for _, name := range []string{"BROKER_SIGNIN_ISSUER", "BROKER_SIGNIN_CLIENT_ID", "BROKER_SIGNIN_CLIENT_SECRET_FILE", "BROKER_SIGNIN_DOMAIN"} {
-			if !strings.Contains(text, name) {
-				t.Fatalf("the sign-in-off page does not name %s:\n%s", name, text)
-			}
-		}
-		status, answer := accountCall(t, offBase, http.MethodPost, "/v1/credential-requests/"+recordB+"/approve",
-			map[string]string{"Authorization": "Bearer " + f.dispatchToken(t)}, map[string]any{"approver": ada})
-		if status != http.StatusForbidden || decodeError(t, answer).Code != "DECIDE_ON_BROKER_PAGE" {
-			t.Fatalf("Dispatch's approve with sign-in off = %d %s, want 403 DECIDE_ON_BROKER_PAGE", status, answer)
-		}
-		requirePending(f.pods(t, base), podB, requestB, "the sign-in-off broker")
 	})
 
 	t.Run("A11: a sign-in begun on one process finishes on another and decides on a third", func(t *testing.T) {

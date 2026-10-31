@@ -63,10 +63,6 @@ type Config struct {
 	// path. Required. Every signed proof and request object names it, so a client's
 	// AGENT_SECRETS_URL must be exactly this.
 	PublicURL string
-	// BROKER_MACHINE_LOGIN_URL: the absolute http(s) URL of the page where a person types a
-	// machine login's code (Dispatch's /credentials/machine). Required. The device grant's
-	// verification_uri names it, so a machine shows its person where to go.
-	MachineLoginURL string
 	// BROKER_API_ACCOUNTS: the Kubernetes service accounts that call the broker's named-caller
 	// routes — the approval routes Dispatch's server calls on a person's behalf, and the
 	// introspection route a resource server reads one of the broker's access tokens back through —
@@ -89,10 +85,10 @@ type Config struct {
 	// trimmed; no variable carries the secret itself, so BROKER_SIGNIN_CLIENT_SECRET is refused),
 	// the Google Workspace domain a person's ID token must name in its hd claim, and how many
 	// seconds a sign-in lasts (an absolute expiry nothing extends, at most 86400, 24 hours, the
-	// default). The first four are set together or not at all: a partial set refuses to start,
-	// naming the ones missing. Unset, sign-in is off (nil) and no person can approve a secret
-	// request, and BROKER_SIGNIN_SESSION_SECONDS is refused, since it would set nothing.
-	SignIn *SignIn
+	// default). The first four are required: a broker missing any of them refuses to start,
+	// naming the ones missing, since nobody could approve a secret request on a page nobody can
+	// sign in to.
+	SignIn SignIn
 	// BROKER_SECRETS_STORE: which secret store the agent secrets live in: aws-secrets-manager (the
 	// default when unset, AWS Secrets Manager with the agent-secrets key in AWS KMS) or
 	// gcp-secret-manager (Google Cloud Secret Manager with the agent-secrets key in Cloud KMS, read
@@ -284,9 +280,9 @@ type SignIn struct {
 	SessionLifetime time.Duration
 }
 
-// SignInSettings are the four settings that turn the broker's sign-in on, set together or not at
-// all: the provider's issuer, the client's id, the file holding the client's secret, and the
-// Workspace domain. Every message that names them names them in this order.
+// SignInSettings are the four settings the broker's sign-in needs, every one of them required:
+// the provider's issuer, the client's id, the file holding the client's secret, and the Workspace
+// domain. Every message that names them names them in this order.
 var SignInSettings = []string{"BROKER_SIGNIN_ISSUER", "BROKER_SIGNIN_CLIENT_ID", "BROKER_SIGNIN_CLIENT_SECRET_FILE", "BROKER_SIGNIN_DOMAIN"}
 
 // NotServingSweeps is how many sweeps a gap between two serving records may last and still count
@@ -706,7 +702,6 @@ func Load(getenv func(string) string) (Config, error) {
 		ListenAddr:         orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
 		DatabaseURL:        getenv("BROKER_DATABASE_URL"),
 		PublicURL:          getenv("BROKER_PUBLIC_URL"),
-		MachineLoginURL:    getenv("BROKER_MACHINE_LOGIN_URL"),
 		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
@@ -730,7 +725,6 @@ func Load(getenv func(string) string) (Config, error) {
 	cfg.SecretsKMSKey = getenv(keyVar)
 	for _, req := range []struct{ name, value string }{
 		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},
-		{"BROKER_MACHINE_LOGIN_URL", cfg.MachineLoginURL},
 		{"BROKER_SECRETS_PREFIX", cfg.SecretsPrefix}, {keyVar, cfg.SecretsKMSKey},
 	} {
 		if strings.TrimSpace(req.value) == "" {
@@ -743,9 +737,6 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if parsed, err := url.Parse(cfg.PublicURL); err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
 		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", redact.URL(cfg.PublicURL))
-	}
-	if parsed, err := url.Parse(cfg.MachineLoginURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-		return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", redact.URL(cfg.MachineLoginURL))
 	}
 	switch cfg.SecretsStore {
 	case secrets.StoreAWS:
@@ -916,12 +907,11 @@ func Load(getenv func(string) string) (Config, error) {
 }
 
 // parseSignIn reads the broker's sign-in client, its session lasting sessionLifetime, the
-// BROKER_SIGNIN_SESSION_SECONDS Load read. It answers nil, sign-in off, when none of the client's
-// four settings is set, and refuses: some of them set and not all, naming each one missing;
-// BROKER_SIGNIN_SESSION_SECONDS set while sign-in is off, since it would set nothing; an issuer
-// that is not an absolute https URL, or http to a loopback host; and an unreadable or blank secret
-// file. No refusal carries the secret.
-func parseSignIn(getenv func(string) string, sessionLifetime time.Duration) (*SignIn, error) {
+// BROKER_SIGNIN_SESSION_SECONDS Load read. All four of the client's settings are required, since
+// a broker nobody can sign in to is a broker on which no secret request is ever approved. It
+// refuses: any of them missing, naming each one; an issuer that is not an absolute https URL, or
+// http to a loopback host; and an unreadable or blank secret file. No refusal carries the secret.
+func parseSignIn(getenv func(string) string, sessionLifetime time.Duration) (SignIn, error) {
 	values := make([]string, len(SignInSettings))
 	var missing []string
 	for i, name := range SignInSettings {
@@ -930,27 +920,21 @@ func parseSignIn(getenv func(string) string, sessionLifetime time.Duration) (*Si
 			missing = append(missing, name)
 		}
 	}
-	if len(missing) == len(SignInSettings) {
-		if getenv("BROKER_SIGNIN_SESSION_SECONDS") != "" {
-			return nil, fmt.Errorf("BROKER_SIGNIN_SESSION_SECONDS is set while sign-in is off, so it would set nothing; set %s with it, or unset it", strings.Join(SignInSettings, ", "))
-		}
-		return nil, nil
-	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("sign-in needs %s set together, or none of them; missing %s", strings.Join(SignInSettings, ", "), strings.Join(missing, ", "))
+		return SignIn{}, fmt.Errorf("the broker's approval page needs %s; missing %s", strings.Join(SignInSettings, ", "), strings.Join(missing, ", "))
 	}
-	signIn := &SignIn{
+	signIn := SignIn{
 		Issuer:          strings.TrimSpace(values[0]),
 		ClientID:        strings.TrimSpace(values[1]),
 		Domain:          strings.TrimSpace(values[3]),
 		SessionLifetime: sessionLifetime,
 	}
 	if !signInIssuerOK(signIn.Issuer) {
-		return nil, fmt.Errorf("BROKER_SIGNIN_ISSUER must be an absolute https URL, or http to a loopback host, got %q", signIn.Issuer)
+		return SignIn{}, fmt.Errorf("BROKER_SIGNIN_ISSUER must be an absolute https URL, or http to a loopback host, got %q", signIn.Issuer)
 	}
 	var err error
 	if signIn.ClientSecret, err = secretFile(SignInSettings[2], values[2]); err != nil {
-		return nil, err
+		return SignIn{}, err
 	}
 	return signIn, nil
 }

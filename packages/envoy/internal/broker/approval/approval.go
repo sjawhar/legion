@@ -72,16 +72,12 @@ func mustRead(name string) []byte {
 
 // Config is what the page is built from.
 type Config struct {
-	// SignIn is the broker's own OpenID Connect client (BROKER_SIGNIN_*). Nil is sign-in off:
-	// every route of the page but its stylesheet answers 503 naming the settings, and no person
-	// can approve a secret request.
-	SignIn *config.SignIn
+	// SignIn is the broker's own OpenID Connect client (BROKER_SIGNIN_*), which config.Load
+	// requires, so a page is never built without one.
+	SignIn config.SignIn
 	// PublicURL is BROKER_PUBLIC_URL as the broker resolved it: the one origin every POST must
 	// come from, and the base of the sign-in's redirect URI, <PublicURL>/signin/callback.
 	PublicURL string
-	// MachineLoginURL is BROKER_MACHINE_LOGIN_URL, Dispatch's page where a person types a
-	// machine login's code; a machine login's record links it and offers no button.
-	MachineLoginURL string
 	// Store holds the sessions.
 	Store *store.Store
 	// Machine reads the records and decides them (ReadRecord, PendingForApprover, ApplyDecision).
@@ -93,8 +89,10 @@ type Page struct {
 	cfg Config
 	// origin is PublicURL's origin as a browser serializes it in an Origin header.
 	origin string
-	// redirectURL is the sign-in's redirect URI.
+	// redirectURL is the sign-in's redirect URI, and machinePage the broker's own machine-login
+	// page, where a machine login is decided and never here.
 	redirectURL string
+	machinePage string
 
 	// flow is the provider's code flow, discovered at the first sign-in that needs it rather than
 	// at boot, so a provider outage never stops the broker serving machines; a failed discovery
@@ -112,7 +110,8 @@ func New(cfg Config) (*Page, error) {
 	if cfg.Store == nil || cfg.Machine == nil {
 		return nil, errors.New("approval: the page needs the store and the request machine")
 	}
-	return &Page{cfg: cfg, origin: originOf(u), redirectURL: strings.TrimRight(cfg.PublicURL, "/") + "/signin/callback"}, nil
+	base := strings.TrimRight(cfg.PublicURL, "/")
+	return &Page{cfg: cfg, origin: originOf(u), redirectURL: base + "/signin/callback", machinePage: base + "/machine"}, nil
 }
 
 // originOf is u's origin as a browser serializes it: lowercase scheme and host, and the port only
@@ -140,16 +139,9 @@ func (s Session) live() bool { return s.Login != "" }
 
 // Authenticate answers the live session r's cookie names, or the zero Session when it names none
 // (no cookie, a malformed one, an expired or logged-out session), since what that means is each
-// route's to answer: the page starts a sign-in, a decision is refused. It writes the answer
-// itself, and reports false, while sign-in is off (503 naming the settings) and when Postgres
-// cannot answer (503).
+// route's to answer: the page starts a sign-in, a decision answers a page with a sign-in link. It
+// writes the answer itself, and reports false, when Postgres cannot answer (503).
 func (p *Page) Authenticate(w http.ResponseWriter, r *http.Request) (Session, bool) {
-	if p.cfg.SignIn == nil {
-		writeMessage(w, http.StatusServiceUnavailable, say("Approval sign-in is off",
-			"This secrets broker has no sign-in configured, so no person can approve a secret request here.",
-			"Its operator turns sign-in on by setting "+strings.Join(config.SignInSettings, ", ")+"."))
-		return Session{}, false
-	}
 	secret, ok := sessionSecret(r)
 	if !ok {
 		return Session{}, true
@@ -230,16 +222,19 @@ func refuseOrigin(w http.ResponseWriter) {
 		"This request did not come from the secrets broker's own page, so nothing was changed."))
 }
 
-// contentSecurityPolicy loads nothing but the page's own stylesheet, runs no script, frames the
-// page nowhere, and lets a form post only to the broker's own origin.
-const contentSecurityPolicy = "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+// ContentSecurityPolicy is the policy every answer of the page carries: it loads nothing but the
+// page's own stylesheet, runs no script, frames the page nowhere, and lets a form post only to
+// the broker's own origin. It names no image source, since default-src 'none' already blocks
+// every image and no page shows one. It is exported because this is the one place the policy is
+// written: the operator document and a production check quote this string.
+const ContentSecurityPolicy = "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
 // setHeaders sets the headers every answer of the page carries. Referrer-Policy is same-origin,
 // not no-referrer: under no-referrer a browser sends Origin: null with the page's own form posts,
 // which sameOrigin refuses, while same-origin keeps their real Origin and sends no referrer to any
 // other origin. No answer carries a CORS header.
 func setHeaders(h http.Header) {
-	h.Set("Content-Security-Policy", contentSecurityPolicy)
+	h.Set("Content-Security-Policy", ContentSecurityPolicy)
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "same-origin")
 	h.Set("Cache-Control", "no-store")
@@ -304,8 +299,8 @@ func writePage(w http.ResponseWriter, status int, name string, view any) {
 	_, _ = w.Write(buf.Bytes())
 }
 
-// ServeStylesheet serves the page's one stylesheet, embedded in the binary. It is served while
-// sign-in is off too, since the page saying so links it.
+// ServeStylesheet serves the page's one stylesheet, embedded in the binary, with no credential:
+// a person who is not signed in reads the sign-in's own message page under it.
 func ServeStylesheet(w http.ResponseWriter, _ *http.Request) {
 	setHeaders(w.Header())
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
@@ -314,7 +309,10 @@ func ServeStylesheet(w http.ResponseWriter, _ *http.Request) {
 
 // codeFlow is the provider's code flow, with its discovery document read: the flow is built at the
 // first sign-in and reads the document then, so the broker's machines never wait on a person's
-// provider at boot, and a read that has already succeeded is not repeated.
+// provider at boot, and a read that has already succeeded is not repeated. A flow whose read
+// failed is dropped, so the next sign-in builds one and reads again rather than answering from
+// oidc's own record of the failure: the person in front of the page is the only traffic here, and
+// a provider that has come back must serve the next page load.
 func (p *Page) codeFlow(r *http.Request) (*oidc.CodeFlow, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -325,6 +323,7 @@ func (p *Page) codeFlow(r *http.Request) (*oidc.CodeFlow, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), discoveryTimeout)
 	defer cancel()
 	if err := p.flow.Discover(ctx); err != nil {
+		p.flow = nil
 		return nil, err
 	}
 	return p.flow, nil
