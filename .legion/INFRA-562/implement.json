@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-562",
-  "completed": "2026-10-31T14:12:21Z",
+  "completed": "2026-10-31T18:46:16Z",
   "proof": [
     {
       "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
@@ -235,6 +235,14 @@
       "observed": "The one conflict held the branch's five test-hook rows (quiesce, disconnect, rotate, publish, slow) and main's change to the `/ws/doc/{room}` row beside them; the resolution keeps the branch's five rows and main's new `/ws/doc` row. The file's word-level diff against main has 29 changed lines, the same 29 the branch had against its fork point, so only the branch's own edits remain. delivery_live_hub_test.go now equals main's (#2594 landed), so it leaves the diff, and the fingerprint (61825754\u2026) equals the one at a8c1b638, before either borrowed test file. Both migration guard tests PASS (main's highest is still 0149, #2411 not landed, 0150-0153 kept); check-ci-filters 28 gates; go build, go vet and gofmt clean.",
       "headSha": "0b95c3c74545",
       "negativeControl": "Before the resolution jj resolve --list reported `packages/envoy/cmd/dispatch/AGENTS.md 2-sided conflict` and nothing else; after it none."
+    },
+    {
+      "criterion": "CI red at 04e67768 (code 0b95c3c7): ci-ok failed only because the dispatch job failed one browser test that main also fails; no code change",
+      "surface": "GitHub Actions CI run 41209030154 on the pull request's merge ref, attempts 1 and 2",
+      "command": "gh api repos/sjawhar/legion/actions/runs/41209030154/jobs?filter=all (attempt 1 job 124566006375 log; attempt 2 job 124606239428)",
+      "observed": "Attempt 1's dispatch job: `1 failed`, `1433 passed`; the failure was `e2e/overlapping-marks.e2e.ts:311` (a wider and a narrower ask, the wider made first, @phone, chromium), a 30 s timeout, while the same case passed in the iphone project and every other mark kind and order passed. This PR changes no Dispatch web code and not that spec; main's own run 41197405735 failed the same test (the architect's reading). Attempt 2 (started by the reviewer, the one permitted re-run): dispatch job 124606239428 `completed success`. No code changed this round; the head stays 0b95c3c7.",
+      "headSha": "0b95c3c74545",
+      "negativeControl": "Attempt 1 of the same job on the same commit failed that one test, so the pass on attempt 2 comes from the rerun, not from any change."
     }
   ],
   "filesChanged": [
