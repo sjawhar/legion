@@ -47077,6 +47077,8 @@ var LegionOperatorClaimResponse = strictObject({
   state: _enum2(LEGION_CLAIM_STATES),
   session: string2(),
   sessionFile: string2(),
+  forgottenSession: nonEmptyString.optional(),
+  forgottenSessionFile: nonEmptyString.optional(),
   locator: legionLocator.optional(),
   budgets: strictObject({
     launchFailures: number2().int().nonnegative(),
