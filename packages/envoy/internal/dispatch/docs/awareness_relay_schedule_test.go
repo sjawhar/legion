@@ -10,15 +10,20 @@ package docs
 //
 // It drives the relay itself - touched, record, flush, resolve, awarenessNotifications, answer,
 // received, localRemoval, reclaimAwarenessSlots - over two ygo awareness instances, one room to a
-// process, with what one process sends handed to the other's received. Nothing else of the
-// service is here: a schedule is its own awarenessHost, so it needs neither a database nor a ygo
-// server nor a timer.
+// process, with what one process sends handed to the other's received. Each room has a browser
+// reading it: an awareness of its own, applied every update the room applies and purged of
+// nothing, as y-protocols leaves a tab connected to that room (relayProcess.browser). Nothing
+// else of the service is here: a schedule is its own awarenessHost, so it needs neither a
+// database nor a ygo server nor a timer.
 //
 // Every schedule is one goroutine at a time. An operation runs on a goroutine of its own and
 // parks in the windows real goroutines interleave in (awarenessWindows); the scheduler hands one
 // thread the baton and waits for it to park or finish before it picks the next, so a seed replays
-// the same schedule. What a schedule is not is a model of the relay: the invariants it checks are
-// about the two rooms, not about what the relay did to them.
+// the same schedule. What a schedule is not is a model of the relay: the invariants it checks
+// are about the two rooms and the browsers reading them, not about what the relay did to them.
+// One of them is checked as each update lands rather than once the schedule has come to rest,
+// because the room it lands in heals itself of it and the browser reading that room does not
+// (takesAway).
 //
 // What a schedule holds still, because what it would break is a decision of the design rather
 // than a fault of the relay's:
@@ -65,6 +70,10 @@ const (
 	// scheduleRoomClient is the client id the room's own awareness stands under on process A; B's
 	// is the next one.
 	scheduleRoomClient uint64 = 1 << 32
+	// scheduleBrowserClient is the client id the browser standing in for the readers connected
+	// to process A's room stands under; B's is the next one. A browser's awareness is a client
+	// of its own, as a room's is, and no schedule removes it.
+	scheduleBrowserClient uint64 = 1 << 33
 	// scheduleCount is how many schedules the test runs when scheduleCountEnv names no other
 	// number. It is what fits in a few seconds of CI; a local run raises it.
 	scheduleCount = 10_000
@@ -82,7 +91,9 @@ const (
 // randomized seeds are run at: what a fix is worth is that the schedule which found the fault
 // passes. A seed is kept because it fails with its fix removed, and which schedule a seed
 // names is the generator's to decide: a change to the generator moves every seed, so after one,
-// re-derive these by taking each fix out in turn and running the schedules again.
+// re-derive these by taking each fix out in turn and running the schedules again. A fix that
+// grows is the same: a schedule the wider fix now passes without the part this seed stood for
+// is re-derived the same way, by taking that part out and keeping the lowest seed it breaks.
 //
 //   - 21: a reader left, was back in the room at a higher clock and left again within one
 //     window. The second departure reached the relay after the first removal had taken the
@@ -91,20 +102,35 @@ const (
 //     clock the list had held. The other process, holding that reader at a clock of its own,
 //     dropped the clock-0 removal and kept its cursor. The batch keeps each entry's clock now,
 //     and a removal recorded over a later entry of the same client stands aside (record).
-//   - 3569: a reader's socket closed and the reader was back at a higher clock while a flush of
-//     its room was in flight - the removal recorded into the next batch, after that flush had
-//     taken its own, and the return landing before the flush's read of the room. The flush read
-//     the reader live and sent that state, and the removal waiting behind it stood at the clock
-//     the list had held, below the state. The other process took the state and dropped the
-//     removal. A flush raises the removal a client taken off the list in that window left
-//     behind, to the clock of the state it sends (resolve).
+//   - 3047: a reader left and was back in the room at a higher clock, its return's record still
+//     to run, while a flush of its room was in flight. The flush read the reader live and sent
+//     that state, and raised the removal waiting in the next batch - the one the departure had
+//     left behind, below the state - to the clock the reader was live at. The other process
+//     took the state, then the removal at that very clock, then the state again from the
+//     return's own record: its room recovered, since it frees a departed client's entry after
+//     every apply (reclaimAwarenessSlots) and took the repeat as a client it had forgotten, but
+//     the browsers reading that room held the null and dropped the repeat at the clock they
+//     stood at, and the cursor of a reader who was in the room was gone from them. A flush
+//     raises no removal of a client the room holds live: it drops that removal and puts the
+//     client back on its list at the clock sent (resolve).
 //   - 14360: two flushes of one room under way together sent a reader's removal ahead of the
 //     state an earlier batch's read had taken of it, both at the clock the reader's last frame
 //     stood at, and the other process, which frees a room's tombstones after every apply
 //     (reclaimAwarenessSlots), took that state for a reader who had left. A room's batches are
 //     taken and sent one flush at a time now, so the state goes first and the removal at its
 //     clock takes it away (takeBatch, flush).
-var relayScheduleRegressions = []uint64{21, 3569, 14360}
+//   - 23434: a reader's socket closed while a flush of its room was in flight - the removal
+//     recorded into the next batch, after that flush had taken its own - and the room's
+//     tombstone of it was freed before the relay read it, so the removal stood at the clock the
+//     list had held (touched), below the state the flush had read of that reader a moment
+//     earlier and sent. The other process took the state and dropped the removal, and kept the
+//     cursor of a reader who had left. A flush raises the removal a client taken off the list
+//     in that window left behind, where the room holds nothing of that client, to the clock of
+//     the state it sends (resolve). It stands where seed 3569 stood, which was the raise's own
+//     seed until the raise learnt to drop the removal of a client the room holds live (3047):
+//     3569's reader was in the room again as its flush read the room, so the drop settles that
+//     schedule now and the raise had to be re-derived.
+var relayScheduleRegressions = []uint64{21, 3047, 14360, 23434}
 
 // relayClient is one reader's awareness client: the process whose room it is a client of, the
 // clock its own frames stand at - its own counter, which never goes back, as a y-protocols
@@ -117,14 +143,27 @@ type relayClient struct {
 }
 
 // relayProcess is one of the two processes a schedule runs on, and the relay's host there
-// (awarenessHost): its room's awareness, the relay watching it, the flushes its records armed,
-// and the notifications the other process sent it. Its one awareness lane handles those in the
-// order they arrived, one at a time, as room sync's lane does (roomSyncHandler).
+// (awarenessHost): its room's awareness, the browser reading that room, the relay watching it,
+// the flushes its records armed, and the notifications the other process sent it. Its one
+// awareness lane handles those in the order they arrived, one at a time, as room sync's lane
+// does (roomSyncHandler).
 type relayProcess struct {
-	name    string
-	aw      *awareness.Awareness
-	relay   *awarenessRelay
-	peer    *relayProcess
+	name  string
+	aw    *awareness.Awareness
+	relay *awarenessRelay
+	peer  *relayProcess
+	// browser stands in for the readers connected to this process's room, as y-protocols
+	// leaves them holding what the room has told them: an awareness of its own, which is
+	// applied every update the room applies - the frames of the room's own readers and the
+	// other process's relayed ones alike (applies) - and which frees no tombstone of its own,
+	// where the room frees them after every change it makes (reclaimAwarenessSlots). So a
+	// removal the room takes and then forgets, which leaves the room free to take the state
+	// behind it again, stands here at the clock it came at and drops that state: what the
+	// rooms settle on is not what their readers see (check).
+	browser *awareness.Awareness
+	// sched is the schedule this process runs in, which every update applied to its room is
+	// checked by (applies).
+	sched   *relaySchedule
 	windows awarenessWindows
 	// flushes are the coalescing windows record armed and no operation has ended yet, oldest
 	// first. The relay arms one per room and arms none while a batch is pending, so this holds
@@ -148,7 +187,7 @@ func (p *relayProcess) injectAwareness(_ context.Context, room string, update []
 	if room != scheduleRoom {
 		return nil
 	}
-	return p.aw.ApplyUpdate(update, "the other process's relay")
+	return p.sched.applies(p, update, "the other process's relay")
 }
 
 func (p *relayProcess) notifyAwareness(_ context.Context, payload string) error {
@@ -169,6 +208,13 @@ func (p *relayProcess) awarenessWindows() awarenessWindows { return p.windows }
 // holds is what p's room holds of client now, and whether it holds a state of it at all.
 func (p *relayProcess) holds(client uint64) (awareness.ClientState, bool) {
 	state, held := p.aw.GetStates()[client]
+	return state, held
+}
+
+// browses is what the browser standing in for the readers of p's room holds of client now, and
+// whether it holds a state of it at all (browser).
+func (p *relayProcess) browses(client uint64) (awareness.ClientState, bool) {
+	state, held := p.browser.GetStates()[client]
 	return state, held
 }
 
@@ -281,8 +327,10 @@ func newRelaySchedule(seed uint64) *relaySchedule {
 	s := &relaySchedule{seed: seed, rand: rand.New(rand.NewPCG(seed, 0x9e3779b97f4a7c15))}
 	for i := range s.procs {
 		process := &relayProcess{
-			name: string(rune('A' + i)),
-			aw:   awareness.New(scheduleRoomClient + uint64(i)),
+			name:    string(rune('A' + i)),
+			aw:      awareness.New(scheduleRoomClient + uint64(i)),
+			browser: awareness.New(scheduleBrowserClient + uint64(i)),
+			sched:   s,
 		}
 		process.windows = awarenessWindows{
 			beforeWatch: func(_ string, aw *awareness.Awareness) {
@@ -580,9 +628,73 @@ func (s *relaySchedule) park(where string) {
 // applied applies one update to a process's room, as a socket's frame, a disconnect and a close
 // each reach it.
 func (s *relaySchedule) applied(process *relayProcess, update []byte, what string) {
-	if err := process.aw.ApplyUpdate(update, what); err != nil {
+	if err := s.applies(process, update, what); err != nil {
 		s.fail(fmt.Sprintf("%s: apply %s: %v", process.name, what, err))
 	}
+}
+
+// applies applies update to process's room and to the browser standing in for the readers
+// connected to it (browser), and checks what its removals take away as they land (takesAway).
+// Every update a room applies comes through here: its own readers' frames (applied) and the
+// other process's relayed ones (injectAwareness).
+func (s *relaySchedule) applies(process *relayProcess, update []byte, what string) error {
+	s.takesAway(process, update, what)
+	err := process.aw.ApplyUpdate(update, what)
+	if browsed := process.browser.ApplyUpdate(update, what); browsed != nil {
+		s.fail(fmt.Sprintf("%s: apply %s to the browser connected to its room: %v", process.name, what, browsed))
+	}
+	return err
+}
+
+// takesAway checks the removals update carries of clients that read on the other process, as
+// they land: a removal of a client that process holds live, at the removal's clock or below,
+// takes a reader who is in the room out of this one (b). ygo takes a null at the clock it holds
+// a client at (awareness/awareness.go:566-581), so the room this is applied to drops that
+// reader, and the reader's own process has nothing later to put it back with - its next frame
+// stands one clock on from where it is now, which is no higher than the removal.
+//
+// It is checked where the update lands rather than once the schedule has come to rest, because
+// a room heals itself of such a removal: the reader's own next frame, or the purge every apply
+// ends with (reclaimAwarenessSlots), which frees the tombstone and leaves the room free to take
+// a state at the clock it just dropped. A browser frees nothing (browser) and the reader's
+// cursor is gone from it until that reader moves again.
+//
+// A removal of this process's own reader is its own room's to make - a socket closing, a close
+// of the room - and says nothing about the other process.
+func (s *relaySchedule) takesAway(process *relayProcess, update []byte, what string) {
+	entries, err := decodeAwarenessEntries(update)
+	if err != nil {
+		s.fail(fmt.Sprintf("%s: read the %s being applied: %v", process.name, what, err))
+		return
+	}
+	for _, entry := range entries {
+		if !entry.removed {
+			continue
+		}
+		reader := s.reader(entry.client)
+		if reader == nil {
+			continue
+		}
+		home := s.procs[reader.home]
+		if home == process {
+			continue
+		}
+		if here, live := home.holds(entry.client); live && here.Clock <= entry.clock {
+			s.fail(fmt.Sprintf("step %d: %s applies %s, taking client %d away at clock %d, though %s holds it at clock %d (b)",
+				len(s.steps), process.name, what, entry.client, entry.clock, home.name, here.Clock))
+		}
+	}
+}
+
+// reader is the schedule's reader announcing that awareness client, or nil where the client is
+// none of theirs.
+func (s *relaySchedule) reader(client uint64) *relayClient {
+	for _, reader := range s.clients {
+		if reader.id == client {
+			return reader
+		}
+	}
+	return nil
 }
 
 func (s *relaySchedule) note(step string) { s.steps = append(s.steps, step) }
@@ -591,12 +703,12 @@ func (s *relaySchedule) fail(what string) { s.failures = append(s.failures, what
 
 // check is what must hold once the schedule has come to rest, of every reader of either room:
 //
-//   - a reader that is not in its own process's room is in no room of the other's (I1): a cursor
-//     the other process keeps sits in its readers' rooms until it expires, thirty seconds later
-//     (awarenessExpiry).
-//   - a reader that is in its own process's room is in the other's, at the same state and the
-//     same clock (I2): a cursor the other process lost shows nothing of a reader who is there,
-//     until that reader's own next frame.
+//   - a reader that is not in its own process's room is in no room of the other's, and in no
+//     browser connected to that room either (I1): a cursor the other process keeps sits in its
+//     readers' rooms until it expires, thirty seconds later (awarenessExpiry).
+//   - a reader that is in its own process's room is in the other's, and in the browsers
+//     connected to it, at the same state and the same clock (I2): a cursor the other process
+//     lost shows nothing of a reader who is there, until that reader's own next frame.
 //   - the relay's list of the clients it relays (local) holds that room's readers and no others
 //     (I3): what a query is answered from (localClients), what a close removes (localRemoval)
 //     and what a removal stands at (touched) all come off that list, so a client listed that has
@@ -608,25 +720,21 @@ func (s *relaySchedule) fail(what string) { s.failures = append(s.failures, what
 //     are marked as that process's for the apply, so the observer ygo fires inside it leaves
 //     them where they came from (received, mark, touched).
 //   - neither relay counts an inbound apply that has ended (I5), which is that same mark.
+//
+// The first two are checked against the browser of the other process as well as its room
+// (settled), because the two part company: a room frees a departed client's entry after every
+// change it makes (reclaimAwarenessSlots) and is then free to take a state at the clock that
+// tombstone stood at, where a browser holds the tombstone and drops the state (y-protocols).
+// So a room that heals itself of a removal it should never have been sent leaves every reader
+// of it without that cursor, which is what the removal cost (takesAway).
 func (s *relaySchedule) check() {
 	for _, client := range s.clients {
 		home, away := s.procs[client.home], s.procs[1-client.home]
 		here, live := home.holds(client.id)
 		there, relayed := away.holds(client.id)
-		switch {
-		case !live && relayed:
-			s.fail(fmt.Sprintf("client %d left %s's room and is still in %s's, at clock %d (I1)",
-				client.id, home.name, away.name, there.Clock))
-		case live && !relayed:
-			s.fail(fmt.Sprintf("client %d is in %s's room at clock %d and in no room of %s's (I2)",
-				client.id, home.name, here.Clock, away.name))
-		case live && relayed && !reflect.DeepEqual(here.State, there.State):
-			s.fail(fmt.Sprintf("client %d is %v on %s and %v on %s (I2)",
-				client.id, here.State, home.name, there.State, away.name))
-		case live && relayed && here.Clock != there.Clock:
-			s.fail(fmt.Sprintf("client %d stands at clock %d on %s and %d on %s (I2)",
-				client.id, here.Clock, home.name, there.Clock, away.name))
-		}
+		s.settled(client, "room", there, relayed)
+		shown, showing := away.browses(client.id)
+		s.settled(client, "browser", shown, showing)
 		if clock, listed := home.lists(client.id); listed != live {
 			if listed {
 				s.fail(fmt.Sprintf("%s relays client %d, at clock %d, though the client left its room (I3)",
@@ -651,8 +759,31 @@ func (s *relaySchedule) check() {
 	}
 }
 
+// settled is I1 and I2 of one reader against what the other process holds of it: its room, or
+// the browser standing in for the readers connected to that room (check). where names which of
+// the two, as a failure reads.
+func (s *relaySchedule) settled(client *relayClient, where string, there awareness.ClientState, relayed bool) {
+	home, away := s.procs[client.home], s.procs[1-client.home]
+	here, live := home.holds(client.id)
+	switch {
+	case !live && relayed:
+		s.fail(fmt.Sprintf("client %d left %s's room and is still in %s's %s, at clock %d (I1)",
+			client.id, home.name, away.name, where, there.Clock))
+	case live && !relayed:
+		s.fail(fmt.Sprintf("client %d is in %s's room at clock %d and in no %s of %s's (I2)",
+			client.id, home.name, here.Clock, where, away.name))
+	case live && relayed && !reflect.DeepEqual(here.State, there.State):
+		s.fail(fmt.Sprintf("client %d is %v in %s's room and %v in %s's %s (I2)",
+			client.id, here.State, home.name, there.State, away.name, where))
+	case live && relayed && here.Clock != there.Clock:
+		s.fail(fmt.Sprintf("client %d stands at clock %d in %s's room and %d in %s's %s (I2)",
+			client.id, here.Clock, home.name, there.Clock, away.name, where))
+	}
+}
+
 // report is the failure and the schedule that produced it: the seed to replay it with, the
-// readers, what each room ended up holding, and every step in the order it ran.
+// readers, what each room and the browser connected to it ended up holding, and every step in
+// the order it ran.
 func (s *relaySchedule) report() string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "seed %d:\n", s.seed)
@@ -663,20 +794,26 @@ func (s *relaySchedule) report() string {
 		fmt.Fprintf(&out, "  client %d reads on %s\n", client.id, s.procs[client.home].name)
 	}
 	for _, process := range s.procs {
-		states := process.aw.GetStates()
-		held := make([]string, 0, len(states))
-		for _, client := range slices.Sorted(maps.Keys(states)) {
-			held = append(held, fmt.Sprintf("%d at clock %d, %v", client, states[client].Clock, states[client].State))
-		}
 		process.relay.mu.Lock()
 		listed := fmt.Sprint(process.relay.local[scheduleRoom])
 		process.relay.mu.Unlock()
-		fmt.Fprintf(&out, "  %s's room holds [%s]; its relay lists %s\n", process.name, strings.Join(held, "; "), listed)
+		fmt.Fprintf(&out, "  %s's room holds [%s]; its relay lists %s; the browser connected to it holds [%s]\n",
+			process.name, relayHeld(process.aw), listed, relayHeld(process.browser))
 	}
 	for i, step := range s.steps {
 		fmt.Fprintf(&out, "  %3d. %s\n", i+1, step)
 	}
 	return out.String()
+}
+
+// relayHeld is what one awareness holds now, in client order, as a report reads.
+func relayHeld(aw *awareness.Awareness) string {
+	states := aw.GetStates()
+	held := make([]string, 0, len(states))
+	for _, client := range slices.Sorted(maps.Keys(states)) {
+		held = append(held, fmt.Sprintf("%d at clock %d, %v", client, states[client].Clock, states[client].State))
+	}
+	return strings.Join(held, "; ")
 }
 
 // describeNotification is what one awareness notification carries, as a schedule's steps name it.

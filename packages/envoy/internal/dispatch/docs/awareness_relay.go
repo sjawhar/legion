@@ -268,12 +268,13 @@ type awarenessRelay struct {
 	// is TestARoomsAwarenessFiresItsObserversWithItsLockReleased.
 	mu sync.Mutex
 	// pending is, per room, what the next flush is to carry for each client; a room is in it
-	// from its first change until the batch the window then sends takes it. A client's entry is
-	// the bytes to send - the removal the room's observer encoded at the clock the client held -
-	// with a nil raw for a client whose current state the flush is to read from the room's
-	// awareness (resolve), so a reader that moves twice within the window is sent where it is
-	// now. Each entry carries the clock it stands at, which is what keeps an entry recorded
-	// late from writing over a later one of the same client (record).
+	// from its first change until the batch the window then sends takes it, or until the last
+	// entry left in it is dropped (resolve). A client's entry is the bytes to send - the
+	// removal the room's observer encoded at the clock the client held - with a nil raw for a
+	// client whose current state the flush is to read from the room's awareness (resolve), so
+	// a reader that moves twice within the window is sent where it is now. Each entry carries
+	// the clock it stands at, which is what keeps an entry recorded late from writing over a
+	// later one of the same client (record).
 	pending map[string]map[uint64]awarenessEntry
 	// flushing is the rooms a flush is sending the batches of now, and whether another flush of
 	// the same room stepped aside while it sent: a room's batches are taken and sent one flush
@@ -305,7 +306,11 @@ type awarenessRelay struct {
 	// settles by reading the room (record).
 	// A flush raises it too: a client still listed stands here at the clock of the entry that
 	// flush sends for it (resolve), which is where the room holds the client now and can be a
-	// state no record of this list's has seen - a heartbeat applied while the batch waited.
+	// state no record of this list's has seen - a heartbeat applied while the batch waited. A
+	// client it finds in the room again, with a removal of an earlier life of it still waiting
+	// to be sent, goes back on the list at that same clock and the removal is dropped: the
+	// state is what the other processes are to hold, and the list is what the client's next
+	// departure builds its removal from (resolve, touched).
 	local map[string]map[uint64]uint64
 	// closed refuses every later send; Close sets it.
 	closed bool
@@ -636,26 +641,52 @@ func (r *awarenessRelay) send(room string, batch map[uint64]awarenessEntry) {
 //
 // What it sends it raises the list to (local): a client still listed stands there at the clock
 // of the entry sent for it, never below the clock the list already holds, and one the list no
-// longer holds is not put back. Without the raise the list would stand below the state the
-// other processes hold - the entry sent here is read from the room, which a heartbeat recorded
-// after this read has already moved on - and the removal that client's departure builds from
-// the list, when a purge has freed its tombstone before the relay reads it (touched), would be
-// older than that state: every other process drops it (awareness/awareness.go:566-581) and the
-// departed reader's cursor sits in their rooms until it expires (awarenessExpiry, 30 s).
+// longer holds is put back only where the room holds it live and a removal of it is waiting
+// (below). Without the raise the list would stand below the state the other processes hold -
+// the entry sent here is read from the room, which a heartbeat recorded after this read has
+// already moved on - and the removal that client's departure builds from the list, when a
+// purge has freed its tombstone before the relay reads it (touched), would be older than that
+// state: every other process drops it (awareness/awareness.go:566-581) and the departed
+// reader's cursor sits in their rooms until it expires (awarenessExpiry, 30 s).
 //
 // The read and the raise are two moments, and the room's own paths move the list in between: a
 // removal recorded there takes a client off it, a later state puts it on at a later clock, and
 // neither is undone here. The states are read first and mu taken after, which is the order
 // every path that takes both takes them in (record).
 //
-// A client taken off the list in that window left it a removal, waiting in the room's next
-// batch at the clock the list held when it was recorded - which is below the state being sent
-// here, since the raise that would have carried the list up to it comes after. That removal is
-// raised to the clock of the entry sent here instead, where it stands as the removal of that
-// very state: every other process takes a null at the clock it holds the client at
-// (awareness/awareness.go:566-581), and at the lower clock it would take none of them and keep
-// the cursor of a reader who has left. The next batch is where the removal is, since one flush
-// of a room sends at a time (flush) and a record puts it nowhere else.
+// A client the list no longer holds, with a removal waiting in the room's next batch below the
+// state being sent here, is one of two, and the room says which - read here under mu, one read
+// to a client (awarenessClientStanding), as record reads it:
+//
+//   - the room holds nothing of the client: it left, in that window or before this flush took
+//     its batch, and the removal waiting for it stands at the clock the list held when it was
+//     recorded, which is below the state being sent. It is raised to the clock of the entry
+//     sent here, where it stands as the removal of that very state: every other process takes
+//     a null at the clock it holds the client at (awareness/awareness.go:566-581), and at the
+//     lower clock it would take none of them and keep the cursor of a reader who has left.
+//   - the room holds the client live: it is in the room again, and the waiting removal is of
+//     the life that ended before the state being sent - the return stands at a strictly higher
+//     clock than the removal it replaces, and the state read here is no lower than the return.
+//     Raised, it would reach every other process as the removal of the very state sent just
+//     ahead of it and take a reader who is in the room out of their rooms: theirs recover, since
+//     each frees a departed client's entry after every apply (reclaimAwarenessSlots) and takes
+//     the client's next state whatever its clock, but the browsers reading those rooms hold the
+//     null until that reader moves again (y-protocols), and the cursor of a reader who is in
+//     the room is gone from them until then. So it is dropped whole: at its own clock no
+//     process would take it, every one of them holding the client at the state sent here or
+//     later, and the client's own next departure is what removes it.
+//
+// The client whose removal is dropped goes back on the list at the clock sent, as it does
+// where the list placed the entry: the removal that client's next departure builds stands at
+// the clock the list holds (touched), and off the list it would stand at the clock the room's
+// tombstone gives, which is 0 where a purge has freed it - older than the state sent here, so
+// every other process would drop it, and a removal recorded over the later entry this one
+// left in the batch stands aside (record).
+//
+// The next batch is where such a removal is, since one flush of a room sends at a time (flush)
+// and a record puts it nowhere else. The room's pending batch goes with the last entry dropped
+// from it: a batch left empty would take the window already armed for it and leave the entries
+// recorded after that one with none (record, takeBatch).
 func (r *awarenessRelay) resolve(room string, batch map[uint64]awarenessEntry) {
 	unread := make([]uint64, 0, len(batch))
 	for client, entry := range batch {
@@ -708,13 +739,27 @@ func (r *awarenessRelay) resolve(room string, batch map[uint64]awarenessEntry) {
 			}
 			continue
 		}
-		if gone, recorded := waiting[entry.client]; recorded && gone.removed && gone.clock < entry.clock {
-			waiting[entry.client] = awarenessEntry{
-				client:  entry.client,
-				clock:   entry.clock,
-				raw:     awarenessRemoval(entry.client, entry.clock),
-				removed: true,
+		gone, recorded := waiting[entry.client]
+		if !recorded || !gone.removed || gone.clock >= entry.clock {
+			continue
+		}
+		if _, live := awarenessClientStanding(aw, entry.client); live {
+			delete(waiting, entry.client)
+			if len(waiting) == 0 {
+				delete(r.pending, room)
 			}
+			if clients == nil {
+				clients = make(map[uint64]uint64)
+				r.local[room] = clients
+			}
+			clients[entry.client] = entry.clock
+			continue
+		}
+		waiting[entry.client] = awarenessEntry{
+			client:  entry.client,
+			clock:   entry.clock,
+			raw:     awarenessRemoval(entry.client, entry.clock),
+			removed: true,
 		}
 	}
 }
