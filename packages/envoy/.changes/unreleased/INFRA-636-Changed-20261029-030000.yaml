@@ -9,9 +9,11 @@ body: |-
     quiet instance the read that sees an event publishes it. An observation its snapshot cannot
     prove is observed again at once while it is the only one unproven, which proves it whenever
     no older transaction id is still running; a gap an older transaction holds is read again on
-    that transaction's commit notification, without the relay's 25 ms window, and the 10-250 ms
-    re-read remains only as the fallback for a holder that ends without notifying, running only
-    while such a gap is open, so an idle process still observes nothing (INFRA-636).
+    that transaction's commit notification, without the relay's coalescing window, and the
+    10-250 ms re-read remains only as the fallback for a holder that ends without notifying,
+    running only while such a gap is open, so an idle process still observes nothing. The relay's
+    coalescing window is 2 ms instead of 25 ms: a transaction's notifications all arrive at its
+    commit, and the longer window only held each live frame back (INFRA-636).
 time: 2026-10-29T03:00:00.000000000Z
 custom:
     Issue: INFRA-636

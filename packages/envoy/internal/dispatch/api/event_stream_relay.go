@@ -19,14 +19,17 @@ import (
 const (
 	// eventRelayCoalesce is how long a notification waits before the relay reads what it
 	// announced. One transaction commonly commits several events (an issue write and its
-	// children's), and the trigger notifies once per statement, so the window collapses a burst
-	// into one read instead of one read each. It is 25 ms rather than the second the delivery
-	// hub's catch-up waits before a failed read, or the 250 ms it settles a dirty view for
-	// (viewQuiet): those feed a dashboard tile, while this is the delay a person watching a page
-	// sees between a comment being posted and its frame arriving. A read that left a gap open
-	// takes the next notification without it (eventGapReread.eager): that read is the one that
-	// closes the gap, and the events it publishes have waited already.
-	eventRelayCoalesce = 25 * time.Millisecond
+	// children's), and the trigger notifies once per statement; Postgres delivers all of a
+	// transaction's notifications at its commit, back to back, so a window of a couple of
+	// milliseconds collapses them into one read, and a longer one only delays the frame. It was
+	// 25 ms; under the event horizon every read already pays a reset check and an observation
+	// after the window, and at half the 2026-10-26 load the 25 ms window put a live frame 14 ms
+	// further behind its commit than it was before the horizon (INFRA-636). A notification
+	// arriving during a read leaves one signal, which becomes one more read after it, so a burst
+	// of commits still costs at most one read per read's own duration. A read that left a gap
+	// open takes the next notification without the window (eventGapReread.eager): that read is
+	// the one that closes the gap.
+	eventRelayCoalesce = 2 * time.Millisecond
 	// eventRelayRetry is how long the relay waits before reading again after a read failed, the
 	// delivery hub's retry (catchUp). The notification that woke the failed read does not come
 	// again, so nothing but the relay itself will ask for those rows.
