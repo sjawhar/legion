@@ -102,7 +102,7 @@ func mergedThrough(updates updateSource) ([]byte, error) {
 		return nil, err
 	}
 	merged, err := crdt.MergeUpdatesV1(stored...)
-	if err != nil {
+	if err = invalidOnce(err); err != nil {
 		return nil, fmt.Errorf("merge document updates: %w", err)
 	}
 	return merged, nil
@@ -256,7 +256,7 @@ func fold(updates updateSource, maxPending int) (state []byte, readBack *crdt.Do
 		if doc == nil {
 			doc = newCappedDocumentCopy(maxPending)
 		}
-		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+		if err := decodeStoredState(doc, update); err != nil {
 			return fmt.Errorf("%w: %w", errUnfoldable, err)
 		}
 		return nil
@@ -291,7 +291,7 @@ func fold(updates updateSource, maxPending int) (state []byte, readBack *crdt.Do
 		parts := [][]byte{state}
 		if err := updates(func(update []byte) error {
 			rest, err := crdt.DiffUpdateV1(update, made)
-			if err != nil {
+			if err = invalidOnce(err); err != nil {
 				return fmt.Errorf("read parked document update: %w", err)
 			}
 			parts = append(parts, rest)
@@ -300,7 +300,7 @@ func fold(updates updateSource, maxPending int) (state []byte, readBack *crdt.Do
 			return nil, nil, nil, err
 		}
 		if state, err = crdt.MergeUpdatesV1(parts...); err != nil {
-			return nil, nil, nil, fmt.Errorf("keep parked document updates: %w", err)
+			return nil, nil, nil, fmt.Errorf("keep parked document updates: %w", invalidOnce(err))
 		}
 	}
 	doc = nil
@@ -314,7 +314,7 @@ func fold(updates updateSource, maxPending int) (state []byte, readBack *crdt.Do
 // a nil error.
 func readsBackOtherwise(state []byte, made crdt.StateVector, maxPending int) (*crdt.Doc, error) {
 	doc := newCappedDocumentCopy(maxPending)
-	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
+	if err := decodeStoredState(doc, state); err != nil {
 		return nil, fmt.Errorf("decode the folded state: %w", err)
 	}
 	read := doc.StateVector()

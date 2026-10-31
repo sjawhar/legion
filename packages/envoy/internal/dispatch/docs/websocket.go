@@ -165,28 +165,33 @@ func validateUpdate(update []byte, maxPending int) error {
 	return decodeStoredState(newCappedDocumentCopy(maxPending), update)
 }
 
-// decodeStoredState applies state, a stored history or the state a room or cold read loads, to
-// doc. Every decode of a stored state as a whole runs here: the history checks (validateUpdate),
+// decodeStoredState applies state, a stored history, one of its rows or the state a room or cold
+// read loads, to doc. Every decode of stored state runs here: the history checks (validateUpdate),
 // a room's load hook (bootstrapLoadedState), the document a load decodes its state into
-// (documentThrough), the tree a socket's admission reads (loadTree) and the fork a cold write
-// makes of the history (coldFork). A fold's apply of one stored row, and its read-back of the
-// state it has just encoded, take ygo's error as it comes: neither refuses the document, and both
-// leave the log served and kept merged (fold, readsBackOtherwise). ygo's apply names a failure as
-// ErrInvalidUpdate followed by the decoder's reason ("crdt: invalid update: encoding: unexpected
-// end of input"), except where its reader of an update's structs fails with no reason of its own,
-// which it reports as that sentinel wrapped in itself ("crdt: invalid update: crdt: invalid
-// update", on every fork release since v1.51.3-sami.4). That one is returned as the sentinel
-// alone, so the line a refusal logs states it once; every other error is returned as ygo gave it.
+// (documentThrough), the tree a socket's admission reads (loadTree), the fork a cold write makes of
+// the history (coldFork), and a fold's apply of each stored row and its read-back of the state it
+// encoded (fold, readsBackOtherwise), whose refusal a load and a compaction log. ygo's apply names a
+// failure as ErrInvalidUpdate followed by the decoder's reason ("crdt: invalid update: encoding:
+// unexpected end of input"), except where its reader of an update's structs fails with no reason of
+// its own, which the release candidate this module pins (go.mod) reports as that sentinel wrapped in
+// itself ("crdt: invalid update: crdt: invalid update"). That one is returned as the sentinel alone,
+// so the line a refusal logs states it once; every other error is returned as ygo gave it. The
+// fold's structural reads of the same rows (MergeUpdatesV1, DiffUpdateV1: mergedThrough and the
+// parked updates fold keeps) pass their errors through invalidOnce too.
 func decodeStoredState(doc *crdt.Doc, state []byte) error {
-	err := crdt.ApplyUpdateV1(doc, state, nil)
+	return invalidOnce(crdt.ApplyUpdateV1(doc, state, nil))
+}
+
+// invalidOnce is err, a ygo error from reading stored state, with the reasonless refusal ygo words
+// as ErrInvalidUpdate wrapped in itself returned as the sentinel alone (decodeStoredState).
+func invalidOnce(err error) error {
 	if err != nil && err.Error() == doubledInvalidUpdate {
 		return crdt.ErrInvalidUpdate
 	}
 	return err
 }
 
-// doubledInvalidUpdate is how ygo's apply words an update it refuses with no reason
-// (decodeStoredState).
+// doubledInvalidUpdate is how ygo words an update it refuses with no reason (invalidOnce).
 var doubledInvalidUpdate = crdt.ErrInvalidUpdate.Error() + ": " + crdt.ErrInvalidUpdate.Error()
 
 // bootstrapLoadedState decodes state, what room's load read (takeLoadedState), into doc, the

@@ -106,7 +106,7 @@ func AppendStoredChangeForTest(ctx context.Context, database *store.Store, artif
 		return fmt.Errorf("load document before crafted update: %w", err)
 	}
 	doc := crdt.New()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+	if err := decodeStoredState(doc, loaded.Update); err != nil {
 		return fmt.Errorf("decode document before crafted update: %w", err)
 	}
 	before := doc.StateVector()
@@ -172,7 +172,7 @@ func appendTextEmbed(ctx context.Context, database *store.Store, artifactID stri
 		return fmt.Errorf("load document before crafted embed: %w", err)
 	}
 	doc := crdt.New()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+	if err := decodeStoredState(doc, loaded.Update); err != nil {
 		return fmt.Errorf("decode document before crafted embed: %w", err)
 	}
 	before := doc.StateVector()
@@ -209,7 +209,7 @@ func AppendNestedLinkForTest(ctx context.Context, database *store.Store, artifac
 		return fmt.Errorf("load document before crafted link: %w", err)
 	}
 	doc := crdt.New()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+	if err := decodeStoredState(doc, loaded.Update); err != nil {
 		return fmt.Errorf("decode document before crafted link: %w", err)
 	}
 	update, err := crafted.NestedLinkUpdate(doc, crafted.NestedValue(100))
