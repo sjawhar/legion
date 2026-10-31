@@ -3,17 +3,39 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strconv"
+	"strings"
 	"testing"
 )
 
 // reviewOrderIndex is the index migration 0120 adds in docs.ReviewOrder's own order.
 const reviewOrderIndex = "artifact_reviews_by_artifact_event_seq"
 
-// The newest-review reads take one row in ReviewOrder: the approval an approval request names and
-// a carry candidate's latest review, read at every request and every version that holds an
-// answered block. Each must read that row from the index in ReviewOrder's order, the first entry
-// of the document's range, rather than read every review of the document and sort them, which
-// artifact_reviews_by_artifact (created_at desc, id desc) alone would make it do.
+// The newest-review reads take one row in ReviewOrder: the approval an approval request names, a
+// carry candidate's latest review, read at every request and every version that holds an
+// answered block, and the document's own newest review, read by every document write that stored
+// a version (api.supersededApprovalAdvice). Each must read that row from the index in
+// ReviewOrder's order, the first entry of the document's range, rather than read every review of
+// the document and sort them, which artifact_reviews_by_artifact (created_at desc, id desc)
+// alone would make it do. newestReviewQueries names them all, and
+// TestEveryNewestReviewQueryIsPlanned fails when this file gains one this test does not explain.
+var newestReviewQueries = []struct {
+	name     string
+	constant string
+	sql      string
+	args     []any
+}{
+	{"the latest approval", "latestApprovedReviewQuery", latestApprovedReviewQuery, []any{reviewPlanDocument}},
+	{"a person's latest review", "latestReviewByQuery", latestReviewByQuery, []any{reviewPlanDocument, "alice@example.com"}},
+	{"the newest review", "newestReviewQuery", newestReviewQuery, []any{reviewPlanDocument}},
+}
+
+// reviewPlanDocument stands for a document in every planned read.
+const reviewPlanDocument = "00000000-0000-4000-8000-000000000000"
+
 func TestNewestReviewReadsTakeTheReviewOrderIndex(t *testing.T) {
 	service, _ := newTestService(t)
 	ctx := context.Background()
@@ -30,15 +52,7 @@ func TestNewestReviewReadsTakeTheReviewOrderIndex(t *testing.T) {
 			t.Fatalf("%s: %v", setting, err)
 		}
 	}
-	document := "00000000-0000-4000-8000-000000000000"
-	for _, query := range []struct {
-		name string
-		sql  string
-		args []any
-	}{
-		{"the latest approval", latestApprovedReviewQuery, []any{document}},
-		{"a person's latest review", latestReviewByQuery, []any{document, "alice@example.com"}},
-	} {
+	for _, query := range newestReviewQueries {
 		t.Run(query.name, func(t *testing.T) {
 			var planJSON []byte
 			if err := tx.QueryRow(ctx, "explain (format json) "+query.sql, query.args...).Scan(&planJSON); err != nil {
@@ -58,6 +72,65 @@ func TestNewestReviewReadsTakeTheReviewOrderIndex(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The plan test above proves only the reads it names, so a fourth newest-review query added to
+// approval_review.go and left out of newestReviewQueries would be unplanned and could read
+// artifact_reviews_by_artifact, which sorts every review of the document. Every package-level
+// query constant of that file that reads one row of artifact_reviews is therefore required to be
+// in the table, by name.
+func TestEveryNewestReviewQueryIsPlanned(t *testing.T) {
+	planned := map[string]struct{}{}
+	for _, query := range newestReviewQueries {
+		planned[query.constant] = struct{}{}
+	}
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, "approval_review.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse approval_review.go: %v", err)
+	}
+	for _, declaration := range file.Decls {
+		general, ok := declaration.(*ast.GenDecl)
+		if !ok || general.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range general.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for index, name := range value.Names {
+				if index >= len(value.Values) {
+					continue
+				}
+				text := strings.ToLower(literalsOf(value.Values[index]))
+				if !strings.Contains(text, "from artifact_reviews") || !strings.Contains(text, "limit 1") {
+					continue
+				}
+				if _, ok := planned[name.Name]; !ok {
+					t.Errorf("%s reads one row of artifact_reviews and no test explains it; add it to newestReviewQueries so its plan is held to %s",
+						name.Name, reviewOrderIndex)
+				}
+			}
+		}
+	}
+}
+
+// literalsOf is every string literal of an expression, joined: a query constant is written as a
+// raw string spliced with ReviewColumns and ReviewOrder, and only its own literals say which
+// table it reads.
+func literalsOf(expression ast.Expr) string {
+	var parts []string
+	ast.Inspect(expression, func(node ast.Node) bool {
+		literal, ok := node.(*ast.BasicLit)
+		if ok && literal.Kind == token.STRING {
+			if text, err := strconv.Unquote(literal.Value); err == nil {
+				parts = append(parts, text)
+			}
+		}
+		return true
+	})
+	return strings.Join(parts, " ")
 }
 
 // planSorts reports whether a plan node, at any depth, is a sort.
