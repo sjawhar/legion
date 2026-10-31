@@ -174,6 +174,10 @@ type mpLaneRelay struct {
 	// for it to close, which healing does.
 	cuts  map[string]chan struct{}
 	links []*mpLaneLink
+	// blackhole, while open, holds every connection the pod opens from then on before its first
+	// byte in either direction, as a route that drops packets leaves a dial: the TCP connection is
+	// accepted, and nats.go waits out its connect timeout for an INFO that never comes.
+	blackhole chan struct{}
 }
 
 // mpLaneLink is one connection through the relay: the pod's socket, the server's, and the client
@@ -305,6 +309,17 @@ func (r *mpLaneRelay) toClient(link *mpLaneLink) {
 // pass waits while the link's connection is cut, and returns at once while it is not, once it is
 // healed, or once the relay is closed.
 func (r *mpLaneRelay) pass(link *mpLaneLink) {
+	if link.lane() == "" {
+		r.mu.Lock()
+		hole := r.blackhole
+		r.mu.Unlock()
+		if hole != nil {
+			select {
+			case <-hole:
+			case <-r.done:
+			}
+		}
+	}
 	gate := r.gate(link.lane())
 	if gate == nil {
 		return
@@ -313,6 +328,23 @@ func (r *mpLaneRelay) pass(link *mpLaneLink) {
 	case <-gate:
 	case <-r.done:
 	}
+}
+
+// blackholeNew holds every connection the pod opens from now on before its first byte, until the
+// returned func runs (pass). Connections already open are untouched.
+func (r *mpLaneRelay) blackholeNew() (heal func()) {
+	hole := make(chan struct{})
+	r.mu.Lock()
+	r.blackhole = hole
+	r.mu.Unlock()
+	return sync.OnceFunc(func() {
+		r.mu.Lock()
+		if r.blackhole == hole {
+			r.blackhole = nil
+		}
+		r.mu.Unlock()
+		close(hole)
+	})
 }
 
 // gate is the open gate of a cut connection name, nil while connections under that name pass.

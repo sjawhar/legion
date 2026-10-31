@@ -684,3 +684,63 @@ func TestTwoPodsLogTheirOwnInstance(t *testing.T) {
 		}
 	}
 }
+
+// The active pod's receive connection alone is lost to a route that drops its packets, so its
+// reconnects are dials that hang as well: the relay freezes the main client's connection and holds
+// every connection the pod opens from then on before its first byte, while the lease connection
+// goes on renewing. nats.go holds the connection's lock across each reconnect dial and its connect
+// init, up to its connect timeout every time, so a receive signal read through that connection's
+// state waits for it. The holder must still release the lease on its own bound
+// (leaseReceiveLost), logging why, and the standby must take it over and deliver every message in
+// publish order, the first published after the cut within 15 s of it, as when the reconnects are
+// refused (TestTwoPodsReceiveConnectionLostHandsOverWithin15s). At 580089b5 (the INFRA-557
+// tester's round-18 finding) the lease loop blocks reading that state, its renewals lapse instead
+// of its release landing, the standby takes the expired record about 8 s after the cut, and the
+// first message after the cut reaches its session 13.9-16.0 s after it (2 of 7 runs past 15 s).
+func TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
+	mpWaitActive(t, a, 30*time.Second)
+	b := mpStartPod(t, binary, uri, "pod-b")
+	mpWaitStandby(t, b, 30*time.Second)
+	serving := mpStartServingPort(t)
+	sessions := []string{"ses_mp_recvhole_one", "ses_mp_recvhole_two"}
+	for _, sessionID := range sessions {
+		a.registerPort(t, serving, sessionID)
+	}
+	publisher := mpConnectPublisher(t, uri)
+
+	stop := publisher.every(100*time.Millisecond, sessions...)
+	mpEventually(t, 10*time.Second, "the first messages to arrive", func() bool { return len(publisher.all()) >= 20 })
+	var heal, unhole func()
+	cut := publisher.quiesce(t, serving, func() {
+		unhole = a.lanes.blackholeNew()
+		heal = a.lanes.cut(mpReceiveConnection(a.instance))
+	})
+	t.Cleanup(func() { unhole(); heal() })
+
+	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
+	time.Sleep(5 * time.Second) // publish on past the take-over
+	stop()
+	if mpLineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`) == "" {
+		t.Fatalf("%s never released the lease for its lost receive connection; its lease lines:\n%s", a.instance,
+			mpLinesMatching(a.Output.String(), "lease"))
+	}
+	messages := publisher.since(cut)
+	serving.awaitAll(t, messages, mpHardBound+5*time.Second)
+	serving.requireWithin(t, messages, mpHardBound, cut)
+	serving.requireOrder(t, messages)
+	serving.requireOnce(t, messages)
+}
+
+// mpLinesMatching is the lines of output that contain needle.
+func mpLinesMatching(output, needle string) string {
+	var kept []string
+	for line := range strings.SplitSeq(output, "\n") {
+		if strings.Contains(line, needle) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
