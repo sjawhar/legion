@@ -2,62 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-558",
-  "round": 7,
-  "completed": "2026-10-31T16:28:00Z",
-  "codeHead": "6176f738827a",
-  "scope": "Review round 5's redesign (7a7c8f8c, 9a4a5df5, 3dba8029, fb2a55a7, e96ad48e) and the two merges of main (dca23bdf, 6176f738), per the architect's items 1-7, plus the rebuild finding the architect named.",
+  "round": 8,
+  "completed": "2026-10-31T18:06:00Z",
+  "codeHead": "e9defcab9e7d",
+  "scope": "The architect's checks after round 7: 49b70f3d passes; the test replacing c0b46985 pins the 1 s limit and fails when the reconnect is broken; on real binaries a page reading at +2 s ends with the full document after it reconnects; the census states the 1 s rule; ci-ok and pr-title at the code head. Round 7's other results stand.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the implementer's token, revoke, replica and refused-history tests at 6176f738 under -race (5 of 5 each), and the two-build harness and browser spec against legion-envoy-v24.7.1 (13cb31a4). I reproduced each failing-first proof myself: the order tests ported to 3ac9da68, and the replica tests in a scratch copy with fb2a55a7's code reverted."
+    "how": "I re-ran the rebuild tests and the slow-page and in-flight tests at e9defcab under -race (3 of 3 each), and drove the rebuild and the slow revoked page on the real binary."
   },
-  "failures": [
-    {
-      "criterion": "A document that reads DOCUMENT_UNLOADABLE, which offers a rebuild, can be rebuilt (or the answer does not offer a rebuild for a cause the rebuild cannot repair). The architect named this finding.",
-      "evidence": "Real binary at 6176f738: a document whose doc_updates holds an update ygo refuses for its clocks (a delete range at 2^53, length 2) answers GET /text with 409 DOCUMENT_UNLOADABLE '... A rebuild from the latest saved version discards every edit made after that version. A person decides whether to rebuild the document'. POST /api/v1/artifacts/{id}/rebuild answers 503 DOC_SERVICE_UNAVAILABLE, and again 2 minutes later. Red test (commit 49b70f3d): cd packages/envoy && go test -count=1 -run TestTheRebuildAStoredHistoryYgoRefusesIsOfferedRestoresTheDocument ./internal/dispatch/docs/ FAILs with 'the read offered a rebuild (the document's stored history cannot load ...), and the rebuild failed: document service unavailable: load document before rebuild: ...'. The test accepts either fix: a rebuild that restores the latest saved version, or a read that offers no rebuild for this cause."
-    },
-    {
-      "criterion": "Architect item 3: a revoke while a large message is in flight delivers every message whole, then closes with 4412.",
-      "evidence": "ygo sends the 4412 close through gorilla's WriteControl, which waits at most 1 s for the frame write in progress. A page that does not drain within that second gets the connection dropped mid-frame; the server logs 'write to peer failed; closing ... use of closed network connection'. Real binaries at 6176f738: a writer page sent 30 x ~300 KB updates into the room while the revoked victim page (2,1) read nothing, then started reading. Reading at tick+0.3s and tick+0.7s gave 8 messages then CLOSE 4412. Reading at tick+2.0s gave 7 messages then CLOSE 1006 'unexpected EOF', 6 of 6 trials (4 in the large document, 2 in the small one). Round 5's code (3ac9da68), same scenario: 8 messages then CLOSE 1012, 3 of 3. Red test (commit c0b46985): go test -count=3 -run TestARevokedSlowPageReadsTheMessageInFlightAndThenTheRevokedClose ./internal/dispatch/docs/ FAILs 3 of 3 with 'ended with websocket: close 1006 (abnormal closure): unexpected EOF, want every message whole and then a close with 4412'. Its page reads 2 s after the revoke, within ygo's 10 s bound on a write. TestARevokeWaitsForTheMessageTheServerHasInFlight passes only because its page reads within milliseconds and one 1 MB message fits in the kernel's send buffer."
-    }
-  ],
-  "failed": 2,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Item 2: a late token answer reaches only its own socket, in both orders; the revoked socket never gets an answer; a read-only reconnect is admitted.",
-      "surface": "Real envoy-dispatch processes (this head, and round 5's 3ac9da68, each with a V3/R2 build) on one database and one nats-server; real pages X (3,2) and Y (3,1) in one room, X kept closing by a writer page's 300 KB updates while it reads nothing",
-      "command": "FLOOD=1 XREAD=3 ORDER=xy|yx DELTA=300 d2trial.sh: the V3/R2 process stops 2s before the re-check tick; both tokens at tick+300ms in that order; X reconnects read-only at +2s and +8s",
-      "observed": "This head, both orders: Y answered 'scope read-write'; X got no answer; X's reconnect admitted 'scope readonly' at +2s and +8s.",
-      "headSha": "6176f738827a",
-      "negativeControl": "3ac9da68, same runs: the reconnect at +2s refused with HTTP 401. Head's order tests ported to 3ac9da68's API FAIL in both orders ('the revoked socket's token answered read-write=true, want false') and on the reconnect ('refused while the revoked socket's token is unanswered'). At this head they PASS 5 of 5 under -race."
+      "criterion": "Round 7 finding 1: a document that reads DOCUMENT_UNLOADABLE, which offers a rebuild, can be rebuilt.",
+      "surface": "Real envoy-dispatch at e9defcab on Postgres 17, a document whose doc_updates holds an update ygo refuses for its clocks; the red test 49b70f3d",
+      "command": "GET /api/v1/artifacts/{id}/text; POST /api/v1/artifacts/{id}/rebuild; GET /text again; go test -race -count=3 -run 'TestTheRebuildAStoredHistoryYgoRefusesIsOfferedRestoresTheDocument|TestRebuild|TestARebuild|TestAStoredHistoryYgoRefusesFromItsClocksCannotLoad' ./internal/dispatch/docs/",
+      "observed": "/text: 409 DOCUMENT_UNLOADABLE. /rebuild: 200 (source_version 1, removed_updates 2, validation_error naming the history's fault). /text after: 200 '# Refused\\n\\nbefore\\n'. Every listed test PASSes 3 of 3.",
+      "headSha": "e9defcab9e7d",
+      "negativeControl": "At 6176f738, /rebuild answered 503 and 49b70f3d FAILed (round 7). A second rebuild of the now-loading document answers 409 DOCUMENT_LOADS."
     },
     {
-      "criterion": "Items 1, 4, 5, 6 and 7: the pin is a release, the hook never blocks, the replica applies Parked, no document reader says 1012, and the merges add nothing beyond the branch's diff.",
-      "surface": "go.mod and the module proxy; docs/websocket.go and schema_admission.go; a scratch copy of this head with fb2a55a7's code reverted; grep over web, e2e, contracts, api, README and AGENTS files; git remerge-diff of dca23bdf and 6176f738; the migrations directory against origin/main",
-      "command": "go list -m github.com/reearth/ygo; go list -m -json github.com/sjawhar/ygo@v1.54.1-sami.2 (GOPROXY=proxy.golang.org); go test -run 'TestTheRoomsRenderedReplicaHoldsWhatACommitParked|TestAStoredHistoryYgoRefusesFromItsClocksCannotLoad' in the scratch copy and at head; git show --remerge-diff",
-      "observed": "1: replace => github.com/sjawhar/ygo v1.54.1-sami.2, resolved on the proxy, with no local path or pseudo-version. 4: the hook does a ctx.Value read plus a three-field read under a mutex that no holder keeps across I/O. 5: the scratch copy FAILs both tests and head PASSes. 6: every remaining 1012 is /ws/live; the document revoke is 4412 everywhere, and the page stops only on 4409. 7: dca23bdf takes main's deletion of the folded pr2392 fragment; 6176f738 resolves fragments to sami.2, keeps the branch's 4425 text and schemaAdmissions.remove beside main's keep-alive removal, and moves the pin; main's newest migration is 0149 and the branch's are 0150-0152.",
-      "headSha": "6176f738827a",
-      "negativeControl": "Item 5 with fb2a55a7's code reverted: the replica renders without the parked edit ('want ...Third.'), and the refused history answers 'document service unavailable'."
+      "criterion": "Round 7 finding 2, ruled the accepted 1 s limit: a revoked page slower than 1 s ends on a code it reconnects on (4412 or 1006), and its reconnect syncs the whole document.",
+      "surface": "Real envoy-dispatch at e9defcab and a V3/R3 build on one database and NATS; a victim page that keeps its own CRDT copy of every message, a writer page sending 30 x ~300 KB updates, a fresh reference page; the test TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole",
+      "command": "conv.sh: the victim reads at tick+2.0s (twice) and tick+0.3s, then reconnects; compare SHA-256 of each copy's document XML with a fresh page's",
+      "observed": "+2.0s: close 1006; the own copy (87afa3d4..., 1,019,936 bytes) differs from the room; after the reconnect (readonly) it is 3277a3d1..., equal to the room. +2.0s again: 1006; after the reconnect d86ff6a8... equals the room. +0.3s: close 4412; the own copy lacks the queued remainder; after the reconnect 61721dad... equals the room. The test PASSes 3 of 3 under -race.",
+      "headSha": "e9defcab9e7d",
+      "negativeControl": "In a scratch copy where authorize refuses every read-only socket, the test FAILs ('connect a peer ... 401 Unauthorized'). In a scratch copy where the revoke closes with 1002, TestARevokeWaitsForTheMessageTheServerHasInFlight FAILs ('ended with ... 1006 ..., want a close with 4412'). In every real run the copy before the reconnect differs from the room."
     },
     {
-      "criterion": "Item 3, the part that holds: a 1 MB message in flight at the revoke is delivered whole, then 4412.",
-      "surface": "Real envoy-dispatch of this head and of 3ac9da68; a page on the large document (sync message 1,073,535 bytes) that reads nothing until 2s after the tick, with no writer page",
-      "command": "NOWRITER=1 d1trial.sh new <port> <tick> big",
-      "observed": "MSG 1 of 1,073,535 bytes read whole, then CLOSE 4412 'DOC_ADMISSION_REVOKED'.",
-      "headSha": "6176f738827a",
-      "negativeControl": "Round 5's binary closes a revoked socket with 1012 (calibration run). With room traffic and a page slower than 1 s, 1006 (failure 2)."
-    },
-    {
-      "criterion": "Acceptance 1 / item 6: the two-build test passes against the previous release, and the cross-build browser spec passes both ways.",
-      "surface": "Two real envoy-dispatch processes, legion-envoy-v24.7.1 and this head, on one Postgres and one NATS; Chromium through the two-process proxy with B on the socket the harness holds",
-      "command": "DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-2471 go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch; DISPATCH_E2E_BINARY_B=<v24.7.1>/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=<v24.7.1>/web bun run e2e:multiprocess -- cross-build.multiprocess (then with both processes on this tree)",
-      "observed": "CLI PASS (26.8s), documents PASS (92.0s, 57 of 57 refs rows each way), messages PASS (125.4s), ok 244.529s. Browser: 2 passed, 1 skipped (B=v24.7.1, no port set); 3 passed (both on this tree). Evidence: https://github.com/sjawhar/legion/pull/2461#issuecomment-6546007492",
-      "headSha": "6176f738827a",
-      "negativeControl": "Round 1's G3 controls stand."
+      "criterion": "The census states the 1 s rule.",
+      "surface": "PR #2461 body (census entry 8, the For the reviewer brief) and packages/envoy/cmd/dispatch/README.md 'Two builds at once'",
+      "command": "gh api repos/sjawhar/legion/pulls/2461 --jq .body; grep in the README",
+      "observed": "Census entry 8: 'ygo sends the close after the message in flight, waiting at most 1 s', and it points to the README. README lines 662-664: '... which it waits at most a second for, so a peer too slow to take it in that second gets no close frame at all and reads the end as 1006; the provider reconnects on either, ... the reconnect's sync restores what was in flight'.",
+      "headSha": "e9defcab9e7d",
+      "negativeControl": "Round 7's body had no 1 s rule in the census (entry 8 is new)."
     }
   ],
-  "ci": "At 6176f738, CI run 41216215751: changes succeeded (job 124581177059); lint, typecheck, test, dispatch-two-builds, envoy-go and ci-ok were queued at 16:24Z. pr-title succeeded (runs 41216303908, 41216247485). I could not read ci-ok, so I could not check the architect's TestAppendsOnDifferentIssuesDoNotWaitForEachOther exception.",
+  "ci": "At e9defcab, CI run 41226066399 was queued, changes included; pr-title was queued (run 41226093829). At 6176f738 and at a57a774e every lane, ci-ok included, was cancelled when the next push superseded it. I have no ci-ok verdict at any head of this round and did not wait.",
   "notes": [
-    "The pod's earlier Postgres servers were not running after the recreation, so I ran my own on port 5440 under $TMPDIR/t558pg, using the binaries at /legion/scratch/pg/root and touching no other role's data directory.",
-    "Migrations 0150-0152 overlap INFRA-562's #2387; per the architect, whichever lands later renumbers."
+    "I could not break the reconnect's convergence itself (a sync holding less than the room) without breaking ygo's sync. The real-binary digests show what the reconnect restores."
   ]
 }
