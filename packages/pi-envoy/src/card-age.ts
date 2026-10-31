@@ -29,12 +29,13 @@ interface CardText {
 /**
  * The time each Envoy card reached this session, and each card's text in a model request with it.
  *
- * A card's `envoy:` block carries `at:`, the time its sender sent it. The host writes the card
- * when it takes it into the session, which can be much later: on a session whose inbox ran behind,
- * hours later. So every request the session makes shows each card with a second time,
- * `delivered:`, the time the host wrote it, and, when the two are `MATERIAL_WAIT_MS` or more apart,
- * `waited:`, the gap in words. The card the host persists is unchanged: these lines exist only in
- * the requests (`annotate`, from the extension's `context` handler).
+ * A card's `envoy:` block carries `at:`, the time its sender sent it, or, on a replay failure
+ * notice, `published_at:`. The host writes the card when it takes it into the session, which can
+ * be much later: on a session whose inbox ran behind, hours later. So every request the session
+ * makes shows each card with a second time, `delivered:`, the time the host wrote it, and, when
+ * the two are `MATERIAL_WAIT_MS` or more apart, `waited:`, the gap in words. The card the host
+ * persists is unchanged: these lines exist only in the requests (`annotate`, from the extension's
+ * `context` handler).
  *
  * The delivery time of a card is the time the host emitted its `message_end` in this process
  * (`written`). A card whose `message_end` this process did not see before its first request has
@@ -44,12 +45,20 @@ interface CardText {
  * request, when the host handed the card to this process (`timestamp`) after this instance
  * started. A card known by none of them keeps its text as it is.
  *
+ * Each of those times is remembered under the session it belongs to as well as the event, because
+ * one process serves a session at a time and moves between sessions: a session that followed the
+ * same topic is shown the same event again, and reads it when its own host writes it, hours after
+ * the session before it did. A switched session therefore takes its own write, its own ledger
+ * record or its own branch position, never the time another session was shown the event; a session
+ * returned to takes what it was already told.
+ *
  * A request's bytes up to the newest message repeat on the next request, so the provider's prompt
- * cache can read them again: each card's delivery time is fixed the first time it is used and
- * reused after, so a card's text is the same in every request this process makes, up to the
- * `CARD_AGES_LIMIT` newest cards. A restart takes the time from the ledger record, written within
- * the same moment as the `message_end`; to the second they agree, except for a write that lands in
- * the next second, which re-reads the cached prefix once from that card on.
+ * cache can read them again: each card's delivery time is fixed the first time it is used in a
+ * session and reused after, so a card's text is the same in every request that session makes in
+ * this process, up to the `CARD_AGES_LIMIT` newest session-and-event pairs. A restart takes the
+ * time from the ledger record, written within the same moment as the `message_end`; to the second
+ * they agree, except for a write that lands in the next second, which re-reads the cached prefix
+ * once from that card on.
  */
 export class CardAges {
   readonly #deps: CardAgesDeps;
@@ -61,30 +70,40 @@ export class CardAges {
     this.#startedAt = deps.now();
   }
 
-  /** The host wrote `message`: a card's first write fixes its delivery time. */
-  written(message: unknown): void {
+  /**
+   * The host wrote `message` in session `sessionID`: that session's first write of a card fixes
+   * the delivery time it reads there.
+   */
+  written(message: unknown, sessionID: string): void {
     const eventID = writtenCardIdentity(message)?.event_id;
-    if (eventID === undefined || this.#delivered.has(eventID)) return;
-    this.#remember(eventID, this.#deps.now());
+    if (eventID === undefined) return;
+    const key = deliveryKey(sessionID, eventID);
+    if (this.#delivered.has(key)) return;
+    this.#remember(key, this.#deps.now());
   }
 
   /**
-   * `messages`, one model request's, with each card's delivery time and, when material, its wait;
-   * undefined when no card changed. `branch` is the session's entries, read only when a card's
-   * delivery time is not known yet.
+   * `messages`, one model request's in session `sessionID`, with each card's delivery time and,
+   * when material, its wait; undefined when no card changed. `branch` is that session's entries,
+   * read only when a card's delivery time in it is not known yet.
    */
-  annotate(messages: readonly unknown[], branch: () => readonly unknown[]): unknown[] | undefined {
+  annotate(
+    messages: readonly unknown[],
+    branch: () => readonly unknown[],
+    sessionID: string
+  ): unknown[] | undefined {
     let recorded: Map<string, number> | undefined;
     let changed = false;
     const annotated = messages.map((message) => {
       const card = cardText(message);
       if (card === undefined) return message;
-      let delivered = this.#delivered.get(card.eventID);
+      const key = deliveryKey(sessionID, card.eventID);
+      let delivered = this.#delivered.get(key);
       if (delivered === undefined) {
         recorded ??= branchTimes(branch());
         delivered = recorded.get(card.eventID) ?? this.#handedHere(message);
         if (delivered === undefined) return message;
-        this.#remember(card.eventID, delivered);
+        this.#remember(key, delivered);
       }
       const text = withDelivery(card.text, delivered);
       if (text === undefined) return message;
@@ -103,13 +122,21 @@ export class CardAges {
     return typeof handed === "number" && handed >= this.#startedAt ? this.#deps.now() : undefined;
   }
 
-  #remember(eventID: string, at: number): void {
-    this.#delivered.set(eventID, at);
+  #remember(key: string, at: number): void {
+    this.#delivered.set(key, at);
     if (this.#delivered.size > CARD_AGES_LIMIT) {
       const oldest = this.#delivered.keys().next();
       if (oldest.done !== true) this.#delivered.delete(oldest.value);
     }
   }
+}
+
+/**
+ * What a remembered delivery time is held under: the session that was shown the card and the event
+ * it showed. A session id holds no newline, so no pair can read as another.
+ */
+function deliveryKey(sessionID: string, eventID: string): string {
+  return `${sessionID}\n${eventID}`;
 }
 
 /**
@@ -180,32 +207,38 @@ function cardText(message: unknown): CardText | undefined {
   return undefined;
 }
 
-/** The `at:` line of an `envoy:` block: two spaces in, as `renderInbound` encodes it. */
-const AT_LINE = /^ {2}at: (.+)$/;
+/**
+ * The line an `envoy:` block dates a card's send by, two spaces in, as the renderers encode it:
+ * `at:` on the card a frame is rendered as (`renderInbound`), `published_at:` on the notice shown
+ * in place of a frame the session could not be shown (`failureNoticeFields`).
+ */
+const SENT_LINE = /^ {2}(at|published_at): (.+)$/;
 
 /** The `delivered:` line this module adds, which another copy of the extension may have added. */
 const DELIVERED_LINE = /^ {2}delivered: /;
 
 /**
- * A card's text with `delivered:`, and `waited:` when material, after its `at:` line; undefined
- * for a text with no `at:` line, or one that already says when it was delivered.
+ * A card's text with `delivered:`, and `waited:` when material, after the line that dates its
+ * send; undefined for a text with no such line, or one that already says when it was delivered.
  */
 export function withDelivery(text: string, delivered: number): string | undefined {
   const lines = text.split("\n");
-  const atIndex = lines.findIndex((line) => AT_LINE.test(line));
-  if (atIndex < 0 || lines.some((line) => DELIVERED_LINE.test(line))) return undefined;
-  const sent = Date.parse(toonString(AT_LINE.exec(lines[atIndex] ?? "")?.[1] ?? ""));
+  const sentIndex = lines.findIndex((line) => SENT_LINE.test(line));
+  if (sentIndex < 0 || lines.some((line) => DELIVERED_LINE.test(line))) return undefined;
+  const matched = SENT_LINE.exec(lines[sentIndex] ?? "");
+  const field = matched?.[1] ?? "at";
+  const sent = Date.parse(toonString(matched?.[2] ?? ""));
   const waitedMs = Number.isNaN(sent) ? 0 : delivered - sent;
   const fields = {
     delivered: inboundTimestamp(delivered),
     ...(waitedMs >= MATERIAL_WAIT_MS && {
-      waited: `${duration(waitedMs)} between at and delivered; at is when it was sent, not the present time`,
+      waited: `${duration(waitedMs)} between ${field} and delivered; ${field} is when it was sent, not the present time`,
     }),
   };
   const added = encode(fields)
     .split("\n")
     .map((line) => `  ${line}`);
-  return [...lines.slice(0, atIndex + 1), ...added, ...lines.slice(atIndex + 1)].join("\n");
+  return [...lines.slice(0, sentIndex + 1), ...added, ...lines.slice(sentIndex + 1)].join("\n");
 }
 
 /** A TOON value as a string: a quoted one is JSON. */

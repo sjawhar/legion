@@ -68,7 +68,7 @@ import { decode } from "@toon-format/toon";
 import { z } from "zod";
 import { version as packageVersion } from "../package.json" with { type: "json" };
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
-import { REPLAY_STATE_ENTRY } from "../src/missed-messages";
+import { REPLAY_DELIVERED_ENTRY, REPLAY_STATE_ENTRY } from "../src/missed-messages";
 
 type ToolResult = {
   readonly content: readonly { readonly type: "text"; readonly text: string }[];
@@ -16306,6 +16306,96 @@ describe("messages missed while the subscription was down", () => {
       expect(second).toBe(first);
       // The card the host keeps is the one it was handed.
       expect(card.content).not.toContain("delivered:");
+    });
+
+    // The replay case above ("a frame shown before the host moved to this session"): one process
+    // serves one session at a time, and a session that followed the same issue is shown the same
+    // event when the host moves to it. Its request must state when the event reached that
+    // session, from its own ledger, not when the session before it was shown it.
+    test("a replayed event in the session the host moved to reads that session's own delivery time", async () => {
+      const model = new StreamModel();
+      // A session that followed the issue, left before the event was published.
+      const left = await bootReplay("card-age-moved-left", model, { sessionID: "ses_moved" });
+      await left.follow(ISSUE_TOPIC);
+      await left.stop();
+      const leftEntries = left.entries();
+      // Another session follows the issue too and is shown the event live: its turn takes the
+      // card, so the host writes it here and now.
+      const session = await bootReplay("card-age-moved-a", model);
+      await session.follow(ISSUE_TOPIC);
+      const frame = issueEvent(ISSUE_SUBJECT, 31);
+      model.store(ISSUE_SUBJECT, frame);
+      session.live(ISSUE_TOPIC).push(frame);
+      await until(() => session.cards("dispatch-31").length > 0, "the live card");
+      await session.take();
+
+      // The host resumes the session it left: that session's sweep hands it the event's card too.
+      // The file it reads holds no record of this event while the sweep decides to show it, and
+      // the record of the host's write is appended after the card is handed, so the request the
+      // session makes next reads it (`movedWithRecord`).
+      const mark = session.fixture.entries.length;
+      const movedFile = () => [...leftEntries, ...session.fixture.entries.slice(mark)];
+      const resumed = sessionContext("ses_moved");
+      const movedContext = {
+        ...resumed,
+        sessionManager: { ...resumed.sessionManager, getBranch: movedFile, getEntries: movedFile },
+      };
+      await session.fixture.handlers.get("session_switch")?.({ reason: "resume" }, movedContext);
+      await until(() => session.cards("dispatch-31").length > 1, "the resumed session's card");
+      await settle();
+
+      const [card] = session.cards("dispatch-31");
+      if (card === undefined) throw new Error("the card was not handed");
+      // Handed before this process started, as a card held across a restart is: the request time
+      // is no delivery time for it, so with nothing in this session's file it stays as it is.
+      const written = {
+        role: "custom",
+        customType: card.customType,
+        content: card.content,
+        display: true,
+        details: card.details,
+        timestamp: 1,
+      };
+      const contextHandler = session.fixture.handlers.get("context");
+      if (contextHandler === undefined) throw new Error("no context handler was registered");
+      const movedWithoutRecord =
+        JSON.stringify(await contextHandler({ messages: [written] }, movedContext)) ?? "";
+
+      // The write this session's host made, a minute and a half before this request.
+      const movedAt = Math.floor((Date.now() - 90_000) / 1_000) * 1_000;
+      const movedIso = `${new Date(movedAt).toISOString().slice(0, 19)}Z`;
+      const recorded = {
+        ...movedContext,
+        sessionManager: {
+          ...movedContext.sessionManager,
+          getBranch: () => [
+            ...movedFile(),
+            {
+              type: "custom",
+              customType: REPLAY_DELIVERED_ENTRY,
+              data: { event_id: "dispatch-31", at: movedAt },
+            },
+          ],
+        },
+      };
+      const movedWithRecord = JSON.stringify(
+        await contextHandler({ messages: [written] }, recorded)
+      );
+      const live = JSON.stringify(
+        await contextHandler({ messages: [written] }, sessionContext("ses_replay"))
+      );
+      const liveAgain = JSON.stringify(
+        await contextHandler({ messages: [written] }, sessionContext("ses_replay"))
+      );
+
+      // Never the time the session shown it live was shown it.
+      expect(movedWithoutRecord).not.toContain("delivered:");
+      expect(movedWithRecord).toContain(`delivered: \\"${movedIso}\\"`);
+      // The session shown it live reads its own write, which its `message_end` fixed.
+      expect(live).toMatch(/\\n {2}delivered: \\"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\\"\\n/);
+      expect(live).not.toContain(movedIso);
+      // Returning to it reads the same bytes, so the provider's prompt cache reads them again.
+      expect(liveAgain).toBe(live);
     });
   });
 

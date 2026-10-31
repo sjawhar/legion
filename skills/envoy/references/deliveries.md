@@ -37,8 +37,8 @@ envoy:
 - `to`: the local inbox that receives this delivery.
 - `from`: the sending session's self-asserted id, with its session title in parentheses when the envelope carries one. Attribution and a direct-reply target, not an authenticated identity.
 - `at`: when the sender sent it, by the sender's clock. It is not the present time: a delivery read late carries an old `at`.
-- `delivered`: when this session got the delivery. An Oh My Pi session shows it in every model request, beside `at`.
-- `waited`: present when `delivered` is 15 minutes or more after `at`: how long the delivery waited, in words. An old `at` on a late delivery says the delivery waited, not that a clock is wrong.
+- `delivered`: when this session got the delivery. An Oh My Pi session shows it in every model request, beside `at`, or beside `published_at` on a notice that names a message the session could not be shown. A session the host moves to shows when it got the delivery there, which can be later than another session got it. A session that got the delivery before its process restarted can show an estimate of that time, taken from its transcript, never later than the delivery.
+- `waited`: present when `delivered` is 15 minutes or more after the send time: how long the delivery waited, in words. An old send time on a late delivery says the delivery waited, not that a clock is wrong.
 - `id`: the delivery id; pass it as `in_reply_to` when you reply.
 - `by`: the expiry deadline, when the sender set one.
 - `urgency`: how soon the sender asks you to act: `low`, `med`, `high` or `blocking`. It is for you to read only: it does not change when a delivery reaches you, or its place among others.

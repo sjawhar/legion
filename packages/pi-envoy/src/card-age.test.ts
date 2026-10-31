@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { renderInbound } from "@legion/envoy-client/delivery";
+import { envoyNoticeText, failureNoticeFields } from "@legion/envoy-client/replay";
 import { CardAges, duration, MATERIAL_WAIT_MS } from "./card-age";
 import { REPLAY_DELIVERED_ENTRY } from "./missed-messages";
 
@@ -28,6 +29,34 @@ function card(eventID: string, sentAt: number, handedAt: number): Record<string,
     display: true,
     details: { event_id: eventID },
     timestamp: handedAt,
+  };
+}
+
+/**
+ * The notice the extension shows in place of a frame the host refused, as `showReplayCard` hands
+ * it: an inert one carries the frame's identity alone, an ordinary one the wake's card marker too.
+ */
+function failureNotice(eventID: string, options: { btw?: boolean }): Record<string, unknown> {
+  return {
+    role: "custom",
+    customType: "envoy-message",
+    content: envoyNoticeText(
+      failureNoticeFields({
+        eventId: eventID,
+        sender: "ses_sender",
+        summary: "unread card",
+        publishedAt: new Date(SENT).toISOString(),
+        error: "host refused card",
+        readWith: "envoy_inbox",
+        envelope: { event_id: eventID, source: "agent" },
+      })
+    ),
+    display: true,
+    details: {
+      event_id: eventID,
+      ...(options.btw === true ? {} : { envoyCard: "c0ffee00-0000-4000-8000-000000000000" }),
+    },
+    timestamp: SENT,
   };
 }
 
@@ -61,10 +90,10 @@ describe("a card in a model request", () => {
     const ages = new CardAges({ now: () => clock });
     const late = card("evt-late", SENT, SENT);
     clock = LATE;
-    ages.written(late);
+    ages.written(late, SESSION);
 
     const text = textOf(
-      ages.annotate([late], () => []),
+      ages.annotate([late], () => [], SESSION),
       "evt-late"
     );
 
@@ -77,10 +106,10 @@ describe("a card in a model request", () => {
   test("written at once says when it was delivered, and nothing about a wait", () => {
     const ages = new CardAges({ now: () => SENT + 2_000 });
     const fresh = card("evt-fresh", SENT, SENT + 1_000);
-    ages.written(fresh);
+    ages.written(fresh, SESSION);
 
     const text = textOf(
-      ages.annotate([fresh], () => []),
+      ages.annotate([fresh], () => [], SESSION),
       "evt-fresh"
     );
 
@@ -94,11 +123,11 @@ describe("a card in a model request", () => {
     const under = card("evt-under", SENT, SENT);
     const at = card("evt-at", SENT, SENT);
     clock = SENT + MATERIAL_WAIT_MS - 1_000;
-    ages.written(under);
+    ages.written(under, SESSION);
     clock = SENT + MATERIAL_WAIT_MS;
-    ages.written(at);
+    ages.written(at, SESSION);
 
-    const annotated = ages.annotate([under, at], () => []);
+    const annotated = ages.annotate([under, at], () => [], SESSION);
 
     expect(textOf(annotated, "evt-under")).not.toContain("waited:");
     expect(textOf(annotated, "evt-at")).toContain('waited: "15 min between at and delivered;');
@@ -110,10 +139,10 @@ describe("a card in a model request", () => {
     const ages = new CardAges({ now: () => clock });
     const late = card("evt-late", SENT, SENT);
     clock = LATE;
-    ages.written(late);
-    const first = ages.annotate([late], () => []);
+    ages.written(late, SESSION);
+    const first = ages.annotate([late], () => [], SESSION);
     clock = LATE + 3 * 3_600_000;
-    const second = ages.annotate([late], () => []);
+    const second = ages.annotate([late], () => [], SESSION);
 
     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
   });
@@ -124,16 +153,16 @@ describe("a card in a model request", () => {
     const handed = card("evt-handed", SENT, SENT + 1_000);
     clock = LATE;
     const first = textOf(
-      ages.annotate([handed], () => []),
+      ages.annotate([handed], () => [], SESSION),
       "evt-handed"
     );
     clock = LATE + 60_000;
-    ages.written(handed);
+    ages.written(handed, SESSION);
 
     expect(first).toContain('delivered: "2026-10-31T11:13:02Z"');
     expect(
       textOf(
-        ages.annotate([handed], () => []),
+        ages.annotate([handed], () => [], SESSION),
         "evt-handed"
       )
     ).toBe(first);
@@ -151,7 +180,7 @@ describe("a card in a model request", () => {
     ];
 
     const text = textOf(
-      ages.annotate([old], () => branch),
+      ages.annotate([old], () => branch, SESSION),
       "evt-old"
     );
 
@@ -176,7 +205,7 @@ describe("a card in a model request", () => {
     ];
 
     const text = textOf(
-      ages.annotate([old], () => branch),
+      ages.annotate([old], () => branch, SESSION),
       "evt-old"
     );
 
@@ -188,7 +217,7 @@ describe("a card in a model request", () => {
     const old = card("evt-old", SENT, SENT);
     const ages = new CardAges({ now: () => LATE });
 
-    expect(ages.annotate([old], () => [])).toBeUndefined();
+    expect(ages.annotate([old], () => [], SESSION)).toBeUndefined();
   });
 
   // Two copies of the extension can run in one process; the first copy's lines stand.
@@ -197,12 +226,12 @@ describe("a card in a model request", () => {
     const ages = new CardAges({ now: () => clock });
     const late = card("evt-late", SENT, SENT);
     clock = LATE;
-    ages.written(late);
-    const annotated = ages.annotate([late], () => []);
+    ages.written(late, SESSION);
+    const annotated = ages.annotate([late], () => [], SESSION);
     const other = new CardAges({ now: () => LATE + 60_000 });
-    other.written(late);
+    other.written(late, SESSION);
 
-    expect(other.annotate(annotated ?? [], () => [])).toBeUndefined();
+    expect(other.annotate(annotated ?? [], () => [], SESSION)).toBeUndefined();
   });
 
   test("with pictures is annotated in its text block, and its pictures kept", () => {
@@ -212,9 +241,9 @@ describe("a card in a model request", () => {
     const image = { type: "image", data: "AAAA", mimeType: "image/png" };
     const withPictures = { ...base, content: [{ type: "text", text: base.content }, image] };
     clock = LATE;
-    ages.written(withPictures);
+    ages.written(withPictures, SESSION);
 
-    const annotated = ages.annotate([withPictures], () => []);
+    const annotated = ages.annotate([withPictures], () => [], SESSION);
     const blocks = blocksOf(annotated?.[0]);
 
     expect(textOf(annotated, "evt-pictures")).toContain('delivered: "2026-10-31T11:13:02Z"');
@@ -238,7 +267,73 @@ describe("a card in a model request", () => {
       timestamp: LATE,
     };
 
-    expect(ages.annotate([user, notice], () => [])).toBeUndefined();
+    expect(ages.annotate([user, notice], () => [], SESSION)).toBeUndefined();
+  });
+
+  // One process serves one session at a time and moves between them. A session that followed the
+  // same issue is shown the event again, and reads it when its own host writes it.
+  test("replayed in a session switched to later takes that session's own delivery time", () => {
+    let clock = SENT;
+    const ages = new CardAges({ now: () => clock });
+    const first = card("evt-shared", SENT, SENT);
+    ages.written(first, SESSION);
+    const early = textOf(
+      ages.annotate([first], () => [], SESSION),
+      "evt-shared"
+    );
+
+    // The host resumes a session that followed the same topic, hours later, and writes the card
+    // there: its ledger record in that session's entries dates the write.
+    clock = LATE;
+    const second = card("evt-shared", SENT, SENT);
+    ages.written(second, "ses_switched");
+    const branch = [
+      {
+        type: "custom",
+        customType: REPLAY_DELIVERED_ENTRY,
+        data: { event_id: "evt-shared", at: LATE },
+      },
+    ];
+    const late = textOf(
+      ages.annotate([second], () => branch, "ses_switched"),
+      "evt-shared"
+    );
+
+    expect(early).toContain('delivered: "2026-10-31T06:27:17Z"');
+    expect(early).not.toContain("waited:");
+    expect(late).toContain('delivered: "2026-10-31T11:13:02Z"');
+    expect(late).toContain('waited: "4 h 45 min');
+    // Back on the first session, its own request reads exactly as it did before.
+    expect(
+      textOf(
+        ages.annotate([first], () => branch, SESSION),
+        "evt-shared"
+      )
+    ).toBe(early);
+  });
+
+  // A session the host refused a card is shown a notice naming it instead, worded by the replay
+  // engine: it dates the send `published_at:`, and reaches the session just as late.
+  test("that is a replay failure notice says when the notice was delivered, ordinary or inert", () => {
+    let clock = SENT;
+    const ages = new CardAges({ now: () => clock });
+    const ordinary = failureNotice("evt-notice", {});
+    const inert = failureNotice("evt-notice-inert", { btw: true });
+    clock = LATE;
+    ages.written(ordinary, SESSION);
+    ages.written(inert, SESSION);
+
+    const annotated = ages.annotate([ordinary, inert], () => [], SESSION);
+
+    for (const eventID of ["evt-notice", "evt-notice-inert"]) {
+      const text = textOf(annotated, eventID);
+      expect(text).toContain(
+        '\n  published_at: "2026-10-31T06:27:17.000Z"\n  delivered: "2026-10-31T11:13:02Z"\n'
+      );
+      expect(text).toContain(
+        '\n  waited: "4 h 45 min between published_at and delivered; published_at is when it was sent, not the present time"\n'
+      );
+    }
   });
 });
 

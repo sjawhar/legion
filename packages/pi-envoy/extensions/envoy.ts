@@ -1145,8 +1145,9 @@ export default function envoyExtension(pi: PiApi): void {
     isOwnSession: (session) => sessionOpen(session),
   });
 
-  // When each card reached this session, which every model request shows beside its send time
-  // (`../src/card-age`): a card's `message_end` fixes it.
+  // When each card reached each session this process serves, which every model request shows
+  // beside the card's send time (`../src/card-age`): a card's `message_end` in a session fixes it
+  // for that session, so a session the host moves to reads when it was shown the card itself.
   const cardAges = new CardAges({ now: () => Date.now() });
 
   // A card's message: its `details` name the frame (`replayLedgerIdentity`), which the host keeps
@@ -2105,7 +2106,7 @@ export default function envoyExtension(pi: PiApi): void {
     const { message } = event;
     if (!shuttingDown) cardWake.messageEnd(message, context);
     recordAgentStreamMessage(message, false);
-    cardAges.written(message);
+    cardAges.written(message, context.sessionManager.getSessionId());
     await unwritten.written(message);
   });
   // The host asks whether any extension handles `session_before_compact`, which turns its
@@ -3430,9 +3431,13 @@ export default function envoyExtension(pi: PiApi): void {
     // it races the handler against the run's own and drops what an aborted handler returns, and
     // the read it shares goes on to fill the cache.
     pi.on("context", async (event, context) => {
+      // The host's own live id, as `message_end` reads it: this one process serves one session at
+      // a time and moves between them, and a session that followed the same topic reads the same
+      // event when its own host writes it, not when the session before it did (`../src/card-age`).
       const aged = cardAges.annotate(
         event.messages,
-        () => context.sessionManager.getBranch?.() ?? []
+        () => context.sessionManager.getBranch?.() ?? [],
+        context.sessionManager.getSessionId()
       );
       if (!atStart.dispatch.enabled) return aged === undefined ? undefined : { messages: aged };
       const withSkill = withDispatchFirst(aged ?? event.messages, DISPATCH_FIRST_CONTEXT);
