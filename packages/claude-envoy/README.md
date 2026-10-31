@@ -32,7 +32,8 @@ events and sends them to the current Claude Code session as supported
   reached; nothing when Dispatch is not configured or a file sets `dispatch.enabled` to false,
   unless the session's missing file is what turns it off while `~/.config/opencode/envoy.json`,
   which is not read, is there: then `unavailable: <notice>`, the notice naming what to do with
-  it). Before that, whether Dispatch is on or off, a checkout's
+  it, after the lost-`DISPATCH_URL` text when `DISPATCH_TOKEN_FILE` is set). Before that, whether
+  Dispatch is on or off, a checkout's
   `.opencode/envoy.json`, which is not read, is one `envoy: <file> is not read: mkdir -p … && mv …`
   line while the checkout has no `.envoy/envoy.json`. The `dispatch` command reads the file
   `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set. A subagent's Bash can lack what the
@@ -172,20 +173,29 @@ events and sends them to the current Claude Code session as supported
   `registry`, `both`).
 - `envoy_role_set` persists the held role in `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json`.
   `claude --resume <session-id>` finds that file and soft-reclaims the role with the saved
-  `previous_session_id`; a plain relaunch is a new session and inherits nothing. Every healthy
-  registration heartbeat checks and reasserts the role if the listener lost it. Shutdown (stdin
-  end, SIGTERM, SIGINT, or the SIGHUP a closing pane sends the whole process group) drains NATS
-  and deregisters the session.
+  `previous_session_id`; a plain relaunch is a new session and inherits nothing. The listener
+  moves the role off that predecessor only when the predecessor has no live registration, when
+  its live registration carries this process's own client instance id, or when either side
+  carries no instance id. A predecessor another process still runs keeps the role, and the claim
+  is refused naming it: this session goes on running and registered without the role, claims it
+  again only on an explicit claim, and keeps the predecessor's role file, since that record
+  belongs to the live holder. Every healthy registration heartbeat checks and reasserts the role
+  if the listener lost it. Shutdown (stdin end, SIGTERM, SIGINT, or the SIGHUP a closing pane
+  sends the whole process group) drains NATS and deregisters the session, naming this process's
+  client instance id, so the listener removes the registry entry only while it still carries
+  that id or none.
 - `/clear` mints a new Claude session id, but a stdio MCP server keeps the `CLAUDE_CODE_SESSION_ID`
   it was spawned with. The SessionStart hook writes the current id to
   `${CLAUDE_PLUGIN_DATA}/sessions/<claude-pid>/session-id` (keyed by the `claude` process both the
   hook and the server are children of, so concurrent sessions never share a file). The server
   polls that file every 250 ms and follows a changed id within that time, with the heartbeat as the
-  fallback: it subscribes the new direct subject first, deregisters the old id, drops the old
-  subject, registers the new one, and moves a held role by soft claim. The listener merges
-  registered topics into the entry and never removes one, so the old subject goes before the
-  registration, and the server sends its registry writes one at a time, each registration reading
-  the id and topics when it runs.
+  fallback: it subscribes the new direct subject first, deregisters the old id under this
+  process's client instance id, drops the old subject, registers the new one, and moves a held
+  role by soft claim. The listener removes the old entry only while it still carries this
+  instance's id, so a process that resumed that id keeps both its registration and its role.
+  The listener merges registered topics into the entry and never removes one, so the old subject
+  goes before the registration, and the server sends its registry writes one at a time, each
+  registration reading the id and topics when it runs.
   Asks authored before `/clear` carry the old Dispatch actor id and drop out of the open-asks
   summary (the same shape as OMP on fork). `ENVOY_SESSION_ID` (QA override) disables the handoff.
 - `envoy_inbox` is local recovery state: the most recent 50 event summaries, with no envelope
@@ -236,17 +246,21 @@ human approval surface.
 
 ## Skills
 
-The plugin ships five skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
-`claude-envoy:dispatch-first`, `claude-envoy:dispatch-writing-specs` and `claude-envoy:asd-ste100`.
+The plugin ships seven skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
+`claude-envoy:dispatch-first`, `claude-envoy:dispatch-writing-specs`, `claude-envoy:asd-ste100`,
+`claude-envoy:outside-message` and `claude-envoy:plain-words`.
 The first four teach the Envoy tools, the `dispatch` command and how to write a spec; `asd-ste100` gives the
-ASD-STE100 rules for text a person reads. `skills/` holds one relative symlink per skill into the repository-root `skills/`, which
+ASD-STE100 rules for text a person reads; `outside-message` holds the steps and the approval before text
+reaches a person outside the company, and `plain-words` the empty verb phrases to delete from any text a
+person reads.
+`skills/` holds one relative symlink per skill into the repository-root `skills/`, which
 stays their only source; Claude Code copies each target into the plugin cache at install. With
 Dispatch configured, the `dispatch-first` hook also puts `dispatch-first` into the model's context
 on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart`, as the
 `hooks/hooks.json` bullet above describes; it sends a spec, or an ask, comment or message a person
 reads, to `dispatch-writing-specs`, which the session loads by name.
 
-`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs` and `asd-ste100` are the five a standalone Claude Code session uses. The other root skills
+`envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `asd-ste100`, `outside-message` and `plain-words` are the seven a standalone Claude Code session uses. The other root skills
 stay out of this plugin: they belong to Legion's roles (the architect, controller, oracle and retro
 skills, and the phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's
 `thermonuclear-*` pair (`skills/AGENTS.md`). A phase worker on Claude Code gets them from the

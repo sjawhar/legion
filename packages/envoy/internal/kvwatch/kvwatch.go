@@ -79,6 +79,16 @@ type Watcher struct {
 	generation uint64
 	stopped    bool
 	err        error
+	// completeChanged is closed, and replaced with an open channel, at every change that can end
+	// a wait: a scan that completed, a terminal error recorded, and the stop. A change that leaves
+	// a blocked waiter's reading as it was - a replacement watcher installed, which is still not
+	// complete - wakes nobody, since such a waiter has already read err == nil, not stopped and
+	// not complete. A waiter takes the state and this channel together
+	// under mu, so a change made after that reading is already a wake-up it will see, and reads
+	// the state again on every wake-up, since completeness is not one-way. New makes it, and
+	// every replacement is made under mu, so it is never nil and no waiter blocks on a nil
+	// channel.
+	completeChanged chan struct{}
 	// repairTimer is the armed wait left by a stop nobody asked for, and is the marker that such a
 	// stop is outstanding and not yet reported: a repair that worked, and an ordered Stop, clear
 	// it, and the one report clears it too, so exactly one ERROR follows one stop. It always
@@ -162,15 +172,16 @@ func WithRescan() Option {
 // keys.
 func New(name string, kv bus.KeyValue, apply func(nats.KeyValueEntry), reset func(), options ...Option) *Watcher {
 	w := &Watcher{
-		name:        name,
-		bucket:      kv.Bucket(),
-		apply:       apply,
-		reset:       reset,
-		ready:       make(chan struct{}),
-		first:       kv,
-		kv:          kv,
-		after:       func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
-		openResumed: openResumedWatch,
+		name:            name,
+		bucket:          kv.Bucket(),
+		apply:           apply,
+		reset:           reset,
+		ready:           make(chan struct{}),
+		completeChanged: make(chan struct{}),
+		first:           kv,
+		kv:              kv,
+		after:           func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
+		openResumed:     openResumedWatch,
 	}
 	for _, option := range options {
 		option(w)
@@ -206,6 +217,9 @@ func (w *Watcher) Start() {
 		current := w.watcher != nil
 		if !current && !w.stopped {
 			w.err = err
+			// Nothing will complete a scan for this watcher until a Rewatch, so a caller waiting
+			// for a complete view reads this error rather than waiting its own ctx out.
+			w.wakeComplete()
 		}
 		w.mu.Unlock()
 		if current {
@@ -282,6 +296,9 @@ func (w *Watcher) Check() error {
 	defer w.mu.Unlock()
 	if !w.stopped && w.err == nil && !w.stream.IsZero() && !stream.Created.Equal(w.stream) {
 		w.err = fmt.Errorf("%s bucket %s was recreated under its watcher", w.name, w.bucket)
+		// Nothing completes a scan until a Rewatch resets the cache, so a caller waiting for a
+		// complete view reads this error rather than waiting its own ctx out.
+		w.wakeComplete()
 	}
 	return nil
 }
@@ -330,6 +347,48 @@ func (w *Watcher) Complete() (generation uint64, complete bool) {
 	return w.generation, w.watcher != nil && w.complete.Load()
 }
 
+// WaitComplete blocks until the current watcher's first scan has delivered every key's current
+// value, the state Complete reports, and then returns nil: a cache that answers only from a
+// complete view (store.Registry.RolesHeldBy) gates its caller on this rather than on WaitReady,
+// which a scan nats.go's idle timer ended releases too. Completeness is not one-way, so this reads
+// the state again after every wake-up and returns nil only on a reading that says complete; a
+// watcher WithRescan scans again until one does. It returns early, rather than waiting ctx out,
+// when nothing will complete a scan: the current watcher's terminal error (Err), which only a
+// Rewatch clears, and a stop, after which the watcher arms nothing. The error is read before
+// completeness, as RolesHeldBy reads it, so a watcher Check found on a recreated bucket never
+// answers this wait nil while that view still refuses every read. Callers bound ctx, whose error
+// it returns when ctx ends first: a bucket can be unreachable.
+func (w *Watcher) WaitComplete(ctx context.Context) error {
+	for {
+		w.mu.RLock()
+		complete := w.watcher != nil && w.complete.Load()
+		err, stopped, changed := w.err, w.stopped, w.completeChanged
+		w.mu.RUnlock()
+		switch {
+		case err != nil:
+			return err
+		case complete:
+			return nil
+		case stopped:
+			return fmt.Errorf("%s watcher stopped before its first scan completed", w.name)
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// wakeComplete wakes every WaitComplete waiter, which then reads the state the caller changed.
+// The caller holds mu for writing, so a waiter that took the channel before this reading of the
+// state is woken, and one that takes it after reads the new state with the channel that replaces
+// the closed one.
+func (w *Watcher) wakeComplete() {
+	close(w.completeChanged)
+	w.completeChanged = make(chan struct{})
+}
+
 // Stop retires the watcher for a shutdown, before the NATS drain. Its end then belongs to no live
 // generation, so it records nothing and logs nothing, and every later Rewatch is a no-op: a
 // reconnect hook or a self-health rebuild still running at shutdown arms no new watcher and
@@ -344,6 +403,8 @@ func (w *Watcher) Stop() {
 	w.watcher = nil
 	w.clearRepairArm()
 	w.generation++
+	// A stopped watcher completes no scan, so a caller waiting for a complete view stops waiting.
+	w.wakeComplete()
 	w.mu.Unlock()
 }
 
@@ -611,6 +672,9 @@ func (w *Watcher) watch(kv bus.KeyValue, conn *nats.Conn, replacing uint64) erro
 		if from == 0 {
 			w.hw.Store(0)
 		}
+		// No wake here: a waiter still blocked has read err == nil, not stopped and not complete,
+		// and this switch leaves it not complete, so there is nothing it would read differently.
+		// The replacement's own scan ends that wait, through scanEnded's wake.
 		// The replacement runs, so the stop it repaired needs no ERROR.
 		w.clearRepairArm()
 		w.mu.Unlock()
@@ -739,6 +803,9 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started ti
 	w.watcher = nil
 	err := terminalError(watcher, w.name)
 	w.err = err
+	// Nothing this watcher does will complete a scan now, so a caller waiting for a complete view
+	// reads this error rather than waiting its own ctx out.
+	w.wakeComplete()
 	// The watcher ended on its own: the connection it was on closed, or the bucket went away. The
 	// cache is frozen until a Rewatch replaces it, and Err says so. The stop is logged at WARN and
 	// not at ERROR, because nothing repairs a watcher while the listener's connection to NATS is
@@ -773,6 +840,7 @@ func (w *Watcher) scanEnded(generation uint64, timedOut bool) {
 	current := generation == w.generation
 	if current && !timedOut {
 		w.complete.Store(true)
+		w.wakeComplete()
 	}
 	w.mu.Unlock()
 	w.applyMu.Unlock()

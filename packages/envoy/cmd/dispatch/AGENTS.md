@@ -176,8 +176,9 @@ stream holds the most copies and the largest limit any Envoy program of the depl
 clustered deployment sets both alike here and in every envoy-listener; what a start and the keeper
 do with them is `packages/envoy/AGENTS.md`'s "Operational notes". A
 present `DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an absolute `http`
-or `https` URL with no path, and is the exact browser origin
-used for sign-in. It must equal the URL humans type into the browser, with
+or `https` URL with no path, and, where the `DISPATCH_SIGNIN_*` settings
+configure browser sign-in, is the exact browser origin used for it. It must
+then equal the URL humans type into the browser, with
 `<DISPATCH_SERVER_URL>/auth/callback` listed on the sign-in pool's app client. Host
 adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
 `DISPATCH_TEST_HOOKS=1` mounts test-only routes — unset in every real deployment. `POST
@@ -316,11 +317,16 @@ write identity errors with `identity.WriteError`.
 
 - `DISPATCH_IDENTITY=cookie` is the default. Cookie identity signs people in
   through a Cognito sign-in pool or with Google directly (OpenID Connect
-  authorization code, `internal/oidc/codeflow.go`) and requires `DISPATCH_SIGNIN_ISSUER`,
-  `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET` and exactly one
-  of `DISPATCH_SIGNIN_GROUP` (through the pool) or
-  `DISPATCH_SIGNIN_DOMAIN` (with Google directly, under the issuer
-  `https://accounts.google.com`). `checkSignInSettings` refuses, in this order,
+  authorization code, `internal/oidc/codeflow.go`) where the sign-in settings
+  configure one: `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`,
+  `DISPATCH_SIGNIN_CLIENT_SECRET` and exactly one of `DISPATCH_SIGNIN_GROUP`
+  (through the pool) or `DISPATCH_SIGNIN_DOMAIN` (with Google directly, under
+  the issuer `https://accounts.google.com`). With none of the five set the
+  server boots and runs no browser sign-in: nobody signs in, `/auth/start`
+  answers `503 SIGNIN_UNCONFIGURED`, and the agent-token API is served, which
+  is what a sandbox deployment runs. `checkSignInSettings`, reached only when
+  at least one sign-in setting is set, is what refuses a partial one. It
+  refuses, in this order,
   both set, some without the others (naming the missing ones), a domain under
   another issuer, a domain that is not a lowercase DNS name, and a group under
   Google's issuer; a deployment with the four Cognito settings reaches none of
@@ -690,7 +696,7 @@ caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`
 | `/api/v1/live/_test/rotate` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/live` socket with 4001 (`max age`); not mounted otherwise. |
 | `/api/v1/agents/{session_id}/stream/_test/publish` | POST | human only, `DISPATCH_TEST_HOOKS=1` only | Feed the in-memory agent relay: one frame, `?as=replay` what a new agent view is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` ends every open agent view as `dropped`, so the page subscribes again and rebuilds from that replay; not mounted otherwise. |
 | `/api/v1/writes/_test/slow` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | `{method, path, delay_ms}`: every keyed run of that method and exact path waits `delay_ms` on its handler's context once its key is claimed (`503 SLOW_WRITE_CUT_OFF` when that context ends first); `delay_ms: 0` removes it; not mounted otherwise. |
-| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/ws/live` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. Every 15 s it sends its peer a keep-alive, an awareness update naming no client (`internal/dispatch/docs/keepalive.go`): `@hocuspocus/provider` closes a socket that has delivered no message for 30 s, ygo never echoes a peer's own awareness back to it, and a ping reaches no page, so without it an idle editor's socket closed and re-synced every 33 s. |
+| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/ws/live` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. ygo echoes a read-write peer's awareness renewal to its sender and gives a read-only peer a bounded empty awareness response, so an idle provider remains connected without Dispatch writing a keep-alive frame. |
 | `/ws/live` | GET | user or bearer | One live socket per browser tab. Each `subscribe` names a delivery, `events`, or human-only `agent` view; the socket replies on that subscription id with delivery snapshots/deltas/freshness, `events_start` and events, or agent responder/replay/frame data. An `events` resume is its decimal event id, and its `events_start` says `replay_complete: true` when that id is at or below the log's head, so every event after it is replayed before the subscription goes live, and `false` with no resume or one above the head; a delivery resume is its change and revisions; an agent view never resumes. Every quiet socket receives a `heartbeat` every `StreamHeartbeat` (15 s). It closes with 4001 (`max age`) at a random age in [30, 60) minutes, 1012 on restart, 1008 when the caller stops resolving, and 1013 when its hub queue fills. |
 
 ## Dispatch topics

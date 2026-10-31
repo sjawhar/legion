@@ -23,6 +23,21 @@ topic that holds its own NATS connection, as this one does, other than its sende
 error names each session that did not reply. Role messages are live only; they are not retained
 for a later claimant, and a session does not recover one it missed.
 
+This extension claims the role for the session the host has open, and every automatic claim is
+soft: it names the session it continues, which is a fork's or branch's parent, or the session
+this process last held the role under. The listener moves the role off that predecessor only
+when the predecessor has no live registration, when its live registration carries this extension
+instance's own client instance id, or when either side carries no instance id. A predecessor
+another process still runs keeps the role, and the claim is refused naming that holder. A refused
+session keeps running and stays registered, without the role: it does not claim again at each
+heartbeat, and it takes the role on its next session event once the holder is gone. Each
+extension instance mints its client instance id when it starts and sends it on every registration
+and on the deregistration at shutdown, where the listener removes the registration only while it
+carries the same id or none. The queues, deadlines and shared role state behind all of this are
+`src/registration-state.ts`, beside the extension's other `src/` modules: a queued task acts
+through a handle that refuses every step past the task's deadline, or once its session is no
+longer the open session.
+
 `envoy_list()` shows the union of the local subscriptions and the listener's persisted interest
 registry. Each reported interest identifies whether it is `live`, `registry`, or `both`, so
 temporary registration drift does not hide the extension's actual delivery state.
@@ -210,8 +225,10 @@ tools and `/whoami`, takes no inbound messages, connects to no NATS server, and 
 the claim before any listener call, so a Legion process fails its boot rather than hold a role
 whose tasks reach nobody. When a
 section is off for a reason worth saying, the session says so once at its start:
-`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, what a
-checkout's file holds that is not read, or that inbound messages are off and why. Invalid configuration, an
+`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the lost `DISPATCH_URL` when
+`DISPATCH_TOKEN_FILE` is set and no server is named (`DISPATCH_TOKEN_FILE is set and DISPATCH_URL
+is not, so Dispatch is off: …`, which every `dispatch` command also prints), the section's error,
+what a checkout's file holds that is not read, or that inbound messages are off and why. Invalid configuration, an
 invalid URL, or an empty token makes every `dispatch` command exit 2 naming the source of the error.
 
 `~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read. While the old

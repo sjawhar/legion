@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -135,17 +136,22 @@ type DispatchArgs struct {
 	// optional in the schema while the resolver is what requires it: a generated Go SDK emits a
 	// nil check in its constructor for every required input whose type can be nil, so a
 	// cluster-only consumer, which sets none of these, could not call the component at all while
-	// they stayed required. With clusterOnly off newDispatchSettings refuses each one missing, in
-	// the wording it always used; with clusterOnly on it refuses each one set.
+	// they stayed required. With clusterOnly off, four of the twelve — the digest-pinned images
+	// envoyImage and cloudSqlProxyImage, natsUrl and natsSeedSecret — every deployment sets, and
+	// newDispatchSettings refuses each one missing by name, in the wording it always used. The
+	// other eight are two groups, each set whole or left wholly unset: the tailnet group
+	// (dispatchTailnetInputs), which builds the front door and serves Dispatch at its tailnet
+	// name, and the sign-in group (dispatchSignInInputs), which runs people's browser sign-in.
+	// Both unset is the sandbox, which the resolver accepts; the tailnet group set with the
+	// sign-in group unset is a tailnet Dispatch that runs no browser sign-in, which it accepts
+	// too. A sign-in input sent with the tailnet group unset is refused for being sent at all
+	// (refuseDispatchSandbox). Otherwise a group set in part is refused by the per-input refusal
+	// it always gave, trailing one clause naming every input of that group still unset
+	// (dispatchGroupClause). With clusterOnly on the resolver refuses each of the twelve that
+	// is set.
 	TailnetDnsName string             `pulumi:"tailnetDnsName,optional"`
 	Tags           []string           `pulumi:"tags,optional"`
 	TailnetAuthKey pulumi.StringInput `pulumi:"tailnetAuthKey,optional" provider:"secret"`
-	// TailnetService is the Tailscale Service the front door's pods host, as Tailscale's API names
-	// it: svc:<hostname>, and once resolved anything else is refused. The consumer declares the
-	// Service (with an auto-approval for the tags) and passes its name output here, so the serve
-	// ConfigMap, and through it the front door's Deployment, waits for the Service: a node that
-	// advertises a Service before it exists is not approved when it appears.
-	TailnetService pulumi.StringInput `pulumi:"tailnetService,optional"`
 
 	EnvoyImage         string `pulumi:"envoyImage,optional"`
 	TailscaleImage     string `pulumi:"tailscaleImage,optional"`
@@ -190,7 +196,14 @@ type DispatchArgs struct {
 	// the default, or REGIONAL, a standby in a second zone that Cloud SQL fails over to. Switching
 	// changes the instance in place, restarting it once.
 	DatabaseAvailabilityType *string `pulumi:"databaseAvailabilityType,optional"`
-	Namespace                *string `pulumi:"namespace,optional"`
+	// DatabaseWaitsFor is a value of the resource whose update the Cloud SQL instance's must
+	// follow, so that a step of the consumer's own — deleting the old tailnet device before the
+	// front door comes back, for instance — runs before the instance restarts. The component never
+	// reads the value, and it reaches no resource: only the resources the value came from are
+	// used, which is what pulumi.DependsOnInputs reads off it. Unset, the instance's ordering is
+	// what it is today.
+	DatabaseWaitsFor pulumi.StringInput `pulumi:"databaseWaitsFor,optional"`
+	Namespace        *string            `pulumi:"namespace,optional"`
 	// ExistingNamespace: use the namespace as it exists in the cluster rather than creating it
 	// (another program owns the namespace).
 	ExistingNamespace *bool `pulumi:"existingNamespace,optional"`
@@ -233,6 +246,19 @@ type DispatchArgs struct {
 	// the largest. Unset renders nothing and both binaries set no limit, so a deployed stream keeps
 	// the one it has (bus.ParseStreamMaxBytes).
 	StreamMaxBytes *int `pulumi:"streamMaxBytes,optional"`
+
+	// SigningKeyGenerations is the ordered key set the server holds, the shape
+	// auth.ParseSigningKeys reads DISPATCH_SIGNING_KEY into: the first entry signs every new
+	// cookie and seals every new refresh token, and every entry verifies a cookie and opens a
+	// seal. Each entry is a generation, which names one generated key: generation 0 is
+	// <hostname>-signing-key, the key a running deployment already holds, and generation n above
+	// 0 is <hostname>-signing-key-<n>. Unset is [0], the single key this component has always
+	// registered. Only the generations the list names are registered, so one it drops is
+	// destroyed and that key cannot come back. A rotation is three applies, nobody signed out:
+	// [0] to [0, 1] adds the new key, which every process then verifies; [0, 1] to [1, 0] makes
+	// it the key every new cookie and seal is made with; and [1, 0] to [1] drops the old key once
+	// nothing made under it is left.
+	SigningKeyGenerations []int `pulumi:"signingKeyGenerations,optional"`
 
 	// AppCpu and appMemory size the app Deployment's envoy-dispatch container, as Kubernetes
 	// quantities set as both its request and its limit: 1 CPU and 4Gi by default. The pod's
@@ -406,9 +432,17 @@ type Dispatch struct {
 // preview. images.tools is frontDoorToolsImage. With clusterOnly set only hostname, region and
 // deletionProtection are resolved: no other field is read by the cluster the mode builds.
 // natsReplicas and streamMaxBytes are 0 when their inputs are unset, where the component renders
-// neither setting.
+// neither setting, and signingKeyGenerations is the generations the component registers a signing
+// key for, in the order the server holds them, [0] when its input is unset. frontDoor and
+// signInOn are the two groups of inputs a consumer sets together or not at all: frontDoor is set
+// when any tailnet input is, where the component builds the front door and Dispatch is reached at
+// its tailnet name, and signInOn when any sign-in input is, where the app runs browser sign-in.
+// With neither the component is the sandbox: Dispatch is reached in the cluster alone, by readers
+// the app's NetworkPolicy admits, and tailnetDNSName, tags, the tailscale and tools images and
+// signIn are empty, since nothing reads them.
 type dispatchSettings struct {
 	clusterOnly                                 bool
+	frontDoor, signInOn                         bool
 	hostname, tailnetDNSName, region, namespace string
 	tags                                        []string
 	images                                      struct{ envoy, tailscale, proxy, tools string }
@@ -423,6 +457,7 @@ type dispatchSettings struct {
 	frontDoorReplicas, listenerReplicas         int
 	natsInCluster                               bool
 	natsReplicas, streamMaxBytes                int
+	signingKeyGenerations                       []int
 	appResources                                dispatchAppResources
 	pprofPort                                   int
 	disruption                                  dispatchDisruption
@@ -437,6 +472,27 @@ func (s dispatchSettings) socks5Proxy() string {
 		return ""
 	}
 	return clusterLocal(s.hostname+"-tailnet", s.namespace) + ":" + strconv.Itoa(dispatchSOCKS5Port)
+}
+
+// clusterURL is the app's own Service inside the cluster, the address a caller already in the
+// cluster reaches Dispatch at: http because that Service terminates no TLS, on the 8766 it
+// publishes. It is what a sandbox tells a reader it is at (serverURL) and what the front door's
+// serve configuration forwards a tailnet request to, so both come from here and can never
+// disagree.
+func (s dispatchSettings) clusterURL() string {
+	return "http://" + clusterLocal(s.hostname, s.namespace) + ":8766"
+}
+
+// serverURL is the address Dispatch tells a reader it is at, the url output and the app's
+// DISPATCH_SERVER_URL: the tailnet name the front door hosts, or, in the sandbox, the app's own
+// Service inside the cluster, which is all there is to reach. It carries no trailing slash, it is
+// http in the sandbox because that Service terminates no TLS, and its port is the 8766 that
+// Service publishes. One derivation, so the output and the variable can never disagree.
+func (s dispatchSettings) serverURL() string {
+	if s.frontDoor {
+		return "https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)
+	}
+	return s.clusterURL()
 }
 
 // dispatchAzure is the Azure embedder's plain configuration, the zero value when
@@ -540,34 +596,56 @@ func dispatchStrategyFor(replicas int) dispatchStrategy {
 	}
 }
 
-// dispatchClusterOnlyInput is one row of the cluster-only refusal table: an input's schema name,
-// and whether the consumer set it. A plain string is set when it is not empty, a slice when it has
-// an element, and a pointer or a pulumi.*Input when it is not nil, as newDispatchAzure judges its
-// pointers and Inputs, so a value unknown at preview is set as it will be at update.
-type dispatchClusterOnlyInput struct {
+// dispatchInput is one input of a refusal table: the input's schema name, and whether the
+// consumer set it. A plain string is set when it is not empty, a slice when it has an element,
+// and a pointer or a pulumi.*Input when it is not nil, as newDispatchAzure judges its pointers
+// and Inputs, so a value unknown at preview is set as it will be at update.
+type dispatchInput struct {
 	input string
 	set   bool
+}
+
+// dispatchTailnetInputs is the tailnet group: every input that exists only because Dispatch has a
+// front door on a tailnet, from the name it is served at to the images its pods run. A consumer
+// sets all five, for a Dispatch readers reach over the tailnet, or none, for the sandbox, where no
+// front door is built and the app is reached inside its cluster alone. Each row's set-predicate is
+// written here and nowhere else, dispatchClusterOnlyRefusals taking the group from here, so the
+// resolver's mode, the refusals of a half-set group and clusterOnly's can never read an input two
+// ways. The rows are in the order a refusal names them in (dispatchGroupClause).
+func dispatchTailnetInputs(args *DispatchArgs) []dispatchInput {
+	return []dispatchInput{
+		{"tailnetDnsName", args.TailnetDnsName != ""},
+		{"tags", len(args.Tags) > 0},
+		{"tailnetAuthKey", args.TailnetAuthKey != nil},
+		{"tailscaleImage", args.TailscaleImage != ""},
+		{"frontDoorToolsImage", args.FrontDoorToolsImage != ""},
+	}
+}
+
+// dispatchSignInInputs is the sign-in group: the Google client Dispatch hands a browser to, and
+// the domain whose accounts it admits. All three or none, as the tailnet group; with none the app
+// runs no browser sign-in at all, which is what the sandbox is for. Written here alone, as the
+// tailnet group is.
+func dispatchSignInInputs(args *DispatchArgs) []dispatchInput {
+	return []dispatchInput{
+		{"signInClientId", args.SignInClientId != ""},
+		{"signInClientSecret", args.SignInClientSecret != nil},
+		{"signInDomain", args.SignInDomain != ""},
+	}
 }
 
 // dispatchClusterOnlyRefusals is every pulumi-tagged input of DispatchArgs that configures
 // Dispatch rather than the cluster, which clusterOnly refuses by name. Only the four inputs both
 // modes use are absent: clusterOnly itself, region and hostname, which name every cloud resource,
-// and deletionProtection, which guards the cluster as well as the database.
-func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchClusterOnlyInput {
-	return []dispatchClusterOnlyInput{
-		{"tailnetDnsName", args.TailnetDnsName != ""},
-		{"tags", len(args.Tags) > 0},
-		{"tailnetAuthKey", args.TailnetAuthKey != nil},
-		{"tailnetService", args.TailnetService != nil},
+// and deletionProtection, which guards the cluster as well as the database. The eight inputs of
+// the two groups come from the groups' own definitions, so an input either group gains is refused
+// here without being written down a second time.
+func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchInput {
+	return slices.Concat(dispatchTailnetInputs(args), dispatchSignInInputs(args), []dispatchInput{
 		{"envoyImage", args.EnvoyImage != ""},
-		{"tailscaleImage", args.TailscaleImage != ""},
 		{"cloudSqlProxyImage", args.CloudSqlProxyImage != ""},
-		{"frontDoorToolsImage", args.FrontDoorToolsImage != ""},
 		{"natsUrl", args.NatsUrl != nil},
 		{"natsSeedSecret", args.NatsSeedSecret != nil},
-		{"signInClientId", args.SignInClientId != ""},
-		{"signInClientSecret", args.SignInClientSecret != nil},
-		{"signInDomain", args.SignInDomain != ""},
 		{"agentSecretsUrl", args.AgentSecretsUrl != ""},
 		{"agentSecretsAudience", args.AgentSecretsAudience != ""},
 		{"appClientId", args.AppClientId != ""},
@@ -577,6 +655,7 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchClusterOnlyInput 
 		{"databaseVersion", args.DatabaseVersion != nil},
 		{"databaseTier", args.DatabaseTier != nil},
 		{"databaseAvailabilityType", args.DatabaseAvailabilityType != nil},
+		{"databaseWaitsFor", args.DatabaseWaitsFor != nil},
 		{"namespace", args.Namespace != nil},
 		{"existingNamespace", args.ExistingNamespace != nil},
 		{"replicas", args.Replicas != nil},
@@ -585,6 +664,7 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchClusterOnlyInput 
 		{"natsInCluster", args.NatsInCluster != nil},
 		{"natsReplicas", args.NatsReplicas != nil},
 		{"streamMaxBytes", args.StreamMaxBytes != nil},
+		{"signingKeyGenerations", len(args.SigningKeyGenerations) > 0},
 		{"appCpu", args.AppCpu != nil},
 		{"appMemory", args.AppMemory != nil},
 		{"proxyCpu", args.ProxyCpu != nil},
@@ -604,7 +684,115 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchClusterOnlyInput 
 		{"azureTenantId", args.AzureTenantId != nil},
 		{"azureClientId", args.AzureClientId != nil},
 		{"azureFederationAudience", args.AzureFederationAudience != nil},
+	})
+}
+
+// dispatchGroupSet reports whether the consumer set any input of group, which is what turns the
+// feature the group configures on: one input is enough, so a consumer who meant to set the group
+// and missed an input is refused by that group's own checks rather than silently given the mode
+// it did not ask for.
+func dispatchGroupSet(group []dispatchInput) bool {
+	return slices.ContainsFunc(group, func(in dispatchInput) bool { return in.set })
+}
+
+// dispatchGroupClause is the clause every refusal of one of feature's own inputs trails while the
+// group is set in part: the rule the consumer broke, then unset, every input of the group left
+// unset, comma-joined and in the group's order. One run then names the whole shortfall whatever
+// the refusal was about, the value an input carries or an input missing: the checks stop at the
+// first input that is wrong, and a consumer told about that one alone would correct it and be
+// refused again for the next. A whole group is missing nothing to name, so its clause is "".
+func dispatchGroupClause(feature string, group []dispatchInput) string {
+	unset := make([]string, 0, len(group))
+	for _, in := range group {
+		if !in.set {
+			unset = append(unset, in.input)
+		}
 	}
+	if len(unset) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (the %s inputs are set together or not at all; unset: %s)", feature, strings.Join(unset, ", "))
+}
+
+// refuseDispatchTailnetGroup judges the tailnet group alone: the tailnet name Dispatch is served
+// at, the tags its front-door nodes carry, the two images those pods run, held to the digest rule
+// the app's own images are held to, and the key the nodes join the tailnet with. It runs only
+// while that group is set, so the sandbox, which sets none of it, reaches none of these checks,
+// and every refusal trails clause, which names every tailnet input still unset
+// (dispatchGroupClause): a group set in part is refused for the first input that is wrong and
+// told the whole shortfall at once.
+func refuseDispatchTailnetGroup(args *DispatchArgs, clause string) error {
+	if !tailnetDNSNameRule.MatchString(args.TailnetDnsName) {
+		return fmt.Errorf("tailnetDnsName %q must match %s%s", args.TailnetDnsName, tailnetDNSNameRule, clause)
+	}
+	if len(args.Tags) == 0 {
+		return fmt.Errorf("tags: at least one tag is required%s", clause)
+	}
+	for i, tag := range args.Tags {
+		if !tagRule.MatchString(tag) {
+			return fmt.Errorf("tags[%d] %q must match %s%s", i, tag, tagRule, clause)
+		}
+	}
+	for _, image := range []struct{ field, ref string }{
+		{"tailscaleImage", args.TailscaleImage},
+		{"frontDoorToolsImage", args.FrontDoorToolsImage},
+	} {
+		if !imageRule.MatchString(image.ref) {
+			return fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>%s", image.field, image.ref, clause)
+		}
+	}
+	if args.TailnetAuthKey == nil {
+		return fmt.Errorf("tailnetAuthKey is required%s", clause)
+	}
+	return nil
+}
+
+// refuseDispatchSandbox judges what the sandbox cannot make good, and requires the two inputs the
+// mode needs. It runs only while the tailnet group is wholly unset, which is what asks for the
+// mode: no front door is built, so a sign-in input would ask an OAuth provider to redirect to an
+// in-cluster http:// address, frontDoorReplicas and frontDoorPdbMinAvailable size and protect a
+// Deployment that does not exist, the pods reach a NATS hub only inside their own cluster, and
+// the app's own policy is its only ingress. Each is refused by its own name rather than accepted
+// and quietly dropped. The sign-in inputs are refused here, before the sign-in group's own
+// checks, so one sent to a sandbox is refused for being sent at all and not for the rest of its
+// group being missing.
+func refuseDispatchSandbox(args *DispatchArgs, signInGroup []dispatchInput) error {
+	for _, in := range signInGroup {
+		if in.set {
+			return fmt.Errorf("%s configures browser sign-in, which needs the tailnet inputs: without them Dispatch is reached at an in-cluster http:// address, which no OAuth provider takes as a redirect origin, so no browser could sign in; unset the sign-in inputs, or set the tailnet inputs", in.input)
+		}
+	}
+	if args.NatsInCluster == nil || !*args.NatsInCluster {
+		return errors.New("natsInCluster is required without the tailnet inputs: the pods reach a tailnet NATS hub only through the front door's SOCKS5 proxy, and no front door is built, so the hub must run in the cluster")
+	}
+	if len(args.AllowedNamespaces) == 0 {
+		return errors.New("allowedNamespaces must name at least one namespace without the tailnet inputs: with no front door its rules are the app's only ingress, and a NetworkPolicy with no rule admits nobody, so nothing could reach Dispatch at all")
+	}
+	if args.FrontDoorReplicas != nil {
+		return errors.New("frontDoorReplicas sizes a front door, which is not built without the tailnet inputs: unset it, or set the tailnet inputs")
+	}
+	if args.FrontDoorPdbMinAvailable != nil {
+		return errors.New("frontDoorPdbMinAvailable covers a front door, which is not built without the tailnet inputs: unset it, or set the tailnet inputs")
+	}
+	return nil
+}
+
+// refuseDispatchSignInGroup judges the sign-in group alone: the Google client Dispatch hands a
+// browser to, the domain whose accounts it admits and that client's secret. It runs only while
+// that group is set, so a deployment that runs no browser sign-in reaches none of these checks,
+// and every refusal trails clause, which names every sign-in input still unset, as the tailnet
+// group's refusals do.
+func refuseDispatchSignInGroup(args *DispatchArgs, clause string) error {
+	if args.SignInClientId == "" {
+		return fmt.Errorf("signInClientId is required%s", clause)
+	}
+	if !signInDomainRule.MatchString(args.SignInDomain) {
+		return fmt.Errorf("signInDomain %q must be a lowercase DNS name%s", args.SignInDomain, clause)
+	}
+	if args.SignInClientSecret == nil {
+		return fmt.Errorf("signInClientSecret is required%s", clause)
+	}
+	return nil
 }
 
 // refuseDispatchHostname refuses a hostname that is not hostnameRule's shape. Both resolvers run
@@ -667,22 +855,28 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if err := refuseDispatchHostname(args.Hostname); err != nil {
 		return dispatchSettings{}, err
 	}
-	if !tailnetDNSNameRule.MatchString(args.TailnetDnsName) {
-		return dispatchSettings{}, fmt.Errorf("tailnetDnsName %q must match %s", args.TailnetDnsName, tailnetDNSNameRule)
+	// Each group is judged by its own function while it is set, and what the sandbox cannot make
+	// good by a third while the tailnet group is unset.
+	tailnetGroup, signInGroup := dispatchTailnetInputs(args), dispatchSignInInputs(args)
+	frontDoor, signInOn := dispatchGroupSet(tailnetGroup), dispatchGroupSet(signInGroup)
+	if frontDoor {
+		if err := refuseDispatchTailnetGroup(args, dispatchGroupClause("tailnet", tailnetGroup)); err != nil {
+			return dispatchSettings{}, err
+		}
+	} else if err := refuseDispatchSandbox(args, signInGroup); err != nil {
+		return dispatchSettings{}, err
 	}
-	if len(args.Tags) == 0 {
-		return dispatchSettings{}, errors.New("tags: at least one tag is required")
-	}
-	for i, tag := range args.Tags {
-		if !tagRule.MatchString(tag) {
-			return dispatchSettings{}, fmt.Errorf("tags[%d] %q must match %s", i, tag, tagRule)
+	if signInOn {
+		if err := refuseDispatchSignInGroup(args, dispatchGroupClause("sign-in", signInGroup)); err != nil {
+			return dispatchSettings{}, err
 		}
 	}
+	// The app's two images, which the app's pod runs in either mode: they belong to no group, so
+	// every consumer sets both and neither refusal trails a clause. The front door's two are the
+	// tailnet group's, held to this same digest rule by that group's own function.
 	for _, image := range []struct{ field, ref string }{
 		{"envoyImage", args.EnvoyImage},
-		{"tailscaleImage", args.TailscaleImage},
 		{"cloudSqlProxyImage", args.CloudSqlProxyImage},
-		{"frontDoorToolsImage", args.FrontDoorToolsImage},
 	} {
 		if !imageRule.MatchString(image.ref) {
 			return dispatchSettings{}, fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>", image.field, image.ref)
@@ -691,26 +885,11 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if err := refuseDispatchRegion(args.Region); err != nil {
 		return dispatchSettings{}, err
 	}
-	if args.SignInClientId == "" {
-		return dispatchSettings{}, errors.New("signInClientId is required")
-	}
-	if !signInDomainRule.MatchString(args.SignInDomain) {
-		return dispatchSettings{}, fmt.Errorf("signInDomain %q must be a lowercase DNS name", args.SignInDomain)
-	}
-	if args.TailnetAuthKey == nil {
-		return dispatchSettings{}, errors.New("tailnetAuthKey is required")
-	}
-	if args.TailnetService == nil {
-		return dispatchSettings{}, errors.New("tailnetService is required")
-	}
 	if args.NatsUrl == nil {
 		return dispatchSettings{}, errors.New("natsUrl is required")
 	}
 	if args.NatsSeedSecret == nil {
 		return dispatchSettings{}, errors.New("natsSeedSecret is required")
-	}
-	if args.SignInClientSecret == nil {
-		return dispatchSettings{}, errors.New("signInClientSecret is required")
 	}
 	if args.AgentSecretsAudience != "" && args.AgentSecretsUrl == "" {
 		return dispatchSettings{}, errors.New("agentSecretsUrl is required when agentSecretsAudience is set")
@@ -766,6 +945,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 
 	s := dispatchSettings{
+		frontDoor:       frontDoor,
+		signInOn:        signInOn,
 		hostname:        args.Hostname,
 		tailnetDNSName:  args.TailnetDnsName,
 		region:          args.Region,
@@ -838,6 +1019,9 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, core.InputErrorf("streamMaxBytes", "streamMaxBytes %d is below 1; leave it unset for no limit", limit)
 		}
 		s.streamMaxBytes = *args.StreamMaxBytes
+	}
+	if s.signingKeyGenerations, err = newDispatchSigningKeyGenerations(args); err != nil {
+		return dispatchSettings{}, err
 	}
 	if s.appResources, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
@@ -922,6 +1106,45 @@ func newDispatchPprofPort(args *DispatchArgs) (int, error) {
 		return 0, fmt.Errorf("pprofPort %d is the cloud-sql-proxy sidecar's port in the same pod; choose another, such as 6060", port)
 	}
 	return port, nil
+}
+
+// newDispatchSigningKeyGenerations resolves signingKeyGenerations, the generations the component
+// registers a signing key for and the order the server holds them in: [0] when the input is unset
+// or empty, which is the single key this component has always registered, since generation 0
+// keeps the name <hostname>-signing-key and is never replaced. A generation above 0 is a key of
+// its own, <hostname>-signing-key-<n>, and only the generations the list names are registered, so
+// one the list drops is destroyed and that key cannot come back.
+//
+// Two refusals, both before any resource is registered. A negative generation names no resource.
+// A repeated generation would render the same key twice, which parseSettingEntries refuses at the
+// server's boot, so it is refused here rather than shipped as a Secret no pod can start on.
+//
+// The resolver sees one state and never the one before it, so the rest is what an operator keeps
+// and the component cannot refuse:
+//   - [0] to [1] with no add step. Every process refuses to start beside a live one whose key set
+//     does not share its current key both ways (processes.keySetsShared), and at one replica,
+//     whose Deployment strategy is Recreate, the running pod is gone before the new one starts,
+//     so that apply signs everyone out rather than being refused.
+//   - [0, 1] to [1], the same skip from the other end: the old key is dropped in the very apply
+//     that promotes the new one.
+//   - dropping the old generation sooner than 30 days after the promote, a session cookie's life
+//     (auth's sessionMaxAgeSeconds): every cookie and every refresh token still under that key
+//     dies with it.
+//   - a rollback to a generation the list already dropped, whose key the random provider
+//     destroyed and which no later apply brings back.
+func newDispatchSigningKeyGenerations(args *DispatchArgs) ([]int, error) {
+	if len(args.SigningKeyGenerations) == 0 {
+		return []int{0}, nil
+	}
+	for i, generation := range args.SigningKeyGenerations {
+		switch {
+		case generation < 0:
+			return nil, core.InputErrorf("signingKeyGenerations", "signingKeyGenerations[%d] is generation %d, which names no resource: a generation is 0, the key a running deployment already holds, or a number above it", i, generation)
+		case slices.Contains(args.SigningKeyGenerations[:i], generation):
+			return nil, core.InputErrorf("signingKeyGenerations", "signingKeyGenerations[%d] repeats generation %d, which would render the same key twice; the server refuses a repeated DISPATCH_SIGNING_KEY entry at boot", i, generation)
+		}
+	}
+	return args.SigningKeyGenerations, nil
 }
 
 // dispatchReplicas resolves one Deployment's replica count, input, to fallback when it is unset,
@@ -1187,6 +1410,13 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 			return nil, err
 		}
 	}
+	// Only the front door declares Dispatch's Tailscale Service, so a consumer that builds none —
+	// the sandbox, and clusterOnly, which leave the mode off — declares no tailscale provider.
+	if s.frontDoor {
+		if err := providers.Require(ctx.Context(), dispatchType, "tailscale", opts...); err != nil {
+			return nil, err
+		}
+	}
 
 	comp := &Dispatch{}
 	if err := ctx.RegisterComponentResource(dispatchType, name, comp, opts...); err != nil {
@@ -1219,7 +1449,7 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 	comp.DatabaseInstance = database.instance.ConnectionName
 	comp.Principal = database.principal
 	comp.AgentToken = database.agentToken.Result
-	comp.Url = pulumi.String("https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)).ToStringOutput()
+	comp.Url = pulumi.String(s.serverURL()).ToStringOutput()
 	// The app's and the listener's pods run as ServiceAccount <hostname> in the component's
 	// namespace, the account newDispatchKubernetes registers, and Kubernetes names a token's subject
 	// after it. The front door's pods run as <hostname>-tailnet, which this subject never names.

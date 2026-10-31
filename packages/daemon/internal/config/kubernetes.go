@@ -93,6 +93,11 @@ type Kubernetes struct {
 	// RepositoryCache is `runtime.kubernetes.repository_cache`, settled: the file's members where it
 	// sets them and the defaults (DefaultRepositoryCache) for the rest, field by field.
 	RepositoryCache RepositoryCacheConfig
+	// TestPostgres is `runtime.kubernetes.test_postgres`: every issue pod serves its own
+	// PostgreSQL for tests, started by the roles container's launcher and named to every role of
+	// the pod as LEGION_TEST_PG_DSN, so no agent points a test at the deployment's own databases.
+	// False when the file sets none. It needs an image carrying /usr/local/bin/legion-testpg.
+	TestPostgres bool
 }
 
 // RepositoryCacheConfig is `runtime.kubernetes.repository_cache`: the volume each repository's
@@ -446,7 +451,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup")
+		"session_database", "role_profiles", "agent_secrets", "plugins", "repository_cache", "setup", "test_postgres")
 	if err != nil {
 		return nil, err
 	}
@@ -510,10 +515,28 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Setup, err = readSetup(fields["setup"]); err != nil {
 		return nil, err
 	}
+	if block.TestPostgres, err = readTestPostgres(fields["test_postgres"]); err != nil {
+		return nil, err
+	}
 	if block.RepositoryCache, err = readRepositoryCache(fields["repository_cache"]); err != nil {
 		return nil, err
 	}
 	return block, nil
+}
+
+// readTestPostgres reads `runtime.kubernetes.test_postgres`, false when absent: whether every
+// issue pod serves its own PostgreSQL for tests. Only true or false, since the key turns one
+// thing on, and `false` reads as the default so an operator can write the key out.
+func readTestPostgres(value *yaml.Node) (bool, error) {
+	const key = kubernetesKey + ".test_postgres"
+	if value == nil {
+		return false, nil
+	}
+	var on bool
+	if value.Tag != "!!bool" || value.Decode(&on) != nil {
+		return false, fmt.Errorf("%s must be true or false", key)
+	}
+	return on, nil
 }
 
 // readSetup reads `runtime.kubernetes.setup`, an argv of non-empty strings (readStrings), nil when

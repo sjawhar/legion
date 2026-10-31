@@ -101,33 +101,30 @@ func TestDispatchClusterOnlyPassesDeletionProtectionToTheCluster(t *testing.T) {
 	}
 }
 
-// dispatchClusterOnlyRefusal is one row of the refusal table: the input's schema name, and what
-// sets that input alone on a valid cluster-only DispatchArgs.
-type dispatchClusterOnlyRefusal struct {
+// dispatchInput is one row of an input table: the input's schema name, and what sets that input,
+// and nothing else, to a value a consumer would plausibly send. A row is applied to whatever
+// DispatchArgs a test hands it, alone on a cluster-only fixture here and on top of other inputs
+// in the sandbox's own tables, so it never assumes what the rest of the arguments hold.
+type dispatchInput struct {
 	input string
 	set   func(*gcp.DispatchArgs)
 }
 
 // dispatchClusterOnlyRefusals is every input the cluster-only mode refuses, one row each, holding
-// a value a consumer would plausibly send. TestDispatchEveryInputIsLiveOrRefusedUnderClusterOnly
-// holds the table complete against DispatchArgs itself.
-func dispatchClusterOnlyRefusals() []dispatchClusterOnlyRefusal {
-	return []dispatchClusterOnlyRefusal{
-		{"tailnetDnsName", func(a *gcp.DispatchArgs) { a.TailnetDnsName = "example-tailnet.ts.net" }},
-		{"tags", func(a *gcp.DispatchArgs) { a.Tags = []string{"tag:example-dispatch"} }},
-		{"tailnetAuthKey", func(a *gcp.DispatchArgs) { a.TailnetAuthKey = pulumi.String("tskey-auth-example-0123456789") }},
-		{"tailnetService", func(a *gcp.DispatchArgs) { a.TailnetService = pulumi.String("svc:example-dispatch") }},
+// a value a consumer would plausibly send. The eight rows of the tailnet and sign-in groups come
+// from the groups' own tables, which are where those values are written
+// (dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup), so a group that gains an input is
+// refused here without that input being written down a second time.
+// TestDispatchEveryInputIsLiveOrRefusedUnderClusterOnly holds the table complete against
+// DispatchArgs itself.
+func dispatchClusterOnlyRefusals() []dispatchInput {
+	return slices.Concat(dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup, []dispatchInput{
 		{"envoyImage", func(a *gcp.DispatchArgs) { a.EnvoyImage = dispatchEnvoyImage }},
-		{"tailscaleImage", func(a *gcp.DispatchArgs) { a.TailscaleImage = dispatchTailscaleImage }},
 		{"cloudSqlProxyImage", func(a *gcp.DispatchArgs) { a.CloudSqlProxyImage = dispatchProxyImage }},
-		{"frontDoorToolsImage", func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = dispatchToolsImage }},
 		{"natsUrl", func(a *gcp.DispatchArgs) { a.NatsUrl = pulumi.String("nats://example-hub.example-tailnet.ts.net:4222") }},
 		{"natsSeedSecret", func(a *gcp.DispatchArgs) {
 			a.NatsSeedSecret = pulumi.String("projects/example-project/secrets/example-nats-seed")
 		}},
-		{"signInClientId", func(a *gcp.DispatchArgs) { a.SignInClientId = "example-client-id" }},
-		{"signInClientSecret", func(a *gcp.DispatchArgs) { a.SignInClientSecret = pulumi.String("example-client-secret") }},
-		{"signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = "example.com" }},
 		{"agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://example-broker.internal.example" }},
 		{"agentSecretsAudience", func(a *gcp.DispatchArgs) { a.AgentSecretsAudience = "example-broker-audience" }},
 		{"appClientId", func(a *gcp.DispatchArgs) { a.AppClientId = "example-app-client-id" }},
@@ -137,6 +134,7 @@ func dispatchClusterOnlyRefusals() []dispatchClusterOnlyRefusal {
 		{"databaseVersion", func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef("POSTGRES_18") }},
 		{"databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef("db-custom-4-15360") }},
 		{"databaseAvailabilityType", func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef("REGIONAL") }},
+		{"databaseWaitsFor", func(a *gcp.DispatchArgs) { a.DatabaseWaitsFor = pulumi.String("example-ordering-value") }},
 		{"namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef("example-namespace") }},
 		{"existingNamespace", func(a *gcp.DispatchArgs) { a.ExistingNamespace = pulumi.BoolRef(true) }},
 		{"replicas", func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(2) }},
@@ -145,6 +143,7 @@ func dispatchClusterOnlyRefusals() []dispatchClusterOnlyRefusal {
 		{"natsInCluster", func(a *gcp.DispatchArgs) { a.NatsInCluster = pulumi.BoolRef(true) }},
 		{"natsReplicas", func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(dispatchNatsReplicas) }},
 		{"streamMaxBytes", func(a *gcp.DispatchArgs) { a.StreamMaxBytes = pulumi.IntRef(dispatchStreamMaxBytes) }},
+		{"signingKeyGenerations", func(a *gcp.DispatchArgs) { a.SigningKeyGenerations = []int{0, 1} }},
 		{"appCpu", func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1") }},
 		{"appMemory", func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4Gi") }},
 		{"proxyCpu", func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("1") }},
@@ -166,7 +165,7 @@ func dispatchClusterOnlyRefusals() []dispatchClusterOnlyRefusal {
 		{"azureFederationAudience", func(a *gcp.DispatchArgs) {
 			a.AzureFederationAudience = pulumi.StringRef("api://AzureADTokenExchange")
 		}},
-	}
+	})
 }
 
 // Every input that configures Dispatch rather than the cluster is refused by name when it arrives

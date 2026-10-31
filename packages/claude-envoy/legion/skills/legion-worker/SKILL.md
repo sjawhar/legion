@@ -14,7 +14,7 @@ You work one phase of one issue in a jj workspace every role of the issue shares
 1. **Read first.** Read the issue, then each committed handoff before your phase, with `read` from `$LEGION_WORKSPACE/.legion/<issue>/`, in order: `plan.json`, `implement.json`, `test.json`, `review.json`. Where one disagrees with your memory or a transcript, the file wins: it is the copy that survived. At each later assignment read them again, your own included, since other phases may have committed since. After a `Your workspace was recreated…` message, anything unpushed is gone, and no file in the workspace says so.
 2. **Commit only your phase's work**, with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`, each commit holding only your phase's paths, so the next phase sees what you changed.
 3. **Put back what you copied in.** Before you write the handoff, run `jj -R "$LEGION_WORKSPACE" status` and remove or restore every file you copied or fetched in that is not your phase's work, such as another branch's test rig. With jj the working copy is the commit: the next role's first commit builds on what you left, and its push ships it.
-4. **Write the handoff** your role prompt names. Each `proof` entry, the implementer's or the tester's, is an object of six non-empty strings: `criterion` (the acceptance line it proves), `surface` (where a user reaches the change), `command`, `observed`, `headSha` (the commit it ran at) and `negativeControl` (a deliberately broken input and the refusal seen); `skill://legion-worker/references/pr-body.md#what-a-proof-is` defines each. To add to a handoff already on disk, `read` it, edit it, and `write` it whole with `completed` set to now.
+4. **Write the handoff** your role prompt names. Each `proof` entry, the implementer's or the tester's, is an object of six non-empty strings: `criterion` (the acceptance line it proves), `surface` (where a user reaches the change), `command`, `observed`, `headSha` (the commit it ran at) and `negativeControl` (a deliberately broken input and the refusal seen); `skill://legion-worker/references/pr-body.md#what-a-proof-is` defines each. To add to a handoff already on disk, `read` it, edit it, read `previousHandoff` again as your role prompt says, and `write` it whole.
 5. **Push, then complete**, as the push section below says. `handoff_complete` is your only way to end a phase: add no label, keep no status of your own and run no loop of your own, since the daemon owns the issue's state and the architect its decomposition and gates.
 
 ## Stop rules
@@ -36,13 +36,14 @@ Read each by its `skill://` link: a read by path stops at 300 lines.
 | You write or edit the PR body, record or verify a proof, or run the simplify pass | `skill://legion-worker/references/pr-body.md` |
 | Before a push, to check your commits' App identity | `skill://legion-worker/references/default-branch-check.md` |
 | You reply on, list or resolve review threads, or judge a bot's finding | `skill://legion-worker/references/review-threads.md` |
-| A conflict, a need only the base meets, a retarget, comparing heads after a forward merge, or rewriting a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
+| A conflict, a need only the base meets, a retarget, a parent's last round, comparing heads after a forward merge, or rewriting a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
 | You write the `skip-checks: true` trailer, or expect a body edit to re-run a check | `skill://legion-worker/references/skip-checks-trailer.md` |
 | You review or approve, build READY, or run the production check | `skill://legion-worker/references/merge-gate.md` |
 | The issue renames a repository, package, or URL across the codebase | `skill://legion-worker/references/systematic-rename.md` |
 | The issue deletes code, a command, or documentation | `skill://legion-worker/references/cleanup-deletion.md` |
-| You need a tool the image may not carry, before you install anything; before you measure Oh My Pi's binary; or a test fails in your pod | `skill://legion-worker/references/tools.md` |
+| You need a tool the image may not carry, before you install anything; before you measure Oh My Pi's binary; or a test fails in your pod or needs a database | `skill://legion-worker/references/tools.md` |
 | A problem outside your issue, or a failed production check | `skill://legion-worker/references/findings.md` |
+| Your text would reach a person outside the company: a comment, issue or pull request on a repository the company does not own, an email, a message to another project's maintainers | `skill://outside-message` |
 
 ## Every role pushes its own commits
 
@@ -62,4 +63,4 @@ Read each by its `skill://` link: a read by path stops at 300 lines.
 
 ## Deployment instructions
 
-Deployment instructions in your prompt override this skill where they conflict, except four rules: no deferrals; bringing the base into the branch only on a real conflict, a need only the base meets, or a retarget (`skill://legion-worker/references/conflicts-and-rewrites.md#reintegrating-the-base`); the implementer's own proof on a production-like surface at the head that merges, an applied simplify head included (`skill://legion-worker/references/pr-body.md#what-a-proof-is`, `skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the implementer's production check after the close (`skill://legion-worker/references/merge-gate.md#the-production-check-after-the-close`).
+Deployment instructions in your prompt override this skill where they conflict, except four rules: no deferrals; bringing the base into the branch only on a real conflict, a need only the base meets, a retarget, or a parent's last round (`skill://legion-worker/references/conflicts-and-rewrites.md#reintegrating-the-base`); the implementer's own proof on a production-like surface at the head that merges, an applied simplify head included (`skill://legion-worker/references/pr-body.md#what-a-proof-is`, `skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the implementer's production check after the close (`skill://legion-worker/references/merge-gate.md#the-production-check-after-the-close`).
