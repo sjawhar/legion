@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-839",
+  "completed": "2026-10-31T02:55:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's own command independently in this workspace at 824a9b0a (code identical to a44186d01569 outside .legion/): `bash packages/envoy/scripts/e2e-local.sh` exited 0 with `unclaimed-role window: kept message c754744e7a6434ad76fa85a4098a1d7f reached the fake session exactly once, carrying kept_at`, `lapsed-claim window: kept message dc00cee91bab988623b6e7bd0467daaf reached the fake session exactly once, carrying kept_at`, `keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing`, and both PASS lines. out/e2e/unheld-role-response.json read 202 {\"kept\":true,\"kept_reason\":\"unclaimed\"}, lapsed-role-response.json 202 {\"holder\":\"ses_e2e_local\",\"kept\":true,\"kept_reason\":\"holder_lapsed\"}, held-role-response.json 200 with no kept field. Each acceptance line was then driven again on surfaces of the tester's own (a rig under $TMPDIR driving the real listener binary, a real NATS and a real session process; the real envoy-client; the daemon's own notify.HTTPPublisher), so no pass rests on the implementer's script alone."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "The merge gate: the reviewer reads CI at the tested head, and the merger needs a head GitHub can merge. Nothing static has been read for this change.",
+      "evidence": "Pull request #2588 conflicts with its base. `gh api repos/sjawhar/legion/pulls/2588` reads {\"mergeable\":false,\"mergeable_state\":\"dirty\",\"base\":\"0d71712bd594344706b3c8d247e7896e49450822\",\"head\":\"824a9b0a6a0317b9c8c49b7196a5572de1ac6b6e\"}: the base branch legion/INFRA-594 moved from 80053e29c957 (the commit the PR body freezes) to 0d71712bd594. `git merge-tree --write-tree --name-only 0d71712bd594 824a9b0a6a03` in a clone of this repository exits 1 with one conflicted path: `CONFLICT (content): Merge conflict in packages/envoy/internal/bus/nats.go`. GitHub computes no merge ref for a conflicting head and runs no checks on it at all, so no lane has ever run on this change: `gh pr checks 2588 --repo sjawhar/legion` -> `no checks reported on the 'legion/INFRA-839' branch`; `gh run list --repo sjawhar/legion --branch legion/INFRA-839 --limit 50 --json databaseId --jq length` -> `0`; `gh api repos/sjawhar/legion/commits/824a9b0a.../check-runs` and the same for a44186d01569 -> no check runs; the combined status reads {\"state\":\"pending\",\"total_count\":0}. The base branch itself is not the cause: its own head 11e3586615d1 has CI `completed success`, so lanes do run on this base. No red test can pin a branch state; the fix is the sanctioned forward merge of the base (`skill://legion-worker/references/conflicts-and-rewrites.md`, a real conflict), after which CI runs and a fingerprint re-check decides whether this round's real-surface verification stands."
+    },
+    {
+      "criterion": "Acceptance 3: a sender can ask not to be kept, and the Legion daemon does, so Envoy and the daemon never both keep one message.",
+      "evidence": "It holds for this release and breaks across two, and nothing in the change records the release order. Measured live against one new listener (built from this head) with a Postgres-free rig under $TMPDIR: this branch's daemon publisher (packages/daemon/internal/notify.HTTPPublisher.Publish, built from this head and called exactly as the outbox calls it) got `listener returned 404 Not Found: {\"error\":\"no holder for role t-daemon\",\"reason\":\"unclaimed\"}` and `errors.Is(err, notify.ErrNoHolder) = true`, and the kept lane held nothing for that role (`notifications.envoy.kept.role.t-daemon`: no message found). The previous release's publisher, built from this branch's base 80053e29c957, whose notify.go carries no Keep field, got `listener returned 202 Accepted: {... \"kept\":true,\"kept_reason\":\"unclaimed\"}` and `errors.Is(err, notify.ErrNoHolder) = false`, and `notifications.envoy.kept.role.t-daemon-old` then held that very message. So a deployment that releases the Envoy listener before the legion binary has both keepers at once: the daemon's outbox holds the row (the 202 is not ErrNoHolder, so the row takes neither the unheld path nor success) while Envoy also hands the message to the role's next holder. The Envoy listener and the legion binary are separate releases (`.github/workflows/release-envoy-listener.yaml`, `release.yaml`), so the order is a deployment choice nothing here constrains. No test in this tree can pin it, since it needs a binary of another release, and a test that read a workflow file would be the check-of-a-check the deployment instructions forbid; the remedy is one sentence of release order in the pull request body and in the envoy changelog fragment, or a listener-side change the architect chooses."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "Acceptance 1: a role message the listener cannot deliver is kept outside the role lanes and forwarded once, in order, when a session claims the role; a listener of the previous release started against the new stream state still starts.",
+      "surface": "The real envoy-listener binary built from this head, a real NATS server (internal/testnats/cmd/natsd) and a real session process, driven over the listener's HTTP API; then the previous release's listener binary built from this branch's base 80053e29c957 against that same NATS and stream.",
+      "command": "bash $TMPDIR/tester/drive.sh $TMPDIR/tester/bin/listener-new $TMPDIR/tester/run-new4 normal ; bash $TMPDIR/tester/rollback.sh",
+      "observed": "Three publishes to an unheld role each answered 202 with {\"kept\":true,\"kept_reason\":\"unclaimed\"}; after one POST /v1/roles/set the holder's prompt log held them at lines 1, 2, 3 in publish order, each exactly once; a second claim of the same role added nothing (3 prompts before, 3 after). Rollback: the new listener left the stream subjects [\"notifications.agent.>\",\"notifications.dispatch.>\",\"notifications.envoy.exceptions.notifications.agent.>\",\"notifications.envoy.kept.>\",\"notifications.ghostwispr.>\",\"notifications.github.>\",\"notifications.legion.>\",\"notifications.slack.>\",\"notifications.whatsapp.>\"] and two kept messages; the previous-release binary then started on that state, logged `envoy-listener ready`, answered /healthz {\"status\":\"healthy\"} and left the kept subject in place; after it stopped, the new listener delivered both kept messages to the role's next holder (2 of 2).",
+      "headSha": "824a9b0a6a0317b9c8c49b7196a5572de1ac6b6e",
+      "negativeControl": "The same unheld-role publish against that previous-release listener, on the same live stack: HTTP 404 {\"error\":\"no holder for role t-roll\",\"reason\":\"unclaimed\"}, and 404 again when the request carried keep:true, which that build does not read. On the real production surface, `envoy_publish(topic=\"notifications.role.legion-infra-infra-839-nobody-holds-this\")` from this session against the deployed listener was refused `no holder for role legion-infra-infra-839-nobody-holds-this`."
+    },
+    {
+      "criterion": "Acceptance 2, both live windows: a role message published with no holder reaches the next holder's session once; one published while the claim has lapsed reaches the next claimant once.",
+      "surface": "packages/envoy/scripts/e2e-local.sh — the real listener binary, a real NATS server and a real session process on a serving port, the implementer's own rig re-run independently in this workspace.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash packages/envoy/scripts/e2e-local.sh",
+      "observed": "Exit 0. `unclaimed-role window: kept message c754744e7a6434ad76fa85a4098a1d7f reached the fake session exactly once, carrying kept_at`; `lapsed-claim window: kept message dc00cee91bab988623b6e7bd0467daaf reached the fake session exactly once, carrying kept_at`; out/e2e/held-role-response.json HTTP 200 {\"holder\":\"ses_e2e_local\"} with no kept field, so none of the three answers can be read for another.",
+      "headSha": "824a9b0a6a0317b9c8c49b7196a5572de1ac6b6e",
+      "negativeControl": "The run's own keep-false control: HTTP 404 {\"error\":\"no holder for role e2e-unkept\",\"reason\":\"unclaimed\"}, nothing stored on the bus, its claimant handed nothing. Against the previous release on a live stack of the tester's own, the unheld publish answered 404 and nothing was delivered (proof 1's negative control)."
+    },
+    {
+      "criterion": "Acceptance 2: a kept message older than 1 hour when the role is claimed is not forwarded, and is dropped and counted.",
+      "surface": "The same live rig, on a test build whose keep window is shortened: a clone of this head at $TMPDIR with `const roleKeepWindow = 3 * time.Second` in place of `time.Hour` in packages/envoy/cmd/listener/role_keep.go, and nothing else changed. Stated here because an hour cannot be waited out: the age is the stream's own store time, which no caller chooses.",
+      "command": "bash $TMPDIR/tester/drive.sh $TMPDIR/tester/bin/listener-shortwin $TMPDIR/tester/run-short2 shortwin",
+      "observed": "The publish was kept (202, event c486e2b2df1799731ed50a0252cf86f1); after 8 seconds the role was claimed; the holder was handed nothing for it; envoy_role_kept_expired_total moved 0 -> 1; the listener logged exactly `listener dropped a kept role message older than the keep window` with session_id ses_tester_rig, topic notifications.role.t-stale, delivery_status expired, role t-stale, age 8.05392618s.",
+      "headSha": "824a9b0a6a0317b9c8c49b7196a5572de1ac6b6e",
+      "negativeControl": "The same run's three messages kept inside the shortened window, claimed at once: all three were forwarded, in order, exactly once. So the drop is the age and not the build: the same binary forwards what is young and drops what is old."
+    },
+    {
+      "criterion": "Acceptance 2: a forwarded kept message carries the time it was kept, so the holder can judge it.",
+      "surface": "The envelope on the holder's agent subject, read from NATS, and the delivery card the agent itself reads — @legion/envoy-client's renderInbound, the function pi-envoy's and claude-envoy's delivery path calls.",
+      "command": "bash $TMPDIR/tester/drive.sh $TMPDIR/tester/bin/listener-new $TMPDIR/tester/run-new4 normal ; bun $TMPDIR/tester/client-202.ts <listener url>",
+      "observed": "Each of the three forwards on notifications.agent.ses_tester_rig carried kept_at (1793414691605, 1793414691682, 1793414691759) with topic notifications.role.t-order, while the stored copy on notifications.envoy.kept.role.t-order carried none, so the stamp is the forward's. renderInbound of such an envelope prints the card an agent reads with the line `kept_at: \"2026-10-31T02:51:03Z\"` beside `at:`.",
+      "headSha": "824a9b0a6a0317b9c8c49b7196a5572de1ac6b6e",
+      "negativeControl": "The assertion fails closed on the copy that must not carry it: the rig refuses the run if the stored kept copy carries kept_at, and refuses it if any forward does not."
+    },
+    {
+      "criterion": "Acceptance 3: a sender can ask not to be kept (keep: false), and the Legion daemon does.",
+      "surface": "The listener's publish route over HTTP, the real @legion/envoy-client a session's envoy_publish calls, and packages/daemon/internal/notify.HTTPPublisher.Publish — the daemon's own code, built from this head and called as the outbox calls it, against a live listener.",
+      "command": "bash $TMPDIR/tester/daemon-notify.sh",
+      "observed": "The daemon publisher: `listener returned 404 Not Found: {\"error\":\"no holder for role t-daemon\",\"reason\":\"unclaimed\"}` and `errors.Is(err, notify.ErrNoHolder) = true`; the kept lane held nothing for that role. Through the client: a keep:false publish threw `no holder for role t-client-unkept`, and a kept publish came back a success with kept=true, keptReason=\"unclaimed\", rendered by the shared tool text both plugins print as `published <id>; kept for the role: no session holds it yet, and the message waits for the session that claims it next`.",
+      "headSha": "824a9b0a6a0317b9c8c49b7196a5572de1ac6b6e",
+      "negativeControl": "The same role without keep:false on the same live listener answers 202 and the message is kept, which is what the daemon's keep:false turns off; and the previous release's publisher, which sends no keep field, gets that 202 (recorded as the second failure above)."
+    },
+    {
+      "criterion": "Acceptance 4: the rule that none is kept for a later claimant is rewritten to the new rule everywhere it is stated.",
+      "surface": "The tree an agent and the public documentation site read.",
+      "command": "grep -rn \"none is stored for a later claimant|An unheld role returns an error|no live session holds the role, the publish fails|none is kept for a later claimant|A role message is not kept for a later claimant\" packages skills docs --include='*.md'",
+      "observed": "No hits. The new rule is stated where the old one stood: packages/envoy/AGENTS.md:2844 (\"A role message no live holder can take is kept for the role's next holder (cmd/listener/role_keep.go), on a stored subject of the listener's own, notifications.envoy.kept.role.<role>\"), skills/envoy/SKILL.md:68, skills/envoy/references/deliveries.md:59, and docs/site/src/content/docs/dispatch/envoy.md:14-15,149,163-170, which names the 202, kept: true and both kept_reason values.",
+      "headSha": "824a9b0a6a0317b9c8c49b7196a5572de1ac6b6e",
+      "negativeControl": "The one remaining hit for the old wording is packages/claude-envoy/legion/skills/legion-worker/references/findings.md:78, the generated copy the claude-envoy rebuild workflow writes on main after the merge; its source, skills/legion-worker/references/findings.md, is rewritten. The grep that found it is the control that the search terms do match the old wording."
+    },
+    {
+      "criterion": "Acceptance 5 (folded from INFRA-119): one listener received line and one messages_received increment per role-lane message, and the message still reaches the session exactly once.",
+      "surface": "A role message published straight onto core NATS, the transport the role lane serves, with the listener's own /metrics endpoint scraped over HTTP.",
+      "command": "bash $TMPDIR/tester/drive.sh $TMPDIR/tester/bin/listener-new $TMPDIR/tester/run-new4 normal",
+      "observed": "One core-NATS publish to an unheld role: envoy_messages_received_total{source=\"agent\",topic_prefix=\"notifications.role\"} moved 0 -> 1 and exactly one `listener received` line named the event; the message was kept on notifications.envoy.kept.role.t-lane and that kept copy added no second record. After the claim forwarded it, the counter still read 1, the `listener received` lines still numbered 1, the holder had been pushed exactly 1 prompt for it, and no notifications.envoy.exception.* envelope named it.",
+      "headSha": "824a9b0a6a0317b9c8c49b7196a5572de1ac6b6e",
+      "negativeControl": "The rig refuses the run if the counter moves by anything but 1 or if a second `listener received` line names the event, and it read 0 for both before the publish, so the 1 is this message's. The three HTTP-route publishes earlier in the same run left the counter at 0 throughout, which is the route's own path and not the lane's."
+    }
+  ],
+  "ciRead": "None. No lane has ever run on legion/INFRA-839: gh pr checks 2588 reports `no checks reported on the 'legion/INFRA-839' branch`, gh run list for that branch returns 0 runs, and the check-runs endpoint is empty at both 824a9b0a6a03 and a44186d01569. The cause is the conflicting head (first failure above), not the stacked base: the base branch's own head 11e3586615d1 has CI `completed success`, so ci.yaml does run on this base. The full CI read waits for the forward merge.",
+  "notRun": "Nothing static was re-run here: lint, typecheck, the Go and Bun suites and the docs-site build are CI's lanes, read on GitHub, and none exists to read yet."
+}
