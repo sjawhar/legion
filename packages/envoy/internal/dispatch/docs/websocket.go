@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"path"
 	"strings"
@@ -63,18 +64,22 @@ type servicePersistenceAdapter struct {
 	service *Service
 }
 
-// LoadDoc is the durable state a room loads. It records the load before it reads, and the head it
-// read after: the room's load (onLoadDocument) takes the record next on the same goroutine (ygo's
+// LoadDoc is the durable state a room loads. It records the load before it reads, and what it read
+// after: the room's load (onLoadDocument) takes the record next on the same goroutine (ygo's
 // loadRoom) to start the instance's roomHold and its cursor, and a version this process appends
 // between the two reaches that instance through the record (roomLoad) rather than no instance at
 // all. The read itself takes no advisory lock - a durable writer holds that one across its whole
 // transaction, and a load that waited for it would wedge a write that forks the room it loads -
 // so the record, not the lock, is what keeps a room from being born behind the head.
+//
+// It hands ygo no bytes: the state goes on the record, and the room's load applies it
+// (applyLoadedState), because ygo's own apply runs the format cleanup a remote apply runs and the
+// room's stored history already holds every cleanup the room made.
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	load := a.service.beginRoomLoad(room)
 	if loaded, ok := a.service.takePreload(room); ok {
-		load.readHead(loaded.Version)
-		return loaded.Update, nil
+		load.read(loaded.Version, loaded.Update)
+		return nil, nil
 	}
 	result, err := a.store.Load(context.Background(), room)
 	if err == nil {
@@ -84,8 +89,8 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 		a.service.failRoom(room, err)
 		return nil, err
 	}
-	load.readHead(result.Version)
-	return result.Update, nil
+	load.read(result.Version, result.Update)
+	return nil, nil
 }
 
 func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
@@ -400,6 +405,35 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 	return nil
 }
 
+// applyLoadedState applies the durable state room's load read (LoadDoc, roomLoad) to the room's
+// document. ygo would apply it with the format cleanup on, which follows a remote apply that
+// touches formatted text with a commit of the room's own; that commit reaches no persistence
+// (ygo registers it after the load), and the stored history already holds every cleanup the room
+// made, so the reloaded room would hold a tree the room before it never held. So the state is
+// applied with the cleanup off, and with the pending queue ygo lifts for a load, and both are set
+// back before any peer or write reaches the room: it cleans up after a browser's update as Yjs
+// does.
+func (s *Service) applyLoadedState(room string, doc *crdt.Doc) error {
+	record, ok := s.roomLoads.Load(room)
+	if !ok {
+		return nil
+	}
+	state := record.(*roomLoad).takeState()
+	if len(state) == 0 {
+		return nil
+	}
+	doc.SetFormatCleanup(false)
+	doc.SetMaxPendingItems(math.MaxInt)
+	defer func() {
+		doc.SetMaxPendingItems(maxUpdateItems)
+		doc.SetFormatCleanup(true)
+	}()
+	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
+		return fmt.Errorf("bootstrapping room %q: %w", room, err)
+	}
+	return nil
+}
+
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
 	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.1,
@@ -415,6 +449,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	}
 	if err := s.roomFailure(room); err != nil {
+		return err
+	}
+	if err := s.applyLoadedState(room, doc); err != nil {
 		return err
 	}
 	// Everything this load needs comes from the pool that owns loads. A writer holding a
