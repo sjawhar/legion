@@ -140,7 +140,7 @@ func TestAColdSubscriptionIsSentAnIdStillOpenWhenItSubscribed(t *testing.T) {
 	// A to end before it answers its first subscriber.
 	subscribeEvents(t, rig.dial(t, withBearer("agent-token")), "starter", nil)
 
-	low, high, commitLow := appendOutOfOrder(t, rig.database, rig.served.deps.Events, first.Key, second.Key)
+	low, high, commitLow, _ := appendOutOfOrder(t, rig.database, rig.served.deps.Events, first.Key, second.Key)
 	client := rig.dial(t, withBearer("agent-token"))
 	if start := subscribeEvents(t, client, "cold", nil); start >= low {
 		t.Fatalf("a cold subscription starts after event %d, at or above the %d still open when it subscribed", start, low)
@@ -462,7 +462,7 @@ func TestTheFirstColdSubscriptionIsSentAnEventThatDrewItsIdBeforeIt(t *testing.T
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	other := createInteractionIssue(t, rig.handler, "OTHER", "Other issue", "A spec")
 
-	low, _, commitLow := appendOutOfOrder(t, rig.database, rig.served.deps.Events, issue.Key, other.Key)
+	low, _, commitLow, _ := appendOutOfOrder(t, rig.database, rig.served.deps.Events, issue.Key, other.Key)
 	client := rig.dial(t, withBearer("agent-token"))
 	sendEventsSubscribe(t, client, "events", nil)
 	// The start's gap read finds low missing and then waits on it: low's own transaction holds a

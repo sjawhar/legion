@@ -179,7 +179,7 @@ func (h *deliveryHub) catchUp(changes, events bool) {
 }
 
 // readEvents catches the event log up (catchUpEvents) once the hub holds an event cursor, and
-// schedules the re-read a gap left open above the safe horizon needs (Horizon.Pending): an event
+// schedules the re-read a gap left open above the safe horizon needs (Horizon.Behind): an event
 // observed above the horizon that the catch-up could not read. The commit's notification can wake
 // a catch-up before the horizon covers that commit, since only a later observation proves an
 // earlier one safe, and nothing notifies again once the open lower ids have ended; without this
@@ -270,10 +270,12 @@ func (h *deliveryHub) catchUpChanges() error {
 
 // catchUpEvents reads every event after the cursor and at or below the safe horizon, acting on
 // those the hub reads, and answers the horizon it read through and whether a gap stands open
-// above it (Horizon.Pending). Event ids are not commit order (events.Broker.Append), so the read
-// is capped at the horizon H, at or below which every event is final, and the cursor moves only
-// to the last row scanned, an existing row at or below H: everything at or below the cursor is
-// final and was acted on, which is also what lets receive act on the event right after it. It
+// above it (Horizon.Behind, asked with the horizon this read capped at and not the one the
+// Horizon holds by then, which another reader's observation can have raised past it). Event ids
+// are not commit order (events.Broker.Append), so the read is capped at the horizon H, at or
+// below which every event is final, and the cursor moves only to the last row scanned, an
+// existing row at or below H: everything at or below the cursor is final and was acted on, which
+// is also what lets receive act on the event right after it. It
 // reads through the live pool (liveRead), so an open page hears of an event while the requests
 // hold every connection of theirs; the horizon observes on its own pool (store.Pool.Horizon).
 //
@@ -333,7 +335,7 @@ func (h *deliveryHub) catchUpEvents(checkReset bool) (safe int64, gap bool, err 
 		}
 	}
 	h.note(deliveryHubNote{what: "events caught up", from: from, through: cursor})
-	return safe, horizon.Pending(), nil
+	return safe, horizon.Behind(safe), nil
 }
 
 // receive acts on one event the broker published. The broker publishes only committed events

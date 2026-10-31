@@ -30,12 +30,13 @@ const (
 	// again, so nothing but the relay itself will ask for those rows.
 	eventRelayRetry = time.Second
 	// eventRelayGapMin and eventRelayGapMax bound the re-read the relay schedules while a gap
-	// stands open above the safe horizon (Horizon.Pending): it first waits eventRelayGapMin,
-	// doubles the wait up to eventRelayGapMax while the horizon stays where it was, and starts
-	// again from eventRelayGapMin each time the horizon moves. A commit's notification can wake
-	// the read before the horizon covers that commit: only a later observation proves an earlier
-	// one safe, and nothing notifies again once the open lower ids have ended, so without this
-	// re-read an event the read held back would wait for the next unrelated commit.
+	// stands open above the safe horizon it read through (Horizon.Behind): it first waits
+	// eventRelayGapMin, doubles the wait up to eventRelayGapMax while the horizon stays where it
+	// was, and starts again from eventRelayGapMin each time the horizon moves. A commit's
+	// notification can wake the read before the horizon covers that commit: only a later
+	// observation proves an earlier one safe, and nothing notifies again once the open lower ids
+	// have ended, so without this re-read an event the read held back would wait for the next
+	// unrelated commit.
 	eventRelayGapMin = 10 * time.Millisecond
 	eventRelayGapMax = 250 * time.Millisecond
 )
@@ -554,8 +555,10 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 // next read's. A log that was reset under the cursor is answered first, and publishes nothing
 // (resetCursor); checkReset false skips that check (run's gap re-read).
 //
-// It answers the horizon it read through and whether a gap stands open above it (Pending): an
-// event observed above the horizon that this read could not publish, which run re-reads for.
+// It answers the horizon it read through and whether a gap stands open above it (Behind, asked
+// with that horizon and not the one the Horizon holds by then, which another reader's
+// observation can have raised past it): an event observed above the horizon this read could not
+// publish, which run re-reads for.
 // ok false is a read that failed.
 func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int64, gap, ok bool) {
 	tracked := store.WithTransactionTracking(ctx)
@@ -568,7 +571,7 @@ func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int6
 			}
 			return 0, false, false
 		case reset:
-			return resetSafe, horizon.Pending(), true
+			return resetSafe, horizon.Behind(resetSafe), true
 		}
 	}
 	safe, err := horizon.Safe(tracked)
@@ -581,7 +584,7 @@ func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int6
 	for {
 		cursor, _ := r.at()
 		if cursor >= safe {
-			return safe, horizon.Pending(), true
+			return safe, horizon.Behind(safe), true
 		}
 		page, err := r.server.readEventsAfterID(tracked, r.live, cursor, safe)
 		if err != nil {
@@ -592,7 +595,7 @@ func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int6
 		}
 		r.publish(page)
 		if len(page) < maxEventReplay {
-			return safe, horizon.Pending(), true
+			return safe, horizon.Behind(safe), true
 		}
 	}
 }

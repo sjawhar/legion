@@ -1217,7 +1217,7 @@ func TestAHubCatchUpNeverMovesItsCursorPastAnOpenLowerID(t *testing.T) {
 	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})
 	rig.startCaughtUp(t)
 
-	low, high, commitLow := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
+	low, high, commitLow, _ := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
 		rig.hub.catchUpNow()
 		if _, cursor := rig.cursors(); cursor >= low {
@@ -1340,7 +1340,7 @@ func TestAHubGapRereadTakesNoSharedConnectionWhileTheHorizonStandsStill(t *testi
 	caughtUp := func(note deliveryHubNote) bool { return note.what == "events caught up" }
 
 	start := rig.mark()
-	low, high, commitLow := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
+	low, high, commitLow, _ := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
 	// The higher id's commit notifies: that catch-up checks for a reset and leaves the gap open.
 	rig.waitFor(t, start, 3*time.Second, "the catch-up the higher id's commit woke", caughtUp)
 	before, rereads := readAcquires(rig.database), rig.mark()
@@ -1354,6 +1354,55 @@ func TestAHubGapRereadTakesNoSharedConnectionWhileTheHorizonStandsStill(t *testi
 
 	commitLow()
 	rig.waitForEventCursor(t, high, "the lower id committed")
+}
+
+// A gap re-read is scheduled on the horizon the catch-up read the log through, not on the one
+// the Horizon holds by the time that catch-up decides. Another reader of the process observes
+// in between - the event relay, a `GET /api/v1/references?since=` read - and its observation
+// can prove the ids this catch-up could not read final: H then stands at the newest id
+// observed, with nothing above it, though this hub has read nothing past its own cursor. Here
+// the id open below the committed one rolls back, which notifies nothing, and the other
+// reader's Await moves H past both while the catch-up is between its own read and its decision.
+// Nothing commits afterwards, so a decision taken on the Horizon's H alone would leave the
+// committed event unread until some unrelated write woke the hub.
+func TestAHubRereadsTheGapAnotherReaderProvedWhileItRead(t *testing.T) {
+	var armed atomic.Bool
+	caught, released := make(chan struct{}), make(chan struct{})
+	rig := newHubRig(t, func(hub *deliveryHub) {
+		noted := hub.observe
+		// The catch-up makes this note between its read of the log and its re-read decision.
+		hub.observe = func(note deliveryHubNote) {
+			if note.what == "events caught up" && armed.CompareAndSwap(true, false) {
+				close(caught)
+				select {
+				case <-released:
+				case <-time.After(eventFeedWait): // the test failed before it let the hub on
+				}
+			}
+			noted(note)
+		}
+	})
+	first := createHubIssue(t, rig.handler, map[string]any{"title": "First"})
+	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})
+	rig.startCaughtUp(t)
+	rig.waitQuiet(t, 300*time.Millisecond)
+
+	low, high, _, rollbackLow := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
+	armed.Store(true)
+	select {
+	case <-caught:
+	case <-time.After(eventFeedWait):
+		t.Fatalf("no catch-up read the event log while id %d stood open below the committed %d", low, high)
+	}
+
+	rollbackLow()
+	proven, err := rig.hub.server.horizon().Await(t.Context())
+	if err != nil || proven < high {
+		t.Fatalf("the other reader's Await once id %d had rolled back = %d, %v; want at least the committed %d", low, proven, err, high)
+	}
+	close(released)
+
+	rig.waitForEventCursor(t, high, "another reader proved the horizon past the catch-up's own")
 }
 
 // waitQuiet waits until the hub has made no note for quiet.
