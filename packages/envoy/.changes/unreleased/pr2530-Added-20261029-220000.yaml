@@ -1,0 +1,14 @@
+kind: Added
+body: |-
+    Broker migration 0020 lets the `enrollments` kind check admit `vm`, the enrollment kind of a
+    Google Cloud VM, beside `session` and `pod`. It recreates the one check constraint and rewrites
+    no row, so a broker of the release before it keeps serving over the migrated database, and a
+    rollback past it needs no down migration. `POST /v1/enrollments` still takes `session` and `pod`
+    alone; nothing creates a `vm` enrollment yet. The migration holds `ACCESS EXCLUSIVE` on
+    `enrollments` for the instant its transaction lasts, so a request of the earlier broker that
+    reads `enrollments` waits that instant. Behind a long transaction it waits at most the runner's
+    5 s lock timeout, after which the new broker's boot fails having applied nothing, and its next
+    boot tries again.
+time: 2026-10-29T22:00:00.000000000Z
+custom:
+    Issue: pr2530
