@@ -1,8 +1,9 @@
 // Checks and re-lays out the semantic line breaks of a markdown file, so concurrent edits to it
 // touch different lines: one sentence per line (R1), a blank line before each list item (R2), and
-// no list item or table row longer than one screen (R3). It is not a CI gate:
-// packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md keep this layout, and
-// `--write` fixes it by changing only whitespace.
+// no list item or table row longer than one screen (R3, which counts a nested item's lines toward
+// that item, not toward its parent). It is not a CI gate: the guides that
+// scripts/semantic-line-breaks.guides.test.ts checks keep this layout, and `--write` fixes it by
+// changing only whitespace.
 //
 // `--write` is conservative by rule. It leaves a leading YAML front matter block (closed by `---`
 // or by YAML's `...`) and the text of a setext heading byte for byte, and R1 does not read them.
@@ -40,7 +41,7 @@ const PARSER_MISSING =
 
 const USAGE = "usage: bun scripts/semantic-line-breaks.ts [--write] <file.md>...\n";
 
-/** A list item or table row longer than this many screen rows fails R3. */
+/** A list item's own lines, or a table row, longer than this many screen rows fails R3. */
 const MAX_SCREEN_ROWS = 50;
 const SCREEN_WIDTH = 100;
 /** `--write` breaks a line longer than this after `; ` or `: `, or before ` —`. */
@@ -101,10 +102,10 @@ const TASK_BOX_LINE = /^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)+\[[ xX]\][ \t]*$/;
 /**
  * The start of an element whose line breaks GitHub shows, a raw-text element or inline code, as
  * raw HTML may hold it anywhere: in a tag, an attribute value, a comment, a processing
- * instruction, CDATA or a malformed tag. The name may be followed by anything but a name
- * character, so `<preview` is no match.
+ * instruction, CDATA or a malformed tag. The name, captured, may be followed by anything but a
+ * name character, so `<preview` is no match.
  */
-const VERBATIM_OPEN = /<(?:pre|code|tt|kbd|samp|textarea|script|style)(?![A-Za-z0-9-])/i;
+const VERBATIM_OPEN = /<(pre|code|tt|kbd|samp|textarea|script|style)(?![A-Za-z0-9-])/i;
 /** Whitespace inside inline HTML: spaces and tabs, and at most one line ending. */
 const TAG_SPACE = String.raw`[ \t]*(?:\r?\n[ \t]*)?`;
 /** CommonMark's open tag: a tag name, attributes each led by whitespace, an optional `/`, `>`. */
@@ -139,7 +140,8 @@ const YAML_DOCUMENT_END = /^\.\.\.[ \t]*\r?$/;
 
 const SENTENCE_MARKS = ".!?";
 const SENTENCE_CLOSERS = ")]\"'*_”’";
-const SENTENCE_START = /^(?:[\p{Lu}a-z0-9`["“]|\*\*)/u;
+/** A sentence start; `(` opens one only before a capital or a backtick: `(The cost is…)`. */
+const SENTENCE_START = /^(?:[\p{Lu}a-z0-9`["“]|\*\*|\([\p{Lu}`])/u;
 const ABBREVIATIONS = [
   "e.g.",
   "E.g.",
@@ -198,9 +200,18 @@ interface ListItem {
   contentColumn: number;
 }
 
+interface VerbatimFrom {
+  /** 0-based index of the line holding the tag. */
+  line: number;
+  /** The tag name in angle brackets, lower-cased, e.g. `<pre>`. */
+  tag: string;
+}
+
 interface Blocks {
   lines: LineInfo[];
   items: ListItem[];
+  /** Where markVerbatim found the first verbatim open, if anywhere. */
+  verbatimFrom: VerbatimFrom | undefined;
 }
 
 interface Fence {
@@ -543,8 +554,7 @@ function scanBlocks(source: readonly string[]): Blocks {
     }
     if (!isBlank(line)) for (const item of open) item.last = index;
   }
-  markVerbatim(source, lines, frontMatter + 1);
-  return { lines, items };
+  return { lines, items, verbatimFrom: markVerbatim(source, lines, frontMatter + 1) };
 }
 
 /**
@@ -553,9 +563,13 @@ function scanBlocks(source: readonly string[]): Blocks {
  * block, and so is a run of lines of one other kind up to the next list item's marker. An HTML
  * block's raw HTML is its whole text; another block's is the inline HTML proseMask reads, so a tag
  * named in a code span, an autolink or escaped text counts for nothing. Fences and indented code
- * hold none.
+ * hold none. Returns the line and tag of the match, or undefined when there is none.
  */
-function markVerbatim(source: readonly string[], lines: LineInfo[], from: number): void {
+function markVerbatim(
+  source: readonly string[],
+  lines: LineInfo[],
+  from: number
+): VerbatimFrom | undefined {
   for (let first = from; first < lines.length; ) {
     const info = lines[first];
     let last = info?.paragraph?.last ?? first;
@@ -567,13 +581,27 @@ function markVerbatim(source: readonly string[], lines: LineInfo[], from: number
       const html: [number, number][] = [];
       if (info?.kind === "html") html.push([0, text.length]);
       else proseMask(text, html);
-      if (html.some(([start, end]) => VERBATIM_OPEN.test(text.slice(start, end)))) {
+      for (const [start, end] of html) {
+        const match = VERBATIM_OPEN.exec(text.slice(start, end));
+        if (match === null) continue;
         for (const line of lines.slice(first)) line.verbatim = true;
-        return;
+        const at = start + match.index;
+        const line = first + text.slice(0, at).split("\n").length - 1;
+        const [, name = ""] = match;
+        return { line, tag: `<${name.toLowerCase()}>` };
       }
     }
     first = last + 1;
   }
+  return undefined;
+}
+
+/** Says on stderr where a verbatim element turns R1, R2 and `--write` off for the rest of the file. */
+function warnVerbatim(path: string, from: VerbatimFrom | undefined): void {
+  if (from === undefined) return;
+  process.stderr.write(
+    `${path}:${from.line + 1}: warning: ${from.tag} opens a verbatim element; from this block to the end of the file, R1 and R2 are not checked and --write changes nothing\n`
+  );
 }
 
 /** Index of the next run of exactly `length` backticks at or after `from`, or -1. */
@@ -700,11 +728,12 @@ function startsBlock(text: string): boolean {
  * closers, then this one space, then a sentence start. A sentence that starts with a lowercase
  * word (`ygo's`, `envoy-dispatch`) follows only a bare `.`, maybe emphasised: after `?`, `!`, a
  * quote, a parenthesis or an ellipsis such a word goes on with the sentence (`asks "why?" and`,
- * `./... in`). A sentence may start with an inline HTML tag (`<kbd>Ctrl</kbd> opens it`). No
- * sentence starts with text `--write` may not cut before. The text may be a paragraph, its lines
- * joined with `\n`, read as `--write` reads it: a line that opens with a list marker stays a line
- * of its own, so the sentence before a mark starts no earlier than its line. Check mode reports
- * these and `--write` turns them into line breaks.
+ * `./... in`). A sentence may start with an inline HTML tag (`<kbd>Ctrl</kbd> opens it`) or with a
+ * parenthesis before a capital or a backtick (`proof. (A call's parent`). No sentence starts with
+ * text `--write` may not cut before. The text may be a paragraph, its lines joined with `\n`, read
+ * as `--write` reads it: a line that opens with a list marker stays a line of its own, so the
+ * sentence before a mark starts no earlier than its line. Check mode reports these and `--write`
+ * turns them into line breaks.
  */
 function sentenceBreaks(line: string, prose = proseMask(line)): number[] {
   const breaks: number[] = [];
@@ -844,9 +873,8 @@ function needsBlankBefore(
  * The document with each paragraph re-laid out and a blank line before each list item; verbatim
  * lines stay byte for byte.
  */
-function relayout(text: string): string {
+function relayout(text: string, blocks: Blocks): string {
   const { lines, trailingNewline } = splitLines(text);
-  const blocks = scanBlocks(lines);
   const out: string[] = [];
   for (let index = 0; index < lines.length; index++) {
     const info = blocks.lines[index];
@@ -1028,7 +1056,7 @@ function renderDifference(parse: Parse, before: string, after: string): string |
  * first pass misread a construct, so the file is not written.
  */
 function secondRelayoutDifference(text: string): string | undefined {
-  const again = relayout(text);
+  const again = relayout(text, scanBlocks(splitLines(text).lines));
   if (again === text) return undefined;
   const lines = text.split("\n");
   const changed = again.split("\n");
@@ -1047,9 +1075,8 @@ function excerpt(line: string, at: number): string {
   return `${start > 0 ? "…" : ""}${line.slice(start, end).trim()}${end < line.length ? "…" : ""}`;
 }
 
-function check(text: string): Finding[] {
+function check(text: string, blocks: Blocks): Finding[] {
   const { lines } = splitLines(text);
-  const blocks = scanBlocks(lines);
   const findings: Finding[] = [];
   for (const [index, line] of lines.entries()) {
     const info = blocks.lines[index];
@@ -1091,8 +1118,28 @@ function check(text: string): Finding[] {
       }
     }
   }
+  // R3 counts an item's own lines. Each line from an item's first line to its last non-blank one
+  // belongs to that item, unless a nested item's span also holds it: then the innermost such item,
+  // the last of them in blocks.items, takes it, also when it starts on its parent's line (`- - x`).
+  // So a nested item is checked on its own, and text after a nested list counts toward its parent.
+  // A blank line, or a run of them, right before a line that opens a list item counts toward no
+  // item, so the blank lines R2 requires between items never add up in an enclosing item. Any
+  // other blank line inside an item's span counts toward the item that holds it, as the one
+  // between a nested item and its parent's paragraph after it counts toward the parent; a blank
+  // line after an item's last line outside any enclosing item counts toward no item.
+  const owners = new Array<ListItem | undefined>(lines.length).fill(undefined);
+  for (const item of blocks.items) owners.fill(item, item.first, item.last + 1);
   for (const item of blocks.items) {
-    const rows = screenRows(lines.slice(item.first, item.last + 1));
+    for (let index = item.first - 1; index >= 0 && isBlank(lines[index] ?? ""); index--) {
+      owners[index] = undefined;
+    }
+  }
+  const own = new Map<ListItem, number>();
+  for (const [index, line] of lines.entries()) {
+    const owner = owners[index];
+    if (owner) own.set(owner, (own.get(owner) ?? 0) + screenRows([line]));
+  }
+  for (const [item, rows] of own) {
     if (rows > MAX_SCREEN_ROWS) {
       const message = `${rows} screen rows: ${excerpt(lines[item.first] ?? "", 0)}`;
       findings.push({ line: item.first, rule: 3, message });
@@ -1134,7 +1181,9 @@ async function checkFiles(paths: readonly string[]): Promise<number> {
   for (const path of paths) {
     const text = await readText(path);
     if (text === undefined) return 2;
-    for (const finding of check(text)) {
+    const blocks = scanBlocks(splitLines(text).lines);
+    warnVerbatim(path, blocks.verbatimFrom);
+    for (const finding of check(text, blocks)) {
       process.stdout.write(`${path}:${finding.line + 1}: R${finding.rule}: ${finding.message}\n`);
       status = 1;
     }
@@ -1174,7 +1223,9 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
       status = 2;
       continue;
     }
-    const next = relayout(text);
+    const blocks = scanBlocks(splitLines(text).lines);
+    const next = relayout(text, blocks);
+    warnVerbatim(path, blocks.verbatimFrom);
     if (next === text) continue;
     const difference = foldedDifference(text, next);
     const refusal =
@@ -1194,7 +1245,10 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
 // `bun scripts/semantic-line-breaks.ts [--write] <file.md>...` prints `file:line: R<n>: <excerpt>`
 // for each finding and exits 1 when there is one; with `--write` it re-lays out each file in place
 // and exits 2, writing nothing for that file, when the result would differ in more than whitespace,
-// would render differently, or would change again under a second re-layout.
+// would render differently, or would change again under a second re-layout. In both modes, a file
+// whose verbatim element (`<pre>`, `<code>` and the like, outside code) turns the checks off for
+// the rest of the file gets one `file:line: warning: <tag> opens a verbatim element; ...` line on
+// stderr; it does not change the exit code.
 if (import.meta.main) {
   const args = process.argv.slice(2);
   const write = args[0] === "--write";
