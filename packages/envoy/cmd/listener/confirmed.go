@@ -152,7 +152,7 @@ func pauseBeforeRetry(ctx context.Context) bool {
 // forwardAndWait forwards item to subject through the delivery configuration's forwardRole and
 // waits for its outcome, which is the form a caller that answers for the forward needs: the
 // publish route answers its sender with what the forward did, and the kept lane's drain moves its
-// cursor past the copy (forwardKeptRoleMessage), where the role lane hands the wait over and
+// cursor past the copy (walkKeptRole), where the role lane hands the wait over and
 // reports it later. storedOnly asks for a forward that counts as delivered once the stream
 // acknowledges storing it, with no receipt (roleForwardStoredOnly): a holder served on a port has
 // no NATS subscriber to answer one, and takes the stored copy through its listener instead.
@@ -200,17 +200,12 @@ func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
 // the answer. Every answer goes through record, the route's one line per request
 // (request_record.go), and is then settled: counted, and logged on the send's own delivery line.
 type roleSend struct {
-	w       http.ResponseWriter
-	record  *requestRecord
-	d       *listenerDeps
-	item    contracts.Envelope
-	role    string
-	arrived time.Time
-	// keep is whether a send that finds no live holder keeps its message on the role's kept
-	// lane for the role's next holder instead of refusing it (the request's keep field,
-	// publishHandler). It defaults to true: keeping is what a sender without a queue of its own
-	// needs, and a sender that has one asks for keep: false and handles the 404 itself.
-	keep     bool
+	w        http.ResponseWriter
+	record   *requestRecord
+	d        *listenerDeps
+	item     contracts.Envelope
+	role     string
+	arrived  time.Time
 	holder   string
 	attempts int
 }
@@ -239,17 +234,18 @@ func (s *roleSend) delivered(outcome sendOutcome) {
 	s.settle(outcome)
 }
 
-// noHolder answers a role with no live claim. With keeping on, and for a state the listener keeps
-// for (roleKeepable: an unclaimed role, and a lapsed claim released or already absent), it keeps
-// the message for the role's next holder and hands the lane to whoever holds the role now, both
-// in the one keep both give-up paths take (keepForNextHolder), and answers kept's 202. A keep
-// that kept nothing - one it refused, a publish that failed, logged by keepRoleMessage - is
-// answered as a send that kept nothing is, since the sender's own fallback must run when the
-// message was not kept: writeRoleHolderError's 404 (unclaimed or holder_lapsed), which the Legion
-// daemon reads as notify.ErrNoHolder, recorded role_unclaimed or role_lapsed. The role lane counts
-// an unclaimed role skipped and a lapsed holder failed.
+// noHolder answers a role with no live claim. For a state the listener keeps for (roleKeepable: an
+// unclaimed role, and a lapsed claim released or already absent), it keeps the message for the
+// role's next holder and hands the lane to whoever holds the role now, both in the one keep both
+// give-up paths take (keepForNextHolder), and answers kept's 202. A keep that kept nothing - one
+// the envelope's own keep flag turned off, one under a role token no claim can name, a publish
+// that failed, logged by keepRoleMessage - is answered as a send that kept nothing is, since the
+// sender's own fallback must run when the message was not kept: writeRoleHolderError's 404
+// (unclaimed or holder_lapsed), which the Legion daemon reads as notify.ErrNoHolder, recorded
+// role_unclaimed or role_lapsed. The role lane counts an unclaimed role skipped and a lapsed
+// holder failed.
 func (s *roleSend) noHolder(result roleHolderResult) {
-	if s.keep && roleKeepable(result) && keepForNextHolder(*s.d.delivery, s.role, s.item) {
+	if roleKeepable(result) && keepForNextHolder(*s.d.delivery, s.role, s.item) {
 		s.kept(result)
 		return
 	}
@@ -362,10 +358,10 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 // sendToRole delivers a role message through the publish route, answering through record. The
 // first resolution reads the holder as an HTTP lookup does (resolveRoleHolder with registered),
 // within sendRequestBudget of arrived as GET /v1/roles/<role> reads it, and gives its answers: a
-// role with no live claim is kept and answered 202 with keep on, for the states the listener
-// keeps for (roleKeepable), else the lookup's 404 unclaimed or holder_lapsed (noHolder), and a
-// resolution that failed the lookup's 503 or 500 (unresolved), so a holder that exists but has
-// not heartbeated lately gets attempts rather than a 404. The first
+// role with no live claim is kept and answered 202 while the envelope asks to be kept, for the
+// states the listener keeps for (roleKeepable), else the lookup's 404 unclaimed or holder_lapsed
+// (noHolder), and a resolution that failed the lookup's 503 or 500 (unresolved), so a holder that
+// exists but has not heartbeated lately gets attempts rather than a 404. The first
 // attempt forwards to that holder when its session entry passes role delivery's freshness test
 // (laneHolderFresh), without reading the claim again; every other attempt resolves the holder
 // again by role delivery's rule (resolveRoleHolder with laneHolderFresh), so a holder that
@@ -377,8 +373,8 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 // roleReceiptTimeout. Every forward carries the same Nats-Msg-Id (bus.Client.RequestCoreTo), so the
 // stream, which captures agent subjects, keeps one copy however many attempts there are. Every read
 // takes ctx, the send's window, so none outlasts it: a send whose window ends is answered 504.
-func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time, keep bool) {
-	send := &roleSend{w: w, record: record, d: d, item: item, role: role, arrived: arrived, keep: keep}
+func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
+	send := &roleSend{w: w, record: record, d: d, item: item, role: role, arrived: arrived}
 	// The sender is stamped before the holder is resolved, so the copy a keep stores carries the
 	// sender's title, roles and directory exactly as the forward of a live delivery does: the
 	// envelope is kept as it is here (keepRoleMessage), and the holder that is handed it later

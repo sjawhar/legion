@@ -103,7 +103,10 @@ resolution (the claim read, the holder's session read and the release of a lapse
 inside the same 3.5 s budget, and one the budget runs out on is that 503 too, naming the call that
 did not answer. Its 413, its 400s and its 403 for a denied publish are unchanged. Its role 404s
 (`unclaimed`, `holder_lapsed`) keep their bodies, and a role send gives one only when the listener
-kept nothing: the request sent `keep: false`, or the keep itself failed. A role send whose message
+kept nothing: the request sent `keep: false`; the role's token is one `rolePattern` refuses, which
+no claim can ever name; the claim lapsed and the restart grace retained it, whose holder keeps the
+role and writes no new claim for a handover to follow; or the keep itself failed. A role send whose
+message
 the listener kept answers `202` instead. A role or ad-hoc topic's confirmed send then runs on
 within its own 4 s and answers its 200, 202, 403 `capability` or 504 as "Role delivery and
 exceptions" says.
@@ -277,13 +280,24 @@ The listener keeps a role message on a stored subject of its own,
 `notifications.envoy.kept.role.<role>`. No session may register that subject, no replay hands it
 out, and no consumer of the notification stream delivers it, so a kept copy never re-enters the
 delivery path it was taken out of. `notifications.role.>` is still not a stream subject. The next
-session that claims the role is handed the role's kept copies off its own claim request: at most
-twenty a claim, each once and in the order they were kept, and the role's cursor,
-`notifications.envoy.kept.cursor.<role>`, moves to the last copy the claim handled. Each forwarded
+session that claims the role is handed the role's kept copies off its own claim request, and the
+claim is answered before they are forwarded. One walk of a role's lane is bounded - twenty
+forwards, two hundred copies read, sixty seconds - and the handover around it walks the lane again,
+for the role's holder as it resolves it each time, until the lane is empty, the role has no live
+holder, or three walks running make no progress at all; a walk that failed is waited out on a
+widening cadence while the holder is live. The role's cursor,
+`notifications.envoy.kept.cursor.<role>`, carries the lane's progress and one walk's claim of it,
+so two listeners walking one lane do not forward a copy twice. A handover this process lost - a
+restart, a rolling deploy - is picked up by a sweep every five minutes and at the listener's own
+start, which hands over every lane that holds copies after its cursor while the role's holder is
+live: nothing waits for a claim a live holder will not make. Each forwarded
 copy carries `kept_at`, the Unix-millisecond time the listener kept it, so the holder can judge
 the message's age. A copy the listener kept more than an hour before is dropped rather than
 forwarded, and counted on `envoy_role_kept_expired_total`. `GET /v1/roles/<role>` still answers
-404 for an unheld or lapsed role: only the publish route gained the kept answer.
+404 for an unheld or lapsed role: only the publish route gained the kept answer. A sender that
+keeps a queue of its own and redelivers from it asks not to be kept (`keep: false`) and gets
+today's 404; the Legion daemon does, and Dispatch's outbox, which sends a role route once and
+reads no exception, does not: its role-routed events are kept like any role message.
 
 An ad-hoc topic sent through the route is published over core NATS, then forwarded the same way
 to each session registered on it, on any machine, that holds its own NATS connection

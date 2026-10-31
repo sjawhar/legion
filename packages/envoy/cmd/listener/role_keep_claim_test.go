@@ -50,17 +50,24 @@ func TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain(t *testi
 	entry := session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	claimRoleWith(t, harness, holder, role, entry)
 
 	var attempted []string
 	failing := harness.config
 	failing.forwardRole = inlineForward(func(_ string, forwarded contracts.Envelope, _ time.Duration) error {
 		attempted = append(attempted, forwarded.DedupeKey)
-		if len(attempted) == 2 {
-			return errors.New("the forward this listener ended on")
+		if len(attempted) < 2 {
+			return nil
 		}
-		return nil
+		// The holder gives the role up as this listener's forward fails, which is what ends
+		// the handover here: a handover whose holder is still live walks the lane again itself
+		// (drainKeptRole), and what this test is about is the lane one walk left behind.
+		if err := harness.registry.Remove(ctx, holder, []string{contracts.RoleTopicPrefix + role}); err != nil {
+			t.Errorf("release %s's claim of %s: %v", holder, role, err)
+		}
+		return errors.New("the forward this listener ended on")
 	})
-	if err := drainKeptRole(ctx, failing, role, holder, entry, time.Now); err == nil {
+	if err := drainKeptRole(ctx, failing, role, time.Now); err == nil {
 		t.Fatalf("the drain whose second forward failed reported no error, so this test no longer reaches the moment it is about")
 	}
 	if !slices.Equal(attempted, keys[:2]) {
@@ -68,7 +75,7 @@ func TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain(t *testi
 	}
 
 	// The listener that drains the role next, with guards of its own, which is what a second
-	// process has.
+	// process has, for the holder that has claimed the role again.
 	var handed []string
 	next := harness.config
 	next.roleKeepDrains = newRoleKeepGuards()
@@ -76,7 +83,8 @@ func TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain(t *testi
 		handed = append(handed, forwarded.DedupeKey)
 		return nil
 	})
-	if err := drainKeptRole(ctx, next, role, holder, entry, time.Now); err != nil {
+	claimRoleWith(t, harness, holder, role, entry)
+	if err := drainKeptRole(ctx, next, role, time.Now); err != nil {
 		t.Fatalf("the next drain of role %s's kept lane: %v", role, err)
 	}
 	if !slices.Equal(handed, keys[1:]) {
@@ -113,6 +121,7 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	claimRoleWith(t, harness, holder, role, entry)
 	var handed []string
 	record := func(cfg listenerDeliveryHandlerConfig, after func()) func(string, contracts.Envelope, time.Duration, bool) (func() error, error) {
 		forward := cfg.forwardRole
@@ -136,7 +145,7 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 	// The listener ends here: its forward is published and stored, and the confirm it would
 	// write next reaches nothing.
 	lost.forwardRole = record(harness.config, cancelDying)
-	if err := drainKeptRole(dying, lost, role, holder, entry, time.Now); err == nil {
+	if err := drainKeptRole(dying, lost, role, time.Now); err == nil {
 		t.Fatalf("the drain that ended after its forward reported no error, so this test no longer reaches the moment it is about")
 	}
 
@@ -154,7 +163,7 @@ func TestADrainThatEndedBetweenItsForwardAndItsConfirmLeavesTheHolderOneStoredCo
 	next.attemptCache = dedupe.New(5 * time.Minute)
 	t.Cleanup(next.attemptCache.Stop)
 	next.forwardRole = record(harness.config, func() {})
-	if err := drainKeptRole(ctx, next, role, holder, entry, past); err != nil {
+	if err := drainKeptRole(ctx, next, role, past); err != nil {
 		t.Fatalf("the next drain of role %s's kept lane: %v", role, err)
 	}
 	if !slices.Equal(handed, []string{key, key}) {
@@ -205,14 +214,18 @@ func TestAClaimNoDrainReleasedHoldsTheLaneUntilItsWindowHasPassed(t *testing.T) 
 		t.Fatalf("write the claim role %s's killed drain left: %v", role, err)
 	}
 
-	entry := session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}
+	claimRoleWith(t, harness, holder, role, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
 	var handed []string
 	cfg := harness.config
 	cfg.forwardRole = inlineForward(func(_ string, forwarded contracts.Envelope, _ time.Duration) error {
 		handed = append(handed, forwarded.DedupeKey)
 		return nil
 	})
-	if err := drainKeptRole(ctx, cfg, role, holder, entry, time.Now); err != nil {
+	// The handover leaves the lane to the drain holding the claim and waits roleKeepClaimWindow
+	// to walk it again; this context ends it there, since the lane it left alone is the point.
+	heldCtx, cancelHeld := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelHeld()
+	if err := drainKeptRole(heldCtx, cfg, role, time.Now); err != nil {
 		t.Fatalf("the drain that found the claim outstanding: %v", err)
 	}
 	if len(handed) != 0 {
@@ -222,7 +235,7 @@ func TestAClaimNoDrainReleasedHoldsTheLaneUntilItsWindowHasPassed(t *testing.T) 
 	// Past roleKeepClaimWindow - which is roleKeepDrainWindow, the whole of a drain's life - the
 	// claim belongs to a drain that has ended, and the copy is the next drain's to forward.
 	past := func() time.Time { return time.Now().Add(roleKeepDrainWindow + time.Minute) }
-	if err := drainKeptRole(ctx, cfg, role, holder, entry, past); err != nil {
+	if err := drainKeptRole(ctx, cfg, role, past); err != nil {
 		t.Fatalf("the drain that took the abandoned claim over: %v", err)
 	}
 	if !slices.Equal(handed, []string{key}) {

@@ -50,8 +50,8 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 // wires it: a config over d's stores with the dedupe cache and the attempt cache the drain judges
 // a forward against (beforeForward), startRoleForward(client) as the forward, a logger, a
 // delivered counter, the drain's kept-expired counter and the guards two drains of one role take
-// (roleKeepGuards). POST /v1/roles/set hands a claim's drain this config (startKeptRoleDrain), so
-// a test that claims a role through that route needs it.
+// (roleKeepGuards). POST /v1/roles/set hands a claim's handover this config (runKeptRoleDrain),
+// so a test that claims a role through that route needs it.
 func withRoleClaimDrain(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
 	cache := dedupe.New(10 * time.Minute)

@@ -63,6 +63,42 @@ func (c *Client) LastStoredMessage(ctx context.Context, subject string) (StoredM
 	}{LastFor: subject})
 }
 
+// KeptRoleLanes reports the role of every kept lane the notification stream still holds a copy on
+// (KeptRoleSubject), sorted, so each is read once and two passes over an unchanged stream read the
+// same list. It is the listener's backstop over the lanes nobody is draining: a role whose kept
+// copies were stranded by a listener that ended mid-drain is on it, and a role whose lane the
+// stream holds nothing on is not, whatever its drain cursor says.
+//
+// It is one STREAM.INFO of the stream with the kept role subjects as its filter, which answers
+// every such subject and how many messages it holds; the listener already holds that grant for the
+// stream it owns (infra/core/permissions.go), and nats.go pages the answer itself, so a sweep
+// costs one round trip whatever the deployment holds. A stream that holds no kept copy at all
+// answers an empty list: the state carries a subject only while a message is stored on it.
+//
+// Its errors are the stream's own: nats.ErrStreamNotFound when the stream is gone,
+// nats.ErrNoResponders when no JetStream answers, and ctx's error when ctx ends first.
+func (c *Client) KeptRoleLanes(ctx context.Context) ([]string, error) {
+	if err := c.ensureConnWithContext(ctx); err != nil {
+		return nil, err
+	}
+	info, err := c.JS().StreamInfo(Stream,
+		&nats.StreamInfoRequest{SubjectsFilter: KeptRoleSubject(">")},
+		nats.Context(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("bus: read %s's kept role lanes: %w", Stream, err)
+	}
+	roles := make([]string, 0, len(info.State.Subjects))
+	for subject, held := range info.State.Subjects {
+		role, ok := strings.CutPrefix(subject, KeptRoleSubjectPrefix)
+		if !ok || role == "" || held == 0 {
+			continue
+		}
+		roles = append(roles, role)
+	}
+	slices.Sort(roles)
+	return roles, nil
+}
+
 // storedMessage makes one stored-message read of the notification stream and reads its answer, for
 // NextStoredMessage and LastStoredMessage alike: request is the body each builds, naming the
 // message it wants. The stream's error answer comes back as the *nats.APIError it is, and an

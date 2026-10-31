@@ -2400,9 +2400,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A sender asks for the 404 with `keep: false` in the publish body, which is for a sender that keeps a queue of its own;
   the Legion daemon does.
   A keep that failed gives the same 404, beside the `listener kept role message publish failed` line.
-  The role's next claim drains the kept lane off the claim's own request (`drainKeptRole`, `startKeptRoleDrain`):
-  it hands the new holder at most `roleKeepDrainMax` (20) copies, each once and in the order they were kept, and moves the role's cursor, `notifications.envoy.kept.cursor.<role>`, which holds the listener's own bookkeeping rather than an envelope.
-  The next claim takes the rest.
+  The role's next claim hands the kept lane over off the claim's own request (`runKeptRoleDrain`, `drainKeptRole`), after the claim is answered.
+  One walk of the lane (`walkKeptRole`) hands the new holder at most `roleKeepDrainMax` (20) copies, each once and in the order they were kept, reads at most `roleKeepScanMax` (200) of them, lives `roleKeepDrainWindow` (60 s), and moves the role's cursor, `notifications.envoy.kept.cursor.<role>`, which holds the listener's own bookkeeping rather than an envelope and carries one walk's claim of the lane, so two listeners walking it never forward one copy twice.
+  The handover walks the lane again - for the role's holder as it resolves it at the top of every pass, after the pause the walk before it earned - until the lane is empty, the role has no live holder, or `roleKeepDrainIdleRounds` (3) walks running forward nothing and pass nothing over; a walk that failed, and every failed read of the holder after one, is waited out on a widening cadence (`roleKeepDrainBackoff`, 1 s to 30 s) while the holder is live, inside `roleKeepHandoverWindow` (10 min).
+  A handover this process loses - a restart, a rolling deploy - is picked up by `sweepKeptRoleLanes`, which runs at the listener's start and every five minutes beside the reapers and hands over every lane holding copies after its cursor whose role has a live holder (`bus.Client.KeptRoleLanes`, one `STREAM.INFO` with a `notifications.envoy.kept.role.>` filter), so no lane waits for a claim a live holder will not make.
   Each forwarded copy carries `kept_at`, the Unix-millisecond time the listener kept it, so the holder can judge the message's age.
   A copy older than `roleKeepWindow` (one hour) when the claim reads it is not forwarded:
   it is dropped, logged and counted on `envoy_role_kept_expired_total`.

@@ -75,6 +75,20 @@ func assertNothingKept(t *testing.T, client *bus.Client, role string) {
 	}
 }
 
+// claimRoleWith registers sessionID with entry and gives it role, which is what a handover of
+// role's kept lane resolves its holder from: the handover reads the role's claim and the session
+// the claim names itself (drainKeptRole), so a test that drains a lane for a holder puts that
+// holder where the listener reads it from rather than naming it.
+func claimRoleWith(t *testing.T, harness listenerDeliveryHarness, sessionID, role string, entry session.SessionEntry) {
+	t.Helper()
+	if err := harness.sessions.Put(sessionID, entry); err != nil {
+		t.Fatalf("register %s: %v", sessionID, err)
+	}
+	if _, err := harness.registry.SetRole(sessionID, "test-machine", role, false); err != nil {
+		t.Fatalf("claim %s for %s: %v", role, sessionID, err)
+	}
+}
+
 // keptRoleDeps is the publish route and the role-claim route over one listener's stores, as main
 // wires them.
 func keptRoleDeps(t *testing.T) (*listenerDeps, *bus.Client) {
@@ -247,12 +261,12 @@ func TestAKeptRoleMessageOlderThanTheKeepWindowIsDroppedAndTheCursorMovesPastIt(
 	if !keepRoleMessage(harness.client, cfg.logger, role, item) {
 		t.Fatalf("keep the role message; the listener log says why:\n%s", harness.logs.String())
 	}
-	entry := session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}
+	claimRoleWith(t, harness, holder, role, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
 	drain := func(now func() time.Time) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := drainKeptRole(ctx, cfg, role, holder, entry, now); err != nil {
+		if err := drainKeptRole(ctx, cfg, role, now); err != nil {
 			t.Fatalf("drain role %s's kept lane: %v", role, err)
 		}
 	}
@@ -442,8 +456,8 @@ func TestADrainSpendsItsBudgetOnForwardsRatherThanOnExpiredCopies(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	entry := session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}
-	if err := drainKeptRole(ctx, cfg, role, holder, entry, now); err != nil {
+	claimRoleWith(t, harness, holder, role, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
+	if err := drainKeptRole(ctx, cfg, role, now); err != nil {
 		t.Fatalf("drain role %s's kept lane: %v", role, err)
 	}
 	if !slices.Equal(forwarded, fresh) {
@@ -451,17 +465,16 @@ func TestADrainSpendsItsBudgetOnForwardsRatherThanOnExpiredCopies(t *testing.T) 
 	}
 }
 
-// Two listeners draining one role must not hand one copy to two holders. Each drain claims a copy
-// - advancing the role's cursor to that copy alone - before it forwards it, so a drain that lost
+// Two listeners draining one role must not hand one copy over twice. Each drain claims a copy -
+// advancing the role's cursor to that copy alone - before it forwards it, so a drain that lost
 // the claim stops there; a cursor written once at the end of the walk let both of them forward
-// everything they had read, to two different agent subjects.
+// everything they had read.
 func TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const (
-		role    = "kept-two-drains"
-		holderA = "ses_kept_drain_first"
-		holderB = "ses_kept_drain_second"
-		copies  = 6
+		role   = "kept-two-drains"
+		holder = "ses_kept_drain_holder"
+		copies = 6
 	)
 	var keys []string
 	for i := range copies {
@@ -474,21 +487,21 @@ func TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder(t *testing.T) {
 
 	var mu sync.Mutex
 	handed := map[string][]string{}
-	hand := func(holder string) func(string, contracts.Envelope, time.Duration) error {
+	hand := func(listener string) func(string, contracts.Envelope, time.Duration) error {
 		return func(_ string, item contracts.Envelope, _ time.Duration) error {
 			mu.Lock()
 			defer mu.Unlock()
-			handed[item.DedupeKey] = append(handed[item.DedupeKey], holder)
+			handed[item.DedupeKey] = append(handed[item.DedupeKey], listener)
 			return nil
 		}
 	}
 	started, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	toFirst := hand(holderA)
+	toFirst := hand("first")
 	first := harness.config
 	first.forwardRole = inlineForward(func(subject string, item contracts.Envelope, window time.Duration) error {
-		// The first drain holds its first forward until the second has walked the whole lane,
-		// which is the moment two listeners drain one role at once.
+		// The first drain holds its first forward until the second has walked the lane, which
+		// is the moment two listeners drain one role at once.
 		once.Do(func() {
 			close(started)
 			<-release
@@ -496,24 +509,27 @@ func TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder(t *testing.T) {
 		return toFirst(subject, item, window)
 	})
 	// The second drain stands in for a second listener: it has guards of its own, where one
-	// listener's guard for the role would hold it until the first drain released it. One guard per
-	// role bounds the drains inside one listener (roleKeepGuards); across listeners the cursor's
-	// compare-and-swap is the guard, which is what this test exercises.
+	// listener's guard for the role would hold it until the first drain had finished. One guard
+	// per role bounds the handovers inside one listener (roleKeepGuards); across listeners the
+	// cursor's compare-and-swap is the guard, which is what this test exercises.
 	second := harness.config
 	second.roleKeepDrains = newRoleKeepGuards()
-	second.forwardRole = inlineForward(hand(holderB))
+	second.forwardRole = inlineForward(hand("second"))
 
-	entry := session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}
+	claimRoleWith(t, harness, holder, role, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
 	done := make(chan error, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		done <- drainKeptRole(ctx, first, role, holderA, entry, time.Now)
+		done <- drainKeptRole(ctx, first, role, time.Now)
 	}()
 	<-started
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// The second listener's handover reads the claim the first is holding and leaves the lane to
+	// it, which it would wait roleKeepClaimWindow out to walk again; this context ends it there,
+	// since what the test is about has happened by then.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := drainKeptRole(ctx, second, role, holderB, entry, time.Now); err != nil {
+	if err := drainKeptRole(ctx, second, role, time.Now); err != nil {
 		t.Fatalf("the second listener's drain of role %s's kept lane: %v", role, err)
 	}
 	close(release)
@@ -524,12 +540,12 @@ func TestTwoDrainsOfOneRoleHandEachKeptCopyToExactlyOneHolder(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	for _, key := range keys {
-		switch holders := handed[key]; len(holders) {
+		switch listeners := handed[key]; len(listeners) {
 		case 1:
 		case 0:
-			t.Errorf("the kept copy under %s reached no holder: %v", key, handed)
+			t.Errorf("the kept copy under %s was forwarded by neither listener: %v", key, handed)
 		default:
-			t.Errorf("the kept copy under %s reached %v; a kept copy reaches exactly one holder", key, holders)
+			t.Errorf("the kept copy under %s was forwarded by %v; a kept copy is handed over once", key, listeners)
 		}
 	}
 }
@@ -579,11 +595,12 @@ func TestTheDrainJudgesAKeptCopyByTheRulesEveryForwardPathApplies(t *testing.T) 
 			if !keepRoleMessage(harness.client, cfg.logger, tc.role, item) {
 				t.Fatalf("keep the role message; the listener log says why:\n%s", harness.logs.String())
 			}
+			claimRoleWith(t, harness, holder, tc.role, tc.entry)
 			drain := func(what string) {
 				t.Helper()
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				if err := drainKeptRole(ctx, cfg, tc.role, holder, tc.entry, time.Now); err != nil {
+				if err := drainKeptRole(ctx, cfg, tc.role, time.Now); err != nil {
 					t.Fatalf("%s drain of role %s's kept lane: %v", what, tc.role, err)
 				}
 			}
@@ -676,9 +693,9 @@ func TestAPublishToARoleNoClaimCanNameIsRefusedAndKeepsNothing(t *testing.T) {
 }
 
 // A keep that lands after a concurrent claim's drain has read the lane still reaches that holder:
-// the keep resolves the role again and drains to whoever holds it now (drainAfterKeep). The claim
-// and its drain are made here before the keep, which is the order that race leaves behind, and no
-// second claim follows.
+// the keep hands the lane over again and that handover resolves whoever holds the role now
+// (keepForNextHolder, runKeptRoleDrain). The claim and its drain are made here before the keep,
+// which is the order that race leaves behind, and no second claim follows.
 func TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const (
@@ -694,8 +711,7 @@ func TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep(t *testing.T) {
 	claimRoleFor(t, harness.registry, harness.sessions, holder, role, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	entry := session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}
-	if err := drainKeptRole(ctx, cfg, role, holder, entry, time.Now); err != nil {
+	if err := drainKeptRole(ctx, cfg, role, time.Now); err != nil {
 		t.Fatalf("the claim's own drain of role %s's still empty kept lane: %v", role, err)
 	}
 
@@ -718,13 +734,13 @@ func TestAKeptCopyReachesTheHolderThatClaimedTheRoleUnderTheKeep(t *testing.T) {
 }
 
 // A sender that keeps a queue of its own and redelivers from it says so on the envelope
-// (contracts.Envelope.Keep false), and the role lane keeps nothing for it: Dispatch's outbox
-// publishes a role-routed event straight onto the lane and answers for its delivery itself, so a
-// copy kept here would reach the role's next holder a second time. The lane raises the no_holder
-// it raised before the kept lane, and an ordinary raw role publish, which carries no such flag, is
-// kept as it is now.
+// (contracts.Envelope.Keep false), and the role lane keeps nothing for it: a copy kept here would
+// reach the role's next holder a second time. The Legion daemon's notice queue publishes that
+// way, and so does a phase worker's stall reminder, whose next run says the same thing. The lane
+// raises the no_holder it raised before the kept lane, and an ordinary raw role publish, which
+// carries no such flag - Dispatch's role-routed events among them - is kept.
 func TestTheRoleLaneKeepsNothingForASenderThatKeepsItsOwnQueue(t *testing.T) {
-	// The flag the sender sets, as Dispatch's outbox sets it on a role-routed event.
+	// The flag the sender sets, as the Legion daemon sets it on a notice of its own queue.
 	keepFalse := false
 	for _, tc := range []struct {
 		name string
@@ -827,5 +843,58 @@ func TestAPublishToTheListenersKeptLaneIsRefused(t *testing.T) {
 				t.Fatalf("the stream holds a message on %s (%v); the refused publish stored nothing", subject, err)
 			}
 		})
+	}
+}
+
+// A kept copy whose forward reached the server and drew no receipt is reported as the live role
+// lane reports the same outcome: counted and logged receipt_timeout. It is still a copy the holder
+// has - the stream stored it on that holder's agent subject - so the walk confirms it and goes on
+// to the copy behind it, where counting it delivered said one word for it here and another on the
+// lane for the same event.
+func TestAKeptCopyThatDrewNoReceiptIsReportedReceiptTimeout(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const (
+		role   = "kept-receipt-timeout"
+		holder = "ses_kept_receipt_timeout"
+		copies = 2
+	)
+	cfg := harness.config
+	var forwarded []string
+	cfg.forwardRole = inlineForward(func(_ string, item contracts.Envelope, _ time.Duration) error {
+		forwarded = append(forwarded, item.DedupeKey)
+		if len(forwarded) == 1 {
+			return fmt.Errorf("role %s's holder answered no receipt: %w", role, bus.ErrReceiptTimeout)
+		}
+		return nil
+	})
+	var keys []string
+	for i := range copies {
+		item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, fmt.Sprintf("kept-receipt-timeout-%02d", i))
+		if !keepRoleMessage(harness.client, cfg.logger, role, item) {
+			t.Fatalf("keep copy %d; the listener log says why:\n%s", i, harness.logs.String())
+		}
+		keys = append(keys, roleForwardDedupePrefix+item.DedupeKey)
+	}
+	claimRoleWith(t, harness, holder, role, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := drainKeptRole(ctx, cfg, role, time.Now); err != nil {
+		t.Fatalf("drain role %s's kept lane: %v", role, err)
+	}
+
+	if !slices.Equal(forwarded, keys) {
+		t.Fatalf("the handover forwarded %v, want both copies %v: a copy that drew no receipt is confirmed and the walk goes on", forwarded, keys)
+	}
+	body := deliveredMetrics(t, harness)
+	if counted := counterValue(t, body, deliveredSeries("receipt_timeout")); counted != 1 {
+		t.Fatalf("%s is %d, want the copy that drew no receipt counted once under it:\n%s", deliveredSeries("receipt_timeout"), counted, body)
+	}
+	if counted := counterValue(t, body, deliveredSeries("delivered")); counted != 1 {
+		t.Fatalf("%s is %d, want only the copy its holder answered for:\n%s", deliveredSeries("delivered"), counted, body)
+	}
+	const line = "listener role receipt timed out"
+	if said := strings.Count(harness.logs.String(), line); said != 1 {
+		t.Fatalf("the drain logged %q %d times, want once for the copy that drew no receipt:\n%s", line, said, harness.logs.String())
 	}
 }

@@ -747,6 +747,11 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			dedupeKey = "publish." + request.IdempotencyKey
 		}
 		item := messageEnvelope(request.messageBody, request.Topic, dedupeKey)
+		// The request's keep flag travels on the envelope, the one place a give-up path reads it
+		// from (keepForNextHolder): a role send that finds no live holder keeps its message for
+		// the role's next holder unless its sender says it keeps a queue of its own. No flag at
+		// all means keep, so every publisher that sets none is unchanged.
+		item.Keep = request.Keep
 		record.item = &item
 		if err := item.Validate(); err != nil {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, err.Error())
@@ -755,7 +760,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
 			defer cancel()
-			sendToRole(ctx, w, record, d, item, role, arrived, request.Keep == nil || *request.Keep)
+			sendToRole(ctx, w, record, d, item, role, arrived)
 			return
 		}
 		if bus.UsesCoreTransport(request.Topic) {
@@ -1097,9 +1102,10 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 // role is a 409, a refused key a 413 or 400, and an unreadable claim the 503 or 500 it was.
 //
 // A claim that landed also hands the role's kept lane to its new holder: whatever the listener
-// kept while the role had none is forwarded to the claimant (startKeptRoleDrain). That runs in a
-// goroutine under a context of its own, so this answer's status and body are exactly what they
-// were and wait for none of it.
+// kept while the role had none is forwarded to the claimant (runKeptRoleDrain, which resolves the
+// role's holder itself and so hands the lane to the claim that superseded this one when one has).
+// That runs in a goroutine under a context of its own, so this answer's status and body are
+// exactly what they were and wait for none of it.
 func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1197,7 +1203,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
-		startKeptRoleDrain(d.delivery, body.Role, body.SessionID, entry)
+		go runKeptRoleDrain(*d.delivery, body.Role)
 		writeJSON(w, http.StatusOK, item)
 	}
 }

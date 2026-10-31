@@ -38,14 +38,19 @@ func TestAKeptCopyItsDrainNeverForwardedStillReachesTheRolesHolder(t *testing.T)
 	entry := session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	claimRoleWith(t, harness, holder, role, entry)
 
 	// The drain that ends between its claim and its forward. Its claim has already advanced the
-	// role's cursor past this copy when the forward it never completes is attempted.
+	// role's cursor past this copy when the forward it never completes is attempted. Its window
+	// is the whole of that listener's life: a handover whose holder is live walks the lane again
+	// after a pause of its own, and this one is gone before it can.
+	lostCtx, cancelLost := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelLost()
 	lost := harness.config
 	lost.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error {
 		return errors.New("this listener ended between its claim of the copy and its forward")
 	})
-	if err := drainKeptRole(ctx, lost, role, holder, entry, time.Now); err == nil {
+	if err := drainKeptRole(lostCtx, lost, role, time.Now); err == nil {
 		t.Fatalf("the drain whose forward never completed reported no error, so this test no longer reaches the moment it is about")
 	}
 
@@ -58,7 +63,7 @@ func TestAKeptCopyItsDrainNeverForwardedStillReachesTheRolesHolder(t *testing.T)
 		handed = append(handed, forwarded.DedupeKey)
 		return nil
 	})
-	if err := drainKeptRole(ctx, replacement, role, holder, entry, time.Now); err != nil {
+	if err := drainKeptRole(ctx, replacement, role, time.Now); err != nil {
 		t.Fatalf("the replacement listener's drain of role %s's kept lane: %v", role, err)
 	}
 	if !slices.Contains(handed, key) {

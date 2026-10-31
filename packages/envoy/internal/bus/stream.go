@@ -115,12 +115,17 @@ func DeliverSubject(sessionID string) string {
 // (StreamSubjects).
 const KeptTopicPrefix = NotificationTopicPrefix + "envoy.kept."
 
+// KeptRoleSubjectPrefix begins the kept lane of every role (KeptRoleSubject): what a reader of all
+// of them filters the stream's subjects on and reads each role's own token back out of
+// (Client.KeptRoleLanes).
+const KeptRoleSubjectPrefix = KeptTopicPrefix + "role."
+
 // KeptRoleSubject is the kept lane of role: the role messages the listener could not deliver, each
 // held until the role is claimed and then forwarded to the new holder. The role name is written
 // into the segment as contracts.RoleTopicPrefix writes it, unsanitized, so a role's kept subject
 // follows from its role topic.
 func KeptRoleSubject(role string) string {
-	return KeptTopicPrefix + "role." + role
+	return KeptRoleSubjectPrefix + role
 }
 
 // KeptRoleCursorSubject is the drain cursor of role: how far the listener has read that role's

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -170,5 +171,43 @@ func TestPublishCursorAtRefusesAWriteWhoseCursorMoved(t *testing.T) {
 	}
 	if stored.Sequence != second || string(stored.Data) != `{"seq":33}` {
 		t.Fatalf("the cursor = %+v, want the new value at %d", stored, second)
+	}
+}
+
+// The sweep over the kept lanes nobody is draining reads every role that has one in a single call,
+// and reads nothing of a role whose cursor subject alone is on the stream: a cursor is the
+// listener's own bookkeeping, not a copy waiting for a holder. A role whose lane the stream holds
+// no copy on is not on the list either, which is what makes a deployment with no kept copy cost
+// one round trip a pass.
+func TestKeptRoleLanesAnswersEveryRoleWithACopyOnItsLane(t *testing.T) {
+	client := keptClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	lanes, err := client.KeptRoleLanes(ctx)
+	if err != nil {
+		t.Fatalf("read the kept lanes of a stream that holds none: %v", err)
+	}
+	if len(lanes) != 0 {
+		t.Fatalf("the kept lanes of a stream that holds none = %v, want none", lanes)
+	}
+
+	roles := []string{"lane-reader-second", "lane-reader-first"}
+	for _, role := range roles {
+		item := keptEnvelope(role, "kept-"+role)
+		if err := client.PublishStoredAs(ctx, bus.KeptRoleSubject(role), item, bus.KeptMsgID(item.DedupeKey, role)); err != nil {
+			t.Fatalf("keep a copy for %s: %v", role, err)
+		}
+	}
+	if _, err := client.PublishCursorAt(ctx, bus.KeptRoleCursorSubject("lane-reader-cursor-only"), []byte(`{"kept":7}`), 0); err != nil {
+		t.Fatalf("write a cursor of a role with no kept copy: %v", err)
+	}
+
+	lanes, err = client.KeptRoleLanes(ctx)
+	if err != nil {
+		t.Fatalf("read the kept lanes: %v", err)
+	}
+	if want := []string{"lane-reader-first", "lane-reader-second"}; !slices.Equal(lanes, want) {
+		t.Fatalf("the kept lanes = %v, want every role with a copy on its lane, sorted: %v", lanes, want)
 	}
 }
