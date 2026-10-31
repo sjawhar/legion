@@ -2,6 +2,7 @@ package admit
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -89,9 +90,9 @@ func TestAChildHandedOverWithoutItsRunTakesTheDecisionKeptOnIt(t *testing.T) {
 			"a child handed over without its run takes what was decided on it, or nobody is ever told",
 			child, task, childAsk, child)
 	}
-	if left := keptRefs(t, pool, old); len(left) != 0 {
-		t.Fatalf("%s keeps %q after the hand-over, want none: %s was decided on an issue that is now a tree of its own, "+
-			"and no start or catch-up of %s names it again", old, left, childAsk, old)
+	if issue, claimTree := keptOwner(t, pool, childAsk); issue != child || claimTree != child {
+		t.Fatalf("%s stands under %q, claimed by a row of tree %q; want it under %s, claimed by that tree's start until its "+
+			"architect's turn on the task starts", childAsk, issue, claimTree, child)
 	}
 }
 
@@ -125,48 +126,19 @@ func TestAnOrphanedParkedChildTakesTheDecisionKeptOnIt(t *testing.T) {
 		t.Fatalf("the start task of %s = %q, want it to name %s, which a person decided on %s while its tree was closed: "+
 			"an orphan takes what was decided on it, or nobody is ever told", child, task, childAsk, child)
 	}
-	if left := keptRefs(t, pool, old); len(left) != 0 {
-		t.Fatalf("%s keeps %q after the orphan's admission, want none: %s was decided on an issue that is now a tree of its own",
-			old, left, childAsk)
+	if issue, claimTree := keptOwner(t, pool, childAsk); issue != child || claimTree != child {
+		t.Fatalf("%s stands under %q, claimed by a row of tree %q; want it under %s, claimed by that tree's start until its "+
+			"architect's turn on the task starts", childAsk, issue, claimTree, child)
 	}
 }
 
 // A root that waits for its slot keeps a person's decision for the start its admission will queue
 // (record.RelayParkedDecision, RelayKept). When a person makes that root a child of a live tree
 // instead, admission adopts it into that tree (adoptQueuedRoots) and it takes no start of its own
-// ever again: the decision is owed to the architect of the tree it joined, which is told it once —
-// at that architect's next ready, whose catch-up names every decision nobody claims. Left kept
-// under the adopted root, it is named to nobody.
-func TestAQueuedRootAdoptedIntoALiveTreeOwesItsDecisionToThatTreesArchitect(t *testing.T) {
-	pool := migratedPool(t)
-	admission := quiet(t, 1)
-	const tree, queued = "LEGION-168", "LEGION-214"
-	seedOpenTree(t, pool, tree)
-	putIssue(t, pool, queuedRoot(queued, tree, "B", 1))
-	ask := "dispatch://LEGION-214/ask/ask-1"
-	keepParkedDecision(t, pool, queued, queued, ask)
-
-	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
-	if got := issue(t, pool, queued); got.Tree != tree {
-		t.Fatalf("%s = %#v, want it adopted into the live tree of %s", queued, got, tree)
-	}
-
-	// The tree's architect comes up: its catch-up names every decision nobody else claims, which
-	// is where a decision of an issue of its tree reaches it.
-	applyFact(t, pool, admission, "architect-ready", intake.ClaimReady{Issue: tree, Role: claim.RoleArchitect, Launch: 1})
-	if told := namings(t, pool, tree); timesNamed(told, ask) != 1 {
-		t.Fatalf("the architect of %s was told %q, want %s named once: a person decided on %s, which now stands in that tree, "+
-			"and no start or catch-up of %s will ever name it", tree, told, ask, queued, queued)
-	}
-	if left := keptRefs(t, pool, queued); len(left) != 0 {
-		t.Fatalf("%s keeps %q after it was adopted into the tree of %s, want none: it is no root, so nothing of its own names them again",
-			queued, left, tree)
-	}
-}
-
-// The same adoption, into a tree whose architect already runs: no ready follows the adoption, so
-// the adoption itself must write that architect a catch-up naming what the adopted root kept while
-// it waited for its slot, or the decision waits for a relaunch that may never come.
+// ever again: the decision is owed to the architect of the tree it joined. That architect already
+// runs and no ready follows the adoption, so the adoption itself writes it a catch-up naming the
+// decision; a later ready of that architect drops that catch-up and names the decision again in
+// its own, once. Left under the adopted root, it would be named to nobody.
 func TestAnAdoptionIntoATreeWhoseArchitectRunsWritesItACatchUp(t *testing.T) {
 	pool := migratedPool(t)
 	admission := quiet(t, 1)
@@ -184,6 +156,33 @@ func TestAnAdoptionIntoATreeWhoseArchitectRunsWritesItACatchUp(t *testing.T) {
 		t.Fatalf("after the adoption the architect of %s was told %q, want %s named once by a catch-up the adoption writes: "+
 			"its architect already runs, and no ready is coming", tree, told, ask)
 	}
+	applyFact(t, pool, admission, "architect-ready", intake.ClaimReady{Issue: tree, Role: claim.RoleArchitect, Launch: 1})
+	if told := namings(t, pool, tree); timesNamed(told, ask) != 1 {
+		t.Fatalf("after the architect's ready %s was told %q, want %s named once: the ready's catch-up replaces the adoption's",
+			tree, told, ask)
+	}
+	if issue, claimTree := keptOwner(t, pool, ask); issue != queued || claimTree != tree {
+		t.Fatalf("%s stands under %q, claimed by a row of tree %q; want it under %s, claimed by %s's catch-up until published",
+			ask, issue, claimTree, queued, tree)
+	}
+}
+
+// keptOwner reads the kept row of ref: the issue it stands under, and the tree of the issue of the
+// outbox row that claims it ("" when nothing claims it, "gone" when the row no longer stands).
+func keptOwner(t *testing.T, pool *pgxpool.Pool, ref string) (issue, claimTree string) {
+	t.Helper()
+	err := pool.QueryRow(context.Background(), `select kept.issue, coalesce(claimed.tree, '')
+		from parked_decisions kept
+		left join outbox claimer on claimer.id = kept.claimed_by
+		left join issues claimed on claimed.key = claimer.issue
+		where kept.ref = $1`, ref).Scan(&issue, &claimTree)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "gone", "gone"
+	}
+	if err != nil {
+		t.Fatalf("read the kept row of %s: %v", ref, err)
+	}
+	return issue, claimTree
 }
 
 // A linger's end hands a child and the grandchild below it to Legion, each with a fence of its
@@ -244,9 +243,13 @@ func TestAGrandchildHandedOverBesideItsParentTakesTheDecisionKeptOnIt(t *testing
 			if !strings.Contains(childTask, childAsk) {
 				t.Fatalf("the start task of %s = %q, want it to name %s, which a person decided on it", child, childTask, childAsk)
 			}
-			if left := keptRefs(t, pool, old); len(left) != 0 {
-				t.Fatalf("%s keeps %q after both hand-overs, want none: each was decided on an issue that is now a tree of its own",
-					old, left)
+			if issue, claimTree := keptOwner(t, pool, grandAsk); issue != grand || claimTree != grand {
+				t.Fatalf("%s stands under %q, claimed by a row of tree %q; want it under %s, claimed by that tree's start",
+					grandAsk, issue, claimTree, grand)
+			}
+			if issue, claimTree := keptOwner(t, pool, childAsk); issue != child || claimTree != child {
+				t.Fatalf("%s stands under %q, claimed by a row of tree %q; want it under %s, claimed by that tree's start",
+					childAsk, issue, claimTree, child)
 			}
 		})
 	}

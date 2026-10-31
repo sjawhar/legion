@@ -1059,7 +1059,7 @@ func TestAConfirmationDoesNotSurviveHalfWritten(t *testing.T) {
 // A root architect's task of a run is held, never dropped, while its root has nobody to hear it
 // (Deps.RootHears): such a task names no phase, so nothing else would keep it from being prompted
 // to an architect whose tree is parked, lingering or waiting for its slot, and the decisions it
-// names were forgotten when the claim queued it. It stays pending, uncharged, and the next deliver
+// names are told when the turn that takes it starts. It stays pending, uncharged, and the next deliver
 // request — the start of the root's next run, which the pending task refuses — is what sends it.
 // A task of no run is nobody's to hold: an operator's own is prompted whatever the root is doing.
 func TestARootArchitectsTaskIsHeldUntilItsRootHasAnArchitectToHearIt(t *testing.T) {
