@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-31T00:41:29Z",
+  "completed": "2026-10-31T02:36:00Z",
   "proof": [
+    {
+      "criterion": "Review round 6: every stop, kill or removal fails closed after a retried lock read; older step directories keep their recorded transport; main merged (AGENTS.md re-layout)",
+      "surface": "cluster.sh under cluster.test.sh's fakes (lock reads failing always, or only once), the loadgen Go tests, and the repository's CI check scripts, at the merged head",
+      "command": "cd packages/envoy && go test -p 2 -parallel 4 -count=1 ./loadtest/ && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh && timeout 1800 bash loadtest/cluster/cluster.test.sh; repo root: shellcheck, check-ci-images.sh tree, check-ci-filters.sh, bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md",
+      "observed": "go test ok (TestTablesReadTheOlderLiveTransport passes); cluster.test.sh 52 PASS, 0 FAIL ((aa): every read failing, runner_stop, runner_step_remove and postgres_exec act on nothing; one failing read, runner_stop acts; (w) waits on exact pids); run-step, common, shellcheck, check-ci-images, check-ci-filters, semantic-line-breaks exit 0",
+      "headSha": "32592e511a29",
+      "negativeControl": "against 6ac30872: 'runner_stop returned 0 although no read of the lock answered'; 'step older-sse, whose summary.json names live.transport alone, reads transport [...] want \"sse\"'"
+    },
     {
       "criterion": "Review round 5: main merged with one dashboard transport; collect --run works while another run holds the lock; the daemons write their pidfile before any lock read; every write into the shared pods goes through a guarded helper, typing_start's token write included",
       "surface": "cluster.sh under cluster.test.sh's fakes (fake lock naming another run, failing lock reads), the loadgen Go tests, and the repository's CI check scripts, at the merged head",
