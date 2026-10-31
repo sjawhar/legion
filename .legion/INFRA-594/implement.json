@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-31T15:48:35Z",
+  "completed": "2026-10-31T18:30:04Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
       "surface": "Real Oh My Pi (omp 18.12.2, this checkout's pi-envoy) and real Claude Code 2.1.311 under this checkout's `legion claude-bridge` with claude-envoy built from the checkout; natsd with JetStream; two real envoy-listener processes; real envoy-dispatch on Postgres 17 with pgvector; in the issue pod",
       "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh",
-      "observed": "At 0debf189 (main ff93d6c4 merged, round 6 fix): ENVOY SESSION DELIVERY: PASS, exit 0, 60 events x 6 windows each counted 1 (evidence/live/head-0deb.table.txt); sampled peak across both live runs 4.28 GiB of 19, 208 samples.",
-      "headSha": "0debf189d6efdb7eab2aed06ec8fe9f3ebccd01a",
+      "observed": "At 3a38540c (main 151d2d79 merged): ENVOY SESSION DELIVERY: PASS, exit 0, 60 events x 6 windows each counted 1; the issue order compared for real: 'issue order compared in pi (12 comments): LDT48b5-001Z@seq4:line17 ... LDT48b5-052Z@seq73:line123', the same in cc (evidence/live/head-3a38.table.txt). Sampled peak over both live runs 4.90 GiB of 19, 195 samples.",
+      "headSha": "3a38540c3919defb9229751d4b0ff3127a923f6b",
       "negativeControl": "--build-from c3d09eec --expect-lost agent,issue,role at a592ce7e: NEGATIVE CONTROL HOLDS: every agent,issue,role event of window a counted 0 in both sessions (evidence/live/c3d09eec-at-a592.out)."
     },
     {
@@ -104,8 +104,8 @@
       "criterion": "Tester round 5: a session upgrading from the released plugin (96a7e5ea, pi-envoy 13.5.1, claude-envoy 1.0.0) to this head is shown every agent, issue and role event stored while it was away, once",
       "surface": "real Oh My Pi and Claude Code sessions started on the plugins built from 96a7e5ea, SIGKILLed, the window's events stored, resumed on this checkout's plugins; natsd, two listeners, Dispatch on Postgres",
       "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh --disruptions a --resume-plugins-from 96a7e5ea9099aabf25dc8b524177b6f73df4eab5 --second-followed-issue",
-      "observed": "At 0debf189: PASS, exit 0; comment-1, comment-2, second-comment counted 1 in both sessions, every agent and role event 1 (evidence/live/upgrade-0deb.table.txt).",
-      "headSha": "0debf189d6efdb7eab2aed06ec8fe9f3ebccd01a",
+      "observed": "At 3a38540c: PASS, exit 0; comment-1, comment-2, second-comment counted 1 in both sessions; 'issue order compared in pi (2 comments): LDT83af-001Z@seq5:line19 LDT83af-002Z@seq6:line20', cc lines 70, 81 (evidence/live/upgrade-3a38.table.txt).",
+      "headSha": "3a38540c3919defb9229751d4b0ff3127a923f6b",
       "negativeControl": "same command with followedOnCorePath neutered in consumer-delivery.ts (working copy, restored after): ENVOY SESSION DELIVERY: FAIL, issue comment-1 and comment-2 counted 0! 0! (evidence/live/upgrade-neg.table.txt), matching the tester's two runs at 1099510d"
     },
     {
@@ -235,6 +235,30 @@
       "observed": "-count=10 ok 188.1s; ./cmd/listener ok 658.8s (sampled peak 3.61 GiB, 305 samples); -race ok 718.9s, no DATA RACE (3.77 GiB, 336 samples); session ok; serverchange ok 147.5s; plugins 3057 pass 0 fail. Matrix: PR comment issuecomment-6545611769",
       "headSha": "0debf189d6efdb7eab2aed06ec8fe9f3ebccd01a",
       "negativeControl": "196233c0's delivery.go: TestTheFanoutReportsARefusalOfAPortlessSessionOnConsumerDelivery both subtests fail ('the exception lanes carried [] for the portless session'); pre-round-5 delivery.go: the no-entry subtest fails (attempt record left behind)"
+    },
+    {
+      "criterion": "Tester round 14: the live script's issue-order assertion actually compares the order; an empty, short or reordered comparison fails",
+      "surface": "scripts/e2e/envoy-session-delivery.sh (compare_issue_order) and its two bun tests; the live runs at 3a38540c",
+      "command": "bun test scripts/e2e/lib/session-delivery-order.test.ts scripts/e2e/lib/session-delivery-order-compare.test.ts; the two live runs",
+      "observed": "6 pass 0 fail; the live runs print 'issue order compared in pi/cc (2 comments)' and '(12 comments)' with each comment's stream seq and transcript line",
+      "headSha": "3a38540c3919defb9229751d4b0ff3127a923f6b",
+      "negativeControl": "INFRA-771's red test with the old .event selectors: fails (selector prints nothing); compare_issue_order with its empty, short and missing guards removed: those three control rows fail"
+    },
+    {
+      "criterion": "Tester round 14: -race ./cmd/listener failed once in three at the tester's; run it three times under the caps keeping every output",
+      "surface": "go test -race on packages/envoy/cmd/listener at 3a38540c",
+      "command": "for k in 1 2 3: GOMAXPROCS=4 GOMEMLIMIT=12GiB CGO_ENABLED=1 go test -p 1 -race -count=1 -timeout 50m ./cmd/listener",
+      "observed": "run 1 ok 719.7s, run 2 ok 708.8s, run 3 ok 715.1s; 0 DATA RACE in each; sampled peak 4.48 GiB, 971 samples (evidence/race-listener-run{1,2,3}.txt)",
+      "headSha": "3a38540c3919defb9229751d4b0ff3127a923f6b",
+      "negativeControl": "none reproduced: no failure in three runs here, so no test can be named"
+    },
+    {
+      "criterion": "Forward merge of main 151d2d79 (#2592, runtime conflicts) keeps both sides",
+      "surface": "the merged tree: Go and plugin suites, the live runs",
+      "command": "go build/vet; go test ./cmd/listener, ./internal/session (and -race); bun test packages/envoy-client packages/pi-envoy; pi-envoy src/registration-state.test.ts; claude-envoy verify-build then bun run test",
+      "observed": "./cmd/listener ok 653.2s; session ok; plugins 3123 pass 0 fail; registration-state 62 pass; claude-envoy 287 pass; both live runs PASS (issuecomment-6547450950)",
+      "headSha": "3a38540c3919defb9229751d4b0ff3127a923f6b",
+      "negativeControl": "before the resolution tsc -p packages/pi-envoy and go vet failed (the dangling Fence references and main's two-argument claim-wiring calls)"
     }
   ],
   "filesChanged": [
@@ -263,7 +287,8 @@
     "Round 11: packages/envoy/cmd/listener/{session_relay,serve_port_workers,delivery}.go + session_relay_test.go, internal/session/{handler,session}.go, AGENTS.md (merged into main's one-sentence layout), changelog; merges c33189da (main 21b40359: AGENTS.md) and f41a4d8c (main d7e1daaa: scripts/e2e/README.md)",
     "Round 12: packages/envoy-client/test/envoy-stack.ts (freePorts); the tester's packages/envoy-client/src/__tests__/free-ports.test.ts (merged from d8eecf87) and packages/envoy/cmd/listener/session_relay_hold_test.go",
     "Round 13: packages/envoy/cmd/listener/delivery.go and session_relay_test.go, packages/envoy/AGENTS.md, changelog fragment; .github/workflows/ci.yaml comments (0968255e); merge of main 2ab9473a at 9455931a (no conflict)",
-    "Round 14: packages/envoy/cmd/listener/delivery.go, fanout_refusal_reports_test.go (new), session_relay_test.go, AGENTS.md, changelog; the tester's session_relay_mode_stall_test.go (bed0de9f); .github/workflows/ci.yaml comments (aea3da5c); merge of main ff93d6c4 at e0e4f0ff (no conflict)"
+    "Round 14: packages/envoy/cmd/listener/delivery.go, fanout_refusal_reports_test.go (new), session_relay_test.go, AGENTS.md, changelog; the tester's session_relay_mode_stall_test.go (bed0de9f); .github/workflows/ci.yaml comments (aea3da5c); merge of main ff93d6c4 at e0e4f0ff (no conflict)",
+    "Round 15: scripts/e2e/envoy-session-delivery.sh (compare_issue_order), scripts/e2e/lib/session-delivery-order-compare.test.ts (new); the tester's scripts/e2e/lib/session-delivery-order.test.ts and packages/envoy/cmd/listener/session_relay_portless_refusal_test.go (merged from 6d5c468e); fanout_refusal_reports_test.go comment; merge of main 151d2d79 at 3a38540c (pi-envoy envoy.ts and src/registration-state.ts, session/registry.go, claim_wiring.go and test, transport.ts and test, envoy-channel-server.ts, docs)"
   ],
   "trickyParts": [
     "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",
