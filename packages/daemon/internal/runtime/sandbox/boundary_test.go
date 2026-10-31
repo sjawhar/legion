@@ -643,8 +643,13 @@ func TestWhatAnIssuePlantsNeitherReadsTheProvisioningTokenNorOutlivesItsPod(t *t
 	if output, err := exec.Command("go", "build", "-o", legion, "github.com/sjawhar/legion/daemon/cmd/legion").CombinedOutput(); err != nil {
 		t.Fatalf("build the Go legion: %v\n%s", err, output)
 	}
+	probeHome := t.TempDir()
 	probeFilters := exec.Command("jj", "config", "list", "--include-defaults", "git.filter.enabled")
-	probeFilters.Env = append(os.Environ(), "JJ_CONFIG="+filepath.Join(t.TempDir(), "none.toml"), "XDG_CONFIG_HOME="+t.TempDir(), "HOME="+t.TempDir())
+	// The probe runs in the empty directory it reads its configuration from: jj searches upward
+	// from the directory it runs in for the closest .jj, so a probe with no Dir would open the
+	// workspace the test process stands in, which in a Legion issue pod is a real one.
+	probeFilters.Dir = probeHome
+	probeFilters.Env = append(os.Environ(), "JJ_CONFIG="+filepath.Join(probeHome, "none.toml"), "XDG_CONFIG_HOME="+probeHome, "HOME="+probeHome)
 	if out, _ := probeFilters.Output(); len(strings.TrimSpace(string(out))) == 0 {
 		t.Fatal("this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs")
 	}

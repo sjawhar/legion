@@ -202,6 +202,14 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	if command.Timeout <= 0 {
 		return Result{}, fmt.Errorf("workspace command has no timeout: %s", strings.Join(command.Argv, " "))
 	}
+	// A child with an empty Dir inherits the working directory of the process that starts it, and
+	// a relative Dir resolves against that same directory: either way exec would chdir somewhere
+	// the caller never chose, and a git or jj that searches upward from there opens a repository
+	// the caller never named. It is one rule, so it is one refusal: every call site in this
+	// package names an absolute directory it owns and knows is there.
+	if !filepath.IsAbs(command.Dir) {
+		return Result{}, fmt.Errorf("workspace command names no absolute working directory of its own (%q): %s", command.Dir, strings.Join(command.Argv, " "))
+	}
 	bounded, cancel := context.WithTimeout(ctx, command.Timeout)
 	defer cancel()
 
@@ -211,7 +219,15 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	args := command.Argv[1:]
 	if command.Argv[0] == "jj" {
-		guarded, err := guardWorkspace(jjWorkspaceRoot(command), command.Clone, true)
+		root := jjWorkspaceRoot(command)
+		if root == "" {
+			// A jj command that names no -R is one of provisioning's two that create a repository,
+			// and jj would open an enclosing one instead of creating its own.
+			if err := refuseEnclosingWorkspace(command.Dir); err != nil {
+				return Result{}, err
+			}
+		}
+		guarded, err := guardWorkspace(root, command.Clone, true)
 		if err != nil {
 			return Result{}, err
 		}
@@ -373,6 +389,37 @@ func refuseSymlinkedLayout(root, dir string) error {
 		dir = filepath.Dir(dir)
 	}
 	return nil
+}
+
+// refuseEnclosingWorkspace refuses a jj command that creates a repository of its own — `jj git
+// clone` and `jj git init --colocate`, the only two provisioning runs that name no -R — when dir,
+// or any directory above it, holds a `.jj`. It completes the one rule Run's three refusals read
+// as: a child of provisioning's takes its working directory (the absolute Command.Dir every call
+// site names), its repository (this) and its git configuration (withoutGitConfigPairs and the
+// GIT_CONFIG_PARAMETERS strip) from the caller's intent, never from the process that happens to
+// start it.
+//
+// jj has no ceiling option: it searches upward from the directory it runs in for the closest
+// `.jj` and opens that repository, which is how a test in a Legion issue pod came to write the
+// pod's shared clone at /legion/repos/github.com/sjawhar/legion. A `.jj` that is a file counts as
+// a repository too, since that is jj's own workspace pointer form, and a component that does not
+// exist holds no `.jj`, so it is passed over, as refuseSymlinkedLayout does. The walk costs a
+// handful of os.Lstat calls once per clone, which is why nothing here is cached.
+func refuseEnclosingWorkspace(dir string) error {
+	for {
+		enclosing := filepath.Join(dir, ".jj")
+		switch _, err := os.Lstat(enclosing); {
+		case err == nil:
+			return fmt.Errorf("refusing to run jj in %s: %s is a Jujutsu repository, and this jj command creates a repository of its own, so jj would open and write that enclosing repository instead of creating one; the directory the daemon provisions under must not sit inside a Jujutsu repository — under `runtime: tmux` that directory is legion.yaml's state_dir, which a relative value resolves against the configuration file's own directory, so a legion.yaml kept inside a checkout puts the shared clone under that checkout's .jj", dir, enclosing)
+		case !errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("refusing to run jj in %s: %w", dir, err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
 }
 
 // sharedRepository is the repository directory jj opens for the workspace whose `.jj` is jjDir,

@@ -207,8 +207,13 @@ func TestTheCredentialedFetchRunsNoWorkingCopyFilter(t *testing.T) {
 // working-copy filters: provisioning is proven against the jj the worker image ships.
 func requireFilters(t *testing.T) {
 	t.Helper()
+	home := t.TempDir()
 	probe := exec.Command("jj", "config", "list", "--include-defaults", "git.filter.enabled")
-	probe.Env = append(os.Environ(), "JJ_CONFIG="+filepath.Join(t.TempDir(), "none.toml"), "XDG_CONFIG_HOME="+t.TempDir(), "HOME="+t.TempDir())
+	// The probe runs in the empty directory it reads its configuration from: jj searches upward
+	// from the directory it runs in for the closest .jj, so a probe with no Dir would open the
+	// workspace the test process stands in, which in a Legion issue pod is a real one.
+	probe.Dir = home
+	probe.Env = append(os.Environ(), "JJ_CONFIG="+filepath.Join(home, "none.toml"), "XDG_CONFIG_HOME="+home, "HOME="+home)
 	if out, _ := probe.Output(); len(strings.TrimSpace(string(out))) == 0 {
 		t.Fatal("this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs")
 	}
