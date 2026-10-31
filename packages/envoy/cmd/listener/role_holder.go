@@ -32,7 +32,11 @@ const (
 
 // roleHolderResult is one resolution of a role's holder (resolveRoleHolder). holder names the
 // claim's holder whenever one was read; entry is set only for roleHolderLive; lastSeen,
-// lastSeenAvailable and claimRelease only for roleHolderLapsed.
+// lastSeenAvailable and claimRelease only for roleHolderLapsed. claimRevision is the role
+// bucket revision of the claim record this resolution leaves behind, which GET /v1/roles/<role>
+// reports as claim_revision and a conditional claim names as if_claim_revision: the revision the
+// claim was read at while a record stands, and zero where none does - an unclaimed role, and a
+// lapsed holder whose claim this resolution released or found already gone.
 type roleHolderResult struct {
 	state             roleHolderState
 	holder            string
@@ -40,6 +44,7 @@ type roleHolderResult struct {
 	lastSeen          int64
 	lastSeenAvailable bool
 	claimRelease      store.ExpiredRoleClaimRelease
+	claimRevision     uint64
 }
 
 // roleHolderStep names the read a role-holder resolution failed at, so a caller that reports the
@@ -82,16 +87,22 @@ func (f *roleHolderFailure) Error() string {
 func (f *roleHolderFailure) Unwrap() error { return f.cause }
 
 type roleHolderError struct {
-	Error         string          `json:"error"`
-	Reason        roleHolderState `json:"reason"`
-	Holder        string          `json:"holder,omitempty"`
-	LastSeen      *int64          `json:"last_seen,omitempty"`
-	ClaimReleased *bool           `json:"claim_released,omitempty"`
+	Error  string          `json:"error"`
+	Reason roleHolderState `json:"reason"`
+	Holder string          `json:"holder,omitempty"`
+	// ClaimRevision is the role's claim revision, as the 200 reports it: zero for an
+	// unclaimed role and for a lapsed holder whose claim is gone, so a scheduler reading this
+	// 404 can claim the role with if_claim_revision and have that claim refused if any record
+	// appears first.
+	ClaimRevision uint64 `json:"claim_revision"`
+	LastSeen      *int64 `json:"last_seen,omitempty"`
+	ClaimReleased *bool  `json:"claim_released,omitempty"`
 }
 
 func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderResult) {
 	response := roleHolderError{
-		Reason: result.state,
+		Reason:        result.state,
+		ClaimRevision: result.claimRevision,
 	}
 	switch result.state {
 	case roleHolderUnclaimed:
@@ -379,7 +390,7 @@ func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions
 		}
 		entry, err := liveSessionEntry(ctx, sessions, holder, roleHolderReadTimeout, live)
 		if err == nil {
-			return roleHolderResult{state: roleHolderLive, holder: holder, entry: entry}, nil
+			return roleHolderResult{state: roleHolderLive, holder: holder, entry: entry, claimRevision: claim.Revision}, nil
 		}
 		if !errors.Is(err, nats.ErrKeyNotFound) {
 			return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderSessionRead, cause: err}
@@ -392,12 +403,22 @@ func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions
 		if superseded {
 			continue
 		}
+		// A released claim and one already gone leave no record, so the revision this
+		// resolution read names nothing a later claim can be conditional on; a retained one
+		// (a restored claim still inside its grace) is still in the bucket at the revision
+		// read, and a conditional claim against it is exactly how a scheduler takes a role
+		// its restart-grace holder never came back for.
+		claimRevision := claim.Revision
+		if release == store.ExpiredRoleClaimReleased || release == store.ExpiredRoleClaimMissing {
+			claimRevision = 0
+		}
 		return roleHolderResult{
 			state:             roleHolderLapsed,
 			holder:            holder,
 			lastSeen:          lastSeen,
 			lastSeenAvailable: lastSeen != 0,
 			claimRelease:      release,
+			claimRevision:     claimRevision,
 		}, nil
 	}
 	return roleHolderResult{}, &roleHolderFailure{step: roleHolderChurn, cause: errRoleHolderChanged}

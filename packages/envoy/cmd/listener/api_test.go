@@ -1104,7 +1104,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 			t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
 		}
 		t.Logf("publish unheld role: %s", recorder.Body.String())
-		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\"}\n" {
+		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\",\"claim_revision\":0}\n" {
 			t.Fatalf("body = %q", body)
 		}
 		assertNoMessage := func(name string, probe *nats.Subscription) {
@@ -1208,7 +1208,7 @@ func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 		if recorder.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
 		}
-		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\"}\n" {
+		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\",\"claim_revision\":0}\n" {
 			t.Fatalf("body = %q", body)
 		}
 	})
