@@ -68,16 +68,17 @@ var listenerPublish = []string{
 func TestListenerPermissions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish:   core.Rules{Allow: listenerPublish},
-		Subscribe: core.Rules{Allow: []string{"_INBOX.>", "notifications.role.> envoy-listener-example-host-a"}},
+		Subscribe: core.Rules{Allow: []string{"_INBOX.>", "notifications.role.> envoy-listener-role-lane"}},
 	}, core.ListenerPermissions("example-host-a"))
 }
 
-// A space in the machine id is a hyphen in the durable and the queue, as the listener names them.
-func TestListenerPermissionsNameTheDurableAndQueueOfAMachineIDWithASpace(t *testing.T) {
+// A space in the machine id is a hyphen in the durable, as the listener names it. The role lane's
+// queue group names no machine, so it is the same entry for every machine id.
+func TestListenerPermissionsNameTheDurableOfAMachineIDWithASpace(t *testing.T) {
 	p := core.ListenerPermissions("example host")
 	require.Contains(t, p.Publish.Allow, "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host")
 	require.Contains(t, p.Publish.Allow, "$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-host.>")
-	require.Contains(t, p.Subscribe.Allow, "notifications.role.> envoy-listener-example-host")
+	require.Contains(t, p.Subscribe.Allow, "notifications.role.> envoy-listener-role-lane")
 }
 
 func TestSessionPermissions(t *testing.T) {
@@ -137,7 +138,7 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish: core.Rules{Allow: append(append([]string{}, listenerPublish...), "_INBOX.>", "agentstream.*.frames")},
 		Subscribe: core.Rules{Allow: []string{
-			"_INBOX.>", "notifications.role.> envoy-listener-example-host-a",
+			"_INBOX.>", "notifications.role.> envoy-listener-role-lane",
 			"notifications.>", "agentstream.*.control",
 		}},
 	}, core.HostPermissions("example-host-a"))
@@ -167,7 +168,7 @@ func TestDispatchPermissions(t *testing.T) {
 	want := core.Permissions{
 		Publish: core.Rules{Allow: dispatchPublish},
 		Subscribe: core.Rules{Allow: []string{
-			"_INBOX.>", "notifications.role.> envoy-listener-example-host-a",
+			"_INBOX.>", "notifications.role.> envoy-listener-role-lane",
 			"agentstream.*.frames",
 		}},
 	}

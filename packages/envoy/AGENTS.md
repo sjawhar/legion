@@ -2759,7 +2759,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   A message past the ack floor that was already acknowledged out of order is delivered again.
 
 - During a rolling deploy the replacement serves `/v1` and its role lane while the old task still holds the durable:
-  `/v1` opens once NATS is connected and the interest and session caches are warm (`envoy-listener /v1 open`, with `since_listening_ms`), and the role lane is a core-NATS queue subscription in the machine's group, `envoy-listener-<machine id>`, which NATS hands each role message to one member of, so the overlap forwards no message twice.
+  `/v1` opens once NATS is connected and the interest and session caches are warm (`envoy-listener /v1 open`, with `since_listening_ms`), and the role lane is a core-NATS queue subscription in `envoy-listener-role-lane` (`bus.ListenerRoleQueue`), the one group every listener joins, which NATS hands each role message to one member of, so neither the overlap nor a second machine's listener forwards a message twice.
   The durable's bind is polled every 2 s (`subscribe failed, retrying`, logged at the first refusal and then once per 30 s), so it binds within 2 s of the old task's exit (`durable bound`, with `attempts` and `waited_ms`);
   a durable still held after 135 s ends the start with `subscribe failed after max attempts, shutting down`, as the backoff it replaced did.
   `/healthz` answers 200 `starting` until the bind, so `starting` no longer means `/v1` is closed.

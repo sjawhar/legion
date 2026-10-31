@@ -2598,7 +2598,7 @@ func TestTheStoresFollowAConnectionReplacedWhileTheDurableIsHeld(t *testing.T) {
 	}
 	caches := listenerCaches(registry, sessions, nil)
 	client.AddReconnectHook(func(conn *natsgo.Conn) error { return rewatchListenerKVWatchers(conn, caches) })
-	if _, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", func(*natsgo.Msg) {}, "envoy-listener-"+machineID); err != nil {
+	if _, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", func(*natsgo.Msg) {}, bus.ListenerRoleQueue); err != nil {
 		t.Fatalf("open the role lane: %v", err)
 	}
 	if _, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() }); err == nil {
@@ -2676,7 +2676,7 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	roleReceived := make(chan struct{}, 1)
 	roleSub, err := client.SubscribeCore("notifications.role.migration", func(*natsgo.Msg) {
 		roleReceived <- struct{}{}
-	}, "envoy-listener-test-machine")
+	}, bus.ListenerRoleQueue)
 	if err != nil {
 		t.Fatalf("boot migrated role lane: %v", err)
 	}

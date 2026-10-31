@@ -274,10 +274,15 @@ on a port is not confirmed. Every forward carries a `Nats-Msg-Id`, so the stream
 per message and recipient, and listeners acknowledge that stored copy without delivering it.
 
 The role lane, a core-NATS queue subscriber in each listener, carries a role topic a client
-publishes straight onto NATS rather than through the route. It resolves the holder at delivery
-time and forwards once, and its outcome is one of three exception reasons: `no_holder` when no
-session claims the role, `delivery_failed` or `receipt_timeout` as above. A role claimant does not
-subscribe directly to its role subject, and a role message is not retained for a future claimant.
+publishes straight onto NATS rather than through the route. Every listener's lane is a member of
+one queue group, `envoy-listener-role-lane` (`bus.ListenerRoleQueue`), not of a group of its own
+machine's, so NATS hands each role message to one listener and the holder is sent one copy
+however many listeners run. That listener resolves the holder at delivery time and forwards once
+over core NATS, from wherever it runs: the holder is read from the shared role and session
+buckets, and its agent subject is reachable from any listener. The outcome is one of three
+exception reasons: `no_holder` when no session claims the role, `delivery_failed` or
+`receipt_timeout` as above. A role claimant does not subscribe directly to its role subject, and
+a role message is not retained for a future claimant.
 
 When a control delivery has no holder, cannot be forwarded, or draws no receipt, Envoy emits an
 envelope on `notifications.envoy.exceptions.<original-topic>`. The exception payload preserves

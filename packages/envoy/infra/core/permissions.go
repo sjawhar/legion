@@ -45,7 +45,8 @@ const inboxes = nats.InboxPrefix + ">"
 //     watchers' consumer create and delete, and their flow-control replies;
 //   - the purge of the interest bucket, which its delete-marker collection sends.
 //
-// Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
+// Subscribe: reply inboxes, then the role lanes in the one group every listener joins
+// (bus.ListenerRoleQueue).
 func ListenerPermissions(machineID string) Permissions {
 	durable := bus.ListenerDurable(machineID)
 	publish := []string{
@@ -65,7 +66,7 @@ func ListenerPermissions(machineID string) Permissions {
 	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
 	return Permissions{
 		Publish:   Rules{Allow: publish},
-		Subscribe: Rules{Allow: []string{inboxes, contracts.RoleTopicPrefix + "> " + bus.ListenerQueue(machineID)}},
+		Subscribe: Rules{Allow: []string{inboxes, contracts.RoleTopicPrefix + "> " + bus.ListenerRoleQueue}},
 	}
 }
 

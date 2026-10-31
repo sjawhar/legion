@@ -80,18 +80,22 @@ func ListenerDurable(machineID string) string {
 	return "listener-" + strings.ReplaceAll(machineID, " ", "-")
 }
 
-// ListenerQueue is the queue group the listener of machine machineID subscribes the role lanes in,
-// so NATS hands each role message to one of the machine's listeners while a rolling deploy runs two.
-// A space in the machine id is a hyphen in the name.
-func ListenerQueue(machineID string) string {
-	return "envoy-listener-" + strings.ReplaceAll(machineID, " ", "-")
-}
+// ListenerRoleQueue is the one queue group every listener subscribes the role lanes in. A role
+// forward is a request to the holder's agent subject, which any listener can make from wherever it
+// runs, since the holder is resolved from the shared role and session buckets rather than from the
+// forwarding listener's machine. NATS hands each role message to one member of a group, so one
+// group means one publish reaches its holder once however many listeners run, and the two tasks of
+// a machine's rolling deploy still forward it once between them. A group per machine would hand
+// the message to a member of each machine's group, and a holder that does not dedupe by event id
+// would act on one publish once per machine.
+const ListenerRoleQueue = "envoy-listener-role-lane"
 
 // ListenerLiveQueue is the queue group the listener of machine machineID subscribes its live lane in
 // (every notifications topic, over core NATS), so NATS hands each message to one of the machine's
-// listeners while a rolling deploy runs two. It must differ from ListenerQueue: NATS merges
-// matching queue subscriptions by queue name across subjects and hands each message to one member,
-// so a live lane in the role lanes' group could take a role message its role lane never sees. A
+// listeners while a rolling deploy runs two. It is per machine because the lane delivers to the
+// sessions on its own machine, and it must differ from ListenerRoleQueue: NATS merges matching
+// queue subscriptions by queue name across subjects and hands each message to one member, so a
+// live lane in the role lanes' group could take a role message its role lane never sees. A
 // space in the machine id is a hyphen in the name.
 func ListenerLiveQueue(machineID string) string {
 	return "envoy-listener-live-" + strings.ReplaceAll(machineID, " ", "-")

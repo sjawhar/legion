@@ -931,8 +931,6 @@ func main() {
 	// (TestUnplaceableRetryWindowFitsTheBoundsItDependsOn).
 	attemptCache := dedupe.New(attemptCacheTTL)
 
-	roleQueue := bus.ListenerQueue(cfg.MachineID)
-
 	// The window an agent delivery this listener cannot place is retried within before it is
 	// given up with a record (unplaceable_delivery.go).
 	unplaceableRetryWindow := envDuration(logger, "ENVOY_UNPLACEABLE_RETRY_WINDOW", defaultUnplaceableRetryWindow)
@@ -964,10 +962,12 @@ func main() {
 		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
 
-	// The role lane is a core-NATS queue subscription in this machine's group. During a rolling
-	// deploy the task being replaced is a member too, and NATS hands each role message to one member
-	// of a group, so opening the lane before the durable binds forwards no message twice.
-	roleSub, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", coreNATSDeliveryHandler(deliveryConfig), roleQueue)
+	// The role lane is a core-NATS queue subscription in bus.ListenerRoleQueue, the one group every
+	// listener joins, so one role publish is forwarded to its holder once however many listeners
+	// run. During a rolling deploy the task being replaced is a member too, and NATS hands each
+	// role message to one member of a group, so opening the lane before the durable binds forwards
+	// no message twice either.
+	roleSub, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", coreNATSDeliveryHandler(deliveryConfig), bus.ListenerRoleQueue)
 	if err != nil {
 		logger.Error("core role subscription failed", slog.String("error", err.Error()))
 		client.Conn.Close()

@@ -51,6 +51,21 @@
 
 ### Fixed
 
+- A role message published onto the role lane reaches its holder once, not once per machine
+  running a listener. Every listener's role lane now subscribes `notifications.role.>` in one
+  queue group, `envoy-listener-role-lane` (`bus.ListenerRoleQueue`), where each listener used to
+  have a group of its own machine's, so NATS handed one publish to a member of every machine's
+  group and each of them forwarded its own copy to the holder's agent subject, under one
+  `event_id` and one forward dedupe key. A receiver that dedupes by `event_id` dropped the extra
+  copies; one that does not acted on the message once per machine. The forward is a core-NATS
+  request to the holder's agent subject and the holder is read from the shared role and session
+  buckets, so any listener can make it. The NATS grant entry moves with it: a listener's,
+  Dispatch's and a host's user now subscribe `notifications.role.> envoy-listener-role-lane`
+  instead of `notifications.role.> envoy-listener-<machine id>`, so a hub's rendered users must
+  be deployed with the listeners. While a rollout runs, a listener still in the old group and
+  one in the new are two groups, and a holder can receive one copy from each until every
+  listener carries this release. The live-topics lane keeps its own per-machine group,
+  `envoy-listener-live-<machine id>`, since it delivers to the sessions on its own machine.
 - A session that subscribed to an issue's topic now hears what the agents on that issue do.
   Every published event's payload carries `quiet` (`events.Quiet`), whether the event carries
   nothing for a reader following its owner topic: a delivery receipt, an anchor refresh,

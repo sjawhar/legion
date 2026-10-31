@@ -140,14 +140,14 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 }
 
 // Both tasks of one machine id run during a rolling deploy, and the replacement's role lane opens
-// before its durable binds, so both subscribe notifications.role.> at once. They are one core-NATS
-// queue group (envoy-listener-<machine id>), and NATS hands each message to one member of a group,
-// so a role message published on the lane reaches its holder once whichever task takes it: no
-// publish is forwarded by both. A re-publish under the same dedupe key can land on the other task,
-// whose dedupe cache has not seen it, and is forwarded again; the holder's pump drops that copy by
-// its dedupe key, as it drops the copy each other machine's listener forwards today. The messages
-// go straight onto the lane, as an operator's or an earlier listener's do: the publish route
-// forwards a role message itself.
+// before its durable binds, so both subscribe notifications.role.> at once. They are members of
+// bus.ListenerRoleQueue, the one core-NATS queue group every listener joins, and NATS hands each
+// message to one member of a group, so a role message published on the lane reaches its holder
+// once whichever task takes it: no publish is forwarded by both. A re-publish under the same
+// dedupe key can land on the other task, whose dedupe cache has not seen it, and is forwarded
+// again; the holder's pump drops that copy by its dedupe key. The messages go straight onto the
+// lane, as an operator's or an earlier listener's do: the publish route forwards a role message
+// itself.
 func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T) {
 	const (
 		machineID = "two-tasks"
@@ -226,7 +226,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	}
 	// NATS spreads a group's messages over its members; all 64 on one has probability 2^-63.
 	if byOld == 0 || byReplacement == 0 {
-		t.Fatalf("the old task forwarded %d and the replacement %d of %d: the replacement's role lane is not a member of the machine's queue group before its durable binds", byOld, byReplacement, messages)
+		t.Fatalf("the old task forwarded %d and the replacement %d of %d: the replacement's role lane is not a member of the listeners' role-lane queue group before its durable binds", byOld, byReplacement, messages)
 	}
 
 	// A re-publish under one dedupe key: either the task that forwarded the first copy skips it,
@@ -266,6 +266,92 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	old.WaitExit(t, "SIGTERM")
 	replacement.waitHealthy(t)
 	replacement.WaitForOutput(t, "durable bound")
+}
+
+// Every listener subscribes notifications.role.> and forwards to the holder's agent subject over
+// core NATS, from wherever it runs, so one role message on the lane must reach its holder once
+// rather than once per listener. That holds only while the lane is one queue group across every
+// listener: a group per machine makes NATS hand the message to one member of each machine's
+// group, and a holder whose plugin does not dedupe by event id acts on it once per machine. The
+// messages go straight onto the lane, as an operator's or an earlier listener's do.
+func TestARoleMessageReachesItsHolderOnceAcrossTwoMachines(t *testing.T) {
+	const (
+		holderID = "ses_two_machines_holder"
+		role     = "two-machines-role"
+		messages = 16
+	)
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	binary := cmdtest.Build(t, "envoy-listener")
+	uri := client.Conn.ConnectedUrl()
+	first := startListenerProcess(t, binary, uri, "machine-one")
+	first.waitHealthy(t)
+	second := startListenerProcess(t, binary, uri, "machine-two")
+	second.waitHealthy(t)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("machine-one:\n%s\nmachine-two:\n%s", first.Output.String(), second.Output.String())
+		}
+	})
+
+	postListener(t, first.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
+	postListener(t, first.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
+	frames := receiveAsSession(t, client, holderID)
+	// The second machine reads the claim from the role bucket and the holder from its own session
+	// cache, which can trail the registration the first machine took. Warm it before the publishes,
+	// so a forward it takes resolves the holder rather than releasing a lapsed claim.
+	if status, answer := callListener(t, second.port, http.MethodGet, "/v1/roles/"+role, ""); status != http.StatusOK {
+		t.Fatalf("the second machine's lookup of %s: status %d %s, want 200", role, status, answer)
+	}
+
+	publish := func(dedupeKey string) {
+		t.Helper()
+		item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, dedupeKey)
+		item.SourceSession = "ses_two_machines_sender"
+		if err := client.Publish(item); err != nil {
+			t.Fatalf("publish %s onto the role lane: %v", dedupeKey, err)
+		}
+	}
+	for index := range messages {
+		publish("publish.two-machines-" + strconv.Itoa(index))
+	}
+	keys := map[string]int{}
+	for received := range messages {
+		select {
+		case frame := <-frames:
+			if !strings.HasPrefix(frame.DedupeKey, roleForwardDedupePrefix) {
+				t.Fatalf("the holder received dedupe key %q, want one prefixed %s", frame.DedupeKey, roleForwardDedupePrefix)
+			}
+			keys[frame.DedupeKey]++
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the holder received %d of %d role messages", received, messages)
+		}
+	}
+	select {
+	case frame := <-frames:
+		t.Fatalf("the holder received a frame past the %d published, so one publish was forwarded by both machines: %+v", messages, frame)
+	case <-time.After(2 * time.Second):
+	}
+	for key, count := range keys {
+		if count != 1 {
+			t.Fatalf("the holder received dedupe key %s %d times, want once", key, count)
+		}
+	}
+	if len(keys) != messages {
+		t.Fatalf("the holder received %d distinct dedupe keys over %d frames, want %d", len(keys), messages, messages)
+	}
+	roleForwards := func(p *listenerProcess) int {
+		return countRecords(p, "listener role forwarded", func(record map[string]any) bool {
+			return record["topic"] == contracts.RoleTopicPrefix+role
+		})
+	}
+	byFirst, bySecond := roleForwards(first), roleForwards(second)
+	if byFirst+bySecond != messages {
+		t.Fatalf("the two machines logged %d + %d role forwards, want %d in all", byFirst, bySecond, messages)
+	}
 }
 
 // receiveAsSession stands in for session sessionID's agent pump on its agent subject: it answers
