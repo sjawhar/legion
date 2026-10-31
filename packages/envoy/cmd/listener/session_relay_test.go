@@ -1049,78 +1049,183 @@ func requireRelayedPush(t *testing.T, pushes <-chan string, item contracts.Envel
 	}
 }
 
-// A message on a followed topic whose targeted delivery mode a serving-port session on consumer
-// delivery does not advertise is refused and acked by the relay of that session's consumer, which
-// holds the session's only copy of it, as soon as the relay reads it. The durable path's fan-out
-// reports nothing and records nothing for such a session, its own refusals included: an attempt
-// record of a refusal nobody pushed is a record naming no push in flight, and the relay would
-// hold its copy under it -- and the session's later messages behind that -- until it expired
-// (attemptCacheTTL, INFRA-594).
+// A message on a followed topic that a serving-port session on consumer delivery cannot be given
+// -- its targeted delivery mode is one the session does not advertise, or one no session can be
+// shown to advertise because it cannot be read unambiguously -- is refused and acked by the relay
+// of that session's consumer, which holds the session's only copy of it, as soon as the relay
+// reads it, and is reported exactly once, by that relay. The durable path's fan-out reports
+// nothing and records nothing for such a session, its own refusals included: it reads the
+// session's entry for every verdict and leaves a message that entry says the session's consumer
+// relays to that consumer's relay, whatever the verdict. An attempt record of a refusal nobody
+// pushed is a record naming no push in flight, and the relay would hold its copy under it -- and
+// the session's later messages behind that -- until it expired (attemptCacheTTL, INFRA-594).
 func TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused(t *testing.T) {
 	const (
 		relayedPort = 4096
 		corePort    = 4097
 	)
-	// Unowned, so no relay runs until the fan-out has read the message: the test orders the two
-	// paths by construction rather than by timing.
-	rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
-	relayed := "ses_mode_relayed_" + id.New()
-	core := "ses_mode_core_" + id.New()
-	topic := "notifications.github.acme.mode-" + id.New() + ".mention"
-	relayedPushes := make(chan string, 8)
-	corePushes := make(chan string, 8)
-	rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
-		body, err := io.ReadAll(request.Body)
+	for _, tc := range []struct {
+		name string
+		// payload is what the publisher sends, and coreTakesIt whether the core-path session,
+		// which advertises "btw", is given the message: a mode that cannot be read is refused for
+		// every session, so that one is refused too.
+		payload     string
+		coreTakesIt bool
+	}{
+		{
+			name:        "the session does not advertise the mode",
+			payload:     `{"delivery":{"mode":"btw"}}`,
+			coreTakesIt: true,
+		},
+		{
+			// Any publisher can send this: the publish route reads the mode only for sends and
+			// role forwards.
+			name:    "the mode cannot be read",
+			payload: `{"delivery":{"mode":"bogus"}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Unowned, so no relay runs until the fan-out has read the message: the test orders
+			// the two paths by construction rather than by timing.
+			rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
+			relayed := "ses_mode_relayed_" + id.New()
+			core := "ses_mode_core_" + id.New()
+			topic := "notifications.github.acme.mode-" + id.New() + ".mention"
+			relayedPushes := make(chan string, 8)
+			corePushes := make(chan string, 8)
+			rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					return nil, err
+				}
+				if strings.HasSuffix(request.URL.Host, strconv.Itoa(relayedPort)) {
+					relayedPushes <- string(body)
+				} else {
+					corePushes <- string(body)
+				}
+				return listenerDeliveryResponse(http.StatusNoContent), nil
+			})}
+			exceptions, err := rig.harness.client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + topic)
+			if err != nil {
+				t.Fatalf("subscribe to the topic's exception lane: %v", err)
+			}
+			t.Cleanup(func() { _ = exceptions.Unsubscribe() })
+			if err := rig.harness.client.Conn.Flush(); err != nil {
+				t.Fatalf("flush the exception probe: %v", err)
+			}
+
+			// The session under test: a serving port on consumer delivery, following the topic,
+			// which advertises no delivery mode at all.
+			rig.subscribe(t, `{"session_id":"`+relayed+`","port":`+strconv.Itoa(relayedPort)+`,"host":"127.0.0.1","topics":["`+topic+`"]}`)
+			if entry := rig.entry(t, relayed); entry.Delivery != session.DeliveryConsumer {
+				t.Fatalf("the session's entry records delivery %q, want the consumer's", entry.Delivery)
+			}
+			// A second interest on the topic, a serving-port session of this machine on the core
+			// path that does advertise the mode: the durable path reads the message for it and
+			// fans it out over every interest, this machine's consumer-delivery session included.
+			if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: core, MachineID: "test-machine"}, []string{topic}); err != nil {
+				t.Fatalf("register %s's interest: %v", core, err)
+			}
+			if err := rig.harness.sessions.Put(core, session.SessionEntry{Port: corePort, MachineID: "test-machine", Host: "127.0.0.1", Capabilities: []string{"btw"}}); err != nil {
+				t.Fatalf("register %s's entry: %v", core, err)
+			}
+			durable := "listener-unadvertised-mode-" + id.New()
+			bindTestDurable(t, rig, durable, topic)
+
+			item := listenerTestEnvelope(topic, "unadvertised-mode-"+id.New())
+			item.Payload = tc.payload
+			ack, err := rig.harness.client.JS().Publish(topic, marshalListenerEnvelope(t, item))
+			if err != nil {
+				t.Fatalf("store the message: %v", err)
+			}
+			if tc.coreTakesIt {
+				select {
+				case body := <-corePushes:
+					if !strings.Contains(body, item.EventID) {
+						t.Fatalf("the core-path session's port was pushed:\n%s\nwant %s", body, item.EventID)
+					}
+				case <-time.After(15 * time.Second):
+					t.Fatal("the durable path never pushed the message to the core-path session")
+				}
+			} else {
+				awaitLogLine(t, rig, "listener delivery mode cannot be read unambiguously", 15*time.Second)
+			}
+			awaitFanoutFinished(t, rig, durable, ack.Sequence)
+
+			rig.relays.setOwned(true)
+			awaitAcked(t, rig.consumers, relayed, ack.Sequence)
+			select {
+			case body := <-relayedPushes:
+				t.Fatalf("the relayed session's port was pushed a message it cannot be given:\n%s", body)
+			case <-time.After(time.Second):
+			}
+			if !tc.coreTakesIt {
+				select {
+				case body := <-corePushes:
+					t.Fatalf("the core-path session's port was pushed a delivery mode that cannot be read:\n%s", body)
+				default:
+				}
+			}
+			if reasons := deliveryExceptionsFor(t, exceptions, relayed, 2*time.Second); len(reasons) != 1 || reasons[0] != "delivery_failed" {
+				t.Fatalf("the exception lane of %s carried %v for the relayed session, want one delivery_failed: the relay reports the refusal, the fan-out reports none of it", topic, reasons)
+			}
+		})
+	}
+}
+
+// awaitFanoutFinished waits for the durable the test bound to have acknowledged the message stored
+// at seq, which the fan-out does once it has decided every interest of it (fanoutDelivery). A test
+// that then starts a relay orders the two paths rather than racing them.
+func awaitFanoutFinished(t *testing.T, rig *relayRig, durable string, seq uint64) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		info, err := rig.harness.client.JS().ConsumerInfo(bus.Stream, durable)
 		if err != nil {
-			return nil, err
+			t.Fatalf("read the durable %s: %v", durable, err)
 		}
-		if strings.HasSuffix(request.URL.Host, strconv.Itoa(relayedPort)) {
-			relayedPushes <- string(body)
-		} else {
-			corePushes <- string(body)
+		if info.AckFloor.Stream >= seq {
+			return
 		}
-		return listenerDeliveryResponse(http.StatusNoContent), nil
-	})}
-
-	// The session under test: a serving port on consumer delivery, following the topic, which
-	// advertises no delivery mode at all.
-	rig.subscribe(t, `{"session_id":"`+relayed+`","port":`+strconv.Itoa(relayedPort)+`,"host":"127.0.0.1","topics":["`+topic+`"]}`)
-	if entry := rig.entry(t, relayed); entry.Delivery != session.DeliveryConsumer {
-		t.Fatalf("the session's entry records delivery %q, want the consumer's", entry.Delivery)
-	}
-	// A second interest on the topic, a serving-port session of this machine on the core path
-	// that does advertise the mode: the durable path reads the message for it and fans it out
-	// over every interest, this machine's consumer-delivery session included.
-	if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: core, MachineID: "test-machine"}, []string{topic}); err != nil {
-		t.Fatalf("register %s's interest: %v", core, err)
-	}
-	if err := rig.harness.sessions.Put(core, session.SessionEntry{Port: corePort, MachineID: "test-machine", Host: "127.0.0.1", Capabilities: []string{"btw"}}); err != nil {
-		t.Fatalf("register %s's entry: %v", core, err)
-	}
-	bindTestDurable(t, rig, "listener-unadvertised-mode-"+id.New(), topic)
-
-	item := listenerTestEnvelope(topic, "unadvertised-mode-"+id.New())
-	item.Payload = `{"delivery":{"mode":"btw"}}`
-	ack, err := rig.harness.client.JS().Publish(topic, marshalListenerEnvelope(t, item))
-	if err != nil {
-		t.Fatalf("store the message: %v", err)
-	}
-	// The durable path has read the message once the core-path session's port has it.
-	select {
-	case body := <-corePushes:
-		if !strings.Contains(body, item.EventID) {
-			t.Fatalf("the core-path session's port was pushed:\n%s\nwant %s", body, item.EventID)
+		if time.Now().After(deadline) {
+			t.Fatalf("the durable %s never acknowledged the message stored at %d: its ack floor is %d", durable, seq, info.AckFloor.Stream)
 		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("the durable path never pushed the message to the core-path session")
+		time.Sleep(20 * time.Millisecond)
 	}
+}
 
-	rig.relays.setOwned(true)
-	awaitAcked(t, rig.consumers, relayed, ack.Sequence)
-	select {
-	case body := <-relayedPushes:
-		t.Fatalf("the relayed session's port was pushed a mode it does not advertise:\n%s", body)
-	case <-time.After(time.Second):
+// deliveryExceptionsFor reads the delivery exceptions for sessionID that arrive on exceptions
+// within window, each as its reason, and ignores those for any other session.
+func deliveryExceptionsFor(t *testing.T, exceptions *natsgo.Subscription, sessionID string, window time.Duration) []string {
+	t.Helper()
+	deadline := time.Now().Add(window)
+	var reasons []string
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return reasons
+		}
+		msg, err := exceptions.NextMsg(remaining)
+		if errors.Is(err, natsgo.ErrTimeout) {
+			return reasons
+		}
+		if err != nil {
+			t.Fatalf("read the exception lane of %s: %v", sessionID, err)
+		}
+		var envelope contracts.Envelope
+		if err := json.Unmarshal(msg.Data, &envelope); err != nil {
+			t.Fatalf("decode the exception on %s: %v", msg.Subject, err)
+		}
+		var payload struct {
+			Reason           string `json:"reason"`
+			RecipientSession string `json:"recipient_session"`
+		}
+		if err := json.Unmarshal([]byte(envelope.Payload), &payload); err != nil {
+			t.Fatalf("decode the exception payload on %s: %v", msg.Subject, err)
+		}
+		if payload.RecipientSession == sessionID {
+			reasons = append(reasons, payload.Reason)
+		}
 	}
 }
 
@@ -1137,14 +1242,17 @@ func TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused(t *testing.
 func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// beforeThePortAccepts runs once the relay has judged the message against the push in
-		// flight, while the port still refuses; nil leaves the hand-over to the worker alone.
-		beforeThePortAccepts func(t *testing.T, rig *relayRig, sessionID, registration string, item contracts.Envelope)
+		// whileThePushIsHeld runs with the worker's push pinned in the test's transport and the
+		// relay holding the message against the attempt record that push left; nil leaves the
+		// hand-over to the worker alone. afterTheHeldPushEnds runs once that push has been let
+		// go, before the port accepts anything.
+		whileThePushIsHeld   func(t *testing.T, rig *relayRig, sessionID string, item contracts.Envelope)
+		afterTheHeldPushEnds func(t *testing.T, rig *relayRig, sessionID, registration string)
 	}{
 		{name: "the worker reads the flipped entry"},
 		{
 			name: "the attempt record is gone",
-			beforeThePortAccepts: func(t *testing.T, rig *relayRig, sessionID, _ string, item contracts.Envelope) {
+			whileThePushIsHeld: func(_ *testing.T, rig *relayRig, sessionID string, item contracts.Envelope) {
 				// What attemptCacheTTL does five minutes after the hand-over, with the time the
 				// message spent queued and refused counting toward it: nothing in this process
 				// says any more that a push of it is in flight.
@@ -1153,14 +1261,18 @@ func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing
 		},
 		{
 			name: "the session's entry is gone and it registers again",
-			beforeThePortAccepts: func(t *testing.T, rig *relayRig, sessionID, registration string, _ contracts.Envelope) {
+			whileThePushIsHeld: func(t *testing.T, rig *relayRig, sessionID string, _ contracts.Envelope) {
 				// The sessions.Get miss that hands the worker's push back (servePortGone), as the
-				// cache refills or the session re-registers: the push is NAKed and the attempt
-				// cleared, and the durable redelivery is skipped because the session's consumer
-				// holds this sequence.
+				// cache refills or the session re-registers. The entry goes while that push is
+				// pinned, so the worker's next try -- its first read of the session since -- is
+				// the one that finds it gone.
 				if err := rig.harness.sessions.Delete(context.Background(), sessionID); err != nil {
 					t.Fatalf("delete the session's entry: %v", err)
 				}
+			},
+			afterTheHeldPushEnds: func(t *testing.T, rig *relayRig, sessionID, registration string) {
+				// The push is NAKed and the attempt cleared, and the durable redelivery is
+				// skipped because the session's consumer holds this sequence.
 				awaitLogLine(t, rig, "serving-port push handed back", 45*time.Second)
 				rig.subscribe(t, registration)
 			},
@@ -1171,12 +1283,34 @@ func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing
 			sessionID := "ses_flip_back_" + id.New()
 			topic := "notifications.github.acme.flip-" + id.New() + ".mention"
 			var accepting atomic.Bool
+			var holding atomic.Bool
 			refused := make(chan string, 64)
 			accepted := make(chan string, 8)
+			// held reports a push pinned in the transport, and releaseHeldPush lets it go: the
+			// steps below are ordered against the worker's push rather than against its backoff.
+			held := make(chan struct{}, 1)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseHeldPush := func() {
+				releaseOnce.Do(func() {
+					holding.Store(false)
+					close(release)
+				})
+			}
+			t.Cleanup(releaseHeldPush)
 			rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
 				body, err := io.ReadAll(request.Body)
 				if err != nil {
 					return nil, err
+				}
+				if holding.Load() {
+					// The pusher waits here, having read the session for this try already, so
+					// nothing it reads again can land between the test's steps.
+					select {
+					case held <- struct{}{}:
+					default:
+					}
+					<-release
 				}
 				if !accepting.Load() {
 					// Never blocking: the worker pushes again on its backoff while the test waits,
@@ -1212,12 +1346,13 @@ func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing
 				t.Fatalf("store the message: %v", err)
 			}
 			requireRefusal(t, refused, item, "the durable path never pushed the message to the port")
-			// Two more refusals before the flip, so the worker's backoff is 4 s by the last of
-			// them: the test has that long to flip the entry, let the relay judge the message
-			// and, in the variant that deletes the entry, delete it before the worker's next try
-			// reads the session again.
-			for range 2 {
-				requireRefusal(t, refused, item, "the worker stopped pushing the message to the port")
+			// The worker's next try is pinned in the transport, so no try of its own reads the
+			// session again until the test lets that push go.
+			holding.Store(true)
+			select {
+			case <-held:
+			case <-time.After(45 * time.Second):
+				t.Fatal("the worker stopped pushing the message to the port")
 			}
 
 			// The next registration finds the consumer and its original start, so the entry is
@@ -1229,9 +1364,16 @@ func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing
 				t.Fatalf("after registering again the entry records delivery %q and consumer start %d, want the consumer's and a start at or below %d",
 					entry.Delivery, entry.ConsumerStart, ack.Sequence)
 			}
-			awaitRelayJudged(t, rig, sessionID, ack.Sequence)
-			if tc.beforeThePortAccepts != nil {
-				tc.beforeThePortAccepts(t, rig, sessionID, registration, item)
+			// The relay has pulled the message and judged it against the attempt record of the
+			// push pinned above: it holds it, and the steps below run after that judgement rather
+			// than racing it.
+			awaitLogLine(t, rig, "session relay holds a message another path is pushing", 45*time.Second)
+			if tc.whileThePushIsHeld != nil {
+				tc.whileThePushIsHeld(t, rig, sessionID, item)
+			}
+			releaseHeldPush()
+			if tc.afterTheHeldPushEnds != nil {
+				tc.afterTheHeldPushEnds(t, rig, sessionID, registration)
 			}
 
 			accepting.Store(true)
@@ -1250,30 +1392,6 @@ func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing
 			}
 		})
 	}
-}
-
-// awaitRelayJudged waits for the relay of sessionID's consumer to have pulled the message stored
-// at seq and judged it against what the caches and the session's entry say: the judgement is two
-// cache reads after the pull, which the settle below allows far more time than. A test that then
-// changes what the message is judged against changes it after the relay's first reading of it,
-// rather than racing that reading.
-func awaitRelayJudged(t *testing.T, rig *relayRig, sessionID string, seq uint64) {
-	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		info, err := rig.consumers.Info(context.Background(), sessionID)
-		if err != nil {
-			t.Fatalf("read the consumer of %s: %v", sessionID, err)
-		}
-		if info.Delivered.Stream >= seq {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the relay of %s never pulled the message stored at %d: its consumer has delivered through %d", sessionID, seq, info.Delivered.Stream)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	time.Sleep(500 * time.Millisecond)
 }
 
 // awaitLogLine waits for line to appear in the listener's log, failing the test when it does not

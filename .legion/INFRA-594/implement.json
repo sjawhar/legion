@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-31T06:45:00Z",
+  "completed": "2026-10-31T11:13:22Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
       "surface": "Real Oh My Pi (omp 18.12.2, this checkout's pi-envoy) and real Claude Code 2.1.311 under this checkout's `legion claude-bridge` with claude-envoy built from the checkout; natsd with JetStream; two real envoy-listener processes; real envoy-dispatch on Postgres 17 with pgvector; in the issue pod",
       "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh",
-      "observed": "At f41a4d8c (main d7e1daaa merged, review round 4 fix): ENVOY SESSION DELIVERY: PASS, exit 0, 60 events x 6 windows each counted 1 (evidence/live/head-f41a.table.txt).",
-      "headSha": "f41a4d8cb9c114731b82d64faaa0cf3b357ee7f9",
+      "observed": "At 196233c0 (main 2ab9473a merged, review round 5 fix): ENVOY SESSION DELIVERY: PASS, exit 0, 60 events x 6 windows each counted 1 (evidence/live/head-1962.table.txt). The live runs have no memory samples: the named sampler job did not start.",
+      "headSha": "196233c090e5d603d5e4951cd7168cc0c8dc450d",
       "negativeControl": "--build-from c3d09eec --expect-lost agent,issue,role at a592ce7e: NEGATIVE CONTROL HOLDS: every agent,issue,role event of window a counted 0 in both sessions (evidence/live/c3d09eec-at-a592.out)."
     },
     {
@@ -104,8 +104,8 @@
       "criterion": "Tester round 5: a session upgrading from the released plugin (96a7e5ea, pi-envoy 13.5.1, claude-envoy 1.0.0) to this head is shown every agent, issue and role event stored while it was away, once",
       "surface": "real Oh My Pi and Claude Code sessions started on the plugins built from 96a7e5ea, SIGKILLed, the window's events stored, resumed on this checkout's plugins; natsd, two listeners, Dispatch on Postgres",
       "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh --disruptions a --resume-plugins-from 96a7e5ea9099aabf25dc8b524177b6f73df4eab5 --second-followed-issue",
-      "observed": "At f41a4d8c: PASS, exit 0; comment-1, comment-2, second-comment counted 1 in both sessions, every agent and role event 1 (evidence/live/upgrade-f41a.table.txt).",
-      "headSha": "f41a4d8cb9c114731b82d64faaa0cf3b357ee7f9",
+      "observed": "At 196233c0: PASS, exit 0; comment-1, comment-2, second-comment counted 1 in both sessions, every agent and role event 1 (evidence/live/upgrade-1962.table.txt).",
+      "headSha": "196233c090e5d603d5e4951cd7168cc0c8dc450d",
       "negativeControl": "same command with followedOnCorePath neutered in consumer-delivery.ts (working copy, restored after): ENVOY SESSION DELIVERY: FAIL, issue comment-1 and comment-2 counted 0! 0! (evidence/live/upgrade-neg.table.txt), matching the tester's two runs at 1099510d"
     },
     {
@@ -219,6 +219,14 @@
       "observed": "ok 9.6s",
       "headSha": "ce082506b077e61e45ac506aa286853b1d4b71da",
       "negativeControl": "tester's controls: one mutex around holdWhilePushedElsewhere fails it ('the other session's message ... never reached its port'); without attemptCache.Clear it fails ('the held message ... never reached the port')"
+    },
+    {
+      "criterion": "Review round 5 (4431289268): a message with an unreadable delivery mode leaves no attempt record, so a serving-port relay acks it and reports it once",
+      "surface": "listener binary, real nats-server, a serving-port consumer session and a core-path session following one topic",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 -count=10 -run 'TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused|TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer' ./cmd/listener; full ./cmd/listener; -race ./cmd/listener; -race ./internal/session; ./internal/bus; serverchange (all -p 1, one at a time)",
+      "observed": "-count=10 ok 177.0s; ./cmd/listener ok 639.5s (sampled peak 3.61 GiB, 336 samples); -race ./cmd/listener ok 705.7s, no DATA RACE (sampled peak 3.81 GiB, 491 samples); -race ./internal/session ok; ./internal/bus ok 334.7s; serverchange ok 150.6s",
+      "headSha": "196233c090e5d603d5e4951cd7168cc0c8dc450d",
+      "negativeControl": "the parent 0968255e's delivery.go with the new tests: 'the mode cannot be read' fails, 'the consumer ... has 1 pending ack, ack floor 0'"
     }
   ],
   "filesChanged": [
@@ -245,7 +253,8 @@
     "Round 9: .github/e2e-scripts.json (envoy-session-delivery.sh under elsewhere, never hosted: it needs an issue pod and a model provider)",
     "Round 10: merge of main e4dc7c4f (9d83f1c1: internal/bus/nats.go, claude-envoy/tests/envoy-channel-stall.test.ts); packages/envoy/cmd/listener/{delivery,serve_port_workers,session_relay,role_lane}.go + session_relay_test.go, internal/session/{session,handler}.go, AGENTS.md, changelog; packages/envoy-client/src/consumer-delivery.ts + test; scripts/e2e/envoy-session-delivery.sh",
     "Round 11: packages/envoy/cmd/listener/{session_relay,serve_port_workers,delivery}.go + session_relay_test.go, internal/session/{handler,session}.go, AGENTS.md (merged into main's one-sentence layout), changelog; merges c33189da (main 21b40359: AGENTS.md) and f41a4d8c (main d7e1daaa: scripts/e2e/README.md)",
-    "Round 12: packages/envoy-client/test/envoy-stack.ts (freePorts); the tester's packages/envoy-client/src/__tests__/free-ports.test.ts (merged from d8eecf87) and packages/envoy/cmd/listener/session_relay_hold_test.go"
+    "Round 12: packages/envoy-client/test/envoy-stack.ts (freePorts); the tester's packages/envoy-client/src/__tests__/free-ports.test.ts (merged from d8eecf87) and packages/envoy/cmd/listener/session_relay_hold_test.go",
+    "Round 13: packages/envoy/cmd/listener/delivery.go and session_relay_test.go, packages/envoy/AGENTS.md, changelog fragment; .github/workflows/ci.yaml comments (0968255e); merge of main 2ab9473a at 9455931a (no conflict)"
   ],
   "trickyParts": [
     "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",

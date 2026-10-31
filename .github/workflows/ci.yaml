@@ -5,10 +5,9 @@ name: CI
 # dorny/paths-filter filter per job, the jobs that read those paths; each job runs only when its
 # filter matches (lint runs on every change, and typecheck and test also run when `changes` itself
 # failed). The last job, `ci-ok`, condenses every job's result into one check: it fails when a job
-# `changes` selected did not succeed. Main's ruleset requires lint, typecheck, test and pr-title,
-# not ci-ok. The docs site's build on a push to main, and its GitHub Pages deploy, are
-# docs-pages.yaml's, a workflow of its own whose header says why. Its paths are held to the docs
-# filter below.
+# `changes` selected did not succeed. Main's ruleset requires ci-ok and pr-title. The docs site's
+# build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a workflow of its own
+# whose header says why. Its paths are held to the docs filter below.
 #
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
@@ -1428,10 +1427,10 @@ jobs:
       - name: Check the package holds every row of .github/ci-images.yaml
         run: .github/scripts/check-ci-images.sh package
 
-  # lint, typecheck and test are the names main's ruleset requires, beside pr-title. Each
+  # lint, typecheck and test keep the names main's ruleset required before it required ci-ok. Each
   # covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when `changes` did not
   # succeed, typecheck and test run rather than skip, since a skipped job reports success and a
-  # failed selector must never turn a required check into a passing skip.
+  # failed selector must never let ci-ok condense a passing skip.
   typecheck:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.typecheck == 'true') }}

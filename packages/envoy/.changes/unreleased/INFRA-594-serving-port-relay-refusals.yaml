@@ -10,12 +10,19 @@ body: |-
   durable path's fan-out, and a serving-port worker whose session moved to consumer delivery --
   records neither an attempt nor a dedupe key for it, so a message another interest on the topic
   sends down the durable path still reaches the port rather than being acked as a copy the session
-  already has. The other side of that rule: an attempt record is a push in flight, not a delivery,
-  so the relay holds a message another path is pushing -- unacked in its consumer, kept in
-  progress, judged again every second -- rather than acking it, and acks it only once the dedupe
-  key that push's 204 records says the session has it. A push that ends without landing, because
-  the worker reads the session's flipped entry, hands the push back, or lets its attempt record
-  expire, leaves the message to the relay, which pushes it itself: delivery rests on the
+  already has. The fan-out reads the session's entry for every judgement it makes, so that rule
+  covers its own refusals too: a message whose delivery mode cannot be read -- a mode no session
+  can be shown to advertise, which any publisher can send on a followed topic -- is left to the
+  relay of that session's consumer, which acks it with one `delivery_failed` exception, rather
+  than being reported twice and leaving that relay, and the session's later messages behind it,
+  stalled for five minutes on a record of a push nobody was making. An attempt the fan-out records
+  before its own resolution of the recipient fails is cleared whatever the failure, a session with
+  no record among them. The other side of that rule: an attempt record is a push in flight, not a
+  delivery, so the relay holds a message another path is pushing -- unacked in its consumer, kept
+  in progress, judged again every second -- rather than acking it, and acks it only once the
+  dedupe key that push's 204 records says the session has it. A push that ends without landing,
+  because the worker reads the session's flipped entry, hands the push back, or lets its attempt
+  record expire, leaves the message to the relay, which pushes it itself: delivery rests on the
   consumer's ack state rather than on a process-local record that expires, and the race between
   the two pushes costs at worst a duplicate the session drops by its dedupe key, never the
   message. A session whose registration was answered `core` on a transient consumer call failure,

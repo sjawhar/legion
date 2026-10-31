@@ -3427,14 +3427,14 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   Any other answer, a transport error or a timeout keeps the message at the head, in progress, and pushes it again after a wait that doubles from 1 s to 30 s, so the session's later messages wait behind it.
   The key is recorded once the port answers 204, as a delivery of the durable path records it.
   A message on a followed topic is judged by the durable path's own refusals (`judgeFollowedTopic`, which the fan-out applies too):
-  a copy under a dedupe key the session already took and one the session published itself are acked unpushed, one whose delivery mode the session does not advertise is acked with a `delivery_failed` exception, and one under a dedupe key already on its way to it is held rather than acked (below).
+  a copy under a dedupe key the session already took and one the session published itself are acked unpushed, one whose delivery mode the session does not advertise, or whose mode cannot be read unambiguously, is acked with a `delivery_failed` exception -- the one report of that refusal, since the fan-out reports none of it for such a session (the bullet below) -- and one under a dedupe key already on its way to it is held rather than acked (below).
   So one upstream event published on several of a session's topics under one dedupe key (`contracts/normalize.go`) reaches its port once.
   Because the relay reads those two caches, a record it finds never names a message nobody delivers.
   Two rules hold that.
   A path that does not push to the session records nothing for it (the bullet below).
   And an attempt record is a push in flight, not a delivery, so the relay holds such a message rather than acking it (`holdWhilePushedElsewhere`):
   it leaves the copy unacked in the consumer, keeps it in progress, and judges it again every second (`relayHeldRecheck`).
-  It acks the message only on the dedupe key that push's 204 writes, and pushes it itself once the attempt record is gone -- the serving-port worker clears it when it drops its push or hands it back, and `attemptCacheTTL` expires it 5 minutes after it was written -- so a hold lasts at most that TTL plus one recheck, and delivery rests on the consumer's ack state, never on a cache that expires.
+  It acks the message only on the dedupe key that push's 204 writes, and pushes it itself once the attempt record is gone -- the serving-port worker clears it when it drops its push or hands it back, the fan-out clears the one it recorded when its own resolution of that recipient then fails (`session.ErrNoSessionRecord`, a session whose entry is gone, among those failures), and `attemptCacheTTL` expires it 5 minutes after it was written -- so a hold lasts at most that TTL plus one recheck, and delivery rests on the consumer's ack state, never on a cache that expires.
   That is the case of a serving-port session whose entry flips from core delivery back to consumer delivery under a push already handed to its worker -- a registration answered `core` on a transient consumer call failure, then one that finds the consumer again -- where the worker's next try reads the flipped entry, drops its push and clears the attempt, and the relay then pushes the message itself.
   A held message delays only the session's own later messages, which wait behind it in stream order as they wait behind a head message the port keeps refusing.
   The worst case, relay and worker pushing at once, is a duplicate the session drops by its dedupe key, never a lost message.
@@ -3447,6 +3447,7 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   the message waits in the session's consumer.
   It records nothing for such a session -- no attempt, no dedupe key (`session.SessionEntry.ConsumerRelaysStored`, which the fan-out, the agent-subject path and the serving-port workers all skip by) -- since the relay of that consumer is what delivers the message and what records its key on the port's 204;
   a dedupe record written for a session nothing was pushed to is one the relay reads as a copy the session already has and acks unpushed, and an attempt record one it would hold that copy under for a push nobody is making, so the fan-out reports even its own refusals of such a session as a skip.
+  The fan-out decides that once per recipient, from the session's entry, which `judgeFollowedTopic` reads for every verdict and not only the ones it judges against that entry, so a delivery mode it cannot read unambiguously -- a mode no session can be shown to advertise, and one any publisher can send on a followed topic -- is left to the relay like every other refusal of such a session, and reported once rather than reported here and left in an attempt record that stalls the session's relay for five minutes.
   The entry records the sequence that consumer starts at (`consumer_start`, written by the registration from `bus.SessionConsumers.Ensure`), and only a message at or after it is the consumer's:
   one stored below that start -- a push NAKed back to the durable, or one deferred as unplaceable, before the session's first consumer was created -- is in no consumer, so the durable path delivers it as it would for a session with none, the stored copy of a role forward included (`roleForwardCopyDelivery`, which reads the copy's own sequence rather than the holder's delivery mode).
   An entry an earlier release wrote carries no start, which reads as today: the consumer holds every stored message of it.
@@ -3989,12 +3990,13 @@ ALREADY_ENROLLED`, and the policy never sees the slot:
 a pod is a requester with no operator, whose service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`.
 Migration 0007 is forward-only: an older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled back past it once a slotted enrollment exists.
 An older broker binary refuses a `BROKER_SERVICES` that names a service for more than one account (`must give each service once`), and the broker is one pod, so once the setting names a service twice the image is never rolled back past this change without moving the setting back in the same step.
-An enrollment's kind is `session` (an agent session on a machine its person logged in:
-the helper's own, or a key a launcher such as agentbox brings through the helper's `enroll-session-key`) or `pod`;
-migration 0012 rewrote every stored `box`/`host` to `session`.
+An enrollment the broker creates is of kind `session` (an agent session on a machine its person logged in:
+the helper's own, or a key a launcher such as agentbox brings through the helper's `enroll-session-key`) or `pod`.
+The `enrollments` kind constraint also admits `vm` (migration 0020), which no route creates.
+Migration 0012 rewrote every stored `box`/`host` to `session`.
 `POST /v1/enrollments` takes only `session` and `pod` (`400 INVALID_KIND` otherwise):
 the `host` and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in again.
-No reader of stored data needs them: the `enrollments` kind constraint admits only the two, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which `record.ParseBody` reads without checking the kind.
+No reader of stored data needs them: the kind constraint admits neither, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which `record.ParseBody` reads without checking the kind.
 The helper still asks an older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box` (`helper/broker.go`, `enroll`:
 gone once the production broker records `session`).
 The CLI and helper speak only the kind-free pair:

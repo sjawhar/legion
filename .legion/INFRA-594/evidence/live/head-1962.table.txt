@@ -1,0 +1,66 @@
+build: listener and bridge this checkout (196233c09 plus the working copy); plugins this checkout (196233c09 plus the working copy); listener grant current
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDTc73a-001Z      1    1
+a session-restart      issue  comment-2         LDTc73a-002Z      1    1
+a session-restart      agent  dispatch-message  LDTc73a-003Z      1    -
+a session-restart      agent  dispatch-message  LDTc73a-004Z      -    1
+a session-restart      agent  listener-send     LDTc73a-005Z      1    -
+a session-restart      agent  listener-send     LDTc73a-006Z      -    1
+a session-restart      role   listener-publish  LDTc73a-007Z      1    -
+a session-restart      role   listener-publish  LDTc73a-008Z      -    1
+a session-restart      role   core-publish      LDTc73a-009Z      1    -
+a session-restart      role   core-publish      LDTc73a-010Z      -    1
+b nats-cut             issue  comment-1         LDTc73a-011Z      1    1
+b nats-cut             issue  comment-2         LDTc73a-012Z      1    1
+b nats-cut             agent  dispatch-message  LDTc73a-013Z      1    -
+b nats-cut             agent  dispatch-message  LDTc73a-014Z      -    1
+b nats-cut             agent  listener-send     LDTc73a-015Z      1    -
+b nats-cut             agent  listener-send     LDTc73a-016Z      -    1
+b nats-cut             role   listener-publish  LDTc73a-017Z      1    -
+b nats-cut             role   listener-publish  LDTc73a-018Z      -    1
+b nats-cut             role   core-publish      LDTc73a-019Z      1    -
+b nats-cut             role   core-publish      LDTc73a-020Z      -    1
+c listener-shared      issue  comment-1         LDTc73a-021Z      1    1
+c listener-shared      issue  comment-2         LDTc73a-022Z      1    1
+c listener-shared      agent  dispatch-message  LDTc73a-023Z      1    -
+c listener-shared      agent  dispatch-message  LDTc73a-024Z      -    1
+c listener-shared      agent  listener-send     LDTc73a-025Z      1    -
+c listener-shared      agent  listener-send     LDTc73a-026Z      -    1
+c listener-shared      role   listener-publish  LDTc73a-027Z      1    -
+c listener-shared      role   listener-publish  LDTc73a-028Z      -    1
+c listener-shared      role   core-publish      LDTc73a-029Z      1    -
+c listener-shared      role   core-publish      LDTc73a-030Z      -    1
+d listener-dispatch    issue  comment-1         LDTc73a-031Z      1    1
+d listener-dispatch    issue  comment-2         LDTc73a-032Z      1    1
+d listener-dispatch    agent  dispatch-message  LDTc73a-033Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDTc73a-034Z      -  0/0
+d listener-dispatch    agent  listener-send     LDTc73a-035Z      1    -
+d listener-dispatch    agent  listener-send     LDTc73a-036Z      -    1
+d listener-dispatch    role   listener-publish  LDTc73a-037Z      1    -
+d listener-dispatch    role   listener-publish  LDTc73a-038Z      -    1
+d listener-dispatch    role   core-publish      LDTc73a-039Z      1    -
+d listener-dispatch    role   core-publish      LDTc73a-040Z      -    1
+e dispatch-kill        issue  comment-1         LDTc73a-041Z      1    1
+e dispatch-kill        issue  comment-2         LDTc73a-042Z      1    1
+e dispatch-kill        agent  dispatch-message  LDTc73a-043Z      1    -
+e dispatch-kill        agent  dispatch-message  LDTc73a-044Z      -    1
+e dispatch-kill        agent  listener-send     LDTc73a-045Z      1    -
+e dispatch-kill        agent  listener-send     LDTc73a-046Z      -    1
+e dispatch-kill        role   listener-publish  LDTc73a-047Z      1    -
+e dispatch-kill        role   listener-publish  LDTc73a-048Z      -    1
+e dispatch-kill        role   core-publish      LDTc73a-049Z      1    -
+e dispatch-kill        role   core-publish      LDTc73a-050Z      -    1
+f none                 issue  comment-1         LDTc73a-051Z      1    1
+f none                 issue  comment-2         LDTc73a-052Z      1    1
+f none                 agent  dispatch-message  LDTc73a-053Z      1    -
+f none                 agent  dispatch-message  LDTc73a-054Z      -    1
+f none                 agent  listener-send     LDTc73a-055Z      1    -
+f none                 agent  listener-send     LDTc73a-056Z      -    1
+f none                 role   listener-publish  LDTc73a-057Z      1    -
+f none                 role   listener-publish  LDTc73a-058Z      -    1
+f none                 role   core-publish      LDTc73a-059Z      1    -
+f none                 role   core-publish      LDTc73a-060Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+note: Dispatch published LIVE-1's comments in another order than they were written: written ; stored 
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/head-1962/sessions/pi/sessions/2026-10-31T11-07-22-206Z_01a191a4-8ade-71d1-bc94-6417d69deca1.jsonl; cc /legion/scratch/tmp/infra594/live/head-1962/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-head-1962-sessions-cc-cwd/c24f7c8f-09a0-4dfd-8f3a-434c27788b56.jsonl
