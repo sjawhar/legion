@@ -2,85 +2,76 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-369",
-  "completed": "2026-10-30T21:30:00Z",
+  "completed": "2026-10-31T00:35:00Z",
+  "round": "the round after the review's thirteen findings, at code head dd2f17197c3ffbb053dd11d687ff57f8dde8f118",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran both of the implementer's commands independently, on a Dispatch stack and database of my own in the issue's pod (the Go server on PostgreSQL 17 with pgvector, database dispatch_tester, started with DATABASE_URL=postgres://postgres:…@127.0.0.1:55432/dispatch_tester bun run dispatch:local, serving on 127.0.0.1:43661 with the fake GitHub on 26802). The acceptance driver answered exit=0 PASS=171 FAIL=0 SKIP=0, the same counts the implement handoff records; the browser row answered 1 passed. Neither the port nor the database was the implementer's, so no state of its run was reused."
+    "how": "Re-ran both of the implementer's commands on a Dispatch stack and database of my own in the issue's pod (the Go server on PostgreSQL 17 with pgvector, database dispatch_tester2, started with DATABASE_URL=postgres://postgres:…@127.0.0.1:55432/dispatch_tester2 bun run dispatch:local, serving on 127.0.0.1:59156 with the fake GitHub on 24924, the fake Envoy on 48354). The acceptance driver answered exit=0 PASS=171 FAIL=0 SKIP=0 and the browser spec 2 passed, the counts the implement handoff records. I then drove its reply-rule proof again myself, on all three reply routes rather than the two it recorded, and drove each of the other four review fixes on its own surface."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A6: an ask's question, each option and its answer are each addressable, and dispatch read shows the reference on the option.",
-      "surface": "A real Dispatch stack in the issue's pod: the Go server on PostgreSQL 17 with pgvector, driven through the real dispatch CLI and HTTP.",
-      "command": "DISPATCH_URL=http://127.0.0.1:43661 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=26802 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh",
-      "observed": "exit=0, PASS=171 FAIL=0 SKIP=0. Driven again by hand against the same server: GET /api/v1/references?to=<ask>&kind=part_of lists b1, b2 and b3 for a two-option ask; each part reads by its own reference with its own text; and `dispatch read --ref dispatch://CORE-4/ask/<id>#b-b2` prints `Option b2 of ask <id> (changed in revision 1):` and `Alpha — One.`.",
-      "headSha": "90d6787daa9e04d7693ad632093f59a7739f23c5",
-      "negativeControl": "GET /api/v1/references?to=dispatch://CORE-4/ask/<id>%23b-b9 answered 404 {\"code\":\"NOT_FOUND\",\"error\":\"no part \\\"b9\\\" in ask <id>\"}, while the same request for #b-b2 answered 200 with that option's text."
+      "criterion": "Review finding 1 (critical): a reply names a block of the item the request named, never of its thread's head.",
+      "surface": "The real Dispatch server in the issue's pod, over HTTP, on an ask whose first option is part b2 and a two-block comment under it whose second block is also b2.",
+      "command": "POST /api/v1/issues/<key>/comments with {reply_to: <that comment>, reply_to_block: \"b2\"}; the same route with {ask_id: <the ask>, reply_to_block: \"b2\"}; and POST /api/v1/comments/<the mentioning comment>/reply with {attempt: 1, reply_to_block: \"b2\"} as the mentioned session, the comment opened under the same ask",
+      "observed": "reply_to answers reply_block {node: comment/<c>#b2, text: \"The second block of this comment weighs Tuesday.\"}; ask_id answers {node: ask/<a>#b2, text: \"Monday — Ship at the start of the week.\"}; the delivery callback under the ask answers {node: comment/<c>#b2, text: \"Tell us tonight.\"}. One block id, three requests, each resolved against the item its own request named. ?to=<the ask's option b2>&kind=replies_to and ?to=<the comment's block b2>&kind=replies_to each list exactly one reply.",
+      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
+      "negativeControl": "reply_to + reply_to_block \"b3\" — a part the ask holds and the named comment does not — answered 400 {\"code\":\"INVALID_COMMENT\",\"error\":\"reply_to_block b3 is not a block of comment <id>\"}, and ask_id + \"b9\" answered the same naming the ask. reply_to and ask_id together, an ask id passed as reply_to, and either naming another issue's item each answered 400 INVALID_COMMENT naming the rule."
     },
     {
-      "criterion": "A6 on a project document's ask: a part of an ask opened on a document is addressable through the document's own reference.",
-      "surface": "The same running Dispatch, over HTTP and through the real dispatch CLI.",
-      "command": "POST /api/v1/projects/CORE/artifacts, then POST /api/v1/artifacts/<doc>/asks, then GET /api/v1/references?to=dispatch://CORE/artifact/<slug>/ask/<id>&kind=part_of and dispatch read --ref 'dispatch://CORE/artifact/<slug>/ask/<id>#b-b2'",
-      "observed": "part_of lists [\"b1\",\"b2\",\"b3\"]; the option reads 200 with text \"Port — Left.\", ref dispatch://CORE/artifact/pdoc-787829420/ask/<id>#b-b2 and parent {kind: ask}; the pinned form @v1 reads state unchanged with the same text; the CLI prints `Option b2 of ask <id> (changed in revision 1):` and its Node: line names `part of dispatch://CORE/artifact/pdoc-787829420/ask/<id> (revision 1)`.",
-      "headSha": "90d6787daa9e04d7693ad632093f59a7739f23c5",
-      "negativeControl": "The same document ask's #b-b9 answered 404 {\"code\":\"NOT_FOUND\",\"error\":\"no part \\\"b9\\\" in ask <id>\"}."
+      "criterion": "Review finding 2 (important): a link written in an ask's part is listed from its ask, in the dashboard's Referenced by panel and in the CLI.",
+      "surface": "The production SPA bundle served by the real Go server in a real Chromium, and the real dispatch CLI.",
+      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/ask-part-references.e2e.ts --project=chromium --reporter=list; then a throwaway row of my own for a link written in an ask's QUESTION, the case the finding names; and dispatch read --issue <the cited issue>",
+      "observed": "The implementer's two rows: 2 passed. My own row: the cited issue's Referenced by panel reads \"Ask · CORE-2\" with the question's own text and holds no \"Artifact · \" group (panel text: \"Ask · CORE-2\\njust now\\n\\nDoes dispatch://CORE-1 settle it?\\n\\nAttached document · CORE-1\\njust now\\n\\nspec.md\"). The CLI prints \"- mentions ask dispatch://KEY/ask/<id> block b1 (…)\" where the finding reported \"block dispatch://KEY/ask/<id>#b-b1\".",
+      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
+      "negativeControl": "The row asserts no \"Artifact · \" group is present, which is the finding's symptom verbatim; the implementer records the same row red against a build of the branch point, where the panel renders the edge as \"Artifact · CORE-2\" in plain text. I removed my own throwaway row from the tree after the run."
     },
     {
-      "criterion": "A15's ask clause and the replaced answer: a pinned part shows the revision it names, then that it was removed, and a second answer is a new part rather than a reword of the first.",
-      "surface": "The same running Dispatch, over HTTP, with the answer written as a signed-in person.",
-      "command": "POST /api/v1/asks/<id>/answer twice (the second with expected_answer_at of the first), then GET /api/v1/references?to=dispatch://CORE-9/ask/<id>%23b-b4 and the same with @v2 and @v3",
-      "observed": "The first answer is part b4 at revision 2; the second answer is part b5 at revision 3, a new id, so the replaced answer was removed rather than reworded. #b-b4 unpinned is 404; #b-b4@v2 is 200 with pin {version 2, text \"Yes - First answer.\", state removed, removed_version 3}; #b-b4@v3 is 404; #b-b5 reads \"No - Second answer.\". The acceptance driver's own A15 ask section (reword then drop of an option) passed in the same run.",
-      "headSha": "90d6787daa9e04d7693ad632093f59a7739f23c5",
-      "negativeControl": "#b-b5@v2 — the new answer pinned to a revision before it existed — answered 404, so a pin is not satisfied by whatever part now holds the id."
+      "criterion": "Review finding 3 (important): a document's own incoming references list an ask that cites it from an option or from its answer.",
+      "surface": "The same running Dispatch, over HTTP, on the route the document page reads.",
+      "command": "GET /api/v1/artifacts/<document>/references for a document named only inside one option of one ask, with GET /api/v1/references?to=<the document> as the control",
+      "observed": "referenced_by lists [{\"kind\":\"ask\",\"id\":\"63a14de2-…\",\"issue_key\":\"CORE-5\",\"project\":\"CORE\",\"excerpt\":\"Only the option cites it.\"}] — the ask, once, where the finding reported it absent; the graph read lists the part's own edge, mentions ask/63a14de2-…#b2, as before.",
+      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
+      "negativeControl": "The same route on the same document before the ask existed answered referenced_by [], so the row follows the citation rather than the document; and the ask is listed once rather than once per citing part."
     },
     {
-      "criterion": "R7 for asks: a link written in a question, an option or an answer starts at that part, is counted once, and reaches its issue's reference closure.",
-      "surface": "The same running Dispatch, over HTTP and through `dispatch read --issue`.",
-      "command": "Asks whose question, whose option alone and whose person-written answer alone name dispatch://CORE-16/artifact/<slug>, then GET /api/v1/references?to=<that document> and dispatch read --issue CORE-15 / CORE-17",
-      "observed": "A link in two options is two edges, one from each part (ask/<id>#b2 and ask/<id>#b3), and dropping the option that held one leaves the other alone. Where the question and an option both name the target, the edges are the two parts and no ask-level row: heldByABlock hides it. `dispatch read --issue` prints `CORE/odoc-1462930646 · depth 1 via ask <id>` for a document named only in an option, prints `- none` after that option is dropped, and prints the same line for a document named only in a person's answer. ask_block_refs.source_seq for the answer's edge is 12, not null, so a ?since= read of the target lists it.",
-      "headSha": "90d6787daa9e04d7693ad632093f59a7739f23c5",
-      "negativeControl": "Before the answer was written the same issue's closure read `References: - none`, and the target's own backlinks held no ask edge; the line appears only with the write that creates the part."
+      "criterion": "Review finding 4 (important): part ids are matched to options and to the answer by what identifies the part, so an index behind its row and an older event payload carry no wrong ids.",
+      "surface": "The same running Dispatch, over HTTP, with the ask row moved under the index by a direct SQL update (what a stale index or an older build leaves).",
+      "command": "update asks set options = … / jsonb_set(answer,'{text}',…) directly in PostgreSQL, then GET /api/v1/asks/<id>; and GET /api/v1/issues/<key>/events after an edit that replaced both options",
+      "observed": "An option no stored part stands for carries id null (Gamma null, Beta keeps b3). Two options swapped under the index keep their own ids — Beta b3, Alpha b2 — so an id follows the text and not the position. A row that grows gives the new option none; one that shrinks keeps the survivor's. An answer rewritten under the index carries none. On the events route the ask.opened payload of an ask whose two options were later replaced carries id null for both, while ask.edited carries the current b2 and b3.",
+      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
+      "negativeControl": "The swap is the control for position matching: a matcher that fell back to position would answer Beta b2 and Alpha b3, the finding's defect, and it answers Beta b3 and Alpha b2."
     },
     {
-      "criterion": "R11's reply clause: a reply in an ask's thread names the part it answers, and R10: a part the ask does not hold is refused by name.",
-      "surface": "The same running Dispatch, over HTTP (POST /api/v1/issues/{key}/comments with ask_id and reply_to_block) and through `dispatch comment --reply-to-ask`.",
-      "command": "POST /api/v1/issues/CORE-10/comments with ask_id=<ask> and reply_to_block in turn b1, b2, b9, \"\", \"../b1\", \"ask/<id>#b1\"; and dispatch comment --issue CORE-4 --reply-to-ask 'dispatch://CORE-4/ask/<id>#b-b2'",
-      "observed": "b1 and b2 are 201, each answering with reply_block {node: ask/<id>#b1|#b2, ref: dispatch://CORE-10/ask/<id>#b-b1|#b-b2, text: the part's own text, removed: false}; GET ?to=<option>&kind=replies_to lists the replies that named it. A nested reply inside the ask's thread (reply_to=<a reply>, reply_to_block=b2) also names the ask's part. The CLI prints `Replied on ask <id> (comment <id>; ask now waiting on human)`.",
-      "headSha": "90d6787daa9e04d7693ad632093f59a7739f23c5",
-      "negativeControl": "reply_to_block b9, \"\", \"../b1\" and \"ask/<id>#b1\" each answered 400 {\"code\":\"INVALID_COMMENT\",\"error\":\"reply_to_block <value> is not a block of ask <id>\"}, and reply_to_block with neither reply_to nor ask_id answered 400 naming both ways to give an owner."
+      "criterion": "Review finding 5 (important): the part's heading does not depend on a request that can fail the whole read.",
+      "surface": "The real dispatch CLI against the same server.",
+      "command": "dispatch read --ref 'dispatch://KEY/ask/<id>#b-b1' and '#b-b2' on a clean ask, and the same on an ask whose index is behind its row",
+      "observed": "A clean ask prints \"Question b1 of ask <id> (changed in revision 1):\" and \"Option b2 of ask <id> (changed in revision 1):\". Where the index is behind the row the heading degrades to \"Part b1 of ask <id>\", the conservative answer, since the read cannot then prove which part the question is. The ask read is now advisory — client.getAsk(...).catch(() => undefined) at dispatch-execute.ts:4703 — so a failure of it leaves the part under \"Part\" and the rest of the read unchanged.",
+      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
+      "negativeControl": "The stale-index ask is the control: it is the state in which the client may not claim \"Question\", and it does not."
     },
     {
-      "criterion": "The reader-facing change: an ask-part reference renders in the dashboard as a link a person can follow, for every kind of part and for a pinned part the ask has since dropped.",
-      "surface": "The production SPA bundle served by the real Go server, in a real Chromium, in the issue's pod.",
-      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/ask-part-references.e2e.ts --project=chromium --reporter=list, then a throwaway row of my own driving the question part, the answer part, a pinned option and a pinned option the ask then dropped",
-      "observed": "The implementer's row: 1 passed. My own row: the question part renders as a link whose text is the question and whose href is /issues/CORE-1/asks/<id>#b-<part>; the answer part renders as a link reading \"Monday - Monday it is.\"; an option pinned @v1 renders its pinned text and its card heads `CORE-1 · Ask`; after the ask drops that option the pinned link still renders and its card reads `Revision 1 / Removed in revision 2`, so a reference to a dropped part degrades to a dated quote rather than a dead link.",
-      "headSha": "90d6787daa9e04d7693ad632093f59a7739f23c5",
-      "negativeControl": "The implementer's row pointed at a part id the ask does not hold renders no link at all and fails with `element(s) not found` on the option's text; I removed my own throwaway row from the tree after the run, so nothing of it is in this branch."
+      "criterion": "The pull request's Contract change census: every entry a person invokes, driven through its real surface.",
+      "surface": "The same running Dispatch, over HTTP.",
+      "command": "GET /api/v1/references?to=<the dashboard URL of the ask with #b-b2, #b-b9 and no fragment>; the same for dispatch://KEY/ask/<id>#b-b2 and #b-b9; GET /api/v1/asks/<id> against the answer of PATCH /api/v1/asks/<id>; and a create and a PATCH that send an option id back",
+      "observed": "(1) the dashboard URL with #b-b2 answers 200 with node ask/<id>#b2 text \"Alpha\", #b-b9 answers 404 {\"code\":\"NOT_FOUND\",\"error\":\"no part \\\"b9\\\" in ask <id>\"}, and with no fragment the ask itself; (2) dispatch://KEY/ask/<id>#b-b2 answers 200 with the option's text and #b-b9 the same 404; (3) the reply rule of proof 1 above; (4) a read carries revision 1 and each option's id, a PATCH answer carries revision null and every option id null, and an id a writer sends back is emptied — {\"label\":\"Gamma\",\"id\":\"b2\"} was stored as the server's own b3, and a create sending {\"label\":\"X\",\"id\":\"b7\"} stored b2.",
+      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
+      "negativeControl": "Entry 1's own refusal is the control: the same URL shape that answered the ask on main answers 404 by name when the fragment is not a part, which is what R10 requires."
     },
     {
-      "criterion": "Recovery and concurrency of the part index: a build that wrote no parts is skipped rather than mis-resolved, a later write re-indexes, and concurrent edits leave one consistent revision.",
-      "surface": "The same running Dispatch, over HTTP, with the store read directly through psql.",
-      "command": "delete from ask_block_state/ask_blocks for one ask, then GET /api/v1/asks/<id> and ?to=<part>; then PATCH the ask; then `update ask_block_state set owed_at = now()` and PATCH again; separately, 12 concurrent PATCHes of one ask's options",
-      "observed": "With the part rows gone the ask reads revision: null with every option id null, ?to=<ask>&kind=part_of is empty and ?to=<part> is 404 naming the part — no row of another ask is resolved in its place. The next write re-indexes from revision 1 (b1..b4) and the owed_at a later write finds is cleared. The 12 concurrent edits all answered 200 and left parts_live=3, parts_total=3, dup_block_ids=0, ask_block_state.revision=13 and max(ask_blocks.changed_revision)=13.",
-      "headSha": "90d6787daa9e04d7693ad632093f59a7739f23c5",
-      "negativeControl": "The deleted-rows state is itself the control for the index's recovery: the read before the re-indexing write answers 404 for the very part id that answered 200 a moment earlier, and no part of any other ask answers in its place."
+      "criterion": "The acceptance lines of the issue, re-proven at this head: A6, A11/R12, A15, R7, R10 and R11 for ask parts, with the identity-hash boundaries the review's fix introduces.",
+      "surface": "The real Dispatch stack in the issue's pod, through the real dispatch CLI and HTTP, and a real Chromium.",
+      "command": "DISPATCH_URL=http://127.0.0.1:59156 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=24924 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh, then boundary probes by hand",
+      "observed": "exit=0, PASS=171 FAIL=0 SKIP=0. Boundaries: two options whose rendered part text is identical (equal text_sha256 in ask_blocks) still take b2 and b3, each reference reading its own part, and rewording one leaves the other's id; an answer whose rendered text equals an option's is a part of its own (option b2, answer b4), the type salt holding.",
+      "headSha": "e3bfd6b6b3fdbd0935a290cebdb3bcd0cb36a6cc",
+      "negativeControl": "The driver's own R10 case: GET /api/v1/references?to=<ask>%23b-b9 answers 404 naming the part while #b-b2 answers 200 with that option's text."
     }
   ],
-  "ci": "Read on GitHub at the code head 1b191490e1bac353d4f78330f3b9d74c03d198b0: run 41128293217 (CI) and 41128290804 (PR Title) were queued at the time of this handoff, so every static lane — lint, typecheck, the unit and integration suites — is read as running, not green and not red. Nothing of CI was re-run here and no CI result is carried into this handoff for a later step to trust; the reviewer reads the head's checks itself.",
-  "findings": [
-    {
-      "kind": "prose, for the reviewer to fix in its own commit",
-      "where": "packages/envoy-client/src/dispatch-execute.ts, refGrammarProblem (the `ref must be a valid dispatch:// reference such as …` refusal), pinned verbatim by packages/envoy-client/src/__tests__/dispatch-execute.test.ts around line 6475",
-      "finding": "The list of valid reference forms names a block of a document, of a comment and of a message, and never a part of an ask — the one form this pull request adds. An agent that gets an ask-part reference wrong is shown every form but the one it needs. Observed: `dispatch read --ref 'dispatch://CORE-12/ask/<id>#b-b2@v0'` refuses with that list, which carries no `dispatch://KEY-1/ask/<uuid>#b-<part id>`. The behaviour is right (the CLI accepts the form, `dispatch read --ref <part>` works); only the help text is incomplete, and the test that pins it would pass either way. The doc comment above innerRefProblem (\"a block link names one block of a document, a comment or a message\") is stale for the same reason."
-    },
-    {
-      "kind": "prose, for the reviewer to fix in its own commit",
-      "where": "packages/envoy-client/src/dispatch-execute.ts, innerRefProblem's fix hint for dispatch comment",
-      "finding": "`dispatch comment --ref <ask part>` is refused with `reply under it with reply_to_ask <ask uuid> and issue <key>`, which drops the part the caller named. `--reply-to-ask` now accepts a part reference — proven above, `dispatch comment --issue CORE-4 --reply-to-ask 'dispatch://CORE-4/ask/<id>#b-b2'` answers `Replied on ask <id>` — and the tool description in packages/contracts/src/dispatch-tools.ts already says so, so the hint should name the part reference rather than the bare ask id."
-    }
+  "ci": "Read on GitHub at the code head dd2f17197c3ffbb053dd11d687ff57f8dde8f118: PR Title run 41148680941 success; CI run 41147479424 still queued when this handoff was written (lint, test, envoy-go, dispatch, contracts, envoy-client, docs and the rest queued; changes success). Every static lane is therefore read as running, not green and not red. Nothing of CI was re-run here and no CI result is carried into this handoff for a later step to trust. One fact the reviewer should carry forward rather than take from me: CI at the PREVIOUS code head 1b191490e1bac353d4f78330f3b9d74c03d198b0 (run 41128293217) settled failure on pi-legion and claude-envoy, two packages this pull request does not change; whether that repeats at this head is for the reviewer's own read of the head's checks.",
+  "notDriven": [
+    "Review finding 7 (minor, the answer part's hash carries its answerer): the scenario needs a second person replacing the first person's answer, and POST /api/v1/asks/{id}/answer refuses that with 403 {\"code\":\"NOT_ANSWERER\",\"error\":\"only the person who gave the current answer may change it\"}, so it is reachable only through the wording-restore and approval-carry paths. The change is in refs/ask_blocks.go and its lock is that package's own Go tests, which CI runs.",
+    "Review finding 8 (minor, restoreWordings indexes at the statement's own time): it runs in the server's boot pass (\"dispatch: restored decided asks' wordings restored=0 copies=0\" on this stack, nothing to restore), and no API write reaches it. Its lock is docs/decided_wording.go's own Go test."
   ],
-  "notRetested": [
-    "The implementer's claim that e2e/ask-part-references.e2e.ts is red against a build of main at 10fc3b77: I verified the row green at this head and verified by hand that each assertion it makes is of a fact only this branch creates (an option's part id in the ask's read), but I did not build main to watch it fail."
-  ]
+  "findings": []
 }
