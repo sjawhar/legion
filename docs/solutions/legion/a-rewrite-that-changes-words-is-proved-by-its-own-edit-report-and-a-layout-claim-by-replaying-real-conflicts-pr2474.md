@@ -26,7 +26,7 @@ That file's guards assume a whitespace-only change; these prove a rewrite that a
 
 ## Evidence
 
-- The issue's `restructure.ts --report`, `check-differences.ts` and `check-rendered.ts` at 119c52c7 (retro removed `.legion/`): 79, 275 and 39 report entries applied with 0 unexplained hunks; 0 missing words over 16,916, 80,696 and 90,972 base words.
+- The issue's `restructure.ts --report`, `check-differences.ts` and `check-rendered.ts`, last at 2907b05b (retro removed `.legion/`; 119c52c7 holds the version before main #2572's anchor): 79, 275 and 39 report entries applied with 0 unexplained hunks; 0 missing words over 16,916, 80,696 and 90,972 base words.
 - The issue's `replay/run.sh` and `replay/README.md` at 119c52c7: 36 PASS; 20 real pairs clean, 10 controls conflict.
   Pairs `990ebd7341e0` and `22817ba1d2a3` (insert after) merged clean; `b1d8a21b1e8f` (insert before the edited command line) conflicted, as classified.
 - Related: docs/solutions/github/price-a-fail-wide-rule-on-replayed-heads-and-pin-the-steps-it-widens-instead-of-widening-their-filters-pr2316.md replays history to price a rule.

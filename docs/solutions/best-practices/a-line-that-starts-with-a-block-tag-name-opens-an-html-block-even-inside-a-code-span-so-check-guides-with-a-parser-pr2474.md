@@ -25,7 +25,7 @@ That file refuses to write such a line; this one is about a guide that already h
 
 ## Evidence
 
-- Main's hard wrap of `docs/kubernetes.md` put `<dir>` at the start of two lines inside code spans, so two paragraphs rendered as raw HTML and were never checked; sjawhar/legion#2474 joins those line breaks (`html-block-k8s-workspace-init-log`, `html-block-k8s-volume-mount-refusal` in the issue's `restructure.ts` at 119c52c7).
+- Main's hard wrap of `docs/kubernetes.md` put `<dir>` at the start of two lines inside code spans, so two paragraphs rendered as raw HTML and were never checked; sjawhar/legion#2474 joins those line breaks (`html-block-k8s-workspace-init-log`, `html-block-k8s-volume-mount-refusal` in the issue's `restructure.ts`, last at 2907b05b).
 - The parser test: `scripts/semantic-line-breaks.guides.test.ts`, "the root guide, the e2e README and the Kubernetes doc hold no raw HTML block, which the checker skips".
 - Converting the root guide's `## Commands` fences code-spanned `<tailnet>`, `<0600 file>` and `@biomejs/biome`; the rendered-text check found all 120 `<…>` placeholders, and failed with the code span removed from one.
 - Converting tables showed two README rows of main whose unescaped `|` inside a code span (`<on|off>`) made GitHub drop the rest of the row.
