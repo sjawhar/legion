@@ -31,6 +31,12 @@ import type { NatsConnection } from "nats";
  *  continuation writes nothing when its await finally resolves. */
 export class AbandonedTaskError extends Error {}
 
+/** Whether `error` is a queued task's deadline rejection, which a caller reads as a stall rather
+ *  than as a failure of the work the task was doing. */
+export function taskWasAbandoned(error: unknown): error is AbandonedTaskError {
+  return error instanceof AbandonedTaskError;
+}
+
 /**
  * A step the task's handle refused. Module-private: it never leaves `run`, which turns it into the
  * task's outcome — swallowed on an abandoned task's late settlement, `undefined` once the task's
@@ -89,8 +95,12 @@ export interface RegistrationStateDeps {
   readonly appendRoleClaimEntry: (role: string) => void;
   /** Opens a NATS connection, storing nothing: this module closes one a refused task opened. */
   readonly dial: () => Promise<NatsConnection>;
-  /** Opens `topic`'s subjects; answers whether any were new. */
-  readonly subscribeTopic: (topic: string) => Promise<boolean>;
+  /**
+   * Opens `topic`'s subjects, dialling with `dial` when the connection has to be made; answers
+   * whether any subjects were new. A queued task is handed its own fenced dial, so a subscribe
+   * whose connection outran the task opens nothing: the dial is closed and the task ends.
+   */
+  readonly subscribeTopic: (topic: string, dial: () => Promise<NatsConnection>) => Promise<boolean>;
   /** Closes a subject this module no longer keeps open, the live subscriptions staying with the
    *  extension: a role's end closes every notice subject a plugin opened while it was held. */
   readonly closeSubject: (subject: string) => void;
@@ -269,13 +279,13 @@ export interface RegistrationState {
   /** How many roles have ended, which a role-bound subscribe compares against. */
   readonly roleEndCount: () => number;
   /** Whether the hold came back from a hand-back rather than from a claim the listener granted. */
-  readonly holdUnconfirmed: () => boolean;
+  readonly holdIsUnconfirmed: () => boolean;
   /** The session the last pass converged to in full. */
-  readonly establishedSession: () => string;
+  readonly establishedFor: () => string;
   /** The session whose agent subject, stream watch and registered interests a pass opened. */
-  readonly inboundOpenFor: () => string;
+  readonly inboundOpenSession: () => string;
   /** The session whose role the last pass decided. */
-  readonly roleSettledFor: () => string;
+  readonly roleSettledSession: () => string;
 }
 
 export function createRegistrationState(deps: RegistrationStateDeps): RegistrationState {
@@ -642,6 +652,23 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
       return { decided: true, regain: "reclaimed" };
     };
 
+    // The one dial a queued task makes, its own: a connection opened for a task that was refused
+    // while the dial was in flight is closed here rather than left dangling, and the task ends.
+    // A subscribe that has to make the connection dials through this too.
+    const dial = async (): Promise<NatsConnection> => {
+      guard();
+      const dialled = await deps.dial();
+      if (!acting()) {
+        await dialled.close().catch(() => {});
+        throw new StepRefused(
+          live()
+            ? `the task acting for session ${bound} dialled NATS for a session that is no longer the open one; the connection it opened was closed`
+            : "the task that dialled NATS was abandoned at its deadline while the dial was in flight; the connection it opened was closed"
+        );
+      }
+      return dialled;
+    };
+
     return {
       actFor: (id) => {
         if (bound !== undefined) {
@@ -719,24 +746,10 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
         guard();
         await handBackAt(topic, sessionID);
       },
-      dial: async () => {
-        guard();
-        const dialled = await deps.dial();
-        // The loser of the race is this dial: a task refused while it was in flight must not put
-        // its connection anywhere, so it is closed here rather than left dangling.
-        if (!acting()) {
-          await dialled.close().catch(() => {});
-          throw new StepRefused(
-            live()
-              ? `the task acting for session ${bound} dialled NATS for a session that is no longer the open one; the connection it opened was closed`
-              : "the task that dialled NATS was abandoned at its deadline while the dial was in flight; the connection it opened was closed"
-          );
-        }
-        return dialled;
-      },
+      dial,
       subscribe: async (topic) => {
         guard();
-        const opened = await deps.subscribeTopic(topic);
+        const opened = await deps.subscribeTopic(topic, dial);
         guard();
         return opened;
       },
@@ -843,9 +856,9 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
     }),
     refusalFor: (sessionID) => refusedRoles.get(sessionID),
     roleEndCount: () => roleEnds,
-    holdUnconfirmed: () => holdUnconfirmed,
-    establishedSession: () => establishedSession,
-    inboundOpenFor: () => inboundOpenFor,
-    roleSettledFor: () => roleSettledFor,
+    holdIsUnconfirmed: () => holdUnconfirmed,
+    establishedFor: () => establishedSession,
+    inboundOpenSession: () => inboundOpenFor,
+    roleSettledSession: () => roleSettledFor,
   };
 }

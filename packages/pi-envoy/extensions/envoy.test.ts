@@ -3023,6 +3023,8 @@ describe("envoy OMP extension", () => {
           title: "",
           driving: false,
           self_subscribed: true,
+          // Minted once per extension instance and sent on every registration (R5).
+          client_instance_id: expect.stringMatching(/^[0-9a-f]{32}$/),
           capabilities: ["aside", "steer"],
           host: machineID(),
           plugin: "@sjawhar/pi-envoy",
@@ -10676,6 +10678,8 @@ console.log(JSON.stringify(args));
         title: "",
         driving: false,
         self_subscribed: true,
+        // Minted once per extension instance and sent on every registration (R5).
+        client_instance_id: expect.stringMatching(/^[0-9a-f]{32}$/),
         capabilities: ["aside", "steer"],
         host: machineID(),
         plugin: "@sjawhar/pi-envoy",

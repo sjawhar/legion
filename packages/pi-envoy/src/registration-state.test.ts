@@ -63,7 +63,7 @@ interface HarnessControl {
   getInterest: (sessionID: string) => Promise<Interest>;
   unsubscribe: (input: UnsubscribeInput) => Promise<void>;
   dial: () => Promise<NatsConnection>;
-  subscribeTopic: (topic: string) => Promise<boolean>;
+  subscribeTopic: (topic: string, dial: () => Promise<NatsConnection>) => Promise<boolean>;
 }
 
 interface Harness {
@@ -157,9 +157,9 @@ function createHarness(): Harness {
     log: { warn: (message, context) => warnings.push({ message, context }) },
     appendRoleClaimEntry: (role) => roleEntries.push(role),
     dial: () => control.dial(),
-    subscribeTopic: (topic) => {
+    subscribeTopic: (topic, dial) => {
       subscribedTopics.push(topic);
-      return control.subscribeTopic(topic);
+      return control.subscribeTopic(topic, dial);
     },
     closeSubject: (subject) => closedSubjects.push(subject),
   });
@@ -260,7 +260,7 @@ describe("the serial queues", () => {
     release.resolve();
     await finished.promise;
     expect(stepped).toBe(false);
-    expect(state.establishedSession()).toBe("");
+    expect(state.establishedFor()).toBe("");
   });
 
   test("a step of a session task whose session is no longer open changes nothing", async () => {
@@ -279,7 +279,7 @@ describe("the serial queues", () => {
     release.resolve();
     expect(await running).toBeUndefined();
     expect(stepped).toBe(false);
-    expect(state.roleSettledFor()).toBe("");
+    expect(state.roleSettledSession()).toBe("");
   });
 
   test("a step of a no-session task runs until the deadline", async () => {
@@ -292,7 +292,7 @@ describe("the serial queues", () => {
       return true;
     });
     expect(ran).toBe(true);
-    expect(state.establishedSession()).toBe("ses_unbound");
+    expect(state.establishedFor()).toBe("ses_unbound");
 
     control.deadlineMs = 0;
     const release = Promise.withResolvers<void>();
@@ -312,7 +312,7 @@ describe("the serial queues", () => {
     release.resolve();
     await finished.promise;
     expect(stepped).toBe(false);
-    expect(state.establishedSession()).toBe("ses_unbound");
+    expect(state.establishedFor()).toBe("ses_unbound");
   });
 
   test("a pass the host leaves mid-pass decides nothing, with no new warning", async () => {
@@ -337,7 +337,7 @@ describe("the serial queues", () => {
     const decided = (await running) ?? false;
     expect(decided).toBe(false);
     expect(notices).toEqual([]);
-    expect(state.roleSettledFor()).toBe("");
+    expect(state.roleSettledSession()).toBe("");
   });
 
   test("a dial opened by a task whose session moved is closed", async () => {
@@ -388,6 +388,36 @@ describe("the serial queues", () => {
     release.resolve();
     await finished.promise;
     expect(closedConnections).toEqual(["abandoned"]);
+  });
+
+  test("a subscribe whose dial its task's session outran closes that dial and opens nothing", async () => {
+    const { state, control, closedConnections, fakeConnection } = createHarness();
+    control.open = "ses_a";
+    const dialling = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const opened: string[] = [];
+    control.dial = async () => {
+      dialling.resolve();
+      await release.promise;
+      return fakeConnection("subscribe-dial");
+    };
+    // The adapter opens the topic only once it has a connection, as the extension's own
+    // `subscribe` does, and it dials with the dial the handle hands it.
+    control.subscribeTopic = async (topic, dial) => {
+      await dial();
+      opened.push(topic);
+      return true;
+    };
+    const running = state.passes.run(async (handle) => {
+      handle.actFor("ses_a");
+      return await handle.subscribe("notifications.dispatch.issue.A-1");
+    });
+    await dialling.promise;
+    control.open = "ses_b";
+    release.resolve();
+    expect(await running).toBeUndefined();
+    expect(opened).toEqual([]);
+    expect(closedConnections).toEqual(["subscribe-dial"]);
   });
 
   test("the handle's listener reads, hand-backs and subscribes refuse once the session moved", async () => {
@@ -750,14 +780,14 @@ describe("the readers", () => {
     expect(state.heldRole()).toBeUndefined();
     expect(state.holdSessionID()).toBeUndefined();
     expect(state.holdsRoleTopic(ALPHA)).toBe(false);
-    expect(state.holdUnconfirmed()).toBe(false);
+    expect(state.holdIsUnconfirmed()).toBe(false);
 
     await harness.hold("alpha", "ses_a");
     expect(state.heldRole()).toBe("alpha");
     expect(state.holdsRoleTopic(ALPHA)).toBe(true);
     expect(state.holdsRoleTopic(BETA)).toBe(false);
     expect(state.holdSessionID()).toBe("ses_a");
-    expect(state.holdUnconfirmed()).toBe(false);
+    expect(state.holdIsUnconfirmed()).toBe(false);
     expect(roleEntries).toEqual(["alpha"]);
 
     state.endUnwantedRole("ses_b", null, ["ses_b"]);
@@ -783,12 +813,12 @@ describe("the readers", () => {
     expect(state.roleSnapshot(CONTROLLER_NOTICE)).toEqual({ roleBound: false, endsBefore: 1 });
   });
 
-  test("establishedSession, inboundOpenFor and roleSettledFor follow what a pass recorded", async () => {
+  test("establishedFor, inboundOpenSession and roleSettledSession follow what a pass recorded", async () => {
     const { state, control } = createHarness();
     control.open = "ses_a";
-    expect(state.establishedSession()).toBe("");
-    expect(state.inboundOpenFor()).toBe("");
-    expect(state.roleSettledFor()).toBe("");
+    expect(state.establishedFor()).toBe("");
+    expect(state.inboundOpenSession()).toBe("");
+    expect(state.roleSettledSession()).toBe("");
     await state.passes.run(async (handle) => {
       handle.actFor("ses_a");
       handle.markAgentSessionOpen("ses_a");
@@ -797,9 +827,9 @@ describe("the readers", () => {
       handle.markRoleSettled("ses_a");
       return true;
     });
-    expect(state.establishedSession()).toBe("ses_a");
-    expect(state.inboundOpenFor()).toBe("ses_a");
-    expect(state.roleSettledFor()).toBe("ses_a");
+    expect(state.establishedFor()).toBe("ses_a");
+    expect(state.inboundOpenSession()).toBe("ses_a");
+    expect(state.roleSettledSession()).toBe("ses_a");
   });
 
   test("forgetOtherAgentSessions answers the sessions whose agent subject the pass must close", async () => {
@@ -812,7 +842,7 @@ describe("the readers", () => {
       handle.markInboundOpen("ses_old");
       expect(handle.forgetOtherAgentSessions("ses_a")).toEqual(["ses_old"]);
       // The inbound record followed the session it was opened for.
-      expect(state.inboundOpenFor()).toBe("");
+      expect(state.inboundOpenSession()).toBe("");
       // Nothing is left to forget on a second pass.
       expect(handle.forgetOtherAgentSessions("ses_a")).toEqual([]);
       return true;
@@ -951,7 +981,7 @@ describe("claimRole", () => {
       return handle.claimRole("alpha", { soft: true });
     });
     expect(state.refusalFor("ses_a")).toBeUndefined();
-    expect(state.holdUnconfirmed()).toBe(false);
+    expect(state.holdIsUnconfirmed()).toBe(false);
     // The listener names this session for the role now, so the pending hold is gone rather than
     // handed back: handing it back would end the new hold.
     await state.roleMoves.run(async (handle) => {
@@ -1072,7 +1102,7 @@ describe("settleEndedHolds", () => {
     expect(state.heldRole()).toBe("alpha");
     expect(state.holdSessionID()).toBe("ses_a");
     // Unconfirmed: nothing has checked it at the listener since.
-    expect(state.holdUnconfirmed()).toBe(true);
+    expect(state.holdIsUnconfirmed()).toBe(true);
     expect(handBacks).toEqual([`${BETA}@ses_a`]);
   });
 
