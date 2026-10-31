@@ -104,7 +104,21 @@ func (e *Engine) byReviewApp(login string) bool {
 
 // Apply changes workflow-owned phase state for one durable intake fact. It never performs I/O;
 // every externally visible consequence is an outbox row committed with the record change.
+//
+// Every fact the handlers are done with goes through askMergeState, which asks the daemon to read
+// GitHub's merge state when the fact is one of those that can change it and the round it left
+// waits on the answer. It is here rather than in the handlers so that a handler's early return
+// cannot silently stop the ladder, and so the facts that ask are one list the compiler checks
+// rather than nine calls and a comment (dispatch://INFRA-714 R3).
 func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	result, err := e.apply(ctx, tx, fact)
+	if err != nil {
+		return result, err
+	}
+	return result, e.askMergeState(ctx, tx, fact)
+}
+
+func (e *Engine) apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	switch fact := fact.(type) {
 	case intake.DispatchIssue:
 		return e.dispatchIssue(ctx, tx, fact)
@@ -719,7 +733,7 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers || issue.Phase == phase.Done {
 		return intake.Result{}, err
 	}
-	working := workingPhase(*issue)
+	working := issue.WorkingPhase()
 	if RoleFor(working) != fact.Role {
 		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: issue.Phase,
 			Reason: fmt.Sprintf("the %s does not work %s's phase %s; nothing is held", fact.Role, issue.Key, working)})
@@ -829,23 +843,24 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.retryPhase(ctx, tx, *issue, issue.Hold.From, "retry held phase")
+	return intake.Result{}, e.retryPhase(ctx, tx, *issue, issue.Hold.From, "retry held phase", false)
 }
 
-// restartPhase is the operator's retry of a phase worker whose issue stands in that worker's own
-// phase, through `legion claims retry` (api's retryClaim): the worker failed, or an operator
-// stopped it, and a stop is no death, so no hold is waiting for its architect to decide. The phase
-// is started again, which is what gives the worker — a new session when the operator asked for one
-// — the task of the phase it is to work. An issue held for this role takes the same path, so the
-// hold it was given is restored from; one whose phase another role works, or that has left the
+// restartPhase is the operator's retry of a phase worker through `legion claims retry` (api's
+// retryClaim): the worker failed, or an operator stopped it, and a stop is no death, so no hold
+// may be waiting for its architect to decide. The phase the worker works is started again, which
+// is what gives it the task of that phase; an issue held for this role is restored from its hold
+// first, as the architect's retry does. One whose phase another role works, or that has left the
 // workflow, is refused, since starting that phase under this claim's name would run the wrong
-// role.
+// role. A restart that asks for a new session (`--fresh-session`) says so on the start it
+// queues, so the claim forgets its recorded session in the retry that start makes and no refusal
+// above can leave a session discarded for a restart that never happened.
 func (e *Engine) restartPhase(ctx context.Context, tx pgx.Tx, fact intake.RestartPhase) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	working := workingPhase(*issue)
+	working := issue.WorkingPhase()
 	if !InWorkflow(*issue) || RoleFor(working) != fact.Role {
 		return refused("PHASE_NOT_RESTARTED", fmt.Sprintf("the %s does not work %s's phase %s, so nothing restarted it",
 			fact.Role, issue.Key, working)), nil
@@ -857,7 +872,7 @@ func (e *Engine) restartPhase(ctx context.Context, tx pgx.Tx, fact intake.Restar
 	if lingers {
 		return refusedLingering(*issue, fmt.Sprintf("the operator's restart of the %s", fact.Role)), nil
 	}
-	return intake.Result{}, e.retryPhase(ctx, tx, *issue, working, "the operator retried this phase's worker")
+	return intake.Result{}, e.retryPhase(ctx, tx, *issue, working, "the operator retried this phase's worker", fact.FreshSession)
 }
 
 // retryPhase gives issue the phase from back — a held issue leaves its hold — and starts that
@@ -874,9 +889,14 @@ func (e *Engine) restartPhase(ctx context.Context, tx pgx.Tx, fact intake.Restar
 // it. The architect, who ordered the retry, is told nothing: a notice now would read as the
 // reviewer's answer to its request.
 //
+// freshSession is the operator's `--fresh-session`: the start it queues retries the claim in a
+// new session rather than the one it recorded. An architect's retry of a held phase asks for
+// none — a claim the provider refused out of its budget takes a new session all the same, which
+// the claim's own retry decides (supervise's freshSession).
+//
 // Its callers have established that the tree does not linger, which is what holds every member
 // where it stood.
-func (e *Engine) retryPhase(ctx context.Context, tx pgx.Tx, issue record.Issue, from phase.Phase, reason string) error {
+func (e *Engine) retryPhase(ctx context.Context, tx pgx.Tx, issue record.Issue, from phase.Phase, reason string, freshSession bool) error {
 	issue.Phase, issue.Hold = from, nil
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return err
@@ -899,7 +919,7 @@ func (e *Engine) retryPhase(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 			reason += ": " + r.reason
 		}
 	}
-	return e.start(ctx, tx, issue, RoleFor(from), task(issue, record.PhaseRow{}, pr, reason), "")
+	return e.start(ctx, tx, issue, RoleFor(from), task(issue, record.PhaseRow{}, pr, reason), "", freshSession)
 }
 
 func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMove) (intake.Result, error) {
@@ -1039,7 +1059,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 		if err != nil {
 			return err
 		}
-		if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason), quiesce); err != nil {
+		if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason), quiesce, false); err != nil {
 			return err
 		}
 	}

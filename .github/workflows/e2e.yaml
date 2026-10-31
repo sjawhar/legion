@@ -36,7 +36,7 @@ on:
   workflow_dispatch:
     inputs:
       script:
-        description: The scripts/e2e proof to run, with or without its .sh (merged-root-waits, say)
+        description: The scripts/e2e proof to run, with or without its .sh (child-adoption, say)
         type: string
         required: true
   pull_request:
@@ -86,8 +86,8 @@ jobs:
         run: .github/scripts/select-e2e-proofs.sh
 
   # One job per proof. Its limit is the script's own row, measured from that script's header with
-  # headroom: no-required-checks waits for three reads of what each base requires, so a run takes
-  # about seven minutes, and every proof builds its driver first.
+  # headroom: child-adoption drives eleven steps of a whole booted daemon through its envelopes
+  # and routes, and every proof builds its driver first.
   proof:
     needs: select
     name: ${{ matrix.proof }}

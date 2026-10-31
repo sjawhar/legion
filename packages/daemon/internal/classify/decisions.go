@@ -9,7 +9,7 @@ import (
 
 // Arrival is what a synchronize says of the move a head arrives by: Before, the head GitHub says
 // the branch moved from, and Sender, the account whose push moved it (the webhook's sender), each
-// empty when the fact names none - a reopen, a close at another head, READY, the daemon's own read
+// empty when the fact names none - a reopen, a close at another head, the daemon's own read
 // of the head, a listener that predates the field; and At, GitHub's clock of the synchronize (the
 // pull request's updated_at), zero when unknown. Since is GitHub's clock of the head the record
 // held, zero when unknown: the moves a skipped synchronize named between the two are this
@@ -115,16 +115,25 @@ func inWindow(named record.Named, start string, since time.Time) bool {
 // chain of recorded pushes led to it from the recorded head (chained) with nothing left for it to
 // wait for (arrivalPushes), and returns the named moves its judgement left (names, the run's). The
 // recorded CI settlement stays, as CheckedHead's: it is the new head's too once every push between
-// them is known to change only .legion/ (settled), a settlement of another head of that same tree
+// them is known to change only .legion/ (Settled), a settlement of another head of that same tree
 // merges into it, and one of a head holding other code replaces it
-// (SettlementFor). GitHub's own verdict on merging the head - Mergeability and MergeState - goes
-// when the pushes say the move changed code (codeMove), and stays when they say it changed only
-// the issue's own handoffs, the same test that carries an approval across (carriedBack): a
-// handoff-only push changes nothing GitHub checks, so the verdict read at the head before it
-// still describes the tree being merged, while a code push changes what GitHub would check, and
-// the verdict is unknown until GitHub answers for the new head. A move the recorded pushes cannot
-// link yet is neither: it keeps the verdict, as it keeps an approval that no longer stands, and
-// the push that links it replays the arrival (replayRun) and takes the verdict then. The move and
+// (SettlementFor). GitHub's own verdict on merging the head - Mergeability and MergeState - stays
+// only while the recorded pushes say the move changed nothing GitHub checks: every push between
+// the two heads changed only the issue's own handoffs, the same test that carries an approval
+// across (carriedBack). A handoff-only push changes nothing GitHub would check, so the verdict
+// read at the head before it still describes the tree being merged.
+//
+// Every other move takes the verdict with it, a move the recorded pushes cannot link yet among
+// them - a synchronize that arrived before the push webhook of its own move. The alternative was
+// to record the head GitHub answered for beside the answer and read a verdict of another head as
+// unread; this is the same rule with no second field to keep true, since a verdict is kept only
+// where the pushes prove the two heads hold one tree, and a kept verdict of another head is
+// exactly what moved an approval of a new head on the old head's `clean`
+// (dispatch://INFRA-714 R2). It costs nothing in the end and at most one read meanwhile: the
+// arrival opens a head run whose anchor keeps the verdict (record.Judgement), so the push that
+// links the move replays the arrival and gives the verdict back when the push says the move
+// carried it, and the arrival is itself a fact that asks GitHub for the new head's state
+// (workflow's askMergeState) for as long as it does not. The move and
 // the chain's pushes join the moves made (madeMoves), and the pushes they spend go
 // (unspentPushes). Nothing here judges the settlement: a CI result moves no issue
 // (dispatch://INFRA-714/spec R1), so a head arrives counting nothing.
@@ -140,7 +149,7 @@ func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []rec
 	}
 	// The verdict is read against the pull request's own pushes, before the move spends them, as
 	// the reader of an approval reads it (ApprovalStands).
-	if codeMove(pr.Pushes, pr.HeadSHA, headSHA) {
+	if !carriedBack(pr.Pushes, headSHA, pr.HeadSHA) {
 		pr.Mergeability, pr.MergeState = "", record.MergeStateUnread
 	}
 	if !read.waits {
@@ -151,17 +160,6 @@ func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []rec
 	pr.Pushes = unspentPushes(pr.Pushes, pr.Moves, true)
 	pr.HeadSHA = headSHA
 	return pr, chained && !read.waits, read.names
-}
-
-// codeMove is whether the recorded pushes say the move from previous to head changed code: a
-// chain of pushes that each said which head it replaced leads from previous to head (chainOf),
-// and no such chain changed only the issue's own handoffs (carriedBack). A move no chain reaches
-// is not one: its pushes have not arrived, and until they do nothing says what it changed.
-func codeMove(pushes []record.ClassifiedPush, previous, head string) bool {
-	if previous == "" || previous == head {
-		return false
-	}
-	return chainOf(pushes, previous, head) != nil && !carriedBack(pushes, head, previous)
 }
 
 // maxMoves bounds the moves a pull request remembers (record.PullRequest.Moves): a push for a move
@@ -663,12 +661,18 @@ func chainOf(pushes []record.ClassifiedPush, from, to string) []record.Classifie
 	return nil
 }
 
-// settled says whether a CI settlement stands for the pull request's current head: one recorded
+// Settled says whether a CI settlement stands for the pull request's current head: one recorded
 // for the head itself, or for a head the current one replaced through pushes that each changed
 // only .legion/ and said which head they replaced (a handoff push can carry GitHub's skip-checks
 // trailer and start no CI of its own). A checked head is recorded only with a settlement
 // (SettlementFor, then ApplySettlement), and cleared with it (a new generation, migration 0028).
-func settled(pr record.PullRequest) bool {
+//
+// The listener settles a commit only once every check it has seen there is terminal, so a
+// settlement standing for the head is the daemon's one account of every check GitHub reported on
+// that head having concluded, and the absence of one is a check that may still be running: which
+// is what the round of an approval waiting on GitHub's merge state reads before it reports a head
+// GitHub will not merge from (workflow's reviewRound).
+func Settled(pr record.PullRequest) bool {
 	return pr.CheckedHead != "" && carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead)
 }
 
@@ -678,7 +682,7 @@ func settled(pr record.PullRequest) bool {
 // Every other settlement - an earlier code head's, a head a force push left - stands for nothing.
 //
 // A settlement of another head than the recorded one, with the recorded one standing for the
-// current head (settled), keeps the fence rather than starting it afresh: both heads carry back
+// current head (Settled), keeps the fence rather than starting it afresh: both heads carry back
 // to the current head through pushes that changed only .legion/, so they hold one tree, and a run
 // on either is a run on the same code. What each check name comes to is then the newest run of it
 // across those heads, which the attempt set decides (ApplySettlement, over the fence
@@ -701,7 +705,7 @@ func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record
 	if head == pr.CheckedHead {
 		return pr, true
 	}
-	if settled(pr) {
+	if Settled(pr) {
 		if carriedBack(pr.Pushes, head, pr.CheckedHead) {
 			pr.CheckedHead = head
 			pr.Generation = 0
@@ -779,7 +783,7 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 //     the sender orders. The replay's shortest chain (chainOf) is a limit there too, shared with the
 //     release before: pushes of another path delivered early can stand for a path the branch did
 //     not take.
-//   - Neither (an older listener, a reopen, a close at another head, READY, the daemon's own read
+//   - Neither (an older listener, a reopen, a close at another head, the daemon's own read
 //     of the head): no repeat and the newest push of each two heads, as the release before did
 //     (TestAnArrivalThatNamesNoMoveIsJudgedAsTheReleaseBefore), a head run that a lost push opened
 //     closing at its bound the one change; so this daemon may deploy before the listener.

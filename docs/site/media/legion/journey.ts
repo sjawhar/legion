@@ -267,7 +267,6 @@ export async function finish(issue: Tracked, example: Example): Promise<void> {
   await linkPullRequest(issue, example);
   for (const status of PHASE_STATUSES) await setStatus(issue, status);
   await accept(issue, example);
-  await postReady(issue, example);
   await closeAtMerge(issue);
 }
 

@@ -50,7 +50,7 @@ func TestTheClaimsSecretReportsEveryTurnAndARunOfRefusalsFailsTheClaim(t *testin
 		t.Fatalf("the third refusal = %d %+v, want 200 with a run of 3 that failed the claim", recorder.Code, answer)
 	}
 	stored := h.stored(token)
-	want := "the provider refused 3 turns in a row; its last refusal: the provider refused the request"
+	want := "the provider refused 3 turns in a row: the provider refused the request"
 	if stored.State != supervise.StateFailed || stored.Failure != want {
 		t.Fatalf("the claim is %s with failure %q, want failed with %q", stored.State, stored.Failure, want)
 	}
@@ -72,6 +72,36 @@ func TestTheLaunchsBootTokenReportsTheSameClaimsTurns(t *testing.T) {
 	stored := h.stored(token)
 	if len(stored.TurnOutcomes) != 1 || stored.LastRefusal() != "Claude Code: error_during_execution" {
 		t.Fatalf("the claim keeps %+v, want the bridge's refusal recorded", stored.TurnOutcomes)
+	}
+}
+
+// A pane left running from a launch the claim has replaced still holds that launch's boot token,
+// and its provider's refusals are not the current pane's: the route refuses the token a relaunch
+// left behind, exactly as the shim's hello on that token is refused, and refuses a report for any
+// generation but the one its launch was minted for. Either would otherwise walk a working claim
+// to the launch failure limit and abandon the session it is working in.
+func TestATurnOutcomeFromAReplacedLaunchIsRefusedAndRecordsNothing(t *testing.T) {
+	h := newHarness(t)
+	token, first := h.launch("LEGION-209", claim.RoleImplementer)
+	current := h.relaunch(token)
+
+	stale, _ := h.turnOutcome(claim.TurnOutcomeRequest{
+		BootToken: first, Generation: 1, Sequence: 1, Outcome: claim.TurnRefused, Message: "the replaced pane's provider",
+	})
+	wantRefusal(t, stale, claim.InvalidBootToken.Status, claim.InvalidBootToken.Message)
+
+	otherGeneration, _ := h.turnOutcome(claim.TurnOutcomeRequest{
+		BootToken: current, Generation: 1, Sequence: 1, Outcome: claim.TurnRefused, Message: "a turn of a generation this launch never ran",
+	})
+	wantRefusal(t, otherGeneration, claim.StaleGeneration.Status, claim.StaleGeneration.Message)
+
+	if kept := h.stored(token).TurnOutcomes; len(kept) != 0 {
+		t.Fatalf("the claim keeps %+v, want neither refused report recorded", kept)
+	}
+	if _, answer := h.turnOutcome(claim.TurnOutcomeRequest{
+		BootToken: current, Generation: 2, Sequence: 1, Outcome: claim.TurnRefused, Message: "the live pane's provider",
+	}); answer != (claim.TurnOutcomeResponse{RefusedRun: 1}) {
+		t.Fatalf("the live pane's report answered %+v, want a run of 1", answer)
 	}
 }
 

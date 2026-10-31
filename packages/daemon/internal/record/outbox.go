@@ -328,6 +328,11 @@ type SuperviseRequest struct {
 	// budget, the runner finishes this row rather than retrying it as RequestRetry with fresh
 	// budgets: the failed claim stays failed for the boot report to name.
 	RuleResume bool `json:"ruleResume,omitempty"`
+	// FreshSession marks a start that must not resume the session its claim recorded: the
+	// operator's `legion claims retry --fresh-session` (api's retryClaim). The runner passes it
+	// to the claim's retry, which forgets the session inside that one decision (supervise's
+	// RequestRetry), so a start that never ran leaves the session where it was.
+	FreshSession bool `json:"freshSession,omitempty"`
 	// Quiesce is the role whose phase a start takes over without that role's completion: the head
 	// started conflicting with its base while that role worked, or the reviewer's own review
 	// decided a round it had not completed (workflow's takenOver). The start acts only once that

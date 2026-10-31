@@ -150,8 +150,8 @@ func (e *Engine) tellReparented(ctx context.Context, tx pgx.Tx, issue *record.Is
 // that tree with every record of its own tree, recorded under the Dispatch parent and held on the
 // blockers child names (intake.AdoptedChild, the release's own read of Dispatch); each member
 // keeps its own. Each record takes its next generation, the fence every row of the old tree already
-// checks (its linger's close, its supervise rows, its issue suspend), with no linger, hold,
-// pending READY or Dispatch chain (record.Issue.Ancestry: a member waits in no line), no
+// checks (its linger's close, its supervise rows, its issue suspend), with no linger, hold or
+// Dispatch chain (record.Issue.Ancestry: a member waits in no line), no
 // hand-over fence and its generation's facts cleared. A todo record enters the tree's run
 // admitted, as an unrecorded todo child does (enterChild), so an open gate starts its planning,
 // unless it waits on an unfinished Dispatch issue: enterChild then holds it at phase.Admitted, on

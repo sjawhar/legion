@@ -107,6 +107,15 @@ type Claim struct {
 	// Every relaunch resumes that recorded session and refuses another one.
 	Session     string
 	SessionFile string
+	// Abandoned is the session this claim stopped resuming when it last forgot one
+	// (forgetSession), and why. The session itself stays in its store — nothing of it is deleted
+	// — so this is the one record of where it went, for the operator who may want to read it and
+	// for the agent that replaces it, which is told of it in the first task it is given
+	// (abandonedTask). It is persisted, since that first task can be a launch and a daemon
+	// restart away, and it is replaced rather than cleared by the next abandonment: the session
+	// before this one is gone whatever happens next. A claim that has abandoned none records a
+	// session of "".
+	Abandoned AbandonedSession
 	// ServingGeneration is the issue generation of the last confirmed delivery this claim retired:
 	// the run it goes on working until another delivery of a run replaces it. It is the second of
 	// the three sources a completion is attributed from (api/handoff.go): the pending delivery
@@ -1209,7 +1218,7 @@ func (m *Machine) startFresh(ctx context.Context, token string, cause error) (ru
 	m.log.Warn("supervise: the recorded session is found nowhere the runtime can resume it, so the claim starts a fresh agent, charged nothing",
 		"session", m.claim.Session, "sessionFile", m.claim.SessionFile, "error", cause)
 	lost := m.claim.Session
-	m.forgetSession()
+	m.forgetSession(fmt.Sprintf("no session store the runtime could resume it from holds it any more: %v", cause))
 	spec, err := m.spawnSpec(ctx, token, true)
 	if err != nil {
 		return runtime.Locator{}, err
@@ -1275,11 +1284,39 @@ func deathCause(observation runtime.Observation) string {
 	return fmt.Sprintf("%s: %s", observation.Kind, observation.Detail)
 }
 
+// AbandonedSession is a session a claim stopped resuming: the id and transcript path it recorded
+// for it, why it was left behind, and when. Why is the sentence whoever abandoned it wrote — the
+// failure of a claim the provider refused out of its budget, the reason an operator's retry gave,
+// the runtime's account of a session no store holds — and it is what the agent that replaces the
+// session is told, so it reads the provider's own words for the refusal, the context size in them
+// included, rather than a sentence the daemon invented.
+type AbandonedSession struct {
+	Session     string    `json:"session"`
+	SessionFile string    `json:"sessionFile,omitempty"`
+	Why         string    `json:"why"`
+	At          time.Time `json:"at"`
+	// Told is set once a prompt carrying the sentence has gone out (startSend), so the agent that
+	// replaced the session is told of it in the first task it is given and in no later one. It
+	// rides the claim's next write, as the delivery's own Prompted mark does: a send the store
+	// never heard of is one the fresh agent may be told of twice, which is the harmless way round.
+	Told bool `json:"told,omitempty"`
+}
+
+// Tells is whether a prompt to this claim's agent must still name the session the claim
+// abandoned: one was abandoned and it has not been told yet.
+func (a AbandonedSession) Tells() bool { return a.Session != "" && !a.Told }
+
 // forgetSession drops the session the claim recorded, leaving the claim as one no agent has
 // registered for: the next launch is a fresh spawn that provisions its workspace anew. The turns
 // reported for that session go with it (freshRun): the next agent is one the provider has refused
-// nothing of.
-func (m *Machine) forgetSession() {
+// nothing of. The session is recorded as abandoned, with why it was, since nothing else keeps
+// where it went and the fresh agent is told of it in its first task.
+func (m *Machine) forgetSession(why string) {
+	if m.claim.Session != "" {
+		m.claim.Abandoned = AbandonedSession{
+			Session: m.claim.Session, SessionFile: m.claim.SessionFile, Why: why, At: m.deps.Clock.Now(),
+		}
+	}
 	m.claim.Session, m.claim.SessionFile = "", ""
 	m.freshRun()
 }

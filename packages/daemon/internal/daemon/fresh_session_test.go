@@ -258,11 +258,15 @@ func TestAnArchitectsRetryOfARefusedClaimStartsANewSessionWithThePhaseTask(t *te
 	if got := rig.machine.Claim(); got.Session != newSession || got.Session == oldSession {
 		t.Fatalf("the retried implementer registered session %q, want the new %q", got.Session, newSession)
 	}
+	// The task of the retried phase, behind the sentence that says this session replaced one the
+	// provider refused: a worker reading an empty transcript would otherwise take the task for a
+	// fresh start and do again what the abandoned session already pushed.
 	prompts := rig.conn.Prompts()
-	want := "Continue Workflow. Issue: LEGION-208. Phase: implementing. Reason: retry held phase."
-	if len(prompts) != 2 || prompts[1].Message != want {
-		t.Fatalf("the new session was prompted %+v, want the retried phase's task %q", prompts, want)
+	task := "Continue Workflow. Issue: LEGION-208. Phase: implementing. Reason: retry held phase."
+	if len(prompts) != 2 || !strings.HasSuffix(prompts[1].Message, task) {
+		t.Fatalf("the new session was prompted %+v, want it to end with the retried phase's task %q", prompts, task)
 	}
+	wantsAbandonment(t, prompts[1].Message, refusal)
 }
 
 // An operator who stops a worker whose agent can do nothing — a provider that refuses its session,
@@ -310,7 +314,60 @@ func TestTheOperatorsFreshSessionRetryOfAStoppedWorkerStartsANewSessionWithThePh
 		t.Fatalf("the retried implementer registered session %q, want the new %q", got.Session, newSession)
 	}
 	prompts := rig.conn.Prompts()
-	if len(prompts) != 2 || !strings.HasPrefix(prompts[1].Message, phaseTask) {
-		t.Fatalf("the new session was prompted %+v, want its phase's task", prompts)
+	if len(prompts) != 2 || !strings.HasSuffix(prompts[1].Message, phaseTask) {
+		t.Fatalf("the new session was prompted %+v, want it to end with its phase's task", prompts)
+	}
+	wantsAbandonment(t, prompts[1].Message, "the retry asked for a new session")
+}
+
+// `--fresh-session` is the one retry, not two steps: the claim forgets its session inside the
+// retry the workflow's start makes, so a restart the workflow refuses leaves the session where
+// the operator still has it. Here the tree lingers, which holds every member where it stood, so
+// the restart refuses and the stopped worker keeps the session it recorded — where forgetting it
+// before applying the fact would have discarded it for a retry that never happened.
+func TestAFreshSessionRetryTheWorkflowRefusesLeavesTheSession(t *testing.T) {
+	rig := newFreshSessionRig(t)
+	route := "/legion/v1/operator/claims/" + string(rig.implementer)
+
+	if recorder := rig.operator(http.MethodPost, route+"/stop", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("the operator's stop = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	lingering := rig.issue
+	until := time.Now().Add(time.Hour)
+	lingering.LingerUntil = &until
+	putOutboxIssue(t, rig.pool, rig.records, lingering)
+	spawns := len(rig.rt.CallsOf("Spawn"))
+
+	recorder := rig.operator(http.MethodPost, route+"/retry", api.RetryRequest{FreshSession: true})
+
+	refused := "the tree LEGION-208 is lingering after it left the workflow, so the operator's restart of the implementer of LEGION-208 changed nothing"
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), refused) {
+		t.Fatalf("retry --fresh-session while the tree lingers = %d, want 409 %q; body %s", recorder.Code, refused, recorder.Body)
+	}
+	got := rig.machine.Claim()
+	if got.Session != oldSession || got.SessionFile != oldSessionFile {
+		t.Fatalf("after the refused retry the claim records session %q (%s), want the session the retry never started kept", got.Session, got.SessionFile)
+	}
+	if got.Abandoned.Session != "" {
+		t.Fatalf("the claim records %+v as abandoned, want nothing abandoned by a retry the workflow refused", got.Abandoned)
+	}
+	if after := rig.rt.CallsOf("Spawn"); len(after) != spawns {
+		t.Fatalf("the refused retry launched %+v, want nothing", after[spawns:])
+	}
+}
+
+// wantsAbandonment is the check both retries make of the fresh session's first prompt: it names
+// the session that was abandoned and why — the provider's own words for a refused one, the
+// context size among them where the provider gave one — and the two things that outlived that
+// session, the issue's branch and the handoffs committed on it.
+func wantsAbandonment(t *testing.T, prompt, why string) {
+	t.Helper()
+	for _, want := range []string{
+		oldSession, "abandoned", why,
+		"legion/" + "LEGION-208", ".legion/LEGION-208/", "plan.json", "implement.json", "test.json", "review.json",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the fresh session's first prompt does not name %q:\n%s", want, prompt)
+		}
 	}
 }

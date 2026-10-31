@@ -30,7 +30,7 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.last_start_row, c.serving_generation,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
 	c.plugin_contract, c.plugin_relaunch_for, c.last_turn_start, c.last_turn_end,
-	c.last_death_cause, c.last_start_failure, c.last_ready, c.turn_outcomes,
+	c.last_death_cause, c.last_start_failure, c.last_ready, c.turn_outcomes, c.abandoned_session,
 	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.prompted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -65,6 +65,16 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		}
 		outcomes = encoded
 	}
+	// Null is a claim that has abandoned no session; one that has records the session, why and
+	// when, for the fresh agent's first task to name (supervise's abandonedTask).
+	var abandoned []byte
+	if c.Abandoned.Session != "" {
+		encoded, err := json.Marshal(c.Abandoned)
+		if err != nil {
+			return fmt.Errorf("put claim %s: encode its abandoned session: %w", c.Token, err)
+		}
+		abandoned = encoded
+	}
 	var enrollmentID, enrollmentIncarnation *string
 	if c.Enrollment != nil {
 		enrollmentID = &c.Enrollment.ID
@@ -77,8 +87,8 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		boot_token_hash, capability_hash, uncertain_streak, last_start_row,
 		serving_generation, agent_secrets_enrollment, agent_secrets_enrollment_incarnation, suspended_by,
 		plugin_contract, plugin_relaunch_for, last_turn_start, last_turn_end,
-		last_death_cause, last_start_failure, last_ready, turn_outcomes)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
+		last_death_cause, last_start_failure, last_ready, turn_outcomes, abandoned_session)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -97,6 +107,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		last_turn_start = excluded.last_turn_start, last_turn_end = excluded.last_turn_end,
 		last_death_cause = excluded.last_death_cause, last_start_failure = excluded.last_start_failure,
 		last_ready = excluded.last_ready, turn_outcomes = excluded.turn_outcomes,
+		abandoned_session = excluded.abandoned_session,
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State), c.Failure,
@@ -104,7 +115,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.LastStartRow, int64(c.ServingGeneration),
 		enrollmentID, enrollmentIncarnation, string(c.SuspendedBy),
 		c.PluginContract, c.PluginRelaunchFor, instant(c.LastTurnStart), instant(c.LastTurnEnd),
-		c.LastDeathCause, c.LastStartFailure, instant(c.LastReady), outcomes,
+		c.LastDeathCause, c.LastStartFailure, instant(c.LastReady), outcomes, abandoned,
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -346,13 +357,14 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		turnStart, turnEnd         *time.Time
 		lastReady                  *time.Time
 		outcomes                   []byte
+		abandoned                  []byte
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Failure, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak,
 		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC, &by,
 		&c.PluginContract, &c.PluginRelaunchFor, &turnStart, &turnEnd,
-		&c.LastDeathCause, &c.LastStartFailure, &lastReady, &outcomes,
+		&c.LastDeathCause, &c.LastStartFailure, &lastReady, &outcomes, &abandoned,
 		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &prompted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
@@ -371,6 +383,11 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			// claim a machine holds before its first report: it reads back as that claim, not as
 			// an empty window of its own.
 			c.TurnOutcomes = nil
+		}
+	}
+	if abandoned != nil {
+		if err := json.Unmarshal(abandoned, &c.Abandoned); err != nil {
+			return supervise.Claim{}, fmt.Errorf("read claim %s: decode its abandoned session: %w", token, err)
 		}
 	}
 	c.LastTurnStart, c.LastTurnEnd, c.LastReady = orZero(turnStart), orZero(turnEnd), orZero(lastReady)

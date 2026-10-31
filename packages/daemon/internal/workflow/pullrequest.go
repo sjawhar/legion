@@ -85,8 +85,9 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	if issue.Phase != phase.Implementing {
 		// A reopen lands under whatever phase the issue stands in, a reviewing round with an
 		// approval standing among them, and GitHub recomputes the merge state of a pull request
-		// it reopens, so the read is asked for from here too.
-		return intake.Result{}, e.askMergeState(ctx, tx, &pr)
+		// it reopens; the read for it is asked for once, after this handler (Apply's
+		// askMergeState).
+		return intake.Result{}, nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
 	if err != nil || row.HandoffCommit == "" {
@@ -165,10 +166,11 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	case phase.Reviewing:
 		// A head that moved under a round whose approval still stands re-asks it; one that did
 		// not, and one whose push is still on its way, leave the round where it is. GitHub
-		// recomputes the merge state of a pull request whose head moved either way, so the read
-		// is asked for on every one of them.
+		// recomputes the merge state of a pull request whose head moved either way, and the read
+		// for it is asked for after this handler whichever of them this is (Apply's
+		// askMergeState).
 		if !moved {
-			return intake.Result{}, e.askMergeState(ctx, tx, pr)
+			return intake.Result{}, nil
 		}
 		if !classify.HeadPushKnown(prior, pr.HeadSHA) {
 			reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
@@ -176,7 +178,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 				return intake.Result{}, err
 			}
 			if reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head != pr.HeadSHA {
-				return intake.Result{}, e.askMergeState(ctx, tx, pr)
+				return intake.Result{}, nil
 			}
 		}
 		return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
@@ -256,10 +258,8 @@ func (e *Engine) reaskRound(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err != nil {
 		return err
 	}
-	if _, err := e.settleRound(ctx, tx, issue, reviewer, pr, e.reviewRound(issue, reviewer, &prior), byPush); err != nil {
-		return err
-	}
-	return e.askMergeState(ctx, tx, pr)
+	_, err = e.settleRound(ctx, tx, issue, reviewer, pr, e.reviewRound(issue, reviewer, &prior), byPush)
+	return err
 }
 
 // merged records the pull request merged, with its merge commit, whatever the issue's phase, and

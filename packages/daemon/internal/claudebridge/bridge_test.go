@@ -43,6 +43,10 @@ func TestMain(m *testing.M) {
 //   - "say <text>": an assistant message of text;
 //   - "inbox <text>": writes one delivery to LEGION_CLAUDE_INBOX and reads its answer;
 //   - "fail <text>": an assistant message of text, then an error_during_execution result;
+//   - "maxturns <text>": an assistant message of text, then an error_max_turns result, which is
+//     Claude Code's own cap on the steps of one turn rather than the provider refusing it;
+//   - "fail-then <text>": one step the provider refused, with a delivery queued behind it, so the
+//     turn goes on and ends on a step that ran;
 //   - anything else: an assistant message "done".
 func fakeClaude() int {
 	record, err := os.OpenFile(os.Getenv("FAKE_CLAUDE_RECORD"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -110,6 +114,25 @@ func fakeClaude() int {
 			assistant(text(strings.TrimPrefix(body, "say ")))
 		case strings.HasPrefix(body, "fail "):
 			assistant(text(strings.TrimPrefix(body, "fail ")))
+			emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
+				"errors": []string{"API Error: 529 overloaded"}})
+			continue
+		case strings.HasPrefix(body, "maxturns "):
+			assistant(text(strings.TrimPrefix(body, "maxturns ")))
+			emit(map[string]any{"type": "result", "subtype": "error_max_turns", "is_error": true,
+				"errors": []string{"reached the maximum number of turns"}})
+			continue
+		case strings.HasPrefix(body, "fail-then "):
+			conn, err := net.Dial("unix", os.Getenv(InboxVariable))
+			if err != nil {
+				fmt.Fprintln(record, "inbox dial", err)
+				return 4
+			}
+			_ = json.NewEncoder(conn).Encode(InboxDelivery{ID: "ev1", Content: "say " + strings.TrimPrefix(body, "fail-then ")})
+			answer, _ := bufio.NewReader(conn).ReadBytes('\n')
+			fmt.Fprintf(record, "inbox-answer %s", answer)
+			_ = conn.Close()
+			assistant(text("trying"))
 			emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
 				"errors": []string{"API Error: 529 overloaded"}})
 			continue

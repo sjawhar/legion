@@ -53,10 +53,7 @@ func (e *Engine) basePush(ctx context.Context, tx pgx.Tx, fact intake.BasePush) 
 		}
 		// A base that moved is what takes a head from clean to behind, which is the one answer
 		// that holds an approved issue in reviewing, so each pull request on it is read for
-		// (askMergeState).
-		if err := e.askMergeState(ctx, tx, own); err != nil {
-			return intake.Result{}, err
-		}
+		// (Apply's askMergeState, which walks this same list once the fact is recorded).
 	}
 	return intake.Result{}, nil
 }

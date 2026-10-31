@@ -84,26 +84,69 @@ const (
 	TurnRefused = "refused"
 )
 
-// TurnOutcomeRequest is the outcome of one turn, reported by the producer that ended it: the
-// pi-legion agent_end hook for an Oh My Pi session, `legion claude-bridge` for a Claude Code one.
+// TurnOutcomeCaller is one of the two identities a turn outcome is reported under, and the type
+// of whichever one its body named (TurnOutcomeRequest.Caller). They are two types rather than
+// five fields of one, so the route reads the identity the caller gave rather than guessing from
+// which fields are filled in which combination.
+type TurnOutcomeCaller interface{ isTurnOutcomeCaller() }
+
+// AgentCaller is the producer inside the agent's own session, which holds the secret its
+// registration was issued and names the claim with it, as the ready and the exit do: pi-legion's
+// agent_end hook for an Oh My Pi session.
+type AgentCaller struct {
+	ClaimToken Token  `json:"claimToken,omitempty"`
+	SessionID  string `json:"sessionId,omitempty"`
+	Secret     string `json:"secret,omitempty"`
+}
+
+// BootCaller is the producer beside the agent rather than inside it, which holds no secret — the
+// Claude bridge, whose pane's registration is claude-envoy's, inside Claude Code, and the secret
+// never leaves that process. It presents the launch's own boot token, the 0600 file its pane is
+// told, which names the same claim (api's turnOutcome).
+type BootCaller struct {
+	BootToken string `json:"bootToken,omitempty"`
+}
+
+func (AgentCaller) isTurnOutcomeCaller() {}
+func (BootCaller) isTurnOutcomeCaller()  {}
+
+// named is whether a body named this identity at all. Any one of the agent's three fields counts:
+// a body that named two of them meant this identity and gave it incompletely, which the route
+// answers by naming the field it left out rather than by reading it as the other caller.
+func (c AgentCaller) named() bool {
+	return c.ClaimToken != "" || c.SessionID != "" || c.Secret != ""
+}
+
+func (c BootCaller) named() bool { return c.BootToken != "" }
+
+// TurnOutcomeRequest is the outcome of one turn, reported by the producer that ended it.
 // Sequence is that producer's own count of the turns it has ended at Generation, from 1, and the
 // daemon keeps the report under the pair: a report that arrives late or out of order lands in its
 // own place, and the run of refused turns the daemon derives is the same either way. Message is
 // what the provider said about a refusal, and is left out of a clean turn.
 //
-// A producer that holds the registration's secret names the claim and authenticates with it, as
-// every other claim route is authenticated. The Claude bridge holds none — the registration is its
-// pane's plugin's, and the secret never leaves that process — so it presents the launch's own boot
-// token instead, which names the same claim (api's turnOutcome). Exactly one of the two.
+// The caller is exactly one of AgentCaller and BootCaller, embedded so that each is a shape of
+// its own on the wire as well as in Go (@legion/contracts' LegionTurnOutcomeRequest is the same
+// union).
 type TurnOutcomeRequest struct {
-	ClaimToken Token  `json:"claimToken,omitempty"`
-	SessionID  string `json:"sessionId,omitempty"`
-	Secret     string `json:"secret,omitempty"`
-	BootToken  string `json:"bootToken,omitempty"`
+	AgentCaller
+	BootCaller
 	Generation uint64 `json:"generation"`
 	Sequence   uint64 `json:"sequence"`
 	Outcome    string `json:"outcome"`
 	Message    string `json:"message,omitempty"`
+}
+
+// Caller is the identity the body named, and false when it named both or neither: each says who
+// is calling, and a caller that cannot say is not answered.
+func (r TurnOutcomeRequest) Caller() (TurnOutcomeCaller, bool) {
+	if r.AgentCaller.named() == r.BootCaller.named() {
+		return nil, false
+	}
+	if r.BootCaller.named() {
+		return r.BootCaller, true
+	}
+	return r.AgentCaller, true
 }
 
 // TurnOutcomeResponse is what the daemon made of the report: the run of refused turns the claim's

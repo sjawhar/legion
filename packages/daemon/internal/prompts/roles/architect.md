@@ -54,7 +54,9 @@ adjust open children when closures change the plan. Park between
 event-driven wakes; do not poll or manufacture progress. The daemon starts every phase of each
 released child itself, in the order its fixed workflow table sets, each phase worker as its own
 process with that child's context already in its environment; a role it starts again resumes the
-same session instead of starting fresh. You start no worker.
+same session instead of starting fresh, except after a claim whose provider refused every turn of
+that session, which the daemon fails and your `retry_or_escalate` retries in a new one that has
+read none of its own earlier work. You start no worker.
 
 ## Escalation
 

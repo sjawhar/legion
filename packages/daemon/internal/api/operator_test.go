@@ -523,22 +523,22 @@ func TestTheOperatorsRetryOfAFailedPhaseWorkerIsRefused(t *testing.T) {
 	}
 }
 
-// heldRetrier stands in for the workflow's retry_or_escalate: a retry decision on a held issue
-// restores the phase it was held from, unless lingers says the tree lingers, where the workflow
-// does nothing. Every fact is recorded first.
-type heldRetrier struct {
+// phaseRestarter stands in for the workflow's restartPhase: it restores a held issue from its
+// hold and starts the phase its worker works, unless lingers says the tree lingers, where the
+// workflow does nothing. Every fact is recorded first.
+type phaseRestarter struct {
 	factRecorder
 	lingers bool
 }
 
-func (r *heldRetrier) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
+func (r *phaseRestarter) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	result, err := r.factRecorder.Apply(ctx, tx, fact)
-	retry, ok := fact.(intake.RetryOrEscalate)
-	if err != nil || result.Refusal != nil || !ok || retry.Decision != intake.RetryDecision || r.lingers {
+	restart, ok := fact.(intake.RestartPhase)
+	if err != nil || result.Refusal != nil || !ok || r.lingers {
 		return result, err
 	}
 	records := record.NewStore()
-	issue, err := records.Issue(ctx, tx, retry.Issue)
+	issue, err := records.Issue(ctx, tx, restart.Issue)
 	if err != nil || issue == nil || issue.Phase != phase.Held || issue.Hold == nil {
 		return result, err
 	}
@@ -585,13 +585,14 @@ func failedImplementer(t *testing.T, handler intake.Handler) (*harness, claim.To
 }
 
 // A failed phase worker whose issue the workflow holds for its own role — its working role failed —
-// is retried by the operator as its architect's retry_or_escalate retries it: the route applies the
-// held phase's retry (intake.RetryOrEscalate, decision retry), whose start relaunches the role, and
-// answers 202 with the claim as it is until that start runs, asking the runtime nothing itself. A
-// refusal of the fact is the route's answer. `legion claims retry --failed` relies on this to
-// relaunch every claim a runtime failed to launch once the cause is gone.
+// is retried by the operator through that phase: the route applies the restart of the phase its
+// worker works (intake.RestartPhase), which the workflow restores the hold for exactly as the
+// architect's retry_or_escalate does, and answers 202 with the claim as it is until that start
+// runs, asking the runtime nothing itself. A refusal of the fact is the route's answer. `legion
+// claims retry --failed` relies on this to relaunch every claim a runtime failed to launch once
+// the cause is gone.
 func TestTheOperatorsRetryOfAFailedPhaseWorkerOnAHeldIssueRetriesThePhase(t *testing.T) {
-	facts := &heldRetrier{}
+	facts := &phaseRestarter{}
 	h, workerToken := failedImplementer(t, facts)
 	heldIssue(t, h, phase.Implementing)
 	calls := len(h.runtime.Calls())
@@ -610,8 +611,8 @@ func TestTheOperatorsRetryOfAFailedPhaseWorkerOnAHeldIssueRetriesThePhase(t *tes
 	if len(applied) != 1 {
 		t.Fatalf("the retry applied %d facts, want the held phase's retry alone: %#v", len(applied), applied)
 	}
-	if fact, ok := applied[0].(intake.RetryOrEscalate); !ok || fact.Issue != "LEGION-209" || fact.Decision != intake.RetryDecision {
-		t.Errorf("the retry applied %#v, want RetryOrEscalate{LEGION-209, retry}", applied[0])
+	if fact, ok := applied[0].(intake.RestartPhase); !ok || fact.Issue != "LEGION-209" || fact.Role != claim.RoleImplementer || fact.FreshSession {
+		t.Errorf("the retry applied %#v, want RestartPhase{LEGION-209, implementer} asking for no new session", applied[0])
 	}
 	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
 		t.Errorf("the route asked the runtime %+v itself, want the phase's start to", got)
@@ -626,7 +627,7 @@ func TestTheOperatorsRetryOfAFailedPhaseWorkerOnAHeldIssueRetriesThePhase(t *tes
 // tree's members stay where they stood — so the operator is answered 409 naming the issue, the
 // phase and the claim, never 202.
 func TestTheOperatorsRetryOfAHeldPhaseThatStaysHeldIsRefused(t *testing.T) {
-	facts := &heldRetrier{lingers: true}
+	facts := &phaseRestarter{lingers: true}
 	h, workerToken := failedImplementer(t, facts)
 	heldIssue(t, h, phase.Implementing)
 
@@ -641,7 +642,7 @@ func TestTheOperatorsRetryOfAHeldPhaseThatStaysHeldIsRefused(t *testing.T) {
 // worker: retrying the phase would relaunch that other role under this claim's name. The route
 // applies nothing and the machine refuses it, as for a phase worker whose issue holds no phase.
 func TestTheOperatorsRetryOfAFailedPhaseWorkerHeldForAnotherRoleIsRefused(t *testing.T) {
-	facts := &heldRetrier{}
+	facts := &phaseRestarter{}
 	h, workerToken := failedImplementer(t, facts)
 	heldIssue(t, h, phase.Testing)
 	calls := len(h.runtime.Calls())

@@ -16,7 +16,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
-	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
@@ -406,31 +405,28 @@ func forgettable(state supervise.ClaimState) bool {
 // retryClaim is the operator's retry of a claim that is running nothing: one that failed, and one
 // an operator stopped, which retires it. A phase worker is retried through its issue's phase,
 // never on its own, because a worker relaunched outside its phase is handed no task and does
-// nothing:
+// nothing: the phase its worker works is started again (intake.RestartPhase), which is where an
+// operator's stop leaves an issue, since a stop is no death and holds nothing, and where a
+// failure the workflow could not hold leaves one. An issue held for that worker's own role takes
+// the same fact: the workflow restores it from its hold and starts the phase it was held from
+// (workflow's restartPhase), as its architect's retry_or_escalate does.
 //
-//   - an issue held for that worker's own role (Options.RoleFor of the phase it is held from) is
-//     retried as its architect's retry_or_escalate retries it (intake.RetryOrEscalate): the phase
-//     it was held from comes back, and its role is started on it;
-//   - an issue standing in that worker's own phase has that phase started again
-//     (intake.RestartPhase). It is where an operator's stop leaves an issue, since a stop is no
-//     death and holds nothing, and where a failure the workflow could not hold leaves one.
-//
-// Either way the start is the workflow's, so the route answers 202 with the claim as it is until
-// that start runs, and a refusal the workflow gives is the route's answer. A retry that leaves the
-// issue held relaunched nothing (a lingering tree's members stay where they stood), so the route
+// The start is the workflow's, so the route answers 202 with the claim as it is until that start
+// runs, and a refusal the workflow gives is the route's answer. A retry that leaves the issue
+// held relaunched nothing (a lingering tree's members stay where they stood), so the route
 // answers 409 naming the issue rather than report a retry. Every other claim is the machine's to
 // answer (retryEvent): an architect is relaunched, and a phase worker whose issue works another
 // role's phase, or that has left the workflow, is refused. It is how an operator relaunches the
 // claims a runtime failed to launch — every failed claim in turn, with `legion claims retry
 // --failed` — once the cause is gone.
 //
-// --fresh-session (RetryRequest) is the other half of that retry, and it is the claim's own: the
-// claim forgets the session it recorded (supervise's RequestForgetSession) before the phase is
-// started, so the start that relaunches it spawns a fresh agent and gives it the phase's task.
-// That is what a session the provider refuses needs — resuming it is refused again, turn after
-// turn — and the one thing no route could do before: a claim the provider refused out of its
-// budget forgets its session whoever retried it (supervise's freshSession), but a worker stuck
-// any other way had its session cleared by hand or not at all.
+// --fresh-session (RetryRequest) rides that one fact (intake.RestartPhase's FreshSession) rather
+// than clearing the session here first: the retry the start makes is where the claim forgets its
+// session (supervise's retry), so a workflow that refuses the restart — a lingering tree, a phase
+// this role does not work, a store that failed — leaves the session the operator still has. That
+// is what a session the provider refuses needs, since resuming it is refused again turn after
+// turn; a claim the provider refused out of its budget takes a new session whoever retried it
+// (supervise's freshSession).
 func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 	token := claim.Token(r.PathValue("token"))
 	m, ok := s.supervisor.Machine(token)
@@ -458,18 +454,12 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record: %v", c.Issue, err)))
 		return
 	}
-	if recorded == nil || s.roleFor(workedPhase(*recorded)) != c.Role {
+	if recorded == nil || s.roleFor(recorded.WorkingPhase()) != c.Role {
 		s.claimRequest("retry", retryEvent(req))(w, r)
 		return
 	}
-	working := workedPhase(*recorded)
-	if req.FreshSession && !s.forgetSessionForRetry(w, r, m, token, c.Session) {
-		return
-	}
-	fact := intake.Fact(intake.RestartPhase{Issue: c.Issue, Role: c.Role})
-	if recorded.Phase == phase.Held {
-		fact = intake.RetryOrEscalate{Issue: c.Issue, Decision: intake.RetryDecision}
-	}
+	working := recorded.WorkingPhase()
+	fact := intake.RestartPhase{Issue: c.Issue, Role: c.Role, FreshSession: req.FreshSession}
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("operator/retry"), fact, s.handlers...)
 	if err != nil {
 		s.logFailure("api: apply the operator's retry of a phase", "claim", token, "issue", c.Issue, "error", err)
@@ -500,31 +490,6 @@ func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
 // claim that failed is one, and so is one an operator stopped, which retires it.
 func failedOrRetired(state supervise.ClaimState) bool {
 	return state == supervise.StateFailed || state == supervise.StateRetired
-}
-
-// workedPhase is the phase a recorded issue's worker works: the phase it is held from while it is
-// held, and the phase it stands in otherwise.
-func workedPhase(issue record.Issue) phase.Phase {
-	if issue.Phase == phase.Held && issue.Hold != nil {
-		return issue.Hold.From
-	}
-	return issue.Phase
-}
-
-// forgetSessionForRetry has the claim drop the session it recorded, for a retry that asked for a
-// new one, and reports whether it did: a machine that refuses it — a claim running the session,
-// which no retry of this route reaches, or one that recorded another session since this request
-// read it — is the operator's answer, and nothing is started after it. The session is passed back
-// as the claim reported it, so the machine clears the one this retry saw and never a later one
-// (supervise's forgetSession).
-func (s *server) forgetSessionForRetry(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token, session string) bool {
-	ctx, decided := s.decision(r, token)
-	defer decided()
-	if err := m.Handle(ctx, supervise.RequestForgetSession{Claim: token, Session: session}); err != nil {
-		s.operatorFailure(w, "retry", token, err)
-		return false
-	}
-	return true
 }
 
 // closeTree is the operator closing a tree no workflow issue backs, through its root claim: the

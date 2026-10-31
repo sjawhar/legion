@@ -121,12 +121,14 @@ func turnOutcome(m *Machine, ctx context.Context, ev Event) error {
 
 // refusalCause is the failure a spent run of refused turns names: what refused the claim, how many
 // turns in a row, and the provider's own words for the newest of them, which is the one fact a
-// person reading the failed claim can act on.
+// person reading the failed claim can act on. The wording is the architect's own
+// (dispatch://INFRA-714/artifact/review-rounds-md, item 2 of the refusal section), and the
+// architect's notice of the failure quotes it.
 func refusalCause(run int, message string) string {
 	if message == "" {
 		return fmt.Sprintf("the provider refused %d turns in a row, and said nothing about why", run)
 	}
-	return fmt.Sprintf("the provider refused %d turns in a row; its last refusal: %s", run, message)
+	return fmt.Sprintf("the provider refused %d turns in a row: %s", run, message)
 }
 
 // freshSession is whether a retry starts a new session rather than relaunching the recorded one,

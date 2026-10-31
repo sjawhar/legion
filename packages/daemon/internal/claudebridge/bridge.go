@@ -535,13 +535,28 @@ func (b *bridge) controlResponse(raw json.RawMessage) {
 	b.abortIDs = nil
 }
 
+// errorDuringExecution is the result subtype Claude Code ends a step with when something failed
+// while the turn ran, the provider's own refusal of the request among them ("API Error: 529
+// overloaded"). It is the one subtype a refused turn is keyed on.
+//
+// Claude Code's other failed subtype, error_max_turns, is its own cap on the steps of one turn:
+// the worker reached it by working, the provider refused nothing, and counting it would walk a
+// working claim to the launch failure limit and abandon the session it is working in. So would
+// any failure of a tool or of the pane. The daemon has budgets of its own for a worker that is
+// wedged some other way; this count is the provider's refusals and nothing else
+// (dispatch://INFRA-714). A subtype this release does not know is logged as the failure it is and
+// counted toward nothing, for the same reason.
+const errorDuringExecution = "error_during_execution"
+
+func providerRefused(subtype string) bool { return subtype == errorDuringExecution }
+
 // result ends a step. The seed's ends the seeding; a turn's step is followed by the next Envoy
 // delivery, else the turn's end. A step an interrupt ended ends the turn at once.
 //
-// A step the provider refused is the turn's outcome: it is kept against the turn (refusal) and
-// reported when the turn ends, clean or refused, with the bridge's own sequence (turnoutcome.go).
-// An aborted step is not a refusal — the daemon asked for that interrupt — and is reported as the
-// clean turn it is.
+// The turn's outcome is the outcome of its newest step (refusal), reported when the turn ends
+// with the bridge's own sequence (turnoutcome.go): a step the provider refused is the turn
+// refused, and a step that ran clears what an earlier failed one left, since the provider
+// answered after all. An aborted step is no refusal either — the daemon asked for that interrupt.
 func (b *bridge) result(subtype string, isError bool, errs []string) {
 	if b.seeding {
 		b.seeding = false
@@ -567,13 +582,18 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 		return
 	}
 	b.stepping = false
+	b.refusal = ""
 	if isError && !b.aborted {
 		// Oh My Pi reports a failed step as the assistant message that ends it, stopReason "error";
 		// the daemon reads neither, so the log line is what puts the failure on the pane and the
 		// turn's own report is what the daemon counts.
 		failure := "Claude Code: " + subtype + " " + strings.Join(errs, "; ")
-		b.refusal = failure
-		b.log.Printf("the step failed: %s", failure)
+		if providerRefused(subtype) {
+			b.refusal = failure
+			b.log.Printf("the step failed: %s", failure)
+		} else {
+			b.log.Printf("the step failed, for a reason that is not the provider refusing the turn, so it counts toward no run of refusals: %s", failure)
+		}
 		b.emitRaw(map[string]any{"type": "message_end", "message": map[string]any{
 			"role": "assistant", "stopReason": "error", "errorMessage": failure}})
 	}

@@ -25,11 +25,12 @@ import type { StallLimits } from "./stall-limits";
  * The first reminder of a run is the `session_stop` continuation, which the host turns into one
  * more turn of the same session, and it is the only one of that run: every one after it is a
  * timer, so the run settles and the daemon sees the turn end, can deliver a queued task and can
- * land a held suspension. A turn the provider refused earns neither, since the worker never read
- * the last reminder and would not read the next one. The host's timer cannot be cancelled
- * (`SessionContext.setTimeout` returns void and there is no clearTimeout), so a monotonic
- * generation, bumped by everything that makes an armed timer stale, is the whole defence against
- * two timers sending two reminders.
+ * land a held suspension. A turn the provider refused earns no continuation, since the worker
+ * never read the last reminder and the next turn would be refused the same way; it earns one
+ * timer instead, so a single transient refusal cannot leave the worker idle. The host's timer
+ * cannot be cancelled (`SessionContext.setTimeout` returns void and there is no clearTimeout), so
+ * a monotonic generation, bumped by everything that makes an armed timer stale, is the whole
+ * defence against two timers sending two reminders.
  */
 
 /** Publishes one Envoy message (`EnvoyClient.publish`). */
@@ -87,8 +88,8 @@ export interface PhaseReminder {
   /** `session_stop`: the turn's end as the session's hooks classified it (`turnEndOf`), and the
    * continuation text to return to the host, or undefined. A host that cannot turn this settle
    * into one more turn of the same session gets undefined whatever it asked: a refused turn earns
-   * no reminder at all, and Claude Code's `StopFailure`, the one settle it ignores the answer of,
-   * is exactly a refused turn. */
+   * no continuation — its reminder comes from the timer this arms instead — and Claude Code's
+   * `StopFailure`, the one settle it ignores the answer of, is exactly a refused turn. */
   readonly settle: (turn: TurnEnd) => Promise<string | undefined>;
   /** `session_switch`, `session_branch`, `session_tree`. */
   readonly sessionChanged: () => void;
@@ -391,11 +392,19 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       generation += 1;
       if (turn.kind === "refused") {
         // The provider refused this turn, so the worker read nothing and said nothing: the state
-        // stands and no reminder — neither a continuation nor a timer's — follows, because the
-        // next turn would be refused the same way. What ends the session is the daemon, which
-        // counts the refused turns the host reports and fails the claim (`turn-outcome`).
+        // stands, and this settle returns no continuation, because the host would turn it into
+        // one more turn at once and the provider would refuse that one too. One timer is armed
+        // all the same: the task the refused turn carried ended with it, the daemon counts the
+        // turn rather than failing the claim while the run is short of `launch_failure_limit`,
+        // and nothing else would wake this worker, so a single transient refusal would leave its
+        // issue idle. By the time the timer fires the daemon has had every refusal of the run
+        // reported (`POST /legion/v1/claims/turn-outcome`): at the limit it has failed the claim,
+        // and the record check the timer runs drops the reminder, which is what stops the
+        // reminding of a session the provider refuses for ever — the whole of
+        // dispatch://INFRA-264.
         advance(turn);
         continued = false;
+        armReminder(reminderText(""), deps.limits.reminderMs);
         return undefined;
       }
       const text = turn.lastAssistantText;

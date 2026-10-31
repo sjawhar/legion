@@ -274,34 +274,59 @@ func (s *server) turnOutcome(w http.ResponseWriter, r *http.Request) {
 
 // turnOutcomeCaller is the claim a turn outcome is reported for and its machine: the claim the
 // body names, authenticated by the registration's secret, or the claim the launch's boot token
-// resolves to. It writes the refusal itself when the body names neither identity, both, or one
-// the daemon does not recognise.
+// resolves to (claim.TurnOutcomeRequest's two caller types). It writes the refusal itself when
+// the body names neither identity, both, or one the daemon does not recognise.
 func (s *server) turnOutcomeCaller(w http.ResponseWriter, r *http.Request, req claim.TurnOutcomeRequest) (claim.Token, *supervise.Machine, bool) {
-	byClaim := req.ClaimToken != "" || req.Secret != "" || req.SessionID != ""
-	if byClaim == (req.BootToken != "") {
-		writeJSON(w, http.StatusBadRequest, errorBody("a turn outcome names its caller with claimToken, sessionId and secret, or with bootToken; give one"))
+	if caller, named := req.Caller(); named {
+		switch caller := caller.(type) {
+		case claim.BootCaller:
+			return s.turnOutcomeByBootToken(w, r, caller, req.Generation)
+		case claim.AgentCaller:
+			return s.turnOutcomeBySecret(w, r, caller)
+		}
+	}
+	// The body named neither caller, or both — and, were a third ever added to claim without
+	// this route, one this route cannot act on, which is the same answer.
+	writeJSON(w, http.StatusBadRequest, errorBody("a turn outcome names its caller with claimToken, sessionId and secret, or with bootToken; give one"))
+	return "", nil, false
+}
+
+// turnOutcomeByBootToken is the claim of the launch a boot token was minted for, held to the same
+// two rules the shim's hello on that token is held to (stream's Listener.hello): a token of a
+// launch the claim has moved past is refused, and so is a report for any generation but that
+// launch's. A pane left running from a replaced launch — one the daemon could not stop, one whose
+// container outlived its stop — would otherwise add its provider's refusals to the run the daemon
+// counts for the pane that replaced it, and fail a claim whose own agent is working.
+func (s *server) turnOutcomeByBootToken(w http.ResponseWriter, r *http.Request, caller claim.BootCaller, generation uint64) (claim.Token, *supervise.Machine, bool) {
+	launch, known, err := s.bootTokens.Resolve(r.Context(), caller.BootToken)
+	if err != nil {
+		s.log.Error("api: resolve a turn outcome's boot token", "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody("turn outcome failed: the daemon could not resolve the boot token"))
 		return "", nil, false
 	}
-	if req.BootToken != "" {
-		launch, known, err := s.bootTokens.Resolve(r.Context(), req.BootToken)
-		if err != nil {
-			s.log.Error("api: resolve a turn outcome's boot token", "error", err)
-			writeJSON(w, http.StatusInternalServerError, errorBody("turn outcome failed: the daemon could not resolve the boot token"))
-			return "", nil, false
-		}
-		m, supervised := s.supervisor.Machine(launch.Claim)
-		if !known || !supervised {
-			writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
-			return "", nil, false
-		}
-		return launch.Claim, m, true
+	m, supervised := s.supervisor.Machine(launch.Claim)
+	if !known || launch.Stale || !supervised {
+		writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
+		return "", nil, false
 	}
+	if generation != launch.Generation {
+		s.log.Warn("api: refused a turn outcome reported for another generation", "claim", launch.Claim,
+			"launch", launch.Generation, "reported", generation)
+		writeJSON(w, claim.StaleGeneration.Status, claim.StaleGeneration)
+		return "", nil, false
+	}
+	return launch.Claim, m, true
+}
+
+// turnOutcomeBySecret is the claim the body names, authenticated by the secret its registration
+// was issued, as the ready and the exit are.
+func (s *server) turnOutcomeBySecret(w http.ResponseWriter, r *http.Request, caller claim.AgentCaller) (claim.Token, *supervise.Machine, bool) {
 	if !requireFields(w,
-		field{"claimToken", string(req.ClaimToken)}, field{"sessionId", req.SessionID}, field{"secret", req.Secret},
+		field{"claimToken", string(caller.ClaimToken)}, field{"sessionId", caller.SessionID}, field{"secret", caller.Secret},
 	) {
 		return "", nil, false
 	}
-	m, ok := s.authenticated(req.ClaimToken, req.Secret)
+	m, ok := s.authenticated(caller.ClaimToken, caller.Secret)
 	if !ok {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return "", nil, false
@@ -309,7 +334,7 @@ func (s *server) turnOutcomeCaller(w http.ResponseWriter, r *http.Request, req c
 	if s.refuseIfStaleClaim(w, r, m.Claim()) {
 		return "", nil, false
 	}
-	return req.ClaimToken, m, true
+	return caller.ClaimToken, m, true
 }
 
 // authenticated is the claim's machine when secret is the one its registration was issued. A

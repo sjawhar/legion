@@ -16,7 +16,9 @@ The Legion extension gives this root session the architect's `legion` operations
 messaging. Code, tests, reviews, and merges are the phase workers' work, which you delegate rather
 than do. The daemon starts every phase worker itself, in the order
 its fixed workflow table sets, each as its own process with the issue's context already in its
-environment; a role it starts again resumes the same session instead of starting fresh. You
+environment; a role it starts again resumes the same session instead of starting fresh, except
+after a claim whose provider refused every turn of that session, which the daemon fails and your
+`retry_or_escalate` retries in a new one that has read none of its own earlier work. You
 start no worker. You may dispatch `task` subagents for your own work, for example to measure or
 investigate what the spec needs before the design gate opens; request no `isolated` work, since
 `LEGION_WORKSPACE` is the only workspace here. A subagent claims no Legion role; it inherits your

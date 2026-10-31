@@ -42,7 +42,8 @@ export type PhaseStallInput =
   /** The turn ended because the provider refused it, not because the worker had finished saying
    * something: `message` is the provider's own words for the refusal (Oh My Pi's `errorMessage`
    * beside an `error` stop, Claude Code's `StopFailure` error text). The worker never read the
-   * last reminder and would not read the next one either, so this earns none. */
+   * last reminder, so this earns no reminder of its own: the runner waits out its delay and
+   * reminds once (`src/phase-reminder.ts`). */
   | { readonly kind: "refused"; readonly message: string }
   /** The host has just delivered a reminder to the worker. */
   | { readonly kind: "reminded" };
@@ -110,11 +111,12 @@ export function stepPhaseStall(state: PhaseStallState, input: PhaseStallInput): 
       return { state: { state: state.state, count: 0 } };
     case "refused":
       // The provider, not the worker, ended this turn: nothing was read and nothing was said, so
-      // the count stands where the last real turn left it and no reminder is earned. Reminding a
-      // session the provider is refusing only buys another refusal, which is what left the
-      // implementer of dispatch://INFRA-264 reminded for ever. The daemon counts these turns
-      // instead (`POST /legion/v1/claims/turn-outcome`) and fails the claim, so the retry starts
-      // a session that can be answered.
+      // the count stands where the last real turn left it and the settling itself earns no
+      // reminder. Reminding such a session at once only buys another refusal, which is what left
+      // the implementer of dispatch://INFRA-264 reminded for ever; the runner arms a delayed one
+      // instead, by which time the daemon — which counts these turns over
+      // `POST /legion/v1/claims/turn-outcome` — has failed the claim if the provider refused it
+      // out of its budget, and a failed claim is reminded of nothing.
       return { state };
     case "reminded":
       return state.state === "closed"

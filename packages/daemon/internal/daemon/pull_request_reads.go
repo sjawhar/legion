@@ -19,9 +19,9 @@ import (
 )
 
 // followHead is the per-issue read's check of pr's head against pull, GitHub's own read of it.
-// The daemon otherwise moves a recorded head only on the pull_request synchronize webhook
-// (and a READY the merger reports), and a webhook lost, or waiting behind hours of the GitHub
-// consumer's backlog, leaves reviews, READY and the CI verdict judged against an old head. When
+// The daemon otherwise moves a recorded head only on the pull_request synchronize webhook, and a
+// webhook lost, or waiting behind hours of the GitHub
+// consumer's backlog, leaves reviews and the CI verdict judged against an old head. When
 // GitHub shows the pull request open at another head than the record holds now (the read looked
 // its record up before it asked GitHub, and a webhook may have moved it since), it applies the
 // intake.PullRequestSynchronized that webhook would have carried, with GitHub's updated_at as its
@@ -132,13 +132,13 @@ func (w *workflowRuntime) applyMergeability(ctx context.Context, pr record.PullR
 }
 
 // handoffPush is the intake.Push that took pr's branch from from to to, as the push webhook would
-// have carried it, when GitHub's compare of the two (githubrest.Client.Compare, the compare READY
-// reads) shows to is from with commits on top that change only the issue's own handoffs,
+// have carried it, when GitHub's compare of the two (githubrest.Client.Compare) shows to is from
+// with commits on top that change only the issue's own handoffs,
 // .legion/<issue>/ (classify.HandoffPath): followHead's recorded head and GitHub's, or the
 // approved head and the recorded one the approval carry compares (readApprovalCarry, the outbox's
 // approvalCarry row). Every other comparison says why it is not
 // one, and the push is left to its webhook: a path outside the issue's handoffs (code, or another
-// issue's handoffs, which READY refuses as code too), a rewritten history or a head behind from, no
+// issue's handoffs, which are code to the daemon too), a rewritten history or a head behind from, no
 // file list or a list GitHub may have cut (githubrest.CompareFilesLimit), and a from GitHub does not
 // know. Any other failure of the read is an error. The push names no pusher: the pusher decides
 // only a code push's planned mark and whether a push spares a fix attempt, which a handoff-only

@@ -20,7 +20,9 @@ import (
 // start each read again. Every other answer the ladder gets is recorded, and an approval left
 // standing on a head GitHub answers with a state it would not merge from tells the tree's
 // architect and the reviewer, once for that head and state, in the review-stuck notice the round
-// writes (workflow's reviewRound, stuckMergeState).
+// writes - but only once the CI settlement standing for the head says every check GitHub reported
+// on it has concluded, since until then the state says no more than that a check is running
+// (workflow's reviewRound, stuckMergeState).
 const (
 	mergeStateLadderReads = 5
 	mergeStateLadderWait  = 30 * time.Second
@@ -39,8 +41,15 @@ func (w *workflowRuntime) queueMergeState(issue string) {
 // readMergeStates runs a ladder for each issue queueMergeState queued, until ctx ends: each wake
 // takes every issue queued since the last one, in the order of their keys, and runs its ladder on
 // a goroutine of its own, so one issue's half-minute waits hold up no other's. An issue whose
-// ladder is still running is left to it: that ladder reads GitHub again anyway, and a second one
-// would only double the reads.
+// ladder is still running starts no second one, and is marked as asked again instead: the running
+// ladder climbs once more when it ends (mergeStateLadder), so the fact that asked is answered by
+// a read made after it, which a ladder already past its last read would not be. Dropping the
+// request outright left the issue standing at whatever the running ladder's last answer was,
+// though the fact behind it - a check that concluded, a push, a review - is exactly what changes
+// GitHub's answer (dispatch://INFRA-714 R4).
+//
+// mergeStateRunning is that bookkeeping: an issue is in it while its ladder runs, and its value
+// is whether a request arrived while it ran.
 func (w *workflowRuntime) readMergeStates(ctx context.Context) {
 	for {
 		issues, ok := w.mergeStates.take(ctx)
@@ -53,10 +62,11 @@ func (w *workflowRuntime) readMergeStates(ctx context.Context) {
 		}
 		started := make([]string, 0, len(issues))
 		for _, issue := range issues {
-			if w.mergeStateRunning[issue] {
+			if _, running := w.mergeStateRunning[issue]; running {
+				w.mergeStateRunning[issue] = true
 				continue
 			}
-			w.mergeStateRunning[issue] = true
+			w.mergeStateRunning[issue] = false
 			started = append(started, issue)
 		}
 		w.mergeStateMu.Unlock()
@@ -66,18 +76,40 @@ func (w *workflowRuntime) readMergeStates(ctx context.Context) {
 	}
 }
 
-// mergeStateLadder reads GitHub's merge state for issue's pull request until GitHub answers with
-// one, at most mergeStateLadderReads times, mergeStateLadderWait apart. GitHub's `unknown` says it
-// is still computing the state, so the ladder asks again; every other answer, the read finding no
-// open pull request among them, is an answer, and the ladder ends on it. After the last `unknown`
-// it ends too, leaving nothing queued or armed behind it. A failed read ends the ladder: the
-// issue's next event, its next handoff and the daemon's next start all read again.
+// mergeStateLadder climbs for issue until nothing has asked for another climb (mergeStateEnds),
+// and leaves the issue unmarked as running when it returns.
 func (w *workflowRuntime) mergeStateLadder(ctx context.Context, issue string) {
-	defer func() {
-		w.mergeStateMu.Lock()
-		delete(w.mergeStateRunning, issue)
-		w.mergeStateMu.Unlock()
-	}()
+	for {
+		w.climbMergeState(ctx, issue)
+		if w.mergeStateEnds(ctx, issue) {
+			return
+		}
+	}
+}
+
+// mergeStateEnds says whether issue's ladder ends here, and is the one place the issue's mark is
+// taken off: it ends unless a request arrived while the climb ran and ctx is still live, and it
+// is read under the lock readMergeStates marks under, so a request made during the last read is
+// either marked before this reads it - and climbs - or lands after the mark is gone and starts a
+// ladder of its own.
+func (w *workflowRuntime) mergeStateEnds(ctx context.Context, issue string) bool {
+	w.mergeStateMu.Lock()
+	defer w.mergeStateMu.Unlock()
+	if w.mergeStateRunning[issue] && ctx.Err() == nil {
+		w.mergeStateRunning[issue] = false
+		return false
+	}
+	delete(w.mergeStateRunning, issue)
+	return true
+}
+
+// climbMergeState reads GitHub's merge state for issue's pull request until GitHub answers with
+// one, at most mergeStateLadderReads times, mergeStateLadderWait apart. GitHub's `unknown` says it
+// is still computing the state, so the climb asks again; every other answer, the read finding no
+// open pull request among them, is an answer, and the climb ends on it. After the last `unknown`
+// it ends too, leaving nothing queued or armed behind it. A failed read ends the climb: the
+// issue's next event, its next handoff and the daemon's next start all read again.
+func (w *workflowRuntime) climbMergeState(ctx context.Context, issue string) {
 	for read := 1; ; read++ {
 		state, err := w.readMergeState(ctx, issue)
 		if err != nil {

@@ -731,12 +731,18 @@ func (RetryOrEscalate) isFact() {}
 // RestartPhase is the operator's retry of one phase worker, from `legion claims retry` of a claim
 // that failed or that an operator stopped (api's retryClaim). The workflow starts Role's phase
 // again, so a worker relaunched with no task — a new session above all, which has read none of the
-// issue's work — is given the task of the phase it is to work. It is the operator's own fact
-// rather than the architect's RetryOrEscalate because an operator's stop leaves no hold for an
-// architect to decide.
+// issue's work — is given the task of the phase it is to work. An issue held for Role is restored
+// from its hold first, as the architect's RetryOrEscalate restores it; it is the operator's own
+// fact rather than that one because an operator's stop leaves no hold for an architect to decide.
+//
+// FreshSession is `legion claims retry --fresh-session`: the start this fact queues retries the
+// claim in a new session rather than resuming the one it recorded (supervise's RequestRetry). It
+// rides the fact so that the session is forgotten inside the retry decision itself, which means a
+// restart the workflow refuses leaves the claim's session where the operator still has it.
 type RestartPhase struct {
-	Issue string
-	Role  claim.Role
+	Issue        string
+	Role         claim.Role
+	FreshSession bool
 }
 
 func (RestartPhase) isFact() {}

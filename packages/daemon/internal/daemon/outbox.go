@@ -990,7 +990,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				r.log.Info("outbox boot rule-resume finished: its claim spent the launch budget", "row", row.ID, "issue", issue.Key, "role", payload.Role)
 				return nil
 			}
-			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
+			// A start that asks for a new session has the retry forget the recorded one, inside
+			// that one decision: the operator's `legion claims retry --fresh-session`, which is
+			// refused by whatever refuses this row rather than having discarded the session first.
+			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token, FreshSession: payload.FreshSession}); err != nil {
 				return fmt.Errorf("retry claim %s: %w", token, err)
 			}
 		case supervise.StateRetired:
@@ -999,7 +1002,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			if err := r.provisionWorkspace(ctx, issue); err != nil {
 				return err
 			}
-			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
+			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token, FreshSession: payload.FreshSession}); err != nil {
 				return fmt.Errorf("relaunch retired claim %s: %w", token, err)
 			}
 		}

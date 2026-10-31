@@ -67,17 +67,6 @@ func (e *Engine) phaseFinished(ctx context.Context, tx pgx.Tx, issue record.Issu
 	return PhaseFinished(ctx, e.store, tx, issue)
 }
 
-// workingPhase is the phase issue's worker works: its phase, or, while it is held, the phase its
-// hold left, the one whose worker's claim failed. RoleFor(workingPhase(issue)) is the role whose
-// failure holds the issue (claimFailed), and the one whose claim Stranded names when nothing will
-// wake it.
-func workingPhase(issue record.Issue) phase.Phase {
-	if issue.Hold != nil {
-		return issue.Hold.From
-	}
-	return issue.Phase
-}
-
 // StopActs is whether a queued stop, row id, still acts on its claim when the outbox runs it, with
 // lastStart the newest start the outbox ran against the claim (its last_start_row), and root the
 // issue's tree root as recorded, read only for a tree close. The outbox executor asks it of every
@@ -246,14 +235,16 @@ const testerVerdictLabel = "Tester's verdict"
 // start starts the phase worker of the issue's current phase, a start stamped with that phase. A
 // start that takes the phase over from a role still at work in it names that role, quiesce, so it
 // waits for that role's turn to end (record.SuperviseRequest's Quiesce); every other start names
-// none. A phase with no worker, and accepting, whose architect admission started with the tree,
-// start nobody.
-func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string, quiesce claim.Role) error {
+// none. A start that must not resume the claim's recorded session says so, freshSession, and only
+// the operator's `legion claims retry --fresh-session` does (record.SuperviseRequest's
+// FreshSession). A phase with no worker, and accepting, whose architect admission started with
+// the tree, start nobody.
+func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string, quiesce claim.Role, freshSession bool) error {
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
-		Generation: issue.Generation, Phase: issue.Phase, Quiesce: quiesce})
+		Generation: issue.Generation, Phase: issue.Phase, Quiesce: quiesce, FreshSession: freshSession})
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue

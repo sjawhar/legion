@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { LegionState } from "@legion/contracts/legion-api";
 import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport";
 import { createPhaseReminder, type PhaseReminder } from "./phase-reminder";
-import type { PhaseStallEntry } from "./phase-stall";
+import { type PhaseStallEntry, REMINDER } from "./phase-stall";
 import { DEFAULT_STALL_LIMITS } from "./stall-limits";
 
 const implementer = {
@@ -17,6 +17,18 @@ const implementer = {
 
 /** A turn the worker ended by saying `text`, as `turnEndOf` classifies it on Oh My Pi. */
 const said = (text: string) => ({ kind: "settle", lastAssistantText: text }) as const;
+
+/** The daemon's state with this role's claim failed, which is its word that the session is
+ * finished. Only the two fields the record check reads, cast because the state's own schema would
+ * demand the whole daemon document for them; `rig` below reads its empty state the same way. */
+const claimFailed = {
+  issues: {
+    "LEGION-208": {
+      phase: "implementing",
+      workers: { implementer: { claim: { state: "failed" } } },
+    },
+  },
+} as unknown as LegionState;
 
 // A daemon that never answers the record check: the check fails open once its bound passes, and
 // the read it started is aborted then rather than left open, one request per reminder.
@@ -66,10 +78,11 @@ interface Rig {
 }
 
 /** The runner over an open phase, with the architect told at the second delivered reminder. The
- * daemon holds no record for the issue, so every record check reminds. */
+ * daemon holds no record for the issue unless a case names one, so every record check reminds. */
 function rig(options: {
   readonly sendReminder?: (reminder: string) => void | Promise<void>;
   readonly publish?: (input: PublishInput) => Promise<unknown>;
+  readonly state?: LegionState;
 }): Rig {
   const timers: ArmedTimer[] = [];
   const sent: string[] = [];
@@ -86,7 +99,7 @@ function rig(options: {
     },
     saveEntry: (entry) => entries.push(entry),
     claim: () => implementer,
-    readState: async () => ({ issues: {} }) as unknown as LegionState,
+    readState: async () => options.state ?? ({ issues: {} } as unknown as LegionState),
     publisher: () => async (input) => {
       published.push(input);
       return options.publish === undefined ? {} : options.publish(input);
@@ -247,9 +260,11 @@ test("a failed delivery arms nothing once a turn has started meanwhile", async (
 });
 
 // The whole of dispatch://INFRA-264: every turn of that implementer was refused by the provider,
-// and every reminder bought another refused turn. A refused turn earns neither the continuation
-// nor a timer, so the reminding stops until something the worker can read happens.
-test("a turn the provider refused earns no reminder and arms no timer", async () => {
+// and every reminder it was given at once bought another refused turn. So a refused turn earns no
+// continuation; but the daemon's task for the phase ended with that turn, and below
+// `launch_failure_limit` nothing fails the claim and nothing hands the task out again, so one
+// delayed reminder follows it rather than silence (the architect's ruling, review round 2).
+test("a refused turn below the limit reminds once, after the delay and not before", async () => {
   const { reminder, timers, sent, entries } = rig({});
   const recorded = entries.length;
 
@@ -257,30 +272,45 @@ test("a turn the provider refused earns no reminder and arms no timer", async ()
     await reminder.settle({ kind: "refused", message: "Overloaded: the model is busy" })
   ).toBeUndefined();
 
-  expect(timers).toEqual([]);
   expect(sent).toEqual([]);
   // Nothing of the state moved, the words the worker last said included: the provider's are not
   // the worker's, and the architect's notice quotes the worker.
   expect(entries).toHaveLength(recorded);
+  expect(timers.map((timer) => timer.delayMs)).toEqual([DEFAULT_STALL_LIMITS.reminderMs]);
 
-  // The next turn the worker does answer is reminded as any first settle of a run is.
-  expect(await reminder.settle(said("Pushed."))).toBeString();
+  await fireLast(timers);
+
+  // Once: the delivered reminder arms no second timer, and the next turn settles its own.
+  expect(sent).toEqual([REMINDER]);
+  expect(timers).toHaveLength(1);
+
+  // The next turn the worker does answer is reminded as any later settle of a run is: the first
+  // reminder of this run has gone out, so this one comes from a timer too.
+  expect(await reminder.settle(said("Pushed."))).toBeUndefined();
+  expect(timers).toHaveLength(2);
+});
+
+// At `launch_failure_limit` the daemon fails the claim, which is its own word that this session
+// is finished: the retry runs in a session of its own, in which the phase's task is given again.
+// The timer the last refused turn armed still fires, and its record check drops the reminder, so
+// nothing is written into a session nobody can act on.
+test("a refused turn at the limit, whose claim the daemon failed, reminds nothing", async () => {
+  const { reminder, timers, sent } = rig({ state: claimFailed });
+
+  expect(
+    await reminder.settle({ kind: "refused", message: "Refusal (reasoning_extraction)" })
+  ).toBeUndefined();
+
+  expect(timers).toHaveLength(1);
+  await fireLast(timers);
+
+  expect(sent).toEqual([]);
 });
 
 // The daemon failing this role's claim is its word that the session is finished: the retry runs
 // in a session of its own, and a reminder written into this one reaches nobody who can act on it.
 // It is what stops the reminding on Claude Code, whose turns this host does not settle.
 test("no reminder is sent once the daemon has failed this role's claim", async () => {
-  // Only the two fields the record check reads, cast because the state's own schema would demand
-  // the whole daemon document for them; `rig` above reads its empty state the same way.
-  const failed = {
-    issues: {
-      "LEGION-208": {
-        phase: "implementing",
-        workers: { implementer: { claim: { state: "failed" } } },
-      },
-    },
-  } as unknown as LegionState;
   const timers: ArmedTimer[] = [];
   const sent: string[] = [];
   const debugged: string[] = [];
@@ -293,7 +323,7 @@ test("no reminder is sent once the daemon has failed this role's claim", async (
     },
     saveEntry: () => {},
     claim: () => implementer,
-    readState: async () => failed,
+    readState: async () => claimFailed,
     publisher: () => undefined,
     project: "legion",
     limits: DEFAULT_STALL_LIMITS,

@@ -243,6 +243,18 @@ func (i Issue) AwaitingPerson() bool { return i.Phase == phase.AwaitingPerson &&
 // waits for its slot.
 func (i Issue) Answered() bool { return i.AwaitingPerson() && i.Awaiting.AnsweredAt != nil }
 
+// WorkingPhase is the phase the issue's worker works: the phase its hold left while it is held —
+// the one whose worker's claim failed — and the phase it stands in otherwise. It is the one rule:
+// workflow.RoleFor(i.WorkingPhase()) is the role whose failure holds the issue, the role the
+// stranded report names, and the role the operator's retry of a phase worker acts for (api's
+// retryClaim), which read it here rather than each keeping a copy to drift from.
+func (i Issue) WorkingPhase() phase.Phase {
+	if i.Hold != nil {
+		return i.Hold.From
+	}
+	return i.Phase
+}
+
 // EventMark places a Dispatch event in its issue's event log: its sequence on the issue (Seq) and
 // Dispatch's time of it (At), each zero when unknown. Dispatch appends an issue's events under the
 // issue's row lock, so their sequence is the order they commit in. The time is the start of the
@@ -355,10 +367,22 @@ type PhaseRow struct {
 
 // ReviewDecision is what one review decided: its state (changes_requested or approved), its body,
 // handed to the next implementer, and the head it was written on, whose code an approval approves.
+//
+// ToldStuckHead and ToldStuckState are the daemon's own mark beside it rather than anything the
+// review said: the head and GitHub's merge state an approval of this decision was last reported
+// stuck on, in the review-stuck notice an approval GitHub will not merge from writes (workflow's
+// settleRound, stuckMergeState). They are what makes that notice once for each head and state
+// rather than once for each fact: GitHub answers one head `blocked`, then `unknown` while it
+// recomputes, then `blocked` again, and the mark is the only thing that survives the answer in
+// between. They live with the decision because the notice is of the approval this decision is: a
+// review that decides the round afresh replaces the decision and the mark with it, and the next
+// head the new approval sticks on is told in its turn. Empty until a notice goes out.
 type ReviewDecision struct {
-	State string `json:"state"`
-	Body  string `json:"body,omitempty"`
-	Head  string `json:"head,omitempty"`
+	State          string     `json:"state"`
+	Body           string     `json:"body,omitempty"`
+	Head           string     `json:"head,omitempty"`
+	ToldStuckHead  string     `json:"toldStuckHead,omitempty"`
+	ToldStuckState MergeState `json:"toldStuckState,omitempty"`
 }
 
 // ReviewOrder is where a review falls among the pull request's reviews: when it was submitted, then
@@ -496,17 +520,26 @@ type Named struct {
 	At     time.Time `json:"at,omitzero"`
 }
 
-// Judgement is the part of a pull request a head run replays: its head, its CI settlement, and
-// the moves it has made.
+// Judgement is the part of a pull request a head run replays: its head, its CI settlement, the
+// moves it has made, and GitHub's verdict on merging the head it stood at.
+//
+// The verdict is the anchor's alone to give back, and only to a record that holds none: a move no
+// push links yet takes the verdict with it (classify's advance), and the push that links the move
+// replays the run, which is where a verdict the move turns out to have carried comes back. A read
+// of GitHub made while the run was open answers for the head the run has reached, which is newer
+// than the anchor's, so it stands and the anchor's is dropped (classify's withJudgement). A run
+// recorded before these fields carries no verdict, and gives none back.
 type Judgement struct {
-	HeadSHA     string       `json:"headSha"`
-	CheckedHead string       `json:"checkedHead,omitempty"`
-	Failing     []string     `json:"failing"`
-	Cancelled   []string     `json:"cancelled"`
-	CheckRuns   []AttemptRun `json:"checkRuns"`
-	Generation  int64        `json:"generation,omitempty"`
-	Snapshot    string       `json:"snapshot,omitempty"`
-	Moves       []Move       `json:"moves,omitempty"`
+	HeadSHA      string       `json:"headSha"`
+	CheckedHead  string       `json:"checkedHead,omitempty"`
+	Failing      []string     `json:"failing"`
+	Cancelled    []string     `json:"cancelled"`
+	CheckRuns    []AttemptRun `json:"checkRuns"`
+	Generation   int64        `json:"generation,omitempty"`
+	Snapshot     string       `json:"snapshot,omitempty"`
+	Moves        []Move       `json:"moves,omitempty"`
+	Mergeability Mergeability `json:"mergeability,omitempty"`
+	MergeState   MergeState   `json:"mergeState,omitempty"`
 }
 
 // Move is a move from the head Before to the head SHA, which a push with the same two heads makes.
@@ -984,8 +1017,8 @@ type Store interface {
 	ClaimSession(ctx context.Context, tx pgx.Tx, token claim.Token) (string, error)
 	// ClearGeneration drops the facts one generation of an issue owns: a merged or closed pull
 	// request, the fix-attempt counts and planned mark of a still-open one (the next generation runs on the same
-	// branch and pull request), its design gate, each role's handoff, review rounds, verdict and
-	// summary, and a READY the gate refused. Each role keeps its claim and its last handoff, so a
+	// branch and pull request), its design gate, and each role's handoff, review rounds, verdict and
+	// summary. Each role keeps its claim and its last handoff, so a
 	// commit an earlier generation reported is never new again.
 	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
 	ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error

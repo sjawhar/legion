@@ -83,11 +83,17 @@ func (d Delivery) StillWorked(generation uint64, p phase.Phase, state ClaimState
 	return d.Generation == generation && d.Phase == p && (d.ConfirmedAt.IsZero() || state == StateWorking)
 }
 
-// message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
-// died in a turn of it, which names the death's cause the claim recorded (Claim.LastDeathCause).
-func (d Delivery) message(deathCause string) string {
-	if d.Interrupted {
-		return interruptedTask(deathCause) + d.Task
+// message is the prompt a delivery is sent as: its task, behind the sentence the claim's state
+// gives it. The first task the agent that replaced an abandoned session is given names that
+// session (abandonedTask); a task whose turn a process died in names the death's cause
+// (interruptedTask, Claim.LastDeathCause). A fresh session cannot carry on the turn it never
+// read, so the abandonment stands in place of the interruption when a task is both.
+func (d Delivery) message(c Claim) string {
+	switch {
+	case c.Abandoned.Tells():
+		return abandonedTask(c) + d.Task
+	case d.Interrupted:
+		return interruptedTask(c.LastDeathCause) + d.Task
 	}
 	return d.Task
 }
@@ -298,7 +304,9 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) (streaming, 
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
 	adopting := m.adopts(d)
-	prompt := d.message(m.claim.LastDeathCause)
+	prompt := d.message(m.claim)
+	// The sentence goes out with this prompt, so no later task of this claim repeats it.
+	m.claim.Abandoned.Told = true
 	if p := m.claim.Pending; p != nil && p.ID == d.ID {
 		p.Prompted = true
 	}
@@ -453,6 +461,29 @@ func interruptedTask(cause string) string {
 		"turn are gone; your transcript does not say so. " +
 		"Before repeating anything, check what that turn already did in your workspace and on the " +
 		"issue's branch, then continue the task.\n\n"
+}
+
+// abandonedTask begins the first task given to the agent that replaced a session the claim
+// abandoned (forgetSession): one the provider refused out of its budget, one an operator retried
+// with --fresh-session, or one no session store holds any more. Nothing in a new session says
+// that an older one existed, so a worker reading an empty transcript takes its task for a fresh
+// start and does again what is already pushed (dispatch://INFRA-714, item 4 of the refusal
+// section). It names the session that was left behind and why in the words the claim recorded —
+// for a refused session the provider's own, the size it refused at among them — and then the two
+// things that outlive a session: the issue's branch, and the handoffs committed on it. The
+// controller is told neither, since it works no checkout.
+func abandonedTask(c Claim) string {
+	read := "read the issue"
+	if c.Role != claim.RoleController {
+		read = fmt.Sprintf("read the issue, then your branch %s and the handoffs committed on it under "+
+			"$LEGION_WORKSPACE/.legion/%s/ (plan.json, implement.json, test.json, review.json)",
+			claim.IssueBranch(c.Issue), c.Issue)
+	}
+	return fmt.Sprintf("The session this claim ran before this one, %s, was abandoned where it stood: %s. "+
+		"This session is a new one: the turns, tool calls, subagents and background jobs of that session are "+
+		"gone, and only what it pushed and committed survives. Before you repeat any of that work, %s, and "+
+		"tell your architect what you found. Then continue the task.\n\n",
+		c.Abandoned.Session, c.Abandoned.Why, read)
 }
 
 // interrupted takes back the pending task whose turn the claim's process can no longer finish — it

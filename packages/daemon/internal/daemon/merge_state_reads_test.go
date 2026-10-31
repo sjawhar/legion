@@ -145,3 +145,70 @@ func TestNoMergeStateIsReadWithoutAnApprovalStanding(t *testing.T) {
 		t.Fatalf("GitHub was read %d times, want none: no approval stands on the head", got)
 	}
 }
+
+// A fact of an issue whose ladder is already reading asks for a read of its own, and dropping it
+// loses the one read that would answer it: the fact - a check that concluded, a push, a review -
+// is what changes GitHub's answer, and the running ladder can already be past its last read, as
+// it is here, where its first answer is one it ends on. The running ladder climbs again for the
+// request instead, and that climb is the read that moves the issue.
+func TestAMergeStateRequestArrivingWhileTheLadderReadsIsNotLost(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	approvedCapture(t, pool)
+	var reads atomic.Int32
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/acme/widgets/pulls/86" {
+			http.NotFound(w, r)
+			return
+		}
+		state := "clean"
+		if reads.Add(1) == 1 {
+			// The first read is held until the second request has been queued, so the request
+			// lands while this ladder is reading rather than before or after it.
+			state = "blocked"
+			<-release
+		}
+		w.Write([]byte(`{"number":86,"state":"open","base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"code"},"mergeable":true,"mergeable_state":"` + state + `"}`))
+	}))
+	t.Cleanup(server.Close)
+	w := readRuntime(pool, server.URL, quietLogger())
+	w.mergeStateRetry = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer close(release)
+	go w.readMergeStates(ctx)
+
+	if _, err := intake.ApplyFact(ctx, pool, "github", "checks-on-code", settledChecksOnCode(), w.handlers...); err != nil {
+		t.Fatalf("apply the CI settlement: %v", err)
+	}
+	testwait.Eventually(t, "the ladder is reading GitHub", func() bool { return reads.Load() == 1 })
+
+	// The next check of the head concludes while that read is in flight, and asks for a read of
+	// its own (workflow's askMergeState).
+	later := settledChecksOnCode()
+	later.Generation, later.Snapshot = 2, "settled-later"
+	later.CheckRuns = []record.AttemptRun{{Name: "pr-checks-result", ID: 4}}
+	if _, err := intake.ApplyFact(ctx, pool, "github", "checks-on-code-again", later, w.handlers...); err != nil {
+		t.Fatalf("apply the second CI settlement: %v", err)
+	}
+	testwait.Eventually(t, "the request reached the ladder that is running", func() bool {
+		w.mergeStateMu.Lock()
+		defer w.mergeStateMu.Unlock()
+		return w.mergeStateRunning["CAPTURE-1"]
+	})
+	release <- struct{}{}
+
+	testwait.Eventually(t, "the approval reached accepting", func() bool {
+		got, _ := capturePhase(t, pool)
+		return got == phase.Accepting
+	})
+	if got := reads.Load(); got != 2 {
+		t.Fatalf("GitHub was read %d times, want two: the first answer ended one climb, and the request that arrived during it asked for another", got)
+	}
+	w.mergeStateMu.Lock()
+	running := len(w.mergeStateRunning)
+	w.mergeStateMu.Unlock()
+	if running != 0 {
+		t.Fatalf("%d ladders are still marked as running, want none once the climbs are over", running)
+	}
+}

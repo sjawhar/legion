@@ -130,6 +130,31 @@ func TestATurnTheDaemonAbortedIsReportedClean(t *testing.T) {
 	}
 }
 
+// What the daemon counts is the provider refusing a turn, keyed on the result's subtype: a step
+// Claude Code ended with its own cap on the steps of one turn (error_max_turns) is the worker
+// having worked, not the provider refusing, and a turn whose newest step ran is the provider
+// having answered after all. Counting either would walk a working claim to the launch failure
+// limit, fail it, and abandon the session it is working in (dispatch://INFRA-714).
+func TestOnlyTheStepsTheProviderRefusedAreReportedRefused(t *testing.T) {
+	r := newReportingRig(t, "-p", "--resume", sessionID)
+
+	r.prompt("p1", "maxturns worked to the cap")
+	r.expect("agent_start", nil)
+	r.untilTurnEnds()
+
+	if report := r.reported(); report.Outcome != claim.TurnClean || report.Message != "" {
+		t.Fatalf("the turn Claude Code's own turn cap ended was reported %+v, want it clean", report)
+	}
+
+	r.prompt("p2", "fail-then the CI is green")
+	r.expect("agent_start", nil)
+	r.untilTurnEnds()
+
+	if report := r.reported(); report.Outcome != claim.TurnClean || report.Message != "" {
+		t.Fatalf("the turn whose last step ran was reported %+v, want it clean: the provider answered after all", report)
+	}
+}
+
 // A pane that names no daemon reports nothing and bridges as it always did: a bridge run by hand
 // has no claim to report to.
 func TestABridgeWithNoDaemonReportsNothingAndStillBridges(t *testing.T) {

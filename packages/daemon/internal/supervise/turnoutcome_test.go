@@ -63,7 +63,7 @@ func TestALateReportLandsInItsOwnPlaceAndFailsTheClaimAsAnInOrderOneWould(t *tes
 	h.report(2, true, "second, reported late")
 
 	h.wantState(StateFailed)
-	if want := "the provider refused 3 turns in a row; its last refusal: third"; h.claim().Failure != want {
+	if want := "the provider refused 3 turns in a row: third"; h.claim().Failure != want {
 		t.Fatalf("failure %q, want %q: the newest refused report names the message, whichever arrived last", h.claim().Failure, want)
 	}
 }
@@ -82,7 +82,7 @@ func TestARunOfRefusedTurnsAtTheLimitFailsTheClaimNamingTheProvidersRefusal(t *t
 	h.report(uint64(limit), true, "the provider ended the turn with an error at 226k tokens of context")
 
 	h.wantState(StateFailed)
-	want := "the provider refused 3 turns in a row; its last refusal: the provider ended the turn with an error at 226k tokens of context"
+	want := "the provider refused 3 turns in a row: the provider ended the turn with an error at 226k tokens of context"
 	if h.claim().Failure != want {
 		t.Fatalf("failure %q, want %q", h.claim().Failure, want)
 	}

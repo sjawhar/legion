@@ -2,6 +2,7 @@ package supervise
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -1238,7 +1239,11 @@ func retry(m *Machine, ctx context.Context, ev Event) error {
 	if fresh, why := freshSession(ev, m.claim, m.deps.Limits.LaunchFailures); fresh {
 		m.log.Info("supervise: retrying in a new session", "why", why, "session", m.claim.Session,
 			"refusedRun", m.claim.RefusedRun())
-		m.forgetSession()
+		// The failure the claim carries is the fuller answer where it has one — it names how many
+		// turns the provider refused and what it said about the newest of them — and the retry's
+		// own reason answers for a claim that failed nothing, an operator's retry of a worker it
+		// stopped.
+		m.forgetSession(cmp.Or(m.claim.Failure, why))
 	}
 	return m.revive(ctx)
 }
@@ -1323,7 +1328,7 @@ func forgetSession(m *Machine, ctx context.Context, ev Event) error {
 	}
 	m.log.Info("supervise: forgetting the recorded session at the operator's ask", "session", m.claim.Session,
 		"sessionFile", m.claim.SessionFile, "state", string(m.claim.State))
-	m.forgetSession()
+	m.forgetSession("an operator cleared it with `legion claims forget-session`, so this claim starts fresh")
 	return m.persist(ctx)
 }
 

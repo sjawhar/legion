@@ -669,16 +669,14 @@ func (s *Postgres) ClaimSession(ctx context.Context, tx pgx.Tx, token claim.Toke
 }
 
 // ClearGeneration empties one issue's generation-scoped facts: a merged or closed pull request,
-// the counters of one still open, its design gate, its recorded handoffs and a READY the gate
-// refused.
+// the counters of one still open, its design gate and its recorded handoffs.
 func (s *Postgres) ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error {
 	return clearGeneration(ctx, tx, "issue = $1", "key = $1", issue, fmt.Sprintf("clear the generation of %s", issue))
 }
 
 // ClearTreeGeneration empties them for every issue of the tree. A root set back to todo starts a
 // new generation of the whole tree, and its children carried the old one's pull request, gate and
-// handoffs into it — a child re-entered at the new generation read a handoff of the last — and a
-// child's READY the old gate refused would wait on a packet cleared with those handoffs.
+// handoffs into it — a child re-entered at the new generation read a handoff of the last.
 func (s *Postgres) ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error {
 	return clearGeneration(ctx, tx, "issue in (select key from issues where tree = $1)", "tree = $1", tree,
 		fmt.Sprintf("clear the generation of tree %s", tree))

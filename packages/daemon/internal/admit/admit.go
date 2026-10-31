@@ -827,8 +827,8 @@ func readmittable(stored record.Issue) bool {
 // readmitted with carry (one that started a phase) is the same work moving from a finished root to
 // a root of its own, so its phase, phase rows, gate and pull request (with its observed head) carry
 // into the new generation, and its promotion starts both its architect and the role of that
-// carried phase. A merged pull request is never observed as merged again, and a review, acceptance
-// or READY would otherwise rerun work already decided or landed.
+// carried phase. A merged pull request is never observed as merged again, and a review or an
+// acceptance would otherwise rerun work already decided or landed.
 //
 // An issue leaving another tree, a hand-over or an orphan, carried or not, records that tree
 // (record.Issue.HandedOverFrom) and stays a tree of its own from then on: re-admitting or reopening
@@ -929,7 +929,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 		// architect never to register its own spec, only when its old root had one. A root reopened
 		// in its linger has its gate cleared with the generation, so a second close hands its
 		// children over with none: such a child keeps its phase and pull request, and its architect
-		// registers its spec as a fresh root's does, the gate its READY needs.
+		// registers its spec as a fresh root's does, the gate every member of its tree starts behind.
 		if gate != nil {
 			gate.Issue = stored.Key
 			if err := a.store.PutGate(ctx, tx, *gate); err != nil {
@@ -946,7 +946,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 		}
 	}
 	// A root set back to todo is a new generation of the whole tree, so the old generation's pull
-	// request, gate, handoffs and pending READY go for every issue of it, not only the root's.
+	// request, gate and handoffs go for every issue of it, not only the root's.
 	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
 }
 
