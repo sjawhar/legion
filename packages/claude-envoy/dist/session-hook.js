@@ -17471,8 +17471,12 @@ function renderAdvice(tool, key, advice, opts) {
       lines.push(`You still have an open ask on ${key}: "${ask.question.slice(0, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`);
     }
   }
+  const superseded = advice.superseded_approval;
+  if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
+    lines.push(`Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`);
+  }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
-    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies." : "Progress ledger or scratchpad? If so, stop.";
+    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies. Their reply ends this: post then what you held back." : "Progress ledger or scratchpad? If so, stop.";
     lines.push(`Posted. You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`);
   }
   return lines;
@@ -20679,6 +20683,17 @@ function writtenToken(config, checkout) {
     checkout: false
   };
 }
+function lostDispatchUrlNotice(env, config) {
+  if (nonEmpty(env.DISPATCH_TOKEN_FILE) === undefined)
+    return;
+  const link = config.missing?.link ?? null;
+  const old = config.missing?.oldUserFileNotice;
+  return [
+    "DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for",
+    ...link === null ? [] : [`${config.path} is a link to ${link}, which does not exist`],
+    ...old === undefined ? [] : [old]
+  ].join("; ");
+}
 function dispatchSettings(env, config, options = {}) {
   const target = dispatchTarget(env, config);
   if (!target.enabled)
@@ -20724,6 +20739,9 @@ function dispatchTarget(env, config) {
   const checkoutServer = checkout?.dispatch.serverUrl;
   const addressed = explicitUrl !== undefined || checkoutServer !== undefined || own.serverUrl !== undefined || own.enabled === true;
   if (!addressed) {
+    const lost = lostDispatchUrlNotice(env, config);
+    if (lost !== undefined)
+      return offWithNotice(lost);
     return offWithNotice(config.missing === null ? `${config.path} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off` : missingConfigNotice(config.path, config.missing, "Dispatch is off"));
   }
   if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
@@ -20871,25 +20889,29 @@ function handedConfigFile(env) {
     return { path: null, error: messageFor(error) };
   }
 }
-function startNotice(config, dispatch, envoy, nats) {
+function startNotice(config, dispatch, envoy, nats, lost) {
   if (config.kind === "failed")
     return `${config.error}: Dispatch and Envoy are off`;
   const { missing, checkout } = config;
+  const lostNotice = !dispatch.enabled && dispatch.notice === lost ? lost ?? null : null;
   const dispatchQuiet = !dispatch.enabled && dispatch.error === null;
   const envoyQuiet = !envoy.enabled && envoy.error === null;
   const parts = [];
-  if (missing !== null && dispatchQuiet && envoyQuiet) {
+  if (missing !== null && dispatchQuiet && envoyQuiet && lostNotice === null) {
     parts.push(missingConfigNotice(config.path, missing, "Dispatch and Envoy are off"));
   } else {
     if (!dispatch.enabled && dispatch.error !== null)
       parts.push(`Dispatch is off: ${dispatch.error}`);
+    else if (lostNotice !== null)
+      parts.push(lostNotice);
     else if (dispatchQuiet && missing !== null) {
       parts.push(missingConfigNotice(config.path, missing, "Dispatch is off"));
     }
     if (!envoy.enabled && envoy.error !== null)
       parts.push(`Envoy is off: ${envoy.error}`);
     else if (envoyQuiet && missing !== null) {
-      parts.push(missingConfigNotice(config.path, missing, "Envoy is off"));
+      const said = lostNotice === null ? missing : { link: null };
+      parts.push(missingConfigNotice(config.path, said, "Envoy is off"));
     }
   }
   if (checkout?.kind === "valid" && checkout.envoyError !== null)
@@ -20920,7 +20942,7 @@ function sessionSettings(file, env, options) {
   return {
     dispatch,
     envoy,
-    notice: startNotice(config, dispatch, envoy, options.nats !== false)
+    notice: startNotice(config, dispatch, envoy, options.nats !== false, config.kind === "read" ? lostDispatchUrlNotice(env, config) : undefined)
   };
 }
 function sessionDispatchSettings(file, env, options) {

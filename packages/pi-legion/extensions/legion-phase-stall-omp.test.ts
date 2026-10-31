@@ -236,7 +236,7 @@ async function stallPane(
         await mkdir(path.join(workspace, ".legion", "STALL-2"), { recursive: true });
         await writeFile(
           path.join(workspace, ".legion", "STALL-2", "implement.json"),
-          '{"schemaVersion":1,"phase":"implement","issue":"STALL-2","completed":"2026-10-09T08:00:00Z"}\n'
+          '{"schemaVersion":1,"phase":"implement","issue":"STALL-2"}\n'
         );
         await jjIn("split", "-m", "implement: record handoff", ".legion/STALL-2/implement.json");
         await jjIn("bookmark", "set", "legion/STALL-2", "-r", "@-");
