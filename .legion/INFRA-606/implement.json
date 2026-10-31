@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-31T02:29:16Z",
+  "completed": "2026-10-31T04:54:48Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -252,6 +252,14 @@
       "observed": "All pass; the regression test passes 10 of 10.",
       "headSha": "783a30cc69908f4fea54a798c54a8c495a7f765b",
       "negativeControl": "With refreshHeldClaims' old record condition (any refreshed key still waiting), the regression test fails 3 of 3: the sender holds the refresh's claim while the row carries the repeat's."
+    },
+    {
+      "criterion": "Tester round 19: the pull request merges into main (confirmation round: only docs differ).",
+      "surface": "The merged tree: the Go module's build and vet, the repository's guide layout check",
+      "command": "cd packages/envoy && go build ./... && go vet ./...; bun test scripts/semantic-line-breaks.guides.test.ts",
+      "observed": "Build and vet clean; the guides check passes 3 of 3; GitHub reports the PR MERGEABLE.",
+      "headSha": "3d5c31a9da84b2ba48cc9895ba0add4ea3b0f9d5",
+      "negativeControl": "Before the split, the guides check refused packages/envoy/AGENTS.md's mention-rule bullet at 83 screen rows (limit 50)."
     }
   ],
   "filesChanged": [
@@ -397,7 +405,8 @@
     "Forward merges at 8f68d44d (main 6fa26c74, #2392's event horizon: the relay, bounded resume, overflow catch-up and the events-log route read only up to the horizon; the hub keeps #2392's asynchronous feed take, costing one seed recompute per hub generation start) and ed9b6759 (main 4ca6415a, #2466's load-test replay beside the restart scenario); fallback table 0150_comment_fallback_copies.",
     "Four hub tests (main's) settle the relay feed's seed before measuring (57c4a697), because this PR starts a hub generation at the first subscribe; no assertion weakened.",
     "refreshHeldClaims records a refreshed claim only over the one it snapshotted (a test-exposed race, not a product defect: the row's claim only moves forward, so no sweep sees a live queued attempt as free).",
-    "Forward merge at ae4d4fee (main 21b40359): AGENTS.md and cmd/dispatch/README.md take #2422's one sentence per line with this PR's content; round-shape.py lists docs and one test only (confirmation round)."
+    "Forward merge at ae4d4fee (main 21b40359): AGENTS.md and cmd/dispatch/README.md take #2422's one sentence per line with this PR's content; round-shape.py lists docs and one test only (confirmation round).",
+    "Forward merge at 3d5c31a9 (main f4ec92ee, #2474): scripts/e2e/README.md in one-sentence-per-line layout with this PR's passages, its audit fallback corrected to the /ws/live replay; packages/envoy/AGENTS.md's mention-rule bullet split for the 50-row limit."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -406,7 +415,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 19,
-  "answersTest": "870b53ba671895c219dc85ca9f3641f86ea976ed",
+  "round": 20,
+  "answersTest": "2a896bca00f230e3d82defaf1fb578e8c81c29cb",
   "answersReview": "d8b5a38fcddc4e3a4c504d787c6371812805bec0"
 }
