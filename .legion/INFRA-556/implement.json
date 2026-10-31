@@ -2,46 +2,45 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-31T05:40:28Z",
-  "round": "review round 5 (changes requested at dd63d61b): round-4 defect 2's two windows closed from one snapshot (e2a61748), frameHeader key and stored_head.go comment (106f21e5), PR body Size and parent commit; no merge (GitHub reads MERGEABLE)",
+  "completed": "2026-10-31T09:42:09Z",
+  "round": "review round 6 (changes requested at 6d882d51): record settles a late removal or answer by reading the room under r.mu and never lowers a listed clock (a2a0a2a1), window-1 test deleted, two comments, #2598's broker claims test copied (7bde205e); no merge (GitHub reads MERGEABLE)",
   "proof": [
     {
       "criterion": "Items 1-6 and D10 across two processes, on the tree merged with main: live edits, cursors and presence, close/reopen, ask authors, agent writes, fresh reads, rebuild/resumption/queue, serving-process header, awareness bounds and the removal clock",
       "surface": "two real envoy-dispatch binaries on one Postgres 17 (pgvector), driven over HTTP and /ws/doc",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 55m ./cmd/dispatch",
-      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1107.300s (multiprocess, every two-process test passing); docs ok 1654.209s",
-      "headSha": "106f21e595b76710ad85fb58bb13b8d704981cd7",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1090.996s (multiprocess); docs ok 1617.799s; plain cmd/dispatch ok 319.010s; broker oauth claims test ok. Throwaway reconnect trial on two real binaries: 24 of 24 trials, both readers held bob's new cursor within 54 ms and still at 2 s",
+      "headSha": "a2a0a2a1c32b4c06a2c31439b787e74c9247ef61",
       "negativeControl": "At cf17a2e1 TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode fails (alice's removal relayed at clock 0); at the test-support commit aa50b68c the seven two-process tests fail on their bugs"
     },
     {
-      "criterion": "A departed reader's removal never drops a client that is back, whether its return lands between the relay's reads or is recorded before the removal (round-4 defect 2, both windows), and a read never installs a copy taken before a replica recover (round-4 defect 1)",
+      "criterion": "A departed reader's removal never drops a client that is back and is never lost after a purge: record settles a late removal or answer by reading the room under r.mu, and never lowers a listed clock",
       "surface": "docs package on real Postgres",
-      "command": "cd packages/envoy && go test -count=3 -timeout 20m -run 'TestAReaderBackAsTheRelayReadsTheRoomForItsRemovalKeepsItsState|TestAReaderBackBeforeItsRemovalIsRecordedKeepsItsState|TestAReaderInTheRoomAgainKeepsItsStateThoughARemovalRacesItsReturn|TestAReadStartsNoReplicaBehindACommitARecoverTookAway' ./internal/dispatch/docs/",
-      "observed": "ok; -race 'Awareness|Relay|Reader' ok; GOWORK=off 'Awareness|TestADocumentSocket|Reader' ok; whole docs package ok 1654.209s at 106f21e5",
-      "headSha": "106f21e595b76710ad85fb58bb13b8d704981cd7",
-      "negativeControl": "With the seams in place and round 4's touched and record: awareness_relay_test.go:411 and :481 'task A's relay no longer lists alice among the clients it relays', :415 and :485 bob's reader holds map[]; at a3bda21a replica_read_start_test.go:89 a read misses the committed paragraph"
+      "command": "cd packages/envoy && go test -count=3 -timeout 20m -run 'TestAReader|TestARoomsAwareness' ./internal/dispatch/docs/; CGO_ENABLED=1 go test -race -count=1 -run 'Awareness|Relay|Reader|Cursor|Presence' ./internal/dispatch/docs/",
+      "observed": "ok (count=3); -race ok 30.775s; GOWORK=off ok 26.532s; docs package ok 1617.799s",
+      "headSha": "a2a0a2a1c32b4c06a2c31439b787e74c9247ef61",
+      "negativeControl": "With round 5's record: TestAReaderBackWhileAnOlderStateOfHersIsAnsweredToAQueryKeepsItsState fails (:446 relay drops alice; bob holds map[]), TestAReaderLeavingOverItsOwnHeartbeatStillLeavesTheOtherProcess fails (:587 bob still holds alice after 2m), TestAReaderLeavingWhileAnOlderStateOfHersIsAnsweredToAQueryStillLeaves and ...IsNotRelisted fail (alice relisted at clock 1)"
     },
     {
       "criterion": "Browser: two people on two processes see each other's typing and cursor within a second on one socket each",
       "surface": "Chromium on main's two-process harness (round-robin proxy, two envoy-dispatch processes, one Postgres)",
       "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra556_e2e?sslmode=disable bun run e2e:multiprocess -- coedit.multiprocess",
-      "observed": "✓ coedit.multiprocess.e2e.ts:143:1 two people on two processes ... (7.6s); 1 passed (11.3s)",
-      "headSha": "106f21e595b76710ad85fb58bb13b8d704981cd7",
+      "observed": "✓ coedit.multiprocess.e2e.ts:143:1 two people on two processes ... (8.1s); 1 passed (10.7s)",
+      "headSha": "a2a0a2a1c32b4c06a2c31439b787e74c9247ef61",
       "negativeControl": "Fails without this change (https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs/awareness_relay.go (touched: one EncodeUpdate snapshot per event's removals; record: drop a removal older than local's clock)",
-    "packages/envoy/internal/dispatch/docs/service.go (seams beforeAwarenessRemovalRead, beforeAwarenessRecord; nil in production)",
-    "packages/envoy/internal/dispatch/docs/awareness_relay_test.go (two new tests)",
-    "packages/envoy/internal/dispatch/docs/keepalive.go, awareness_limit.go (frameHeader takes the key)",
-    "packages/envoy/internal/dispatch/docs/stored_head.go (file comment)"
+    "packages/envoy/internal/dispatch/docs/awareness_relay.go (record settles against the room; answered flag; awarenessClientStanding; lock-order comment)",
+    "packages/envoy/internal/dispatch/docs/service.go (beforeAwarenessAnswerRecord added, beforeAwarenessRemovalRead removed)",
+    "packages/envoy/internal/dispatch/docs/awareness_relay_test.go (one driver; four new tests; lock-order guard; window-1 test deleted)",
+    "packages/envoy/internal/broker/oauth/claims_doc_test.go (byte copy of #2598 at 930cad24)"
   ],
   "deviations": [
-    "The pod was recreated mid-round; the Postgres rig was rebuilt on the issue volume ($TMPDIR/pgrig, port 5433) and nothing unpushed was lost (the round had pushed nothing)."
+    "Beyond the review's two cases, the mirror (a removal recorded between an answer's read and its record) also lost the removal; fixed in the same mechanism with two failing-first tests. internal/broker lapse tests fail locally on SO_PEERPIDFD (gVisor), unrelated to this change."
   ],
   "openQuestions": [],
   "trickyParts": [
-    "ygo's awareness lock is private; EncodeUpdate reads clock and state under it in one call, and encodes an id it holds nothing of as clock 0 with null, so one decode decides live / tombstone / unknown."
+    "r.mu now wraps ygo's awareness read lock; safe because ygo fires every observer with its lock released, guarded by TestARoomsAwarenessFiresItsObserversWithItsLockReleased."
   ]
 }
