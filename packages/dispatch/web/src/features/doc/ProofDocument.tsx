@@ -66,6 +66,7 @@ import {
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
+import { createPendingWaiter } from "./pending-waiter";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
@@ -208,6 +209,12 @@ export function ProofDocument({
   const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [pending, setPending] = useState<PendingState | undefined>(undefined);
+  // Whoever waits for this browser's edits of this document to reach the server
+  // (`DocumentBridge.whenSent`), beside the state the toolbar renders: the margin asks from a
+  // callback the editor holds for the document's lifetime, and the pending reports below answer
+  // it. One waiter serves every document this page shows, since each report and each wait names
+  // the document it is about.
+  const pendingWaiter = useMemo(() => createPendingWaiter(), []);
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
   // Whether the issue was closed when the current admission came. The server admits a socket
@@ -348,6 +355,16 @@ export function ProofDocument({
       `${window.location.origin}${window.location.pathname}${blockFragment(blockId)}`
     );
   }, []);
+  // Whether this browser holds no edit of this document the server has still to take: the margin
+  // waits on it after it has marked the words a comment is to anchor to again, so the mark it
+  // sends is one the server can already see. That mark is an edit of its own, so the wait is for
+  // a report taken after it (`pending-waiter.ts`); the count is every tab's, so a row another
+  // tab cannot send keeps it waiting, and the bound is what ends the wait there. The margin
+  // retries either way.
+  const whenSent = useCallback(
+    (timeoutMs: number): Promise<void> => pendingWaiter.whenSent(artifact.id, timeoutMs),
+    [artifact.id, pendingWaiter]
+  );
   // Every focus in the live editor - a block link, the margin's mark and block focus, a reader's
   // click to a block - runs `focus` now and `refocus` once more after the page's mermaid diagrams
   // have drawn (`refocusAfterDiagrams`), since a diagram that draws above the target pushes it
@@ -485,9 +502,15 @@ export function ProofDocument({
         },
         focusMark: (markId) => focusInEditor(() => handle.focusMark(markId)),
         removeMark: (markId) => handle.removeMark(markId),
+        // The composer keeps the placement it was opened over, or nothing where the editor had
+        // none to give; the editor reads an absent one as null. This is where the two meet, so
+        // no caller of the bridge has to.
+        remarkMark: (markId, kind, quote, placement) =>
+          handle.remarkMark(markId, selectionBarKindFor(kind), quote, placement ?? null),
         retypeMark: (markId, kind) => handle.retypeMark(markId, selectionBarKindFor(kind)),
         setActiveBlocks: (blockIds) => handle.setActiveBlocks(blockIds),
         setActiveMarks: (markIds) => handle.setActiveMarks(markIds),
+        whenSent,
       });
       const unbindRemoteMarks = bindRemoteMarks(connection.doc, handle);
       const fragment = connection.doc.getXmlFragment(FRAGMENT_NAME);
@@ -635,6 +658,7 @@ export function ProofDocument({
             onPending: (state) => {
               if (mounted) {
                 setPending(state);
+                pendingWaiter.report(artifact.id, state);
               }
             },
             onSynced: () => {
@@ -659,6 +683,7 @@ export function ProofDocument({
                         anchor: {
                           artifact: artifact.id,
                           mark_id: action.markId,
+                          placement: action.placement ?? undefined,
                           quote: action.quote,
                         },
                         kind: composerKindFor(action.kind),
@@ -705,7 +730,15 @@ export function ProofDocument({
       readmitRef.current = undefined;
       teardown();
     };
-  }, [artifact.id, createEditor, focusInEditor, loadTransport, queryClient]);
+  }, [
+    artifact.id,
+    createEditor,
+    focusInEditor,
+    loadTransport,
+    pendingWaiter,
+    queryClient,
+    whenSent,
+  ]);
 
   // A blocked admission is admitted again by the next successful read of the document's text: the
   // refetch a repair upload's or a rebuild's invalidation makes, or any other. Each successful read

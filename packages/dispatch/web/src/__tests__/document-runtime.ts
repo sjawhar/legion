@@ -124,6 +124,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         return new Map<string, number>();
       },
       removeMark() {},
+      remarkMark() {
+        return { refused: "gone" as const };
+      },
       retypeMark() {
         return { refused: "missing" as const };
       },
