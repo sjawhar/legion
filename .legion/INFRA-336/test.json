@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-336",
+  "completed": "2026-10-31T05:09:12Z",
+  "previousHandoff": "ec7c7ad0a98ff101f123d1228a9af5ba348c737e",
+  "round": "3 — a full round at the forward-merge head 4389e477086ef0d07f5272462bca99334e82e365, because the fingerprint moved between the head this tester last verified and this one",
+  "forwardMerge": {
+    "from": "cdd83c7d8bb717ee46ebbfc2634fdbef0483a9f3",
+    "to": "4389e477086ef0d07f5272462bca99334e82e365",
+    "fingerprintBefore": "05772da37cf7e1077f6613c770381e0179fab31d1d38d280cfd599a213eef389",
+    "fingerprintAfter": "a19fe705fefcc0acbf5c416507b9eaf1a285839fb880150e7a9344ee0e76e420",
+    "verdict": "changed — a full test round, not bare gates",
+    "why": "The tester's two heads are not the implementer's. The implementer's comment compares its own tip before and after its merge (ec7c7ad0 → 4389e477, unchanged), which is right for that pair. Between the head this tester last verified (cdd83c7d) and that tip sits the reviewer's prose commit dc17476bff19, which rewrote the handoff sentence in go/worker-common.md and in all four role residues and in skills/legion-worker/SKILL.md — product text of this very change that no tester had read. The fingerprint says so, so this round re-ran every criterion rather than the bare gates."
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Every entry of this round's implement handoff was driven again at the pushed head 4389e477 with the tester's own rig, rebuilt from scratch after the pod recreated the workspace ($TMPDIR/infra336t was gone with it): my own composer, my own tasks, my own extraction of the new main (3f7b3e75) and my own scratch jj repository, never the implementer's scripts. The merge resolution was checked against main rather than read: `jj diff --from main@origin --to @- -- packages/daemon/internal/prompts/go/architect-common.md` adds this change's paragraph and nothing else, so main's own #2295 paragraph survives the resolution byte for byte. Its C1, C3 and C7 observations all reproduce, and its disclosed wrinkle about the revset after a retro reproduces exactly as it states it (see observations)."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The forward merge keeps this change whole and main's own edit on the same lines whole, and the head GitHub refused to check is now checkable",
+      "surface": "the repository at the merge head, and GitHub's own mergeability for pull request 2585",
+      "command": "jj -R \"$LEGION_WORKSPACE\" diff --from 'main@origin' --to @- --git -- packages/daemon/internal/prompts/go/architect-common.md; jj -R \"$LEGION_WORKSPACE\" diff --from 'main@origin' --to @- --stat; gh pr view 2585 --json mergeable,mergeStateStatus",
+      "observed": "against main at 3f7b3e753f8510131c725e9df0df0d97126edb6e the conflicted file adds exactly one paragraph, this change's time sentence, with main's paragraph on the bash tool's one shell and the Dispatch variables (#2295) present as unchanged context above it; the whole branch diff against main is 25 files, the change itself plus the five retro learnings, the changelog fragment and the tester's red test, with no stray file from the merge. GitHub now reports `mergeable: MERGEABLE` where the pre-merge head was CONFLICTING and so got no checks at all.",
+      "headSha": "4389e477086ef0d07f5272462bca99334e82e365",
+      "negativeControl": "the other resolution, keeping only one side, is visible in the same grep: `git grep -Fl \"<the time sentence>\" -- packages/daemon/internal/prompts` lists three files, and dropping this change's paragraph would leave two; dropping main's would make the file differ from main@origin in a removed paragraph, which the diff above would print as a `-` line and does not"
+    },
+    {
+      "criterion": "C3 (A2, A4, R1, R3) at the merge head, over the reviewer's rewritten sentence and against the new base: an agent reading the prompt this checkout's daemon composes writes a handoff with no `completed` key and with `previousHandoff`, and writes no time it did not measure",
+      "surface": "six fresh headless Oh My Pi sessions on the tester, planner and implementer prompts `workerPane()` composes from a checkout's own daemon module, three on this merge head and three on the new main",
+      "command": "bun $TMPDIR/infra336t/compose2.ts <daemon module> <role> <rig> <out> for each of the six prompts, then bash $TMPDIR/infra336t/sessions.sh head and bash $TMPDIR/infra336t/sessions.sh base — `omp -p --session-dir <dir> \"<the role's task>\" --append-system-prompt \"$(cat <prompt>)\"` with every LEGION_* and DISPATCH_* unset, OMP_SESSION_SQL_DSN_FILE unset, OMP_SESSION_STORAGE=file; then `jq -r 'has(\"completed\")'`, `jq -c 'keys'` and a grep for every RFC 3339 string in each body, each string looked up in that session's own JSONL",
+      "observed": "each recomposed head prompt carries the root-anchored revset once, the time sentence once and the old `completed` field shape zero times. All three head handoffs print has(completed)=false and their key sets are exactly their role part's shape with `previousHandoff` in each (tester 7c1e55a0…, the commit its task named; planner and implementer the empty string). None of the three wrote any date at all — including the implementer, whose task asked for a pull-request comment naming when its proof ran: it wrote no comment and replied that nothing in the session printed that time, that `date -u +%FT%TZ` gives 05:06:58Z which is now and not when the proof ran, that writing it would be a fabricated record on the pull request, and that it recorded the missing prerequisite as an open question. That is the rule working on the case it exists for.",
+      "headSha": "4389e477086ef0d07f5272462bca99334e82e365",
+      "negativeControl": "the same three tasks on the new main's prompt, composed from the daemon module of 3f7b3e753f8510131c725e9df0df0d97126edb6e extracted with `git archive`, at the same minute: all three carry `completed` and none carries `previousHandoff`; the tester's and the planner's both read 2026-10-31T00:00:00Z — midnight — in sessions that ran at 05:06Z, each string in exactly one assistant entry of its transcript and in no tool result. The base implementer did run `date` and wrote its output, 2026-10-31T05:06:47Z, as the time its proof ran — a measured clock reading standing for a time nobody measured, which is the same defect one step quieter, and which the head session refused outright"
+    },
+    {
+      "criterion": "C1 (A1, R1, R2): no prompt, skill, harness or fixture still asks for or writes the field, after the merge brought 80 new and 118 modified files from main",
+      "surface": "the repository at the merge head",
+      "command": "git grep -nE '<the plan's A1 pattern>' -- packages/daemon/internal/prompts packages/daemon/internal/api skills packages/pi-legion/scripts/skill-scenarios packages/pi-legion/extensions packages/dispatch ':!packages/pi-legion/scripts/skill-scenarios/score.test.ts'; the same grep over that one excluded file; and a wider sweep, git grep -nE '\"completed\"|completed: \"<|`completed`' over the whole tree less the CHANGELOGs and .legion",
+      "observed": "with the exclusion: prints nothing, exit 1. Over the excluded file alone: one line, score.test.ts:2956, the legacy-shape body inside the tester's red test, which the harness must still read. The wider sweep over the merged tree finds no handoff time anywhere: every other hit is an unrelated `status: \"completed\"` of a CI, task or Dispatch schema, plus the generated copy packages/claude-envoy/legion/skills/legion-worker/SKILL.md, which still carries the old step 4 and is rewritten on main by claude-envoy-rebuild.yaml after the merge — the plan's R2.",
+      "headSha": "4389e477086ef0d07f5272462bca99334e82e365",
+      "negativeControl": "the same grep at the new main (3f7b3e75) prints the 14 lines this change removes"
+    },
+    {
+      "criterion": "C2 (A2, R2): the skill-scenario harness scores a tester handoff written to the new shape, and the tester's red test still pins the shape every other checkout writes",
+      "surface": "the harness's own test run at the merge head",
+      "command": "cd packages/pi-legion && bun test scripts/skill-scenarios/score.test.ts",
+      "observed": "68 pass, 0 fail, 357 expect() calls, the tester's red test among them, on the merged tree",
+      "headSha": "4389e477086ef0d07f5272462bca99334e82e365",
+      "negativeControl": "the same command at the head of round 1 (ffc0ee86, where `previousHandoff` was required) printed 67 pass, 1 fail at exactly that test; the red test's own in-test control, the same body with `implementerProof` removed, still parses false"
+    },
+    {
+      "criterion": "C4 and C5 (A4, A5, R4, R5): after the merge the time sentence is still in the three prompt parts and nowhere else, `previousHandoff` in the five prompt files, and the correction in the four notes",
+      "surface": "the repository at the merge head",
+      "command": "git grep -Fl \"<the time sentence>\" -- packages/daemon/internal/prompts; git grep -ln previousHandoff -- packages/daemon/internal/prompts; git grep -Fc 'No handoff carries a `completed` field since dispatch://INFRA-336' -- docs/solutions",
+      "observed": "the sentence is in go/architect-common.md, go/worker-common.md and roles/controller-root.md and in no other prompt file — the conflicted file included, so the merge neither lost nor doubled it; previousHandoff is in go/worker-common.md and the four role residues; the correction sentence prints 1 in each of the four docs/solutions notes and in none of the five new retro notes",
+      "headSha": "4389e477086ef0d07f5272462bca99334e82e365",
+      "negativeControl": "the same greps at the new main print nothing for either needle"
+    },
+    {
+      "criterion": "C6 (R3, D4): with `previousHandoff`, a round that repeats its predecessor's decision, counts and findings at an unmoved head still writes a commit the completion can report",
+      "surface": "the mechanic `handoff_complete` runs — a fresh scratch jj repository with a real remote, read with findHandoffCommit's own revset",
+      "command": "bash $TMPDIR/infra336t/c6.sh — three review rounds at one head with the same decision, counts and finding; round 2 names round 1's commit, round 3 repeats round 2's bytes; each runs `jj split`, then `jj log -r @- -T empty` and the root-anchored revset",
+      "observed": "round 1 commits de9446ca998cdfe07614b7e7348248a68c933678, empty=false; round 2, naming round 1's commit, commits 1bee886c4f1148d57b7260834e59b93230786d94, empty=false, and the revset answers that new commit",
+      "headSha": "4389e477086ef0d07f5272462bca99334e82e365",
+      "negativeControl": "round 3, byte-identical to round 2: `jj split` makes an empty commit (`jj log -r @- -T empty` prints true) and the revset answers round 2's commit 1bee886c again — the HANDOFF_NOT_NEW refusal this field closes"
+    },
+    {
+      "criterion": "C7: the repository's static lanes at the head under test",
+      "surface": "GitHub's checks on pull request 2585, read and not re-run",
+      "command": "gh pr checks 2585; gh run list --repo sjawhar/legion --commit 4389e477086ef0d07f5272462bca99334e82e365",
+      "observed": "at 2026-10-31T05:08:22Z run 41170924674 (CI) is `queued` and run 41170982030 (PR Title) is `queued` at this head, neither concluded; read as running, waited for by nothing and re-run by nothing. This is the first head of this branch GitHub will check since the conflict, because a conflicting head gets no checks at all. No earlier head of this round has a CI verdict either: every run at round 2's head was cancelled by the next push.",
+      "headSha": "4389e477086ef0d07f5272462bca99334e82e365",
+      "negativeControl": "main's new scripts/semantic-line-breaks.ts, which the merge brings in, is deliberately not a CI gate and its guides test covers only AGENTS.md, scripts/e2e/README.md, docs/kubernetes.md, packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md — no file this change touches — so no new lane of the merged base judges this change's markdown. Checked rather than assumed, because a new gate on prose would have been this merge's own way to go red"
+    }
+  ],
+  "observations": [
+    "The implementer's disclosed wrinkle reproduces and is real prose, not a behaviour defect. Measured: `latest((::5c5474e08c3ac5da7c2c66bff72213dcb8885f81 ~ ::trunk()) & files(root:\".legion/INFRA-336/implement.json\"))` answers ec7c7ad0, retro's commit that REMOVED `.legion/INFRA-336/`, and the same revset for test.json answers ec7c7ad0 too, which is the value this handoff carries. go/worker-common.md says `previousHandoff` is \"the commit that carried this role's previous handoff of this phase\", and after a retro the command it gives answers a commit that carried no handoff. Nothing breaks — the value still differs from the round before's, which is all the field has to do, and the four role residues already describe it accurately as \"the commit the daemon part's revset prints\" — so this is not a failure of the round. It is a sentence in a file this pull request touches that is untrue in one measured case, and the fix is one clause. The architect decides whether it is worth a round; the implementer reported it too.",
+    "Secret scrub, recorded here and not in the pull request body: every session of C3 ran with every LEGION_* and DISPATCH_* variable unset and OMP_SESSION_SQL_DSN_FILE unset, so no pod credential reached a scratch session or its transcript.",
+    "The pod recreated this workspace between rounds and took $TMPDIR/infra336t with it. The rig was rebuilt from nothing in one step — the composer, the session runner and the C6 probe are twenty lines each — so the loss cost one command, not a re-derivation; the retro note docs/solutions/testing/prove-a-prompt-change-with-the-production-composer-a-real-session-and-the-old-prompt-as-the-control-INFRA-336.md is what the implementer rebuilt its own copy from."
+  ]
+}
