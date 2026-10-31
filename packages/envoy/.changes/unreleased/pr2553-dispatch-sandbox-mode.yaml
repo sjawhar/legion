@@ -2,7 +2,7 @@ kind: Added
 body: |-
     `envoy-infra:gcp:Dispatch` takes its tailnet inputs and its sign-in inputs as two groups, each
     set whole or left wholly unset. With the tailnet group — `tailnetDnsName`, `tags`,
-    `tailnetAuthKey`, `tailnetService`, `tailscaleImage` and `frontDoorToolsImage` — unset the
+    `tailnetAuthKey`, `tailscaleImage` and `frontDoorToolsImage` — unset the
     component builds no front door at all: no `<hostname>-tailnet` Deployment, Service,
     NetworkPolicy or ServiceAccount, no `<hostname>-tailnet-auth-key` or `<hostname>-tailnet-tls`
     Secret, neither RBAC object for that Secret, and no `<hostname>-serve` ConfigMap. The `url`
@@ -20,4 +20,4 @@ body: |-
     setting.
 time: 2026-10-30T12:00:00.000000000Z
 custom:
-    Issue: INFRA-797
+    Issue: pr2553

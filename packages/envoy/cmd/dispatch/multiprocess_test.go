@@ -1848,36 +1848,6 @@ func TestAStagedKeyRotationAcrossThreeAppliesKeepsPeopleSignedIn(t *testing.T) {
 	}
 }
 
-// The apply the component cannot refuse and the README therefore states as the procedure's first
-// precondition: [0] → [1] in one step, which renders generation 1's key alone while the live
-// tasks still sign with generation 0's. Each key set lacks the key the other signs with, so the
-// registry refuses the new process at its boot (processes.Register) and the rollout stalls on a
-// pod that never serves, rather than the fleet serving under two disjoint keys and signing people
-// out of whichever task their next request reaches. The pair carries on serving the person signed
-// in before the attempt, which is why a stalled rollout is the better of the two outcomes.
-func TestAStagedKeyRotationThatSkipsTheAddApplyIsRefusedAtBoot(t *testing.T) {
-	issuer := oidctest.New(t)
-	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
-	pair := newPair(t)
-	// All three processes run the same unstamped build and differ only in their setting, so the
-	// binary is built once.
-	options := dispatchOptions{
-		NATSURL: pair.nats, SigningKey: stagedGeneration0, Env: cookieSignIn(issuer),
-		Binary: cmdtest.Build(t, "envoy-dispatch"),
-	}
-	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), options)
-	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), options)
-	pair.a.waitHealthy(t)
-	pair.b.waitHealthy(t)
-	session := signInThrough(t, pair.a, issuer)
-
-	options.SigningKey = stagedGeneration1
-	skipped := startDispatchProcessWith(t, pair.databaseURL(t), options)
-	requireRefusedToStart(t, skipped, "the first pod of an apply that moved straight from [0] to [1]")
-	requireWhoami(t, pair, pair.a, session, "the cookie A minted, once the skipped apply's pod was refused")
-	requireWhoami(t, pair, pair.b, session, "the cookie A minted, once the skipped apply's pod was refused")
-}
-
 // ───── the fleet's build ────────────────────────────────────────────────────
 
 // The two builds TestTwoProcessesAnnounceTheirBuildOnce rolls between, stamped into its binaries

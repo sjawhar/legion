@@ -142,11 +142,13 @@ func TestConstructOrdersTheDatabaseInstanceAfterDatabaseWaitsFor(t *testing.T) {
 
 // Measured, rather than read off the SDK: a consumer's pulumi.DependsOn on the component itself
 // does not reach the component's children. Constructed with one URN in the ConstructRequest's
-// Dependencies, the field that option arrives in, the Cloud SQL instance registers with its two
-// siblings alone — the network and the private-services Connection it already waits for — and
-// never that URN. The SDK gives a component-level DependsOn to the component's own resource
-// options (pulumi/sdk/v3 v3.268.0's go/pulumi/provider.go:174-178), and each child's register
-// request carries only the DependsOn the component gave that child.
+// Dependencies, the field that option arrives in, the Cloud SQL instance registers the
+// dependencies of its own it always has and never that URN. What it does wait for is its own
+// business and left to the tests of those orderings, so a sibling added later is no failure
+// here; the list being non-empty is what says the absence was read and not an empty answer. The
+// SDK gives a component-level DependsOn to the component's own resource options (pulumi/sdk/v3
+// v3.268.0's go/pulumi/provider.go:174-178), and each child's register request carries only the
+// DependsOn the component gave that child.
 //
 // So a consumer that must order a child of Dispatch after one of its own resources cannot get it
 // by depending on the component: databaseWaitsFor, the explicit input
@@ -156,11 +158,10 @@ func TestConstructComponentDependsOnDoesNotReachTheChildren(t *testing.T) {
 	m, _, err := constructDispatch(t, dispatchConstructBaseInputs(), false, upstream)
 	require.NoError(t, err)
 
-	require.Equal(t, []string{
-		dispatchConstructChildURN("gcp:compute/network:Network", "example-dispatch-network"),
-		dispatchConstructChildURN("gcp:servicenetworking/connection:Connection", "example-dispatch-services"),
-	}, m.Named(t, "gcp:sql/databaseInstance:DatabaseInstance", "example-dispatch").RPC.GetDependencies(),
-		"the instance waits for its own siblings alone, never for what the consumer's DependsOn on the component names")
+	deps := m.Named(t, "gcp:sql/databaseInstance:DatabaseInstance", "example-dispatch").RPC.GetDependencies()
+	require.NotEmpty(t, deps, "the instance registers the dependencies it does have, so the absence below is a read and not an empty list")
+	require.NotContains(t, deps, string(upstream),
+		"the instance never waits for what the consumer's DependsOn on the component names")
 }
 
 func TestConstructAcceptsUnknownDispatchInputsUnderPreview(t *testing.T) {
@@ -566,7 +567,7 @@ func TestConstructRefusesADispatchInputWithClusterOnly(t *testing.T) {
 	require.Empty(t, m.Types())
 }
 
-// A sandbox reaches the plugin over the same wire a consumer's pulumi up uses: the nine inputs of
+// A sandbox reaches the plugin over the same wire a consumer's pulumi up uses: the eight inputs of
 // the two groups are absent from the call, as an SDK leaves out what the program never set, and
 // not sent as empty values. tailnetAuthKey and signInClientSecret arrive as nothing at all there,
 // so the component reads neither as an Input it could resolve, and answers with the in-cluster
@@ -574,7 +575,7 @@ func TestConstructRefusesADispatchInputWithClusterOnly(t *testing.T) {
 // names them.
 func TestConstructDispatchSandbox(t *testing.T) {
 	inputs := dispatchConstructInputs()
-	// The nine inputs of the two groups, from the groups' own lists, so a group that gains an
+	// The eight inputs of the two groups, from the groups' own lists, so a group that gains an
 	// input leaves it out of this call too.
 	for _, group := range [][]dispatchInput{dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup} {
 		for _, in := range group {

@@ -111,7 +111,7 @@ type dispatchInput struct {
 }
 
 // dispatchClusterOnlyRefusals is every input the cluster-only mode refuses, one row each, holding
-// a value a consumer would plausibly send. The nine rows of the tailnet and sign-in groups come
+// a value a consumer would plausibly send. The eight rows of the tailnet and sign-in groups come
 // from the groups' own tables, which are where those values are written
 // (dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup), so a group that gains an input is
 // refused here without that input being written down a second time.

@@ -11,4 +11,4 @@ body: |-
     setting it misses, so a production deployment that loses one of them is refused as before.
 time: 2026-10-30T12:00:00.000000000Z
 custom:
-    Issue: INFRA-797
+    Issue: pr2553

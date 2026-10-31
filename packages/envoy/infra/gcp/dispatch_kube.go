@@ -346,26 +346,18 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	dispatchSecretName := s.hostname + "-dispatch"
 	databaseURL := pulumi.Sprintf("postgres://dispatch:%s@127.0.0.1:5432/dispatch?sslmode=disable", database.password.Result)
 	// DISPATCH_SIGNING_KEY is the key set auth.ParseSigningKeys reads: the generations' results
-	// in the list's order, one space between them. With one generation it is that result alone,
-	// no join and no Sprintf wrapper that could change a byte, so a deployment already running
-	// one key keeps the exact Secret data it has and this release's first apply plans no change
-	// to it.
-	signingKey := database.signing[0].Result
-	if len(database.signing) > 1 {
-		results := make([]any, 0, len(database.signing))
-		labels := make([]string, 0, len(database.signing))
-		for i, key := range database.signing {
-			results = append(results, key.Result)
-			labels = append(labels, fmt.Sprintf("the signing key at signingKeyGenerations[%d]", i))
-		}
-		signingKey = pulumi.All(results...).ApplyT(func(values []any) (string, error) {
-			keys, err := outputStrings(dispatch, values, labels...)
-			if err != nil {
-				return "", err
-			}
-			return strings.Join(keys, " "), nil
-		}).(pulumi.StringOutput)
+	// in the list's order, one space between them. One generation joins to that result alone,
+	// unchanged, so a deployment already running one key keeps the exact Secret data it has and
+	// this release's first apply plans no change to it (TestDispatchDefaultSigningKeySetIsTodaysOneKey
+	// pins those bytes). The join runs on a StringArray, so every element is a string already and
+	// there is no resolution the apply could fail on.
+	results := make(pulumi.StringArray, 0, len(database.signing))
+	for _, key := range database.signing {
+		results = append(results, key.Result)
 	}
+	signingKey := results.ToStringArrayOutput().ApplyT(func(keys []string) string {
+		return strings.Join(keys, " ")
+	}).(pulumi.StringOutput)
 	// The sign-in client secret is one key of this Secret only where sign-in is on: without the
 	// sign-in inputs signInClientSecret is nil, which refuseDispatchSeedInSecret cannot take, and
 	// the app reads no such variable anyway.

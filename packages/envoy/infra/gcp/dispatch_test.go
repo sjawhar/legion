@@ -625,6 +625,26 @@ func TestDispatchRequiresGCPAndRandomProvidersBeforeRegistering(t *testing.T) {
 	require.Equal(t, []string{gcpProviderType}, m.Types())
 }
 
+// Only a Dispatch with a front door declares the Tailscale Service, so only that mode needs a
+// tailscale provider, and the component says so before it registers anything of its own: a
+// front-door consumer that declares none is refused where it can still fix its program, rather
+// than halfway through an update. A sandbox builds no front door and declares no such Service,
+// so the gcp and random providers alone are enough for it — what the resolver's own comment and
+// the component's README promise a sandbox consumer, and what would otherwise make every
+// sandbox program declare a provider it never uses.
+func TestDispatchRequiresATailscaleProviderOnlyWithAFrontDoor(t *testing.T) {
+	t.Run("with a front door", func(t *testing.T) {
+		m, err := runDispatchWithProviders(t, "example-dispatch", dispatchArgs(), newGCPProvider, newRandomProvider)
+		require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch needs a "tailscale" provider in its providers option`)
+		require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types(),
+			"the program's own two providers registered and nothing of the component's")
+	})
+	t.Run("a sandbox", func(t *testing.T) {
+		_, err := runDispatchWithProviders(t, "example-dispatch", dispatchSandboxArgs(), newGCPProvider, newRandomProvider)
+		require.NoError(t, err, "a sandbox declares no Tailscale Service, so it needs no tailscale provider")
+	})
+}
+
 // Every plain string input of the component has a row; the seed is found as bus.HoldsSeed finds
 // it: any type, either case, whole, inside a longer value, or split. tailnetAuthKey,
 // signInClientSecret and natsSeedSecret are Inputs, checked once they resolve
@@ -1487,6 +1507,69 @@ func TestDispatchTheFrontDoorWaitsForTheDatabaseInstance(t *testing.T) {
 		"the Tailscale Service is declared only once the instance's restart is over")
 	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies(), instanceURN,
 		"the front door's pods come back only once the instance's restart is over")
+}
+
+// The front door advertises the Tailscale Service from its pods, and a node that advertises a
+// Service before it exists is not approved when it appears: it sits unapproved for
+// tailnetAdvertiseStuckSeconds with the name answering nowhere. So both halves of the front door
+// register after the Service the component declares — the serve config the pods serve that name
+// by, and the Deployment whose pods advertise it and terminate its TLS.
+func TestDispatchTheFrontDoorWaitsForItsTailscaleService(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	serviceURN := "urn:pulumi:s::p::" + dispatchType + "$tailscale:index/service:Service::example-dispatch"
+	require.Contains(t, m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").RPC.GetDependencies(), serviceURN,
+		"the serve config, which the pods serve the Service's name by, is created after that Service")
+	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies(), serviceURN,
+		"a pod that advertises the Service before it exists is not approved when it appears")
+}
+
+// The Service the component declares is the name every reader reaches Dispatch at: svc: and the
+// hostname, so the Service and the nodes that advertise it can never be named differently; tcp:443
+// alone, the one port the front door terminates TLS on; and the component's own tags, the same
+// grant its front-door nodes join the tailnet under, so a node may host the Service it advertises.
+func TestDispatchDeclaresItsTailscaleService(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	service := m.Named(t, "tailscale:index/service:Service", "example-dispatch")
+	require.Equal(t, "svc:example-dispatch", normalizedProperty(service.Inputs["name"]))
+	require.Equal(t, []any{"tcp:443"}, normalizedProperty(service.Inputs["ports"]),
+		"the front door terminates TLS on 443 and publishes no other port")
+	// The tags input itself, as the engine reads a property list, so the row is the fixture's own
+	// value rather than a second spelling of it and an absent tags fails as an absent list.
+	wantTags := make([]any, 0, len(dispatchArgs().Tags))
+	for _, tag := range dispatchArgs().Tags {
+		wantTags = append(wantTags, tag)
+	}
+	require.Equal(t, wantTags, normalizedProperty(service.Inputs["tags"]),
+		"the Service carries the component's own tags input, the grant its nodes join under")
+}
+
+// The Service's Protect follows deletionProtection, the input that already guards the cluster and
+// the database, and is true when the consumer sets nothing: no resource option of a consumer's own
+// program reaches a component's child, so a hard-coded Protect could be undone only by a state
+// edit and deleting a Dispatch would need one. Shaped as the cluster-only mode's own pair
+// (TestDispatchClusterOnlyPassesDeletionProtectionToTheCluster).
+func TestDispatchProtectsItsTailscaleServiceWithDeletionProtection(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		set  *bool
+		want bool
+	}{
+		{"unset", nil, true},
+		{"false", pulumi.BoolRef(false), false},
+		{"true", pulumi.BoolRef(true), true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			args.DeletionProtection = row.set
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			require.Equal(t, row.want, m.Named(t, "tailscale:index/service:Service", "example-dispatch").RPC.GetProtect())
+		})
+	}
 }
 
 // A listener bound to 0.0.0.0 refuses to start without a bearer. The app reaches the listener and

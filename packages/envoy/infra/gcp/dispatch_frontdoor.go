@@ -481,8 +481,9 @@ gate() {
 // children's options.
 //
 // Its Protect follows deletionProtection, the input that already guards the cluster and the
-// database, rather than being hard-coded: a resource a remote component protects on its own is
-// one the consumer has no way to unprotect, so deleting a Dispatch would need an edit here.
+// database, rather than being hard-coded: no resource option of the consumer's own program
+// reaches a component's child, so a hard-coded Protect could be undone only by a state edit
+// (`pulumi state unprotect <urn>`), and deleting a Dispatch would need one.
 //
 // It waits for the Cloud SQL instance because the front door waits for it in turn: switching the
 // instance's availability type updates it in place and restarts it, and the name must come back
