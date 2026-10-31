@@ -177,6 +177,14 @@ cat >"$bin/kubectl" <<'EOF'
 # The fake kubectl: records each call, flags one without -n <FAKE_NS>, answers from FAKE_DIR.
 set -u
 printf '%s\n' "$*" >>"$FAKE_DIR/kubectl.log"
+# kubectl-calls.log: one line per call, tagged with the caller's session, so a check can pair two
+# calls of one cluster.sh command whatever the run's daemons (each a session of its own, setsid)
+# call in between, and whatever lines one call's arguments span. Not the process group: kube and
+# kube_for run kubectl under timeout, which gives each call a process group of its own. Truncated
+# to stay one short write, which the kernel appends whole.
+call_sid=$(sed -E 's/^.*\) //' "/proc/$$/stat" | cut -d' ' -f4)
+call_args=${*//$'\n'/\\n}
+printf '%s\t%s\n' "$call_sid" "${call_args:0:1000}" >>"$FAKE_DIR/kubectl-calls.log"
 verb="" sel="" ctr="" prev="" has_ns=false seen=false cmd=()
 for a in "$@"; do
   if $seen; then
@@ -847,7 +855,7 @@ write_pods() {
 }
 
 reset_fake() {
-  rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]* \
+  rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/kubectl-calls.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]* \
     "$fake/runner-stops" "$fake/rc-polls" "$fake/df-seq" "$fake/runner-heap-kept" "$fake/lock-get-fails" \
     "$fake/sleep.log" "$fake/apply-errors" "$fake/replay-template" "$fake/restores" "$fake/pod-dump" \
     "$fake/stored-order.log" "$fake/go-dispatch.log" "$fake/go-browsertype.log" "$fake/git.log" \
@@ -870,15 +878,22 @@ no_create() {
   ! grep -qE "^-n $ns (create|apply) " "$fake/kubectl.log" 2>/dev/null
 }
 
-# guarded_by_lock_read PATTERN: the last kubectl call whose logged line holds PATTERN came right
-# after a read of the lock, which is what a write through a guarded helper (runner_exec,
-# postgres_exec and the rest) looks like in the log: copy_is_ours reads the lock, and the write
-# is the next kubectl call.
+# guarded_by_lock_read PATTERN: the last kubectl call that holds PATTERN came right after a read
+# of the lock by the same command, which is what a write through a guarded helper (runner_exec,
+# postgres_exec and the rest) looks like: copy_is_ours reads the lock, and the write is that
+# command's next kubectl call. The calls are paired in kubectl-calls.log (one line per call,
+# tagged with the caller's session), so the run's daemons, each a session of its own, can call
+# kubectl in between without changing the answer.
 guarded_by_lock_read() {
-  local n
-  n=$(grep -nF -- "$1" "$fake/kubectl.log" | tail -n1 | cut -d: -f1)
-  { [ -n "$n" ] && ((n > 1)); } || return 1
-  sed -n "$((n - 1))p" "$fake/kubectl.log" | grep -q 'get configmap dispatch-loadtest-lock'
+  local entry sid
+  entry=$(grep -F -- "$1" "$fake/kubectl-calls.log" | tail -n1)
+  [ -n "$entry" ] || return 1
+  sid=${entry%%$'\t'*}
+  awk -F '\t' -v g="$sid" -v pat="$1" '
+    $1 != g { next }
+    index($0, pat) { before = prev }
+    { prev = $0 }
+    END { exit (index(before, "get configmap dispatch-loadtest-lock") ? 0 : 1) }' "$fake/kubectl-calls.log"
 }
 
 # all_gone PID...: none of the pids is a live process any more.
@@ -2294,13 +2309,21 @@ run_cluster hold --namespace "$ns" --for 1h
 [ -f "$hold_dir/hold-until" ] || fail "hold wrote no hold-until in $hold_dir: $(cat "$tmp/out")"
 hold_hb=$(<"$hold_dir/heartbeat.pid")
 hold_patches=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
-sleep 1
-hold_patches_after=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
+# Wait on events, not on time: the fake sleep makes each 60 s cycle return at once, so a held
+# heartbeat patches again and again; three more patches after hold returned, with no command of
+# the run alive, are three cycles the hold kept going. The 300 s is a hang's backstop only.
+hold_patches_after=$hold_patches
+for ((i = 0; i < 3000; i++)); do
+  hold_patches_after=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
+  ((hold_patches_after < hold_patches + 3)) || break
+  kill -0 "$hold_hb" 2>/dev/null || break
+  sleep 0.1
+done
 hold_alive=no
 kill -0 "$hold_hb" 2>/dev/null && hold_alive=yes
 [ "$hold_alive" = yes ] ||
   fail "the heartbeat of a held run stopped although no command of it runs: 15 min later another worker's up calls the kept copy stale and prints the down that deletes it"
-((hold_patches_after > hold_patches)) ||
+((hold_patches_after >= hold_patches + 3)) ||
   fail "the heartbeat of a held run patched the lock no more than before ($hold_patches_after, was $hold_patches): the kept run's lock ages and goes stale"
 run_cluster status --namespace "$ns"
 grep -q 'hold: until ' "$tmp/out" || fail "status does not show the hold's expiry: $(cat "$tmp/out")"
