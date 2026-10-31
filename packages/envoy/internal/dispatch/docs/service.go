@@ -280,8 +280,9 @@ type Service struct {
 	// (*preloadedDocument), for the room load that socket makes next (takePreload).
 	preloads sync.Map
 	// schemaAdmissions holds each document socket's schema admission, from authorize until the
-	// socket ends: the token's answer reads it (authorizeSchemaVersion), and so does the re-check
-	// that closes a socket the live fleet no longer admits (RunSchemaAdmission).
+	// socket ends: a token's answer reads the admission of the socket that sent it
+	// (authorizeSchemaVersion), and the re-check that closes a socket the live fleet no longer
+	// admits walks them all (RunSchemaAdmission).
 	schemaAdmissions schemaAdmissions
 	// replicas holds, for each resident room document, a weak pointer to the replica its update
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
@@ -676,7 +677,7 @@ func New(deps Deps) *Service {
 
 	service.srv = newRoomServer(srv)
 	srv.Authorize = service.authorize
-	srv.OnTokenAuth = service.authorizeSchemaVersion
+	srv.OnTokenAuthContext = service.authorizeSchemaVersion
 	srv.OnInject = service.allowInject
 	srv.OnLoadDocument = service.onLoadDocument
 	srv.OnLastPeer = service.settleLastPeer

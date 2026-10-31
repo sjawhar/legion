@@ -257,13 +257,15 @@ func TestSchemaAdmissionOfAClosedIssueIsReadOnly(t *testing.T) {
 	}
 }
 
-// The provider authenticates with its schema version alone. A token no socket of the room
-// presented and is still waiting to authenticate is read-only: with no socket at all, and once the
-// one socket that presented it has had its answer.
+// The provider authenticates with its schema version alone, and the answer is the admission of
+// the socket that sent the token: a token that reaches the service outside any socket - a
+// context carrying no admission - is read-only, and so is one naming a schema_version its own
+// socket did not present. A socket's own token is answered its own admission as often as it
+// sends it.
 func TestATokenNoWaitingSocketPresentedIsReadOnly(t *testing.T) {
 	service, artifactID, server := newAdmissionServer(t, false)
 	version := strconv.Itoa(pmdoc.SchemaVersion())
-	if config, err := service.authorizeSchemaVersion(artifactID, version); err != nil || !config.ReadOnly {
+	if config, err := service.authorizeSchemaVersion(context.Background(), artifactID, version); err != nil || !config.ReadOnly {
 		t.Errorf("a token with no socket = %#v, %v; want read-only", config, err)
 	}
 
@@ -271,19 +273,20 @@ func TestATokenNoWaitingSocketPresentedIsReadOnly(t *testing.T) {
 	if !tokenWritable(t, connection, artifactID, version) {
 		t.Fatal("a current page's first token was answered read-only, want read-write")
 	}
-	if tokenWritable(t, connection, artifactID, version) {
-		t.Error("the same token sent again, with no socket waiting for it, was answered read-write, want read-only")
+	if !tokenWritable(t, connection, artifactID, version) {
+		t.Error("the same socket's token sent again was answered read-only; its own admission is read-write until its socket ends")
 	}
 	other := mustDialPage(t, server.URL, artifactID, page(pmdoc.SchemaVersion(), pmdoc.SchemaCreatable()))
 	if tokenWritable(t, other, artifactID, "1") {
-		t.Error("a token naming a version no socket presented was answered read-write, want read-only")
+		t.Error("a token naming a version its own socket did not present was answered read-write, want read-only")
 	}
 }
 
-// Two sockets of one room presenting one schema version share one token, so the answer to a token
-// is ambiguous while two waiting sockets were admitted differently. A second socket admitted
-// otherwise than one still waiting for its token is refused, and its provider retries; once the
-// first has its answer, the second is accepted.
+// Two sockets of one room presenting one schema version share one token, and each is answered
+// its own admission, so neither waits on the other: a second socket admitted read-only beside a
+// writable one - a process that creates what its page cannot represent joined between them - is
+// accepted rather than refused, and the one token they share is answered read-write to the first
+// and read-only to the second.
 func TestASecondSocketAdmittedOtherwiseWaitsForTheFirstSocketsToken(t *testing.T) {
 	service, artifactID, server := newAdmissionServer(t, false)
 	first := mustDialPage(t, server.URL, artifactID, page(1, 1))
@@ -292,21 +295,16 @@ func TestASecondSocketAdmittedOtherwiseWaitsForTheFirstSocketsToken(t *testing.T
 	}
 	fleetProcess(t, service, 3, 2, 0)
 
-	second, response, err := dialPage(server.URL, artifactID, page(1, 1))
-	if err == nil {
-		_ = second.Close()
-		t.Fatal("a second socket admitted read-only beside a writable one waiting for the same token was accepted")
-	}
-	if !errors.Is(err, gws.ErrBadHandshake) || response == nil || response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("the second socket's refusal = %v, response %#v; want a 401 handshake", err, response)
+	second := mustDialPage(t, server.URL, artifactID, page(1, 1))
+	if probeWritable(t, second, artifactID) {
+		t.Fatal("a page that cannot represent what the newer process creates was accepted writable")
 	}
 
 	if !tokenWritable(t, first, artifactID, "1") {
 		t.Error("the first socket's token was answered read-only, want its own read-write admission")
 	}
-	if socket, authenticated := admission(t, server.URL, artifactID, page(1, 1), "1"); socket || authenticated {
-		t.Errorf("the second socket, once the first had its answer, was admitted writable=%t by its socket and %t by its token, want read-only",
-			socket, authenticated)
+	if tokenWritable(t, second, artifactID, "1") {
+		t.Error("the second socket's token was answered read-write, want its own read-only admission")
 	}
 }
 
@@ -514,94 +512,97 @@ func TestARevokedSocketTakesNoWriteAfterItsCloseFrame(t *testing.T) {
 	}
 }
 
-// Two pages of one room presenting one schema_version share a token, and a re-check can revoke one
-// of them while its token is still on its way: after a rollback the page creating up to version 2
-// is no longer admitted, and the page creating up to 1 stays writable. The revoked socket keeps
-// its place in the key's waiting list, so the token that arrives first takes it and the page that
-// is still admitted is not left read-only. A read-only socket of that key is refused while the
-// revoked entry waits, since its own token could otherwise take the writable answer that entry
-// holds.
+// Two pages of one room presenting one schema_version share a token, and a re-check can revoke
+// one of them while its token is still on its way: after a rollback the page creating up to
+// version 2 is no longer admitted, and the page creating up to 1 stays writable. The older page
+// was admitted first and the newer beside it. Each socket's token is answered that socket's own
+// admission, so the one the fleet still admits is read-write whichever of the two tokens comes
+// first, and the revoked socket's own token is read-only. The revoked page's read-only reconnect
+// joins them rather than being refused: no socket's answer is another's to take.
 func TestARevokedSocketKeepsItsPlaceUntilItsTokenIsAnswered(t *testing.T) {
 	var admissions schemaAdmissions
 	key := schemaAdmissionKey{room: "room", token: "2"}
 	older := &schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 1, valid: true}, writable: true}
 	newer := &schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 2, valid: true}, writable: true}
 	for _, admission := range []*schemaAdmission{older, newer} {
-		if !admissions.admit(admission) {
-			t.Fatalf("a page creating up to %d was refused beside the sockets of its key", admission.page.creatable)
-		}
+		admissions.admit(admission)
 	}
 
 	revoked := admissions.revokeUnless(schemaFleet{minVersion: 2, maxCreatable: 1})
 	if len(revoked) != 1 || revoked[0] != newer {
 		t.Fatalf("the rollback revoked %d sockets, want the newer page's alone", len(revoked))
 	}
-	if admissions.admit(&schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 2, valid: true}}) {
-		t.Error("the revoked page's reconnect was admitted read-only while the revoked socket waits for its token")
+	reconnect := &schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 2, valid: true}}
+	admissions.admit(reconnect)
+	if admissions.writable(reconnect, key) {
+		t.Error("the revoked page's read-only reconnect was answered read-write")
 	}
-	if !admissions.answer(key) {
-		t.Fatal("the first token of the key was answered read-only, want the writable admission both sockets hold")
+	if admissions.writable(newer, key) {
+		t.Fatal("the revoked socket's own token was answered read-write, want read-only")
 	}
-	if !admissions.answer(key) {
-		t.Error("the second token of the key was answered read-only; the socket that is still admitted holds a writable admission")
+	if !admissions.writable(older, key) {
+		t.Error("the socket that is still admitted was answered read-only; it holds a writable admission")
 	}
 }
 
-// A revoked socket's entry waits behind every socket of its key that is still open. Here the
-// newer page is admitted first and the older one beside it, and the rollback revokes the newer:
-// the token that arrives is the older page's, and its answer must come from its own entry, not
-// from the revoked one ahead of it. A revoked entry that answered in a live socket's place would
-// leave that socket's entry waiting for the life of its socket, and the key would refuse every
-// read-only socket until that page closed - the revoked page's own read-only reconnect among
-// them.
+// Here the newer page is admitted first and the older one beside it, and the rollback revokes
+// the newer: the revoked socket's token, already read when the revoke landed, arrives first and
+// is answered read-only, taking nothing from the older page. The revoked socket's ServeHTTP then
+// returns and forgets its admission, and the older page's token - the only one left of that
+// token - is still answered the read-write admission of its own socket. A read-only reconnect of
+// the revoked page joins beside it.
 func TestARevokedSocketsEntryAnswersBehindEverySocketStillOpen(t *testing.T) {
 	var admissions schemaAdmissions
 	key := schemaAdmissionKey{room: "room", token: "2"}
 	newer := &schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 2, valid: true}, writable: true}
 	older := &schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 1, valid: true}, writable: true}
 	for _, admission := range []*schemaAdmission{newer, older} {
-		if !admissions.admit(admission) {
-			t.Fatalf("a page creating up to %d was refused beside the sockets of its key", admission.page.creatable)
-		}
+		admissions.admit(admission)
 	}
 
 	revoked := admissions.revokeUnless(schemaFleet{minVersion: 2, maxCreatable: 1})
 	if len(revoked) != 1 || revoked[0] != newer {
 		t.Fatalf("the rollback revoked %d sockets, want the newer page's alone", len(revoked))
 	}
-	if !admissions.answer(key) {
-		t.Fatal("the older page's token was answered read-only, want the writable admission both sockets hold")
-	}
-	if !older.answered {
-		t.Error("the older page's token was answered from the revoked entry, and the older socket's own entry is still waiting for an answer it will never get")
+	if admissions.writable(newer, key) {
+		t.Fatal("the revoked socket's own token was answered read-write, want read-only")
 	}
 	admissions.remove(newer)
 
-	if !admissions.admit(&schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 2, valid: true}}) {
-		t.Error("the revoked page's read-only reconnect was refused once the revoked socket was gone, since the older page's entry is still waiting for its token")
+	if !admissions.writable(older, key) {
+		t.Error("the older page's token was answered read-only once the revoked socket was gone; its own admission is read-write")
+	}
+	reconnect := &schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 2, valid: true}}
+	admissions.admit(reconnect)
+	if admissions.writable(reconnect, key) {
+		t.Error("the revoked page's read-only reconnect was answered read-write")
 	}
 }
 
-// A revoked socket whose token already had its answer is forgotten as it is revoked: nothing of
-// its key waits for a token any longer, so the next token of that key is answered read-only.
+// A revoked socket answers nothing read-write afterwards, its own token included, and its
+// ServeHTTP is what forgets it: the registry the re-check walks is empty once that socket has
+// ended, so no later pass revokes it a second time.
 func TestARevokedSocketWhoseTokenWasAnsweredIsForgotten(t *testing.T) {
 	var admissions schemaAdmissions
 	key := schemaAdmissionKey{room: "room", token: "3"}
 	socket := &schemaAdmission{key: key, page: schemaPage{version: 3, creatable: 2, valid: true}, writable: true}
-	if !admissions.admit(socket) {
-		t.Fatal("the newer page's socket was refused on a key of its own")
-	}
-	if !admissions.answer(key) {
+	admissions.admit(socket)
+	if !admissions.writable(socket, key) {
 		t.Fatal("the socket's token was answered read-only, want its writable admission")
 	}
 
 	if revoked := admissions.revokeUnless(schemaFleet{minVersion: 2, maxCreatable: 1}); len(revoked) != 1 || revoked[0] != socket {
 		t.Fatalf("the rollback revoked %d sockets, want the newer page's", len(revoked))
 	}
-	if waiting := admissions.sockets[key]; len(waiting) != 0 {
-		t.Errorf("the key holds %d sockets after the revoke, want the answered one forgotten", len(waiting))
+	if admissions.writable(socket, key) {
+		t.Error("the revoked socket's token was answered read-write, want read-only")
 	}
-	if admissions.answer(key) {
-		t.Error("a token of the revoked socket's key was answered read-write, want read-only")
+	if revoked := admissions.revokeUnless(schemaFleet{minVersion: 2, maxCreatable: 1}); len(revoked) != 0 {
+		t.Errorf("a second pass revoked %d sockets, want the revoked one left as it is", len(revoked))
+	}
+
+	admissions.remove(socket)
+	if held := len(admissions.sockets); held != 0 {
+		t.Errorf("the registry holds %d sockets once the revoked one has ended, want none", held)
 	}
 }

@@ -201,7 +201,7 @@ func TestSchemaAdmissionAuthorizesAPagePresentingItsCreatableVersionReadWrite(t 
 	if !ok || accepted.ReadOnly {
 		t.Fatalf("socket authorization = %#v, %t; want read-write acceptance", accepted, ok)
 	}
-	authenticated, err := service.authorizeSchemaVersion(artifactID, version)
+	authenticated, err := service.authorizeSchemaVersion(request.Context(), artifactID, version)
 	if err != nil || authenticated.ReadOnly {
 		t.Fatalf("token authorization = %#v, %v; want read-write", authenticated, err)
 	}
