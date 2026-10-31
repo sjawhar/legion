@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-264",
+  "completed": "2026-10-31T15:36:00Z",
+  "round": 5,
+  "reviewedHead": "f68d1f2e3698284be3e345caaf7327de5f94b22b (code head and CI head c9f4cb6e1f1a)",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "fingerprint": "683c93b6 b3194dfab6b25bf5359906b1a82e99faba1de700e1a5ec75e823f224f838e71c -> f68d1f2e 62d7c68b11fa55f14c48065f9099e53e752b762d9d8c00e8bd514f07908a8e17: changed, so this is a new round. The PR's own diff moved in one file only: the /ws/doc/{room} row of packages/envoy/cmd/dispatch/AGENTS.md, now this branch's cookie-only sentence followed by main's #2526 tail.",
+  "merge": "c9f4cb6e merges main's ten commits; its one conflict is that AGENTS.md row. main's #2526, which removed the keep-alive, touches the same docs/websocket.go and docs/service.go as this PR's removal of the bearer door. git merged them in separate hunks: no bearer path, ActorHeader, AgentTokens or refuseUnstorableActor came back. The heartbeat re-resolution still closes the socket, because ygo v1.54.1-sami.1 watches the request context. No migration collides.",
+  "ci": "Run 41205769030 at c9f4cb6e: lint, typecheck, test and pr-title (the required set) succeeded, as did every other job but two. dispatch was still in progress. envoy-session-stall failed in envoy-client's nats-stall.test.ts row B (stalled redials, a timing assertion). Neither this PR nor the merge touches that code: between 683c93b6 and c9f4cb6e nothing changed under packages/envoy-client or cmd/listener. The same job passed at 6c1023be with the same PR code, and the check is not required.",
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at f68d1f2e (go build, go vet, and the docs and api websocket, scope and broker-token suites pass against a real Postgres)",
+    "codeQuality": "Verdict: APPROVE at f68d1f2e"
+  },
+  "keyFindings": []
+}

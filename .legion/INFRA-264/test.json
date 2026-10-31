@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-264",
+  "completed": "2026-10-31T13:55:00Z",
+  "round": 6,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round six follows the forward merge c9f4cb6e, which the reviewer's approval at 683c93b6 preceded. I computed the unchanged-diff fingerprint at the head my last E2E line names (97c793359d3a → 80def57ef7f08db380f243b87aa3e2717f5d7c0d075921191e39753a3b9f5e5d) and at this head (d914571538ed → 62d7c68b11fa55f14c48065f9099e53e752b762d9d8c00e8bd514f07908a8e17): different, so this is a full test round rather than a bare-gate re-check. Reading the two fingerprint diffs against each other shows the whole of that difference: the pull request's own lines moved in exactly two places, both prose — the `/ws/doc/{room}` row of cmd/dispatch/README.md, where main rewrote the row this branch also rewrites and the merge keeps both sides (this branch's `user` and its sentence that the room takes a person's cookie and no bearer, on top of main's new text), and a code comment that now names migration 0021's expiry index rather than 0020's, which is the reviewer's own commit 6c1023be. No executable line of the branch's own diff changed. I ran the full battery anyway, as the skill requires after any forward merge, on a live pair rebuilt at this head and driven by the second DPoP/RFC 8693 client written from the RFCs with the Go standard library alone: all three of the implementer's proofs for this round hold, and every acceptance line of rounds one to five repeats."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The forward merge changed the branch's own diff in prose alone, and the one conflict keeps both sides: the document room takes a person's cookie and no bearer (INFRA-264).",
+      "surface": "The fingerprint of the pull request's own diff at both heads, read line by line, and then the room itself on the live Dispatch.",
+      "command": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' at 97c793359d3a and at d914571538ed, diffed against each other; then /ws/doc/{EXAMPLE-1's spec} upgraded with the shared bearer and the old X-Dispatch-Actor header, with a broker token under DPoP, and with a signed-in person's cookie",
+      "observed": "The two diffs differ in two hunks only: the README's `/ws/doc/{room}` row (`user or bearer` → `user`, with this branch's sentence kept above main's new text) and a comment naming 0021's index in place of 0020's. On the live server the shared bearer → 401, a broker token → 401, the person's cookie → 101 Switching Protocols, and the repository's browser suite passes 19 of 19 document and collaboration rows in a real Chromium.",
+      "headSha": "d914571538edd578946d80a592ff978847a4973c",
+      "negativeControl": "The same shared bearer on the HTTP API in the same run → 200 at /api/v1/whoami, so the socket's 401 is the deleted door and not a wrong token."
+    },
+    {
+      "criterion": "The merge carries nothing broken into the branch: a caller presenting a broker-issued token is accepted, Dispatch reports the session, the person and the project, and every presentation defect is refused with its own code (INFRA-264).",
+      "surface": "A live pair rebuilt at this head: packages/envoy/scripts/dev-broker.sh and packages/dispatch `bun run dispatch:local`, with a counting proxy between them.",
+      "command": "GET /api/v1/whoami under DPoP; a write with no actor and one naming another session; the same whoami under Bearer, proved by a second key, with one jti replayed, with the ath dropped, and with an htu of another origin",
+      "observed": "200 {\"kind\":\"agent\",\"owner\":\"ada@example.com\",\"project\":\"EXAMPLE\",\"service\":null,\"session\":\"example-worker-session\"}; the plain write 201; the mismatching actor 403 ACTOR_SESSION_MISMATCH; Bearer 401; the second key 401 BROKER_TOKEN_KEY_MISMATCH; the replay, the dropped ath and the foreign htu 401 each.",
+      "headSha": "d914571538edd578946d80a592ff978847a4973c",
+      "negativeControl": "The accepted read and write in the same run, so each refusal is the one thing it names."
+    },
+    {
+      "criterion": "A credential naming one project writes that project and nothing else, by every addressing kind and every uuid spelling Postgres accepts; a deployment write and a write into another session's conversation are refused (INFRA-265).",
+      "surface": "The same live pair, with EXAMPLE as the token's project and the seed's CORE as the other.",
+      "command": "The CORE comment addressed canonically, with no hyphens, with a hyphen after each group of four, in upper case and in braces; the caller's own comment in the first four spellings; an unknown uuid; POST /api/v1/issues/CORE-1/comments; POST /api/v1/projects; a multipart upload into the planner's session and into its own",
+      "observed": "All five CORE spellings → 403; all four of its own → 200; the unknown uuid → 403 'this write resolves to no project of that credential's'; the CORE write → 403 PROJECT_SCOPE naming both; POST /api/v1/projects → 403 PROJECT_SCOPE_DEPLOYMENT; the other session's conversation → 403, its own → 201.",
+      "headSha": "d914571538edd578946d80a592ff978847a4973c",
+      "negativeControl": "The caller's own project writes throughout the same run, and a signed-in person's cookie created both projects and their issues, so the check is a no-op for a credential naming none."
+    },
+    {
+      "criterion": "An unusable project scope is still refused rather than read as unscoped, and the two the broker writes are accepted (INFRA-264, INFRA-265; review round 3's minor).",
+      "surface": "The same live pair with the counting proxy in its rewrite mode, so Dispatch's reader meets an introspection answer the exchange never writes; each probe on a freshly exchanged token.",
+      "command": "PUT /__rewrite {\"project_scope\":\"named\",\"project\":\"\"} then a read and a write; then {\"project_scope\":\"\"}; then {\"project_scope\":\"person\",\"project\":\"\"}; then the rewrite off",
+      "observed": "A named scope with an empty project → 401 BROKER_TOKEN_NOT_A_SESSION at the read and at the write; an empty scope → the same; the person scope → 200 with project null; with the rewrite off, the broker's own named answer → 200 with project EXAMPLE.",
+      "headSha": "d914571538edd578946d80a592ff978847a4973c",
+      "negativeControl": "The two accepted answers around the refusals in the same run are the control; an unknown scope word was refused the same way earlier in the run."
+    },
+    {
+      "criterion": "A revoked token stops working within the cache's few seconds, on an exchanged token and on a dev box token; a refusal is never cached; the unauthenticated path is bounded before it spends the broker (INFRA-264; the architect's point 4; plan P5).",
+      "surface": "The same live pair with the counting proxy, and a machine login driven by hand at the broker.",
+      "command": "whoami to cache, POST /v1/oauth/revoke as the dispatch caller, then whoami every half second; the same with POST /v1/launcher-credentials/{id}/revoke-by-approver; one unknown token twice; forty-five unknown tokens from one address, then one more read with its headers",
+      "observed": "Exchanged token accepted to t=+4.7 s, 401 BROKER_TOKEN_NOT_ACTIVE at t=+5.2 s; the dev box token (whoami project null, session ada-devbox, writing CORE and EXAMPLE) accepted to t=+4.4 s, refused at t=+4.9 s. One unknown token twice cost two introspections. Five presentations within 1.5 s cost one introspection, a sixth after five seconds a second, ten concurrent exactly one with all ten 200. The flood ends 429 Too Many Requests with 'Retry-After: 1' and BROKER_TOKEN_RATE_LIMITED, the refused ones never reaching the broker.",
+      "headSha": "d914571538edd578946d80a592ff978847a4973c",
+      "negativeControl": "Both revocations presented by the introspection-only caller → 403 ACCOUNT_LACKS_POWER naming that caller and that route, with the token still accepted afterwards; and the machine login's own token, before the exchange, → 401 BROKER_TOKEN_NOT_A_SESSION."
+    },
+    {
+      "criterion": "Both renumbered migrations still apply at the merge head, and a broker outage fails closed on every class of route.",
+      "surface": "The live Dispatch's and the live broker's own databases, and every route class with cmd/broker stopped.",
+      "command": "The servers' boot ran their migrations; `select max(version)` on each; then, with the broker killed, whoami, a write to its own project, a write to another, POST /api/v1/projects and the agent-artifact route",
+      "observed": "Dispatch reports version 150, the broker 21. With the broker down all five routes answered 503 BROKER_UNAVAILABLE, the caller's own targets and the session-scoped route included.",
+      "headSha": "d914571538edd578946d80a592ff978847a4973c",
+      "negativeControl": "In the same outage the shared token and a person's cookie both answered 200 at /api/v1/whoami, so the 503 is the broker-token branch alone."
+    },
+    {
+      "criterion": "The named suites of every scope pass at the merge head, the tree is gofmt-clean, and the private-name check passes.",
+      "surface": "The packages' own suites against a real Postgres, and the repository's own scripts.",
+      "command": "go test -run of the project-scope, broker-token, agent-artifact and rate-refusal tests in ./internal/dispatch/api; ./internal/brokertoken/..., ./internal/ratelimit/... and ./internal/broker/oauth/...; TestAPodWritesOnlyUnderASessionRegisteredForIt and TestAListedAccountReachesOnlyItsOwnRoutes in ./cmd/broker; TestEveryAccountRouteDeclaresItsPower and the Flood tests in ./internal/broker/api; gofmt -l envoy; bash .github/scripts/check-private-names.sh",
+      "observed": "All pass: internal/dispatch/api 10.3 s, internal/brokertoken 16.5 s, internal/ratelimit 0.03 s, internal/broker/oauth 64.9 s (the claim-list check among them), cmd/broker 37.2 s, internal/broker/api 7.9 s. gofmt lists nothing. check-private-names exits 0 over 6731 files.",
+      "headSha": "d914571538edd578946d80a592ff978847a4973c",
+      "negativeControl": "TestEveryMutatingRouteIsClassed's own sub-tests are the control and pass, which is what proves this merge left no mutating route of main's undecided."
+    }
+  ],
+  "ciAtTheHead": {
+    "note": "Read on GitHub and recorded for no later step to trust; no lane was re-run as evidence and none was waited for.",
+    "pullRequest": "sjawhar/legion#2541 at d914571538edd578946d80a592ff978847a4973c, mergeable MERGEABLE, mergeStateStatus BLOCKED, reviewDecision APPROVED",
+    "runs": "The head is the handoff commit and carries `skip-checks: true`, so the merge head c9f4cb6e is where CI runs: run 41205769030 (CI) and 41205768973 (PR Title) were both queued at the time of writing. Worth the next reader's attention: no CI run of this branch has settled yet — the runs at 525d94c5 and 6c1023be were cancelled when the next push superseded them, and this one is queued behind the runner backlog. That is the base's required checks not yet green, which is what mergeStateStatus BLOCKED says; it is not a red, and a required check that settles red sends the work back on its own."
+  },
+  "environment": {
+    "note": "This round the workspace survived, and so did the driver and the harness. Another role of this pod runs the Postgres harness on 127.0.0.1:5433, so this round used that server and created its own databases on it. gVisor still answers SO_PEERPIDFD 'protocol not available', so a machine login is driven as its four HTTP steps; webkit and firefox cannot be installed here, so only chromium rows run, and the browser suite now carries 19 document and collaboration rows after main added two."
+  }
+}
