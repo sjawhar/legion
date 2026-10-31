@@ -535,7 +535,9 @@ func TestMigrationTwentyAdmitsAVMEnrollment(t *testing.T) {
 // TestTheBuildBeforeTwentyStillReadsAndWritesItsOwnKinds holds 0020 to a rolling deploy, where the
 // build before it keeps serving over the migrated database: the session and pod rows that build
 // wrote at 0019 survive 0020 unchanged, and the session and pod rows it writes after 0020 are
-// stored and read back as at 0019.
+// stored and read back as at 0019. It writes a vm row after 0020 as well, so the test fails unless
+// 0020 widened the check: session and pod alone pass under 0012's constraint, which would let an
+// empty 0020 file through.
 func TestTheBuildBeforeTwentyStillReadsAndWritesItsOwnKinds(t *testing.T) {
 	ctx := context.Background()
 	tx, apply := migrationSchema(t, "migration_twenty_previous_build", 20)
@@ -563,6 +565,7 @@ func TestTheBuildBeforeTwentyStillReadsAndWritesItsOwnKinds(t *testing.T) {
 
 	rows["00000000-0000-0000-0000-0000000000e3"] = enrol("after 0020", "00000000-0000-0000-0000-0000000000e3", "session")
 	rows["00000000-0000-0000-0000-0000000000e4"] = enrol("after 0020", "00000000-0000-0000-0000-0000000000e4", "pod")
+	rows["00000000-0000-0000-0000-0000000000e5"] = enrol("after 0020", "00000000-0000-0000-0000-0000000000e5", "vm")
 	for id, want := range rows {
 		var got enrollment
 		if err := tx.QueryRow(ctx, `select kind, runtime_id, thumbprint from enrollments where id = $1`, id).
