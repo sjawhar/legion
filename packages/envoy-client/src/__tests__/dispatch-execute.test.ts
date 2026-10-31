@@ -5940,28 +5940,34 @@ describe("executeDispatchTool", () => {
       });
 
       // `reply_to_ask` answers a part, so the refusal hands it the whole reference rather than
-      // the ask's id, which would drop the part.
+      // the ask's id, which would drop the part. A pin goes: `reply_to_ask` refuses a part
+      // pinned to a revision.
       test("a tool that would act on the part's owner refuses it, naming the part reply_to_ask answers", async () => {
-        const refused = await executeDispatchTool({
-          tool: "dispatch_comment",
-          args: { ref: `${askRef}#b-b2`, body: "Yes, Friday." },
-          cwd: "/workspace",
-          host: "omp",
-          config,
-          env: {},
-          exec: repoExec("owner/repo"),
-          fetchImpl: (() => {
-            throw new Error("network must not be called");
-          }) as unknown as typeof fetch,
-        }).then(
-          () => [],
-          (error: unknown) => {
-            if (!(error instanceof ToolInputError)) throw error;
-            return error.problems;
-          }
-        );
-        expect(refused).toEqual([
+        const refused = async (ref: string) =>
+          await executeDispatchTool({
+            tool: "dispatch_comment",
+            args: { ref, body: "Yes, Friday." },
+            cwd: "/workspace",
+            host: "omp",
+            config,
+            env: {},
+            exec: repoExec("owner/repo"),
+            fetchImpl: (() => {
+              throw new Error("network must not be called");
+            }) as unknown as typeof fetch,
+          }).then(
+            () => [],
+            (error: unknown) => {
+              if (!(error instanceof ToolInputError)) throw error;
+              return error.problems;
+            }
+          );
+
+        expect(await refused(`${askRef}#b-b2`)).toEqual([
           `ref ${askRef}#b-b2 names block b2 of an ask on CORE-1; dispatch comment would act on CORE-1 and drop the block: reply under it with reply_to_ask ${askRef}#b-b2 and issue CORE-1`,
+        ]);
+        expect(await refused(`${askRef}#b-b2@v2`)).toEqual([
+          `ref ${askRef}#b-b2@v2 names block b2 of an ask on CORE-1; dispatch comment would act on CORE-1 and drop the block: reply under it with reply_to_ask ${askRef}#b-b2 and issue CORE-1`,
         ]);
       });
     });
@@ -9511,6 +9517,39 @@ describe("executeDispatchTool", () => {
     const part = `dispatch://DSP-1/ask/${parent}#b-b3`;
     expect(await problems(part)).toEqual([
       `reply_to ${part} names a block of an ask, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>); answer it with dispatch comment --reply-to-ask '${part}'`,
+    ]);
+  });
+
+  test("a comment reply refuses a reply_to_ask that names no part of an ask", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const problems = async (replyToAsk: string) => {
+      const error = await executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Yes", reply_to_ask: replyToAsk },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (() => {
+          throw new Error("network must not be called");
+        }) as unknown as typeof fetch,
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+      if (!(error instanceof ToolInputError)) throw new Error("expected ToolInputError");
+      return error.problems;
+    };
+    const block = `dispatch://DSP-1/comment/${parent}#b-b2`;
+
+    // A block of another item is no part of an ask: what `reply_to_ask` answers is a part of the
+    // ask it names, so the refusal hands the block to the field that answers it.
+    expect(await problems(block)).toEqual([
+      `reply_to_ask ${block} names a block of a comment, but reply_to_ask answers a part of the ask it names (dispatch://KEY/ask/<id>#b-<block id>); answer it with dispatch comment --reply-to '${block}'`,
+    ]);
+    expect(await problems(`dispatch://DSP-1/ask/${parent}#b-b2@v2`)).toEqual([
+      `reply_to_ask dispatch://DSP-1/ask/${parent}#b-b2@v2 names revision 2 of the block, but a reply answers the block whatever its text becomes: drop @v2`,
     ]);
   });
 

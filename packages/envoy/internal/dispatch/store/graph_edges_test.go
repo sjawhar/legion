@@ -179,10 +179,10 @@ func TestGraphEdgesCarryBlockMentionsAndPartOf(t *testing.T) {
 // A current block of a comment, a message or an ask is a node of the graph under its storage kind
 // (comment_block, message_block, ask_block): it is part_of its item, each link it holds is an edge
 // out of it, and a reply that names it is a replies_to edge to it. A removed block is neither
-// part_of its item nor the source of the links it held. A reply in an ask's thread names an ask
-// part in the same comments.replies_to_block column a reply to a comment names a comment block in,
-// so the two kinds are told apart by the node id's prefix: the ask part's reply reaches ask_block
-// and the comment block's reply comment_block.
+// part_of its item nor the source of the links it held. A reply whose request names an ask names
+// a part of that ask in the same comments.replies_to_block column a reply to a comment names a
+// comment block in, so the two kinds are told apart by the node id's prefix: the ask part's
+// reply reaches ask_block and the comment block's reply comment_block.
 func TestItemBlockArmsAreGraphEdges(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)

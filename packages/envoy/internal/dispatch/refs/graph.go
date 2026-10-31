@@ -194,27 +194,6 @@ func documentBlockIDs(param string) string {
 	return `(select d.node_id from document_blocks d join artifacts a on a.id = d.artifact_id where a.ref_key = ` + param + `)`
 }
 
-// asksCitingTheDocument lists, as the ask itself, every ask holding a current part that cites
-// the document whose ref_key is the numbered parameter param, or one of that document's current
-// blocks: the arms a whole-document "in" read adds (readEdgeRows). An ask's own refs row holds
-// the links of its question alone, so a link written in an option or in the answer is in
-// ask_block_refs and in no edge of the ask's row, where a comment's or a message's row holds
-// every link its blocks hold. Each ask is listed once per target it cites, at the latest time
-// one of its parts took that link; the read's own dedupe (ReferencedBy) keeps it once overall,
-// as it does for a comment citing the document from two blocks.
-func asksCitingTheDocument(param string) string {
-	tables, _ := ItemAsk.tables()
-	source := `
-		from ` + tables.refs + ` r
-		join ` + tables.blocks + ` b on b.` + tables.item + ` = r.` + tables.item + ` and b.block_id = r.block_id
-		where b.position is not null and r.to_kind = `
-	return `select r.kind, '` + string(ItemAsk) + `', r.ask_id::text, max(r.created_at), max(r.source_seq), null::text` + source + `'artifact' and r.to_id = ` + param + `
-		group by r.kind, r.ask_id
-		union all
-		select r.kind, '` + string(ItemAsk) + `', r.ask_id::text, max(r.created_at), max(r.source_seq), r.to_id` + source + `'block' and r.to_id in ` + documentBlockIDs(param) + `
-		group by r.kind, r.ask_id, r.to_id`
-}
-
 // itemBlockIDs is the node id of every current block of the item of kind whose uuid is the
 // numbered parameter param, the set an "in" arm reads an item's blocks' edges by. A removed block
 // keeps its row with no position, and the edges at it drop out of every list until a revision

@@ -43,10 +43,7 @@ func Closure(ctx context.Context, q Queryer, issueKey string) ([]Member, bool, e
 				or (r.from_kind = 'artifact' and r.from_id in (select id::text from artifacts where issue_key = $1))
 			)
 			union
-			select `+documentOfTarget+`, 1, 'ask', r.ask_id::text
-			from ask_block_refs r
-			join ask_blocks b on b.ask_id = r.ask_id and b.block_id = r.block_id
-			where b.position is not null
+			select `+documentOfTarget+`, 1, 'ask', r.ask_id::text`+askPartLinks+`
 			  and r.ask_id in (select id from asks where issue_key = $1)
 			  and `+documentTarget+`
 			union

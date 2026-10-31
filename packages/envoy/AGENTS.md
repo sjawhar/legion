@@ -2759,8 +2759,12 @@ wording's restore). A part's text is the
 ask row's own: the question, an option as `<label> — <description>` or its label alone, and the
 answer as the one line an `ask.answered` summary renders it. A part is a text of its own rather
 than a span of one body, since an ask has none, so the mentions of each part are read from that
-part's text alone (`askPartPairs`) where a comment's are placed by their offsets. Part ids are
-`b1`, `b2`, … and an edit keeps them as a comment's blocks keep theirs, except that the answer is
+part's text alone (`askPartPairs`) where a comment's are placed by their offsets. What identifies
+a part is its type and its text, and for the answer part its answerer: the identity hash
+`itemblocks.Align` matches on is salted with the part's type (`askPart`), so an option whose text
+is the question's does not take the question's id, and the answer part's hash with the answerer
+as well (`askAnswerPart`), so the same answer from another person is a part of its own. Part ids
+are `b1`, `b2`, … and an edit keeps them as a comment's blocks keep theirs, except that the answer is
 replaced rather than reworded: `itemblocks.Align` takes a variadic list of the types a new block
 replaces instead of rewording, and `indexAskParts` passes the one such type, `refs.AskAnswerPart`
 (a comment's and a message's index passes none), so rule 3 never gives an answer's id to the
@@ -2785,7 +2789,8 @@ onto an ask's detail read, its owner's ask list, the Inbox and every ask payload
 serves (`attachAskPartIDs`, read beside the backlink count; `attachAskEventPartIDs` writes them
 onto the payload's own options and answer, so a payload names the ask's parts as they stand now,
 never what the write recorded, and one the ask has moved past - an `ask.opened` whose options an
-edit replaced - carries none). A payload published live carries none: it is the write's own, and
+edit replaced, an `ask.answered` another answer superseded - carries none). A payload published
+live carries none: it is the write's own, and
 no write knows a part id. No caller writes one either:
 `validateAskOptions` empties the id of every option a write sends, and an ask whose parts are not
 indexed yet carries no id and revision 0, so no reader depends on the index being current. "What

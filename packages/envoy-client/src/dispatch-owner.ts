@@ -50,12 +50,17 @@ export function dispatchDocumentRef(owner: string, slug: string): string {
   return `dispatch://${owner}/artifact/${slug}`;
 }
 
+/** The kinds of item whose blocks are its own rather than a document's: an ask, whose parts are
+ *  its question, its options and its answer; a comment, whose blocks its own revisions number;
+ *  and an issue message, which is never edited, so its blocks carry no revision at all. They are
+ *  the parents a block node naming no document has. */
+export const ITEM_KINDS = ["ask", "comment", "message"] as const;
+
+/** One of those kinds. */
+export type ItemKind = (typeof ITEM_KINDS)[number];
+
 /** The `dispatch://` address of an ask, comment, or message under an owner's address. */
-export function dispatchChildRef(
-  ownerRef: string,
-  kind: "ask" | "comment" | "message",
-  id: string
-): string {
+export function dispatchChildRef(ownerRef: string, kind: ItemKind, id: string): string {
   return `${ownerRef}/${kind}/${id}`;
 }
 
@@ -91,7 +96,7 @@ export interface ParsedDispatchRef {
   /** The reference of the document a block ref of a document names a block of. */
   readonly document?: string;
   /** The ask, comment or issue message a block ref of an item names a block of. */
-  readonly item?: { readonly kind: "ask" | "comment" | "message"; readonly id: string };
+  readonly item?: { readonly kind: ItemKind; readonly id: string };
   /** The version of its document, or the revision of its comment or of its ask's parts, a pinned
    *  block ref (`#b-<id>@v<N>`) names: N's decimal digits as written (`parseBlockFragment`),
    *  which a number past 2^53 would round. */

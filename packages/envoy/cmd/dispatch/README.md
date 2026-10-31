@@ -1671,7 +1671,9 @@ An ask's parts are blocks too (migrations `0150`-`0151`): its question, each of 
 its current answer, in that order (`refs.AskParts`), each a text of its own rather than a span of
 one body, since an ask has no body — the question as the row holds it, an option as
 `<label> — <description>` or its label alone, and the answer as the one line an `ask.answered`
-summary renders it. Parts are named `b1`, `b2`, … as an item's blocks are, and an edit keeps each
+summary renders it. What identifies a part is its type and its text, and for the answer part its
+answerer, so the same answer from another person is a part of its own (`askAnswerPart`). Parts
+are named `b1`, `b2`, … as an item's blocks are, and an edit keeps each
 id the same way, except that an answer is replaced rather than reworded: `itemblocks.Align`
 takes a variadic list of the types a new block replaces instead of rewording, and the ask's
 index passes the answer part's (`refs.AskAnswerPart`), where a comment's and a message's passes

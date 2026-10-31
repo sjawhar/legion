@@ -1323,14 +1323,16 @@ export interface Comment extends AnchorPosition {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
-  /** The block of the comment this reply answers (`reply_to_block`); null on every other
-   *  comment, and absent from a Dispatch older than the field. */
+  /** The block this reply answers (`reply_to_block`): a block of the comment `reply_to` names,
+   *  or, with `ask_id`, a part of that ask; null on every other comment, and absent from a
+   *  Dispatch older than the field. */
   readonly reply_block?: ReplyBlock | null;
 }
 
-/** The block a reply answers: its node id (`comment/<uuid>#b2`), its reference (absent for a
- *  block of a direct message, which has no address), its id, its text cut to 480 characters (the
- *  last text it held once removed), and whether its item's current revision no longer holds it. */
+/** The block a reply answers: its node id (`comment/<uuid>#b2`, or `ask/<uuid>#b2` for a part of
+ *  the ask the reply names), its reference (absent for a block of a direct message, which has no
+ *  address), its id, its text cut to 480 characters (the last text it held once removed), and
+ *  whether its item's current revision no longer holds it. */
 export interface ReplyBlock {
   readonly node: string;
   readonly ref?: string;
@@ -2870,10 +2872,10 @@ export interface CreateCommentInput {
   readonly anchor?: AnchorInput;
   readonly reply_to?: string;
   /** The id of the block the reply answers (`b2`): a block of the comment `reply_to` names,
-   *  checked against that comment before `reply_to` climbs to its thread's head, or, when the
-   *  thread it joins is an ask's (`ask_id`, or a `reply_to` the climb takes to one), a part of
-   *  that ask. `400 INVALID_COMMENT` without `reply_to` or `ask_id`, and for a block the item it
-   *  is checked against does not hold now. */
+   *  checked against that comment before `reply_to` climbs to its thread's head, in an ask's
+   *  thread as anywhere else, or, with `ask_id`, a part of that ask. `400 INVALID_COMMENT`
+   *  without `reply_to` or `ask_id`, and for a block the item it is checked against does not
+   *  hold now. */
   readonly reply_to_block?: string;
   readonly ask_id?: string;
   readonly mentions?: Array<{ readonly target: string }>;

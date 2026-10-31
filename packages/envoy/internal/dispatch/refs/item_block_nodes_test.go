@@ -87,15 +87,15 @@ func TestAnOlderBuildSkipsItemBlockRows(t *testing.T) {
 	}
 	comment := insertIndexedItem(t, tx, ItemComment, "CORE-1", "First cites dispatch://CORE-2.\n\nSecond cites dispatch://CORE-2 again.")
 	message := insertIndexedItem(t, tx, ItemMessage, "CORE-1", "Hello.\n\nSee dispatch://CORE-2.")
-	commentBlock := func(block string) string { return ItemBlockNode(ItemComment, comment, block) }
-	messageBlock := ItemBlockNode(ItemMessage, message, "b2")
+	commentBlock := func(block string) string { return itemBlockNodeID(ItemComment, comment, block) }
+	messageBlock := itemBlockNodeID(ItemMessage, message, "b2")
 	citer := insertIndexedItem(t, tx, ItemComment, "CORE-1", "See dispatch://CORE-1/comment/"+comment+"#b-b2.")
 	ask := insertAsk(t, tx, "CORE-1", "Ship dispatch://CORE-2 first?", model.AskOption{Label: "Yes"})
 	if _, err := ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, itemBlockServer); err != nil {
 		t.Fatalf("index the ask's own references: %v", err)
 	}
 	indexAskPartsAt(t, tx, ask, 1)
-	askBlock := ItemBlockNode(ItemAsk, ask.ID, "b1")
+	askBlock := itemBlockNodeID(ItemAsk, ask.ID, "b1")
 	insertIndexedItem(t, tx, ItemComment, "CORE-1", "See dispatch://CORE-1/ask/"+ask.ID+"#b-b1.")
 
 	incoming := Query{Direction: "in", Kind: "issue", ID: "CORE-2", Kinds: []string{"mentions"}}

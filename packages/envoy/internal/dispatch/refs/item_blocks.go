@@ -60,17 +60,13 @@ func (kind ItemKind) BlockKind() string {
 	return string(kind) + "_block"
 }
 
-// ItemBlockNode is the node id of block blockID of the item of kind whose uuid is itemID, the
-// one shape every block table's node_id column holds and every reference to one resolves
-// through: `comment/<uuid>#b2`, `message/<uuid>#b1`, `ask/<uuid>#b3` for a part of an ask. A
-// document's block is addressed by its ref_key instead (`KEY/slug#b2`), which this never writes.
-func ItemBlockNode(kind ItemKind, itemID, blockID string) string {
-	return string(kind) + "/" + itemID + "#" + blockID
-}
-
-// ParseItemBlockNode reads an item block's node id (ItemBlockNode): the kind of item it is a
-// block of, that item's uuid and the block's id. ok is false for any other text — a document
-// block's node id, which names no item kind, and a kind this build does not know among them.
+// ParseItemBlockNode reads an item block's node id: the kind of item it is a block of, that
+// item's uuid and the block's id. That id is `<item kind>/<item uuid>#<block id>` -
+// `comment/<uuid>#b2`, `message/<uuid>#b1`, `ask/<uuid>#b3` for a part of an ask - the one
+// shape every block table's node_id column holds, which text.TargetID writes for a reference to
+// one and the index writes into the rows. ok is false for any other text — a document block's
+// node id, which is its document's ref_key and names no item kind (`KEY/slug#b2`), and a kind
+// this build does not know among them.
 func ParseItemBlockNode(nodeID string) (kind ItemKind, itemID, blockID string, ok bool) {
 	item, blockID, found := strings.Cut(nodeID, "#")
 	if !found {

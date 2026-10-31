@@ -245,7 +245,7 @@ func TestIndexingAnAskWritesItsPartsAtRevisionOne(t *testing.T) {
 		t.Fatalf("the parts of the ask = %v, want %v", got, want)
 	}
 	for _, part := range readAskParts(t, tx, ask.ID) {
-		if node := ItemBlockNode(ItemAsk, ask.ID, part.blockID); part.nodeID != node {
+		if node := itemBlockNodeID(ItemAsk, ask.ID, part.blockID); part.nodeID != node {
 			t.Errorf("the node id of part %s = %q, want %q", part.blockID, part.nodeID, node)
 		}
 	}

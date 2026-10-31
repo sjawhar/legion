@@ -89,6 +89,8 @@ import {
   dispatchIssueRef,
   documentLabel,
   documentTopicOf,
+  ITEM_KINDS,
+  type ItemKind,
   issueTopic,
   type Owner,
   type OwnerTopic,
@@ -701,7 +703,7 @@ function article(kind: string): string {
  */
 function replyBlockProblem(
   field: "reply_to" | "in_reply_to" | "reply_to_ask",
-  kind: "comment" | "message" | "ask",
+  kind: ItemKind,
   value: string
 ): string | undefined {
   if (!/^dispatch:\/\/[^#]*#b-/.test(value)) return undefined;
@@ -721,11 +723,11 @@ function replyBlockProblem(
             ? `; answer it with ${commandLine("dispatch_comment", { reply_to_ask: value })}`
             : "";
     const named = other === undefined ? "a document" : article(other);
-    // A reply to an ask is a comment in the ask's thread, not a comment of its own that a block
-    // of the ask holds: it answers the part its ask places.
+    // `reply_to_ask` answers one part of the ask it names - its question, an option or its
+    // answer - not a block another item holds.
     const answers =
       kind === "ask"
-        ? "a reply in an ask's thread answers a part of that ask"
+        ? "reply_to_ask answers a part of the ask it names"
         : `${article(kind)} reply answers a block of ${article(kind)}`;
     return `${field} ${value} names a block of ${named}, but ${answers} (${form})${answer}`;
   }
@@ -1250,11 +1252,14 @@ function innerRefProblem(
     ref.owner.kind === "issue"
       ? `issue ${ref.owner.issue}${documentArgument}`
       : `project ${ref.owner.project} and artifact ${ref.artifact}`;
+  // A part of an ask is what `reply_to_ask` answers, so a part's hint hands it the whole
+  // reference; the ask's own id would drop the part it names. The pin goes: `reply_to_ask`
+  // refuses a part pinned to a revision, since a reply answers the part whatever its text
+  // becomes.
+  const partRef = ref.pin === undefined ? refText : refText.slice(0, -`@v${ref.pin}`.length);
   const fix =
     tool === "dispatch_comment" && itemKind === "ask"
-      ? // A part of an ask is what `reply_to_ask` answers, so a part's hint hands it the whole
-        // reference; the ask's own id would drop the part it names.
-        `reply under it with reply_to_ask ${ref.item === undefined ? ref.id : refText} and ${ownerArguments}`
+      ? `reply under it with reply_to_ask ${ref.item === undefined ? ref.id : partRef} and ${ownerArguments}`
       : tool === "dispatch_comment" && itemKind === "comment"
         ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}`
         : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
@@ -2088,15 +2093,11 @@ function referenceLines(read: GraphReferences | string): string[] {
   return read.edges.map(edgeLine);
 }
 
-/** The kinds of item whose blocks are its own, and are numbered by its own revisions rather than
- *  a document's versions: an ask, whose parts are its question, its options and its answer, a
- *  comment and an issue message. They are the parents a block node naming no document has, and
- *  one set serves every read of such a node (`edgeLine`, `nodeLine`), so a part of an ask reads
- *  as its ask, as a block of a comment reads as its comment. */
-const ITEM_KINDS = ["ask", "comment", "message"] as const satisfies readonly GraphNode["kind"][];
-
-/** Whether `kind`, a graph node's, is one of those items. */
-function isItemKind(kind: GraphNode["kind"] | undefined): kind is (typeof ITEM_KINDS)[number] {
+/** Whether `kind`, a graph node's, is one of the items whose blocks are its own (`ITEM_KINDS`):
+ *  the parents a block node naming no document has. One set serves every read of such a node
+ *  (`edgeLine`, `nodeLine`), so a part of an ask reads as its ask, as a block of a comment reads
+ *  as its comment. */
+function isItemKind(kind: GraphNode["kind"] | undefined): kind is ItemKind {
   return ITEM_KINDS.some((item) => item === kind);
 }
 
@@ -2438,9 +2439,10 @@ function askPartEdges(
       rest.push(edge);
       continue;
     }
+    const { block: _block, ...atPart } = edge;
     const held = at.get(part);
-    if (held === undefined) at.set(part, [{ ...edge, block: undefined }]);
-    else held.push({ ...edge, block: undefined });
+    if (held === undefined) at.set(part, [atPart]);
+    else held.push(atPart);
   }
   return { at, rest: { node: incoming.node, edges: rest } };
 }

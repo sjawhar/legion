@@ -285,3 +285,151 @@ func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string) (bo
 	}
 	return true, nil
 }
+
+// askPartLinks is the from and where of a read of the links the current parts of an ask hold,
+// the link row aliased r and the part holding it b, each link sourced as the ask whose part
+// holds it (r.ask_id). An ask's own refs row holds the links of its question alone, so a link
+// written in an option or in the answer is in ask_block_refs and in no edge of the ask's row,
+// where a comment's or a message's row holds every link its blocks hold. A removed part keeps
+// its row with no position, so the links it held drop out until a revision holds the part
+// again. The caller selects its own columns and adds its own conditions with `and`.
+const askPartLinks = `
+		from ask_block_refs r
+		join ask_blocks b on b.ask_id = r.ask_id and b.block_id = r.block_id
+		where b.position is not null`
+
+// asksCitingTheDocument lists, as the ask itself, every ask holding a current part that cites
+// the document whose ref_key is the numbered parameter param, or one of that document's current
+// blocks: the arms a whole-document "in" read adds (readEdgeRows). Each ask is listed once per
+// target it cites, at the latest time one of its parts took that link; the read's own dedupe
+// (ReferencedBy) keeps it once overall, as it does for a comment citing the document from two
+// blocks.
+func asksCitingTheDocument(param string) string {
+	ask := `'` + string(ItemAsk) + `', r.ask_id::text, max(r.created_at), max(r.source_seq), `
+	return `select r.kind, ` + ask + `null::text` + askPartLinks + `
+		and r.to_kind = 'artifact' and r.to_id = ` + param + `
+		group by r.kind, r.ask_id
+		union all
+		select r.kind, ` + ask + `r.to_id` + askPartLinks + `
+		and r.to_kind = 'block' and r.to_id in ` + documentBlockIDs(param) + `
+		group by r.kind, r.ask_id, r.to_id`
+}
+
+// AskIDs is the part ids one read of an ask shows: the revision its parts have reached, the id
+// of each of its options in the ask's order and the id of its answer. An option or an answer no
+// current part stands for carries "", as every part of an ask the index has not reached does,
+// whose revision is 0 as well.
+type AskIDs struct {
+	Revision int
+	Options  []string
+	Answer   string
+}
+
+// AskPartIDs is the part ids of each of asks, in the order they were given, read in one
+// statement over the part rows IndexAskParts writes. A reader shows them beside each option and
+// the answer, so a reference to either can be written: `dispatch://<key>/ask/<id>#b-<part id>`,
+// pinned to the ask's revision with `@v<N>`. The same ask may be given twice - two event
+// payloads of one ask - and each is matched on its own.
+//
+// A part is matched to the option or the answer it stands for by what identifies it: its type
+// and the identity hash of its own text (AskParts, which salts an answer's with its answerer),
+// never by its place among the parts. Each stored part stands for one of them, so an ask
+// holding one option twice gives its two parts' ids in order, as the index gave them
+// (itemblocks.Align). An option or an answer no stored part stands for - the index is behind the
+// ask's row, or the options are an event payload's and the ask has moved past them - carries no
+// id rather than another part's; the revision the ask's parts have reached is still its own. An
+// ask with no state row, which no build with the part index has written, carries no id and
+// revision 0, so a read of an ask never depends on the index being current.
+func AskPartIDs(ctx context.Context, q Queryer, asks []*model.Ask) ([]AskIDs, error) {
+	if len(asks) == 0 {
+		return nil, nil
+	}
+	ids := make([]AskIDs, len(asks))
+	askIDs := make([]string, 0, len(asks))
+	for index, ask := range asks {
+		ids[index].Options = make([]string, len(ask.Options))
+		askIDs = append(askIDs, ask.ID)
+	}
+	rows, err := askPartRows(ctx, q, askIDs)
+	if err != nil {
+		return nil, err
+	}
+	for index, ask := range asks {
+		stored, indexed := rows[ask.ID]
+		if !indexed {
+			continue
+		}
+		// AskParts' order: the question, then the options in the ask's order, then the answer
+		// while the ask holds one.
+		parts := stored.idsOf(AskParts(*ask))
+		ids[index].Revision = stored.revision
+		copy(ids[index].Options, parts[1:])
+		if ask.Answer != nil {
+			ids[index].Answer = parts[len(parts)-1]
+		}
+	}
+	return ids, nil
+}
+
+// storedAskParts is one ask's indexed parts as askPartRows reads them: the revision its parts
+// have reached, and the id, the type and the identity hash of the text of each current part, in
+// position order (AskParts' order: the question, then the options, then the answer the ask holds
+// now).
+type storedAskParts struct {
+	revision         int
+	ids, types, sums []string
+}
+
+// idsOf is the stored id of each of parts, "" where no stored part stands for one: a part is
+// matched by its type and the identity hash of its text, and each stored part stands for one
+// part, so an ask holding one option twice gives its two parts' ids in order, as the index gave
+// them (itemblocks.Align).
+func (stored storedAskParts) idsOf(parts []itemblocks.Block) []string {
+	untaken := make(map[[2]string][]string, len(stored.ids))
+	for index, id := range stored.ids {
+		key := [2]string{stored.types[index], stored.sums[index]}
+		untaken[key] = append(untaken[key], id)
+	}
+	ids := make([]string, len(parts))
+	for index, part := range parts {
+		key := [2]string{part.Type, part.Hash}
+		if matches := untaken[key]; len(matches) > 0 {
+			ids[index], untaken[key] = matches[0], matches[1:]
+		}
+	}
+	return ids
+}
+
+// askPartRows reads the indexed parts of each ask, keyed by ask id; an ask with no state row,
+// which no build with the part index has written, is absent. One statement for the whole list,
+// with the parts of each ask as arrays in position order, as a comment's blocks are read; an ask
+// whose state row holds no part yet reads as an empty list.
+func askPartRows(ctx context.Context, q Queryer, askIDs []string) (map[string]storedAskParts, error) {
+	rows, err := q.Query(ctx, `
+		select s.ask_id::text, s.revision,
+		       coalesce(array_agg(b.block_id order by b.position) filter (where b.block_id is not null), '{}') as ids,
+		       coalesce(array_agg(b.type order by b.position) filter (where b.block_id is not null), '{}') as types,
+		       coalesce(array_agg(b.text_sha256 order by b.position) filter (where b.block_id is not null), '{}') as sums
+		from ask_block_state s
+		left join ask_blocks b on b.ask_id = s.ask_id and b.position is not null
+		where s.ask_id = any($1::uuid[])
+		group by s.ask_id, s.revision
+	`, askIDs)
+	if err != nil {
+		return nil, fmt.Errorf("read ask parts: %w", err)
+	}
+	defer rows.Close()
+	parts := make(map[string]storedAskParts, len(askIDs))
+	for rows.Next() {
+		var askID string
+		var stored storedAskParts
+		if err := rows.Scan(&askID, &stored.revision, &stored.ids, &stored.types, &stored.sums); err != nil {
+			return nil, fmt.Errorf("scan ask parts: %w", err)
+		}
+		parts[askID] = stored
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read ask parts: %w", err)
+	}
+	return parts, nil
+}

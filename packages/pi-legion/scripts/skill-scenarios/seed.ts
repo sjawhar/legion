@@ -369,7 +369,12 @@ function openSpecApproval(asks: Ask[], fixture: SpecFixture): Ask | undefined {
 /** What `state` writes to state-<turn>.json. */
 export interface TurnState {
   turn: number;
-  open_asks: { id: string; question: string; options: Required<AskOption>[]; multiple: boolean }[];
+  open_asks: {
+    id: string;
+    question: string;
+    options: Required<Omit<AskOption, "id">>[];
+    multiple: boolean;
+  }[];
   approval: { ask_id: string; version: number } | null;
 }
 

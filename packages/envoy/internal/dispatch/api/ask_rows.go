@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -174,46 +173,29 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 }
 
 // attachAskPartIDs reads, in one query over `ask_blocks`, the part id of every listed ask's
-// options and answer and the ask's current part revision, so every read that shows an ask's
-// options shows the reference of each: `dispatch://<key>/ask/<id>#b-<part id>`, pinned to the
-// ask's `revision` with `@v<N>`. It is read beside attachAskBacklinkCounts, which every list and
-// detail read of an ask already pays for, and never by a write, whose answer carries no id.
+// options and answer and the ask's current part revision (`refs.AskPartIDs`), so every read
+// that shows an ask's options shows the reference of each: `dispatch://<key>/ask/<id>#b-<part
+// id>`, pinned to the ask's `revision` with `@v<N>`. It is read beside attachAskBacklinkCounts,
+// which every list and detail read of an ask already pays for, and never by a write, whose
+// answer carries no id.
 //
-// A part is matched to the option or the answer it stands for by what identifies it: its type
-// and the identity hash of its own text, the two the index wrote it under (refs.AskParts builds
-// that text, ask_blocks stores the hash as text_sha256), never by its place among the parts. An
-// ask whose parts are not indexed yet - owed by migration 0151's trigger and never drained, so
-// no build with the index has written them - has no state row or no parts, and carries no id and
-// revision 0: a read of an ask never depends on the index being current. An option no stored
-// part stands for - the index is behind the row, or the options are an event payload's and the
-// ask has moved past them - carries no id rather than another part's; the revision the ask's
-// parts have reached is still its own.
+// Which option or answer each stored part stands for, and what an ask the index has not reached
+// or an option no part stands for carries, is refs.AskPartIDs'.
 func attachAskPartIDs(ctx context.Context, q queryer, asks []*model.Ask) error {
 	if len(asks) == 0 {
 		return nil
 	}
-	ids := make([]string, 0, len(asks))
-	for _, ask := range asks {
-		ids = append(ids, ask.ID)
-	}
-	parts, err := readAskParts(ctx, q, ids)
+	partIDs, err := refs.AskPartIDs(ctx, q, asks)
 	if err != nil {
 		return err
 	}
-	for _, ask := range asks {
-		stored, indexed := parts[ask.ID]
-		if !indexed {
-			continue
-		}
-		ask.Revision = stored.revision
-		// refs.AskParts' order: the question, then the options in the ask's order, then the
-		// answer while the ask holds one.
-		partIDs := stored.idsOf(refs.AskParts(*ask))
-		for index := range ask.Options {
-			ask.Options[index].ID = partIDs[index+1]
+	for index, ask := range asks {
+		ask.Revision = partIDs[index].Revision
+		for option := range ask.Options {
+			ask.Options[option].ID = partIDs[index].Options[option]
 		}
 		if ask.Answer != nil {
-			ask.Answer.ID = partIDs[len(partIDs)-1]
+			ask.Answer.ID = partIDs[index].Answer
 		}
 	}
 	return nil
@@ -229,69 +211,6 @@ func attachAskReadFields(ctx context.Context, q queryer, asks []*model.Ask) erro
 		return err
 	}
 	return attachAskPartIDs(ctx, q, asks)
-}
-
-// askParts is one ask's indexed parts as attachAskPartIDs reads them: the revision its parts
-// have reached, and the id, the type and the identity hash of the text of each current part, in
-// position order (refs.AskParts' order: the question, then the options, then the answer the ask
-// holds now).
-type askParts struct {
-	revision         int
-	ids, types, sums []string
-}
-
-// idsOf is the stored id of each of parts, "" where no stored part stands for one: a part is
-// matched by its type and the identity hash of its text, and each stored part stands for one
-// part, so an ask holding one option twice gives its two parts' ids in order, as the index gave
-// them (itemblocks.Align).
-func (stored askParts) idsOf(parts []itemblocks.Block) []string {
-	untaken := make(map[[2]string][]string, len(stored.ids))
-	for index, id := range stored.ids {
-		key := [2]string{stored.types[index], stored.sums[index]}
-		untaken[key] = append(untaken[key], id)
-	}
-	ids := make([]string, len(parts))
-	for index, part := range parts {
-		key := [2]string{part.Type, part.Hash}
-		if matches := untaken[key]; len(matches) > 0 {
-			ids[index], untaken[key] = matches[0], matches[1:]
-		}
-	}
-	return ids
-}
-
-// readAskParts reads the indexed parts of each ask, keyed by ask id; an ask with no state row,
-// which no build with the part index has written, is absent. One statement for the whole list,
-// with the parts of each ask as arrays in position order, as api/item_blocks.go reads a comment's
-// blocks; an ask whose state row holds no part yet reads as an empty list.
-func readAskParts(ctx context.Context, q queryer, askIDs []string) (map[string]askParts, error) {
-	rows, err := q.Query(ctx, `
-		select s.ask_id::text, s.revision,
-		       coalesce(array_agg(b.block_id order by b.position) filter (where b.block_id is not null), '{}') as ids,
-		       coalesce(array_agg(b.type order by b.position) filter (where b.block_id is not null), '{}') as types,
-		       coalesce(array_agg(b.text_sha256 order by b.position) filter (where b.block_id is not null), '{}') as sums
-		from ask_block_state s
-		left join ask_blocks b on b.ask_id = s.ask_id and b.position is not null
-		where s.ask_id = any($1::uuid[])
-		group by s.ask_id, s.revision
-	`, askIDs)
-	if err != nil {
-		return nil, fmt.Errorf("read ask parts: %w", err)
-	}
-	defer rows.Close()
-	parts := make(map[string]askParts, len(askIDs))
-	for rows.Next() {
-		var askID string
-		var stored askParts
-		if err := rows.Scan(&askID, &stored.revision, &stored.ids, &stored.types, &stored.sums); err != nil {
-			return nil, fmt.Errorf("scan ask parts: %w", err)
-		}
-		parts[askID] = stored
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read ask parts: %w", err)
-	}
-	return parts, nil
 }
 
 func (s *server) loadAskAnchorArtifact(

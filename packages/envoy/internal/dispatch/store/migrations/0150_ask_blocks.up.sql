@@ -7,16 +7,17 @@
 -- comment's blocks take (internal/dispatch/itemblocks). A part is a graph node: its node id is
 -- `ask/<ask id>#<part id>` (`ask/<uuid>#b2`), its storage kind in graph_edges and refs.to_kind
 -- is `ask_block`, a kind a build without these tables skips as unknown. A part is part_of its
--- ask, a mention written inside it is an edge out of it, and a reply naming the ask names the
--- part it answers.
+-- ask, a mention written inside it is an edge out of it, and a reply whose request names the
+-- ask names the part it answers.
 -- Additive while the previous build serves: new tables, no column of an existing table, and the
 -- view restated with two more arms and one existing arm split in two (below).
 --
--- A node id is the ask's uuid, '#' and a block id; the primary key makes it unique within the
--- ask, so it needs no unique constraint. Every read of node_id and from_node is an equality, so
--- both are hash indexed, as 0142's are.
+-- A node id is `ask/<uuid>#<part id>`, the ask's uuid and the part's own id; the primary key
+-- makes it unique within the ask, so it needs no unique constraint. Every read of node_id and
+-- from_node is an equality, so both are hash indexed, as 0142's are.
 --
--- position is the part's place in the ask's current body, null once a later revision removed it,
+-- position is the part's place in refs.AskParts' order - the question, then the options in the
+-- ask's row order, then the answer it holds now - null once a later revision removed it,
 -- when removed_at holds the time. made_at is the time of the revision that first held the part,
 -- null for a part found at the first indexing of an ask edited before this migration, whose
 -- making time was never recorded. changed_revision and changed_at are the revision the part's
@@ -93,12 +94,13 @@ create index ask_block_refs_from_node on ask_block_refs using hash (from_node);
 -- graph_edges re-stated: 0142's arms plus, for an ask's parts, each current part's part_of edge
 -- to its ask and each link a current part holds.
 --
--- 0142's reply arm over comments.replies_to_block is split in two. A reply in an ask's thread
--- names the part it answers in that same column, whose node id starts `ask/`, where a reply to a
--- comment names a block whose node id starts `comment/`; the arm as 0142 wrote it published every
--- one of them under comment_block, which would make an ask part's reply an edge to a comment
--- block that does not exist. The node id's prefix tells the two apart, so each reaches its own
--- kind. The messages arm needs no such split: a message never replies to an ask part.
+-- 0142's reply arm over comments.replies_to_block is split in two. A reply whose request names
+-- an ask (ask_id with reply_to_block) names a part of that ask in that same column, whose node
+-- id starts `ask/`, where a reply to a comment names a block of that comment, whose node id
+-- starts `comment/`, in an ask's thread as anywhere else; the arm as 0142 wrote it published
+-- every one of them under comment_block, which would make an ask part's reply an edge to a
+-- comment block that does not exist. The node id's prefix tells the two apart, so each reaches
+-- its own kind. The messages arm needs no such split: a message never replies to an ask part.
 create or replace view graph_edges (from_kind, from_id, kind, to_kind, to_id, created_at, source_seq) as
   select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from refs
   union all

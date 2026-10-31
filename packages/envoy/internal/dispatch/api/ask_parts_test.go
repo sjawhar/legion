@@ -901,13 +901,14 @@ func TestAListedAskCarriesThePartIDsItsOwnReadCarries(t *testing.T) {
 	}
 }
 
-// A reply in an ask's thread names the part it answers: `reply_to_block` is checked against the
-// ask's own parts, the reply stores that part's node id, every read of the reply carries it and
-// ?to= the part lists the reply. The ask's referenced-by count leaves the reply out, since a
-// clarification thread is never what "referenced by" means (refs.AskBacklinkExclusions); an edit
-// that drops the option leaves the reply reading the part removed, with the last text it held, as
-// a removed comment block's reply reads; a part the ask does not hold is refused; and a reply an
-// older build wrote under the ask, with no block at all, still reads under it naming none.
+// A reply whose request names an ask names the part of it that it answers: `ask_id` with
+// `reply_to_block`, which is checked against the ask's own parts, the reply stores that part's
+// node id, every read of the reply carries it and ?to= the part lists the reply. The ask's
+// referenced-by count leaves the reply out, since a clarification thread is never what
+// "referenced by" means (refs.AskBacklinkExclusions); an edit that drops the option leaves the
+// reply reading the part removed, with the last text it held, as a removed comment block's reply
+// reads; a part the ask does not hold is refused; and a reply an older build wrote under the
+// ask, with no block at all, still reads under it naming none.
 func TestAReplyToAnAskNamesThePartItAnswers(t *testing.T) {
 	const monday = "Monday — Ship at the start of the week."
 	handler, database := newTestHandlerWithStore(t)

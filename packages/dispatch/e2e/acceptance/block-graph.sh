@@ -12,7 +12,7 @@
 # option and its answer — each named by its own reference and printed on the option's line by
 # `dispatch read` (A6), carrying the facts of every node, a part the ask has dropped included
 # (A11), pinned to a revision of the ask's parts (A15), holding a link of its own (R7), refused by
-# name where the ask holds no such part (R10) and named by a reply in the ask's thread (R11).
+# name where the ask holds no such part (R10) and named by a reply that answers that ask (R11).
 #
 # Inputs: DISPATCH_URL (the server), DISPATCH_TOKEN or DISPATCH_TOKEN_FILE (an agent bearer, read
 # here and never printed), PROJECT (an existing project key), and optionally COMPONENT_SOURCE
@@ -1207,7 +1207,7 @@ fi
 # revision reads the text that revision held, says it changed after a reword and was removed after
 # the drop (A15); a bare dispatch:// URL in a question, in an option and in an answer starts at that
 # part, and the target counts each written link once (R7); a part no revision of the ask holds is
-# refused by name (R10); and a reply in the ask's thread names the part it answers (R11). No part id
+# refused by name (R10); and a reply that answers the ask names the part it answers (R11). No part id
 # is guessed: every one of them comes from the ask's own read or from its part_of edges. Answering is
 # a person's write alone (POST /api/v1/asks/{id}/answer is human-only), so the answer part and R7's
 # third link run under DEV_SIGNIN_LOGIN; every other check runs on any server.
@@ -1363,8 +1363,8 @@ want_status 404 R10 "?to=<ask>#b-b9"
 expect R10 "?to=<ask>#b-b9 is 404 NOT_FOUND naming the part and the ask" true \
   --arg a "$parts_ask" '.code == "NOT_FOUND" and (.error | contains("no part \"b9\" in ask \($a)"))'
 
-# R11: a reply in the ask's thread names the part it answers, and every read of it carries that
-# part with its text.
+# R11: a reply that answers an ask (`--reply-to-ask`) names a part of that ask, and every read of
+# it carries that part with its text.
 run R11 "a reply naming the first option" comment --issue "$child" --reply-to-ask "$monday_ref" \
   --body "Monday works: the check runs at the start of the week."
 # A reply under an ask reports `Replied on ask <id> (comment <uuid>; …)`, not a posted comment.
