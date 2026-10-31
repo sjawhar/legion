@@ -2,54 +2,76 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-727",
-  "completed": "2026-10-30T22:40:00Z",
-  "round": 4,
+  "completed": "2026-10-31T01:10:00Z",
+  "round": 5,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2548",
-  "head": "50a3a5870436",
-  "answers": "The tester's failure (test.json round 3) and the architect's decision recorded on the pull request.",
+  "head": "abf83df601f8",
+  "answers": "The reviewer's round-1 changes request at 50a3a587: all eight important findings and all four minor ones, none deferred. Nine threads answered and resolved.",
   "proof": [
     {
-      "criterion": "The tester's red row, unmodified: a comment is not moved to the block's other reading when its own words are deleted - and the rule behind it, that a record on a passage the reader never selected is worse than a refusal",
-      "surface": "Dispatch's web app in Chromium through Playwright, against the real Go server and PostgreSQL 17.11 with pgvector",
-      "command": "cd packages/dispatch && bun run e2e -- compose-wait",
-      "observed": "10 passed (4.7m) at 50a3a5870436. The tester's row is green: the paragraph 'Alpha the lazy dog. Beta the lazy dog.' becomes 'Alpha the lazy dog.', taking the reader's own sentence and the mark, and Send creates no comment, leaves no mark in the document, keeps the draft 'Which dog is this?' and tells the reader the text around their words changed.",
-      "headSha": "50a3a5870436",
-      "negativeControl": "The same row is the tester's own red test, which measured the comment landing at offset 6, on 'Alpha the lazy dog', with the composer closing and nothing said. The proof-editor suite holds the unit form of both sides of the new gate: a block that held the quote once and holds it once with changed surroundings is marked, and one that held it twice and now holds one refuses."
+      "criterion": "Finding 1: whenSent answers from the report taken before the re-mark, so the retry goes out before the server can see the mark - the very failure this issue reports",
+      "surface": "The margin's wait and the composer, through their own React tests, and the whole compose-wait browser suite against the real Go server and PostgreSQL 17.11",
+      "command": "cd packages/dispatch && bun test --parallel web/src e2e/__tests__ ; cd packages/dispatch && bun run e2e -- compose-wait",
+      "observed": "A new features/doc/pending-waiter.ts answers a wait only from a report of that document taken after the wait began, with the bound as the backstop; the pending report is reset when the artifact changes; whenSent returns Promise<void>. The composer registers with the margin (registerComposer/keepDraft), so the automatic re-send carries what the reader has typed rather than what the 300 ms debounce last wrote. 2974 unit tests pass, and 11 compose-wait rows pass (6.1m).",
+      "headSha": "abf83df601f8",
+      "negativeControl": "Dropping the keepDraft call turns the new margin row red ('the margin's own re-send carries what the reader typed while it waited'); the waiter's own test fails if a report taken before the wait is allowed to answer it."
     },
     {
-      "criterion": "The architect's second instruction: a refusal for words still where they were selected must not claim they moved",
-      "surface": "The margin's refusal table, driven by its own unit suite over three composer kinds",
-      "command": "cd packages/dispatch && bun test --parallel web/src e2e/__tests__",
-      "observed": "2966 pass, 0 fail. REANCHOR_REFUSALS has a fourth sentence, for the reader's own block still reading the words while no reading there is surrounded as theirs was: 'The text around the words you selected changed, so nothing is left to say which reading of them this <comment|ask|suggestion> is about. Your draft is kept - select the text again to attach it.' The three existing sentences are byte-identical, which margin-context.test.ts asserts word for word, and no sentence of the four says 'changed or deleted' except the one that means it.",
-      "headSha": "50a3a5870436",
-      "negativeControl": "The test file asserts the new sentence says the surroundings changed and does not say the words moved; the prefix-edit shape (Beta -> Bravo beside an untouched selection) is driven in the proof-editor suite and refuses with that reason rather than the document-wide one."
+      "criterion": "Finding 2: a selection across two blocks never re-anchors, and the reader is told it was changed or deleted while it is on the page",
+      "surface": "The browser suite, plus the proof-editor unit suite",
+      "command": "cd packages/dispatch && bun run e2e -- compose-wait",
+      "observed": "The document is read as one text, break and all, with an index from text offset back to document position, so a quote that spans a paragraph break is found by the re-anchor and by the decision between 'gone' and 'unplaceable'. New row 'a comment on words that run across two paragraphs keeps its anchor' is green: the selection spans the break, the sweep takes the mark while the author is away, and Send attaches the comment over both halves. The mislabelled unit test that claimed to cover this is corrected, and two real cross-block unit tests added.",
+      "headSha": "abf83df601f8",
+      "negativeControl": "The second cross-block unit test is the control for the exactly-one rule: the same quote reading twice across four paragraphs refuses 'unplaceable' rather than attaching."
     },
     {
-      "criterion": "Nothing of the nine rows already green went back",
-      "surface": "The same browser suite",
-      "command": "cd packages/dispatch && bun run e2e -- compose-wait",
-      "observed": "All ten rows green in one run at this head, the tester's four unmodified: jj diff over packages/dispatch/e2e is empty for this round.",
-      "headSha": "50a3a5870436",
-      "negativeControl": "The sentence-rewrite row ('a comment whose mark another writer's edit removed re-anchors to the same text') is the control for the new gate's upper edge: it takes the block's single reading with no surroundings match, which the gate still allows because the block held the words once at selection. Removing that allowance turns it red."
+      "criterion": "Findings 3 and 4, and the two minor editor items: the tracking plugin cannot answer in production, two refusal sentences are false, and the scans are duplicated",
+      "surface": "The proof-editor and margin unit suites",
+      "command": "cd packages/proof-editor && bun test src/tests tests ; cd packages/dispatch && bun test --parallel web/src e2e/__tests__",
+      "observed": "The plugin and everything only it needed are deleted and removeRecordMark is back to its old contract; the re-anchor order is the live mark, then the selector. Two surrounded readings of the reader's own block answer a new 'ambiguous' reason, and a compose whose document is not on screen answers a sentence that says so instead of claiming the words were deleted. One readingsOf helper replaces readingCount and the double scans. 227 proof-editor and 2974 dispatch tests pass.",
+      "headSha": "abf83df601f8",
+      "negativeControl": "margin-context.test.ts asserts the three unchanged sentences word for word and that only the 'words read nowhere' sentence says 'changed or deleted', so a wrong sentence in any of the five cases fails it."
+    },
+    {
+      "criterion": "The server finding: the minute is counted from the last sweep that saw the author, not from the author's last presence, so an idle reconnect takes the mark",
+      "surface": "The Go docs package against PostgreSQL 17.11",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/docs/ -run 'Unrecorded|Sweep|Settle|VerifyMark' -count=1 -timeout 20m",
+      "observed": "ok (149s). roomState.departed records when each user's last browser left the room, a reconnection clears it, and the sweep ages a mark from the later of that time and its first-seen time, re-arming settlement from the same instant. Three new tests: the reviewer's scenario with the drop one second before the re-armed sweep, a reconnection before the deadline, and two tabs of one author.",
+      "headSha": "abf83df601f8",
+      "negativeControl": "Ignoring the recorded departure in the sweep fails TestAnUnrecordedMarkOutlivesASweepRunJustAfterItsAuthorDropped and TestAnUnrecordedMarkAgesFromItsAuthorsLastBrowserNotTheFirstToClose; the control was run and removed."
+    },
+    {
+      "criterion": "Nothing else in the application broke",
+      "surface": "The whole Chromium e2e project",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium",
+      "observed": "934 passed, 1 failed (1.1h) at abf83df601f8. The one failure is e2e/hover-preview.e2e.ts:87.",
+      "headSha": "abf83df601f8",
+      "negativeControl": "That row is not this change's: it fails on main@origin in this same pod with nothing of this branch in the tree, which I measured in round 3 and the tester confirmed."
     }
   ],
   "filesChanged": [
-    "packages/proof-editor/src/dispatch-marks.ts (RecordMarkPlacement.readings), src/record-mark-retype.ts (readingCount, the new 'unsurrounded' refusal, the gated remembered-block step)",
-    "packages/proof-editor/tests/record-mark-retype.test.ts, tests/comment-on-selection.test.ts",
-    "packages/dispatch/web/src/features/margin/margin-context.tsx (the fourth refusal sentence), margin-context.test.ts, MentionComposer.margin.test.tsx",
-    "packages/dispatch/web/src/features/conversation/composer-model.ts, held-sends.ts, features/doc/ProofDocument.test.tsx"
+    "packages/envoy/internal/dispatch/docs/roomstate.go, websocket.go, marks.go, marks_test.go (the author's last presence)",
+    "packages/envoy/.changes/unreleased/pr2548-Fixed-20261030-230000.yaml, replacing INFRA-727-compose-keeps-anchor.yaml",
+    "packages/proof-editor/src/record-mark-retype.ts, lib.ts, dispatch-marks.ts, dispatch-action-bar.ts and their tests (plugin deleted, cross-block text, one scan, the ambiguous reason)",
+    "packages/dispatch/web/src/features/doc/pending-waiter.ts and pending-waiter.test.ts (new), ProofDocument.tsx, ProofDocument.test.tsx, editor.ts",
+    "packages/dispatch/web/src/features/margin/margin-context.tsx, margin-context.test.ts, MentionComposer.margin.test.tsx, margin-fixture.tsx",
+    "packages/dispatch/web/src/features/conversation/MentionComposer.tsx, held-sends.ts, held-sends.test.ts, useSessionSends.ts, composer-model.ts",
+    "packages/dispatch/e2e/compose-wait.e2e.ts (my own eleventh row only; the tester's four rows untouched)"
   ],
   "trickyParts": [
-    "The gate is on what the block held at selection, not on what it holds now. A block that held the words once is the same passage however its sentence was rewritten, which is the case the issue was filed for; a block that held them twice and now holds one may be holding the reading the reader never selected. Only the remembered count tells those apart, and neither the current document nor the tracked range can.",
-    "The refusal reasons now say four different things, and each is true of its own case alone: the words read nowhere ('gone'); they read somewhere but not in the reader's block ('unplaceable'); they read in the reader's block but nothing there says which reading was theirs ('unsurrounded'); a suggestion's text cannot carry the mark ('unmarkable')."
+    "The wait had to be for a report taken after the call, not for the last report: the store counts a local update only once its IndexedDB write is through, so on a quiet document the report that exists when the margin asks was taken without the new mark in it.",
+    "Flushing the draft needed the composer to register with the margin, because the margin owns the re-send and the composer owns the text; a composer with no send of its own registers nothing and the retry behaves as before.",
+    "A cross-block selection has no block and no surroundings, so it is matched on its words alone in the document read as one text. That is the one place the exactly-one rule carries the whole decision, which is why the second cross-block test refuses two readings."
   ],
-  "deviations": [],
+  "deviations": [
+    "The minor suggestion to move the placement code into its own proof-editor module is declined in this round and said so on its thread: the split needs biome.json and packages/proof-editor/AGENTS.md edited with it, since that AGENTS.md enumerates every legion-owned file under src/, and with the tracking plugin gone the module is 486 lines on one subject."
+  ],
   "openQuestions": [
     "The reported 'about ten seconds' is still unexplained, as every round has recorded.",
-    "e2e/hover-preview.e2e.ts:87 fails in this pod on main as well as on this branch; CI is where it is watched."
+    "e2e/hover-preview.e2e.ts:87 fails in this pod on main as well as here; CI is where it is watched."
   ],
   "discoveredComplexity": [
-    "The whole Chromium project was not run again this round. The architect's instruction was to run it only if the round touched more than the margin and its tests; it touched the margin, the editor's re-anchor and their own unit tests. Its last run is at 8ac732495fe0: 932 passed, 1 failed, that one failure reproduced on main.",
-    "The simplify pass is spent (round 1, ce-simplify-code at 96a647eb, applied). Rounds answering a tester failure run no second pass."
+    "The simplify pass is spent (round 1, ce-simplify-code at 96a647eb, applied). A round answering a review runs no second pass.",
+    "Never use `jj restore <path>` to undo a temporary negative control: it restores from the parent commit and takes the whole round's work in that file with it. It cost me margin-context.tsx once here, recovered with `jj op restore` from the working-copy snapshot. Copy the file aside instead."
   ]
 }
