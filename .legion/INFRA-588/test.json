@@ -2,62 +2,84 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "completed": "2026-10-30T00:40:00Z",
-  "round": 10,
-  "head": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
-  "codeHead": "073ea88737c4f30bf562b53c4d1e20fbc8f95c9e",
-  "roundNote": "Round 10 tests the answer to review round 7 (073ea887): 'packages/envoy/migrationid/**' in ci.yaml's worker_image filter; migrationid's closing files become an unexported slice, and Check needs exactly one of them present (none or two is an error), with CheckClosedAt for crafted sets; autodeploy.sh's two-form comparison in one schema_changed helper; and docs. My three red tests (017d1df01dcb, 7feb642d6bbb, a25cec37291a) are unchanged. Dispatch's store code is unchanged since round 7, so the rolling-deploy proofs still apply.",
+  "completed": "2026-10-31T04:53:00Z",
+  "round": 11,
+  "head": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
+  "codeHead": "75680e4592f295e3f460dedecb0a0ff0b69012dd",
+  "roundNote": "Round 11 is the parent's last round, so it is a full test round, not a fingerprint check. 75680e45 forward-merges main d7e1daaaaf70 (which carries INFRA-629/630/631/632) and raises the closings to main's last numbers (daemon 0064, Dispatch 0149). It also adds a daemon changelog fragment and relays out the store README. I re-ran the migration proofs and the five INFRA-633 acceptance checks myself, on branches and a live run of my own. The workspace was recreated, so I stood up a fresh PostgreSQL 17.11 + pgvector 0.8.0 from Debian packages on the issue volume (docs/solutions/testing/...INFRA-42.md).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the claims myself. The red tests pass at this head, their files unchanged. In a scratch clone off this head, a next-number branch is refused and timestamped branches pass alone and merged. The image-trigger and filter checks pass, and the image check fails when migrationid is taken out of the filter. The daemon's real Migrate boots on this head on my own PostgreSQL 18.6. autodeploy.sh's refactored functions give round 8's five outcomes on real psql output."
+    "how": "Every figure of the implementer's I re-ran holds: the merges both ways for the fragments, the skills and the guides; check-dist; the measurement (my run to 04:37Z reads 130 PRs, 408 conflicting merges, 0 in the after state for all 8 globs, changelog-only 3.4%; theirs to 04:00Z reads 403, 3.5%); and the migration tests and boots. The implementer's proof does not cover the daemon fragment below, which the architect flagged (Envoy 321fe6ce)."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "Changelog entries are fragment files that the fold takes (AGENTS.md 'Changelog entries are fragment files'; the architect's brief: a fragment, not a CHANGELOG edit)",
+      "evidence": "The head adds packages/daemon/.changes/unreleased/pr-2411-migration-timestamps.yaml. packages/daemon has no .changie.yaml (ls: no such file), and .github/workflows/changelog-fold.yaml's CHANGELOG_PACKAGES (lines 65-68) does not list it. AGENTS.md line 540: 'A package without one, such as packages/daemon, has no fold.' Driven with the fold's own planner at this head: 'bash .github/scripts/release-push.sh fold-plan <the CHANGELOG_PACKAGES list>' exits 0 and plans 23 fragments, none under packages/daemon. The same command with packages/daemon added refuses: '::error::release-push.sh fold-plan: packages/daemon holds no CHANGELOG.md at HEAD to fold its fragments into'. So the fragment never folds and stays on main. Required fix, as the architect specified: delete packages/daemon/.changes/unreleased/pr-2411-migration-timestamps.yaml and change nothing else. The packages/envoy fragment is right: it names no Dispatch key, and the fold's plan holds it for envoy's next release, as it does every unreleased fragment of a released package. I wrote no permanent red test. The only test that could catch this is a repository gate over every .changes/ directory, and main already holds three such daemon fragments (fix-open-roles-live.yaml, pr-2542-daemon-silent-cut.yaml, squash-commit-message.yaml), so the gate would fail on main itself. I am reporting those three to the controller as a defect outside this tree."
+    }
+  ],
+  "failed": 1,
   "proof": [
     {
-      "criterion": "Migration identifiers two concurrent pull requests cannot both claim, for both runners; and a set that lost its closing file is refused rather than checked without a boundary",
-      "surface": "each runner's identifier check on real branches in a scratch clone off this head: the daemon's migrations package tests (Load runs migrationid.Check) and Dispatch's TestMigrationSetTakesNumbersThenTimestamps",
-      "command": "branch nx adds daemon 0062_t588_nx and Dispatch 0142_t588_nx (+census); branches ta and tb add 20261030090000 and 20261030091000; branch rn renames daemon 0061_pull_request_head_run.up.sql to 0061_head_run_renamed.up.sql and Dispatch 0141_drop_broadcast_idempotency_keys.{up,census}.sql to 0141_renamed.*; git merge-tree ta tb; go test on each branch and the merge",
-      "observed": "nx refused in both: 'migration 0062_t588_nx.up.sql takes version 62: the numbered migrations ended at 61…' and '…0142… ended at 141…'. ta, tb and their merge: ok in both. rn refused in both: 'the migration set holds none of the files a numbered series closed at, so it is no runner's set this rule knows…'",
-      "headSha": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
-      "negativeControl": "round 9's code fell back to 1..N with no boundary for a renamed closing file (my round-9 observation); here the rename is refused"
+      "criterion": "Migration identifiers two concurrent pull requests cannot both claim, after the forward merge raised the closings to main's last numbers",
+      "surface": "each runner's identifier check on real branches in a scratch clone off 75680e45, and the tests at this head",
+      "command": "branch nx adds daemon 0065_t588_nx and Dispatch 0150_t588_nx (+census); branches ta and tb add 20261031050000 and 20261031051000; git merge-tree ta tb both orders; go test on each branch and the merge; at this head, go test of migrationid, pgmigrate, the daemon migrations package and Dispatch's identifier and migrate tests against my Postgres",
+      "observed": "migrationid closings: 0064_pull_request_pass_settlement.up.sql at 64, 0149_event_horizon.up.sql at 149, main's last numbered files. nx refused in both: 'migration 0065_t588_nx.up.sql takes version 65: the numbered migrations ended at 64…' and '…0150… ended at 149…'. ta, tb and the merge (tree c35d533f9e2f, the same both orders) pass. All identifier and migrate tests pass, including my three red tests, whose files are unchanged (jj diff a25cec37..75680e45: 0 files). No existing .sql file differs from main",
+      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
+      "negativeControl": "the nx refusals above"
     },
     {
-      "criterion": "The red tests pass unmodified, with the identifier tests",
-      "surface": "go test in the issue workspace at this head",
-      "command": "daemon: go test ./internal/store/migrations/ -run '^TestLoadRefusesANewMigrationNumberedAfterTheShippedSet$'; envoy: go test ./migrationid/ and ./internal/dispatch/store/ -run '^(TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet|TestMigrationSetTakesNumbersThenTimestamps)$'",
-      "observed": "all PASS; jj diff a25cec37..073ea887 over both next_number_test.go files and migrate_out_of_order_test.go: 0 files changed",
-      "headSha": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
-      "negativeControl": "both next-number red tests failed at 9ce23f73 (round 8)"
+      "criterion": "The migrations run once and old pods keep answering, from main's code through this release",
+      "surface": "the daemon's real Migrate and Dispatch's real Migrate and Pool.Healthy, built at main d7e1daaa, this head and the merged timestamped tree, on PostgreSQL 17.11 + pgvector 0.8.0",
+      "command": "daemon: main, then this head, then the merged tree, then again; fresh: merged. Dispatch: main seeds a database; main's process loops Healthy while this head migrates; this head's process loops while the merged tree migrates; control: main's process while the merged tree migrates",
+      "observed": "daemon: 64, 0 (version 64), 2 (version 20261031051000), 0; fresh 66. Dispatch: this head over main keeps column integer, rows 149, and main's pods read 25 clean, 0 failed; the merged tree over this head: column bigint, rows 151, and this head's pods read 25 clean, 0 failed",
+      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
+      "negativeControl": "main's pods under the merged tree directly: 24 clean, 1 failed (the release-order case the docs state)"
     },
     {
-      "criterion": "The worker image trigger covers migrationid, and the CI filters still cover every file their jobs read (review round 7, finding 1)",
-      "surface": ".github/scripts/check-image-trigger-paths.sh (the required lint job's check) and .github/scripts/check-ci-filters.sh, run on this head",
-      "command": "uv run --no-project --with pyyaml==6.0.2 -- bash .github/scripts/check-image-trigger-paths.sh; same for check-ci-filters.sh; then the image check in a git scratch copy of the tree with ci.yaml line 1026 ('packages/envoy/migrationid/**') removed",
-      "observed": "image check exit 0, 'every image trigger covers every input its build reads (5 image build(s))'; filter check exit 0, 25 gates",
-      "headSha": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
-      "negativeControl": "without the migrationid line: exit 1, '::error file=.github/workflows/ci.yaml::… jobs.changes filter worker_image) does not cover packages/envoy (packages/daemon/docker/worker.Dockerfile:299)…'"
+      "criterion": "INFRA-633 #1 and #2: changelog fragments and built claude-envoy files no longer conflict",
+      "surface": "git merge-tree on branches in a scratch clone; packages/claude-envoy's check-dist at this head; the rebuild workflow's runs on main",
+      "command": "f1 and f2 off this head each add one fragment to packages/envoy/.changes/unreleased; s1 and s2 each append a line to skills/legion-worker/SKILL.md and skills/legion-architect/SKILL.md; merge-tree both orders; (cd packages/claude-envoy && bun run check-dist); gh run list --workflow claude-envoy-rebuild.yaml --branch main",
+      "observed": "fragments: exit 0 both orders. Skills: exit 0 both orders, each branch touching only its skills/ file. check-dist: 'dist/ and legion/ match a fresh build'. Rebuild run 41164510507 at d7e1daaaaf70: success. This PR changes no CHANGELOG.md and no packages/claude-envoy/dist or legion file",
+      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
+      "negativeControl": "c1 and c2 off c892b97d each add an entry under packages/envoy/CHANGELOG.md's [Unreleased]: exit 1 both orders, naming packages/envoy/CHANGELOG.md"
     },
     {
-      "criterion": "The daemon boots and migrates under the new rule and refuses a set with no closing file at boot",
-      "surface": "the daemon's real store.Open + Migrate + SchemaVersion on PostgreSQL 18.6, from binaries built at this head, the merged timestamped tree and the rename branch",
-      "command": "fresh database g1: this head, then the merged tree; fresh database g2: the rename branch",
-      "observed": "g1: applied=61 version=61, then applied=2 version=20261030091000; g2: refused, 'the migration set holds none of the files a numbered series closed at…', applied=0, and no schema_version table was created",
-      "headSha": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
-      "negativeControl": "the g2 refusal above"
+      "criterion": "INFRA-633 #3: two pull requests editing different sentences or list items of a restructured guide do not conflict",
+      "surface": "git merge-tree on commits built with git plumbing in a scratch clone, for AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, scripts/e2e/README.md and docs/kubernetes.md",
+      "command": "for each guide at this head: one branch appends a sentence to a paragraph's first sentence line and another to its third; one branch adds a list item after the first item of a list and another after the third; merge-tree both orders. Then the same two sentence edits on the c892b97d layout, the paragraph rewrapped at 100 columns as its convention had",
+      "observed": "all five guides: sentence pair exit (0, 0), list pair exit (0, 0)",
+      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
+      "negativeControl": "the old layout with the paragraph rewrapped: exit (1, 1) in all five guides"
     },
     {
-      "criterion": "The auto-deployer's rollback guard behaves as before after the schema_changed refactor (review round 7, finding 4)",
-      "surface": "autodeploy.sh's schema_applied, schema_changed, schema_label and roll_back_or_stop, extracted as written, against real psql output; only docker stubbed",
-      "command": "database ad with 1..141 and 20261029210000; roll_back_or_stop after (1) nothing applied, (2) 20261029200000 applied below the max, (3) a legacy bare-max baseline with that, (4) a legacy baseline with the max raised, (5) an unreachable database",
-      "observed": "(1) rolls back, exit 0; (2) 'refusing to roll back … changed the applied migrations to 20261029210000 (143 applied)', exit 1; (3) rolls back (legacy form, as documented); (4) refused, exit 1; (5) 'could not read the schema version … so refusing', exit 1. These are round 8's five outcomes",
-      "headSha": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
-      "negativeControl": "the previous deployer (650e3cb5) rolled back in case (2) (round 8)"
+      "criterion": "INFRA-633 #4: the guidance is on main",
+      "surface": "grep of the guides at this head (main plus this PR, which changes none of these lines)",
+      "command": "grep AGENTS.md, packages/envoy/AGENTS.md, packages/claude-envoy/AGENTS.md and README.md; then grep every AGENTS.md, README.md and SKILL.md for 'commit (the) built|rebuilt|dist/|legion/'",
+      "observed": "AGENTS.md:537 'Changelog entries are fragment files' and :550 'Never edit a CHANGELOG.md'; AGENTS.md:6 and packages/envoy/AGENTS.md:5 carry the layout note, and AGENTS.md:570 has the convention; packages/claude-envoy/AGENTS.md:82,99,249 and README.md:298 say a pull request never commits dist/ or legion/",
+      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
+      "negativeControl": "no guide tells a pull request to commit built files (the second grep is empty)"
+    },
+    {
+      "criterion": "INFRA-633 #5: the measurement after the fixes",
+      "surface": "the measure.ts CLI against sjawhar/legion on GitHub, fresh workdir",
+      "command": "bun scripts/conflicts/measure.ts --since 2026-10-28T09:12:59Z --branch-prefix legion/ --workdir $TMPDIR/t588/meas --compare-with before.json --fixed 'packages/*/CHANGELOG.md=184897acc118' --fixed 'packages/claude-envoy/dist/**=78d5f6b61539' --fixed 'packages/claude-envoy/legion/**=78d5f6b61539' --fixed 'packages/envoy/AGENTS.md=8a72cf798a5f' --fixed 'packages/envoy/cmd/dispatch/README.md=8a72cf798a5f' --fixed 'AGENTS.md=d7e1daaaaf70' --fixed 'scripts/e2e/README.md=d7e1daaaaf70' --fixed 'docs/kubernetes.md=d7e1daaaaf70' (the merge commits of #2419, #2423, #2422 and #2474)",
+      "observed": "exit 0, about 13 min, 867 MB. 130 PRs read, 95 carrying, 408 conflicting merges. Every fixed glob has 0 in the after state: changelogs 1/38/0, dist 5/4/0, legion 0/1/0, envoy AGENTS.md 111/18/0, Dispatch README 99/13/0, AGENTS.md 9/0/0, e2e README 5/1/0, kubernetes 10/1/0. Changelog-only 89/253 (35.2%) -> 14/408 (3.4%); changelog + guides + generated 108 (42.7%) -> 55 (13.5%)",
+      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
+      "negativeControl": "my own git merge-base --is-ancestor loop over the raw records gives envoy AGENTS.md 111 before / 18 transition and changelogs 1 / 38, with no after, matching the tool"
+    },
+    {
+      "criterion": "The script, its router job and the filters after the merge",
+      "surface": "the CLI, its tests, and the repository's two filter checks at this head; GitHub's check list at 75680e45",
+      "command": "bun scripts/conflicts/measure.ts --from-json before.json --branch-prefix legion/; bun test, biome and tsc on scripts/conflicts; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh and check-image-trigger-paths.sh; gh api check-runs",
+      "observed": "scripts/conflicts unchanged since round 10 (0 files). 126/80/253, tiers 89/108; 40 pass, biome clean, tsc 0; check-ci-filters exit 0 ('conflicts-script: 37 files, 0 uncovered', 29 gates); image check exit 0 (5 builds). GitHub's changes job succeeded and scheduled conflicts-script on this head",
+      "headSha": "506d78160bfeb81e08b0f02e1999f6f9f1a6261f",
+      "negativeControl": "round 5: removing scripts/conflicts/** from the filter fails check-ci-filters with 15 uncovered"
     }
   ],
   "observations": [
-    "CI at code head 073ea887: only changes (queued) and pr-title runs exist; no lint, typecheck or test result. 1bb810ca is handoff-only.",
-    "The pod's python3 has no PyYAML, so the two .github checks ran with uv run --with pyyaml==6.0.2. CI runs them on the runner's Python.",
-    "Round 7's release-order note (this release before any carrying a timestamped migration), round 4's squash-body note and round 1's `since`-edge note still apply."
+    "CI at code head 75680e45: changes succeeded. Every other job, lint, typecheck, test, pr-title and conflicts-script among them, was queued when I read it (04:46Z). 506d7816 is handoff-only.",
+    "For the architect: scripts/conflicts/README.md is a new file and carries no semantic-line-breaks note. scripts/semantic-line-breaks.ts fails it (line 147, R1). AGENTS.md says 'a new guide is written this way and carries the note'. Whether a script's README is a guide is a judgment, and no gate checks it. The three files the guides test checks, and every guide carrying the note, pass. packages/envoy/deploy/README.md and loadtest/README.md fail the checker too but carry no note, so they are outside the rule.",
+    "Raising the closings follows main: another pull request that merges a numbered migration before this one does will need the closing raised again in this branch's next forward merge.",
+    "Round 7's release-order note, round 4's squash-body note and round 1's `since`-edge note still apply."
   ]
 }
