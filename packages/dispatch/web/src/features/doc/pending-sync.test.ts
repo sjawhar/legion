@@ -236,7 +236,13 @@ test("a read-only first sync applies nothing and keeps the saved edits", async (
   expect(paragraphText(doc).toString()).toBe("shared");
   expect(Y.encodeStateVector(doc)).toEqual(before);
   expect((await rowsOf(artifact)).length).toBe(1);
-  expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    countsEveryRow: true,
+    readOnly: true,
+    rebuiltAt: undefined,
+    stored: true,
+  });
 });
 
 test("a read-only admission stores none of the editor's own updates", async () => {
@@ -251,7 +257,13 @@ test("a read-only admission stores none of the editor's own updates", async () =
   stampHeadingId(doc);
 
   expect(await rowsOf(artifact)).toEqual([]);
-  expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 0,
+    countsEveryRow: true,
+    readOnly: true,
+    rebuiltAt: undefined,
+    stored: true,
+  });
 });
 
 test("a read-only load drops the heading id an earlier read-only load stored once it derives the id again, and keeps a person's saved edit", async () => {
@@ -272,7 +284,13 @@ test("a read-only load drops the heading id an earlier read-only load stored onc
 
   await waitFor(async () => expect(await rowsOf(artifact)).toEqual([typed?.key]));
   await waitFor(() =>
-    expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true })
+    expect(states.at(-1)).toEqual({
+      count: 1,
+      countsEveryRow: true,
+      readOnly: true,
+      rebuiltAt: undefined,
+      stored: true,
+    })
   );
 });
 
@@ -317,7 +335,13 @@ test("a read-only first sync drops a saved row the server already holds", async 
   await admit(sync, true);
 
   expect(await rowsOf(artifact)).toEqual([]);
-  expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 0,
+    countsEveryRow: true,
+    readOnly: true,
+    rebuiltAt: undefined,
+    stored: true,
+  });
 });
 
 test("a read-only first sync keeps a saved row that changes an object attribute", async () => {
@@ -339,7 +363,13 @@ test("a read-only first sync keeps a saved row that changes an object attribute"
   await admit(sync, true);
 
   expect((await rowsOf(artifact)).length).toBe(1);
-  expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    countsEveryRow: true,
+    readOnly: true,
+    rebuiltAt: undefined,
+    stored: true,
+  });
 });
 
 test("a read-only first sync drops a saved row that only splits the same text into other items", async () => {
@@ -360,7 +390,13 @@ test("a read-only first sync drops a saved row that only splits the same text in
   await admit(sync, true);
 
   expect(await rowsOf(artifact)).toEqual([]);
-  expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 0,
+    countsEveryRow: true,
+    readOnly: true,
+    rebuiltAt: undefined,
+    stored: true,
+  });
 });
 
 test("a read-only first sync drops a saved row that inserts and deletes the same text", async () => {
@@ -378,7 +414,13 @@ test("a read-only first sync drops a saved row that inserts and deletes the same
   await admit(sync, true);
 
   expect(await rowsOf(artifact)).toEqual([]);
-  expect(states.at(-1)).toEqual({ count: 0, readOnly: true, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 0,
+    countsEveryRow: true,
+    readOnly: true,
+    rebuiltAt: undefined,
+    stored: true,
+  });
 });
 
 test("a read-only first sync keeps a saved row that writes a margin record", async () => {
@@ -392,7 +434,13 @@ test("a read-only first sync keeps a saved row that writes a margin record", asy
   await admit(sync, true);
 
   expect((await rowsOf(artifact)).length).toBe(1);
-  expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    countsEveryRow: true,
+    readOnly: true,
+    rebuiltAt: undefined,
+    stored: true,
+  });
 });
 
 test("a read-only first sync keeps a saved row that writes a root other than the tree and the margin records", async () => {
@@ -406,7 +454,13 @@ test("a read-only first sync keeps a saved row that writes a root other than the
   await admit(sync, true);
 
   expect((await rowsOf(artifact)).length).toBe(1);
-  expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    countsEveryRow: true,
+    readOnly: true,
+    rebuiltAt: undefined,
+    stored: true,
+  });
 });
 
 test("a connection first admitted read-only and later writable stores and counts the typing", async () => {
@@ -426,7 +480,13 @@ test("a connection first admitted read-only and later writable stores and counts
 
   await waitFor(async () => expect((await rowsOf(artifact)).length).toBe(2));
   await waitFor(() =>
-    expect(states.at(-1)).toEqual({ count: 2, readOnly: false, rebuiltAt: undefined, stored: true })
+    expect(states.at(-1)).toEqual({
+      count: 2,
+      countsEveryRow: true,
+      readOnly: false,
+      rebuiltAt: undefined,
+      stored: true,
+    })
   );
 });
 
@@ -494,7 +554,13 @@ test("a restore that merges is recorded under the new client and the old rows ar
 
   expect(paragraphText(doc).toString()).toBe("shared saved");
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
-  expect(states.at(-1)).toEqual({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    countsEveryRow: true,
+    readOnly: false,
+    rebuiltAt: undefined,
+    stored: true,
+  });
 });
 
 test("a stale saved row does not discard another row that still applies", async () => {
@@ -666,4 +732,45 @@ test("an edit recorded while a SyncStep2 acknowledgement is clearing stays track
   } finally {
     logged.mockRestore();
   }
+});
+
+// A report's count is a read of the store, and a row written while that read is in flight lands
+// behind it: the count answers for the document as it was, without that row, and on a document
+// with nothing else pending it reads none pending. The margin waits for this browser's edits to
+// reach the server before it sends a refused compose again, and the row such a count misses can
+// be the very mark it is waiting for, so the report says what its count holds and the wait reads
+// that rather than the count alone (`pending-waiter.ts`).
+test("a report whose count was taken before a row was written says so", async () => {
+  const held = Promise.withResolvers<void>();
+  let counts = 0;
+  const wrapStore = (edits: PendingEdits): PendingEdits => ({
+    ...edits,
+    async count() {
+      counts += 1;
+      if (counts > 1) {
+        return edits.count();
+      }
+      // The first count - the one the sync takes as it starts - reads the store now and answers
+      // later, exactly as a count a row's own write queues behind does.
+      const taken = await edits.count();
+      await held.promise;
+      return taken;
+    },
+  });
+  const { artifact, states, type } = await scripted(artifactId(), undefined, wrapStore);
+  await waitFor(() => expect(counts).toBe(1));
+
+  type("first");
+  await waitFor(async () => expect((await rowsOf(artifact)).length).toBe(1));
+  held.resolve();
+
+  // That count read a document with no row in it, and this tab has written one since: the report
+  // carries its none-pending count and says it does not hold every row. The count taken once the
+  // row was stored does.
+  await waitFor(() =>
+    expect(states.map((state) => [state.count, state.countsEveryRow])).toEqual([
+      [0, false],
+      [1, true],
+    ])
+  );
 });

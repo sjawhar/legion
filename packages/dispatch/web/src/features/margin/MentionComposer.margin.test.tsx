@@ -413,6 +413,17 @@ function RegisterDocument({ bridge }: { bridge: DocumentBridge }): ReactNode {
   return null;
 }
 
+/** The same registration on a press: a document whose editor binds only once it has synced, which
+ *  a resumed send's refusal can beat (`whenBridgeBinds` in margin-context.tsx). */
+function BindDocument({ bridge }: { bridge: DocumentBridge }): ReactNode {
+  const { registerDocument } = useMargin();
+  return (
+    <button onClick={() => registerDocument(bridge)} type="button">
+      Bind the document
+    </button>
+  );
+}
+
 function ComposeOnMark({ kind }: { kind: ComposerKind }): ReactNode {
   const { composeForMark } = useMargin();
   return (
@@ -428,8 +439,13 @@ function ComposeOnMark({ kind }: { kind: ComposerKind }): ReactNode {
 }
 
 /** The margin of an issue whose document `bridge` is, with the selection bar's compose on a
- *  press, as the document page renders it. */
-function renderMarginCompose(bridge: DocumentBridge, kind: ComposerKind = "comment") {
+ *  press, as the document page renders it. `bindOnPress` leaves the document unregistered until
+ *  the test presses for it, as a document still building its editor is. */
+function renderMarginCompose(
+  bridge: DocumentBridge,
+  kind: ComposerKind = "comment",
+  bindOnPress = false
+) {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -445,7 +461,7 @@ function renderMarginCompose(bridge: DocumentBridge, kind: ComposerKind = "comme
     <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
         <MarginProvider>
-          <RegisterDocument bridge={bridge} />
+          {bindOnPress ? <BindDocument bridge={bridge} /> : <RegisterDocument bridge={bridge} />}
           <ComposeOnMark kind={kind} />
           <Margin />
         </MarginProvider>
@@ -600,6 +616,49 @@ test("a refused re-anchor on an ask calls it an ask, and never a comment", async
   } finally {
     view.unmount();
     createAsk.mockRestore();
+  }
+});
+
+// A reload resumes a margin send pressed within `KEPT_SEND_RESUME_MS`, and the server's
+// `ANCHOR_MISSING` for it can land before the reader's own document has bound its bridge - that
+// happens only after `onSynced`, `createEditor` and `bindEditor`. Telling the reader looking at
+// that very document that it "is not open" would be false, so the recovery waits for the bridge
+// and runs when it binds (dispatch://INFRA-727).
+test("a missing anchor that lands before the document binds is recovered once it does", async () => {
+  const remarked: string[] = [];
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark(markId, _kind, quote, placement) {
+      remarked.push(markId);
+      return { markId: "m-2", placement: placement ?? null, quote };
+    },
+  });
+  let attempts = 0;
+  const createComment = spyOn(api, "createComment").mockImplementation(async () => {
+    attempts += 1;
+    if (attempts === 1) throw ANCHOR_MISSING;
+    return undefined as never;
+  });
+  const view = renderMarginCompose(bridge, "comment", true);
+
+  try {
+    const composer = await sendMarginComment("Please revise.");
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    // While no document is registered the margin neither writes a mark nor tells the reader
+    // their document is closed: it is loading, and its bridge is seconds away.
+    expect(remarked).toEqual([]);
+    expect(within(composer).queryByText(/is not open/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Bind the document" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(remarked).toEqual(["m-1"]);
+    expect(createComment.mock.calls[1]?.[1].anchor).toEqual({
+      artifact: MARK_ANCHOR.artifact,
+      mark_id: "m-2",
+    });
+    expect(createComment.mock.calls[1]?.[1].body).toBe("Please revise.");
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
   }
 });
 

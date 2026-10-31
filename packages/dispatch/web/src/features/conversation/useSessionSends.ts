@@ -52,7 +52,7 @@ export function useSessionSends(sessionId: string, landed?: () => void): Session
   return {
     discard: (held) => void store.discard(held.mutationKey),
     pending,
-    retry: (held) => void store.retry(held.mutationKey),
+    retry: (held) => store.retry(held.mutationKey),
     send: (name, body, delivery) => {
       const sendKey = newSendKey();
       store.send([...name, sendKey], {

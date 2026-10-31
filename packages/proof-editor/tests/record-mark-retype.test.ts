@@ -450,7 +450,8 @@ test("the surroundings the cap keeps tell those readings apart where a shorter p
 
     // Two characters of that prefix - all a cap of two would have kept - read in front of
     // "Alpha" as much as in front of "Beta", so two readings of the reader's own block answer
-    // them and neither can be taken for theirs.
+    // them and neither can be taken for theirs: the block step's "ambiguous", driven by a
+    // placement whose surroundings really do answer both.
     const shorter = { ...placement, prefix: placement.prefix.slice(-2) };
     expect(remarkRecordMark(view, start.id, "comment", BY, REPEATED, shorter)).toEqual({
       refused: "ambiguous",
@@ -490,9 +491,9 @@ test("remarkRecordMark refuses two readings of a block whose surroundings both m
 
     // The reading after the reader's is surrounded by the same text to the cap's depth on both
     // sides. Marking either of them could put the record on the passage they never selected -
-    // and their words are exactly where they selected them, so the refusal is the one for two
-    // readings nothing tells apart, never the "unplaceable" that tells a reader their words are
-    // no longer where they left them.
+    // and their words are exactly where they selected them, so the refusal is the block step's
+    // "ambiguous", for two readings of their own block nothing tells apart, never the
+    // "unplaceable" that tells a reader their words are no longer where they left them.
     expect(remarkRecordMark(view, start.id, "comment", BY, OPERATOR, placement)).toEqual({
       refused: "ambiguous",
     });
@@ -635,9 +636,11 @@ test("remarkRecordMark takes the reading the whole document surrounds as the rea
     dropParagraph(view);
     rebuildEditorState(view);
 
-    // Two readings left, each surrounded as the reader's was and nothing to tell them apart: a
-    // record on the passage the reader never selected is worse than one they can attach again,
-    // and their words never moved, so the refusal is the one for readings that read alike.
+    // Two readings left, each surrounded as the placement remembers and nothing to tell them
+    // apart: a record on the passage the reader never selected is worse than one they can
+    // attach again, and their words never moved. This is the document-wide step's "ambiguous" -
+    // the surroundings the composer kept really do answer both readings - never the refusal for
+    // a selection nothing was kept of.
     expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement)).toEqual({
       refused: "ambiguous",
     });
@@ -666,11 +669,13 @@ test("remarkRecordMark marks the one place the quote reads in the document when 
     dropMark(view, start.id);
     rebuildEditorState(view);
 
-    // Two readings of those words and nothing left to tell them apart. They are still on the
-    // page and still where they were, so the refusal is neither that they were changed or
-    // deleted nor that they moved: it is the one for readings that read alike.
+    // Two readings of those words and nothing kept of the reader's selection to tell them
+    // apart: with no placement there are no surroundings to answer, and the text around the two
+    // readings is not the same text, so this is the document-wide step's "unremembered" rather
+    // than the "ambiguous" that says they read alike. The words are still on the page and still
+    // where they were, so neither "changed or deleted" nor "moved" is true of them.
     expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, null)).toEqual({
-      refused: "ambiguous",
+      refused: "unremembered",
     });
     expect(marksInDoc(view)).toEqual([]);
   });
@@ -736,11 +741,12 @@ test("remarkRecordMark puts the mark back over a quote that runs across two bloc
       dropMark(view, start.id);
       rebuildEditorState(view);
 
-      // The same words run across a second break further down: two readings, and nothing to
-      // tell them apart. They are plainly on the page and exactly where the reader selected
-      // them, so the refusal says they read alike and never that they moved.
+      // The same words run across a second break further down: two readings, and a selection
+      // across a break is one no placement can describe, so nothing kept of it says which
+      // reading was theirs. The document-wide step answers "unremembered" - they are plainly on
+      // the page and exactly where the reader selected them, so it never says they moved.
       expect(remarkRecordMark(view, start.id, "comment", BY, ACROSS_BLOCKS, null)).toEqual({
-        refused: "ambiguous",
+        refused: "unremembered",
       });
       expect(marksInDoc(view)).toEqual([]);
     }
@@ -759,11 +765,13 @@ test("remarkRecordMark refuses when the words are gone, when the block reads the
   });
   await withMarksEditor(PARAGRAPH, ({ view }) => {
     const start = comment(view, QUOTE, BY, "", quoteRange());
-    // A second reading of the same words in the block, with nothing remembered about the
-    // reader's own: marking either one could put the record on the passage they never selected.
+    // A second reading of the same words in the block, with nothing kept of where the reader
+    // selected: marking either one could put the record on the passage they never selected, and
+    // the words around the two readings differ, so the document-wide step answers
+    // "unremembered" rather than "ambiguous".
     rewriteParagraph(view, `${QUOTE}, and ${QUOTE}.`);
     expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, null)).toEqual({
-      refused: "ambiguous",
+      refused: "unremembered",
     });
     expect(marksInDoc(view)).toEqual([]);
   });

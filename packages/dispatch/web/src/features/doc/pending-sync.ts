@@ -10,6 +10,14 @@ import { readField } from "./sync-frame";
 export interface PendingState {
   /** Rows this document holds across every tab in this browser. */
   count: number;
+  /** Whether `count` holds every row this tab had asked the store to add when it was taken.
+   *  IndexedDB runs transactions whose scopes overlap in the order they were created, so a count
+   *  holds every row whose write was issued before it and nothing issued after: a count taken
+   *  while a row's own write was still queued behind it reads a document that has yet to hold
+   *  that row. Whoever waits for this browser's edits to reach the server answers only a report
+   *  that counts them all (`pending-waiter.ts`), since the row the count missed can be the very
+   *  one being waited for. */
+  countsEveryRow: boolean;
   /** This admission cannot send the rows it holds. */
   readOnly: boolean;
   /** When the oldest dropped row was saved before a document rebuild. */
@@ -287,6 +295,10 @@ export function startPendingSync({
   let reportAgain = false;
   let storageAvailable: boolean | undefined;
   const persistedSeqByOrdinal = new Map<number, number>();
+  // The newest row this tab has asked the store to hold, by the `seq` the store assigned it: a
+  // count asked for before this grew holds every row the tab had, and one asked for earlier does
+  // not (`PendingState.countsEveryRow`).
+  let recordedThrough = 0;
   let recorded: RecordedUpdate[] = [];
   let sent: SentFrame[] = [];
 
@@ -316,8 +328,13 @@ export function startPendingSync({
         if (destroyed) {
           return;
         }
+        // Read before the count is asked for, so what the count answers for is what the store
+        // had been asked to hold when its transaction was created.
+        const countedThrough = recordedThrough;
+        const count = edits === undefined ? 0 : await edits.count();
         const state: PendingState = {
-          count: edits === undefined ? 0 : await edits.count(),
+          count,
+          countsEveryRow: countedThrough === recordedThrough,
           readOnly,
           rebuiltAt,
           stored: edits !== undefined,
@@ -325,6 +342,7 @@ export function startPendingSync({
         if (
           lastState === undefined ||
           lastState.count !== state.count ||
+          lastState.countsEveryRow !== state.countsEveryRow ||
           lastState.readOnly !== state.readOnly ||
           lastState.rebuiltAt !== state.rebuiltAt ||
           lastState.stored !== state.stored
@@ -358,6 +376,7 @@ export function startPendingSync({
         }
         const row = edits.record(update);
         entry.seq = row.seq;
+        recordedThrough = row.seq;
         persistedSeqByOrdinal.set(entry.ordinal, row.seq);
         return row.written;
       })

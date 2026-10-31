@@ -93,15 +93,17 @@ const DRAFT_KEPT = "Your draft is kept — select the text again to attach it.";
 /** What the composer says in place of the server's `ANCHOR_MISSING` words when the margin could
  *  not write the mark again: what became of the words the send is anchored to, about the thing
  *  the reader is writing. A `ComposerKind` reads as its own word - comment, ask, suggestion -
- *  and this is the one place that puts it in a sentence. The five cases are five different
+ *  and this is the one place that puts it in a sentence. The six cases are six different
  *  things to be told: the words read nowhere in the document; the block the reader selected in
  *  still reads them, but the text around them changed, so nothing says which reading was theirs;
- *  that block reads them in two places with the same text around both, so they are where the
- *  reader left them and nothing says which of the two the draft is about; they read somewhere
- *  else, but not in the block the reader selected in; or they cannot carry a suggestion's mark
- *  at all. Only `"unplaceable"` says the words are no longer where they were selected, because
- *  only there is that true. The server's own message is unchanged - agents' clients read it -
- *  and this one is the reader's. */
+ *  they read in two places with the same text around both - two readings of that block, or two
+ *  of the document once that block is gone - so they are where the reader left them and nothing
+ *  says which of the two the draft is about; they read in more than one place and the composer
+ *  kept nothing of where they were selected, so there is nothing to tell those readings apart
+ *  by; they read somewhere else, but not in the block the reader selected in; or they cannot
+ *  carry a suggestion's mark at all. Only `"unplaceable"` says the words are no longer where
+ *  they were selected, because only there is that true. The server's own message is unchanged -
+ *  agents' clients read it - and this one is the reader's. */
 export const REANCHOR_REFUSALS: Record<RemarkRefusal["refused"], (kind: ComposerKind) => string> = {
   ambiguous: (kind) =>
     `The words you selected read in more than one place with the same text around them, so nothing says which one this ${kind} is about. ${DRAFT_KEPT}`,
@@ -111,6 +113,8 @@ export const REANCHOR_REFUSALS: Record<RemarkRefusal["refused"], (kind: Composer
     `A suggestion needs whole words inside one table cell, so this ${kind} cannot be marked over the text you selected. ${DRAFT_KEPT}`,
   unplaceable: (kind) =>
     `The text you selected is still in the document, but no longer where you selected it, so this ${kind} cannot be attached on its own. ${DRAFT_KEPT}`,
+  unremembered: (kind) =>
+    `The words you selected read in more than one place, and nothing kept of where you selected them says which one this ${kind} is about. ${DRAFT_KEPT}`,
   unsurrounded: (kind) =>
     `The text around the words you selected changed, so nothing is left to say which reading of them this ${kind} is about. ${DRAFT_KEPT}`,
 };
@@ -127,6 +131,15 @@ export const DOCUMENT_CLOSED_REFUSAL = (kind: ComposerKind): string =>
  *  draft again. The document's pending count holds every tab's rows, and this page cannot make
  *  the server take another tab's, so the wait always ends and the retry goes either way. */
 const REANCHOR_SEND_WAIT_MS = 5000;
+
+/** How long a refused send waits for a document to register its bridge before the margin tells
+ *  the reader the document is not open. The bridge binds only once the document has synced and
+ *  its editor is built (`ProofDocument`'s `onSynced`, `createEditor`, `bindEditor`), while a
+ *  reload resumes a margin send pressed within `KEPT_SEND_RESUME_MS`: the refusal of a send on
+ *  the document the reader is looking at can land seconds before that document's editor exists.
+ *  Long enough for a document to load on a slow connection, and short enough that a reader on no
+ *  document at all is not left waiting for a recovery that cannot come. */
+const BRIDGE_BIND_WAIT_MS = 10_000;
 
 interface MarkComposeRequest {
   anchor: ComposerAnchor;
@@ -199,10 +212,6 @@ interface MarginContextValue {
    *  registered document withdraws a hidden layout. An empty map is still an answer - a document
    *  with no live mark and no typed block has one - so the maps cannot stand in for this. */
   placementsReported: boolean;
-  /** Takes the composer that holds the draft of a held send, for as long as it is mounted, and
-   *  answers what unregisters it. The margin asks the composer of the send it is about to send
-   *  again for what the reader has typed since the refusal (`reanchor`). */
-  registerComposer(composer: ComposerBridge): () => void;
   registerDocument(bridge: DocumentBridge | undefined): void;
   /** Shows the compose held for `artifact`, which the reader just came back to. */
   revealCompose(artifact: string): void;
@@ -243,10 +252,6 @@ const MarginContext = createContext<MarginContextValue>({
   markPlacements: new Map(),
   pendingCompose: undefined,
   placementsReported: false,
-  // A composer outside a margin - a test's bare one, a surface the provider does not wrap -
-  // registers with nobody, and nothing asks it for its draft; its own debounced write still
-  // keeps it.
-  registerComposer: () => () => {},
   registerDocument: unavailableMargin,
   revealCompose: unavailableMargin,
   retypeCompose: unavailableMargin,
@@ -259,6 +264,18 @@ const MarginContext = createContext<MarginContextValue>({
   shownCompose: undefined,
   withdrawPlacements: unavailableMargin,
 });
+
+/** Where a composer registers the draft it holds, apart from the margin's own value: the margin's
+ *  changes with every hover, selection and placement report, while this never does. Every
+ *  `MentionComposer` on the page registers - the conversation tab's and `AgentMessageComposer`'s
+ *  among them, which read nothing else of the margin - so reading it from the margin's value
+ *  would re-render each of them on margin state none of them shows. */
+const ComposerRegistry = createContext<(composer: ComposerBridge) => () => void>(
+  // A composer outside a margin - a test's bare one, a surface the provider does not wrap -
+  // registers with nobody, and nothing asks it for its draft; its own debounced write still
+  // keeps it.
+  () => () => {}
+);
 
 export function MarginProvider({ children }: { children: ReactNode }): ReactNode {
   const queryClient = useQueryClient();
@@ -289,6 +306,9 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   // (the editor holds `composeForMark` for the document's lifetime).
   const openCompose = useRef<OpenCompose | undefined>(undefined);
   const bridgeRef = useRef<DocumentBridge | undefined>(undefined);
+  // Who waits for the next document to bind its bridge: a refused send whose document is still
+  // loading (`whenBridgeBinds`). A wait only ever drops itself, which Set iteration allows.
+  const bridgeWaiters = useRef(new Set<(bridge: DocumentBridge) => void>());
   // The composers on screen that hold a draft, by the name of the send that draft belongs to.
   const composers = useRef(new Map<string, ComposerBridge>());
   const show = useCallback((artifact: string, turnedAway: boolean) => {
@@ -300,6 +320,28 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const publishCompose = useCallback((next: OpenCompose | undefined) => {
     openCompose.current = next;
     setPendingCompose(next?.request);
+  }, []);
+  // The bridge of the document on screen, waiting while no document has registered one at all:
+  // the reader may be on the very document a refused send is anchored to, with its editor still
+  // being built, and telling them it is not open would be false - the recovery is seconds away.
+  // A page that is on no document registers nothing, so the wait ends at `BRIDGE_BIND_WAIT_MS`
+  // with the bridge as it stands then - none - and the reader gets a refusal they can act on. A
+  // bridge already registered answers at once, this document's or another's: which document is
+  // on screen is then known, and no waiting makes the compose's own document the one here.
+  const whenBridgeBinds = useCallback((): Promise<DocumentBridge | undefined> => {
+    if (bridgeRef.current !== undefined) return Promise.resolve(bridgeRef.current);
+    return new Promise<DocumentBridge | undefined>((resolve) => {
+      const waiter = (bridge: DocumentBridge) => {
+        bridgeWaiters.current.delete(waiter);
+        clearTimeout(bound);
+        resolve(bridge);
+      };
+      const bound = setTimeout(() => {
+        bridgeWaiters.current.delete(waiter);
+        resolve(bridgeRef.current);
+      }, BRIDGE_BIND_WAIT_MS);
+      bridgeWaiters.current.add(waiter);
+    });
   }, []);
   // The server refuses a send whose mark the document no longer holds (`409 ANCHOR_MISSING`):
   // the reader held the composer open while another writer rewrote the sentence, or their tab was
@@ -314,8 +356,8 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     async (held: HeldSend & { status: "refused" }): Promise<void> => {
       const anchor = held.request.anchor;
       if (anchor === undefined) return;
-      const bridge = bridgeRef.current;
       const kind = held.request.kind;
+      const bridge = await whenBridgeBinds();
       // The compose's own document is not the one on screen, so there is no editor here to
       // write its mark again. Nothing about the words is known from here - saying they were
       // changed or deleted would send the reader looking for an edit nobody made - and opening
@@ -324,6 +366,10 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
         setAnchorRefusal({ markId: anchor.mark_id, text: DOCUMENT_CLOSED_REFUSAL(kind) });
         return;
       }
+      // The reader can discard the refusal while their document is still loading: the draft the
+      // mark would belong to is gone, and a mark written for it would sit in the document with
+      // nothing to attach.
+      if (store.get(held.mutationKey)?.status !== "refused") return;
       // What the refused send itself carries: the words the composer was opened over, and the
       // block and surrounding text the editor wrote its mark among. Both outlive the mark and
       // the editor state that wrote it, which is why the composer is the one that keeps them.
@@ -346,7 +392,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       composers.current.get(hashKey(held.mutationKey))?.keepDraft();
       store.retry(held.mutationKey);
     },
-    [store]
+    [store, whenBridgeBinds]
   );
   // From Send on, the compose is its send's: the held-send store keeps its draft, its refusal and
   // the mark it names, whatever unmounts its composer, until the send lands or the reader discards
@@ -493,6 +539,11 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       bridgeRef.current = bridge;
       setDocumentBridge(bridge);
       withdrawPlacements();
+      // A document that has just bound its editor answers whoever waited for one; an
+      // unregistration answers nobody - the next document, or the wait's own bound, does.
+      if (bridge !== undefined) {
+        for (const waiter of bridgeWaiters.current) waiter(bridge);
+      }
     },
     [withdrawPlacements]
   );
@@ -539,7 +590,6 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       markPlacements,
       pendingCompose,
       placementsReported,
-      registerComposer,
       registerDocument,
       revealCompose,
       retypeCompose,
@@ -572,7 +622,6 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       placementsReported,
       publishBlockPlacements,
       publishMarkPlacements,
-      registerComposer,
       registerDocument,
       revealCompose,
       retypeCompose,
@@ -584,9 +633,20 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     ]
   );
 
-  return <MarginContext.Provider value={value}>{children}</MarginContext.Provider>;
+  return (
+    <ComposerRegistry.Provider value={registerComposer}>
+      <MarginContext.Provider value={value}>{children}</MarginContext.Provider>
+    </ComposerRegistry.Provider>
+  );
 }
 
 export function useMargin(): MarginContextValue {
   return useContext(MarginContext);
+}
+
+/** Takes the composer that holds the draft of a held send, for as long as it is mounted, and
+ *  answers what unregisters it. The margin asks the composer of the send it is about to send
+ *  again for what the reader has typed since the refusal (`reanchor`). */
+export function useComposerRegistry(): (composer: ComposerBridge) => () => void {
+  return useContext(ComposerRegistry);
 }

@@ -45,6 +45,13 @@ const PAST_THE_SWEEP_MS = 70_000;
 const GONE_MESSAGE =
   "The text you selected was changed or deleted, so this comment has nothing to attach to. " +
   "Your draft is kept — select the text again to attach it.";
+/** The composer's message when the words read in more than one place and nothing the composer
+ *  kept says which reading was the reader's, which is every selection that runs across a block
+ *  break: such a selection belongs to no block, so no surrounding text is kept for it. */
+const UNREMEMBERED_MESSAGE =
+  "The words you selected read in more than one place, and nothing kept of where you selected " +
+  "them says which one this comment is about. " +
+  "Your draft is kept — select the text again to attach it.";
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -802,11 +809,13 @@ test("a cross-block refusal does not claim the words moved while they are where 
     await expect(documentEditor(page)).toContainText("The swift fox jumps.");
 
     await send(page);
-    await expect(composer(page)).toContainText("Your draft is kept");
+    await expect(composer(page)).toContainText(UNREMEMBERED_MESSAGE);
     await expect(composer(page).getByLabel("Comment")).toHaveValue("Which pair is this?");
     expect(await listComments(issue.key, issue.primary_artifact_id)).toHaveLength(0);
-    // Their words are still where they selected them: the refusal must not say otherwise.
+    // Their words are still where they selected them, and the text around them is not the same
+    // in both places: the refusal claims neither.
     expect(await composer(page).textContent()).not.toContain("no longer where you selected it");
+    expect(await composer(page).textContent()).not.toContain("with the same text around them");
   } finally {
     await alice.close();
   }

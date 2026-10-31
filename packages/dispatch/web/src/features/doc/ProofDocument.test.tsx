@@ -288,12 +288,19 @@ test("ProofDocument reports connection status and pending edits through the tool
     act(() => status("connected"));
     await waitFor(() => expect(toolbar.current?.connection).toBe("connected"));
     act(() => {
-      pending({ count: 2, readOnly: false, rebuiltAt: undefined, stored: true });
+      pending({
+        count: 2,
+        countsEveryRow: true,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      });
       status("offline");
     });
     await waitFor(() =>
       expect(toolbar.current?.pending).toEqual({
         count: 2,
+        countsEveryRow: true,
         readOnly: false,
         rebuiltAt: undefined,
         stored: true,
@@ -325,7 +332,15 @@ test("the margin's wait for this browser's edits is answered by a report taken a
     // nothing has to be one taken after the wait began: the last report before it was taken
     // without that mark in it, and on a quiet document it says nothing pending, which would send
     // the retry straight back into the refusal it is recovering from.
-    act(() => pending({ count: 0, readOnly: false, rebuiltAt: undefined, stored: true }));
+    act(() =>
+      pending({
+        count: 0,
+        countsEveryRow: true,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
     let answered = false;
     const waiting = bridge.whenSent(5000).then(() => {
       answered = true;
@@ -333,18 +348,42 @@ test("the margin's wait for this browser's edits is answered by a report taken a
     await Promise.resolve();
     expect(answered).toBe(false);
 
-    act(() => pending({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true }));
+    act(() =>
+      pending({
+        count: 1,
+        countsEveryRow: true,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
     await Promise.resolve();
     expect(answered).toBe(false);
 
-    act(() => pending({ count: 0, readOnly: false, rebuiltAt: undefined, stored: true }));
+    act(() =>
+      pending({
+        count: 0,
+        countsEveryRow: true,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
     await waiting;
     expect(answered).toBe(true);
 
     // A read-only admission cannot send the row it holds, and a row another tab holds is not
     // this page's to send either: the bound is what ends the wait, and the margin sends again
     // whatever it answers.
-    act(() => pending({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true }));
+    act(() =>
+      pending({
+        count: 1,
+        countsEveryRow: true,
+        readOnly: true,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
     await bridge.whenSent(0);
   } finally {
     view.unmount();

@@ -10,6 +10,7 @@ const REASONS: readonly RemarkRefusal["refused"][] = [
   "gone",
   "unmarkable",
   "unplaceable",
+  "unremembered",
   "unsurrounded",
 ];
 
@@ -34,6 +35,9 @@ test("every re-anchor refusal names what the reader is writing, in its own word"
     "The text you selected is still in the document, but no longer where you selected it, so " +
       "this ask cannot be attached on its own. Your draft is kept — select the text again to " +
       "attach it.",
+    "The words you selected read in more than one place, and nothing kept of where you selected " +
+      "them says which one this ask is about. Your draft is kept — select the text again to " +
+      "attach it.",
     "The text around the words you selected changed, so nothing is left to say which reading " +
       "of them this ask is about. Your draft is kept — select the text again to attach it.",
   ]);
@@ -48,6 +52,9 @@ test("every re-anchor refusal names what the reader is writing, in its own word"
     "The text you selected is still in the document, but no longer where you selected it, so " +
       "this suggestion cannot be attached on its own. Your draft is kept — select the text " +
       "again to attach it.",
+    "The words you selected read in more than one place, and nothing kept of where you selected " +
+      "them says which one this suggestion is about. Your draft is kept — select the text again " +
+      "to attach it.",
     "The text around the words you selected changed, so nothing is left to say which reading " +
       "of them this suggestion is about. Your draft is kept — select the text again to attach " +
       "it.",
@@ -63,6 +70,9 @@ test("every re-anchor refusal names what the reader is writing, in its own word"
     "The text you selected is still in the document, but no longer where you selected it, so " +
       "this comment cannot be attached on its own. Your draft is kept — select the text again " +
       "to attach it.",
+    "The words you selected read in more than one place, and nothing kept of where you selected " +
+      "them says which one this comment is about. Your draft is kept — select the text again to " +
+      "attach it.",
     "The text around the words you selected changed, so nothing is left to say which reading " +
       "of them this comment is about. Your draft is kept — select the text again to attach it.",
   ]);
@@ -107,7 +117,13 @@ test("only the refusal for words that read nowhere says they were changed or del
     expect({ kind, says: REANCHOR_REFUSALS.gone(kind).includes("was changed or deleted") }).toEqual(
       { kind, says: true }
     );
-    for (const reason of ["ambiguous", "unmarkable", "unplaceable", "unsurrounded"] as const) {
+    for (const reason of [
+      "ambiguous",
+      "unmarkable",
+      "unplaceable",
+      "unremembered",
+      "unsurrounded",
+    ] as const) {
       expect({
         kind,
         reason,
@@ -135,9 +151,10 @@ test("the refusal for changed surroundings tells the reader what did change, and
   }
 });
 
-/** The refusal for two readings of the reader's own block that the same text surrounds: their
- *  words are exactly where they selected them and the text around them is the text they read
- *  there, so the sentence may say neither that the words moved nor that their surroundings
+/** The refusal for two readings the same text surrounds - two of the reader's own block, or two
+ *  of the document once that block is gone, both of them readings a kept placement answers:
+ *  their words are exactly where they selected them and the text around them is the text they
+ *  read there, so the sentence may say neither that the words moved nor that their surroundings
  *  changed. What it has to say is the one true thing left: the words read in more than one
  *  place alike, so nothing says which of them the draft is about. */
 test("the refusal for readings nothing tells apart says why, and claims no edit", () => {
@@ -150,6 +167,26 @@ test("the refusal for readings nothing tells apart says why, and claims no edit"
       says: text.includes("read in more than one place with the same text around them"),
       which: text.includes(`which one this ${kind} is about`),
     }).toEqual({ kind, changed: false, moved: false, says: true, which: true });
+  }
+});
+
+/** The refusal for a send whose composer kept nothing of where the reader selected - a selection
+ *  across a block break, or a send held since before the placement was kept - whose words read
+ *  in more than one place. Nothing was remembered to compare the text around those readings
+ *  with, and that text is not the same from one to the next, so saying they read alike would be
+ *  false; what is true is that the words read in more than one place and nothing kept of the
+ *  selection says which was theirs. Their words never moved, and nobody deleted them. */
+test("the refusal for readings nothing was kept to tell apart claims no likeness, edit or move", () => {
+  for (const kind of KINDS) {
+    const text = REANCHOR_REFUSALS.unremembered(kind);
+    expect({
+      kind,
+      alike: text.includes("with the same text around them"),
+      changed: text.includes("changed"),
+      moved: text.includes("no longer where you selected it"),
+      says: text.includes("read in more than one place"),
+      which: text.includes(`which one this ${kind} is about`),
+    }).toEqual({ kind, alike: false, changed: false, moved: false, says: true, which: true });
   }
 });
 

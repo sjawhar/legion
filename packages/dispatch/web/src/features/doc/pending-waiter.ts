@@ -15,7 +15,11 @@ interface Wait {
  * IndexedDB write is through - and only a report taken after the wait begins can be one that
  * counts it. The last report before it was taken without it, and a document with nothing else
  * pending reports nothing pending there: answering from it would send the retry straight back
- * into the refusal it is recovering from.
+ * into the refusal it is recovering from. Taken after the wait begins is not enough on its own
+ * either: another edit's acknowledgement counts the rows too, and the re-mark's own write can
+ * still be queued behind that count, which then reads a document that has yet to hold it. Such a
+ * report says so (`PendingState.countsEveryRow`), and only a report that counts every row this
+ * tab has written answers a wait.
  */
 export interface PendingWaiter {
   /** Takes the pending report `state` of the document `artifactId`. */
@@ -37,7 +41,10 @@ export function createPendingWaiter(): PendingWaiter {
     report(artifactId, state) {
       // The count is every tab's, and a read-only admission cannot send the rows it holds:
       // neither is this page's to make go, so a wait on one of them ends at its bound.
-      if (state.count !== 0 || state.readOnly) return;
+      // A count taken before the newest row this tab wrote was added holds a document without
+      // it, and that row can be the very mark this wait is about: the next report, taken once
+      // the store holds it, is the one that answers.
+      if (state.count !== 0 || state.readOnly || !state.countsEveryRow) return;
       // A wait only ever drops itself, which Set iteration already allows, and none adds one: no
       // copy of the set is needed on a callback every edit fires.
       for (const wait of waiting) {

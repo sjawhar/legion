@@ -473,23 +473,24 @@ export class HeldSends {
     }
   }
 
-  /** Sends the refused send under `mutationKey` again as a press of its own, and says whether
-   *  there was one to send. Every Retry is this one body - a session row's and a composer's, and
-   *  the margin's own re-send once it has written a refused compose's mark again and
-   *  re-addressed the send to it - so what a Retry carries is decided in one place: the request
-   *  the store holds now, so the retry names the mark the margin wrote, and the draft the store
-   *  holds, which the composer writes what the reader wrote over the refusal into. Unedited,
-   *  that is the refused request itself, picked delivery mode included: it goes under its own
-   *  key where the send ended without Dispatch's verdict, so Dispatch makes one message of the
-   *  two. Edited, it is another message, in the mode this one went in, under a key of its own.
-   *  A refusal Dispatch gave is its verdict on that send's key, so that attempt too goes out
-   *  under a key of its own (`requestFor`): a second body under the answered key would be
-   *  replayed that verdict or refused outright. */
-  retry(mutationKey: MutationKey): boolean {
+  /** Sends the refused send under `mutationKey` again as a press of its own. Every Retry but a
+   *  mounted composer's is this one body - a session row's, and the margin's own re-send once it
+   *  has written a refused compose's mark again and re-addressed the send to it - so what those
+   *  carry is decided in one place: the request the store holds now, so the retry names the mark
+   *  the margin wrote, and the draft the store holds, which the composer writes what the reader
+   *  wrote over the refusal into. A composer on screen builds its own Retry from the fields the
+   *  reader has in front of them instead (`MentionComposer`'s `sentRequest`), through the same
+   *  `requestFor`. Unedited, that is the refused request itself, picked delivery mode included:
+   *  it goes under its own key where the send ended without Dispatch's verdict, so Dispatch
+   *  makes one message of the two. Edited, it is another message, in the mode this one went in,
+   *  under a key of its own. A refusal Dispatch gave is its verdict on that send's key, so that
+   *  attempt too goes out under a key of its own (`requestFor`): a second body under the
+   *  answered key would be replayed that verdict or refused outright. */
+  retry(mutationKey: MutationKey): void {
     const held = this.get(mutationKey);
-    if (held?.status !== "refused") return false;
+    if (held?.status !== "refused") return;
     const { sendKey: _refused, ...addressed } = held.request;
-    return this.send(
+    this.send(
       mutationKey,
       requestFor(held.request, held.refusal, {
         ...addressed,

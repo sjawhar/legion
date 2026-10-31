@@ -58,7 +58,7 @@ import {
 } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
-import { useMargin } from "../margin/margin-context";
+import { useComposerRegistry } from "../margin/margin-context";
 import { AgentName, type AgentText, useAgentText } from "../refs/AgentName";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
@@ -499,7 +499,7 @@ export function MentionComposer({
     landed: (sent) => landed(sent),
     refused: (held) => replaceDraft(held.draft.draft),
   });
-  const { registerComposer } = useMargin();
+  const registerComposer = useComposerRegistry();
   /** This composer's send by name, which is what the margin looks it up by. */
   const composerName = mutationKey === undefined ? undefined : hashKey(mutationKey);
   // Only the mount reads it, so it is computed once rather than on every keystroke: the held

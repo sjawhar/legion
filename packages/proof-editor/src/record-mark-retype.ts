@@ -53,10 +53,13 @@
  * words more than once - the re-mark is refused rather than anchored to a passage the reader
  * never selected, which no refusal would ever tell them about. The refusal says which case it
  * was: the words read nowhere (`"gone"`), their own block still reads them but no reading there
- * is surrounded as theirs was (`"unsurrounded"`), two readings of their own block are surrounded
- * alike, so the words are where they were selected and nothing says which of them the draft is
- * about (`"ambiguous"`), or they read elsewhere in the document and no reading of them is the
- * reader's own to take (`"unplaceable"`), which the margin puts to the reader in different words.
+ * is surrounded as theirs was (`"unsurrounded"`), two readings are surrounded alike - two of
+ * their own block, or two of the document once that block is gone - so the words are where they
+ * were selected and nothing says which of them the draft is about (`"ambiguous"`), the composer
+ * kept nothing of where they selected and the words read in more than one place, so there is
+ * nothing to tell those readings apart by (`"unremembered"`), or they read elsewhere in the
+ * document and no reading of them is the reader's own to take (`"unplaceable"`), which the
+ * margin puts to the reader in different words.
  *
  * `removeRecordMark` is the precise removal both this module and the handle's `removeMark` use:
  * span by span, by id, whatever the mark's type. Upstream's `deleteMark` is not it - it cannot
@@ -103,14 +106,22 @@ export type RetypeOutcome = RetypedMark | RetypeRefusal;
  *  `"unmarkable"` says; the words the mark was written over read nowhere in the document any
  *  more (`"gone"`); the block the reader selected in still reads them, but no reading there is
  *  surrounded as theirs was, so the text around their words changed and nothing says which
- *  reading was theirs (`"unsurrounded"`); that block reads them in two places with the same text
- *  around both, so their words are where they selected them and nothing says which of the two
- *  the draft is about (`"ambiguous"`); or they read somewhere else in the document and no
- *  reading of them can be taken for the reader's own (`"unplaceable"`). None of the four is the
- *  same thing to say to a reader, so none of them is the same answer. A re-mark never answers
- *  `"missing"`: a mark the document has lost is the case it is for. */
+ *  reading was theirs (`"unsurrounded"`); two readings are surrounded as theirs was - two of
+ *  their own block, or two of the document once that block is gone - so their words are where
+ *  they selected them and nothing says which of the two the draft is about (`"ambiguous"`); the
+ *  composer kept nothing of where they selected, so nothing but the words themselves is left to
+ *  go by, and they read in more than one place (`"unremembered"`); or they read somewhere else
+ *  in the document and no reading of them can be taken for the reader's own (`"unplaceable"`).
+ *  None of the six is the same thing to say to a reader, so none of them is the same answer. A
+ *  re-mark never answers `"missing"`: a mark the document has lost is the case it is for. */
 export interface RemarkRefusal {
-  readonly refused: "ambiguous" | "gone" | "unmarkable" | "unplaceable" | "unsurrounded";
+  readonly refused:
+    | "ambiguous"
+    | "gone"
+    | "unmarkable"
+    | "unplaceable"
+    | "unremembered"
+    | "unsurrounded";
 }
 
 export type RemarkOutcome = RetypedMark | RemarkRefusal;
@@ -307,6 +318,15 @@ interface TextBlock {
   readonly length: number;
 }
 
+/** One block's own text, read as the selection bar reads a quote out of the document:
+ *  `textBetween` with a newline for each break, where an inline atom stands for one character as
+ *  it does for one position, so a text offset is a position offset. The one read behind every
+ *  scan of a block - a placement's count of its readings, and a re-mark's choice between them -
+ *  so no two of them can disagree about what reads there. */
+function textOf(block: ProseMirrorNode): string {
+  return block.textBetween(0, block.content.size, "\n", "\n");
+}
+
 /** The whole document as one text, with where each of its blocks sits in it: every textblock's
  *  own text, joined by a newline for each block break, which is what `textBetween(from, to, "\n",
  *  "\n")` reads out of the document and so what the selection bar reads a quote out of
@@ -321,7 +341,7 @@ function documentText(doc: ProseMirrorNode): { blocks: TextBlock[]; text: string
     // reads as the one newline `textBetween` gives it, and a textblock as its own text.
     const leaf = node.isLeaf && !node.isTextblock;
     if (!node.isTextblock && !leaf) return true;
-    const own = leaf ? "\n" : node.textBetween(0, node.content.size, "\n", "\n");
+    const own = leaf ? "\n" : textOf(node);
     if (blocks.length > 0) text += "\n";
     blocks.push({ at: text.length, base: leaf ? pos : pos + 1, length: own.length });
     text += own;
@@ -380,7 +400,7 @@ export function placementOf(
   const $start = doc.resolve(range.from);
   if (!$start.parent.isTextblock) return null;
   const base = $start.start();
-  const text = $start.parent.textBetween(0, $start.parent.content.size, "\n", "\n");
+  const text = textOf($start.parent);
   const offset = range.from - base;
   if (text.slice(offset, offset + quote.length) !== quote) return null;
   const after = offset + quote.length;
@@ -411,11 +431,9 @@ function remarkRange(
       ? null
       : blockWithId(state.doc, placement.blockId);
   if (block !== null) {
-    // The reader's own block, while it still reads their words, read as the selection bar reads
-    // a quote out of the document - `textBetween` with a newline for each break, where an inline
-    // atom stands for one character as it does for one position, so a text offset is a position
-    // offset. One scan of it answers all three questions below.
-    const blockText = block.block.textBetween(0, block.block.content.size, "\n", "\n");
+    // The reader's own block, while it still reads their words, read as the selection bar read
+    // the quote out of it. One scan of it answers all three questions below.
+    const blockText = textOf(block.block);
     const readings = readingsOf(blockText, quote, surroundings, (at) => block.base + at);
     // Two readings there surrounded as theirs was: another writer's reading of the same words
     // among the same words is not one this editor may choose between, and their own words have
@@ -441,12 +459,18 @@ function remarkRange(
   const { blocks, text } = documentText(state.doc);
   const readings = readingsOf(text, quote, surroundings, (at) => positionIn(blocks, at));
   if (readings.surrounded.length === 1) return readings.surrounded[0];
-  // More than one reading surrounded alike is the same case as two alike inside the reader's own
-  // block: the words are where they were and nothing says which of them is theirs. With nothing
-  // remembered - a selection across a break, or a send held by a tab older than the placement -
-  // every reading counts as alike, which is exactly what that says. Saying instead that the words
-  // are no longer where they were selected would be false: they never moved.
-  if (readings.surrounded.length > 1) return { refused: "ambiguous" };
+  // More than one reading surrounded alike, where the composer kept where the reader selected:
+  // the words are where they were and nothing says which of them is theirs, exactly as two
+  // alike inside the reader's own block. Saying instead that the words are no longer where they
+  // were selected would be false - they never moved.
+  if (readings.surrounded.length > 1 && placement !== null) return { refused: "ambiguous" };
+  // With no placement kept - a selection across a block break, which no one block's text reads,
+  // or a send held by a tab older than the placement - there are no surroundings to answer, so
+  // every reading answers `NO_SURROUNDINGS` and more than one of them says only that the words
+  // read in more than one place. What reads around those readings is not the same text, so the
+  // refusal for readings surrounded alike would be false here; what is true is that nothing kept
+  // of the selection says which reading was theirs. Their words never moved here either.
+  if (readings.surrounded.length > 1) return { refused: "unremembered" };
   // Telling the reader the words were changed or deleted while they are plainly on the page is
   // false too. The count is of that same text, so a quote on the page across a break is never
   // called deleted.
