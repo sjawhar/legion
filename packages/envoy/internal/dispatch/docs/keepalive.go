@@ -51,16 +51,7 @@ func keepAliveFrame(room string) []byte {
 		encoder.WriteVarUint(hocuspocusAwareness)
 		encoder.WriteVarBytes(noAwarenessChange)
 	})
-	frame := []byte{finalFrame | gws.BinaryMessage}
-	switch length := len(message); {
-	case length < 126:
-		frame = append(frame, byte(length))
-	case length <= 0xffff:
-		frame = binary.BigEndian.AppendUint16(append(frame, 126), uint16(length))
-	default:
-		frame = binary.BigEndian.AppendUint64(append(frame, 127), uint64(length))
-	}
-	return append(frame, message...)
+	return append(frameHeader(gws.BinaryMessage, true, int64(len(message)), nil), message...)
 }
 
 // keepAliveWriter is a document socket's response writer. The connection ygo's websocket upgrade
@@ -268,18 +259,60 @@ func frameHeaderLength(header []byte) int {
 	return length
 }
 
+// framePayloadLength is the payload length the frame header names, or -1 when it names one past
+// what an int64 holds (RFC 6455 keeps the top bit of a 64-bit length clear). It is the one place
+// a frame's length is decoded: the keep-alive's watch of what this service writes (frameBegins)
+// and the awareness filter's read of what a socket sends (awarenessLimitConn.readFrame) both
+// take it from here.
+func framePayloadLength(header []byte) int64 {
+	switch length := int64(header[1] &^ maskedFrame); length {
+	case 126:
+		return int64(binary.BigEndian.Uint16(header[2:4]))
+	case 127:
+		if named := binary.BigEndian.Uint64(header[2:10]); named <= uint64(1<<63-1) {
+			return int64(named)
+		}
+		return -1
+	default:
+		return length
+	}
+}
+
+// frameHeader is the header of a websocket frame of opcode carrying length payload bytes: the
+// opcode byte, with the FIN bit set when final, then the payload's length in the 7-, 16- or
+// 64-bit form RFC 6455 section 5.2 gives it, then key, the masking key. A frame a client sends
+// gives its four-byte key, which sets the MASK bit on the length's first byte; a frame a server
+// sends gives none (nil), and its MASK bit stays clear. It is the one place a frame's header is
+// encoded: the keep-alive's own frame (keepAliveFrame) and the awareness filter's frames to ygo
+// (awarenessLimitConn.writeFrame, and the continuation header awarenessLimitConn.pass writes)
+// all build theirs here. The caller appends the payload, masked under key when it gives one.
+func frameHeader(opcode byte, final bool, length int64, key []byte) []byte {
+	header := append(make([]byte, 0, maxFrameHeader), opcode)
+	if final {
+		header[0] |= finalFrame
+	}
+	var mask byte
+	if key != nil {
+		mask = maskedFrame
+	}
+	switch {
+	case length < 126:
+		header = append(header, mask|byte(length))
+	case length <= 0xffff:
+		header = binary.BigEndian.AppendUint16(append(header, mask|126), uint16(length))
+	default:
+		header = binary.BigEndian.AppendUint64(append(header, mask|127), uint64(length))
+	}
+	return append(header, key...)
+}
+
 // frameBegins reads the frame header just written: the frame's payload follows it.
 func (w *frameWatch) frameBegins() {
 	header := w.header[:w.headerRead]
 	w.headerRead = 0
-	payload := uint64(header[1] &^ maskedFrame)
-	switch payload {
-	case 126:
-		payload = uint64(binary.BigEndian.Uint16(header[2:4]))
-	case 127:
-		payload = binary.BigEndian.Uint64(header[2:10])
-	}
-	w.payloadLeft = payload
+	// A length past what an int64 holds (-1) is a frame no writer of this service makes, and
+	// nothing follows it to count.
+	w.payloadLeft = uint64(max(framePayloadLength(header), 0))
 	switch opcode := int(header[0] & 0x0f); {
 	case opcode == gws.CloseMessage:
 		w.closed = true

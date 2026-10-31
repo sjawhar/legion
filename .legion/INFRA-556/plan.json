@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-556",
+  "completed": "2026-10-27T02:53:30Z",
+  "planDocument": "dispatch://INFRA-556/artifact/plan-md",
+  "base": "819dc283",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the proof object (criterion, surface, command, observed, headSha, negativeControl), the PR body, the push and the production check after the close",
+      "ce-simplify-code: the simplify pass over the settled diff before the final proofs (plan task 16)",
+      "dispatch: the production check record and any Dispatch write (a finding ask, a message on the issue)",
+      "asd-ste100: the README, AGENTS.md, running-dispatch.md and PR text are read by teammates and agents"
+    ],
+    "test": [
+      "legion-worker: re-run every command the plan names on the head, record proofs with negative controls, and the before/after runs (task-1 commit vs head) for each multiprocess test and the browser spec"
+    ],
+    "review": [
+      "legion-worker: the merge gate, review threads, and the rule that every finding fixed here has a test failing before and passing after",
+      "asd-ste100: check that the three named documents and the PR text say what is true in plain, unambiguous English"
+    ]
+  },
+  "summary": "Replace the stale-room evictor with a Postgres-only room-sync follower: rooms catch up from doc_updates instead of closing; awareness crosses processes through a ygo cluster.Relay over NOTIFY; an issues trigger closes and reopens every process's rooms; ask authors become durable; a lock-aware room query protocol (holds/flush/share) lets agent writes, the lost-edit check and its participants see every process; reads never return text older than the store; rebuild, settlement resumption, the conditional-edit cap and cold writes hold across processes. One multiprocess test per spec item fails at the test-support commit and passes at head; a browser spec runs on INFRA-559's two-process harness.",
+  "tasks": [
+    "1 test support (docstest awareness/auth scope/close code; test hooks: resident rooms, failure and compaction counters, persistence hold, live-write pause points; multiprocess helpers); new multiprocess tests written and run here as the 'before' evidence",
+    "2 process UUID, pg_stat_activity membership, room-sync listener and dedicated sender connections (docs/room_sync.go replaces docs/stale_room.go; store/pool.go; cmd/dispatch/main.go)",
+    "3 live edits: cursor model, gate split, catch-up, history-replaced close, remote origin in the observer, settle re-arm, durable settlement actor, store never torn (D3)",
+    "4 awareness relay over NOTIFY with activation query, before-close removal, AwarenessExpiry 30s (D4)",
+    "5 issues closed_at trigger + handler on every process + open check in the append (D5)",
+    "6 doc_ask_block_authors (D6)",
+    "7 room query protocol: flush before fork, share at re-join under the lock, post-commit flush, participants union, cold write publishes only into a resident room (D7)",
+    "8 reads: room only at or past the stored head, else the store (D8)",
+    "9 rebuild holds-query and head re-check; leased settlement resumption (leasePoolSize 9); global conditional-edit cap table; finding 7 verified (D9)",
+    "10 X-Dispatch-Process header on the /ws/doc upgrade (D10)",
+    "11 rewrite or delete the close-on-behind tests (multiprocess_test.go 692/998/1059; stale_room_test.go; stale_room_eviction_test.go); new two-Service docs tests",
+    "12 TestStoredHistoryIsNeverTorn invariant test (-race, 200 iterations)",
+    "13 seven multiprocess tests, one per spec item plus D10",
+    "14 packages/dispatch/e2e/coedit.multiprocess.e2e.ts on INFRA-559's harness",
+    "15 docs, comments, CHANGELOG",
+    "16 simplify pass, then proofs at the merging head"
+  ],
+  "acceptance": [
+    {"criterion": "Item 1: edits, awareness and room state reach every process, no disconnect; finding 7", "surface": "two envoy-dispatch processes on one Postgres", "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<url> go test -tags multiprocess -count=1 -timeout 30m -run TestTwoEditorsOnTwoProcesses -v ./cmd/dispatch", "beforeAfter": "fails at the task-1 commit, passes at head"},
+    {"criterion": "Item 2: close and reopen change every process's rooms; read-only follows", "surface": "same", "command": "-run TestClosingAndReopeningAnIssue", "beforeAfter": "same"},
+    {"criterion": "Item 3: ask author durable", "surface": "same", "command": "-run TestAnAskBlockKeepsItsAuthor", "beforeAfter": "same"},
+    {"criterion": "Item 4: agent write, lost-edit check, participants see every process", "surface": "same", "command": "-run TestAnAgentWriteSeesEditsInFlight", "beforeAfter": "same"},
+    {"criterion": "Item 5: reads never older than the store", "surface": "same", "command": "-run TestAReadOnTheOtherProcess", "beforeAfter": "same"},
+    {"criterion": "Item 6: rebuild, resumption, conditional-edit cap, cold writes", "surface": "same", "command": "-run TestRebuildResumptionQueue", "beforeAfter": "same"},
+    {"criterion": "Browser suite against two processes: edits, cursors and presence within 1 s, no reconnect", "surface": "Dispatch's browser suite, INFRA-559 two-process mode", "command": "cd packages/dispatch && DATABASE_URL=<url> bun run e2e:multiprocess -- coedit.multiprocess", "beforeAfter": "fails on a build of the task-1 commit, passes at head; both runs quoted on the PR"},
+    {"criterion": "Docs say what is true", "surface": "packages/envoy/cmd/dispatch/README.md, packages/envoy/AGENTS.md, docs/site/src/content/docs/dispatch/running-dispatch.md", "command": "reviewer reads them", "beforeAfter": "-"},
+    {"criterion": "Stored history never torn", "surface": "docs package", "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<url> go test -race -count=1 -run TestStoredHistoryIsNeverTorn ./internal/dispatch/docs", "beforeAfter": "-"},
+    {"criterion": "No regression", "surface": "docs and api packages; the whole multiprocess file", "command": "go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ && go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch", "beforeAfter": "-"}
+  ],
+  "dependencies": [
+    "Browser spec (task 14) needs INFRA-559's two-process harness on main: DISPATCH_E2E_PROCESSES=2, bun run e2e:multiprocess, proxy on 8777, cookie dispatch-e2e-process=a|b, GET /_proxy/sockets, *.multiprocess.e2e.ts, job dispatch-browser-multiprocess, no NATS (agreed with the INFRA-559 planner over Envoy, 2026-10-27T02:14Z)",
+    "Making dispatch-multiprocess and dispatch-browser-multiprocess required is INFRA-563's",
+    "Production cross-pod proof is INFRA-564's after INFRA-561 raises the replica count; it reads X-Dispatch-Process"
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "D6 flush barrier as drafted cannot run: a NOTIFY on the request's transaction is delivered only at commit, a second pooled connection is refused (store.ErrNestedAcquire), waiting holds the owner row; and it would not remove a torn store", "answer": "Queries go through a dedicated non-pooled sender connection (D2). Flush runs only where the requester holds no document lock (in joinLiveWrite before lockArtifactOwner, and after commit); at re-join under the lock a lock-free share query returns the member's unstored updates (D7). The torn store is closed at the writer (D3.8) with an invariant test (task 12)."},
+      {"finding": "Catch-up row by row can show torn and pending states to rooms and browsers on the other process", "answer": "Catch-up merges and applies one batch per wake (D3.2); the store is kept causally ordered so every stored prefix is a state the room held (D3.8); PendingStats must be zero after a batch, else an ERROR log"},
+      {"finding": "D2 needs a new cursor model", "answer": "Cursor = highest contiguously held version plus a sorted set of held versions above it, folded like roomHold.since; own rows skipped; hold.add for every caught-up row (D3.1, D3.2)"},
+      {"finding": "One applier per room and a lock order; follower must not use srv.Apply; failed reads need retry", "answer": "Per-room catch-up mutex; order advisory lock -> catch-up mutex -> state.mu; follower uses GetDoc under holdOpen, never srv.Apply; settlement catches up under the document lock; retries use the evictor's backoff (D3.2, D3.5)"},
+      {"finding": "Awareness: a reader opening second waits up to 15 s; relayed heartbeats keep peerless rooms resident; Inject loads a racing room; forced close drops removals; expiry removal relayed", "answer": "Activation and new-connection awareness query; Inject only into rooms with local connections; the race is narrow and idles out; local awareness removed before a close; AwarenessExpiry 30s with the relayed expiry removal accepted and documented (D4)"},
+      {"finding": "Ask authors: id-less blocks, a first render that is never appended, cleanup, roll", "answer": "Stamped blocks get their row in the settlement transaction; browser blocks in their append transaction; write-site registrations in their commit transaction; remote renders attribute nothing; rows deleted with the ask row and for blocks absent from the settled tree; old build leaves rows a new build's settlement deletes (D6)"},
+      {"finding": "Trigger migration duties, handle off the listener goroutine, open check in the append, reopen closes rooms, roll behaviour", "answer": "Migration with .census.sql and README paragraph naming locks; handler off the listener goroutine; append checks the issue is open (one indexed lookup folded into the gate query); reopen closes rooms so sockets reconnect writable; PR states old-build rooms behave as today during the roll (D5, task 5, task 15)"},
+      {"finding": "History-replaced check reconnects rooms only behind across a compaction; prune reuses version numbers", "answer": "Accepted: only when a compaction lands inside a catch-up window of milliseconds, documented; rebuild and prune caught marker-free (D3.3). PruneAfter is called only by ygo's conformance tests"},
+      {"finding": "Rebuild test feasibility; conditional cap leak and namespace; extra transaction", "answer": "Test makes the stored history unloadable by SQL while B holds the room; cap writes the absolute in-memory count, uses its own advisory namespace, one short transaction before the request's (D9, task 13)"},
+      {"finding": "Finding 7 fix reverses a deliberate exception; no observable exists", "answer": "Exception kept unless blame shows its reason gone; D3 removes the per-keystroke trigger; hook counters show no room fails and no lock-waiting compaction across 200 cross-process keystrokes (D9, task 1, task 13)"},
+      {"finding": "'Fails before, passes after' determinism: hooks missing at base, item 5 flaky window, item 3 settlement placement", "answer": "Hooks and test support land first with no behaviour change; that commit is the 'before' run; item 5 uses the evictor's 2 s refusal window; item 3 SIGKILLs B and lets A's resumption settle (task 1, task 13)"},
+      {"finding": "Browser criteria undefined: presence, within one second, no reconnect; docstest lacks awareness/auth/close", "answer": "Presence = .proof-collab-cursor__label with the login at doc.e2e.ts's cursor-test setup; expect timeout 1000 from the keystroke; one socket per page in /_proxy/sockets and connectedDot never offline; docstest extended (task 1, task 14)"},
+      {"finding": "Two builds, connection budget, re-registration, awareness rate, listener outage", "answer": "dispatch_doc_changed payload unchanged; membership via pg_stat_activity needs no registration rows; +2 connections documented; awareness coalesced 50 ms; no polling during a redial, reads stay fresh (D1, D2, D4, risks)"},
+      {"finding": "D7 reads wait inside a transaction", "answer": "Reads never wait: room at or past the stored head, else the store, head read through the caller's transaction (D8)"},
+      {"finding": "More documents and comments made false; CHANGELOG", "answer": "Listed in task 15"},
+      {"finding": "Finding 8 owner unsourced; INFRA-559 dependency; production socket pod recording", "answer": "INFRA-558 spec item 2 and the INFRA-63 architect's Envoy message (02:45Z) assign finding 8 to INFRA-558; dependency named; D10 adds X-Dispatch-Process (recorded as a departure)"}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 3},
+  "specDepartures": [
+    {
+      "spec": "The spec's header names audit 'Document rooms' findings 1-11.",
+      "plan": "Fixes findings 1-7 and 9-11; finding 8 (read-only/editable flips during a schema-changing roll) is left to INFRA-558.",
+      "evidence": "INFRA-558 spec item 2 covers it; the INFRA-63 architect confirmed over Envoy at 2026-10-27T02:45Z that INFRA-558's plan item D5 fixes it and INFRA-556 leaves it out; the spec's six numbered items do not include it.",
+      "outcome": {"kind": "changed", "scope": "Audit 'Document rooms' finding 8 is out of this issue's scope; INFRA-558 owns it."}
+    },
+    {
+      "spec": "The spec's six items do not mention identifying which process served a document socket.",
+      "plan": "D10 adds the X-Dispatch-Process response header (hostname) on the /ws/doc upgrade.",
+      "evidence": "Root acceptance (dispatch://INFRA-63/spec): two readers in production 'with two token-authenticated document connections whose serving pods are recorded'; nothing today tells a client which pod served its socket and no child owns it.",
+      "outcome": {"kind": "changed", "scope": "Adds one response header on the document socket upgrade, used by the multiprocess tests and by INFRA-564's production check."}
+    }
+  ]
+}

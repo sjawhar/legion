@@ -41,7 +41,7 @@ func compareFlow(t *testing.T, sides [2]*equivalenceSide, document *equivalenceD
 		copyHistory(t, sides[0].database, sides[1].database, ids.artifact)
 	}
 	history := storedHistory(t, sides[0].database, ids.artifact)
-	if other := storedHistory(t, sides[1].database, ids.artifact); !slices.EqualFunc(history, other, storedRow.equal) {
+	if other := storedHistory(t, sides[1].database, ids.artifact); !slices.EqualFunc(history, other, historyRow.equal) {
 		t.Fatalf("the two sides start the flow from different stored histories (%d and %d rows)", len(history), len(other))
 	}
 	var observed [2]flowObservation
@@ -184,7 +184,7 @@ type rowEffect struct {
 
 // run is flow on the side, from history, the stored document both sides start from: in a joined
 // transaction, committed when the flow succeeds, and what it left before and after the commit.
-func (side *equivalenceSide) run(t *testing.T, document *equivalenceDocument, flow equivalenceFlow, ids flowIDs, history []storedRow) flowObservation {
+func (side *equivalenceSide) run(t *testing.T, document *equivalenceDocument, flow equivalenceFlow, ids flowIDs, history []historyRow) flowObservation {
 	t.Helper()
 	ctx := context.Background()
 	var observed flowObservation
@@ -283,7 +283,7 @@ func (side *equivalenceSide) run(t *testing.T, document *equivalenceDocument, fl
 // rowEffects applies the rows at versions, in order, to the stored document history leaves, and
 // records what each leaves. client is the flow's transaction's own client id, named "txn" so the
 // two sides' compare.
-func (side *equivalenceSide) rowEffects(t *testing.T, document *equivalenceDocument, artifactID string, versions []int64, client crdt.ClientID, history []storedRow) []rowEffect {
+func (side *equivalenceSide) rowEffects(t *testing.T, document *equivalenceDocument, artifactID string, versions []int64, client crdt.ClientID, history []historyRow) []rowEffect {
 	t.Helper()
 	if len(versions) == 0 {
 		return nil
@@ -294,8 +294,8 @@ func (side *equivalenceSide) rowEffects(t *testing.T, document *equivalenceDocum
 	if err != nil {
 		t.Fatalf("read the flow's rows: %v", err)
 	}
-	appended, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (storedRow, error) {
-		var stored storedRow
+	appended, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (historyRow, error) {
+		var stored historyRow
 		return stored, row.Scan(&stored.version, &stored.update, &stored.contentChanged)
 	})
 	if err != nil {

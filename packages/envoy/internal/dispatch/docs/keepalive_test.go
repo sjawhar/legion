@@ -105,7 +105,7 @@ func TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts(t *testing.T) {
 				t.Fatalf("the idle socket heard nothing for %v, past the %v the keep-alive allows", gap.Round(time.Millisecond), allowed)
 			}
 			last = frame.at
-			if awarenessUpdate, ok := awarenessMessage(t, frame.message, artifactID); ok {
+			if awarenessUpdate, ok := awarenessUpdateIn(t, frame.message, artifactID); ok {
 				before := changes
 				if err := applied.ApplyUpdate(awarenessUpdate, nil); err != nil {
 					t.Fatalf("apply the awareness frame %x: %v", frame.message, err)
@@ -148,9 +148,9 @@ func TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts(t *testing.T) {
 	}
 }
 
-// awarenessMessage is the awareness update message carries when it is a Hocuspocus awareness
+// awarenessUpdateIn is the awareness update message carries when it is a Hocuspocus awareness
 // message, and whether it is one. Every message the room sends names its document first.
-func awarenessMessage(t *testing.T, message []byte, artifactID string) ([]byte, bool) {
+func awarenessUpdateIn(t *testing.T, message []byte, artifactID string) ([]byte, bool) {
 	t.Helper()
 	decoder := encoding.NewDecoder(message)
 	name, err := decoder.ReadVarString()

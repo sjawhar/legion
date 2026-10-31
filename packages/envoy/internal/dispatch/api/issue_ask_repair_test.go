@@ -7,10 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -46,6 +49,9 @@ func newRepairFixtureSettlingAfter(t *testing.T, settle time.Duration) repairFix
 	database := storetest.Open(t)
 	documents := docs.New(docs.Deps{Store: database, Identity: headerIdentity(database), Settle: settle})
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+	// A close or reopen reaches the document rooms from its commit (migration 0150's trigger),
+	// whoever wrote it, an older release's SQL below included.
+	runDocumentRoomSync(t, database, documents)
 	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
 		Store:       database,
@@ -79,7 +85,8 @@ func repairActor(id string) model.Actor {
 
 // closeWithoutWithdrawing closes issue as a release older than the withdrawal did: the issue's
 // row reads done and closed at closedAt, an issue.closed event names actor, and every ask and
-// block is left as it was. With no actor it appends no event.
+// block is left as it was. With no actor it appends no event. The rooms hear of the close from
+// its commit (runDocumentRoomSync), and it returns once they have closed.
 func closeWithoutWithdrawing(t *testing.T, f repairFixture, issue string, actor *model.Actor, closedAt time.Time) {
 	t.Helper()
 	ctx := store.WithTransactionTracking(context.Background())
@@ -89,11 +96,13 @@ func closeWithoutWithdrawing(t *testing.T, f repairFixture, issue string, actor 
 	if actor != nil {
 		appendIssueEvent(t, f, issue, "issue.closed", "done", *actor)
 	}
-	f.documents.SetIssueClosed(ctx, issue, true)
+	awaitIssueRoomsClosed(t, f, issue)
 }
 
 // reopenWithoutRestoring reopens issue as a release older than the withdrawal did: the issue's
 // row reads status, an issue.updated event names actor, and its withdrawn asks stay withdrawn.
+// The rooms hear of the reopen from its commit (runDocumentRoomSync), and it returns once they
+// have closed, for their next load to read the issue open.
 func reopenWithoutRestoring(t *testing.T, f repairFixture, issue, status string, actor model.Actor) {
 	t.Helper()
 	ctx := store.WithTransactionTracking(context.Background())
@@ -101,7 +110,32 @@ func reopenWithoutRestoring(t *testing.T, f repairFixture, issue, status string,
 		t.Fatalf("reopen %s: %v", issue, err)
 	}
 	appendIssueEvent(t, f, issue, "issue.updated", status, actor)
-	f.documents.SetIssueClosed(ctx, issue, false)
+	awaitIssueRoomsClosed(t, f, issue)
+}
+
+// awaitIssueRoomsClosed waits up to ten seconds for this process to hold no room of issue's
+// documents: the close or reopen just committed closes every one it held (setRoomIssueOpen),
+// storing what each had taken first, and nothing here loads one again meanwhile.
+func awaitIssueRoomsClosed(t *testing.T, f repairFixture, issue string) {
+	t.Helper()
+	rows, err := f.database.Pool.Query(store.WithTransactionTracking(context.Background()),
+		`select id::text from artifacts where issue_key = $1 and kind = 'doc'`, issue)
+	if err != nil {
+		t.Fatalf("list the documents of %s: %v", issue, err)
+	}
+	documents, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("list the documents of %s: %v", issue, err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		resident := f.documents.ResidentRooms()
+		if !slices.ContainsFunc(documents, func(document string) bool { return slices.Contains(resident, document) }) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a room of %s's documents %v stayed resident after its close or reopen (resident: %v)", issue, documents, resident)
+		}
+	}
 }
 
 // appendIssueEvent appends an eventType event of issue naming actor, its payload the issue's
@@ -360,8 +394,9 @@ func TestRepairRestoresTheWithdrawnAsksOfAnIssueReopenedWithoutRestoring(t *test
 	}
 }
 
-// A browser on another process's room - which the close's SetIssueClosed never reached - writes
-// an ask block into a closed issue's document, leaving a settlement owed that no settlement runs
+// A browser on another process's room - one that never hears of the close, as a process of an
+// older build does not, or has not yet when its room stores the write - writes an ask block into a
+// closed issue's document, leaving a settlement owed that no settlement runs
 // while the issue is closed. The repair gives that issue the close's final sweep, so the block
 // reads resolved; a closed issue whose document owes no settlement is not touched.
 func TestRepairSweepsAClosedIssuesDocumentWrittenByAnotherProcess(t *testing.T) {

@@ -1,0 +1,15 @@
+kind: Changed
+body: |-
+  An agent's document write sees the edits a person on another process made before it. Before the
+  write forks, every other member process that holds the document's room stores its room's
+  updates, and an open write's fork follows the stored head. A
+  `409 EDIT_LOST_TO_CONCURRENT_CHANGE` names the people connected on this process and on every
+  member that answered, and the `200`'s `lost_ops` is judged on the document at the stored head.
+  The members are the processes whose listener connection is named
+  `dispatch-listener <process id>` in `pg_stat_activity`. A process asks them on
+  `dispatch_doc_query` and, for each question, waits 500 ms at most for their answers on
+  `dispatch_doc_answer`. A write asks up to three questions, so it can wait up to 1.5 s in all.
+  After each wait it continues, and logs a WARN that names the members that did not answer.
+time: 2026-10-28T12:12:15Z
+custom:
+  Issue: pr2414

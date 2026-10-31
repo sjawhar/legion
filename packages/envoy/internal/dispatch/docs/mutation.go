@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"weak"
 
@@ -169,6 +168,11 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 	version, err := s.persistence.AppendUpdateTx(ctx, op.tx, op.write.artifactID, update, contentChanged)
 	if err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
+	}
+	op.write.appended = append(op.write.appended, version)
+	if len(op.write.versions) == 0 {
+		// The transaction holds the document's advisory lock from this append until it ends.
+		s.hooks.parkLiveWrite(op.write.artifactID, PauseAfterFirstAppend)
 	}
 	// The append holds the document's advisory lock until the transaction ends, so no eviction
 	// of the room can finish before then, and a later reload holds the write. A room that failed
@@ -862,9 +866,9 @@ func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string,
 
 // readDocument is the document the caller sees, read without loading or writing its room, so it
 // also reads a closed issue's document: the tree of the calling transaction's fork or of the
-// resident room (heldTree), else the rendering of the stored document (coldRead), or the stored
-// document's tree where the rendering does not take it. A document with no stored state has
-// neither, and no error.
+// resident room, or of the stored document when that room is behind the stored head (heldTree),
+// else the rendering of the stored document (coldRead), or the stored document's tree where the
+// rendering does not take it. A document with no stored state has neither, and no error.
 func (s *Service) readDocument(ctx context.Context, artifactID string) (*documentRead, *pmdoc.Node, error) {
 	tree, held, err := s.heldTree(ctx, artifactID)
 	if err != nil || held {
@@ -875,7 +879,11 @@ func (s *Service) readDocument(ctx context.Context, artifactID string) (*documen
 
 // heldTree is the tree of the document where this server holds it, once a failed room's recovery
 // is done: the calling transaction's fork's when it has one (joinRead), else the resident room's,
-// as of one moment (liveTree). held is false where neither holds it.
+// as of one moment (liveTree). held is false where neither holds it. It is never older than the
+// stored head, read after joinRead and before the room (readStoredHead): a resident room behind
+// that head - another process stored an update its catch-up has not applied yet - is read from
+// the store instead (storedTree), which does not fail the room, sound and only behind; the read
+// waits for no catch-up.
 func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.Node, held bool, err error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
 		return nil, false, err
@@ -888,11 +896,20 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 		tree, err := s.readFork(fork)
 		return tree, true, err
 	}
-	if live := s.srv.GetDoc(artifactID); live != nil {
-		tree, err := s.liveTree(artifactID, live)
+	live := s.srv.GetDoc(artifactID)
+	if live == nil {
+		return nil, false, nil
+	}
+	head, err := s.readStoredHead(ctx, artifactID)
+	if err != nil {
+		return nil, false, err
+	}
+	if !s.roomHoldsHead(live, head) {
+		tree, err := s.storedTree(ctx, artifactID)
 		return tree, true, err
 	}
-	return nil, false, nil
+	tree, err = s.liveTree(artifactID, live)
+	return tree, true, err
 }
 
 // loadTree is the tree of the document a socket's admission check reads (heldTree, else the stored
@@ -1136,62 +1153,6 @@ func (s *Service) prevalidateLiveOperations(ctx context.Context, artifactID stri
 		return nil, err
 	}
 	return s.prevalidateOperations(ctx, artifactID, tree, ops)
-}
-
-const maxQueuedConditionalEdits = 32
-
-type conditionalEditGate struct {
-	turn   chan struct{}
-	mu     sync.Mutex
-	queued int
-}
-
-// AcquireConditionalEdit queues one conditional edit in memory before it can
-// acquire a database connection, keeping stale retries from exhausting pgx.
-func (s *Service) AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error) {
-	for {
-		created := &conditionalEditGate{turn: make(chan struct{}, 1)}
-		created.turn <- struct{}{}
-		value, _ := s.conditionalGates.LoadOrStore(artifactID, created)
-		gate := value.(*conditionalEditGate)
-		gate.mu.Lock()
-		current, present := s.conditionalGates.Load(artifactID)
-		if !present || current != gate {
-			gate.mu.Unlock()
-			continue
-		}
-		if gate.queued >= maxQueuedConditionalEdits {
-			gate.mu.Unlock()
-			return nil, ErrPreconditionBusy
-		}
-		gate.queued++
-		gate.mu.Unlock()
-
-		select {
-		case <-gate.turn:
-			return func() {
-				gate.mu.Lock()
-				gate.queued--
-				last := gate.queued == 0
-				if last {
-					s.conditionalGates.CompareAndDelete(artifactID, gate)
-				}
-				gate.mu.Unlock()
-				if !last {
-					gate.turn <- struct{}{}
-				}
-			}, nil
-		case <-ctx.Done():
-			gate.mu.Lock()
-			gate.queued--
-			last := gate.queued == 0
-			if last {
-				s.conditionalGates.CompareAndDelete(artifactID, gate)
-			}
-			gate.mu.Unlock()
-			return nil, ctx.Err()
-		}
-	}
 }
 
 func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snapshots []tableAnchorSnapshot) error {
@@ -1686,15 +1647,15 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // (LEGION-503). The room is taken inside the Apply that loads and as docTree reads it: a room
 // looked up again once that Apply returned can have been evicted in between.
 //
-// A version is never rendered from a room behind the durable head (refuseRoomBehindHead): with two
-// envoy-dispatch processes on one Postgres, that room lacks what the other process appended, and
-// the version would record that update's cursor over text missing it, so no later settlement
-// would version those words (INFRA-218). A room found behind the head inside the Apply, under the
-// document's advisory lock this transaction holds, is versioned from the stored document instead,
-// as a write behind the head forks from it (coldFork); so is a write's fork that came from the
-// store. Neither holds a change still in flight in the room, so the version lists none of the
-// room's in-flight credits (withoutInflight): a credit whose append lands later is owed then, and
-// one whose append the gate refuses is credited again when its browser resends the edit.
+// A version is never rendered from a room behind the durable head (the gate's derived rule,
+// appendDerived): with two envoy-dispatch processes on one Postgres, that room can lack what the
+// other process appended until its catch-up takes it in, and the version would record that
+// update's cursor over text missing it, so no later settlement would version those words
+// either. A room found behind the head inside the Apply, under the document's advisory lock
+// this transaction holds, is versioned from the stored document instead, as a write behind the
+// head forks from it (coldFork); so is a write's fork that came from the store. Neither holds a
+// change still in flight in the room, so the version lists none of the room's in-flight credits
+// (withoutInflight): a credit whose append lands later is owed then.
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (renderedTree, authorCapture, error) {
 	tx, _ := txFromContext(ctx)
 	write := joinedLiveWrite(ctx, room)
@@ -1768,7 +1729,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		var readErr error
 		var behind bool
 		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
-			if cursor := s.cursorOf(live); cursor != nil && refuseRoomBehindHead(room, cursor, head) != nil {
+			if cursor := s.cursorOf(live); cursor != nil && cursor.heldThrough() != head {
 				behind = true
 				return
 			}
@@ -1801,14 +1762,16 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	return renderedTree{tree: tree, markdown: markdown, offsets: offsets}, capture, nil
 }
 
-// storedTree is the tree of artifactID's stored document at its head, for a version whose room
-// stands behind that head (captureLiveTextAndAuthors). It is read on the pool that owns loads
-// (LoadDocument), as a cold write's fork reads the stored document (coldFork), and the caller
-// holds the document's advisory lock, so no append lands between the head it compared against
-// and this read. A load that fails does not fail the room, where coldFork's does: coldFork reads
-// the store in place of a room, so its failure is the document's, while here the room is sound
-// and only behind, and its settlement or the stale-room evictor reloads it. The version's
-// transaction answers ErrServiceUnavailable instead, and its caller retries.
+// storedTree is the tree of artifactID's stored document at its head, for a version or a read
+// whose room stands behind that head (captureLiveTextAndAuthors, heldTree, docTree). It is read on
+// the pool that owns loads (LoadDocument), as a cold write's fork reads the stored document
+// (coldFork), never through the caller's transaction or a second connection of the shared pool. A
+// version's caller holds the document's advisory lock, so no append lands between the head it
+// compared against and this read; a read's holds nothing, and its load reads a head at or past
+// the one it compared against. A load that fails does not fail the room, where coldFork's does:
+// coldFork reads the store in place of a room, so its failure is the document's, while here the
+// room is sound and only behind, and its catch-up brings it to the head (roomCatchUps). The caller
+// answers ErrServiceUnavailable instead, and its caller retries.
 func (s *Service) storedTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
 	loaded, err := s.persistence.LoadDocument(ctx, artifactID)
 	if err != nil {

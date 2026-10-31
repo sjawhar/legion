@@ -65,6 +65,13 @@ var keyedWriteGuardAllowed = map[string]string{
 	// marked). A failure is only logged, and a duplicate after a takeover adds only one more row of
 	// statistics.
 	"api.server.insertRelatedChecks": "records a check whether or not its write wrote; a takeover's duplicate only adds a statistics row",
+	// The count of this process's queued conditional edits of one document, written again as the
+	// edit leaves the queue (docs.Service.releaseConditionalEdit): bookkeeping of the queue, never
+	// the request's own work, written without the queue lock on a detached context after the edit.
+	// A failure is only logged, the other processes read the last count written until the next,
+	// and an admission deletes the rows of every process that is no member, so a count a crash
+	// left behind is cleared rather than replayed.
+	"docs.Service.releaseConditionalEdit": "writes the queue's own count after the edit, which no key marks",
 }
 
 // keyedWriteOffence is one statement a keyed route's handler can reach that commits a write outside

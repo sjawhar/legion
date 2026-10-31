@@ -239,7 +239,9 @@ func TestConditionalEditAdmissionBoundsQueuedRequests(t *testing.T) {
 		t.Fatal("conditional edit gate not registered")
 	}
 	gate := gateValue.(*conditionalEditGate)
-	deadline := time.Now().Add(time.Second)
+	// Each admission is a short transaction under the queue's advisory lock (admitConditionalEdit),
+	// so 31 of them queue one after another; the wait is the room wait, not a fixed second.
+	deadline := time.Now().Add(roomWait(t))
 	for queueDepth(gate) != maxQueuedConditionalEdits && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
@@ -355,6 +357,11 @@ func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
 	seedServiceText(t, service, artifactID, "# First")
 	if _, err := joinedReplaceText(service, artifactID, "base", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("prepare document: %v", err)
+	}
+	// The write resolves inside the Apply of the room a browser edits; a write to a document no
+	// room holds loads none (publishLiveWrite), so the room is loaded here.
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
 	}
 	entered := make(chan struct{})
 	release := make(chan struct{})

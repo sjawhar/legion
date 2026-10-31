@@ -46,6 +46,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/pglisten"
 	"github.com/sjawhar/envoy/internal/redact"
 	"github.com/sjawhar/envoy/listenfd"
 )
@@ -407,12 +408,12 @@ func main() {
 	//     (its claim window) and the delivery intakes (NATS's push-durable exclusivity, which
 	//     delivery.StartIntakes takes).
 	//   - per-process by design, because each serves this process's own connections or memory:
-	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
-	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
-	//     delivery live hub and its listener (migration 0107_events_notify.up.sql states that
-	//     purpose), the event stream relay, the document rooms' timers, and the stale-room
-	//     evictor (it closes the rooms resident in this process that the other process's writes
-	//     left behind the durable head, so it has to run wherever a room is resident).
+	//     the delivery live hub and its listener (migration 0107_events_notify.up.sql states that
+	//     purpose), the event stream relay, the document rooms' timers, the process's shared
+	//     listener hub (its connection is this process's membership, so it has to run in every
+	//     process) and the room sync registered on it (it serves the rooms resident in this
+	//     process: it catches them up with the other processes' writes and answers their room
+	//     queries).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
 	//     above.
@@ -462,12 +463,26 @@ func main() {
 	}
 	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
-	// anyone opening its document.
-	go documentService.RunSettlementResumption(ctx)
-	// INFRA-66: a document written by the other envoy-dispatch process is announced over
-	// Postgres, and the room this process holds for it closes within that round trip, so its
-	// browsers reconnect and re-sync instead of reading text the store no longer holds.
-	go documentService.RunStaleRoomEviction(ctx)
+	// anyone opening its document. One process per period arms them (docs.RunSettlementResumption).
+	go documentService.RunSettlementResumption(ctx, leases)
+	// This process's one shared LISTEN connection. Its name is what makes
+	// this process a member: the other envoy-dispatch processes read it in pg_stat_activity
+	// (docs/room_sync.go). The document rooms' room sync is registered on it: a document written
+	// by another process is announced over Postgres, and the room this process holds for it
+	// catches up from the stored updates within that round trip, so its browsers see the write
+	// without a reconnect. The delivery hub and the event stream relay still hold listener
+	// connections of their own (store.Pool.Listener). Both stop with ctx, like the loops beside
+	// them; the service's NOTIFY sender stays open until documentService.Shutdown has drained the
+	// rooms.
+	listenerHub := &pglisten.Hub{
+		Owner: "dispatch",
+		Dial: func(ctx context.Context) (*pgx.Conn, error) {
+			return database.Pool.Dedicated(ctx, docs.ListenerApplicationPrefix+documentService.ProcessID())
+		},
+	}
+	runRoomSync := documentService.RegisterRoomSync(listenerHub)
+	go runRoomSync(ctx)
+	go listenerHub.Run(ctx)
 	// The related-item check's keyword statistics (each project's df and N), rebuilt at
 	// boot and every ten minutes.
 	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, leases)
@@ -1032,6 +1047,7 @@ func devSignInSharedSigningKey(shared string) string {
 // router through appContextOptions, so dropping a hand-off here fails a case.
 func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
 	built.AgentTokens = boot.AgentTokens
+	built.TestHooks = boot.TestHooksEnabled
 	return docs.New(built)
 }
 

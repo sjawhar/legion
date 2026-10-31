@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-556",
+  "completed": "2026-10-31T12:35:00Z",
+  "round": 14,
+  "testedCodeHead": "dd61cd4660bb",
+  "scope": "INFRA-63 architect, 2026-10-31T10:27Z: confirm by fingerprint that nothing else changed (the fix, its no-behaviour companions, the merge of main and any migration renumbering); the new test's failing-first proof against a2a0a2a1; the awareness tests under -race; the departure, reconnect, and departure-then-heartbeat trials on real binaries; ci-ok and pr-title at the code head",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran at dd61cd46: the new test 3 of 3, the -race awareness run (ok 38.525s, 28 passed), the two-process file (ok 1124.016s), and the browser coedit spec 2 of 2. Reproduced the new test failing 2 of 2 at a2a0a2a1."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A late state record of a departed reader is settled by one read of the room under r.mu, so it no longer overwrites the reader's removal",
+      "surface": "the docs package's two Services on a real Postgres 17, with the relay's ordering hooks",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test -count=3 -run 'TestAReadersHeartbeatRecordedOverItsOwnRemovalStillLeavesTheOtherProcess|TestARoomsAwarenessFiresItsObserversWithItsLockReleased' ./internal/dispatch/docs",
+      "observed": "Both pass 3 of 3 at head. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6543395232",
+      "headSha": "dd61cd4660bb",
+      "negativeControl": "At a2a0a2a1, with head's two test files and no other change (the hooks already exist there), the new test fails 2 of 2: ':578 task A's relay lists alice at clock 2 … though she left its room' and ':587' her removal never reaches bob on B within 10 s."
+    },
+    {
+      "criterion": "On real binaries: a departure followed at once by a heartbeat from the same tab before it closes, a plain departure, and a reconnect onto the other process",
+      "surface": "two real envoy-dispatch binaries on one Postgres, driven by document sockets (throwaway TestProbeR14DepartureThenHeartbeatBeforeClose, TestProbeR14DepartureReachesTheOtherProcess and TestProbeR14ReconnectAcrossProcesses, not committed)",
+      "command": "go test -tags multiprocess -count=2 -run TestProbeR14 ./cmd/dispatch",
+      "observed": "Departure then heartbeat: 24 of 24. Bob is gone from the reader on his own process in 0-2 ms and from the other process's reader in 51-57 ms, and neither holds him 2 s later. Departure: 24 of 24, gone in 0-1 ms on his own process and 52-54 ms on the other. Reconnect: 24 of 24, back after 10-25 ms and shown on both readers 2 s later.",
+      "headSha": "dd61cd4660bb",
+      "negativeControl": "Each trial first requires both readers to hold bob. A departure that only the 30 s expiry clears would fail the 1 s bound, and a heartbeat that brought him back would fail the 2 s re-check."
+    },
+    {
+      "criterion": "Only the fix and its test move changed since round 13, and the merge of main kept the branch's changes intact",
+      "surface": "the commits' diffs",
+      "command": "function-by-function comparison of awareness_relay_test.go at a2a0a2a1 against awareness_relay_test.go plus awareness_relay_race_test.go at e1f4fa33; for each of the 132 files, the branch's changed lines on top of main compared before the merge (8a72cf79 to e1f4fa33) and after it (cc3a30bb to dd61cd46)",
+      "observed": "Every test function moved byte for byte, except the new heartbeat test and the guard test. The guard now also queues a write from another goroutine inside the observer, a stronger test-only change. awareness_relay.go changes record (one settling read for any non-removal entry the list does not place) and answer (nulls removed first). Main brought 25 commits. All 132 files' changes on top of main are byte-identical before and after the merge. claims_doc_test.go no longer differs from main, since #2598 merged it. No migration was renamed or renumbered.",
+      "headSha": "dd61cd4660bb",
+      "negativeControl": "A change of one line in any file's changes on top of main would change that file's sha1 comparison; none did."
+    },
+    {
+      "criterion": "No regression: the awareness tests under -race, the two-process file and the browser coedit spec",
+      "surface": "the docs package; two real envoy-dispatch binaries; Chromium on main's two-process harness",
+      "command": "CGO_ENABLED=1 go test -race -run 'Awareness|Relay|Reader' ./internal/dispatch/docs; go test -tags multiprocess -count=1 ./cmd/dispatch; cd packages/dispatch && bun run e2e:multiprocess -- coedit.multiprocess --repeat-each=2",
+      "observed": "-race: ok 38.525s, 28 passed, no data race reported. ok github.com/sjawhar/envoy/cmd/dispatch 1124.016s (135 passed). coedit.multiprocess 2 passed.",
+      "headSha": "dd61cd4660bb",
+      "negativeControl": "coedit.multiprocess fails on a0f877c5, the harness without this change (round 1)"
+    }
+  ],
+  "ci": "At dd61cd46, read 2026-10-31T12:31Z: changes queued in run 41199293699; pr-title runs 41199358122 and 41199400720 queued, five earlier runs cancelled; ci-ok not posted yet. No lane has run or failed. Migrations 0150-0152 overlap #2387; the architect said not to fail the round for it."
+}

@@ -1,0 +1,13 @@
+kind: Changed
+body: |-
+  Each `envoy-dispatch` process opens up to two more Postgres connections. The lease pool grows
+  from 13 to 14 for the settlement resumption. A dedicated NOTIFY connection sends the document
+  rooms' cursors and their questions and answers to the other processes. A document edit's own
+  notifications go out in the transaction that writes it. The process's shared listener
+  connection, named `dispatch-listener <process id>`, replaces the stale-room listener. The
+  processes read that name in `pg_stat_activity` to know which processes are members. One process
+  holds up to 91 connections at its ceiling (`store.ConnectionsPerProcess`), up from 89, and
+  `infra/gcp`'s `dispatchConnectionsPerPod` is 91 to match.
+time: 2026-10-28T12:12:18Z
+custom:
+  Issue: pr2414

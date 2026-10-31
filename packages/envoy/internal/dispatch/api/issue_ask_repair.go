@@ -65,8 +65,9 @@ func (r *IssueAskRepair) add(other IssueAskRepair) {
 //     attributed to the actor of the event that reopened it last: the first issue.updated after its
 //     latest issue.closed whose status is not done;
 //   - a closed issue one of whose documents owes a settlement marked after markedSince (any, when
-//     it is nil) - a write from another process's room, which SetIssueClosed never reached, leaves
-//     one, and no settlement runs while the issue is closed - gets the close's final sweep: its
+//     it is nil) - a write a room stored after the close's sweep, before its process heard of the
+//     close, or a room of a process of an older build, which never hears of it, leaves one, and no
+//     settlement runs while the issue is closed - gets the close's final sweep: its
 //     resolved block asks' blocks and copies, and its answered block asks' copies, the answer left
 //     out, are written again from their rows, and every readable ask block with no ask row and no
 //     source is marked resolved, each one logged, attributed to its latest closer.

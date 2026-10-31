@@ -47,7 +47,7 @@ func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
 	}
-	service.SetIssueClosed(context.Background(), "DOC-1", true)
+	service.issueOpenChanged(context.Background(), "DOC-1")
 	waitForNoLiveDocument(t, service, artifactID)
 	connection.SetReadDeadline(time.Now().Add(time.Second))
 	for {
@@ -87,11 +87,13 @@ func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
 					`update issues set closed_at = case when $1::boolean then now() end where key = 'DOC-1'`, closed); err != nil {
 					t.Fatalf("set the document issue's closed_at: %v", err)
 				}
-				service.SetIssueClosed(context.Background(), "DOC-1", closed)
+				service.issueOpenChanged(context.Background(), "DOC-1")
 			}
 			setIssueClosed(true)
 			reader := connectPeer(t, httpServer.URL, artifactID, "alice")
-			waitForPeerDocument(t, reader, "before\n")
+			if err := reader.WaitForText(peerMarkdown, "before\n", 10*time.Second); err != nil {
+				t.Fatal(err)
+			}
 
 			// The premise: the room admitted the reader read-only, so it drops what the reader
 			// types and keeps the connection. The room handles one connection's frames in order, so
@@ -132,7 +134,9 @@ func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
 			// The room a connection now loads takes edits. It loads from the store, so its copy
 			// also shows the read-only reader's keystroke never reached the store.
 			editor := connectPeer(t, httpServer.URL, artifactID, "alice")
-			waitForPeerDocument(t, editor, "before\n")
+			if err := editor.WaitForText(peerMarkdown, "before\n", 10*time.Second); err != nil {
+				t.Fatal(err)
+			}
 			typeOver(t, editor, "before", "after")
 			waitForPersistedProofText(t, service.store, artifactID, "after\n")
 		})

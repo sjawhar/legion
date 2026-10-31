@@ -236,22 +236,23 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	return version, nil
 }
 
-// listenerPoolSize bounds the pool Listener takes its connections from. Three permanent
-// listeners dial through it - the delivery hub, the event stream relay and the stale-room
-// evictor - and each connection is hijacked as soon as it is opened, so it leaves with its
-// caller and the pool holds none between dials: what one bounds is dials in flight, not
-// connections held. A listener redialling while another dials waits that dial out, which is
-// what a loop that dials and then waits for notifications for the life of the process can
-// afford.
+// listenerPoolSize bounds the pool Listener and Dedicated take their connections from. Four
+// permanent connections dial through it - the delivery hub's and the event stream relay's
+// listeners, the process's shared listener hub (pglisten.Hub, which the document rooms' room sync
+// is registered on) and the document rooms' NOTIFY sender - and each connection
+// is hijacked as soon as it is opened, so it leaves with its caller and the pool holds none
+// between dials: what one bounds is dials in flight, not connections held. A caller redialling
+// while another dials waits that dial out, which is what a loop that dials and then waits for
+// notifications for the life of the process can afford, and what the sender's first send after
+// a failure can afford too.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
-// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go)
-// and the document rooms' stale-room evictor (docs/stale_room.go) each hold one for as long as
-// they wait for notifications, which is the life of the process: a connection of the shared pool
-// held that long would be one fewer for every request, and a LISTEN on a pooled connection would
-// end when the pool recycled it.
+// The delivery hub (api/delivery_live_hub.go) and the event stream relay (api/event_stream_relay.go)
+// each hold one for as long as they wait for notifications, which is the life of the process: a
+// connection of the shared pool held that long would be one fewer for every request, and a LISTEN
+// on a pooled connection would end when the pool recycled it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
 	if err != nil {
@@ -264,25 +265,50 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	return conn.Hijack(), nil
 }
 
+// Dedicated returns one connection of its own, as Listener does, that pg_stat_activity names
+// applicationName. The caller closes it. It is outside the nested-acquire guard
+// (ErrNestedAcquire) for the reason the other separate pools are: a connection that belongs to no
+// shared-pool caller cannot close the cycle the guard prevents, so a request holding one of the
+// shared pool's transactions may use one. Two such connections are held per process: the shared
+// listener hub that cmd/dispatch dials, whose name is how every Dispatch process reads which
+// processes are listening (docs.ListenerApplicationPrefix), and the document rooms' NOTIFY sender
+// (docs/room_sync.go), which a request inside a transaction sends through.
+func (p *Pool) Dedicated(ctx context.Context, applicationName string) (*pgx.Conn, error) {
+	conn, err := p.Listener(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Exec(ctx, `select set_config('application_name', $1, false)`, applicationName); err != nil {
+		// Bounded, so a connection that went half-open between its dial and this statement
+		// cannot hold the caller in its Terminate.
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+		return nil, fmt.Errorf("name the connection %s: %w", applicationName, err)
+	}
+	return conn, nil
+}
+
 // leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
 // (duty.Exclusive). One connection per caller that can be inside Exclusive at the same moment is
 // the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
 // connection before it learns whether the lease is held, so a pass that skips because the other
-// process holds the lease holds a connection for that round trip too. Thirteen names are leased -
+// process holds the lease holds a connection for that round trip too. Fourteen names are leased -
 // the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
 // the block-index reconciliation, the term-statistics refresh, the GitHub webhook redelivery
-// sweep, the architecture import, the delivery reconcile, the edit-notice sweep, the repair of
-// closed and reopened issues' asks (api.RunIssueAskRepair), one per delivery durable for the
-// consumers' reconciliation (delivery.consumerLease, a name each for delivery-events and
-// delivery-jobs) and the server process registry's prune (processes.RunPrune) - taken by thirteen
-// callers, since each delivery intake takes its own durable's name from a bind poll of its own,
-// so thirteen callers can be inside Exclusive at once. Thirteen connections are exactly those
-// thirteen: the headroom is zero, not one, and the next leased loop added here makes a fourteenth
-// caller that waits for a connection rather than failing, for as long as the longest pass then
-// holding one. They cannot come from the shared pool: a lease is held for the whole pass, which
-// is minutes for the compaction, and the shared pool's sharedPoolSize connections are what every
-// request reads through.
-const leasePoolSize = 13
+// sweep, the architecture import, the delivery reconcile, the edit-notice sweep, the document
+// settlement resumption (docs.RunSettlementResumption), the repair of closed and reopened issues'
+// asks (api.RunIssueAskRepair), one per delivery durable for the consumers' reconciliation
+// (delivery.consumerLease, a name each for delivery-events and delivery-jobs) and the server
+// process registry's prune (processes.RunPrune) - taken by fourteen callers, since each delivery
+// intake takes its own durable's name from a bind poll of its own, so fourteen callers can be
+// inside Exclusive at once. Fourteen connections are exactly those fourteen: the headroom is
+// zero, not one, and the next leased loop added here makes a fifteenth caller that waits for a
+// connection rather than failing, for as long as the longest pass then holding one. They cannot
+// come from the shared pool: a lease is held for the whole pass, which is minutes for the
+// compaction, and the shared pool's sharedPoolSize connections are what every request reads
+// through.
+const leasePoolSize = 14
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
@@ -305,8 +331,10 @@ const outboxPoolSize = 1
 const registryPoolSize = 1
 
 // permanentListeners is how many connections the listener pool dials and hands off for the life
-// of the process: the delivery hub, the event stream relay and the stale-room evictor (Listener).
-const permanentListeners = 3
+// of the process: the delivery hub's and the event stream relay's listeners (Listener), and the
+// document rooms' two (Dedicated): the shared listener hub that room sync registers on, and the
+// NOTIFY sender, which opens at the first send and then stays open.
+const permanentListeners = 4
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
 // every pool's size, the registry's own pool (processes.Register) and the event horizon's
@@ -601,6 +629,15 @@ type beforeCommitKey struct{}
 // with its own rollback error, as it would without one.
 func WithBeforeCommit(ctx context.Context, step BeforeCommit) context.Context {
 	return context.WithValue(ctx, beforeCommitKey{}, step)
+}
+
+// WithoutBeforeCommit returns ctx with the step taken off, for a transaction of a request's that
+// writes none of the request's own work: the document rooms' conditional-edit queue takes its
+// bookkeeping transaction this way (docs.Service.admitConditionalEdit), since it commits before
+// the request's write and a crash between the two must leave the key for the repeat to run rather
+// than answer it KEY_COMMITTED for a write nobody made.
+func WithoutBeforeCommit(ctx context.Context) context.Context {
+	return context.WithValue(ctx, beforeCommitKey{}, BeforeCommit(nil))
 }
 
 // trackedTx clears the caller's mark however the transaction ends, and takes the caller's

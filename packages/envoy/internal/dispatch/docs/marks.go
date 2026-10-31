@@ -145,7 +145,11 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 
 // VerifyMark returns what a browser-written mark anchors to, now or after its next document
 // update. It subscribes to the room's updates inside the Apply that loads and holds the room: a
-// room looked up again once that Apply returned can have been evicted in between.
+// room looked up again once that Apply returned can have been evicted in between. Each look reads
+// docTree, which is never older than the stored head: a mark a browser on another process placed
+// and that process stored is found at once, from the store while this room's catch-up has not
+// applied it. One stored after a look wakes the next look through the room's update, a catch-up
+// batch (roomCatchUps) when another process stored it, or a browser's update on this process.
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
 	updates := make(chan struct{}, 1)
 	var unsubscribe func()

@@ -1184,8 +1184,8 @@ func TestEditNoticeAClosedAndReopenedIssueNamesTheLaterBrowserEditor(t *testing.
 		t.Fatalf("adam's joined write with zoe's browser edit inside it: %v", err)
 	}
 	waitForLandedAppends(t, service, artifactID)
-	service.SetIssueClosed(context.Background(), "DOC-1", true)
-	service.SetIssueClosed(context.Background(), "DOC-1", false)
+	setIssueClosedHere(t, service, "DOC-1", true)
+	setIssueClosedHere(t, service, "DOC-1", false)
 	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
 		t.Fatalf("load the reopened document: %v", err)
 	}

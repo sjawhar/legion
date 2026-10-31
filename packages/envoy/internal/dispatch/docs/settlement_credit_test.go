@@ -194,9 +194,9 @@ func TestTwoCreditedWritersBothSurviveACrashRestart(t *testing.T) {
 	}
 }
 
-// The issue route closes an issue's rooms on its request's context, which the pool tracks as one
-// caller holding at most one connection. Every closing document still records its latest edit
-// source and releases its state, however many documents the issue has.
+// An issue's close reaches its rooms on the room-sync lane (issueOpenChanged), whose context the
+// pool tracks as one caller holding at most one connection. Every closing document still records
+// its latest edit source and releases its state, however many documents the issue has.
 func TestClosingAnIssueOnATrackedContextPersistsEveryDocumentsCredit(t *testing.T) {
 	for _, procs := range []int{4, 16} {
 		t.Run(fmt.Sprintf("GOMAXPROCS=%d", procs), func(t *testing.T) {
@@ -212,8 +212,8 @@ func TestClosingAnIssueOnATrackedContextPersistsEveryDocumentsCredit(t *testing.
 			if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 				t.Fatalf("close the documents' issue: %v", err)
 			}
-			// What PATCH /api/v1/issues/{key} hands it (api/issue_patch.go).
-			service.SetIssueClosed(context.WithoutCancel(store.WithTransactionTracking(ctx)), "DOC-1", true)
+			// What the room-sync lane hands it (roomSync.register).
+			service.issueOpenChanged(store.WithTransactionTracking(ctx), "DOC-1")
 
 			var persisted int
 			if err := database.Pool.QueryRow(ctx, `
@@ -764,9 +764,16 @@ func newTestServiceInstance(t *testing.T, database *store.Store) (*Service, *htt
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
+	return service, newTestServer(t, service)
+}
+
+// newTestServer serves service's HTTP and document websocket for a test's browsers, until the
+// test ends.
+func newTestServer(t *testing.T, service *Service) *httptest.Server {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)
-	return service, server
+	return server
 }
 
 // versionAuthors is the authors artifactID's version number credits.
@@ -803,6 +810,11 @@ func TestABrowserEditAfterARoomReloadIsOwed(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	// The writes below publish into this room, which the test then reloads; a write to a document
+	// no room holds publishes into none (publishLiveWrite).
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -974,10 +986,13 @@ func TestABrowserEditAnotherTransactionsObserverReachesFirstIsCreditedExactly(t 
 				t.Fatal("bob's edit never reached the room, so nothing here is tested")
 			}
 			// Bob's own observer is still held, and so is the append his update's persistence
-			// makes after it: whatever credits him by now is the published write's observer,
-			// which reached the room's update log first.
-			if credited := slices.Contains(pendingAuthors(t, service, artifactID), bob); credited != (test.places == 1) {
-				t.Fatalf("with bob's own observer held, bob is credited = %t, want %t: the published write's observer classifies his edit", credited, test.places == 1)
+			// makes after it: whatever credits him by now is another drain of the room's update
+			// log that reached it first - the published write's observer, or, for an edit the
+			// write's fork holds, the write's own drain before it stored his update ahead of its
+			// row (storeRoomUpdatesAhead), whose version then lists him.
+			credited := slices.Contains(pendingAuthors(t, service, artifactID), bob) || countVersionAuthor(t, service.store, artifactID, bob) > 0
+			if credited != (test.places == 1) {
+				t.Fatalf("with bob's own observer held, bob is credited = %t, want %t: another observer classifies his edit", credited, test.places == 1)
 			}
 			release()
 			waitForLandedAppends(t, service, artifactID)
@@ -1073,9 +1088,9 @@ func appendCredited(t *testing.T, service *Service, artifactID string, credited 
 
 // appendCreditedTo is appendCredited for an update instance's room takes: its credit records the
 // stored version in that instance's hold (UpdateCredit.held), and the append carries the
-// instance's cursor, as a room's own append does (StoreUpdateContext), so the room takes the
-// version in and is not left behind the head. A nil instance is another process's append, which
-// this room neither holds nor takes in.
+// instance's cursor, as a room's own append does (withRoomCursor, BrowserAppend), so the room
+// takes the version in and is not left behind the head. A nil instance is another process's
+// append, which this room neither holds nor takes in.
 func appendCreditedTo(t *testing.T, service *Service, artifactID string, credited *testCredit, instance *roomInstance) {
 	t.Helper()
 	var credit *UpdateCredit
@@ -1097,7 +1112,7 @@ func appendCreditedTo(t *testing.T, service *Service, artifactID string, credite
 	}
 	doc := crdt.New()
 	doc.GetXmlFragment(fragmentName)
-	if _, err := service.persistence.AppendUpdateWithCredit(ctx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true, credit); err != nil {
+	if _, err := service.persistence.AppendUpdateWithCredit(ctx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true, credit, nil); err != nil {
 		t.Fatalf("append the update: %v", err)
 	}
 }
@@ -1255,7 +1270,7 @@ func closeTestIssue(t *testing.T, service *Service) {
 	if _, err := service.store.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close the issue: %v", err)
 	}
-	service.SetIssueClosed(ctx, "DOC-1", true)
+	service.issueOpenChanged(ctx, "DOC-1")
 	waitFor(t, 30*time.Second, "the closed issue's room to close", func() bool {
 		return len(service.srv.Rooms()) == 0
 	})
@@ -1267,7 +1282,7 @@ func reopenTestIssue(t *testing.T, service *Service) {
 	if _, err := service.store.Pool.Exec(ctx, `update issues set closed_at = null where key = 'DOC-1'`); err != nil {
 		t.Fatalf("reopen the issue: %v", err)
 	}
-	service.SetIssueClosed(ctx, "DOC-1", false)
+	service.issueOpenChanged(ctx, "DOC-1")
 }
 
 func waitForAskAuthor(t *testing.T, service *Service, artifactID string, want model.Actor) {

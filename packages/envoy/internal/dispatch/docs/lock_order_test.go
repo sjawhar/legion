@@ -247,7 +247,7 @@ func TestLiveUpdateIsNotBlockedByTheOwnerLock(t *testing.T) {
 	doc.GetXmlFragment(fragmentName)
 	awaitUnblocked(t, "a live document update", func() error {
 		_, err := service.persistence.(*PgVersioned).AppendUpdateWithCredit(
-			ctx, id, crdt.EncodeStateAsUpdateV1(doc, nil), true, nil,
+			ctx, id, crdt.EncodeStateAsUpdateV1(doc, nil), true, nil, nil,
 		)
 		return err
 	})

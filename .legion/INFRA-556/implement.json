@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-556",
+  "completed": "2026-10-31T12:03:32Z",
+  "round": "review round 7 (changes requested at 1d099b15): a late state of an unlisted client is settled by one read of the room (e1f4fa33), the five no-behaviour items, and one merge of main cc3a30bb taking main's claims_doc_test.go whole (dd61cd46)",
+  "proof": [
+    {
+      "criterion": "Items 1-6 and D10 across two processes, on the tree merged with main: live edits, cursors and presence, close/reopen, ask authors, agent writes, fresh reads, rebuild/resumption/queue, serving-process header, awareness bounds and the removal clock",
+      "surface": "two real envoy-dispatch binaries on one Postgres 17 (pgvector), driven over HTTP and /ws/doc",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 55m ./cmd/dispatch",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1113.044s (multiprocess) at dd61cd46; plain cmd/dispatch ok 338.717s; store ok 367.808s; broker/oauth ok. Throwaway real-binary trial run twice: 24/24 departures (cursor gone on the other process in 51-54 ms) and 24/24 reconnects (new cursor held within 54 ms and at 2 s)",
+      "headSha": "dd61cd4660bb4a6b7b7f752225c6dbf0b23f28ec",
+      "negativeControl": "At cf17a2e1 TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode fails (alice's removal relayed at clock 0); at the test-support commit aa50b68c the seven two-process tests fail on their bugs"
+    },
+    {
+      "criterion": "A departed reader's removal is never lost or overridden: record settles a late removal, or a state for a client the list does not hold or holds at a later clock, by one read of the room under r.mu",
+      "surface": "docs package on real Postgres",
+      "command": "cd packages/envoy && go test -count=3 -timeout 20m -run 'TestAReader|TestARoomsAwareness' ./internal/dispatch/docs/; CGO_ENABLED=1 go test -race -count=1 -run 'Awareness|Relay|Reader|Cursor|Presence' ./internal/dispatch/docs/",
+      "observed": "ok (count=3, e1f4fa33); -race ok 32.176s at dd61cd46; GOWORK=off ok; whole docs package ok 1675.260s at e1f4fa33 (the merge changed nothing under internal/dispatch)",
+      "headSha": "dd61cd4660bb4a6b7b7f752225c6dbf0b23f28ec",
+      "negativeControl": "With a2a0a2a1's record: TestAReadersHeartbeatRecordedOverItsOwnRemovalStillLeavesTheOtherProcess fails (awareness_relay_race_test.go:578 relay lists alice at clock 2; :587 bob still holds her after 10s)"
+    },
+    {
+      "criterion": "Browser: two people on two processes see each other's typing and cursor within a second on one socket each",
+      "surface": "Chromium on main's two-process harness (round-robin proxy, two envoy-dispatch processes, one Postgres)",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra556_e2e?sslmode=disable bun run e2e:multiprocess -- coedit.multiprocess",
+      "observed": "✓ coedit.multiprocess.e2e.ts:143:1 two people on two processes ... (7.8s); 1 passed (10.4s)",
+      "headSha": "dd61cd4660bb4a6b7b7f752225c6dbf0b23f28ec",
+      "negativeControl": "Fails without this change (https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/docs/awareness_relay.go (record by entry kind, answered removed, comments, dead store)",
+    "packages/envoy/internal/dispatch/docs/awareness_relay_race_test.go (new: race tests moved, new heartbeat-after-removal test, lock guard queues a write)",
+    "packages/envoy/internal/dispatch/docs/awareness_relay_test.go (515 lines)",
+    "packages/envoy/internal/broker/oauth/claims_doc_test.go (main's version via the merge)"
+  ],
+  "deviations": [
+    "Merged main cc3a30bb on the architect's instruction (claims_doc_test.go conflict). #2387 is still open, so 0150-0152 stay."
+  ],
+  "openQuestions": [],
+  "trickyParts": [
+    "answer now leaves out the nulls its read found: the client's own observer entry carries a real removal or return."
+  ]
+}

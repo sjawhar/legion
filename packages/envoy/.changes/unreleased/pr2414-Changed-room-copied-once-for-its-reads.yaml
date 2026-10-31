@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+  A document room a process holds is copied once for its reads rather than once per read. A read
+  of a room that has taken no edit yet - the room a settlement loads for an agent's write, or one
+  opened only to be read - copied the whole document under the room's lock and threw the copy
+  away; that copy now becomes the room's rendered copy, which every later read of the room walks
+  and the room's next edit moves, instead of a second document built beside it.
+time: 2026-10-30T18:40:00Z
+custom:
+  Issue: pr2414

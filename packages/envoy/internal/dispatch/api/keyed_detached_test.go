@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 )
@@ -502,21 +504,25 @@ func TestAKeyedCloseWhoseSettlementIsHeldOnTheIssuesRowEndsAtItsRunsBound(t *tes
 	}
 }
 
-// closeCommitHold is the document service with a pause between a close's commit and its sweep:
-// its SetIssueClosed, which the close calls once its transaction commits and before it sweeps the
-// issue's ask blocks (patchIssue), closes committed and returns only once release is closed.
+// closeCommitHold is the document service with a pause between a close's commit and its sweep: the
+// sweep's own Join, the first document call it makes, which comes once the close's transaction has
+// committed and before the sweep locks the issue's row (sweepClosedIssueAsksTx), closes committed
+// and returns only once release is closed. The close's own transaction joins first, and that join
+// passes straight through: the count of joins since the hold was installed is what tells the two
+// apart, and only the sweep's pauses.
 type closeCommitHold struct {
 	docs.API
+	joins     atomic.Int32
 	committed chan struct{}
 	release   chan struct{}
 }
 
-func (h closeCommitHold) SetIssueClosed(ctx context.Context, issueKey string, closed bool) {
-	h.API.SetIssueClosed(ctx, issueKey, closed)
-	if closed {
+func (h *closeCommitHold) Join(ctx context.Context, tx pgx.Tx) (context.Context, *docs.Ledger) {
+	if h.joins.Add(1) == 2 {
 		close(h.committed)
 		<-h.release
 	}
+	return h.API.Join(ctx, tx)
 }
 
 // A keyed close whose sweep, after its commit, waits on the issue's row ends at the keyed run's
@@ -527,11 +533,13 @@ func (h closeCommitHold) SetIssueClosed(ctx context.Context, issueKey string, cl
 func TestAKeyedCloseWhoseSweepIsHeldOnTheIssuesRowEndsAtItsRunsBound(t *testing.T) {
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	served.requestKeyRunLimit = time.Second
-	hold := closeCommitHold{API: served.deps.Docs, committed: make(chan struct{}), release: make(chan struct{})}
-	served.deps.Docs = hold
 	issue := createInteractionIssue(t, handler, "TEST", "Swept while its row is held", "Context\n")
 	awaitSettled(t, database, issue.PrimaryArtifactID)
 	ctx := context.Background()
+	// Installed once the issue is seeded and settled, so the close's own transaction is the first
+	// write to join the document service through the hold and its sweep the second.
+	hold := &closeCommitHold{API: served.deps.Docs, committed: make(chan struct{}), release: make(chan struct{})}
+	served.deps.Docs = hold
 
 	answered := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
