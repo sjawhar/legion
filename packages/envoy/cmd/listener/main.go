@@ -43,6 +43,11 @@ type listenerDeps struct {
 	// live is the live topics lane's own client (openLiveTopics), nil when ENVOY_SUBSCRIBE_ALL_TOPICS
 	// leaves the lane off.
 	live *bus.Client
+	// roleLane says the process opened the role lane on client, so /healthz reads whether the
+	// server still admits it (bus.Client.CoreSubOK). A rig that builds these dependencies without
+	// opening the lane leaves it false and is not reported, as a listener without a live lane
+	// leaves live nil.
+	roleLane bool
 	// caches lists the stores above that are open, for the sites that treat every cache alike.
 	caches []listenerCache
 	// consumer names the durable whose lag /healthz reports.
@@ -422,6 +427,13 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // failed it by running past the check's timeout. A check that answered with a failure keeps its
 // answer.
 //
+// The role lane is reported beside the durable subscription (bus.Client.CoreSubOK). A server that
+// refuses the lane's subscription - a grant that does not admit its queue group - closes nothing
+// and answers nothing: nats.go reports the violation asynchronously and keeps the subscription,
+// so without this check the listener runs healthy while every role message is dropped, delivered
+// to nobody and raising no exception. It is unhealthy rather than degraded because nothing the
+// listener does repairs it; only the grant does.
+//
 // The role claim view is reported too, last of all and as a 200 "degraded" naming it
 // (store.Registry.RoleViewErr): until its watcher's first scan has delivered every claim the view
 // answers no read, so GET /v1/sessions and GET /v1/registry/<session_id> answer 503 while every
@@ -456,6 +468,11 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		if !d.client.SubOK() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "subscription inactive"})
+			return
+		}
+		if d.roleLane && !d.client.CoreSubOK() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "role lane inactive"})
 			return
 		}
 		if d.live != nil && (!d.live.Connected() || !d.live.CoreSubOK()) {
@@ -1008,6 +1025,7 @@ func main() {
 	ready := &listenerDeps{
 		client:     client,
 		live:       live,
+		roleLane:   true,
 		registry:   registry,
 		sessions:   sessions,
 		ciStore:    ciStore,

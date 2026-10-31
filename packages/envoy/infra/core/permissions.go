@@ -46,7 +46,13 @@ const inboxes = nats.InboxPrefix + ">"
 //   - the purge of the interest bucket, which its delete-marker collection sends.
 //
 // Subscribe: reply inboxes, then the role lanes in the one group every listener joins
-// (bus.ListenerRoleQueue).
+// (bus.ListenerRoleQueue), then the role lanes in the machine's own group (bus.ListenerQueue),
+// which the release before it subscribed in. Both are allowed for one release so neither deploy
+// order leaves a listener whose role lane the server refuses, in either direction: a listener of
+// the earlier release re-sends its subscription whenever it reconnects, which replacing the
+// server's own instance makes it do, and a refused role lane delivers nothing. The group a
+// subscription names is the client's own, so the second entry grants nothing a listener cannot
+// already do. Drop it once every listener runs bus.ListenerRoleQueue.
 func ListenerPermissions(machineID string) Permissions {
 	durable := bus.ListenerDurable(machineID)
 	publish := []string{
@@ -65,8 +71,14 @@ func ListenerPermissions(machineID string) Permissions {
 	}
 	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
 	return Permissions{
-		Publish:   Rules{Allow: publish},
-		Subscribe: Rules{Allow: []string{inboxes, contracts.RoleTopicPrefix + "> " + bus.ListenerRoleQueue}},
+		Publish: Rules{Allow: publish},
+		// A machine named role-lane gives bus.ListenerQueue the shared group's own name, so the
+		// two entries are joined rather than written twice: nats-server takes a repeated entry,
+		// and every set here holds each entry once.
+		Subscribe: Rules{Allow: union(
+			[]string{inboxes, contracts.RoleTopicPrefix + "> " + bus.ListenerRoleQueue},
+			[]string{contracts.RoleTopicPrefix + "> " + bus.ListenerQueue(machineID)},
+		)},
 	}
 }
 

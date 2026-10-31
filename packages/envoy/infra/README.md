@@ -1457,7 +1457,7 @@ The listener's outputs are `containerName` and `port`.
 
 | Input | Default | What it is |
 | --- | --- | --- |
-| `machineId` | required | The listener's name, `ENVOY_MACHINE_ID`. It names the durable consumer `listener-<machineId>`; an interior ordinary space becomes a hyphen in that name. The role lane's queue group, `envoy-listener-role-lane`, names no machine. |
+| `machineId` | required | The listener's name, `ENVOY_MACHINE_ID`. It names the durable consumer `listener-<machineId>` and the retired role-lane group `envoy-listener-<machineId>` the grant still admits; an interior ordinary space becomes a hyphen in both. The group every listener subscribes the role lanes in, `envoy-listener-role-lane`, names no machine. |
 | `natsUrls` | required | The NATS servers to connect to. May come from another resource or stack. |
 | `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy:<tag>`. |
 | `containerName` | `envoy-listener` | The container's name. |
@@ -1491,8 +1491,8 @@ The listener refuses these before it registers anything, with an error naming wh
   `seed` is the one input that is a seed;
 - an empty `machineId`, one with leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`,
   `\`, a control character, or whitespace other than an interior ordinary space, or one over 246 bytes: none can be used
-  the durable consumer `listener-<machineId>` the
-  listener uses;
+  the durable consumer `listener-<machineId>` or the group `envoy-listener-<machineId>` the
+  grant names;
 - a `hostBridge` holding a control character, such as a line break;
 - a `port` outside 1-65535;
 - a `hostBridge` with leading or trailing whitespace;
@@ -1862,7 +1862,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 
 | Input | Default | What it is |
 | --- | --- | --- |
-| `machineId` | required | `ENVOY_MACHINE_ID`, the listener's name. It names the durable consumer `listener-<machineId>`; an interior ordinary space becomes a hyphen in that name. The role lane's queue group, `envoy-listener-role-lane`, names no machine. |
+| `machineId` | required | `ENVOY_MACHINE_ID`, the listener's name. It names the durable consumer `listener-<machineId>` and the retired role-lane group `envoy-listener-<machineId>` the grant still admits; an interior ordinary space becomes a hyphen in both. The group every listener subscribes the role lanes in, `envoy-listener-role-lane`, names no machine. |
 | `natsUrls` | required | The NATS servers. May come from another resource as an output of the whole list, such as `nats.internal_url.apply(lambda url: [url])`. |
 | `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy@sha256:<digest>`. |
 | `region` | required | The container's `awslogs-region`. |
@@ -2716,8 +2716,12 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 
-It subscribes to `_INBOX.>`, and to the role lanes in the one queue group every listener joins,
-`notifications.role.> envoy-listener-role-lane`, so NATS hands each role message to one listener.
+It subscribes to `_INBOX.>`, to the role lanes in the one queue group every listener joins,
+`notifications.role.> envoy-listener-role-lane`, so NATS hands each role message to one listener,
+and to the role lanes in the machine's own group, `notifications.role.> envoy-listener-<m>`,
+which the release before it subscribed in. The second entry is admitted for one release so that
+neither deploy order leaves a listener whose role lane the server refuses; the group a
+subscription names is the client's own, so it grants nothing a listener cannot already do.
 
 `SessionPermissions()` is what any agent session needs, with `*` for the session id. It publishes
 to `_INBOX.>`, for the receipt a role delivery waits for, and `agentstream.*.frames`, and

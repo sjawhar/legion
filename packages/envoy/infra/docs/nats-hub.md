@@ -118,11 +118,12 @@ The hub refuses these before it registers anything, with an error naming the inp
 
 - `machineId`: the user of one host, whose listener and sessions all connect as it, granted
   `HostPermissions(machineId)` (see [Permission sets](../README.md#permission-sets)). Give it the
-  listener's own `machineId`: the set names that machine's durable consumer. The role lane's
-  queue group names no machine, so every listener's entry for it reads alike.
+  listener's own `machineId`: the set names that machine's durable consumer, and the role-lane
+  group of the release before this one, which the set admits beside the group every listener
+  subscribes in today.
 - `dispatchMachineId`: the user shared by `envoy-dispatch` and the listener beside it, granted
   `DispatchPermissions(dispatchMachineId)`. Give it that listener's `machineId`, since the set
-  names its durable consumer.
+  names its durable consumer and that same retired group.
 - `daemon: true`: the dedicated user of one Legion daemon, granted `DaemonPermissions()` (see
   [Permission sets](../README.md#permission-sets)). Its seed belongs only to that daemon.
 - `permissions`: `{publish, subscribe}`, each a `nats:Rules`, an `allow` list and an optional
@@ -170,9 +171,11 @@ more ([The hub's listener](#the-hubs-listener)).
 A user is refused when it names more than one of `machineId`, `dispatchMachineId`, `daemon: true`
 and `permissions`, or none, or when its `nkey` is empty, named by its index alone, as
 `users[1]: nkey is required`, since these come before the authorization has checked the names. A
-`machineId` or `dispatchMachineId` names the durable consumer `listener-<id>`; the role lane's
-queue group, `envoy-listener-role-lane`, names no machine, so every listener is one member of one
-group and a role message is forwarded to its holder once. The shared machine-ID rule refuses an
+`machineId` or `dispatchMachineId` names the durable consumer `listener-<id>` and the retired
+role-lane group `envoy-listener-<id>`. The group every listener subscribes the role lanes in,
+`envoy-listener-role-lane`, names no machine, so every listener is one member of one group and a
+role message is forwarded to its holder once; the retired group is admitted beside it for one
+release, so a listener of either release starts against either server. The shared machine-ID rule refuses an
 empty id; leading or trailing
 whitespace; `.`, `*`, `>`, `/` or `\`; a control character; and any whitespace other than an
 ordinary space; and any id over 246 bytes, so `listener-<id>` fits NATS's 255-byte consumer-name

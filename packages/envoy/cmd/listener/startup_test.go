@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -383,6 +384,36 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoMachines(t *testing.T) {
 	if len(byFirst) == 0 || len(bySecond) == 0 {
 		t.Fatalf("machine-one forwarded %d and machine-two %d of %d: one of them is not a member of the listeners' one role-lane queue group", len(byFirst), len(bySecond), messages)
 	}
+}
+
+// A server that refuses the role lane's subscription closes nothing and answers nothing: NATS
+// reports the violation asynchronously and nats.go keeps the subscription, so the start finishes,
+// the durable binds, and every role message is dropped with no delivery and no exception. The
+// grant below is the one a server of the release before bus.ListenerRoleQueue carries, which
+// admits the machine's own group alone. /healthz must report it, so a health check and a load
+// balancer take such a listener out rather than leave it holding a lane nothing comes out of.
+func TestAListenerWhoseGrantRefusesTheRoleLaneIsUnhealthy(t *testing.T) {
+	const machineID = "role-lane-refused"
+	config := fmt.Sprintf(`jetstream {}
+authorization {
+  users = [ { user: listener, password: listener, permissions: { subscribe: { allow: ["_INBOX.>", %q] } } } ]
+}
+`, contracts.RoleTopicPrefix+"> "+bus.ListenerQueue(machineID))
+	_, uri := testnats.StartConfig(t, config, []string{"-js"}, false)
+	uri = strings.Replace(uri, "nats://", "nats://listener:listener@", 1)
+
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("listener:\n%s", listener.Output.String())
+		}
+	})
+	var status int
+	var answer string
+	waitFor(t, 60*time.Second, "/healthz to report the refused role lane", func() bool {
+		status, answer = callListener(t, listener.port, http.MethodGet, "/healthz", "")
+		return status == http.StatusServiceUnavailable && strings.Contains(answer, "role lane inactive")
+	})
 }
 
 // receiveAsSession stands in for session sessionID's agent pump on its agent subject: it answers

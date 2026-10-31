@@ -95,8 +95,10 @@ versions. Never add the module to the root `go.work`.
   limit. The hub also refuses two ids that give one durable (`a b` and `a-b` collide), an id that
   takes the hub listener's durable, and a second `dispatchMachineId` user, since every one binds
   `core.DispatchDurables()`. An ordinary space is accepted only inside the id and becomes a hyphen in
-  `bus.ListenerDurable`'s `listener-<id>`. The role lane's queue group,
-  `bus.ListenerRoleQueue`, names no machine. A seed check that already precedes this rule stays first.
+  `bus.ListenerDurable`'s `listener-<id>` and `bus.ListenerQueue`'s `envoy-listener-<id>`, the
+  retired role-lane group a grant admits for one release. The group every listener subscribes the
+  role lanes in, `bus.ListenerRoleQueue`, names no machine. A seed check that already precedes
+  this rule stays first.
   `core.ListenerConfig.Check` also holds the checks of the listener's environment that the
   resolver can make (`port`, `listenHost`, `hostBridge`), run once before anything registers;
   `ListenerConfig.Env` runs `Check` again, so no caller renders a config `Check` refuses, then

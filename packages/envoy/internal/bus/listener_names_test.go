@@ -7,19 +7,26 @@ import (
 )
 
 // The listener's durable is the name cmd/listener spelled itself before it moved here: a space in
-// the machine id becomes a hyphen. The role lane's queue group names no machine at all, so every
-// listener is one member of one group and a role message is forwarded once.
-func TestListenerDurableKeepsTheListenersName(t *testing.T) {
-	for _, tc := range []struct{ machineID, durable string }{
-		{"example-host-a", "listener-example-host-a"},
-		{"example host", "listener-example-host"},
+// the machine id becomes a hyphen. The retired role-lane group, which no listener subscribes in
+// any more and the grant admits for one release, spells a machine id the same way.
+func TestListenerDurableAndTheRetiredQueueKeepTheListenersNames(t *testing.T) {
+	for _, tc := range []struct{ machineID, durable, queue string }{
+		{"example-host-a", "listener-example-host-a", "envoy-listener-example-host-a"},
+		{"example host", "listener-example-host", "envoy-listener-example-host"},
 	} {
 		if got := bus.ListenerDurable(tc.machineID); got != tc.durable {
 			t.Errorf("ListenerDurable(%q) = %q, want %q", tc.machineID, got, tc.durable)
 		}
+		if got := bus.ListenerQueue(tc.machineID); got != tc.queue {
+			t.Errorf("ListenerQueue(%q) = %q, want %q", tc.machineID, got, tc.queue)
+		}
 	}
 }
 
+// The group every listener subscribes the role lanes in names no machine, so a role message is
+// handed to one listener and forwarded once however many machines run one. A machine named
+// role-lane gives ListenerQueue that same name; core.ListenerPermissions writes one entry for
+// the two.
 func TestListenerRoleQueueNamesNoMachine(t *testing.T) {
 	if got := bus.ListenerRoleQueue; got != "envoy-listener-role-lane" {
 		t.Errorf("ListenerRoleQueue = %q, want %q", got, "envoy-listener-role-lane")

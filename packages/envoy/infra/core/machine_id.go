@@ -13,10 +13,11 @@ const machineIDNameRefusal = ", which the listener's NATS names or the hub's gra
 // CheckMachineID refuses a machine id that cannot safely name a listener's NATS identities or
 // ride in a hub grant entry or the watchdog's files. It also caps the id so that the durable
 // listener-<id> fits NATS's 255-byte consumer-name limit. The refusal text states exactly this.
-// bus.ListenerDurable replaces each ordinary space with a hyphen and produces listener-<id>; the
-// role lane's queue group, bus.ListenerRoleQueue, names no machine at all. nats-server refuses a
-// durable name holding a dot, wildcard, path separator or whitespace. The rule is stricter than
-// NATS where a hub grant entry
+// bus.ListenerDurable replaces each ordinary space with a hyphen and produces listener-<id>, and
+// bus.ListenerQueue, the retired role-lane group a grant still admits, envoy-listener-<id>; the
+// group every listener subscribes the role lanes in, bus.ListenerRoleQueue, names no machine at
+// all. nats-server refuses a durable name holding a dot, wildcard, path separator or whitespace.
+// The rule is stricter than NATS where a hub grant entry
 // (core/nats_auth.go) or the watchdog's heredoc and environment file could not carry the
 // character: a control character or whitespace other than an ordinary space. The listener trims ENVOY_MACHINE_ID while loading it,
 // so leading or trailing whitespace is refused rather than allowed to change either generated

@@ -90,6 +90,17 @@ func ListenerDurable(machineID string) string {
 // would act on one publish once per machine.
 const ListenerRoleQueue = "envoy-listener-role-lane"
 
+// ListenerQueue is the queue group a listener of the release before ListenerRoleQueue subscribed
+// the role lanes in, one of its own machine's. No listener subscribes in it any more. It is kept
+// for one release so a grant admits a listener of either release and neither deploy order leaves
+// a listener whose role lane the server refuses: the group a subscription names is the client's
+// own, so allowing both names grants nothing a listener cannot already do. Drop it, and the entry
+// built from it, once every listener runs ListenerRoleQueue. A space in the machine id is a
+// hyphen in the name.
+func ListenerQueue(machineID string) string {
+	return "envoy-listener-" + strings.ReplaceAll(machineID, " ", "-")
+}
+
 // ListenerLiveQueue is the queue group the listener of machine machineID subscribes its live lane in
 // (every notifications topic, over core NATS), so NATS hands each message to one of the machine's
 // listeners while a rolling deploy runs two. It is per machine because the lane delivers to the

@@ -2580,10 +2580,15 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   The role claim watcher is the interest registry's second (`store.Registry.Ping` and `WatchErr` read both), so its stop, and a role bucket recreated under it, are answered under the registry's dependency name, `interest KV watcher unavailable: role claims watcher stopped` or `interest KV watcher unavailable: role claims bucket envoy_roles was recreated under its watcher` (`interest KV unavailable: ...` from the request whose own ping finds the recreate), and the self-health monitor rebuilds it as it does the others.
   A listener that mounts no GitHub webhook route keeps no CI cache, and its healthy answer carries `"ci_cache": "not_applicable"`.
 
+- A listener whose own role lane the server refuses is `503 {"status":"unhealthy","error":"role lane inactive"}` (`bus.Client.CoreSubOK` on the main client, checked right after the durable subscription).
+  NATS answers a subscription it refuses with an asynchronous error and closes nothing, and nats.go keeps the subscription, so such a listener starts, binds its durable and reports ready while every role message it is handed is dropped: no delivery, no exception, no counter.
+  It is unhealthy rather than degraded because only the grant repairs it.
+
 - Every healthy answer carries `live_topics`:
   `"subscribed"` when `ENVOY_SUBSCRIBE_ALL_TOPICS=1` opened the live topics lane, `"not_applicable"` when it is off;
   with it on, a live client that is not connected, holds no valid subscription, or whose subscription the server refused (`bus.Client.CoreSubOK`:
   nats.go keeps a refused subscription valid, so the bus reads the server's own refusal until it sends the subscription again, as one restarted without the grant refuses it) is `503 {"status":"unhealthy","error":"live subscription inactive"}`, since every topic the stream does not store then reaches no serve-port session.
+  The role lane above is the same check on the main client.
   Its bus checks - the flush, each cache's KV ping and the durable consumer's info read - share one 3 s budget taken from the request (`healthzBudget`), so a stall in JetStream alone, which the flush's core PING does not see, is answered inside it, not after the 10 s JetStream wait.
   A ping or info read that has not answered when the budget ends is `503 unhealthy` naming the dependency and `context deadline exceeded`, so the ECS container health check (`curl -sf`) still fails and replaces the task, as it did when that wait ran past the check's timeout;
   a check that answered with a failure keeps its answer.
@@ -2760,6 +2765,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
 
 - During a rolling deploy the replacement serves `/v1` and its role lane while the old task still holds the durable:
   `/v1` opens once NATS is connected and the interest and session caches are warm (`envoy-listener /v1 open`, with `since_listening_ms`), and the role lane is a core-NATS queue subscription in `envoy-listener-role-lane` (`bus.ListenerRoleQueue`), the one group every listener joins, which NATS hands each role message to one member of, so neither the overlap nor a second machine's listener forwards a message twice.
+  A grant admits that group and the machine's own, `envoy-listener-<machine id>` (`bus.ListenerQueue`), which the release before it subscribed in, so a listener of either release starts against a server carrying either set of users and no deploy order is required; drop the second entry once every listener runs the first.
   The durable's bind is polled every 2 s (`subscribe failed, retrying`, logged at the first refusal and then once per 30 s), so it binds within 2 s of the old task's exit (`durable bound`, with `attempts` and `waited_ms`);
   a durable still held after 135 s ends the start with `subscribe failed after max attempts, shutting down`, as the backoff it replaced did.
   `/healthz` answers 200 `starting` until the bind, so `starting` no longer means `/v1` is closed.
