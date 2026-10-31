@@ -224,6 +224,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comment_block_refs",
 		"message_block_refs",
 		"document_search",
+		"search_term_queue",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename

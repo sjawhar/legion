@@ -1308,8 +1308,8 @@ alone, the lexemes it searched for, its keyword, meaning and total milliseconds 
 it listed. `search_term_stats` (how many of a project's searchable items hold each lexeme) and
 `search_term_totals` (how many searchable items the project has, and when they were counted) are
 the statistics the check picks its keywords from; the term-statistics refresh, added with it,
-rebuilds a project's rows
-at boot and every 10 minutes, and the check only reads them. Every row names its project with `on
+rebuilt a project's rows whole at boot and every 10 minutes, where `0157`-`0159` have it apply
+what changed, and the check only reads them. Every row names its project with `on
 delete cascade`, and a check's row also cascades from its issue, document or ask. The tables are
 new, so the migration rewrites and refuses no row and its census answers `0`; its foreign keys
 take the referenced tables' locks for milliseconds, as `0070`'s did.
@@ -1536,6 +1536,67 @@ runner's advisory lock for its whole run, and every other Dispatch process booti
 on it before it can apply or check a migration of its own. The pull request records the run time
 on the larger test database; a boot that looks stuck during a deploy of this release is this
 statement.
+
+Migration `0157_search_term_queue` creates `search_term_queue`, the items whose search text has
+changed since each project's word counts were last written. The related-terms refresh counted
+every issue, document, comment, ask and message of every project every ten minutes, 1,882 s of
+database time in the 24 hours to 2026-10-30; with this table it applies what changed and counts a
+project again only where no pass of this build has counted it. Each row names the kind of item,
+the item — a comment, an ask and a message by their own id, an issue by its key, a document by
+its artifact — and the issue or the artifact whose project it takes, all copied from the row the
+trigger was handed, so a pass finds the project of an item that has since been deleted. It
+carries the vector the item held before the change, which is what a pass subtracts, and the
+`pg_current_xact_id()` of the transaction that wrote it, which is what tells a change a pass's
+own snapshot sees from one committed after it. The table declares no foreign key, to any table: a
+`references` makes the census size the table it points at, and a key to an item would refuse the
+very row a delete queues. Both statements lock only the table this migration creates, which no
+other session can reach before the commit, so it takes milliseconds. Its census answers `0`: the
+table is new and the migration reads no other. No operator follow-up — the queue starts empty,
+and the first pass of this release counts every project in full, so nothing is owed for the
+writes made before it.
+
+Migration `0158_search_term_totals_snapshot` adds `snapshot pg_snapshot` and `snapshot_at
+timestamptz` to `search_term_totals`, both nullable and with no default. Every pass of this
+release writes `items`, `refreshed_at`, `snapshot` and `snapshot_at` in the one statement that
+counts, `refreshed_at` and `snapshot_at` from that statement's `statement_timestamp()` and
+`snapshot` from the `pg_current_snapshot()` it takes there, and then drops exactly the queue rows
+that snapshot sees. A later pass applies the queue on top of those counts only where the row is
+its own work, which is `snapshot is not null and refreshed_at is not distinct from snapshot_at`;
+otherwise it counts the project again. The signal is that comparison and not a null snapshot,
+because the release before this one updates `items` and `refreshed_at` alone and leaves this
+release's snapshot in place, so during a roll a rule keyed on a null snapshot would apply the
+queue on top of counts that rebuild already held. Adding a nullable column with no default writes
+`pg_attribute` and rewrites no row; the `ACCESS EXCLUSIVE` it takes on `search_term_totals`, one
+row per project, is held for that catalog write alone. Its census answers `0`: it reads no row,
+rewrites none and refuses none, and every row already there reads as the null snapshot of a
+project this release has not counted yet. No operator follow-up.
+
+Migration `0159_search_term_queue_triggers` creates the five functions and the five triggers that
+fill `0157`'s queue: `asks` on `insert or delete or update of question, options, answer`,
+`comments` on `body`, `issues` on `key, title`, `messages` on `body` — the columns each item's
+search vector is built from (`0057`–`0061`) — and `document_search` on `insert or update of
+search`, which is where a document's change is taken from, because `0154`'s table already holds
+exactly the vector the refresh counts and `0155`'s trigger writes it inside the
+`artifact_versions` write. The event broker advances `issues.last_seq` and `artifacts.last_seq`
+on every event and neither column is in a list here, so an event append queues nothing. Each
+trigger is one insert that reads no row, which is what holds the writes to the 10% this change
+allows them. Ten statements, every one a `create function` or a `create trigger`, which is what
+exempts the migration from the census's table-size limit (`internal/pgmigrate/exempt.go`): the
+exemption is per migration and not per table, so one migration carries all five where five would
+have taken five lock windows and four more migration numbers. `create trigger` takes `SHARE ROW
+EXCLUSIVE` on its table — reads are not held, writes wait for the commit — and the five are taken
+in one fixed order, `asks`, `comments`, `issues`, `messages`, then `document_search`, so two
+migrations written to this rule cannot each hold a lock the other waits for. The four item tables
+are small (the census of 2026-10-30 gives `comments` 110 MiB and `messages` 20 MiB), and the
+functions, which lock no table, are created first, so the lock window is the five `create
+trigger` statements alone. Every migration's lock wait is bounded at `pgmigrate.LockTimeout`,
+five seconds, with `pgmigrate.LockTimeoutAttempts` attempts; a holder that outlives all three
+fails the migration and the pod's boot with it, the release before it keeps serving, and a retry
+is safe because the failed attempt's transaction rolled back. Its census answers `0`: a trigger
+runs only on later writes and rewrites no row already stored. The operator follow-up is the queue
+itself: each row carries a copy of an item's old vector, a 660 KB document's included, so if the
+refresh loop stops, `select count(*) from search_term_queue` grows, and the recovery is a full
+build, which the refresh already runs for a project whose snapshot is null.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -2004,8 +2065,18 @@ made. It searches the write's own project in two stages started together:
   `cancelled`), which says nothing of the search's time.
 
 df and N come from `search_term_stats` and `search_term_totals` (`0139`), which the term-statistics
-refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`) rebuilds for every project at
-boot and every 10 minutes; the check only reads them. A word written since the last refresh is
+refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`) keeps up to date for every
+project at boot and every 10 minutes; the check only reads them. Each pass applies what changed:
+the triggers of `0159` queue every item whose search text a write changed, with the vector it
+held before, and a pass subtracts that vector, adds what the item holds now, and moves the item
+count by the items that appeared less those that were there — the counts a rebuild from every
+item would write, for a fraction of its work. A pass counts a project from its items again where
+no pass of this build has counted it: a project created since the last pass, a project whose row
+another writer touched (`0158`), and every project on the first pass after this release is
+deployed. A pass drains a project's whole queue, every row its own snapshot sees, before it moves
+`refreshed_at`; a change committed after that snapshot waits for the next pass, so no change is
+applied twice and none is lost. Each project a pass changes is logged on a line of its own, with
+`mode=step` or `mode=full` and how many items it applied. A word written since the last pass is
 counted live, at most 50 per check, and a project with no statistics yet starts a refresh of its
 own in the background and has every word counted live meanwhile.
 
