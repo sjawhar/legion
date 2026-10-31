@@ -2,52 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-31T02:45:00Z",
-  "round": 18,
-  "headTested": "72a07b4954ff7f3191d375d898a3b6a7f8b3246f",
-  "handoffHead": "0433444e15f290ed04db930acaa1ad319621553f",
-  "roundShape": "Narrow round, as the architect asked: 72a07b49 changes two test rigs and one product line (refreshHeldClaims). Round 17's behaviour evidence stands.",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round18-tar-gz (RESULTS.md); scripts: dispatch://INFRA-606/artifact/infra606-tester-scripts-tar-gz version 8",
+  "completed": "2026-10-31T04:30:00Z",
+  "round": 19,
+  "headTested": "783a30cc69908f4fea54a798c54a8c495a7f765b",
+  "handoffHead": "301ea207c8390eca745f442c2744e0fbacf2bd25",
+  "roundShape": {
+    "verdict": "confirmation round (forward-merge re-check 72a07b4954ff → 783a30cc6990: the PR's own diff differs only in two docs and one new test, so bare gates only)",
+    "tool": "round-shape.py v3 (dispatch://INFRA-598/artifact/round-shape-py), run from the workspace with 2406",
+    "oldHead": "72a07b4954ff7f3191d375d898a3b6a7f8b3246f",
+    "newHead": "783a30cc69908f4fea54a798c54a8c495a7f765b",
+    "differingFiles": [
+      "packages/envoy/AGENTS.md (doc)",
+      "packages/envoy/cmd/dispatch/README.md (doc)",
+      "packages/envoy/internal/dispatch/api/comment_mention_refresh_race_test.go (test, new)"
+    ],
+    "equalOnlyAfterNormalisation": []
+  },
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round18-tar-gz (RESULTS.md); round 18's behaviour evidence stands",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command myself: both tests pass 50 of 50 with -race (GOMAXPROCS=4) and 50 of 50 without it."
+    "how": "Re-ran the committed regression test: 10 of 10 pass at head, and 3 of 3 fail with refreshHeldClaims' old record condition (go -overlay). The committed file is byte-identical to the test I attached in round 18, apart from trailing whitespace, which I compared with it stripped."
   },
   "failures": [
     {
       "criterion": "The pull request merges into main (the architect's standing instruction: complete failing on a conflict).",
-      "evidence": "gh pr view 2406 reads CONFLICTING / DIRTY at 0433444e, against main faf3e74d. Main changed three files the PR also changes: packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md (#2422, 8a72cf79, lays both out one sentence per line) and packages/envoy/cmd/listener/api_test.go (#2517, e018f1d3). All three are docs or a test, so the forward merge may be a confirmation round if it resolves them as text. GitHub ran no CI on 72a07b49."
+      "evidence": "Read at about 04:25Z, after the lanes went green: gh pr view 2406 reads CONFLICTING / DIRTY at 301ea207 against main d7e1daaa. Main's #2474 (d7e1daaa, 'lay out the root guide, the live-proof README and the Kubernetes guide one sentence per line') changed scripts/e2e/README.md, which this PR also changes; it is the only file both sides changed. That is a docs-only conflict, so the next forward merge is a confirmation round if it resolves it as text."
     }
   ],
   "failed": 1,
   "proof": [
     {
-      "criterion": "The refreshHeldClaims change: a refresh that loses to a newer claim keeps the newer one, and a sweep cannot take a live claim with or without the change.",
-      "surface": "internal/dispatch/api against Postgres 16, through a test added with go -overlay, so the workspace is not changed",
-      "command": "go test -overlay ov/race-head.json -run '^TestARefreshThatLosesToAKeyedRepeatKeepsTheRepeatsClaim$' -count=3; the same with ov/race-old.json, which restores the old condition `if _, waiting := m.claims[claim.key]; waiting`",
-      "observed": "The test lets the refresh's statement commit, then writes a newer claim to the row and the map (what queueLocked records for a keyed repeat), and then lets the refresh record its result. At head the sender keeps the newer claim, the next refresh moves the row on, and the attempt is sent once: 3 of 3 pass. Reading the code: no path reaches that gap today, because a keyed repeat claims only a free attempt (comment_mention_sender.go:476-478, DeliveryClaimFreeSQL) and a refresh that committed has just made the row live. The sweep takes only lapsed rows, and the row's claim only moves forward under either version, so neither lets the sweep take a live claim. The new condition matters only if the map and the row could disagree for good, and with it they cannot.",
-      "headSha": "72a07b4954ff",
-      "negativeControl": "With the old condition, 3 of 3 fail: 'the sender holds claim <older> for the queued attempt, the row carries <newer>: the refresh recorded its own result over the repeat's claim'."
-    },
-    {
-      "criterion": "Both round-17 flakes are gone, and the held-lane order holds through a sweep on the real binary.",
-      "surface": "internal/dispatch/api under the race detector; two envoy-dispatch processes built from 0433444e on one database",
-      "command": "GOMAXPROCS=4 CGO_ENABLED=1 go test -p 2 -parallel 4 -race ./internal/dispatch/api/ -run '^(TestIdenticalViewsShareOneRecompute|TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep)$' -count=50, then the same without -race; steal.sh 45 (listener at 2 s, 45 comments to ses-a)",
-      "observed": "50 of 50 each with -race, and 50 of 50 each without. steal.sh: the backlog settles 190 s after the first post, more than three claim leases. ses-a stores c1-c45 once each, in order, and process B sends nothing.",
-      "headSha": "72a07b4954ff",
-      "negativeControl": "At ed9b6759 each test failed 4 of 20 (round 17)."
-    },
-    {
-      "criterion": "The api, events, outbox and store suites pass.",
-      "surface": "Go suites against Postgres 16 (fresh database t17)",
-      "command": "go test -p 2 -parallel 4 ./internal/dispatch/api/ ./internal/dispatch/events/... ./internal/dispatch/outbox/ ./internal/dispatch/store/ -count=1",
-      "observed": "events, outbox and store pass. The api suite's only failure is TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses this database's byte-order collation (rank_test.go:317); CI runs it.",
-      "headSha": "72a07b4954ff",
-      "negativeControl": "None needed for a suite run; the round-17 failures it carried are the control above."
+      "criterion": "Confirmation round at 783a30cc: the committed refreshHeldClaims regression test, the build step, and the named CI lanes.",
+      "surface": "internal/dispatch/api against Postgres 16; go build and go vet of packages/envoy; tsc in the touched TypeScript packages; GitHub checks at 783a30cc",
+      "command": "go test ./internal/dispatch/api/ -run '^TestARefreshThatLosesToAKeyedRepeatKeepsTheRepeatsClaim$' -count=10; the same with -overlay ov/old-only.json -count=3; (cd packages/envoy && go build ./... && go vet ./...); (cd packages/contracts && bun run typecheck); (cd packages/dispatch && bun run typecheck); gh api repos/sjawhar/legion/commits/783a30cc.../check-runs",
+      "observed": "The regression test passes 10 of 10. Build and vet: no output, exit 0. tsc in contracts and dispatch: no errors. At 783a30cc lint, typecheck, test, pr-title, dispatch, envoy-go and envoy-go-race-api are all success (dispatch was the last, at 04:22Z), and no check failed.",
+      "headSha": "783a30cc6990",
+      "negativeControl": "With the old record condition (`if _, waiting := m.claims[claim.key]; waiting`), the regression test fails 3 of 3."
     }
   ],
   "notes": [
-    "CI at 72a07b49: GitHub ran no checks at all, since the PR conflicts. lint, typecheck, test, pr-title, dispatch, envoy-go and envoy-go-race-api are all unread.",
-    "72a07b49 also drops ageQueuedClaims' check that the row carries the map's claim: the rig now ages whatever claim the row carries and sets the map to it. The overlay test above checks map-row agreement directly in its place.",
-    "The overlay test is not committed. If the implementer wants the refreshHeldClaims rule pinned, ov/refresh_race_test.go in the evidence bundle is ready to add."
+    "packages/envoy/infra is not touched by this PR, so the infra module's vets do not apply.",
+    "Every red test (5) stays in the suite unmodified; it ran green in envoy-go at 783a30cc."
   ]
 }
