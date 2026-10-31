@@ -32,9 +32,12 @@ import (
 // refusal, is pinned by TestTheFanoutReportsARefusalOfAPortlessSessionOnConsumerDelivery and
 // TestAPortlessConsumerSessionIsReportedAnUnreadableDeliveryMode, which fail on that tree.
 //
-// A session with no entry is the one recipient a mode cannot be judged against: it is taken, and
-// the resolution that then fails records no attempt at all, so nothing is left for the relay of a
-// session that registers again to hold a later copy under (INFRA-594).
+// A session with no entry leaves no attempt record whichever refusal it meets (INFRA-594): a
+// mode it does not advertise cannot be judged against an entry there is none of, so the message
+// is taken and the resolution that then fails records nothing, and a mode that cannot be read is
+// refused before the entry is read at all but recorded only where the resolution succeeded. So
+// nothing is left for the relay of a session that registers again to hold a later copy under
+// (TestAnUnreadableDeliveryModeToASessionWithNoEntryLeavesNoHoldForItsRelay).
 func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -74,11 +77,15 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 			core:          true,
 		},
 		{
+			// Refused, since judgeFollowedTopic reads a mode nobody can advertise before it looks
+			// for an entry, but recorded nowhere: the resolution of this recipient fails
+			// (session.ErrNoSessionRecord), and an attempt record naming a push that was never
+			// made is one the session's own relay would hold this message under once the session
+			// registers again on a serving port.
 			name:          "a session with no entry is sent a mode that cannot be read",
 			payload:       `{"delivery":{"mode":"bogus"}}`,
 			wantException: true,
 			wantLog:       "listener delivery mode cannot be read unambiguously",
-			wantAttempt:   true,
 		},
 		{
 			// No entry is no refusal: a mode nobody advertises cannot be judged against an entry
@@ -148,10 +155,11 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 // (TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused). A portless session's relay
 // publishes every frame unjudged (sessionRelays.relayNATS) and the plugin drops a frame whose
 // delivery mode it cannot read without a word, so a refusal left to that relay would be reported
-// by nobody. The fan-out records no attempt for it: nothing reads such a record back for a
-// portless session, and the relay of the same session on a serving port would hold its copy --
-// and the session's later messages behind it -- under one until it expired (attemptCacheTTL,
-// INFRA-594).
+// by nobody. The fan-out records no attempt for it: judgeFollowedTopic is what reads such a
+// record back, and the relay of a serving-port session's consumer applies that same judgement,
+// so a record would make the relay of this session hold its copy -- and the session's later
+// messages behind it -- until it expired (attemptCacheTTL) once the session is on a serving port
+// (INFRA-594).
 func TestTheFanoutReportsARefusalOfAPortlessSessionOnConsumerDelivery(t *testing.T) {
 	const corePort = 4097
 	for _, tc := range []struct {
