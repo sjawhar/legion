@@ -208,7 +208,7 @@ func (p *PgVersioned) readCompaction(ctx context.Context, pool *pgxpool.Pool, ro
 	through := persistence.Version(*point)
 	if err := p.foldRead(ctx, tx, room, through, len(folded.rows), total, "compaction read", func(updates updateSource) error {
 		var err error
-		if folded.state, _, folded.misread, err = fold(updates, p.pendingItems()); err != nil {
+		if folded.state, _, folded.misread, err = fold(updates, p.maxPendingItems); err != nil {
 			return fmt.Errorf("fold compacted document updates: %w", err)
 		}
 		return nil

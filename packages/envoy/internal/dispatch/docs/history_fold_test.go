@@ -388,7 +388,7 @@ func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
 // A log whose updates park more items than the fold's pending queue holds is not folded: the load
 // serves the stored updates merged whole, and compaction leaves every row stored.
 func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
-	rows, _ := unfoldableHistory(testPendingItems)
+	rows, _ := unfoldableHistory()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	shrinkPendingItems(t, nil, versioned)
@@ -418,15 +418,15 @@ func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
 	}
 }
 
-// unfoldableHistory is a log whose updates park more items than a fold's pending queue of
-// maxPending items holds: each of its two later rows holds maxPending/2+1 inserts and depends on
-// an insert no row holds, so the fold parks both rows and refuses the second. It returns the rows
-// and the writer that wrote them, whose later updates a test appends to change the log.
+// unfoldableHistory is a log whose updates park more items than a fold's pending queue holds: each
+// of its two later rows holds testPendingItems/2+1 inserts and depends on an insert no row holds,
+// so the fold parks both rows and refuses the second. It returns the rows and the writer that
+// wrote them, whose later updates a test appends to change the log.
 //
-// maxPending is the cap of whatever folds the log: testPendingItems for a store or a service a
-// test shrank (shrinkPendingItems), which keeps the rows a few dozen items rather than the half
-// million maxUpdateItems takes.
-func unfoldableHistory(maxPending int) ([][]byte, *crdt.Doc) {
+// Its rows are built for testPendingItems, the queue a test shrinks a store or a service to
+// (shrinkPendingItems), which keeps them a few dozen items rather than the half million
+// maxUpdateItems takes: every test that stores them shrinks what folds them.
+func unfoldableHistory() ([][]byte, *crdt.Doc) {
 	writer := crdt.New(crdt.WithClientID(7))
 	text := writer.GetText("t")
 	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
@@ -436,7 +436,7 @@ func unfoldableHistory(maxPending int) ([][]byte, *crdt.Doc) {
 	for range 2 {
 		before := writer.StateVector()
 		writer.Transact(func(txn *crdt.Transaction) {
-			for range maxPending/2 + 1 {
+			for range testPendingItems/2 + 1 {
 				text.Insert(txn, 0, "y", nil)
 			}
 		})

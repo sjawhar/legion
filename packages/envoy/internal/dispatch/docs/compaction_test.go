@@ -363,7 +363,7 @@ func TestACompactionSkipsAnUnfoldableLogUntilItChanges(t *testing.T) {
 
 	// Each later row leans on an insert no row holds ("x"), so the fold parks more than its
 	// pending queue holds; the writer writes the update that changes the log below.
-	rows, writer := unfoldableHistory(testPendingItems)
+	rows, writer := unfoldableHistory()
 	text := writer.GetText("t")
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)

@@ -77,7 +77,7 @@ func TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt(t *testing.T) {
 		return strings.HasPrefix(peerMarkdown(beta), "after")
 	})
 
-	room := liveMarkdown(t, service, artifactID)
+	room := currentLiveMarkdown(t, service, artifactID)
 	if other := peerMarkdown(beta); room != other {
 		t.Fatalf("the room reads %q but its other peer reads %q: the room kept part of an update it sent no other peer", room, other)
 	}
@@ -100,28 +100,4 @@ func unknownDeleteRanges(ranges int) []byte {
 	// Encoded against the client's own state, the update carries none of its structs: the delete
 	// set alone.
 	return crdt.EncodeStateAsUpdateV1(far, far.StateVector())
-}
-
-// liveMarkdown renders the room's live document, read under the room's lock.
-func liveMarkdown(t *testing.T, service *Service, artifactID string) string {
-	t.Helper()
-	live := service.srv.GetDoc(artifactID)
-	if live == nil {
-		t.Fatal("the document's room is not open")
-	}
-	fragment := live.GetXmlFragment(fragmentName)
-	var rendered string
-	var readErr error
-	live.Transact(func(txn *crdt.Transaction) {
-		tree, err := pmdoc.ReadInTransaction(txn, fragment)
-		if err != nil {
-			readErr = err
-			return
-		}
-		rendered, readErr = pmdoc.Render(tree)
-	}, nil)
-	if readErr != nil {
-		t.Fatalf("render the room's document: %v", readErr)
-	}
-	return rendered
 }

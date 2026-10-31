@@ -114,9 +114,8 @@ type Service struct {
 	// maxPendingItems is the pending queue the service's rooms decode their stored state under
 	// (Server.MaxPendingItems, which New sets from it and ygo reads as each room loads) and the
 	// queue the check a room's load is compared with takes (validateUpdate). New sets it to
-	// maxUpdateItems, the queue every production decode of document bytes takes (see
-	// maxUpdateItems); a test lowers it, and the server's, before any room opens
-	// (shrinkPendingItems).
+	// maxUpdateItems, whose comment states the rule; a test lowers it, and the server's, before
+	// any room opens (shrinkPendingItems).
 	maxPendingItems int
 	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
@@ -665,13 +664,11 @@ func New(deps Deps) *Service {
 	// Transactional server-side edits suppress one automatic ygo write and
 	// append it inside the API transaction, so persistence stays per update.
 	srv.PersistCoalesceWindow = -1
-	// The rooms decode under the service's own cap, maxUpdateItems, the queue every decode of
-	// document bytes takes (see maxUpdateItems); a test lowers both before any room opens
-	// (shrinkPendingItems), and ygo reads this field as each room loads. It is also the most a
-	// room's peers can park in it, about ten times ygo's default; bounding what one peer's update
-	// can do to a room is LEGION-487. ygo's check of each update the service broadcasts
-	// (Server.BroadcastUpdate) takes no pending queue: the room has already applied the update
-	// (reearth/ygo#268, in the pinned fork).
+	// The rooms decode under the service's own cap (Service.maxPendingItems; see maxUpdateItems),
+	// which ygo reads as each room loads. It is also the most a room's peers can park in it, about
+	// ten times ygo's default; bounding what one peer's update can do to a room is LEGION-487.
+	// ygo's check of each update the service broadcasts (Server.BroadcastUpdate) takes no pending
+	// queue: the room has already applied the update (reearth/ygo#268, in the pinned fork).
 	srv.MaxPendingItems = service.maxPendingItems
 	// A room whose last peer leaves, or that only Server.Apply touches, stays resident until it has
 	// been idle for roomIdleTimeout: ygo stamps a room idle when its last peer leaves, and when an

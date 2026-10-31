@@ -378,7 +378,7 @@ type LoadedDocument struct {
 func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
 	var doc *crdt.Doc
 	stamp, err := p.loadStored(ctx, room, func(head persistence.Version, updates updateSource) (err error) {
-		doc, err = documentThrough(room, head, updates, p.pendingItems())
+		doc, err = documentThrough(room, head, updates, p.maxPendingItems)
 		return err
 	})
 	if err != nil {

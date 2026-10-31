@@ -62,7 +62,7 @@ func TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks(t *testing.T)
 		return strings.HasPrefix(peerMarkdown(beta), "second\n\nfirst\n\nSeed.")
 	})
 	requireStoredRowsFoldToTheRoom(t, service, artifactID, "once the first keystroke landed")
-	if got := liveMarkdown(t, service, artifactID); !strings.HasPrefix(got, "second\n\nfirst\n\nSeed.") {
+	if got := currentLiveMarkdown(t, service, artifactID); !strings.HasPrefix(got, "second\n\nfirst\n\nSeed.") {
 		t.Fatalf("the room reads %q once both keystrokes landed, want second, first, then the seed", got)
 	}
 }
@@ -80,7 +80,7 @@ func requireStoredRowsFoldToTheRoom(t *testing.T, service *Service, artifactID, 
 	if live == nil {
 		t.Fatalf("%s: the document's room is not open", when)
 	}
-	if room, stored := liveMarkdown(t, service, artifactID), docMarkdown(loaded.Doc); room != stored {
+	if room, stored := currentLiveMarkdown(t, service, artifactID), docMarkdown(loaded.Doc); room != stored {
 		t.Fatalf("%s: the room reads %q but its stored rows fold to %q", when, room, stored)
 	}
 	if room, stored := fmt.Sprint(live.StateVector()), fmt.Sprint(loaded.Doc.StateVector()); room != stored {

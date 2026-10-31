@@ -153,10 +153,11 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 // validateUpdate decodes a stored history, or an update about to replace one, as the room will
 // decode it: into a document with maxPending parked items, the caller's own pending queue
 // (Service.maxPendingItems for a rebuild's check of the history its rooms would load,
-// PgVersioned.pendingItems for the store's check of a rebuilt seed), which is the cap a room's
-// load hook decodes its stored state under (bootstrapLoadedState), so a history a room served is
-// never judged one that cannot load. A rebuild runs it on its seed and on the history it replaces;
-// a room's load does not, as its own decode is the check.
+// PgVersioned.maxPendingItems for the store's check of a rebuilt seed; see maxUpdateItems for the
+// rule both follow), which is the cap a room's load hook decodes its stored state under
+// (bootstrapLoadedState), so a history a room served is never judged one that cannot load. A
+// rebuild runs it on its seed and on the history it replaces; a room's load does not, as its own
+// decode is the check.
 func validateUpdate(update []byte, maxPending int) error {
 	if len(update) == 0 {
 		return nil
@@ -165,12 +166,17 @@ func validateUpdate(update []byte, maxPending int) error {
 }
 
 // decodeStoredState applies state, a stored history or the state a room or cold read loads, to
-// doc. ygo's apply names a failure as ErrInvalidUpdate followed by the decoder's reason ("crdt:
-// invalid update: encoding: unexpected end of input"), except where its reader of an update's
-// structs fails with no reason of its own, which it reports as that sentinel wrapped in itself
-// ("crdt: invalid update: crdt: invalid update", on every fork release since v1.51.3-sami.4). That
-// one is returned as the sentinel alone, so the line a refusal logs states it once; every other
-// error is returned as ygo gave it.
+// doc. Every decode of a stored state as a whole runs here: the history checks (validateUpdate),
+// a room's load hook (bootstrapLoadedState), the document a load decodes its state into
+// (documentThrough), the tree a socket's admission reads (loadTree) and the fork a cold write
+// makes of the history (coldFork). A fold's apply of one stored row, and its read-back of the
+// state it has just encoded, take ygo's error as it comes: neither refuses the document, and both
+// leave the log served and kept merged (fold, readsBackOtherwise). ygo's apply names a failure as
+// ErrInvalidUpdate followed by the decoder's reason ("crdt: invalid update: encoding: unexpected
+// end of input"), except where its reader of an update's structs fails with no reason of its own,
+// which it reports as that sentinel wrapped in itself ("crdt: invalid update: crdt: invalid
+// update", on every fork release since v1.51.3-sami.4). That one is returned as the sentinel
+// alone, so the line a refusal logs states it once; every other error is returned as ygo gave it.
 func decodeStoredState(doc *crdt.Doc, state []byte) error {
 	err := crdt.ApplyUpdateV1(doc, state, nil)
 	if err != nil && err.Error() == doubledInvalidUpdate {
@@ -187,8 +193,8 @@ var doubledInvalidUpdate = crdt.ErrInvalidUpdate.Error() + ": " + crdt.ErrInvali
 // room's document. It is the one decode of the stored state a room's load makes: ygo is handed no
 // bytes (servicePersistenceAdapter.LoadDoc), so it decodes under the pending cap ygo set on doc
 // before its load hook ran, the server's MaxPendingItems, which New sets from the service's own
-// cap (Service.maxPendingItems, maxUpdateItems in production). An empty state - an empty history -
-// decodes nothing.
+// cap (Service.maxPendingItems; see maxUpdateItems). An empty state - an empty history - decodes
+// nothing.
 func (s *Service) bootstrapLoadedState(room string, doc *crdt.Doc, state []byte) error {
 	if len(state) == 0 {
 		return nil

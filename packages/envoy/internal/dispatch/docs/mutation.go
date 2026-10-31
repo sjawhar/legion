@@ -898,7 +898,8 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 // loadTree is the tree of the document a socket's admission check reads (heldTree, else the stored
 // document decoded), with the durable state it decoded the document from, nil when this server
 // holds the document. A durable history that does not decode is ErrDocumentUnloadable and fails
-// the room, as ygo's own load of it would.
+// the room, as ygo's own load of it would; its decode is the one every decode of a stored state
+// makes (decodeStoredState), so a refusal ygo gives no reason for is stated once.
 func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *persistence.LoadResult, error) {
 	tree, held, err := s.heldTree(ctx, artifactID)
 	if err != nil || held {
@@ -916,7 +917,7 @@ func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node,
 		return nil, &loaded, nil
 	}
 	doc := newDocumentCopy()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+	if err := decodeStoredState(doc, loaded.Update); err != nil {
 		// The room carries the decode failure as its cause, which a reader that meets the
 		// failed room answers as DOC_SERVICE_UNAVAILABLE; this read met the history itself.
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))

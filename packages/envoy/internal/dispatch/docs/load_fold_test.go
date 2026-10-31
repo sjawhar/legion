@@ -25,7 +25,7 @@ import (
 func TestALoadReadsOneStateWhetherItFoldsTheLogInMemoryOrStreamed(t *testing.T) {
 	fixtures := readHistoryFixtures(t)
 	parked, lost, gone := parkedHistory(t)
-	unfoldable, _ := unfoldableHistory(testPendingItems)
+	unfoldable, _ := unfoldableHistory()
 	unfoldableMerged, err := crdt.MergeUpdatesV1(unfoldable...)
 	if err != nil {
 		t.Fatalf("merge the unfoldable log: %v", err)
@@ -422,7 +422,7 @@ func TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode(t *testing.T) 
 		}
 	}
 	t.Cleanup(func() { close(finished) })
-	unfoldable, _ := unfoldableHistory(testPendingItems)
+	unfoldable, _ := unfoldableHistory()
 	merged, err := crdt.MergeUpdatesV1(unfoldable...)
 	if err != nil {
 		t.Fatalf("merge the unfoldable log: %v", err)
