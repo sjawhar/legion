@@ -214,13 +214,16 @@ type awarenessRelay struct {
 	// local is, per room, the awareness clients of this process's own peers that the relay is
 	// sending to the other processes, each with the clock its last state stood at: every client
 	// the room's observer has seen a state of and not since a removal it relayed - a client the
-	// room holds again by the time the observer reads it is relayed none and stays on the list
-	// (touched) - less the ones another process's notification brought (inbound). The room's
-	// sockets hold the list to maxAwarenessClientsPerSocket clients each (awareness_limit.go).
-	// It is what a query is answered with, what a close of a room removes (localRemoval), and
-	// the clock a removal the room's own observer relays stands at, which is read from here
-	// rather than from the room's awareness because a purge may have freed the departing
-	// client's tombstone by then (touched).
+	// snapshot a removal is decided from finds in the room again is relayed none and stays on
+	// the list (touched) - less the ones another process's notification brought (inbound). The
+	// room's sockets hold the list to maxAwarenessClientsPerSocket clients each
+	// (awareness_limit.go).
+	// It is what a query is answered with, what a close of a room removes (localRemoval), the
+	// clock a removal the room's own observer relays stands at when the room's awareness holds
+	// nothing older - a purge may have freed the departing client's tombstone by then (touched)
+	// - and what a removal is tested against as it is recorded: one older than the clock held
+	// here is of a client that is in the room again, and is dropped rather than recorded over
+	// the state that brought it back (record).
 	local map[string]map[uint64]uint64
 	// closed refuses every later send; Close sets it.
 	closed bool
@@ -311,6 +314,20 @@ func (r *awarenessRelay) Close() error {
 // frame that made it, and a socket's frame touches no more than maxAwarenessClientsPerSocket of
 // them (awareness_limit.go), so a tab inventing thousands reaches the relay as its own handful
 // and the readers who join after it are relayed at once.
+//
+// A removal older than the state the list holds for its client is dropped whole - neither the
+// list nor the batch is touched for it - because the client is in the room again and the later
+// state is already recorded. Deciding a removal (touched) and recording it are two moments, and
+// the client's return can be recorded in between, by the observer its own frame fires; recorded
+// over that return, the removal would take the client off the list this process relays and
+// answers queries from and replace the client's own entry in the batch, so every other process
+// would drop the cursor of a reader who is in the room. A removal at the very clock the list
+// holds is applied: it is that state's own removal, since a client's return always stands at a
+// strictly higher clock than the tombstone it replaces - ygo drops a state whose clock equals
+// what it holds and takes a null at that clock as the removal of it
+// (awareness/awareness.go:566-581) - and it is the clock every other process takes the removal
+// at for the same reason. A client the list does not hold is a client the relay knows no state
+// of, whose removal stands as it was built (touched).
 func (r *awarenessRelay) record(room string, entries []awarenessEntry) {
 	if len(entries) == 0 {
 		return
@@ -327,6 +344,9 @@ func (r *awarenessRelay) record(room string, entries []awarenessEntry) {
 	clients := r.local[room]
 	for _, entry := range entries {
 		if entry.removed {
+			if held, listed := clients[entry.client]; listed && entry.clock < held {
+				continue
+			}
 			delete(clients, entry.client)
 		} else {
 			if clients == nil {
@@ -646,7 +666,11 @@ func (r *awarenessRelay) watchRoomAwareness(room string, aw *awareness.Awareness
 		ahead(room, aw)
 	}
 	aw.OnUpdate(func(event awareness.UpdateEvent) {
-		r.record(room, r.touched(room, aw, event))
+		entries := r.touched(room, aw, event)
+		if ahead := r.service.beforeAwarenessRecord; ahead != nil {
+			ahead(room, aw, entries)
+		}
+		r.record(room, entries)
 		if len(event.Removed) > 0 {
 			reclaimAwarenessSlots(room, aw)
 		}
@@ -659,26 +683,36 @@ func (r *awarenessRelay) watchRoomAwareness(room string, aw *awareness.Awareness
 // again, encoded here. A client another process's notification is being applied for is left to
 // the process it came from (inbound, received).
 //
-// A removal stands at the clock the relay holds for that client (local), raised to the clock of
-// the tombstone the room still holds, and never at what the room's awareness would encode now:
-// ygo fires its update observers with the awareness unlocked, and a purge of a tombstone this
-// one's age (awarenessTombstoneAge, one nanosecond) runs after every inbound apply (received)
-// and after every other removal of the room's own. One landing between the apply and this encode
-// leaves EncodeUpdate nothing to read, so it names the client at a clock of 0
-// (awareness/awareness.go:477-480), which every other process drops as older than the state it
-// holds (awareness/awareness.go:566-581) - the departed reader's cursor would then sit in every
-// other process's rooms until it expired, thirty seconds later (awarenessExpiry).
+// Each removal is decided from one snapshot of its client - the client's state and its clock
+// read together, under the awareness's own lock - and never from one read of which clients are
+// live followed by another of the clock. ygo keeps that lock private (awareness/awareness.go:135)
+// and GetStates (awareness/awareness.go:344) and Meta (awareness/awareness.go:361) each take it
+// for themselves, so two reads are two moments, and a client's return landing between them is
+// what neither read sees. EncodeUpdate takes the lock once for the clients it is asked for
+// (awareness/awareness.go:458), and what it writes for one of them says which of three that
+// client is:
 //
-// The clock is raised only where the room answers for a tombstone, which is what the client the
-// removal is of must be: ygo's Meta answers for a live client as readily as for a tombstone
-// (awareness/awareness.go:361-375), and the observer reads the room after the change, so a
-// client removed at one clock and announcing itself again at the next - its own tab's frame
-// landing between the removal's apply and this encode - would have its removal raised to the
-// clock of the state it is live at. Every other process would take that removal, since it is no
-// older than what it holds, and drop the cursor of a reader who is in the room. So a client the
-// room holds a state of (GetStates, which leaves tombstones out) is relayed no removal at all:
-// its own entry carries its state, and it stays on the list of clients this process relays and
-// answers queries from (local, record), which only a relayed removal takes it off.
+//   - a state that is not null: the client is in the room again - its own tab's frame having
+//     landed between the change and this read - and no removal is sent at all. Its own entry
+//     carries its state, and it stays on the list of clients this process relays and answers
+//     queries from (local, record), which only a relayed removal takes it off. A removal here
+//     would stand at the clock of the state the client is live at; every other process would
+//     take it, since it is no older than what it holds (awareness/awareness.go:566-581), and
+//     the cursor of a reader who is in the room would go from all of them.
+//   - a null state at the tombstone's clock: the client is gone, and its removal stands at that
+//     clock or at the one the relay holds for it (local), whichever is the later.
+//   - a null state at a clock of 0, which is what EncodeUpdate writes for a client the room
+//     holds nothing of (awareness/awareness.go:477-480): ygo fires its update observers with
+//     the awareness unlocked, and a purge of a tombstone this one's age (awarenessTombstoneAge,
+//     one nanosecond) runs after every inbound apply (received) and after every other removal
+//     of the room's own, so one can land between the change and this read. The removal then
+//     stands at the clock the relay holds for the client, which no purge takes away; sent at 0
+//     it would be dropped by every other process as older than the state it holds, and the
+//     departed reader's cursor would sit in their rooms until it expired, thirty seconds later
+//     (awarenessExpiry).
+//
+// The last two are one rule, since a client the room holds nothing of reads as a clock of 0:
+// a removal stands at the later of the snapshot's clock and the relay's own.
 func (r *awarenessRelay) touched(room string, aw *awareness.Awareness, event awareness.UpdateEvent) []awarenessEntry {
 	entries := make([]awarenessEntry, 0, len(event.Added)+len(event.Updated)+len(event.Removed))
 	left := make([]awarenessEntry, 0, len(event.Removed))
@@ -707,13 +741,33 @@ func (r *awarenessRelay) touched(room string, aw *awareness.Awareness, event awa
 	if len(left) == 0 {
 		return entries
 	}
-	held := aw.GetStates()
+	departed := make([]uint64, len(left))
+	for i, entry := range left {
+		departed[i] = entry.client
+	}
+	if ahead := r.service.beforeAwarenessRemovalRead; ahead != nil {
+		ahead(room, aw, departed)
+	}
+	// The one snapshot every removal below is decided from. A snapshot that does not decode -
+	// which is ygo's own encoding of what it holds, so nothing short of a bug - leaves each
+	// removal at the clock the relay holds for its client, the clock the client last stood at
+	// here.
+	snapshot, err := decodeAwarenessEntries(aw.EncodeUpdate(departed))
+	if err != nil {
+		slog.Debug("dispatch: read the awareness of a room's departed clients", "room", room, "error", err)
+	}
+	read := make(map[uint64]awarenessEntry, len(snapshot))
+	for _, entry := range snapshot {
+		read[entry.client] = entry
+	}
 	for _, gone := range left {
-		if _, back := held[gone.client]; back {
-			continue
-		}
-		if meta, known := aw.Meta(gone.client); known && meta.Clock > gone.clock {
-			gone.clock = meta.Clock
+		if entry, found := read[gone.client]; found {
+			if !entry.removed {
+				continue
+			}
+			if entry.clock > gone.clock {
+				gone.clock = entry.clock
+			}
 		}
 		gone.raw = awarenessRemoval(gone.client, gone.clock)
 		entries = append(entries, gone)

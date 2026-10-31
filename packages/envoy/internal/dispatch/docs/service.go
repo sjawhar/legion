@@ -143,6 +143,16 @@ type Service struct {
 	// an observer of their own ahead of the relay's, since ygo fires a room's update observers in
 	// the order they were registered.
 	beforeAwarenessWatch func(room string, aw *awareness.Awareness)
+	// beforeAwarenessRemovalRead runs inside the relay's observer once the clients a change took
+	// away are known - the ones this process is to relay a removal of - and before the relay
+	// reads the room's awareness for them (awarenessRelay.touched). Nil outside tests; tests use
+	// it to announce a departing client again in that window.
+	beforeAwarenessRemovalRead func(room string, aw *awareness.Awareness, removed []uint64)
+	// beforeAwarenessRecord runs with what the relay's observer is to send of a change
+	// (awarenessRelay.touched) and before it records it (awarenessRelay.record). Nil outside
+	// tests; tests use it to announce a departing client again in that window, so the return's
+	// own record runs first.
+	beforeAwarenessRecord func(room string, aw *awareness.Awareness, entries []awarenessEntry)
 	// beforeSettleStart runs as a settlement starts (settleRoomWithin), before it compares the
 	// room's generation under the state lock: after its timer fired, while the timer is still
 	// registered, or after settleLastPeer took the timer and counted the settlement running. Nil
