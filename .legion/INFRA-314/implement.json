@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-314",
-  "completed": "2026-10-31T16:30:00Z",
+  "completed": "2026-10-31T18:35:00Z",
   "proof": [
     {
       "criterion": "A1, A2, A3, A4, A9, A10, A11: the broker serves its own approval page with a sign-in on its own origin; only the signed-in approver decides, and the decision is bound to what the page showed; nothing Dispatch holds decides; the four sign-in settings are required; a sign-in crosses processes and restarts",
@@ -83,6 +83,14 @@
       "observed": "The focused run is ok. The invariant now removes the exact approve_url the fake broker answered with, read from the fixtures, before checking its absent list, so the host elsewhere, 127.0.0.1 outside that URL, the account id, the region, the project and 'the broker at' are still refused. A new fixture PENDING_NO_RECORD answers with no record_id and both waiting-line tests drive it under each AGENT_SECRETS_APPROVE_URL value; before the fix that answer dereferenced a nil. The 120-package run leaves six failing here (cmd/agent-secrets's 18, cmd/agent-secrets-helper, cmd/listener, internal/broker/helper, internal/broker/store, internal/dispatch/files); the clone of main fails every one identically, cmd/agent-secrets test for test, so each is the pod and none is this change. internal/dispatch/pmdoc passes under -timeout 50m.",
       "headSha": "0bcfc8d5c99dc7477eef22cb3939b226517447cd",
       "negativeControl": "The exception is the control for itself: it removes one exact string, so the same run still fails if any other line names the host, and the eight subtests that were red at 6fb80d4ede9e are the proof the invariant has teeth. The clone of main is the control for the six remaining package failures."
+    },
+    {
+      "criterion": "The review's Important finding, and the spec's Design: \"Each answer of a page route, a redirect included, has Content-Security-Policy, X-Frame-Options: DENY, Referrer-Policy: same-origin and Cache-Control: no-store\" - which the 429 past the per-address bucket did not",
+      "surface": "the api package's real mounted broker (newTestServerWith) over HTTP from one address through the trusted proxy header, with a burst of 3, plus Dispatch's browser suite in real Chromium against the real Dispatch server, the real broker binary and the development issuer, for the fake broker's deleted branches",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=<pod Postgres> go test -count=1 -run TestAFloodedPageAnswersThePagesOwn429AndNamesNoToken ./internal/broker/api/ ; then go test -count=1 ./internal/broker/api/ ./internal/broker/approval/ ./internal/broker/config/ ./cmd/broker/ and go test -count=1 -run 'WaitingOn|Pending|ApproveURL|NoSessionLine|ExecFormPending|MachineLogin' ./cmd/agent-secrets/ ; then cd packages/dispatch && bun run e2e -- broker-approval.e2e.ts machine-login.e2e.ts inbox.e2e.ts --project chromium",
+      "observed": "ok. Inside the burst none of GET /approve/<id>, GET /signin/callback and GET /signin/status is refused and the stylesheet answers 200. Past it the two page routes answer 429 with Retry-After: 3600, Content-Security-Policy equal to approval.ContentSecurityPolicy, X-Frame-Options: DENY, Referrer-Policy: same-origin, Cache-Control: no-store, nosniff and Content-Type: text/html, with HTML saying 'Too many requests' and naming neither 'serviceaccount' nor 'token'; GET /signin/status answers 429 RATE_LIMITED naming neither word; the stylesheet still answers 200. All four Go packages ok, cmd/agent-secrets ok, and the browser suite 53 passed with 1 pre-existing skip, machine-login.e2e.ts:43 among them, which is what covers fake-broker.ts's deleted refusal branches.",
+      "headSha": "e2dcb986ec2438f5b483f5cd6cfabb47ed572951",
+      "negativeControl": "With the bucket's spend deleted from authenticate's authSignIn case, the new test fails at 'GET /approve/<id> past the bucket = 302 Retry-After=\"\" , want 429 with Retry-After 3600'; restored, ok. That is the review's own point, that deleting either call would have passed every suite before this round."
     }
   ],
   "filesChanged": [
