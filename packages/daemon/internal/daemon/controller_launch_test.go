@@ -171,7 +171,7 @@ func TestForgetSessionLetsTheControllerKeeperSpawnFresh(t *testing.T) {
 	rt := fake.NewRuntime()
 	var record built
 	o := fakeRuntime(rt, &record)
-	o.orphanSweep, o.controllerRetry = 10*time.Millisecond, 100*time.Millisecond
+	o.orphanSweep, o.controllerRetry = 2*time.Second, 100*time.Millisecond
 	d := startDaemon(t, cfg, o)
 	project, err := claim.ProjectToken(cfg.Project)
 	if err != nil {
