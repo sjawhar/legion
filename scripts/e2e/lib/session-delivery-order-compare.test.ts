@@ -15,12 +15,18 @@ interface Case {
   readonly written: readonly string[];
   /** The markers in the order the stream stored them (published_order). */
   readonly published: readonly string[];
+  /** Markers of published the stream holds no copy of, so they get no stream sequence. */
+  readonly unstored?: readonly string[];
   /** Each marker's first transcript line in pi and in cc; a marker absent from a session is left out. */
   readonly lines: Readonly<Record<"pi" | "cc", Readonly<Record<string, number>>>>;
 }
 
 function compare(run: Case): { readonly ok: string; readonly output: string } {
-  const seq = run.published.map((marker, i) => `stream_seq[${marker}]=${i + 10}`).join("\n");
+  const seq = run.published
+    .map((marker, i) =>
+      run.unstored?.includes(marker) === true ? "" : `stream_seq[${marker}]=${i + 10}`
+    )
+    .join("\n");
   const lines = (["pi", "cc"] as const)
     .flatMap((label) =>
       Object.entries(run.lines[label]).map(
@@ -89,14 +95,15 @@ describe("compare_issue_order", () => {
     expect(output).toContain("issue order in cc: c2 (stream seq 11) is in no transcript line");
   });
 
-  test("fails a stream order shorter than the comments written", () => {
+  test("fails a comment the stream does not hold", () => {
     const { ok, output } = compare({
       written: ["c1", "c2"],
-      published: ["c1"],
-      lines: both({ c1: 5 }),
+      published: ["c2", "c1"],
+      unstored: ["c2"],
+      lines: both({ c1: 5, c2: 9 }),
     });
     expect(ok).toBe("0");
-    expect(output).toContain("2 comments of LIVE-1 were written and 1 read back in stream order");
+    expect(output).toContain("the stream holds no comment carrying c2");
   });
 
   test("fails a comparison that holds nothing", () => {
