@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-177",
+  "completed": "2026-10-31T03:03:00Z",
+  "round": 15,
+  "headReviewed": "01b6a9628035eef52873f01c6a6dfd4caa2771d7 (code head 8f21fdf70; 7caa4eb8 and 01b6a962 add only .legion/INFRA-177/)",
+  "scope": "Merge-only round set by the INFRA-138 architect: fingerprint a9d4f392 -> fac79d58 from merges 11cb25c1 (main 8fd342e4) and 84641aed (main 39b51494), plus 8f21fdf7.",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "verified": "Relaid envoy AGENTS.md and cmd/dispatch/README.md keep every fact this change added (handoffs row, handoff.recorded, routeBody, handoffRequestLimit 1,576,960, CAP_EXCEEDED on uploads and the handoff write, REQUEST_BODY_UNREADABLE, keyedSpillError, the four handoff routes); the 0150_handoffs paragraph moved into its .up.sql header per main's new README rule, and the SQL body is byte-identical to d66f7ae6. The five resolved prompt and skill files differ from main only by this change's handoff wording, and main's #2576 text is kept. The three pr2422 notes are corrected in place (past tense plus the present rule) and listed in the superseding note. Retro's 3fe12bb0 (docs/solutions) and 183b8b12 (.legion removal) are retro's commits. Dispatch 0150 still free on main; contract 44 and daemon 0065 free. No thermonuclear pass: no code moved.",
+  "ci": "At CI head 7caa4eb8 (code tree 8f21fdf7; compare to 01b6a962: handoffsOnly true): required lint, typecheck, test and pr-title completed success. E2E lines name handoff-records.sh at 7caa4eb8.",
+  "keyFindings": []
+}
