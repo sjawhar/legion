@@ -2,55 +2,63 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-646",
-  "completed": "2026-10-30T11:30:00Z",
+  "completed": "2026-10-31T00:45:00Z",
   "proof": [
     {
-      "criterion": "A1, the merge rule: on LINUX's replay the change is not slower, three base and three head runs alternating in one session on one box (base-1 21:09:54Z, head-1 22:03:11Z, base-2 22:50:47Z, head-2 23:32:25Z, base-3 00:14:10Z, head-3 00:55:57Z).",
-      "surface": "the Dispatch server (packages/envoy/cmd/dispatch) under the INFRA-639 replay client, LINUX's write log of 2026-10-26 22:55-23:34Z, on a 2-core pod",
-      "command": "LOADTEST_ROOT=$TMPDIR/dispatch-loadtest LOADTEST_SRC=$TMPDIR/legion-src packages/envoy/loadtest/run-step.sh <base-n|head-n> --replay --rate 0.05 --reads 1 --uploads 0.25 --rng-seed 1 --gomaxprocs 2 --dispatch-commit <c1f746a4 | 88a5056f>",
-      "observed": "Dispatch CPU-seconds base 235.92 / 228.72 / 225.76 (spread 10.16), head 218.25 / 215.78 / 225.31. Median head 218.25 is 17.67 CPU-s below the highest base run 235.92, and every head run is below every base run (-7.5% on the medians). Every run: saturated false, 174 writes sent and 0 failed, box_busy_before 0.6-1.4%, and replay.end_state.sha256 be102ba5bbda19838a3dacb5f4f27ad8f664a6dea92050042bdea3343f2d49bd on all six, so both builds were sent the same writes and left the same documents. The step directories are dispatch://INFRA-646/artifact/infra646-measurement-tgz.",
-      "headSha": "88a5056f718c5523d23e1feb07a6a422e6062ba4",
-      "negativeControl": "base-1 was run once with my own compiles on the box during its window and was discarded unused; the six runs quoted were taken with the box idle (box_busy_before 0.006-0.014), which is what the end_state equality and the 0 failed writes confirm."
+      "criterion": "A1, the merge rule: on LINUX's replay the change is not slower - the median of three head runs uses no more whole-process CPU-seconds than the highest of three base runs. Six runs alternating, base first, in one session on one pod (m-base-1 20:04:38Z, m-head-1 20:47:39Z, m-base-2 21:30:29Z, m-head-2 22:13:08Z, m-base-3 22:55:52Z, m-head-3 23:38:15Z).",
+      "surface": "the Dispatch server (packages/envoy/cmd/dispatch) under the INFRA-639 replay client, LINUX's write log of 2026-10-26 22:55-23:34Z",
+      "command": "LOADTEST_ROOT=$TMPDIR/dispatch-loadtest LOADTEST_SRC=$TMPDIR/legion-src packages/envoy/loadtest/run-step.sh m-<base|head>-<n> --replay --rate 0.05 --reads 1 --uploads 0.25 --rng-seed 1 --gomaxprocs 2 --dispatch-commit <2d3a725f | ef448091>",
+      "observed": "Dispatch CPU-seconds base 422.01 / 415.71 / 402.50 (spread 19.51), head 404.69 / 385.15 / 393.06. The median head run 393.06 is 28.95 CPU-s below the highest base run 422.01. Not every head run is below every base run: m-head-1 404.69 is above m-base-3 402.50, two runs ninety minutes apart and well inside the base's own spread. Every run: saturated false, 174 writes sent with 0 failed, box_busy_before 0.9-1.3%, and replay.end_state.sha256 aa48884b08c5... on all six, so both builds did the same work. The pair is main 2d3a725f, the merge's second parent, against the merge head ef448091: the forward merge brought main's own docs and pmdoc work into the head, so only this pair judges this change.",
+      "headSha": "ef448091e7626ea4638dc856fff0a98c3beb30b7",
+      "negativeControl": "The run is blind to a build that does not differ only if its inputs differ, so the control is the end state and the write census: all six sent the same 174 writes with 0 failed and left the same replay.end_state.sha256, and the box was idle for each (box_busy_before 0.009-0.013 against the harness's 10% warning threshold)."
     },
     {
-      "criterion": "Behaviour: every answer, token, version, anchor and CRDT update of a document write is what it was (the shared context's equivalence rule, and A5 on real-size documents).",
-      "surface": "the docs service's own write path on 19 real LINUX specs (300-600 KB), warm and cold, each write a committed transaction against a local Postgres with pgvector",
-      "command": "DISPATCH_TOKEN_CORPUS=<19 LINUX specs> DISPATCH_WRITE_CORPUS_OUT=<dump> go test -run 'TestWriteCorpus$' ./internal/dispatch/docs/ at base c1f746a4 and at head 88a5056f, then cmp of the two dumps",
-      "observed": "byte-equal: cmp base-writes.jsonl head2-writes.jsonl is silent, 7,358,198 bytes, 19 specs x 2 passes x 11 committed transactions (anchored comment, suggestion, replace, insert after a block, two-operation batch, document precondition, block precondition, a stale precondition refused, a replace refused as unreadable, delete by block id, delete by find). The dump records each EditOutcome, each refusal's words, the document token, every block token and range, every version's markdown and each step's markdown SHA-256. Dumps at dispatch://INFRA-646/artifact/infra646-write-dumps-tgz.",
-      "headSha": "88a5056f718c5523d23e1feb07a6a422e6062ba4",
-      "negativeControl": "with the two-endpoint walk returning the block after the right one (first = index + 1 in pmdoc.ValidDocument.BlockIndexes, pmdoc/splice.go:152), TestBlockIndexesAnswerTwoBlockIndexLookups (pmdoc/block_indexes_test.go) fails on the first corpus document ('block_indexes_test.go:41: BlockIndexes({0 170}) = 1..13, want 0..13' on adjacent-lists.md; the tester reproduced it at head 13aed196, and I ran the same control before the simplify pass moved that walk into pmdoc, where it failed the docs-side test the walk then had); with equalYTextPText's final length check dropped, TestEqualYTextPTextAnswersTheDeltaComparison fails ('equalYTextPText = true, the delta comparison says false')."
+      "criterion": "Behaviour: every answer, token, version, anchor and CRDT update of a document write is what it was, on real-size documents.",
+      "surface": "the docs service's own write path on 23 real LINUX specs (the largest of the replay bundle's 1,760 documents), warm and cold, each write a committed transaction against a local Postgres with pgvector",
+      "command": "DISPATCH_TOKEN_CORPUS=<23 LINUX specs> DISPATCH_WRITE_CORPUS_OUT=<dump> GOWORK=off go test -count=1 -run 'TestWriteCorpus$' ./internal/dispatch/docs/ in worktrees at 2d3a725f and at ef448091, then cmp of the two dumps",
+      "observed": "byte-equal: cmp is silent, 11,374,504 bytes, 23 specs x 2 passes x 11 committed transactions (anchored comment, suggestion, replace, insert after a block, two-operation batch, document precondition, block precondition, a stale precondition refused, a replace refused as unreadable, delete by block id, delete by find). The dump records each EditOutcome, each refusal's words, the document token, every block token and range, every version's markdown and each step's markdown SHA-256.",
+      "headSha": "ef448091e7626ea4638dc856fff0a98c3beb30b7",
+      "negativeControl": "with the two-endpoint walk returning the block after the right one (first = index + 1 in pmdoc.ValidDocument.BlockIndexes), TestBlockIndexesAnswerTwoBlockIndexLookups fails with 'block_indexes_test.go:41: BlockIndexes({0 170}) = 1..13, want 0..13' on adjacent-lists.md; with equalYTextPText's final length check dropped, TestEqualYTextPTextAnswersTheDeltaComparison fails with 'equalYTextPText = true, the delta comparison says false'."
     },
     {
-      "criterion": "A2, a doc-edit validates each tree once; A3, every fork read skips ToDelta; A4, the flattened text is built without regrowth.",
+      "criterion": "A5, nothing anyone sees changes: every write of the route through the HTTP API on ten LINUX specs, then GET text, blocks, artifact and every new version, base against head.",
+      "surface": "the HTTP API of a base build and a head build, each on its own stack.sh reset --replay of the replay template that build prepared, driven by the tester's A5 harness (INFRA-645's a3, ported)",
+      "command": "bash a5/run-a5.sh - stackfor.sh per build, then drive.py (--choose on the base, --reuse on the control and the head), norm.py and compare.py; twelve writes a spec",
+      "observed": "972 records a side. Every status equal (920x200, 40x201, 10x409 for the stale precondition, 2x400 for the HTML refusal) and all 522 markdown SHA-256s equal. 593 field positions differ, every one a minted block id or a token carrying one, and a base-against-base control run of the same build differs in exactly the same 593 positions (diff of the two position lists is empty), so base-against-head minus base-against-base is empty and the head introduces nothing.",
+      "headSha": "ef448091e7626ea4638dc856fff0a98c3beb30b7",
+      "negativeControl": "the base-against-base control run is the control: without it the comparison reads as 593 differences rather than none, and it is what tells a minted id from a change."
+    },
+    {
+      "criterion": "A2, a doc-edit validates each tree once; A3, every fork read of the write's own operation skips ToDelta; A4 (profile half), the flattened text is built without regrowth.",
       "surface": "the whole-window CPU profiles of the same six runs",
       "command": "go tool pprof -top -nodecount=1000000 -nodefraction=0 -edgefraction=0 with -show_from='docs\\.\\(\\*Service\\)\\.applyOpsUnconditional\\.func1$' -focus='pmdoc\\.\\(\\*Node\\)\\.Validate$', then -show_from='docs\\.\\(\\*Service\\)\\.readFork$' -focus='crdt\\.\\(\\*YText\\)\\.ToDelta$', then -show_from='pmdoc\\.buildFlattenedText$' -focus='runtime\\.growslice$'",
-      "observed": "Validate under the edit subtree 0.49/0.50/0.50 s at base against 0.09/0.06/0.09 s at head (-82%). ToDelta under readFork 1.14 s at base against 0 s at head. growslice under buildFlattenedText 0.46 s at base against 0.01 s at head. The gate share S (the three functions this change touches) 2.75% of samples at base-1 against 2.38% at head-1; crdt.(*YText).ToDelta over the whole process 2.27/2.22/2.42 s at base against 1.02/1.35/1.35 s at head.",
-      "headSha": "88a5056f718c5523d23e1feb07a6a422e6062ba4",
-      "negativeControl": "the same -focus on the base profiles returns non-zero for each of the three (1.14 s of ToDelta under readFork, 0.46 s of growslice under buildFlattenedText), so the head's zeros are the change and not a filter that matches nothing."
+      "observed": "Validate under the edit subtree 0.82 / 0.74 / 0.75 s at base against 0.11 / 0.13 / 0.14 s at head. ToDelta under readFork 1.73 / 1.78 / 1.70 s at base against 0 s in every one of the three head runs. growslice under buildFlattenedText 0.92 / 0.93 / 0.85 s at base against 0.05 / 0.05 / 0.05 s at head. The gate share S, the three functions this change touches, 2.66% of samples at m-base-1 against 2.42% at m-head-1.",
+      "headSha": "ef448091e7626ea4638dc856fff0a98c3beb30b7",
+      "negativeControl": "the same three filters over the base profiles of the same six runs return non-zero for each, so the head's zeros are the change and not a filter that matches nothing."
+    },
+    {
+      "criterion": "A4 (benchmark half), the quote finder's buffers: B/op and ns/op down with identical ranges. It measures the preallocation alone, not the validation a reused finder skips.",
+      "surface": "a throwaway pmdoc benchmark of the tester's, not in the tree, on a 657 KB LINUX spec of the replay bundle",
+      "command": "LOADTEST_BENCH_SPEC=<657 KB spec> LOADTEST_BENCH_QUOTE='No proposal: drafted from the C source and the image.' GOMAXPROCS=2 GOWORK=off go test ./internal/dispatch/pmdoc -run '^$' -bench BenchmarkFindQuoteOnASpec -benchtime 60x -count 3, in worktrees at 2d3a725f and ef448091",
+      "observed": "ns/op base 51.3 / 52.8 / 52.9 ms against head 34.2 / 34.6 / 34.2 ms; B/op 37,394,812 / 37,393,569 / 37,395,423 against 10,769,011 / 10,771,483 / 10,771,481; allocs/op 14,314 against 14,216; the range found identical in all six runs, 513006..513059. The benchmark calls the one-shot FindQuote, which validates the tree on both sides, so it carries the preallocation and says nothing about ValidDocument.QuoteFinder's skipped validation; the tester measures that.",
+      "headSha": "ef448091e7626ea4638dc856fff0a98c3beb30b7",
+      "negativeControl": "the identical range in all six runs is the control on the preallocation: a count that came out short would regrow, which costs time but changes no answer, while a build that wrote the wrong text would move the range."
     },
     {
       "criterion": "A6, nothing more stays in memory.",
-      "surface": "the end-of-window heap profiles of the first two pairs",
-      "command": "go tool pprof -sample_index=inuse_space -top -focus='docs\\.|pmdoc\\.' <run>/heap-end.pprof, and -diff_base base-1/heap-end.pprof head-1/heap-end.pprof",
-      "observed": "in-use space under docs./pmdoc. 109.74 MB at base-1 against 93.56 MB at head-1, and 77.07 MB at base-2 against 62.43 MB at head-2. The diff of head-1 against base-1 is -17.95 MB; no positive entry falls under a function this change touches (the one positive, crdt.NewYXmlElement +2.50 MB, is ygo's own document storage).",
-      "headSha": "88a5056f718c5523d23e1feb07a6a422e6062ba4",
-      "negativeControl": "the same command without -focus shows the whole heap, so the filter is not what makes the head's figure smaller; the quote finder's buffers are the call's own and are dropped with the finder, which is why nothing new is resident."
+      "surface": "the end-of-window heap profiles of all three pairs",
+      "command": "go tool pprof -sample_index=inuse_space -top -focus='docs\\.|pmdoc\\.' <run>/heap-end.pprof, and -diff_base m-base-<n>/heap-end.pprof m-head-<n>/heap-end.pprof for each pair",
+      "observed": "In-use space under docs./pmdoc.: pair 1 137.44 MB at head against 90.25 MB at base, pair 2 105.83 against 139.63, pair 3 99.50 against 102.33 - one pair up, two down, the spread of a heap read at one moment. No positive entry of any of the three diffs falls under a function this change touches: the positives are ygo's own document storage (crdt.NewYXmlElement, decodeItem, Item.integrate, the encoder's buffers), pgx's buffers, and pmdoc.(*blockPathWalker).record in pmdoc/block_path.go, a file the diff does not touch.",
+      "headSha": "ef448091e7626ea4638dc856fff0a98c3beb30b7",
+      "negativeControl": "the pair whose head heap is larger is quoted here rather than dropped, so the claim is read against all three pairs and not the two that suit it; the same reads without -focus show the whole heap, so the filter is not what makes a figure smaller."
     },
     {
-      "criterion": "A7, the fork reads stay single-reader (pmdoc.ReadUnshared's condition).",
-      "surface": "the docs package under the race detector, in the pod",
-      "command": "CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=<local Postgres> go test -count=1 -race -timeout 1800s -run 'Fork|Live|Edit' ./internal/dispatch/docs/",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/docs 532.997s, no data race reported.",
-      "headSha": "88a5056f718c5523d23e1feb07a6a422e6062ba4",
-      "negativeControl": "the run before it, without CGO_ENABLED=1, refused to start ('-race requires cgo'), so the green run is one the detector was actually built into."
-    },
-    {
-      "criterion": "The fork reads of a write are still counted and reused exactly as they were (docs/fork_reads_test.go's rule, on real specs).",
-      "surface": "the write corpus's read counters on the same 19 LINUX specs",
-      "command": "DISPATCH_TOKEN_CORPUS=<19 LINUX specs> go test -run 'TestWriteCorpus' ./internal/dispatch/docs/ (TestWriteCorpusReadsOnce)",
-      "observed": "TestWriteCorpusReadsOnce passed at the head: each anchored MarkQuote still reads its fork twice, every SnapshotVersion after a write, the suggestion's SuggestionKind and each ProjectMark still reuse the write's rendering once, warm and cold, on every spec.",
-      "headSha": "88a5056f718c5523d23e1feb07a6a422e6062ba4",
-      "negativeControl": "the same run on a subset holding LINUX-533.md failed in the corpus's own quote chooser before any count was taken, which is how a run that never exercised the counters is told from a green one."
+      "criterion": "A8 (local half) and the merge: the package suites and the static checks at the merge head.",
+      "surface": "the two packages this change touches, in the pod",
+      "command": "gofmt -l internal/dispatch/, go build ./..., go vet ./internal/dispatch/pmdoc/ ./internal/dispatch/docs/, go test -count=1 ./internal/dispatch/pmdoc/ and ./internal/dispatch/docs/ with DISPATCH_TEST_DATABASE_URL, and .github/scripts/check-private-names.sh",
+      "observed": "gofmt and vet clean; pmdoc green in 940 s and docs green in 1,705 s; check-private-names clean over 6,592 files. pmdoc's TestTheWriterSpellsEveryTreeItReadsAsTheEngine first failed for a missing proof-sdk module that main's merge pinned, and passed after bun install - main's dependency, not this change's.",
+      "headSha": "ef448091e7626ea4638dc856fff0a98c3beb30b7",
+      "negativeControl": "that first failure is the control on the suite: it named its own cause (Cannot find module 'proof-sdk-upstream/...', 'not in cache, run bun install') and went away with the install, so the green run is one whose differential actually ran."
     }
   ],
   "filesChanged": [
@@ -65,7 +73,11 @@
     "packages/envoy/internal/dispatch/docs/marks.go, reject.go, ask_block_text.go, ask_lifecycle.go: the accept, reject and lifecycle writes take the validated tree",
     "packages/envoy/AGENTS.md: the fork-read and validate-once rules",
     "packages/envoy/.changes/unreleased/pr2522-Changed-20261029-205500.yaml",
-    "tests: pmdoc/valid_methods_test.go, block_indexes_test.go, flattened_text_test.go, update_text_equality_test.go; docs/refusal_order_test.go, precondition_token_test.go, write_corpus_test.go (seven more edit kinds per spec)"
+    "tests: pmdoc/valid_methods_test.go, block_indexes_test.go, flattened_text_test.go, update_text_equality_test.go; docs/refusal_order_test.go, precondition_token_test.go, write_corpus_test.go (seven more edit kinds per spec)",
+    "packages/envoy/internal/dispatch/pmdoc/splice.go, blocks.go: the exported Splice, BlockIndex, BlockBoundary, BlockRange, BlockDescendantIDs, DeleteTextblock and InsertTableRows removed with insertTableRowsWantsDocument; each operation has one form, the method, refusing through valid_document.go's new wantsDocument",
+    "packages/envoy/internal/dispatch/pmdoc/plain_tree_test.go: the validation-then-method shape the package's own tests use, test-only",
+    "packages/envoy/internal/dispatch/docs/apply_operations_test.go: applyOperations, now a test helper; applyOperationsWithValidation gone",
+    "packages/envoy/internal/dispatch/pmdoc/find.go: merged onto main's QuoteFinder rewrite (#2480), the valid gate in matches"
   ],
   "trickyParts": [
     "The token reuse (N1) is exact only because a document token carries no block identity, so the stamp between the precondition check and the batch cannot change it; TestStampingBlockIDsChangesNoDocumentToken pins that.",
@@ -74,14 +86,17 @@
     "pmdoc's exported function and its ValidDocument method share one core, so a test comparing the two cannot catch a wrong core; what catches one is the base-against-head write corpus and the two differential tests (BlockIndexes against BlockIndex, the text walk against the delta comparison)."
   ],
   "deviations": [
-    "The plan's measurement build (a counter of Validate calls, n_base and n_head) was not built: with the architect's rule of 2026-10-29 (S and E are evidence, not a gate) the same fact is read directly from the profiles, where Validate under the edit subtree falls from 0.49-0.50 s to 0.06-0.09 s.",
-    "E was stated before any head run from the design profile rather than from base-1's own, because reading base-1's profile would have meant running go tool pprof on the box inside head-1's window, which the architect's alternation rule forbids; the real shares are quoted above. The architect accepted both departures (Envoy, 2026-10-29 21:11Z).",
-    "N1, N3 and N5 were built beyond the plan, at the architect's direction. N2, N4 and N6 are not built, each with its evidence in the pull request body.",
-    "The equivalence corpus is 19 LINUX specs (the largest of the 1,204 and a spread of others), not all of them: each spec costs about 40 s a side, and the dump is byte-compared, so more specs buy repetition rather than coverage."
+    "The plan's measurement build (a counter of Validate calls, n_base and n_head) was not built: with the architect's rule of 2026-10-29 (S and E are evidence, not a gate) the same fact is read from the profiles, where Validate under the edit subtree falls from 0.82/0.74/0.75 s to 0.11/0.13/0.14 s.",
+    "The measured pair is main 2d3a725f against the merge head, not the plan's merge base: the branch was forward-merged twice, once to take main's docs race job and once to resolve pmdoc/find.go against #2480's QuoteFinder rewrite, so only the merge's second parent judges this change.",
+    "N1, N3 and N5 were built beyond the plan, at the architect's direction. N2, N4 and N6 are not built, each with its evidence and its head share in the pull request body.",
+    "The equivalence corpus is 23 real LINUX specs and A5's is ten, not all 1,204: each spec costs about 40 s a side and the dumps are byte-compared, so more specs buy repetition rather than coverage.",
+    "The FindQuote benchmark is the tester's throwaway, not a committed one, and it measures the preallocation alone; the validation a reused finder skips is the tester's A4 by agreement with the architect."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "A forward merge of main was needed: this head's only red required check was the docs package timing out at 30 minutes under -race, which main's #2516 fixes by giving that package a job of its own. The branch's own diff is unchanged across the merge (fingerprint e9ea01a2360db2615c7fc68b79569910525b553df83113f16cbb6934d48b72ab before and after), so the proofs above, taken at 88a5056f, hold at the merge head 13aed196.",
-    "Round 2 is evidence only, no code change: the committed handoff's negative control named a test the simplify pass had renamed (corrected above), and A10 wanted the pull request body to link the INFRA-512 write-up and quote a head share for each not-built item, which the body now does from the tester's own profiles at base cd5ca7c3 and head 13aed196 (N2 pmdoc.updateChildren about 0.3% of samples and unmoved by this change, N4's remaining after-read 1.33-1.49%, N6 pmdoc.AuthoredTextRuns 0.047-0.080%)."
+    "Two re-pin drains replaced this pod mid-round. Nothing of a measurement survives a replacement: the load-test root, its Postgres, the restored replay seed and both prepared templates are rebuilt from nothing, about forty minutes before the first write. Evidence that must outlive a drain goes to a Dispatch artifact (infra646-round2-evidence-tgz, infra646-measurement-tgz, the tester's infra646-tester-round1-tgz).",
+    "stack.sh identifies its processes by pid and each role has its own PID namespace, so a stack another role left running is invisible to ps and blocks stack.sh start on its port. The fix is to ask that role to stop it (INFRA-639 owns the bug).",
+    "The six runs of this round and the tester's six are on different pods and are not comparable with each other; each pair is read within itself.",
+    "Round 3 is the review's: the merge with main, the cutover of the exported pmdoc forms the methods replaced, and the prose that claimed more than the code does."
   ]
 }
