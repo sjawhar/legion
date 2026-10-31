@@ -864,6 +864,9 @@ func newGitHubStandIn(t *testing.T, root string) *gitHubStandIn {
 		{"-C", seed, "push", "--quiet", remote, "HEAD:main"},
 	} {
 		command := exec.Command(git, argv...)
+		// The remote and the seed are made under root, so the stand-in's setup runs there rather
+		// than in the directory the test process happens to have.
+		command.Dir = root
 		command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(argv, " "), err, output)
@@ -939,6 +942,9 @@ func feedTar(remote string) ([]byte, error) {
 	defer func() { _ = os.RemoveAll(dir) }()
 	clone := filepath.Join(dir, "clone.git")
 	command := exec.Command("git", "clone", "--bare", "--quiet", "--no-local", remote, clone)
+	// The clone creates the directory it names, so it runs in the temporary directory holding it
+	// rather than in whatever directory the test process has.
+	command.Dir = dir
 	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 	if output, err := command.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("clone %s: %w\n%s", remote, err, output)

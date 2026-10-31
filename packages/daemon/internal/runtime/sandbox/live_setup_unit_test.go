@@ -886,7 +886,12 @@ func (r *setupRig) plainClone() string {
 
 func (r *setupRig) git(args ...string) {
 	r.t.Helper()
-	if output, err := exec.Command(r.realGit, args...).CombinedOutput(); err != nil {
+	command := exec.Command(r.realGit, args...)
+	// Every repository the rig makes or configures lies under its root, which the commands that
+	// create one need as their parent, so the helper runs there rather than in the directory the
+	// test process happens to have.
+	command.Dir = r.root
+	if output, err := command.CombinedOutput(); err != nil {
 		r.t.Fatalf("git %q: %v: %s", args, err, output)
 	}
 }
@@ -1025,7 +1030,11 @@ func (h *helperLog) helper(name string) string {
 func (h *helperLog) repo(name string, keys ...[2]string) string {
 	h.t.Helper()
 	path := filepath.Join(h.dir, name)
-	if output, err := exec.Command(h.realGit, "init", "--quiet", path).CombinedOutput(); err != nil {
+	initialise := exec.Command(h.realGit, "init", "--quiet", path)
+	// The init creates path, so it runs in the log's own directory, which holds it; the configure
+	// below reaches the repository with -C.
+	initialise.Dir = h.dir
+	if output, err := initialise.CombinedOutput(); err != nil {
 		h.t.Fatalf("init %s: %v: %s", name, err, output)
 	}
 	for _, kv := range keys {
