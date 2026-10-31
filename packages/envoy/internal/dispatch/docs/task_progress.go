@@ -72,8 +72,8 @@ const latestPrimaryVersion = `(
 // lock is taken only by the batch that writes it, so the predicate reads nothing it would wait on.
 const taskProgressDrift = `i.tasks_version is distinct from ` + latestPrimaryVersion
 
-// taskProgressBatch is how many issues one reconciliation transaction counts; between batches the
-// pool is free for requests.
+// taskProgressBatch is how many issues one reconciliation transaction counts; between batches its
+// connection of the background pool is free for the other loops, and its row locks for writers.
 const taskProgressBatch = 50
 
 // TaskProgressReconcileInterval is how often the server reconciles the task counts after the pass
@@ -155,14 +155,19 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) {
 }
 
 // reconcileTaskProgressBatch counts one batch of drifted issues in one transaction and returns how
-// many it counted and whether drift remained past them. Each issue row is locked `for no key
+// many it counted and whether drift remained past them. The transaction runs on the background
+// pool (store.Pool.Background), which no request waits on. Each issue row is locked `for no key
 // update skip locked` - the level every owner-row writer takes (lockArtifactOwner), enough for
 // three non-key columns - so a concurrent writer holding the row is left alone: a version write
 // records its own count, and any other writer leaves the row's drift to a later batch.
 func (s *Service) reconcileTaskProgressBatch(
 	ctx context.Context,
 ) (counted int, remaining bool, err error) {
-	tx, err := s.store.Pool.Begin(ctx)
+	background, err := s.backgroundPool()
+	if err != nil {
+		return 0, false, err
+	}
+	tx, err := background.Begin(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("begin task progress reconciliation: %w", err)
 	}

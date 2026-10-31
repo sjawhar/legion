@@ -169,7 +169,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback(ctx)
-		joined, ledger := service.Join(ctx, tx)
+		joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 		defer ledger.Discard()
 		if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
 			{Op: "insert", After: "end", Markdown: "agent\n"},
@@ -196,22 +196,22 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 
 	// Settlement reads the room only once every update it has seen is durable, so it runs beside a
 	// peer that pauses between keystrokes long enough for that, and only a settlement that read the
-	// room counts, overlapping when the peer's update reached the room between the settlement's
-	// lock and the end of its read (afterSettleLock, afterSettleRead). Its document leads with a
-	// longer run of rules, since the database work around its read leaves the walk a smaller share
-	// of each run. The peer deletes each paragraph it types, so settlement also meets a block its
-	// read counted to stamp that is gone when it stamps.
+	// room counts, overlapping when the peer's update reached the room during its read, between
+	// the take that starts it and the render that follows it (afterSettleAuthorsTake,
+	// beforeSettleRender). Its document leads with a longer run of rules, since the work around its
+	// read leaves the walk a smaller share of each run. The peer deletes each paragraph it types, so
+	// settlement also meets a block its read counted to stamp that is gone when it stamps.
 	t.Run("settlement", func(t *testing.T) {
 		service, artifactID, serverURL := newPeeredService(t, rules(2_000)+seeded)
 		// The hooks are set before the peer types, since a settlement can run on a timer from then.
 		var peer atomic.Value
-		var locked, read atomic.Uint64
+		var taken, read atomic.Uint64
 		applied := func() uint64 {
 			client, _ := peer.Load().(crdt.ClientID)
 			return peerApplied(service, artifactID, client)
 		}
-		service.afterSettleLock = func(string) { locked.Store(applied()) }
-		service.afterSettleRead = func(string) { read.Store(applied()) }
+		service.afterSettleAuthorsTake = func(string) { taken.Store(applied()) }
+		service.beforeSettleRender = func(string) { read.Store(applied()) }
 		peer.Store(typeIntoDocument(t, service, serverURL, artifactID, 20*time.Millisecond))
 		overlapping(t, func() bool {
 			state := service.room(artifactID)
@@ -220,7 +220,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 			state.mu.Unlock()
 			read.Store(0)
 			service.settleRoom(artifactID, generation)
-			return read.Load() > locked.Load()
+			return read.Load() > taken.Load()
 		})
 	})
 

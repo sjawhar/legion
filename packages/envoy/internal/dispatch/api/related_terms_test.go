@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // relatedTermsServer is a server whose term statistics and picker a test drives directly, with
@@ -492,5 +493,51 @@ func TestRelatedTermsTokenizeATextAsADocumentVersionsVectorIsBuilt(t *testing.T)
 		if !slices.Contains(stored, lexeme) {
 			t.Fatalf("picked %q, which the stored vector %v does not hold", lexeme, stored)
 		}
+	}
+}
+
+// The refresh a request's related-item check starts for a project with no statistics
+// (ensureSearchTermStats) is background work: it outlives the request and runs outside admission,
+// so it takes its connection from a pool of its own and never from the request pool, which bounds
+// how many requests are served at once. Here another session holds the project's totals row, so the
+// refresh waits on it for as long as that session holds it; while it waits, the request pool has no
+// connection taken.
+func TestARefreshTheRelatedCheckStartedHoldsNoRequestPoolConnection(t *testing.T) {
+	handler, database, srv := relatedTermsServer(t)
+	createSuggestionProject(t, handler, "HELD")
+	other := storetest.SecondProcess(t, database)
+	ctx := context.Background()
+	hold, err := other.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = hold.Rollback(context.Background())
+		awaitTermStatsRefresh(t, srv, "HELD")
+	})
+	if _, err := hold.Exec(ctx, `insert into search_term_totals (project_key, items, refreshed_at) values ('HELD', 0, now())`); err != nil {
+		t.Fatalf("hold the project's totals row: %v", err)
+	}
+	createSearchIssue(t, handler, "HELD", "Lighthouse lens", "")
+	// The create answered; the refresh its check started runs after it. Wait until that refresh
+	// is waiting on the held row, read from another process's pool so the read takes nothing here.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := other.Pool.QueryRow(ctx, `select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'
+			  and query like 'insert into search_term_totals%'`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no statistics refresh waited on the held totals row within 10 s of the create")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if held := database.Pool.Stat().AcquiredConns(); held != 0 {
+		t.Fatalf("%d request-pool connections taken while the statistics refresh the create started waits, want 0", held)
 	}
 }

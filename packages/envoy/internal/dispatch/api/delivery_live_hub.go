@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"strconv"
@@ -398,10 +399,23 @@ func signal(wake chan struct{}) {
 	}
 }
 
-// readContext is a context for one read of the shared pool, marked so the pool refuses it a second
-// connection.
+// readContext is a context for one read of the request pool, marked so the pool refuses it a second
+// connection: a Subscribe's resume read, which a page's frame asks for and so is the client's.
 func (h *deliveryHub) readContext() context.Context {
 	return store.WithTransactionTracking(h.lifetime)
+}
+
+// liveRead is a context for one of the intake's or the worker's reads, marked so the pool refuses it
+// a second connection, and the pool it reads through: the live pool (store.Pool.Live), so an open
+// page hears of a change while the requests hold every connection of theirs. The intake reads one
+// statement at a time and the worker's recompute at most concurrentReadWeight at once, which with
+// the event stream relay's one read are the live pool's connections.
+func (h *deliveryHub) liveRead() (context.Context, *store.Pool, error) {
+	live, err := h.server.deps.Store.Pool.Live()
+	if err != nil {
+		return nil, nil, fmt.Errorf("open the delivery live hub's pool: %w", err)
+	}
+	return store.WithTransactionTracking(h.lifetime), live, nil
 }
 
 func (h *deliveryHub) note(n deliveryHubNote) {

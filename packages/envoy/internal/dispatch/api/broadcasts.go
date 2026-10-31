@@ -137,12 +137,12 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 		SessionIDs []string `json:"session_ids"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	requested, err := validateBroadcastInput(input.Body, input.Delivery, input.SessionIDs)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if s.deps.Envoy == nil {
@@ -170,7 +170,7 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, err.Error())
 			return
 		}
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	targets := resolveBroadcastTargets(requested, input.Delivery, sessions)
@@ -193,7 +193,7 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 
 	created, events, err := s.writeBroadcast(r.Context(), actor, input.Body, input.Delivery, recipients, excluded)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	for _, event := range events {
@@ -278,11 +278,11 @@ func (s *server) replayBroadcast(w http.ResponseWriter, r *http.Request, point b
 	ctx := r.Context()
 	read, err := s.readBroadcast(ctx, point.BroadcastID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := s.sendOwedBroadcastRecipients(ctx, read); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	excluded := point.Excluded
@@ -582,7 +582,7 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 		limit 50
 	`)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer rows.Close()
@@ -594,17 +594,17 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 			&summary.ID, &author, &summary.Body, &summary.Delivery, &summary.CreatedAt,
 			&summary.Recipients, &summary.Replies,
 		); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		if err := json.Unmarshal(author, &summary.Author); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		summaries = append(summaries, summary)
 	}
 	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, summaries)
@@ -626,7 +626,7 @@ func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, read)

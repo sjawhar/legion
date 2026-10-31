@@ -170,8 +170,16 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 	// moving the cursor to a page's last row skips nothing. It pages through the whole range on the
 	// one relay subscription, never ending it partway: whatever the relay publishes meanwhile waits
 	// in the subscription (or overflows it, which ends the subscription with an ended frame, behind).
+	//
+	// It reads through the live pool, as the relay that feeds this subscription does
+	// (eventStreamRelay): a socket's backlog never queues for a request's connection.
+	live, err := s.deps.Store.Pool.Live()
+	if err != nil {
+		endEventsAfterFailure(ctx, stream, sub, "open the live pool", err)
+		return
+	}
 	for cursor := from; cursor < published; {
-		page, err := s.readEventsAfterID(ctx, cursor, published)
+		page, err := s.readEventsAfterID(ctx, live, cursor, published)
 		if err != nil {
 			endEventsAfterFailure(ctx, stream, sub, "read the event log", err)
 			return

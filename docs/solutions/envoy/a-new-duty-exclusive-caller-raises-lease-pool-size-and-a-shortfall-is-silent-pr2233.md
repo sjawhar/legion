@@ -13,7 +13,7 @@ module: packages/envoy/internal/dispatch/store
 # A new duty.Exclusive caller raises leasePoolSize, and a shortfall is silent
 
 - When you add a Dispatch maintenance loop that takes a lease through `duty.Exclusive`, add one to
-  `leasePoolSize` in `packages/envoy/internal/dispatch/store/pool.go`, and add the loop's name to the
+  `leasePoolSize` in `packages/envoy/internal/dispatch/store/pools.go`, and add the loop's name to the
   list in that constant's comment.
 - Count callers, not lease names. A caller that can be inside `Exclusive` at the same moment as
   another needs its own connection. Each delivery durable's intake is its own caller.
@@ -37,4 +37,4 @@ module: packages/envoy/internal/dispatch/store
 - It happened again on the sixteenth forward merge: main's sjawhar/legion#2137 added the edit-notice
   sweep (lease `edit-notices`), and each side held `leasePoolSize` at 10 for its own tenth caller.
   The merged tree has eleven callers, and `leasePoolSize` went from 10 to 11.
-- The size appears only in `pool.go`. Neither `duty/` nor `packages/envoy/AGENTS.md` mentions it.
+- The size appears only in `pools.go`. Neither `duty/` nor `packages/envoy/AGENTS.md` mentions it.

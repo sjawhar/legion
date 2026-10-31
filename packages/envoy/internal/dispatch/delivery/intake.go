@@ -368,7 +368,20 @@ const standbyLogEvery = 30 * time.Second
 // could only get in during the milliseconds between those holds: in CI's run of that row it never
 // did, and the row failed with "consumer delivery-jobs was not push-bound within 20s". A lease per
 // durable keeps a stuck reconciliation to the durable it is stuck on.
-func consumerLease(durable string) string { return "delivery-consumer-" + durable }
+//
+// Each durable's name is duty's (duty.DeliveryEventsConsumerLease, duty.DeliveryJobsConsumerLease),
+// on the lease list the lease pool is sized from, and duty.Exclusive refuses a name that is not: a
+// durable added to the intakes adds its consumer lease there and here, or its reconciliation never
+// runs. Any other durable is answered with its own name, which is on no list and so refused.
+func consumerLease(durable string) string {
+	switch durable {
+	case bus.DispatchDeliveryDurable:
+		return duty.DeliveryEventsConsumerLease
+	case bus.DispatchJobDurable:
+		return duty.DeliveryJobsConsumerLease
+	}
+	return durable
+}
 
 // bindOutcome is what one attempt at a durable did, which is three things rather than two: a
 // durable another process holds, or has not created yet, is neither a bind nor a fault.

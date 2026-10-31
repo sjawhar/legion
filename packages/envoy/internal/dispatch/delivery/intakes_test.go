@@ -41,7 +41,7 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 			clients = append(clients, client)
 		}
 		return client, err
-	}, pool, fake.newTestClient(), events.NewBroker())
+	}, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker())
 	if err != nil {
 		cancel()
 		t.Fatalf("start the intakes: %v", err)
@@ -152,7 +152,7 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	stop, err := StartIntakes(runCtx, func(string) (*bus.Client, error) {
 		return bus.Connect([]string{natsURL})
-	}, pool, github, events.NewBroker())
+	}, pool, deliveryTestLeases(t, pool), github, events.NewBroker())
 	if err != nil {
 		cancel()
 		t.Fatalf("start the intakes: %v", err)
@@ -217,7 +217,7 @@ func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
 	stop, err := StartIntakes(t.Context(), func(string) (*bus.Client, error) {
 		t.Error("connected a client for intakes that have no GitHub App")
 		return nil, errors.New("no connection here")
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("start the intakes: %v", err)
 	}
@@ -236,8 +236,7 @@ func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
 // TestIntakesWhoseSecondConnectFailsStartNeither: the job intake's connect failing returns its
 // error with neither intake started and the intake's client closed, so no durable is bound.
 func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
-	// A real pool rather than none: StartIntakes opens the lease pool its intakes reconcile
-	// their durables under before it connects anything.
+	// Real pools, as cmd/dispatch hands them; neither intake starts, so neither pool is used.
 	pool, _ := deliveryTestPool(t)
 	publisher := intakeTestClient(t)
 	natsURL := testnats.URL(t)
@@ -250,7 +249,7 @@ func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
 		var err error
 		first, err = bus.Connect([]string{natsURL})
 		return first, err
-	}, pool, newFakeGitHub(t).newTestClient(), events.NewBroker())
+	}, pool, deliveryTestLeases(t, pool), newFakeGitHub(t).newTestClient(), events.NewBroker())
 	if !errors.Is(err, refused) {
 		t.Fatalf("start the intakes = %v, want the job intake's connect error", err)
 	}

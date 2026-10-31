@@ -37,21 +37,21 @@ func TestHorizonProvesAnObservationOnlyFromALaterSnapshot(t *testing.T) {
 	}}
 	horizon := NewHorizon(db)
 	for step, want := range []struct {
-		safe    int64
-		pending bool
+		safe   int64
+		behind bool
 	}{
-		{safe: 0, pending: true},
-		{safe: 0, pending: true},
-		{safe: 8, pending: true},
-		{safe: 9, pending: false},
+		{safe: 0, behind: true},
+		{safe: 0, behind: true},
+		{safe: 8, behind: true},
+		{safe: 9, behind: false},
 	} {
 		safe, err := horizon.Safe(ctx)
 		if err != nil {
 			t.Fatalf("observation %d: %v", step+1, err)
 		}
-		if safe != want.safe || horizon.Pending() != want.pending {
-			t.Fatalf("after observation %d: Safe = %d, Pending = %v; want %d, %v",
-				step+1, safe, horizon.Pending(), want.safe, want.pending)
+		if behind := horizon.Behind(safe); safe != want.safe || behind != want.behind {
+			t.Fatalf("after observation %d: Safe = %d, Behind(%d) = %v; want %d, %v",
+				step+1, safe, safe, behind, want.safe, want.behind)
 		}
 	}
 }
@@ -385,8 +385,8 @@ func TestHorizonResetForgetsTheOldLog(t *testing.T) {
 	resetEventLog(ctx, t, database)
 	head := commitHorizonEvent(ctx, t, database)
 	horizon.Reset()
-	if horizon.Pending() {
-		t.Fatal("Pending right after Reset")
+	if horizon.Behind(0) {
+		t.Fatal("Behind the forgotten log's floor right after Reset")
 	}
 	if safe, err := horizon.Safe(ctx); err != nil || safe != 0 {
 		t.Fatalf("Safe right after Reset = %d, %v; want 0", safe, err)
@@ -432,9 +432,9 @@ func TestHorizonResetDiscardsAnObservationInFlight(t *testing.T) {
 
 // Safe must not settle for an observation already in flight when it is called: that one's
 // snapshot can predate an event committed just before the call, and with its A at or below H it
-// leaves Pending false, so a reader would arm no re-read and the event would wait for the next
-// notification however long that takes. Whatever Safe returns, an event committed before the call
-// must be at or below H or keep Pending true.
+// leaves Behind false for the H it answers, so a reader would arm no re-read and the event would
+// wait for the next notification however long that takes. Whatever Safe returns, an event
+// committed before the call must be at or below H or leave Behind true for it.
 func TestHorizonSafeWaitsOutAnObservationInFlightBeforeTheCall(t *testing.T) {
 	database := storetest.Open(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -476,14 +476,51 @@ func TestHorizonSafeWaitsOutAnObservationInFlightBeforeTheCall(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("Safe after committing id %d: %v", id, got.err)
 	}
-	if got.safe < id && !horizon.Pending() {
-		t.Fatalf("Safe after committing id %d = %d with Pending false: a reader would never re-read for it", id, got.safe)
+	if got.safe < id && !horizon.Behind(got.safe) {
+		t.Fatalf("Safe after committing id %d = %d with Behind false: a reader would never re-read for it", id, got.safe)
 	}
 	horizon.mu.Lock()
 	observed := horizon.newest
 	horizon.mu.Unlock()
 	if observed < id {
 		t.Fatalf("Safe after committing id %d returned from observations that saw only up to %d", id, observed)
+	}
+}
+
+// A reader decides whether to re-read on the H it read the log through, and the Horizon's own H
+// moves under it while it reads: the reader takes Safe, pages the log up to what it answered,
+// and asks only then whether anything observed stands above that. Scripted here as the race
+// production runs: a write holding id 7 keeps H at 6 while 9 is committed and observed, the
+// reader reads through 6, and before it asks, the write ends (rolls back, which notifies
+// nothing) and another reader's observation proves 9 final, so H is 9 and nothing stands above
+// the Horizon's own H. Event 9 has been read by nobody, so the decision must be taken against
+// the reader's own 6, which it still stands behind; taken against the Horizon's H it would say
+// there is nothing to re-read for, and 9 would wait for the next commit.
+func TestHorizonBehindAnswersTheSafeItsCallerReadThrough(t *testing.T) {
+	ctx := context.Background()
+	db := &scriptedHorizonDB{script: []scriptedObservation{
+		{newest: 6, xmin: 100, xid: 101},
+		{newest: 9, xmin: 102, xid: 103}, // proves the first: H = 6, with 7 open below the committed 9
+		{newest: 9, xmin: 104, xid: 105}, // another reader's, once 7 has ended: it proves 9
+	}}
+	horizon := NewHorizon(db)
+	if safe, err := horizon.Safe(ctx); err != nil || safe != 0 {
+		t.Fatalf("Safe before any observation is proven = %d, %v; want 0", safe, err)
+	}
+	reader, err := horizon.Safe(ctx)
+	if err != nil || reader != 6 {
+		t.Fatalf("the reader's Safe while id 7 is open below the committed 9 = %d, %v; want 6", reader, err)
+	}
+	proven, err := horizon.Safe(ctx)
+	if err != nil || proven != 9 {
+		t.Fatalf("the other reader's Safe once id 7 has ended = %d, %v; want 9", proven, err)
+	}
+	if horizon.Behind(proven) {
+		t.Fatalf("Behind(%d) is true with the newest id observed proven safe", proven)
+	}
+	if !horizon.Behind(reader) {
+		t.Fatalf("Behind(%d) is false while the committed event %d, which that reader did not read, stands above it",
+			reader, proven)
 	}
 }
 
@@ -565,17 +602,19 @@ func waitForStallWarnings(logged *storetest.LockedLog, want int) int {
 // does not return within a short wait, while the write holding id is open.
 func requireHorizonBelow(ctx context.Context, t *testing.T, horizon *Horizon, id int64) {
 	t.Helper()
+	var safe int64
 	for range 10 {
-		safe, err := horizon.Safe(ctx)
+		observed, err := horizon.Safe(ctx)
 		if err != nil {
 			t.Fatalf("Safe: %v", err)
 		}
-		if safe >= id {
-			t.Fatalf("Safe = %d while the write holding id %d is open", safe, id)
+		if observed >= id {
+			t.Fatalf("Safe = %d while the write holding id %d is open", observed, id)
 		}
+		safe = observed
 	}
-	if !horizon.Pending() {
-		t.Fatalf("Pending is false while a committed id above the open write's %d is observed", id)
+	if !horizon.Behind(safe) {
+		t.Fatalf("Behind(%d) is false while a committed id above the open write's %d is observed", safe, id)
 	}
 	short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 	defer cancel()

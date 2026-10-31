@@ -209,11 +209,13 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 	h.finishRecompute(spec, cause, started, read.prs, read.runs, subscribers, sent)
 }
 
-// read is recompute's read and compute, outside the hub's lock.
+// read is recompute's read and compute, outside the hub's lock, through the live pool (liveRead).
 func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryViewRead, error) {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
 	var read deliveryViewRead
-	var err error
+	ctx, pool, err := h.liveRead()
+	if err != nil {
+		return read, err
+	}
 	if read.seq, err = delivery.LatestChangeSeq(ctx, pool); err != nil {
 		return read, err
 	}
@@ -235,7 +237,7 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryV
 		if spec.at != nil {
 			read.at = *spec.at
 		}
-		if read.pipe, err = h.server.readPipelinePopulation(ctx, read.settings, read.at); err != nil {
+		if read.pipe, err = h.server.readPipelinePopulation(ctx, pool, read.settings, read.at); err != nil {
 			return read, err
 		}
 		body = deliveryPipelineCompute(read.settings, read.pipe, read.at, now)
@@ -250,7 +252,7 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec) (deliveryV
 		if spec.preset > 0 {
 			from, to = now.Add(-spec.days()), now
 		}
-		if read.pop, err = h.server.readDeliveryPopulation(ctx, read.settings, from, to, spec.query, spec.kind == deliveryLiveTimeline); err != nil {
+		if read.pop, err = h.server.readDeliveryPopulation(ctx, pool, read.settings, from, to, spec.query, spec.kind == deliveryLiveTimeline); err != nil {
 			return read, err
 		}
 		read.issues = map[string]struct{}{}

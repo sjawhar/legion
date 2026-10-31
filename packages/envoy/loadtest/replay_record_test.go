@@ -262,9 +262,15 @@ func TestReplayTable(t *testing.T) {
 		}}},
 	}
 	md := renderTables(steps)
+	// The Replay table alone: a step that replayed nothing has a row in every other table, the
+	// Pools and admission table's `| routes | 0 / 0 | ...` among them.
+	replay := ""
+	if at := strings.Index(md, "## Replay"); at >= 0 {
+		replay = md[at:]
+	}
 	want := "| replay-f0.1 | 0.100 | 1.00 | 0.25 | 2,340 | 468.0 | 2.00 | 1.50 | yes (timeouts) | 14 / 15 | 1 | 3 / 2 |"
-	if !strings.Contains(md, "## Replay") || !strings.Contains(md, want) || strings.Contains(md, "| routes | 0") {
-		t.Fatalf("Replay table:\n%s", md[strings.Index(md, "## Replay"):])
+	if !strings.Contains(replay, want) || strings.Contains(replay, "| routes |") {
+		t.Fatalf("Replay table:\n%s", replay)
 	}
 	if strings.Contains(renderTables(steps[:1]), "## Replay") {
 		t.Fatal("a Replay table without a replay step")

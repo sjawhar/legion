@@ -38,8 +38,10 @@ const poolSizeParam = "pool_max_conns"
 
 // Open connects to databaseURL and verifies the database is reachable. The pool's size is
 // sharedPoolSize: how many connections Dispatch may hold is a property of Dispatch, not of the
-// string that names its database. Every connection it opens scans timestamptz in UTC
-// (scanTimestampsInUTC), as do the pools Pool.separate copies from its configuration.
+// string that names its database. It is the request pool (RequestsPool): its connections carry
+// dispatch-requests in application_name, and its acquires are bounded at requestAcquireBound.
+// Every connection it opens scans timestamptz in UTC (scanTimestampsInUTC), as do the pools
+// Pool.separate copies from its configuration.
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	declared, err := declaresPoolSize(databaseURL)
 	if err != nil {
@@ -55,6 +57,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, fmt.Errorf("parse Postgres URL: %w", err)
 	}
 	config.MaxConns = sharedPoolSize
+	configurePool(config, RequestsPool, requestAcquireBound)
 	config.AfterConnect = scanTimestampsInUTC
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

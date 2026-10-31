@@ -231,27 +231,24 @@ type limitRecord struct {
 	Strikes int `json:"strikes"`
 }
 
-// webhookRedeliveryLease names the lease one sweep of Run's loop runs under. It is not what makes
-// the sweep safe to run twice: every redelivery is already claimed by a compare-and-set on the
-// delivery's record in the sweep's NATS KV bucket, so two processes sweeping at once ask GitHub
-// for no delivery twice. It is the GitHub rate limit: each sweep lists every failed attempt in
-// its window, page by page, against one installation's limit, and N processes sweeping is N
-// times those list calls for one result.
-const webhookRedeliveryLease = "webhook-redelivery"
-
 // Run sweeps now and then every interval until ctx ends, logging each sweep's counts: the failed
 // attempts listed, the deliveries they belong to, and how many deliveries had each outcome. Each
-// sweep runs under webhookRedeliveryLease for one interval, so one sweep's listings are what the
-// installation's rate limit pays for that interval however many processes sweep - a process that
-// starts in the middle of another's interval, which is what a rolling update makes, finds that
-// interval swept and skips. The period is interval itself, the loop's own tick, and not the
-// package's Interval. The ticks are duty.RunLeased's, a ticker's: the first at the moment Run
-// starts, then one each interval; the first tick a sweep overran comes at once with the moment it
-// was due, and only the ones after it are dropped, so a lone process sweeps every period its
-// sweeps do not overrun. leases is required, as it is of every leased loop
-// (cmd/dispatch exits at boot if the lease pool cannot be opened).
+// sweep runs under duty.WebhookRedeliveryLease for one interval, so one sweep's listings are what
+// the installation's rate limit pays for that interval however many processes sweep - a process
+// that starts in the middle of another's interval, which is what a rolling update makes, finds
+// that interval swept and skips. The lease is not what makes the sweep safe to run twice: every
+// redelivery is already claimed by a compare-and-set on the delivery's record in the sweep's NATS
+// KV bucket, so two processes sweeping at once ask GitHub for no delivery twice. It is the GitHub
+// rate limit: each sweep lists every failed attempt in its window, page by page, against one
+// installation's limit, and N processes sweeping is N times those list calls for one result. The
+// period is interval itself, the loop's own tick, and not the package's Interval. The ticks are
+// duty.RunLeased's, a ticker's: the first at the moment Run starts, then one each interval; the
+// first tick a sweep overran comes at once with the moment it was due, and only the ones after it
+// are dropped, so a lone process sweeps every period its sweeps do not overrun. leases is
+// required, as it is of every leased loop (cmd/dispatch exits at boot if the lease pool cannot be
+// opened).
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
-	duty.RunLeased(ctx, leases, webhookRedeliveryLease, interval, duty.TickAtStart, s.sweepAndReport)
+	duty.RunLeased(ctx, leases, duty.WebhookRedeliveryLease, interval, duty.TickAtStart, s.sweepAndReport)
 }
 
 // sweepAndReport is one sweep of the running loop and its log line.

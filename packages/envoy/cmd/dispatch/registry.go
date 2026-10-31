@@ -13,9 +13,10 @@ import (
 )
 
 // deregisterTimeout bounds the delete that takes this process out of the registry of live server
-// processes at shutdown. It is one delete by primary key, so five seconds is a slow round trip
-// rather than a slow statement; a deregistration that does not land leaves a row whose heartbeat
-// has stopped, which drops out of the live window (processes.LiveWindow) on its own.
+// processes at shutdown, inside what is left of the shutdown's one deadline (shutdownContext). It
+// is one delete by primary key, so five seconds is a slow round trip rather than a slow statement;
+// a deregistration that does not land leaves a row whose heartbeat has stopped, which drops out of
+// the live window (processes.LiveWindow) on its own.
 const deregisterTimeout = 5 * time.Second
 
 // joinRegistry enters this process into the registry of live server processes (INFRA-555) as
@@ -37,10 +38,11 @@ const deregisterTimeout = 5 * time.Second
 // counts as live once more; beside a live process whose keys it does not share it refuses
 // (Registration.Lost), and serving stops as at a signal and ends the process with 1 once drained
 // (serveUntilStopped). The prune loop deletes what processes that died without deregistering left
-// behind, once overall under its lease. The announcer starts only now, so its first pass counts
-// this process among the live ones and never announces a build the fleet is rolling away from.
-func joinRegistry(ctx context.Context, database *store.Store, instance processes.Instance, leases duty.Leases,
-	announcer *startup.Announcer) (*processes.Registration, error) {
+// behind, once overall under its lease, reading through background like every background loop. The
+// announcer starts only now, so its first pass counts this process among the live ones and never
+// announces a build the fleet is rolling away from.
+func joinRegistry(ctx context.Context, database *store.Store, background *store.Pool, instance processes.Instance,
+	leases duty.Leases, announcer *startup.Announcer) (*processes.Registration, error) {
 	if _, err := database.Pool.Healthy(ctx); err != nil {
 		return nil, fmt.Errorf("probe the database: %w", err)
 	}
@@ -49,16 +51,16 @@ func joinRegistry(ctx context.Context, database *store.Store, instance processes
 		return nil, err
 	}
 	slog.Info("dispatch: registered this server process", "instance", registration.ID)
-	go processes.RunPrune(ctx, database.Pool, leases)
+	go processes.RunPrune(ctx, background, leases)
 	go announcer.Run(ctx)
 	return registration, nil
 }
 
 // deregisterAfterDrain is the deregistration shutdown runs once HTTP has drained: registration's
-// row deleted within deregisterTimeout, a failure logged.
-func deregisterAfterDrain(registration *processes.Registration) func() {
-	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
+// row deleted within deregisterTimeout of the shutdown's ctx, a failure logged.
+func deregisterAfterDrain(registration *processes.Registration) func(context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, deregisterTimeout)
 		defer cancel()
 		if err := registration.Deregister(ctx); err != nil {
 			slog.Warn("dispatch: deregister this server process", "instance", registration.ID, "error", err)

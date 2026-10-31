@@ -75,11 +75,14 @@
 #
 # Environment: LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest); LOADTEST_SRC (default: the
 # checkout holding this script); the ports, which follow LOADTEST_ROOT (common.sh: the root's block
-# k of the path's sha256 modulo 200 gives postgres 15000+10k, proxy 15001+10k, nats 15002+10k,
-# nats_monitor 15003+10k, listener 15004+10k, dispatch 15005+10k, pprof 15006+10k), so two roots on
-# one machine hold the same 7 ports about 1 pair in 200 and otherwise none, and a collision is
-# refused by start, not shared; LOADTEST_PG_PORT, LOADTEST_PROXY_PORT, LOADTEST_NATS_PORT, LOADTEST_NATS_MONITOR_PORT,
-# LOADTEST_LISTENER_PORT, LOADTEST_DISPATCH_PORT and LOADTEST_PPROF_PORT each override their own
+# k of the path's sha256 modulo 200 gives postgres 10000+10k, proxy 10001+10k, nats 10002+10k,
+# nats_monitor 10003+10k, listener 10004+10k, dispatch 10005+10k, pprof 10006+10k, metrics
+# 10007+10k), so two roots on one machine hold the same 8 ports about 1 pair in 200 and otherwise
+# none, and a collision is refused by start, not shared; setup also refuses a port that lies
+# inside the machine's ephemeral range (common.sh: check_ephemeral_ports), which an outbound
+# connection would take from the stack; LOADTEST_PG_PORT, LOADTEST_PROXY_PORT,
+# LOADTEST_NATS_PORT, LOADTEST_NATS_MONITOR_PORT, LOADTEST_LISTENER_PORT, LOADTEST_DISPATCH_PORT,
+# LOADTEST_PPROF_PORT and LOADTEST_METRICS_PORT each override their own
 # port, read by setup into stack.json (`stack.sh status` prints them); LOADTEST_PROXY_RTT (1ms);
 # LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy;
 # LOADTEST_DISPATCH_COMMIT (setup, above); LOADTEST_GOMAXPROCS, Dispatch's GOMAXPROCS (default: nproc);
@@ -174,6 +177,12 @@ port() {
   jq -er --arg n "$1" '.ports[$n]' "$STACK"
 }
 
+# recorded_ports: the ports stack.json records, "KEY PORT" a line, as stack_ports prints them.
+recorded_ports() {
+  need_stack
+  jq -r '(.ports // {}) | to_entries[] | "\(.key) \(.value)"' "$STACK"
+}
+
 stack_name() { jq -er .name "$STACK"; }
 
 # json_set FILE JQ_FILTER [jq args...]: rewrite a JSON file through a filter.
@@ -199,8 +208,9 @@ random_hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 # write_stack_json writes stack.json on the first setup, with this root's ports (stack_ports: the
 # defaults that follow LOADTEST_ROOT, each one overridden by its LOADTEST_*_PORT). A later setup
 # keeps the ports the file records and moves only those whose variable this environment sets, so a
-# rerun with no port variable set keeps the stack's ports; it refuses to move a port while the
-# stack runs. The name, tokens and pids are kept.
+# rerun with no port variable set keeps the stack's ports. It adds a port key that stack.json lacks
+# (one that a newer stack.sh added, such as metrics) even while the stack runs, but refuses to move
+# or drop a port stack.json holds while the stack runs. The name, tokens and pids are kept.
 write_stack_json() {
   local ports k p var args=()
   if [ ! -f "$STACK" ]; then
@@ -224,9 +234,13 @@ write_stack_json() {
   done < <(stack_ports "$ROOT")
   ports=$(jq -n "${args[@]}" '$ARGS.named')
   if [ "$(jq -c .ports "$STACK")" != "$(jq -c . <<<"$ports")" ]; then
-    for k in "${PROCESSES[@]}"; do
-      running "$k" && die "the port variables in the environment move ports of $STACK while $k is running; stack.sh stop first"
-    done
+    local moved
+    moved=$(jq -r --argjson ports "$ports" '.ports | to_entries | map(select($ports[.key] != .value) | .key) | join(", ")' "$STACK")
+    if [ -n "$moved" ]; then
+      for k in "${PROCESSES[@]}"; do
+        running "$k" && die "the port variables in the environment move ports of $STACK ($moved) while $k is running; stack.sh stop first"
+      done
+    fi
     stack_set '.ports = $ports' --argjson ports "$ports"
     note "ports in $STACK updated from the environment: $(jq -c . <<<"$ports")"
   fi
@@ -369,7 +383,7 @@ port_holder() {
 # check_port NAME PORT_KEY: refuse a port another process holds, naming it when this PID namespace
 # can see it, and saying that it cannot when it cannot. A port this namespace cannot see is most
 # often another Legion role of the pod whose LOADTEST_ROOT hashed into this root's block of ports
-# (common.sh: a block out of 200, so about 1 pair of roots in 200 collides), and then all 7 ports
+# (common.sh: a block out of 200, so about 1 pair of roots in 200 collides), and then all 8 ports
 # are the same, so the refusal names the block and both remedies. It says that only of a port this
 # root's block still sets: a port stack.json recorded under another block, or one a LOADTEST_*_PORT
 # overrides, is held by whoever holds it, which this root's block says nothing about.
@@ -383,13 +397,13 @@ check_port() {
   block=$(port_block "$LOADTEST_ROOT")
   [ "$p" = "$(default_port "$key" "$block")" ] ||
     die "port $p ($key, for $name) is already in use, and no process of this PID namespace holds it: another Legion role of this pod, or another PID namespace, may hold it, in the network namespace they share. This port is not the default of this root's port block $block (stack.json records it, or ${PORT_VAR[$key]} sets it). Stop whatever holds it and rerun stack.sh start, or set ${PORT_VAR[$key]} to a port no one holds and rerun stack.sh setup with it set, then stack.sh start (start reads the ports stack.json records, so a port variable takes effect only through setup)"
-  die "port $p ($key, for $name) is already in use, and no process of this PID namespace holds it: another Legion role of this pod, or another PID namespace, may hold it, in the network namespace they share. This root is in port block $block of $PORT_BLOCKS (the block is the hash of $LOADTEST_ROOT modulo $PORT_BLOCKS), and a second root in block $block holds these same 7 ports. Stop that stack from the role that started it and rerun stack.sh start; or set the LOADTEST_*_PORT variables (${PORT_VAR[$key]} for this one) to ports no one holds and rerun stack.sh setup with them set, then stack.sh start (start reads the ports stack.json records, so a port variable takes effect only through setup); or move this stack to another LOADTEST_ROOT, which picks another block with probability $((PORT_BLOCKS - 1))/$PORT_BLOCKS, and run stack.sh setup and stack.sh start there"
+  die "port $p ($key, for $name) is already in use, and no process of this PID namespace holds it: another Legion role of this pod, or another PID namespace, may hold it, in the network namespace they share. This root is in port block $block of $PORT_BLOCKS (the block is the hash of $LOADTEST_ROOT modulo $PORT_BLOCKS), and a second root in block $block holds these same 8 ports. Stop that stack from the role that started it and rerun stack.sh start; or set the LOADTEST_*_PORT variables (${PORT_VAR[$key]} for this one) to ports no one holds and rerun stack.sh setup with them set, then stack.sh start (start reads the ports stack.json records, so a port variable takes effect only through setup); or move this stack to another LOADTEST_ROOT, which picks another block with probability $((PORT_BLOCKS - 1))/$PORT_BLOCKS, and run stack.sh setup and stack.sh start there"
 }
 
 ports_of() {
   case $1 in
     nats) printf '%s\n' nats nats_monitor ;;
-    dispatch) printf '%s\n' dispatch pprof ;;
+    dispatch) printf '%s\n' dispatch pprof metrics ;;
     *) printf '%s\n' "$1" ;;
   esac
 }
@@ -480,6 +494,7 @@ start_dispatch() {
   running dispatch && die "Dispatch is already running (pid $(pid_of dispatch)); stack.sh stop dispatch first"
   check_port dispatch dispatch
   check_port dispatch pprof
+  check_port dispatch metrics
   local pg_port direct=false
   pg_port=$(port proxy)
   if [ "${LOADTEST_PG_DIRECT:-}" = 1 ]; then
@@ -498,9 +513,10 @@ start_dispatch() {
   mkdir -p -- "$webdist" "$STACK_HOME"
   # scripts/e2e/dispatch-session-settings.sh's Dispatch, on the stack's ports and tokens. No
   # DISPATCH_SIGNING_KEY: Dispatch keeps its key under the stack's HOME (XDG_DATA_HOME), so it is the
-  # same across steps. No AWS_*: no Bedrock calls. Of the settings below, the only one 35efd326 (the
-  # replay seed's build) lacks is DISPATCH_PPROF_PORT: it has no pprof.go, so the overlay's
-  # LOADTEST_DISPATCH_PPROF_PORT stands in for it.
+  # same across steps. No AWS_*: no Bedrock calls. DISPATCH_METRICS_ADDR serves the /metrics that the
+  # 5 s sampler scrapes; a build older than that endpoint ignores it. Of the settings below, the only
+  # one 35efd326 (the replay seed's build) lacks is DISPATCH_PPROF_PORT: it has no pprof.go, so the
+  # overlay's LOADTEST_DISPATCH_PPROF_PORT stands in for it.
   # shellcheck disable=SC2034
   local dispatch_env=("${base_env[@]}"
     "DATABASE_URL=postgres://postgres@127.0.0.1:$pg_port/$db?sslmode=disable"
@@ -512,6 +528,7 @@ start_dispatch() {
     "DISPATCH_SERVER_URL=http://127.0.0.1:$(port dispatch)"
     "DISPATCH_WEB_DIST=$webdist"
     "$pprof_var=$(port pprof)"
+    "DISPATCH_METRICS_ADDR=127.0.0.1:$(port metrics)"
     "GOMAXPROCS=$procs"
     "NATS_URLS=nats://127.0.0.1:$(port nats)"
     "ENVOY_URL=http://127.0.0.1:$(port listener)"
@@ -520,7 +537,7 @@ start_dispatch() {
   set_pid dispatch "$(pid_of dispatch)"
   stack_set '.pg_direct = $d' --argjson d "$direct"
   wait_for "Dispatch /healthz to report ok and NATS" "$healthz_seconds" dispatch "$log" dispatch_healthy
-  note "dispatch pid $(pid_of dispatch) ($binary, database $db, GOMAXPROCS $procs) on 127.0.0.1:$(port dispatch), pprof $(port pprof), postgres via port $pg_port; log $log"
+  note "dispatch pid $(pid_of dispatch) ($binary, database $db, GOMAXPROCS $procs) on 127.0.0.1:$(port dispatch), pprof $(port pprof), metrics $(port metrics), postgres via port $pg_port; log $log"
 }
 
 # ---- builds ------------------------------------------------------------------------------------------
@@ -670,12 +687,16 @@ log_line_prefix = '%m [%p] %a '
 EOF
   fi
   write_stack_json
+  check_ephemeral_ports "$(recorded_ports)"
 }
 
 cmd_start() {
   need_stack
   [ -f "$PGDATA/PG_VERSION" ] || die "no Postgres data directory at $PGDATA; run stack.sh setup first"
-  # Every port a stopped process needs is checked before anything starts.
+  # Every port a stopped process needs is checked before anything starts: free here, and outside
+  # the range the kernel gives to outbound connections (a stack.json from before the port base
+  # moved below that range still records one inside it).
+  check_ephemeral_ports "$(recorded_ports)"
   local p k
   for p in "${START_ORDER[@]}"; do
     running "$p" && continue

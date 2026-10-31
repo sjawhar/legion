@@ -14,22 +14,21 @@ import (
 // impatient paths; this one keeps a model honest on its own.
 const SyncInterval = 5 * time.Minute
 
-// architectureImportLease names the lease one import pass runs under. Every pass re-reads each
-// enabled source's tree from GitHub against one installation's rate limit, so N processes
-// importing is N times those calls for one result.
-const architectureImportLease = "architecture-import"
-
 // Run re-imports every enabled architecture source on SyncInterval, one
 // source at a time, until ctx is cancelled. The first tick is jittered so a
 // restart does not stampede GitHub, and a server without App credentials logs
 // once and stops: no sync can be signed. Shares its jittered-ticker loop with
-// delivery.Reconcile.Run via duty.RunJittered.
+// delivery.Reconcile.Run via duty.RunJittered. cmd/dispatch hands it the
+// importer on the background pool (Importer.On), so a pass neither waits for
+// the requests' connections nor takes one.
 //
-// Each pass runs under architectureImportLease for one SyncInterval, so one process imports per
-// interval however many serve the database - the second process's tick, jittered to a phase of
-// its own, finds that interval imported and skips rather than spending the same GitHub calls
-// again; leases is required, as it is of every leased loop (cmd/dispatch exits at boot if the
-// lease pool cannot be opened).
+// Each pass runs under duty.ArchitectureImportLease for one SyncInterval, so one process imports
+// per interval however many serve the database: every pass re-reads each enabled source's tree
+// from GitHub against one installation's rate limit, so N processes importing is N times those
+// calls for one result. The second process's tick, jittered to a phase of its own, finds that
+// interval imported and skips rather than spending the same GitHub calls again; leases is
+// required, as it is of every leased loop (cmd/dispatch exits at boot if the lease pool cannot be
+// opened).
 func Run(ctx context.Context, importer *Importer, leases duty.Leases) {
 	duty.RunJittered(ctx, SyncInterval, func() bool {
 		if importer.HasApp() {
@@ -43,7 +42,7 @@ func Run(ctx context.Context, importer *Importer, leases duty.Leases) {
 // syncAllLeased runs one import pass under the lease, for the SyncInterval this loop ticks on and
 // the tick due at due.
 func syncAllLeased(ctx context.Context, importer *Importer, leases duty.Leases, due time.Time) {
-	duty.Exclusive(ctx, leases, architectureImportLease, due, SyncInterval, func(ctx context.Context) { syncAll(ctx, importer) })
+	duty.Exclusive(ctx, leases, duty.ArchitectureImportLease, due, SyncInterval, func(ctx context.Context) { syncAll(ctx, importer) })
 }
 
 // syncAll imports every enabled source, ordered by project and then id; a

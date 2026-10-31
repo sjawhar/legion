@@ -202,7 +202,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	parent := strings.TrimSpace(query.Get("parent"))
 	labels, err := normalizeIssueLabels(query["label"])
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	for index, label := range labels {
@@ -219,17 +219,17 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	}
 	priorities, unsetPriority, err := parsePriorityFilter(query["priority"])
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	routeStatus, err := parseRouteStatusFilter(query.Get("route_status"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	page, err := parseIssuePage(query)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	listQuery := listIssuesQuery
@@ -243,7 +243,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	}
 	issues, err := s.scanIssueSummaries(r.Context(), listQuery, arguments)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if routed := slices.ContainsFunc(issues, func(issue model.IssueSummary) bool { return issue.Route != nil }); routed {
@@ -315,27 +315,27 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	issue, progress, err := s.loadIssueWithProgress(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	artifacts, err := s.loadArtifacts(r.Context(), s.deps.Store.Pool, issue.Key)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	openAsks, err := s.loadOpenAsks(r.Context(), s.deps.Store.Pool, issue.Key)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	children, err := s.loadChildren(r.Context(), s.deps.Store.Pool, issue.Key)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	counts, err := refs.BacklinkCounts(r.Context(), s.deps.Store.Pool, "issue", []string{issue.Key}, nil)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	var reach model.IssueRouteReach

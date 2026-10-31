@@ -308,13 +308,106 @@ func TestDecisionBlockCheckOnAProjectDocumentLeavesTheDocumentOut(t *testing.T) 
 	}
 }
 
-// The checks of one edit's blocks run at once, and each reads its items' ask states and writes
-// its record on a connection of its own: every block whose question restates an answered ask is
-// answered with that decision, its ask state on the item, and every block's check is recorded.
-// On the request's one connection mark, one check's open cursor had the pool refuse another's
-// ask-state read and record (store.ErrNestedAcquire), which dropped the state and the row. Every
-// ask shares a word with every block and carries a long answer, so each check reads every ask's
-// state and its cursor stays open over several network reads, which is when the others collided.
+// routeWeightOf is the admission weight the table gives one route: the most request-pool
+// connections a request of it may hold at once (apiRoute.Weight, a weight below one being one).
+func routeWeightOf(t *testing.T, method, pattern string) int32 {
+	t.Helper()
+	for _, route := range (&server{}).routes() {
+		if route.Method == method && route.Pattern == pattern {
+			return int32(max(route.Weight, 1))
+		}
+	}
+	t.Fatalf("no route %s %s in the table", method, pattern)
+	return 0
+}
+
+// An edit holds no more request-pool connections than its route's admission weight, whatever its
+// decision blocks: its checks run one after another, so only one check's reads are in flight,
+// where five at once asked for a connection each - two each where meaning search is on - against
+// a route admission counted one connection for. The checks are held at the term statistics every
+// one of them reads first, so what the edit holds is read while they wait there rather than
+// raced for.
+func TestAnEditHoldsNoMoreConnectionsThanItsRouteWeighs(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "WGHT")
+	createSearchIssue(t, handler, "WGHT", "Dashboard ledger for zymurgy batches", "")
+	spec := "# Spec\n\nPlanning notes.\n"
+	issue := createAdviceIssue(t, handler, "WGHT", "Five decisions", &spec)
+	refreshTermStats(t, database, "WGHT")
+	awaitQuietRequestPool(t, database.Pool)
+
+	ctx := context.Background()
+	lockTx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+	if _, err := lockTx.Exec(ctx, "lock table search_term_stats in access exclusive mode"); err != nil {
+		t.Fatalf("lock search_term_stats: %v", err)
+	}
+	// The lock's own connection is not the edit's, and the waits are read on it, so the test adds
+	// nothing to what the pool hands out while the edit runs.
+	ours := database.Pool.Stat().AcquiredConns()
+
+	markdown := make([]string, 0, decisionBlockCheckLimit)
+	for index := range decisionBlockCheckLimit {
+		markdown = append(markdown, fmt.Sprintf(":::ask{#choice%d}\nWhich zymurgy ledger layout %d?\n:::", index, index))
+	}
+	edited := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		edited <- editDocument(t, handler, issue.PrimaryArtifactID, insertAtEnd(strings.Join(markdown, "\n\n")))
+	}()
+
+	waiting := func() int {
+		var waits int
+		if err := lockTx.QueryRow(ctx, `
+			select count(*) from pg_locks where relation = 'search_term_stats'::regclass and not granted
+		`).Scan(&waits); err != nil {
+			t.Fatalf("read lock waits: %v", err)
+		}
+		return waits
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for waiting() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the edit never committed with a decision block check waiting on the term statistics")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Every check the edit runs at once is held at the lock, so the connections they hold stand
+	// still while they are counted.
+	var peak int32
+	for range 100 {
+		peak = max(peak, database.Pool.Stat().AcquiredConns()-ours)
+		time.Sleep(5 * time.Millisecond)
+	}
+	if weight := routeWeightOf(t, http.MethodPost, "/api/v1/artifacts/{id}/edits"); peak > weight {
+		t.Errorf("an edit adding %d decision blocks held %d request-pool connections, want at most its route's weight %d",
+			decisionBlockCheckLimit, peak, weight)
+	}
+
+	if err := lockTx.Rollback(ctx); err != nil {
+		t.Fatalf("release the lock: %v", err)
+	}
+	checks, present := decisionBlockChecksOf(t, <-edited)
+	if !present || len(checks) != decisionBlockCheckLimit {
+		t.Fatalf("decision_block_checks = %+v (present %t), want %d", checks, present, decisionBlockCheckLimit)
+	}
+	for index, check := range checks {
+		if check.Suggestions == nil || check.Suggestions.Outcome == "not_made" {
+			t.Fatalf("check %d = %+v, want it made once the lock was released", index, check.Suggestions)
+		}
+	}
+}
+
+// Every one of an edit's blocks is checked whole, and each reads its items' ask states and
+// writes its record: every block whose question restates an answered ask is answered with that
+// decision, its ask state on the item, and every block's check is recorded. The checks ran at
+// once once, and on the request's one connection mark one check's open cursor had the pool
+// refuse another's ask-state read and record (store.ErrNestedAcquire), which dropped the state
+// and the row; they run one after another now (decisionBlockChecks), each on a mark of its own.
+// Every ask shares a word with every block and carries a long answer, so each check reads every
+// ask's state over several network reads.
 func TestDecisionBlockChecksEachReadTheirAskStatesAndRecord(t *testing.T) {
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "RACE")

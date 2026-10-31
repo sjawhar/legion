@@ -24,7 +24,9 @@ Each item below names a variable, then its purpose.
 
   Postgres connection string.
   Dispatch applies embedded migrations before serving.
-  The pool size is fixed in code (`store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter.
+  Every pool's size is fixed in code, at most 89 connections a process in all (`store.ConnectionsPerProcess`) (the request pool's 48 is `store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter.
+  Each connection names its pool in `application_name`, which replaces the connection string's own:
+  `dispatch-requests`, `dispatch-background`, `dispatch-live`, `dispatch-settlements`, `dispatch-rooms`, `dispatch-health`, `dispatch-listen`, `dispatch-leases`, `dispatch-outbox`, `dispatch-horizon` or `dispatch-registry`, so `select application_name, count(*) from pg_stat_activity group by 1` shows what each pool holds.
 
 - `DISPATCH_AGENT_TOKEN`
 
@@ -111,6 +113,13 @@ Each item below names a variable, then its purpose.
   Where meaning search embeds, and with what credential.
   Every process of one deployment takes the same values, and a model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it (Search, below).
   A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries.
+
+- `DISPATCH_METRICS_ADDR`
+
+  `host:port` the Prometheus metrics endpoint listens on, on a listener of its own apart from the server's routes and the loopback-only profiler, so a scraper in another pod can reach it.
+  It has no authentication: every series carries counts and durations, never a name, a key or a person.
+  Unset or empty, nothing listens; a value that is not `host:port` with a port 1-65535, or an address already taken, refuses startup naming the variable.
+  The series are listed under Metrics, below.
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot with comma-separated `owner/repo=KEY` entries.
 Existing dashboard mappings take precedence over this seed:
@@ -411,8 +420,37 @@ kubectl port-forward <pod> <port>:<port>
 go tool pprof -seconds 30 http://127.0.0.1:<port>/debug/pprof/profile
 ```
 
-`/debug/pprof/` lists the other profiles (`heap`, `goroutine`, `allocs`, `threadcreate`, `trace`).
-`mutex` and `block` are listed too but record nothing: Dispatch sets no mutex or block sampling rate.
+`/debug/pprof/` lists the other profiles (`heap`, `goroutine`, `allocs`, `threadcreate`, `trace`, `mutex`, `block`).
+With `DISPATCH_PPROF_PORT` set, the mutex and block profiles record from boot, at rates low enough to leave on (`runtime.SetMutexProfileFraction(100)`: one contended unlock in a hundred; `runtime.SetBlockProfileRate(1_000_000)`: every block of a millisecond or more, a shorter one in proportion to its length), so a load test can see which lock or channel the goroutines queue on.
+Unset, neither records, and the process pays nothing for them.
+To see where goroutines wait on locks:
+
+```sh
+go tool pprof http://127.0.0.1:<port>/debug/pprof/mutex
+```
+
+### Metrics
+
+Set `DISPATCH_METRICS_ADDR` to `host:port` (`:9090` for every interface) to serve `GET /metrics`, Prometheus's text format, on a listener of its own, which closes with the process like the profiler's.
+Every series is read when the scrape comes, but the outbox lag, which one query on the background pool samples every 5 seconds whatever the scrape rate.
+
+| Series | What it counts |
+| --- | --- |
+| `dispatch_db_pool_max_conns`, `dispatch_db_pool_total_conns`, `dispatch_db_pool_in_use_conns`, `dispatch_db_pool_idle_conns` | Each database pool's connections: its size, open, held by callers, open and idle. Label `pool`: the pool's `application_name` less `dispatch-` (`requests`, `rooms`, `health`, `listen`, `leases`, `outbox`, `background`, `live`, `settlements`, `horizon`, `registry`). A pool opened on first use (rooms, health, the listener's, live, settlements, the event horizon's) has no series until it opens, and the outbox's none on a server with no NATS. |
+| `dispatch_db_pool_waiting` | Acquires of the pool in progress: callers waiting for a connection. Label `pool`. |
+| `dispatch_db_pool_acquire_seconds` | Histogram of how long each acquire waited for a connection, 1 ms to 30 s; its `_count` is the pool's checkouts. Label `pool`. |
+| `dispatch_db_pool_acquire_timeouts_total` | Acquires that ran out the pool's acquire bound (`store.ErrPoolBusy`, which a request answers `503 DATABASE_BUSY`). Label `pool`. |
+| `dispatch_go_gc_pause_seconds` | Histogram of the garbage collector's stop-the-world pauses (`/gc/pauses:seconds`), 10 µs to 1 s; its `_sum` is estimated from the runtime's buckets, which carry no sum. |
+| `dispatch_go_heap_live_bytes`, `dispatch_go_heap_objects_bytes`, `dispatch_go_goroutines` | The heap the last collection marked live, the heap objects hold now, and the goroutines. |
+| `dispatch_outbox_lag_seconds` | Age of the oldest event the outbox has not published, a pending subscription command aside, counting events backed off or held behind their owner; 0 when none. With NATS off nothing publishes, so it grows from the first event. |
+| `dispatch_outbox_published_total` | Events this process's outbox has marked published. |
+| `dispatch_events_committed_total` | Events this process has committed to the event log: every write that appends counts each event once it commits, so summed over the processes it grows as the `events` table does. |
+| `dispatch_http_in_flight`, `dispatch_http_queued` | Admission units held by admitted requests (a route that reads side by side holds two), and requests waiting for admission. Label `class`: `read` or `write`. |
+| `dispatch_http_refused_total` | Requests refused `429 OVERLOADED`. Labels `class` and `reason`: `queue_full` or `wait_exceeded`. |
+| `dispatch_http_admitted_units`, `dispatch_http_admitted_units_limit`, `dispatch_http_admitted_reserved_read_units` | Admission units held across both classes now, the combined cap over the two (40, below the 28 reads and 24 writes the class limits allow), and how many of the cap's units writes leave to the reads while a read waits for room (22). No labels. |
+| `dispatch_doc_writer_queued` | Writers waiting for a document's writer gate. |
+| `dispatch_settlements_running`, `dispatch_settlements_waiting` | Document settlements holding one of the settlement slots, and waiting for one. |
+| `dispatch_log_dropped_total` | Log records dropped because the log writer fell behind. Label `level`: `debug`, `info`, `warn` or `error`. |
 
 ## The live socket behind a proxy
 
@@ -1575,7 +1613,8 @@ The dashboard's own pages and assets write none, so a browser's page loads do no
 Three answers are given before any route runs and write none:
 the `403` a cookie request from another origin gets, the `421` a request for another host gets on a server with local sign-in, and the `307` redirect Go's router gives an unclean path (`/api/v1//issues`) or a prefix route called without its trailing slash (`/api/github/rest`).
 Match the line as `msg="dispatch: request"`: the previous-shared-token warning's message starts with the same words.
-The line is one synchronous write to stderr per request, so a log pipe that blocks stalls requests.
+The line goes through the process's logger, which never makes a request wait on stderr:
+a line that finds its buffer of 4,096 full is dropped and counted (`dispatch_log_dropped_total`, and one WARN `dropped N log records` once there is room).
 
 ## Routes
 
@@ -2375,6 +2414,61 @@ What each node type weighs:
 | `image` | an image; its alt text's nodes weigh 1 each | 3 | source, alt, title |
 | `html` | a piece of inline HTML | 2 | the HTML |
 | `footnote_reference` | a footnote reference | 2 | label |
+
+## Load errors
+
+Past what it can serve, Dispatch refuses a request at once rather than queueing it without end,
+and tells the client when to ask again. Every `/api/v1` route but the test hooks is admitted
+before it runs: reads (GET, HEAD) and writes (every other method) each have
+a limit of the request pool's 48 connections, 14 reads and 12 writes per CPU the server may use up
+to 28 reads and 24 writes (28 and 24 on two CPUs or more), and the two classes hold at most 40
+units together, which is what the pool has for admitted requests. The class limits add up to
+more, so a class reaches its own only while the other is quiet; a request is admitted when its
+class and the 40 both have room, and 22 of the 40 are the reads' while a read is waiting for
+room, so writes hold at most 18 under read pressure and reach their whole 24 only while the
+reads are light. A route that runs two reads side by
+side counts twice: the delivery timeline, measures and pipeline, and every route that runs the
+related-item check - the two related routes, creating an issue or an ask, and editing a document,
+whose new decision blocks are checked one after another so that one check's two reads are all the
+edit runs at once. A request that finds no room waits,
+in arrival order, at most 1 second in a queue twice as long as its class's limit; a request the
+combined cap alone holds up waits ahead of the other class's later arrivals, so a weight-two
+write is not starved by the reads behind it, while a write the reads' reserved room alone holds
+up waits ahead of the writes behind it and of nothing else, since the reads must be able to take
+what is kept for them. An admitted read has 20
+seconds to answer, and the four file version downloads 5 minutes; a write has no deadline and,
+once admitted, runs to completion. Every wait for a database connection is bounded too, at 3
+seconds for a request's. The document and delivery websockets are neither admitted nor bounded.
+
+A slow client is bounded as well, so that it holds neither the admission units it was admitted
+with nor the database connection its read pinned for as long as it cares to. A request's whole
+body has 60 seconds to arrive, counted from the first read of it: enough to carry a 26 MiB upload
+over a link of 450 KB/s and a 1 MiB JSON body over one of 17 KB/s. Past it the read of the body
+fails, and the request is answered `400 REQUEST_BODY_UNREADABLE` - or with whatever its layer had
+already answered, such as a refused upload's `409 ISSUE_CLOSED` - with the connection closed after
+it. A read's answer is written under the read's own deadline too (20 seconds, 5 minutes for a file
+version download), counted from its first byte, so a client that stops reading a large answer has
+the connection closed under it there. Each route also bounds its body in bytes: 1 MiB for a JSON
+route (`413 REQUEST_TOO_LARGE`) and 26 MiB for an upload (`413 CAP_EXCEEDED`). Neither bound
+touches the websockets, which are mounted outside the routes.
+
+Each answer below carries `Retry-After` in seconds, and all but `EDIT_QUEUE_FULL` carry
+`Cache-Control: no-store`; none is logged above DEBUG, and a request whose client went away is
+answered nothing and recorded in the access log as `status=499`, nginx's client-closed code,
+rather than as the 200 of a handler that wrote nothing. The `dispatch` command waits out
+`Retry-After` and asks again, at most twice and within its 60-second deadline: any method on a
+429, a read only on a 503. The one failure below that carries no `Retry-After` is
+`500 COMMIT_OUTCOME_UNKNOWN`, which must not be sent again without reading what the write may
+have done.
+
+| Status / code | Meaning |
+| --- | --- |
+| `429 OVERLOADED` | The server had no room for another read or write: its queue was full, or 1 second passed with no room. Nothing ran, so any method may be sent again after `Retry-After: 1`. A refused request's body is read and discarded first, up to the route's body limit and within the 60 seconds the body has to arrive, so a browser reads the 429 rather than a reset connection. A write that waited for a document's writer gate and then found no room is refused this way too. `dispatch_http_refused_total` counts them. |
+| `429 EDIT_QUEUE_FULL` | 32 writes were already waiting for a document this write changes. Every write to a live document waits for that document's writer gate, one write at a time, before its transaction opens: an edit, an upload, a rebuild, an anchored comment or ask, a reply that writes into its document, a comment edited, resolved, reopened, accepted or rejected, an ask answered, resolved or edited. Nothing ran; send it again after `Retry-After: 1`. |
+| `503 DATABASE_BUSY` | No database connection came free within its pool's bound (`store.ErrPoolBusy`). A read may be sent again after `Retry-After: 1`; a write may have committed part of its work before the wait that failed it, so read what it wrote before sending it again. `dispatch_db_pool_acquire_timeouts_total` counts the waits. |
+| `503 REQUEST_TIMEOUT` | A read ran past its deadline: 20 seconds, 5 minutes for a file version download. Send it again after `Retry-After: 1`. |
+| `500 COMMIT_OUTCOME_UNKNOWN` | The database did not answer this write's commit within the commit's bound (10 seconds). The outcome is unknown: the transaction may have committed, and the server cannot tell. Read what the write would have written before sending it again, or send it again under the same `Idempotency-Key`, which answers a replay rather than writing twice. It carries no `Retry-After`, and the server logs it at ERROR. |
+
 ## Input errors
 
 Each item below names a status and code, then its meaning.
@@ -2404,6 +2498,11 @@ Each item below names a status and code, then its meaning.
 - `400 INVALID_SESSION_ID`
 
   An agent artifact route's `session_id` is empty or holds `/`, `?`, `#`, whitespace, a control character or a character that ends a reference in text, so no reference could name what it owns; nothing is written.
+
+- `400 REQUEST_BODY_UNREADABLE`
+
+  The request's body did not arrive within the 60 seconds a body has, counted from the first read of it, or its connection broke while it was being read; nothing ran, and the connection closes after the answer.
+  A keyed request answers it too, with its key unclaimed, so the same key may be sent again.
 
 ## Document errors
 

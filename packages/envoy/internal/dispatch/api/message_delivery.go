@@ -18,7 +18,7 @@ import (
 func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return
 	}
 	var input struct {
@@ -26,12 +26,12 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 		Actor    *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if !human {
 		if actor, err = bearerSessionActor(r, actor, input.Actor); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -48,7 +48,7 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 	// still settles its attempt, and one a process death strands the delivery sweep resumes.
 	attempt, err := s.deliverMessage(context.WithoutCancel(r.Context()), message, input.Delivery, nil, actor, nil)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusCreated, attempt)
@@ -121,7 +121,7 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		Actor *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
@@ -145,12 +145,12 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 	})
 	tx, err := s.begin(ctx)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(ctx)
 	if err := s.deps.Events.LockOwners(ctx, tx, event); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// Every attempt is opened, resumed and accepted under this lock, so what the checks below
@@ -159,7 +159,7 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 	// through its insert's foreign key, this row FOR KEY SHARE, which FOR UPDATE would wait for
 	// while this transaction waits for the attempt row the reply holds.
 	if _, err := tx.Exec(ctx, `select 1 from messages where id = $1 for no key update`, message.ID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	var sessionID, delivery, state string
@@ -185,7 +185,7 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	switch {
@@ -238,16 +238,16 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		message.ID, number, acceptedAsUserTurn,
 	))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	appended, err := s.appendEvent(ctx, tx, event)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(appended)
@@ -731,7 +731,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		InReplyToBlock *string `json:"in_reply_to_block"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
@@ -753,13 +753,13 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 
 	followUp, err := followUpRequested(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -773,14 +773,14 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if message.IssueKey != nil {
 		if _, err := s.requireOpenIssue(r.Context(), tx, *message.IssueKey); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
 	if input.InReplyToBlock != nil {
 		// Before the attempt row, as the accept route takes them: issue, message, attempt.
 		if err := lockReplyParentMessage(r.Context(), tx, message.ID); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -810,18 +810,18 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		answer, err := s.loadMessage(r.Context(), tx, messageIssueKey(message), *attempt.ReplyID)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		read, posted, err := s.replyAfterAnswer(r.Context(), tx, answer, actor, input.Body, followUp)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		// A message handed back as it is stored reads the block it answers as every read does.
 		if posted == nil {
 			if err := hydrateMessageReplyBlocks(r.Context(), tx, &read.Message); err != nil {
-				s.writeHandlerError(w, err)
+				s.writeHandlerError(w, r, err)
 				return
 			}
 		}
@@ -839,12 +839,12 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			message.ID, input.Attempt, *input.Error,
 		))
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		receipt, err := s.appendEvent(r.Context(), tx, messageDeliveryReceipt(message, actor, updated, ""))
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		response, events = updated, append(events, receipt)
@@ -853,13 +853,13 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		if input.InReplyToBlock != nil {
 			block, err = s.replyBlockOf(r.Context(), tx, refs.ItemMessage, message.ID, *input.InReplyToBlock, "in_reply_to_block", "INVALID_MESSAGE")
 			if err != nil {
-				s.writeHandlerError(w, err)
+				s.writeHandlerError(w, r, err)
 				return
 			}
 		}
 		reply, answered, err := s.insertSessionReply(r.Context(), tx, message, actor, *input.Body, block)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		// The session answered, so the message reached it whatever the attempt recorded: a failed
@@ -868,13 +868,13 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			update message_deliveries set reply_id = $3, state = 'sent', error = null
 			where message_id = $1 and attempt = $2
 		`, message.ID, input.Attempt, reply.ID); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		response, events, status = replyRead{Message: reply}, append(events, answered), http.StatusCreated
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(events...)

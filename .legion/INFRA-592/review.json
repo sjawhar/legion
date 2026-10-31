@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-592",
+  "completed": "2026-10-30T12:11:57Z",
+  "round": 1,
+  "reviewedCodeHead": "b18e2678e2b6e6691e3d7e3743a61bc25266aaa6",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 11,
+  "minor": 5,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head b18e2678 (run 41038111571): lint success, pr-title success, typecheck and test still queued at 12:10Z. pi-envoy (not required) red with the 9 card-delivery-omp failures main has carried since #2376 (INFRA-826, fixed on main by #2550, 2d3a725f); this PR touches no pi-envoy file.",
+  "proseFixedByReviewer": "2cf5bc25: the budget was 87 before the partition, not 86 (AGENTS.md, store/pool.go); no table route is an event stream (AGENTS.md, README, admission.go, the admission changeset); the live socket's catch-up is on the live pool (AGENTS.md); the registry pool in the metrics' pool label and which pools open on first use (README, metrics.go, cmd/dispatch/AGENTS.md); withholdAnswers is weighAnswers (AGENTS.md, cmd/dispatch/AGENTS.md).",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/server.go", "description": "Security[transport]: an admitted request holds its admission units while its body is read (keyed spool, decodeJSON before requireActor in patchIssue) and a pinned read holds its request-pool connection while its response is written, with no read or write timeout on the server: 12 slow bodies stop every write on a pod, 28 slow readers every read."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/service.go", "description": "settleRoom's new 60 s deadline covers the statements after applySuppressed wrote the stamp or repairs into the room (BroadcastUpdate, AppendUpdateTx, version writes), so a deadline there runs abandon -> failRoom, evicting the room and closing every editor's socket; before, a timer settlement had no deadline."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/service.go", "description": "awaitRoomRecovery refuses inside a transaction but not on a pinned context: a pinned read (artifact text) waits on a failed room's eviction holding its request-pool connection, and the eviction's withRoomLock acquires from the request pool."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/suggestions.go", "description": "The related-item check takes two request connections and decisionBlockChecks runs up to five at once (ten connections), on routes of weight 1 (issue create, ask create, document edits): spec acceptance line 3 says one request cannot take many connections at once."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/asks.go", "description": "The writer gate is held across post-commit work: createAskFor defers release past the related check (up to 5 s), createCommentFor past the mention deliveries, so every other writer of the document waits behind them; editArtifact releases before its checks."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/store/acquire.go", "description": "store.Overloaded counts any deadline but the request's as DATABASE_BUSY and WriteUnserved logs it at DEBUG: a commit cut off at CommitContext's 10 s bound (unknown outcome) answers 'no connection free' and reaches no ERROR line."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/service.go", "description": "The settlement warm-up drops Settlements()'s error and warms through the request pool, the pool the comment above says it must not use; settlePass then opens Settlements() again and fails on it."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/service.go", "description": "settlePass is one 588-line function with four commit endings, state threaded through pointer-to-pointer and closure parameters, and the room-dead check repeated seven times."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/routes_table.go", "description": "routeServings is a second table keyed by 'METHOD pattern' strings beside the route table; BodyLimit is read only through a string lookup (routeBodyLimit); AGENTS.md names a Stream field apiRoute does not have."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/store/pool.go", "description": "OpenRegistry repeats open step by step and the nested-acquire refusal is written three times (guard, target, handOver); the file grows to 1,010 lines."},
+    {"severity": "important", "file": "packages/envoy-client/src/dispatch-http.ts", "description": "A second injectable clock (RetryClock) beside writeRetry's now/pause, its sleep a copy of pauseFor, and writeAnswer keeping its own JSON parse beside answerPayload."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/admission/answer.go", "description": "A request whose client went away is answered nothing and the access log records it as status 200, where it was a 500."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/store/pool.go", "description": "target() refuses a nested acquire only for a held connection: a pinned read is handed Background, Live or Settlements connections, which AGENTS.md and dispatch-store.md say it is refused."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/routes/router.go", "description": "The WriteUnserved-then-log-then-500 branch is written five times; one helper."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/issue_patch.go", "description": "A hand-built copy of gatedWrite's gate, re-read and documents-moved check, without its redo."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "Prose tied to the findings above, for the implementer's push: the weight lists omit the related routes; dispatch-api.md's file count (100) and 'every read pinned'; dispatch-store.md's 'every acquire on every pool bounded' (outbox, registry, health are not); AGENTS.md:2843's withholdAnswers."}
+  ]
+}

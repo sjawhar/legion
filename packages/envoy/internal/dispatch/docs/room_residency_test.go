@@ -763,7 +763,12 @@ func TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt(t *testing.T) {
 
 			written := make(chan error, 1)
 			go func() {
-				ctx := context.Background()
+				ctx, release, err := takeWriterGates(service, context.Background(), artifactID)
+				if err != nil {
+					written <- err
+					return
+				}
+				defer release()
 				tx, err := service.store.Pool.Begin(ctx)
 				if err != nil {
 					written <- err
@@ -853,7 +858,7 @@ func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				joined, ledger := service.Join(ctx, tx)
+				joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 				if _, err := service.ReplaceText(joined, artifactID, markdown(paragraphs, "after"), alice); err != nil {
 					t.Fatalf("trial %d: replace: %v", trial, err)
 				}

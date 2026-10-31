@@ -39,12 +39,12 @@ import (
 // CAP_EXCEEDED. An answer is caller text the server writes twice: the answer route writes it into
 // its ask's block, and settlement writes it back into a block that returns to the document. Where
 // the document has no room for it, each records who answered and when and leaves the answer out of
-// the block (SetBlockAttributes, withholdAnswers), and the ask keeps it. Of the other writes that
+// the block (SetBlockAttributes, weighAnswers), and the ask keeps it. Of the other writes that
 // run through neither, a rebuild weighs the markdown a caller supplies as SeedText weighs
 // a new document's, and restores a latest version whatever it weighs, since that is the server's
 // own text (RebuildDocument); the block-id backfill (stampBlockIDs) and the sweep of unrecorded
 // marks (unmarkExpired) add no caller text, and settlement's own repair of a returning answer
-// (withholdAnswers, returnAnswersWithRoom) is weighed for size the same way a caller's answer is.
+// (weighAnswers, returnAnswersWithRoom) is weighed for size the same way a caller's answer is.
 // None of these three calls refuseGrowth, so none reaches refuseUndecodable either: a document
 // already past the decode cap still accepts them, unrefused (LEGION-545). Settlement's own
 // repair is the one of the three with a plausible route there - two rounds of a 50,000-byte

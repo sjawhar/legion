@@ -115,13 +115,12 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 	return nil
 }
 
-// editNoticeLease names the lease one sweep runs under, editNoticeInterval the sweep's period and
-// the wait after each sweep before the next, editNoticeBatch the most due notices one sweep sends,
-// and editNoticeDiffBytes the most a notice's diff holds. A notice is due at most
-// editNoticeInterval, plus the time the sweep before took, before a sweep sends it, so a person's
-// edit reaches its sessions within the quiet time plus five seconds and that sweep's time.
+// editNoticeInterval is the sweep's period and the wait after each sweep before the next,
+// editNoticeBatch the most due notices one sweep sends, and editNoticeDiffBytes the most a
+// notice's diff holds. A notice is due at most editNoticeInterval, plus the time the sweep before
+// took, before a sweep sends it, so a person's edit reaches its sessions within the quiet time
+// plus five seconds and that sweep's time.
 const (
-	editNoticeLease     = "edit-notices"
 	editNoticeInterval  = 5 * time.Second
 	editNoticeBatch     = 20
 	editNoticeDiffBytes = 4096
@@ -143,12 +142,13 @@ const dueEditNotice = `
 // RunEditNotices sends each document's edit notice once its quiet window ends: one
 // artifact.human_edited event, which reaches the sessions the document credits and its issue's
 // route (outbox.publishAuthorRoutes). It sweeps at start and then editNoticeInterval after each
-// sweep returns (duty.RunLeasedAfterEachPass) until ctx ends, under the edit-notices lease, so one
+// sweep returns (duty.RunLeasedAfterEachPass) until ctx ends, under duty.EditNoticeLease, so one
 // process sweeps a period however many serve the database. The window is a row, not a timer, so a
-// notice still pending when a process stops is sent by the next sweep of any process.
+// notice still pending when a process stops is sent by the next sweep of any process. Its
+// statements run on the background pool (store.Pool.Background), which no request waits on.
 func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
-	duty.RunLeasedAfterEachPass(ctx, leases, editNoticeLease, editNoticeInterval, func(ctx context.Context) time.Duration {
+	duty.RunLeasedAfterEachPass(ctx, leases, duty.EditNoticeLease, editNoticeInterval, func(ctx context.Context) time.Duration {
 		sent, err := s.sendDueEditNotices(ctx)
 		if err != nil && ctx.Err() == nil {
 			slog.Error("dispatch: send edit notices", "error", err)
@@ -165,7 +165,11 @@ func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases) {
 // one document never holds back the others; err is the read of the due ids alone.
 func (s *Service) sendDueEditNotices(ctx context.Context) (int, error) {
 	ctx = store.WithTransactionTracking(ctx)
-	rows, err := s.store.Pool.Query(ctx, dueEditNotices, editNoticeBatch)
+	background, err := s.backgroundPool()
+	if err != nil {
+		return 0, err
+	}
+	rows, err := background.Query(ctx, dueEditNotices, editNoticeBatch)
 	if err != nil {
 		return 0, fmt.Errorf("list due edit notices: %w", err)
 	}
@@ -181,7 +185,7 @@ func (s *Service) sendDueEditNotices(ctx context.Context) (int, error) {
 		if ctx.Err() != nil {
 			return sent, nil
 		}
-		ok, err := s.sendEditNotice(ctx, id)
+		ok, err := s.sendEditNotice(ctx, background, id)
 		if err != nil {
 			slog.Error("dispatch: send an edit notice", "artifact", id, "error", err)
 			continue
@@ -194,17 +198,17 @@ func (s *Service) sendDueEditNotices(ctx context.Context) (int, error) {
 }
 
 // sendEditNotice claims artifactID's due notice and appends its artifact.human_edited event in one
-// transaction, then publishes the event once it commits, and reports whether it sent one. It takes
-// the locks in the settlement's order: the document owner's (lockArtifactOwner), then the notice
-// row, which the settlement writes after its version (recordEditNotice), then the events' own
-// (events.Broker.Append, which takes the owner's lock again). No statement here locks
+// transaction on pool, then publishes the event once it commits, and reports whether it sent one.
+// It takes the locks in the settlement's order: the document owner's (lockArtifactOwner), then the
+// notice row, which the settlement writes after its version (recordEditNotice), then the events'
+// own (events.Broker.Append, which takes the owner's lock again). No statement here locks
 // `for update`.
 //
 // A document deleted since the unlocked read has taken its notice with it (on delete cascade), and
 // one whose issue has closed takes no more edits: either way nothing is sent, and a closed issue's
 // notice is dropped.
-func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, error) {
-	tx, err := s.store.Pool.Begin(ctx)
+func (s *Service) sendEditNotice(ctx context.Context, pool *store.Pool, artifactID string) (bool, error) {
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("begin edit notice transaction: %w", err)
 	}

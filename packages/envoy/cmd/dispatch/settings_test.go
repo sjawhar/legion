@@ -825,6 +825,20 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_PPROF_PORT": "0"}, "DISPATCH_PPROF_PORT")
 		},
+		"DISPATCH_METRICS_ADDR": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_METRICS_ADDR": " 0.0.0.0:9090 "}); boot.MetricsAddr != "0.0.0.0:9090" {
+				t.Errorf("MetricsAddr = %q, want 0.0.0.0:9090", boot.MetricsAddr)
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_METRICS_ADDR": ":9090"}); boot.MetricsAddr != ":9090" {
+				t.Errorf("MetricsAddr = %q, want every interface at :9090", boot.MetricsAddr)
+			}
+			if boot := resolveWith(t, nil); boot.MetricsAddr != "" {
+				t.Errorf("unset: MetricsAddr = %q, want none", boot.MetricsAddr)
+			}
+			for _, value := range []string{"9090", "127.0.0.1", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:+90", "[::1"} {
+				refusedWith(t, map[string]string{"DISPATCH_METRICS_ADDR": value}, "DISPATCH_METRICS_ADDR")
+			}
+		},
 		"DISPATCH_SERVER_URL": func(t *testing.T) {
 			if cfg, err := envoyJSON(t, map[string]string{"DISPATCH_SERVER_URL": "https://from-the-table.example"}); err != nil || cfg.Dispatch.ServerURL != "https://from-the-table.example" {
 				t.Errorf("set: %+v, %v; want the variable over envoy.json", cfg, err)

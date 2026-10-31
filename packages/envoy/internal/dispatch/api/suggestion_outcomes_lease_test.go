@@ -7,8 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
@@ -19,7 +18,7 @@ import (
 const sweepLeaseTick = 20 * time.Millisecond
 
 // sweepLeases is the pool a sweep takes its lease on, the one cmd/dispatch gives it.
-func sweepLeases(t *testing.T, database *store.Store) *pgxpool.Pool {
+func sweepLeases(t *testing.T, database *store.Store) *store.RawPool {
 	t.Helper()
 	leases, err := database.Pool.Leases()
 	if err != nil {
@@ -80,9 +79,9 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 		defer close(secondDone)
 		RunSuggestionOutcomeSweep(secondCtx, second.Pool, sweepLeaseTick, secondLeases, nil)
 	}()
-	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease) == 0; {
+	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass skipped", duty.SuggestionOutcomeLease) == 0; {
 		if time.Now().After(deadline) {
-			t.Fatalf("the second runner never skipped the %s lease:\n%s", suggestionOutcomeLease, logs.Lines("lease="))
+			t.Fatalf("the second runner never skipped the %s lease:\n%s", duty.SuggestionOutcomeLease, logs.Lines("lease="))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -101,12 +100,12 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 		t.Fatalf("release write_suggestions: %v", err)
 	}
 
-	entered := countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease) +
-		countLeaseLines(logs, "dispatch duty: leased pass cut short by shutdown; its period is left unserved", suggestionOutcomeLease)
+	entered := countLeaseLines(logs, "dispatch duty: leased pass ran", duty.SuggestionOutcomeLease) +
+		countLeaseLines(logs, "dispatch duty: leased pass cut short by shutdown; its period is left unserved", duty.SuggestionOutcomeLease)
 	if entered != 1 {
 		t.Fatalf("the two runners got into the pass %d times; want once:\n%s", entered, logs.Lines("lease="))
 	}
-	if skipped := countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease); skipped == 0 {
+	if skipped := countLeaseLines(logs, "dispatch duty: leased pass skipped", duty.SuggestionOutcomeLease); skipped == 0 {
 		t.Fatalf("neither runner skipped:\n%s", logs.Lines("lease="))
 	}
 }
@@ -142,8 +141,8 @@ func TestALoneRunnerMakesAPassOnEveryTick(t *testing.T) {
 	stop()
 	<-done
 
-	ran := countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease)
-	skipped := countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease)
+	ran := countLeaseLines(logs, "dispatch duty: leased pass ran", duty.SuggestionOutcomeLease)
+	skipped := countLeaseLines(logs, "dispatch duty: leased pass skipped", duty.SuggestionOutcomeLease)
 	t.Logf("one runner, %d ticks of %v: ran %d, skipped %d", ticks, tick, ran, skipped)
 	if skipped != 0 {
 		t.Errorf("a lone runner skipped %d of its %d ticks; no other process swept, so each of those intervals went unswept:\n%s",

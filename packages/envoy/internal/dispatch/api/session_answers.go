@@ -32,24 +32,24 @@ func (s *server) listSessionAnswers(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := requestSessionID(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	query := r.URL.Query()
 	since, err := parseSessionAnswersSince(query, time.Now().UTC())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	maxChars, limited, valid := parseQueryInt(query, "max_chars", 1, sessionAnswersMaxChars)
 	if limited && !valid {
-		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY",
+		s.writeHandlerError(w, r, errorf(http.StatusBadRequest, "INVALID_QUERY",
 			"max_chars must be one integer from 1 to %d", sessionAnswersMaxChars))
 		return
 	}
 	items, err := sessionanswers.List(r.Context(), s.deps.Store.Pool, session, since)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	response := model.SessionAnswersResponse{SessionID: session, Since: since, Total: len(items), Items: items}

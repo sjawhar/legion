@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-592",
+  "completed": "2026-10-31T11:02:00Z",
+  "round": 9,
+  "headSha": "d7182e35b67c6980dd2fbdc63a71b3c4318bac38",
+  "codeHeadSha": "530c866955816e6b04fda4d0b07859c5fe1c2a9a",
+  "loadRule": "Every run on pod 9534abcf-6826-448e-9408-b04ce8b93c7b, in adjacent base/head pairs (base 07c21242 from the worktree /legion/scratch/tmp/infra-592/basewt, head the workspace), nothing else of mine running during the pairs; each run uploaded the moment it finished (dispatch://INFRA-592/artifact/infra-592-tester-r9-t9-*-tar-gz, 10 runs); memory sampled every 2 s beside the series: sampled peak 10.80 GiB of 19, 1,239 samples.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Their 10x result reproduced in two pairs: head 8.07 and 8.18 events/s committed (theirs 8.34), base 3.85 and 3.99 (theirs 4.09), every refusal 429, 0 connection failures, request-pool waiters at most 1. Their 1x claim (head refused nothing in three pairs) did not hold in mine: one of my three head 1x runs refused 126 reads and 8 writes (the failure below); their port refusal reproduced on a fresh root."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "At 1x the head refuses nothing, reads or writes (the architect's round-9 check 1)",
+      "evidence": "Three adjacent 1x pairs (--events 4 --sessions 400 --requests 60): head t9-head-1x-a 0/0, t9-head-1x-b 0/0, t9-head-1x-c 126 reads (1.17%) and 8 writes (1.11%), all 429 OVERLOADED; base t9-base-1x-a 221 reads and 28 writes, t9-base-1x-b 0/0, t9-base-1x-c 0/1. t9-head-1x-c's in-window refusals fall at 10:27:58-10:28:13 (read refusal counter 38 -> 108 between the 10:27:58 and 10:28:03 samples, write 5 -> 12; loadgen logs write refusals at 10:28:09-13). In that window: no 'event horizon held back' line in Dispatch's log (none in the run); the 1 s /proc/stat sampler's ticks were 1.02-1.43 s at 50-82% CPU (no box-wide stall); Postgres's log shows 1.04 s, 2.02 s and 1.58 s executions of the artifact-listing select (stmtcache_731df244...) at 10:28:00-08 on dispatch-requests, and a dispatch-settlements backend's 'select closed_at is null from issues where key = $1 for no key update' taking 3.26 s at 10:28:09 (a row-lock wait); 33 comment writes and 27 issue reads took over 2 s each between 10:28:00 and 10:28:16. loadgen's own 5 s sampler took no sample between 10:28:03 and 10:28:16, so admission's in-flight gauges at the peak are unsampled (the 10:28:03 sample shows 15 reads and 8 writes in flight). So the burst is Postgres-side slowness (a row-lock wait and slow listing reads) filling slots for about 10 s, not the event-horizon hold of round 8 and not a box stall; which write held the issue row is not established. No red test: it appears in one of three 180 s load runs. Evidence: dispatch://INFRA-592/artifact/infra-592-tester-r9-t9-head-1x-c-tar-gz (dispatch.log, samples.json, boxcpu) and the Postgres log lines quoted here."
+    }
+  ],
+  "architectChecks": {
+    "oneX": "FAIL in one of three pairs (above).",
+    "tenX": "PASS on the collapse criterion; read share reported. Two adjacent pairs (--events 40 --sessions 1000 --requests 600): base a/b 3.85/3.99 of 39.81 events/s committed, 14,161/15,156 of 107,355 reads served (13.2%/14.1%, 78.7/84.2 reads/s); head a/b 8.18/8.07 events/s, 8,830/8,985 reads (8.2%/8.4%, 49.1/49.9 reads/s), read p50 33/31 ms and p99 1,602/1,584 ms. Every refusal 429 OVERLOADED, 0 connection failures and 0 other non-2xx in all four; request-pool waiters (dispatch_db_pool_waiting) at most 1; goroutines waiting for a connection at most 12-14. Reads are not starved (about 50/s served, fast when served) but at 10x the head serves fewer reads than 1x offers (60/s) and 38-42% fewer than the base, while committing twice the events: the trade the PR body names. Dispatch RSS max 6.9-7.0 GB at the head against 4.4-4.7 GB at the base.",
+    "harnessPorts": "PASS. A fresh LOADTEST_ROOT's `stack.sh setup` with LOADTEST_PG_PORT=16250 refused: 'these stack ports lie inside this machine's ephemeral port range 16000-65535 (/proc/sys/net/ipv4/ip_local_port_range): postgres 16250 (LOADTEST_PG_PORT)...' (it does initdb and write stack.json before refusing); its default ports were 11280-11287. All ten pair steps started Dispatch and bound every port (0 'address already in use'), including the steps right after the two 10x runs.",
+    "realBinary": "PASS at the head. 13 slow-body writers: all 13 400 REQUEST_BODY_UNREADABLE at 61.6-62.2 s; normal writes at 5, 30, 55, 65, 70, 75 s all 201 in 0.08-0.11 s (with 24 write units the tricklers no longer hold every unit). issues locked ACCESS EXCLUSIVE 30 s: 28 reads 503 REQUEST_TIMEOUT at 20.00-20.10 s, 12 reads 429 at 1.01-1.05 s. Proxy SIGSTOPped 20 s: 60 reads and 20 writes 503 DATABASE_BUSY within 3.01 s; /healthz 200 after; 3 ERROR lines, the registry heartbeat during the freeze.",
+    "ci": "At 530c8669 at 11:00Z: changes and pr-title success; every other lane (lint, typecheck, test, ci-filters, dispatch, envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-go-race-pmdoc and the rest) queued, and ci-ok not yet created: all unread, read as queued, not waited for."
+  },
+  "proof": [
+    {
+      "criterion": "10x refuses only with 429 and does not collapse; committed events against the base",
+      "surface": "INFRA-589's 2-core load reproduction, adjacent base/head pairs on one pod",
+      "command": "run-step.sh t9-{base,head}-10x-{a,b} --events 40 --sessions 1000 --requests 600 (r10.sh)",
+      "observed": "head 8.18 and 8.07 of 39.81 events/s committed, every refusal 429, 0 connection failures, request-pool waiters at most 1, 49-50 reads/s served",
+      "headSha": "d7182e35b67c6980dd2fbdc63a71b3c4318bac38",
+      "negativeControl": "base 07c21242 in the same pairs: 3.85 and 3.99 events/s committed"
+    },
+    {
+      "criterion": "The load harness refuses a port inside the ephemeral range, and a stack binds every time",
+      "surface": "packages/envoy/loadtest/stack.sh on the pod",
+      "command": "LOADTEST_ROOT=<fresh> LOADTEST_PG_PORT=16250 stack.sh setup; then ten run-step.sh steps on ports 11250-11257",
+      "observed": "setup refused naming the range 16000-65535 and LOADTEST_PG_PORT; ten steps, 0 bind failures",
+      "headSha": "d7182e35b67c6980dd2fbdc63a71b3c4318bac38",
+      "negativeControl": "round 8 on ports 16250-16257: two steps failed with 'bind: address already in use' after a 10x step"
+    },
+    {
+      "criterion": "Slow bodies, request deadlines and bounded connection waits on the real binary",
+      "surface": "the real envoy-dispatch, raw HTTP clients and psql",
+      "command": "slowbody.py 11255 <issue>; bounds.sh",
+      "observed": "13 tricklers 400 REQUEST_BODY_UNREADABLE at 61.6-62.2 s with normal writes 201 throughout; 28 x 503 REQUEST_TIMEOUT at 20.0-20.1 s and 12 x 429; 80 x 503 DATABASE_BUSY within 3.0 s",
+      "headSha": "d7182e35b67c6980dd2fbdc63a71b3c4318bac38",
+      "negativeControl": "round 8 at 07c21242 (write limit 12): the 13th trickler 429 and normal writes 429 until the tricklers were cut"
+    }
+  ]
+}

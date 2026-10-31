@@ -87,9 +87,10 @@ const (
 	// spill does, so a keyed 25 MiB upload costs no more memory than an unkeyed one.
 	keyedBodyInMemory = 1 << 20
 	// keyedBodyMax is the largest body an upload route reads: an upload's file and a megabyte of
-	// fields (uploadArtifactFor). Every other route reads a JSON body of at most
-	// maxJSONRequestBytes (routeBodyLimit).
-	keyedBodyMax = maxArtifactBlobSize + 1<<20
+	// fields (uploadArtifactFor), which is what the table gives those routes
+	// (apiRoute.BodyLimit, upload). Every other route reads a JSON body of at most
+	// maxJSONRequestBytes (apiRoute.bodyLimit).
+	keyedBodyMax = maxUploadRequestBytes
 	// keyedBookkeeping bounds the layer's work around the handler - the claim before it, and each
 	// statement recording its answer after it - which runs on past a client that went away, since
 	// its retry needs the key claimed and the answer recorded.
@@ -152,15 +153,15 @@ var replayKeptMembers = []string{"advice", "ask_waiting_on"}
 // answer's shape: the replayKeptMembers stored holds and fresh does not (a write's advice, a reply's
 // ask_waiting_on) kept, and nothing else of stored, so a member the fresh read leaves out is never
 // answered stale. With no stored answer it answers fresh alone. Its status is the write's own 201.
-func (s *server) writeRefreshed(w http.ResponseWriter, stored []byte, fresh any) {
+func (s *server) writeRefreshed(w http.ResponseWriter, r *http.Request, stored []byte, fresh any) {
 	encoded, err := json.Marshal(fresh)
 	if err != nil {
-		s.writeHandlerError(w, fmt.Errorf("encode a replayed resource: %w", err))
+		s.writeHandlerError(w, r, fmt.Errorf("encode a replayed resource: %w", err))
 		return
 	}
 	var current map[string]json.RawMessage
 	if err := json.Unmarshal(encoded, &current); err != nil {
-		s.writeHandlerError(w, fmt.Errorf("read a replayed resource: %w", err))
+		s.writeHandlerError(w, r, fmt.Errorf("read a replayed resource: %w", err))
 		return
 	}
 	var answer map[string]json.RawMessage
@@ -224,10 +225,9 @@ type resolvedCaller struct {
 // died is taken over, once its lease lapses. A handler cut off with its client would roll its
 // transactions back and leave the next attempt to start again from nothing, so a write that takes
 // the server longer than the client waits could never land.
-func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, replay keyedReplay) http.HandlerFunc {
+func (s *server) keyedWrites(method, pattern string, bodyLimit int64, handler http.HandlerFunc, replay keyedReplay) http.HandlerFunc {
 	wildcards := patternWildcards(pattern)
 	keepsAnswer := !answerHoldsSecret[method+" "+pattern]
-	bodyLimit := routeBodyLimit(method, pattern)
 	run := handler
 	if s.deps.TestHooksEnabled {
 		run = s.slowedByTestHook(handler)
@@ -240,7 +240,7 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 			return
 		}
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		actor, human, err := s.optionalActor(r)
@@ -261,14 +261,14 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 		inFlight, err := s.requestKeyInFlight(r.Context(), login, key)
 		if err != nil {
 			w.Header().Set(contracts.IdempotencyKeyHeader, key)
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		if inFlight {
 			if s.repeatFoundInFlight != nil {
 				s.repeatFoundInFlight()
 			}
-			s.answerDrainedRepeat(w, r, method, pattern, wildcards, login, key, replay)
+			s.answerDrainedRepeat(w, r, method, pattern, bodyLimit, wildcards, login, key, replay)
 			return
 		}
 		digest := sha256.New()
@@ -281,7 +281,7 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 			// Dispatch's own failure, not the request's: answered as a 5xx under the key, which
 			// nothing has claimed, so the client asks again under it.
 			w.Header().Set(contracts.IdempotencyKeyHeader, key)
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		case err != nil:
 			writeError(w, "REQUEST_BODY_UNREADABLE", http.StatusBadRequest, "could not read the request body: "+err.Error())
@@ -290,7 +290,7 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 		replayable, err := body.reader()
 		if err != nil {
 			w.Header().Set(contracts.IdempotencyKeyHeader, key)
-			s.writeHandlerError(w, fmt.Errorf("reread a keyed request's body: %w", err))
+			s.writeHandlerError(w, r, fmt.Errorf("reread a keyed request's body: %w", err))
 			return
 		}
 		if body.size > bodyLimit {
@@ -341,18 +341,6 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 		settled = true
 		answer.deliver()
 	}
-}
-
-// routeBodyLimit is the largest body a route reads: an upload's file and a megabyte of fields
-// (uploadArtifactFor) for an upload route, and a JSON body (decodeJSON) for every other. It is the
-// most the keyed layer spools before its handler runs - a body past it is refused by the route's
-// handler whatever its key, so it runs unkeyed rather than spooled - and the most an early answer
-// discards before it is written (drainBeforeAnswer).
-func routeBodyLimit(method, pattern string) int64 {
-	if keyedUploads[method+" "+pattern] {
-		return keyedBodyMax
-	}
-	return maxJSONRequestBytes
 }
 
 // keyedUploads is every keyed route whose body may hold a file (uploadArtifactFor).
@@ -545,7 +533,7 @@ func (w spillWriter) Write(p []byte) (int, error) {
 }
 
 // readKeyedBody reads body into a keyedBody, at most one byte past limit, the route's own
-// (routeBodyLimit), writing it to digest as it goes (bodyDigest). A body that fits in
+// (apiRoute.bodyLimit), writing it to digest as it goes (bodyDigest). A body that fits in
 // keyedBodyInMemory never touches the disk: a route whose limit is no more than that holds even its
 // one byte past the limit in memory.
 func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (*keyedBody, error) {
@@ -796,12 +784,12 @@ func (s *server) claimRequestKey(
 			return claim, false
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			s.writeHandlerError(w, fmt.Errorf("claim an idempotency key: %w", err))
+			s.writeHandlerError(w, r, fmt.Errorf("claim an idempotency key: %w", err))
 			return claim, true
 		}
 		held, found, err := s.readHeldRequestKey(ctx, login, key)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return claim, true
 		}
 		if !found {
@@ -816,7 +804,7 @@ func (s *server) claimRequestKey(
 				delete from request_keys
 				where login = $1 and idempotency_key = $2 and created_at < now() - make_interval(secs => $3)
 			`, login, key, contracts.IdempotencyKeyTTL.Seconds()); err != nil {
-				s.writeHandlerError(w, fmt.Errorf("expire an idempotency key: %w", err))
+				s.writeHandlerError(w, r, fmt.Errorf("expire an idempotency key: %w", err))
 				return claim, true
 			}
 			continue
@@ -829,7 +817,7 @@ func (s *server) claimRequestKey(
 			  and status is null and recovery is null and committed_at is null
 		`, login, key, held.attempt)
 		if err != nil {
-			s.writeHandlerError(w, fmt.Errorf("take over an idempotency key: %w", err))
+			s.writeHandlerError(w, r, fmt.Errorf("take over an idempotency key: %w", err))
 			return claim, true
 		}
 		if tag.RowsAffected() == 1 {
@@ -905,23 +893,22 @@ func answerHeldKey(w http.ResponseWriter, r *http.Request, key string, held held
 // answered 409 KEY_IN_FLIGHT at once, with nothing read: it has sent nothing, so the answer is as
 // fresh as the key, and a read would ask it for its whole body only to judge it.
 //
-// The body is read for at most drainTime (readFor): one that stops arriving is answered 409
-// KEY_IN_FLIGHT, which is what the key said, and the connection closes after it. A body past the
-// route's limit is answered as its route answers one (bodyTooLarge), unkeyed, as a request whose
-// body is past the limit runs unkeyed. Either keeps the read's deadline for net/http's own reads
-// after the answer; only a body read to its end lifts it.
+// The body is read under the bound it arrives under, whatever is left of it (drainedBody.arm):
+// one that stops arriving is answered 409 KEY_IN_FLIGHT, which is what the key said, and the
+// connection closes after it. A body past the route's limit is answered as its route answers one
+// (bodyTooLarge), unkeyed, as a request whose body is past the limit runs unkeyed. Either keeps
+// that bound for net/http's own reads after the answer; only a body read to its end lifts it
+// (drainedBody.lift).
 func (s *server) answerDrainedRepeat(
-	w http.ResponseWriter, r *http.Request, method, pattern string, wildcards []string, login, key string, replay keyedReplay,
+	w http.ResponseWriter, r *http.Request, method, pattern string, limit int64, wildcards []string, login, key string, replay keyedReplay,
 ) {
 	if expectsContinue(r) {
 		w.Header().Set(contracts.IdempotencyKeyHeader, key)
 		writeKeyInFlight(w, key)
 		return
 	}
-	limit := routeBodyLimit(method, pattern)
 	digest := sha256.New()
 	writeRequestFields(digest, r, method, pattern, wildcards)
-	lift := s.readFor(w)
 	size, err := digestKeyedBody(r.Body, digest, r.Header.Get("Content-Type"), limit)
 	switch {
 	case err != nil:
@@ -934,13 +921,12 @@ func (s *server) answerDrainedRepeat(
 		writeError(w, tooLarge.code, tooLarge.status, tooLarge.message)
 		return
 	}
-	lift()
 	w.Header().Set(contracts.IdempotencyKeyHeader, key)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), keyedBookkeeping)
 	defer cancel()
 	held, found, err := s.readHeldRequestKey(ctx, login, key)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if found && answerHeldKey(w, r, key, held, held.state(hex.EncodeToString(digest.Sum(nil)), replay != nil), replay) {
@@ -1155,7 +1141,7 @@ func replayRecovered[T recoveryPoint](
 	return func(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, stored []byte) {
 		var point T
 		if err := json.Unmarshal(recovery, &point); err != nil {
-			s.writeHandlerError(w, fmt.Errorf("read a recovery point: %w", err))
+			s.writeHandlerError(w, r, fmt.Errorf("read a recovery point: %w", err))
 			return
 		}
 		replay(w, r, point, stored)

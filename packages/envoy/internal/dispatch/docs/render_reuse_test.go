@@ -386,7 +386,7 @@ func (sh *renderShadow) op(t *testing.T, ctx context.Context, run func(ctx conte
 func (sh *renderShadow) write(t *testing.T, ops ...func(ctx context.Context) error) *liveWrite {
 	t.Helper()
 	var write *liveWrite
-	if err := joinedWrite(sh.service, func(ctx context.Context) error {
+	if err := joinedWrite(sh.service, sh.artifactID, func(ctx context.Context) error {
 		for _, run := range ops {
 			write = sh.op(t, ctx, run)
 		}
@@ -827,7 +827,7 @@ func TestRenderReuseAReloadedRoomNeverTakesTheWritesRendering(t *testing.T) {
 				}
 			}
 			m := sh.measure()
-			ctx := context.Background()
+			ctx := gated(t, service, context.Background(), artifactID)
 			tx, err := service.store.Pool.Begin(ctx)
 			if err != nil {
 				t.Fatalf("begin: %v", err)
@@ -933,7 +933,7 @@ func TestRenderReuseAForeignCommitBetweenOperations(t *testing.T) {
 			service, artifactID, sh := newWarmRenderReuseRoom(t)
 			m := sh.measure()
 			var write *liveWrite
-			if err := joinedWrite(service, func(ctx context.Context) error {
+			if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 				sh.op(t, ctx, applyOps(service, artifactID, reuseAgent, model.EditOp{Op: "replace", Find: "Paragraph 15 opens", With: "Paragraph 15 now opens"}))
 				release := holdPeerEdit(t, service, artifactID, &service.beforeObserveUpdate, replaceRun("Paragraph 16 opens", "Paragraph 16 then opens"))
 				if consumedFirst {
@@ -1030,7 +1030,7 @@ func TestRenderReuseAColdWriteAppendedDuringALoadIsRendered(t *testing.T) {
 		t.Fatal("the room's load never reached the window it is held in")
 	}
 	m := sh.measure()
-	ctx := context.Background()
+	ctx := gated(t, service, context.Background(), artifactID)
 	tx, err := service.store.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)

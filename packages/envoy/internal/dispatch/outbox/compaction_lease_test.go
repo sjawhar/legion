@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -27,7 +25,7 @@ func (d *countingDocs) CompactAll(context.Context) error {
 }
 
 // leasesOf is the pool a compaction takes its lease on, the one cmd/dispatch gives the outbox.
-func leasesOf(t *testing.T, database *store.Store) *pgxpool.Pool {
+func leasesOf(t *testing.T, database *store.Store) *store.RawPool {
 	t.Helper()
 	leases, err := database.Pool.Leases()
 	if err != nil {
@@ -52,7 +50,7 @@ func TestTheCompactionTickWhoseLeaseIsHeldElsewhereCompactsNothing(t *testing.T)
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(ctx, leases, documentCompactionLease, time.Time{}, 0, func(context.Context) {
+		held <- duty.Exclusive(ctx, leases, duty.DocumentCompactionLease, time.Time{}, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})
@@ -80,9 +78,9 @@ func TestTheCompactionTickWhoseLeaseIsHeldElsewhereCompactsNothing(t *testing.T)
 }
 
 // compactTick is one tick of compactDaily's loop, due now: the compaction under
-// documentCompactionLease and its period, as duty.RunLeased runs it.
+// duty.DocumentCompactionLease and its period, as duty.RunLeased runs it.
 func compactTick(ctx context.Context, deps Deps) {
-	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, time.Now(), compactInterval, func(ctx context.Context) {
+	duty.Exclusive(ctx, deps.Leases, duty.DocumentCompactionLease, time.Now(), compactInterval, func(ctx context.Context) {
 		compactDocuments(ctx, deps)
 	})
 }

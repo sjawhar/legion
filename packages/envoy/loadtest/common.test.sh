@@ -24,9 +24,11 @@
 # are refused as "not visible"; (g) a record of another PID namespace whose pid is a live process
 # here (this test's own) is refused as "not visible", without naming that process as the holder;
 # (i) a root always gets the same set of ports, these two roots get two sets that share none (two
-# roots in general share all 7 when their paths hash into one block of the 200, which stack.sh
+# roots in general share all 8 when their paths hash into one block of the 200, which stack.sh
 # refuses), every port of every block lies in 1024-65535 and no two ports of two blocks meet, and a
-# LOADTEST_*_PORT overrides its own port alone.
+# LOADTEST_*_PORT overrides its own port alone; (j) a port inside the machine's ephemeral port
+# range is refused, naming the range, the port and the LOADTEST_*_PORT that moves it, while a
+# range file that cannot be read or parsed refuses nothing.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -428,13 +430,14 @@ ports_for() {
   shift
   env -u LOADTEST_PG_PORT -u LOADTEST_PROXY_PORT -u LOADTEST_NATS_PORT \
     -u LOADTEST_NATS_MONITOR_PORT -u LOADTEST_LISTENER_PORT -u LOADTEST_DISPATCH_PORT \
-    -u LOADTEST_PPROF_PORT "$@" bash -c 'source "$1"; stack_ports "$2"' ports "$helper" "$root"
+    -u LOADTEST_PPROF_PORT -u LOADTEST_METRICS_PORT "$@" \
+    bash -c 'source "$1"; stack_ports "$2"' ports "$helper" "$root"
 }
 
 # case_stack_ports: the stack's default ports follow LOADTEST_ROOT, so two Legion roles of one pod,
 # each on its own root, almost always start a stack each with no port variable set: each root's path
 # picks one of the 200 blocks of ports, and no two ports of one block or of two different blocks
-# meet. Two roots whose paths pick one block (about 1 pair in 200) hold the same 7 ports; the two
+# meet. Two roots whose paths pick one block (about 1 pair in 200) hold the same 8 ports; the two
 # roots below do not.
 case_stack_ports() {
   out=""
@@ -446,7 +449,7 @@ case_stack_ports() {
   [ "$one" != "$two" ] || { out="$one" fail "(i) two roots got the same ports"; return; }
   overlap=$(comm -12 <(awk '{print $2}' <<<"$one" | sort) <(awk '{print $2}' <<<"$two" | sort))
   [ -z "$overlap" ] || { out="$one"$'\n'"$two" fail "(i) two roots share the ports $(tr '\n' ' ' <<<"$overlap")"; return; }
-  [ "$(wc -l <<<"$one")" = 7 ] || { out="$one" fail "(i) a root's ports are not the 7 stack.json keys"; return; }
+  [ "$(wc -l <<<"$one")" = 8 ] || { out="$one" fail "(i) a root's ports are not the 8 stack.json keys"; return; }
 
   # Every port of every block, against every other: all inside 1024-65535, none twice.
   local report
@@ -476,6 +479,47 @@ case_stack_ports() {
   printf 'PASS: the default ports follow LOADTEST_ROOT, two roots in two blocks share no port, and each LOADTEST_*_PORT overrides its own\n'
 }
 
+# check_ports_for ROOT [NAME=VALUE...]: check_ephemeral_ports over ROOT's ports, in a shell that
+# holds no LOADTEST_*_PORT but the ones given. Sets out to what it printed and rc to its status.
+check_ports_for() {
+  local root=$1
+  shift
+  rc=0
+  out=$(env -u LOADTEST_PG_PORT -u LOADTEST_PROXY_PORT -u LOADTEST_NATS_PORT \
+    -u LOADTEST_NATS_MONITOR_PORT -u LOADTEST_LISTENER_PORT -u LOADTEST_DISPATCH_PORT \
+    -u LOADTEST_PPROF_PORT -u LOADTEST_METRICS_PORT "$@" \
+    bash -c 'source "$1"; check_ephemeral_ports "$(stack_ports "$2")"' ports "$helper" "$root" 2>&1) || rc=$?
+}
+
+# case_ephemeral_ports: a port inside the machine's ephemeral port range is refused before
+# anything tries to bind it. The kernel gives such a port to an outbound connection, which is how
+# a root in the old 15000 base lost its Dispatch port to the load generator between two steps
+# ("bind: address already in use"); the default blocks now lie below every such range. The range
+# file is injected through LOADTEST_EPHEMERAL_RANGE_FILE, so the test writes nothing under /proc,
+# and a file it cannot read or parse refuses nothing.
+case_ephemeral_ports() {
+  out=""
+  local range="${temporary_dir}/ip_local_port_range" root=/legion/scratch/tmp/lt-one
+  printf '16000\t65535\n' >"$range"
+
+  check_ports_for "$root" LOADTEST_EPHEMERAL_RANGE_FILE="$range"
+  ((rc == 0)) || { fail "(j) a root's default ports were refused against the ephemeral range 16000-65535"; return; }
+  [ -z "$out" ] || { fail "(j) the check printed something for ports below the ephemeral range"; return; }
+
+  check_ports_for "$root" LOADTEST_EPHEMERAL_RANGE_FILE="$range" LOADTEST_DISPATCH_PORT=16255
+  ((rc != 0)) || { out="" fail "(j) a Dispatch port of 16255 passed the ephemeral range 16000-65535"; return; }
+  [[ $out == *16000-65535* && $out == *"dispatch 16255"* && $out == *LOADTEST_DISPATCH_PORT* ]] ||
+    { fail "(j) the refusal names the range, the port and its variable"; return; }
+
+  check_ports_for "$root" LOADTEST_EPHEMERAL_RANGE_FILE="${temporary_dir}/no-such-range" LOADTEST_DISPATCH_PORT=16255
+  ((rc == 0)) || { fail "(j) a port was refused with no readable range file"; return; }
+  printf 'not a range\n' >"$range"
+  check_ports_for "$root" LOADTEST_EPHEMERAL_RANGE_FILE="$range" LOADTEST_DISPATCH_PORT=16255
+  ((rc == 0)) || { fail "(j) a port was refused against a range file that holds no two numbers"; return; }
+  out=""
+  printf 'PASS: a port inside the machine ephemeral range is refused, naming the range, the port and its variable\n'
+}
+
 failed=0
 case_orphaned_child || failed=$((failed + 1))
 case_stale_record || failed=$((failed + 1))
@@ -486,7 +530,8 @@ case_waiting_callers || failed=$((failed + 1))
 case_foreign_record_live_pid || failed=$((failed + 1))
 case_prepare_stack_built_migration || failed=$((failed + 1))
 case_stack_ports || failed=$((failed + 1))
+case_ephemeral_ports || failed=$((failed + 1))
 if ((failed > 0)); then
-  printf 'FAIL: %d of 9 cases failed\n' "$failed" >&2
+  printf 'FAIL: %d of 10 cases failed\n' "$failed" >&2
   exit 1
 fi

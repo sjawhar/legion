@@ -38,8 +38,8 @@ import (
 
 // promptShutdown bounds a SIGTERM's whole ordered shutdown with a dashboard open. Closing the
 // sockets, finishing the requests in flight and settling one small document take milliseconds; a
-// connection that held the HTTP drain open would cost httpDrainBeforeDocuments, eleven seconds,
-// alone.
+// connection that held the HTTP drain open would hold it for its whole share of the shutdown's
+// deadline, six seconds, alone.
 const promptShutdown = 3 * time.Second
 
 // streamedSessionID is the session whose conversation the test's agent view watches; an agent
@@ -86,13 +86,13 @@ func TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument(t *testing
 	process.checkSettledAtShutdown(t, database, artifactID)
 }
 
-// A request in flight can hold the HTTP drain for its whole share of the budget, here a title change
-// queued behind another writer's lock on the issue. The document service starts once that share
-// ends, so the settlement owed by the edit before the signal still runs and commits. Settlement waits
-// on the same lock: the edit's own timer starts one two seconds in, during the drain, and Shutdown
-// starts another. The lock is released once Shutdown's is queued behind it too, or two seconds after
-// the document service started, which is ample for it to read what is owed; a release before that
-// read could let the timer's settlement commit first.
+// A request in flight can hold the HTTP drain for its whole share of the shutdown's deadline, here a
+// title change queued behind another writer's lock on the issue. The document service starts once
+// that share ends, so the settlement owed by the edit before the signal still runs and commits.
+// Settlement waits on the same lock: the edit's own timer starts one two seconds in, during the
+// drain, and Shutdown starts another. The lock is released once Shutdown's is queued behind it too,
+// or two seconds after the document service started, which is ample for it to read what is owed; a
+// release before that read could let the timer's settlement commit first.
 func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *testing.T) {
 	database := storetest.Open(t)
 	process := startDispatchProcess(t, database.Pool.Config().ConnString())
@@ -129,14 +129,13 @@ func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *tes
 // writes (lockIssueRows in internal/dispatch/api/issue_parent.go), as pg_stat_activity shows it.
 const renameLock = `select parent_key from issues where key = $1 for no key update`
 
-// A write in flight at SIGTERM can wait on a lock past the HTTP drain's share, the document
-// service's budget and the point a fixed shutdown bound would end it, here a title change behind
-// another writer that holds the issue for 27 seconds after the signal, 3 s inside the runtime's
-// kill. The database is answering, so Dispatch keeps the request's connection open until the write
-// commits and its answer is sent, and only then closes the pool, as the deferred close of the pool
-// before this shutdown order did.
+// A write in flight at SIGTERM can wait on a lock past the HTTP drain's share and the document
+// service's, here a title change behind another writer that holds the issue until 3 s before the
+// shutdown's deadline. The database is answering, so Dispatch keeps the request's connection open
+// until the write commits and its answer is sent, and only then closes the pool: a write that
+// finishes before the deadline is committed and answered, however late in it.
 func TestSIGTERMWhileAWriteWaitsOnALockCommitsItAndAnswersBeforeExit(t *testing.T) {
-	const lockHeldAfterSIGTERM = 27 * time.Second
+	const lockHeldAfterSIGTERM = stopGrace - shutdownMargin - 3*time.Second
 	database := storetest.Open(t)
 	process := startDispatchProcess(t, database.Pool.Config().ConnString())
 	process.waitHealthy(t)
@@ -483,11 +482,13 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
-		shutdown(server.Config, documentService, database.Pool, func() {
+		stopping, stopped := shutdownContext()
+		defer stopped()
+		shutdown(stopping, server.Config, documentService, database.Pool, func() {
 			close(entered)
 			<-release
 			background.Wait()
-		}, func() {})
+		}, func(context.Context) {})
 	}()
 	select {
 	case <-entered:
@@ -582,30 +583,45 @@ func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) 
 }
 
 // A database that stops answering - a failover, a partition - holds every connection waiting on it,
-// and closing the pool waits for every connection in use. Once the document service has stopped,
-// Dispatch gives up on them when silentProbes health probes in a row have failed with no
-// connection taken back meanwhile, so it exits well inside a runtime's grace period instead of
-// being killed.
+// and closing the pool waits for every connection in use. Here it stops answering with a write in
+// flight, a title change already waiting at the database behind another writer's lock, which
+// holds the HTTP drain for its whole share, and with a resident room whose edit owes a
+// settlement, which spends the document service's whole share. Writes have no server deadline,
+// so nothing but the shutdown's one deadline bounds that: Dispatch must still give up on the
+// connections once silentProbes health probes in a row have failed, say so, and exit before that
+// deadline rather than be killed at stopGrace without a word.
 func TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget(t *testing.T) {
 	database := storetest.Open(t)
 	relay := startDatabaseRelay(t, database.Pool.Config().ConnString())
 	process := startDispatchProcess(t, relay.url)
 	process.waitHealthy(t)
-	_, artifactID := process.createIssue(t)
+	key, artifactID := process.createIssue(t)
 	editor := process.openEditor(t, artifactID, "before\n")
 	replaceText(t, editor, "before", "after")
 	waitForRoom(t, editor)
+	holder := lockIssue(t, database, key)
+	go func() {
+		// It never gets an answer: the database stops answering while it waits.
+		_, _ = process.renameIssue(key, "Never committed")
+	}()
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, 10*time.Second); waiting < 1 {
+		t.Fatalf("the title change never queued behind the issue lock:\n%s", process.Output.String())
+	}
 
 	relay.freeze()
 	signalled := process.Terminate(t)
-	process.WaitExit(t, "SIGTERM with the database unanswering")
+	// The wait outlasts the runtime's kill, so a process that overruns it is measured, not cut.
+	select {
+	case <-process.Exited:
+	case <-time.After(stopGrace + 15*time.Second):
+		t.Fatalf("Dispatch was still running %v after SIGTERM with the database unanswering:\n%s",
+			time.Since(signalled), process.Output.String())
+	}
 	exited := time.Since(signalled)
 	t.Logf("exited %v after SIGTERM", exited)
-	// Nothing is in flight over HTTP, so the document service starts at once and spends at most
-	// its budget (14 s: more than round 5's, so a loaded box's jitter on this real binary is
-	// proportionally bigger too, observed up to 26.4 s on this box); then each failed probe takes
-	// its two seconds and a poll interval.
-	if bound := documentShutdownTimeout + silentProbes*(2*time.Second+drainPollInterval) + 8*time.Second; exited > bound {
+	// One second of slack past the deadline covers the deferred stops, the log flush and the
+	// process's exit on a loaded box; the deadline itself is shutdownMargin inside the runtime's kill.
+	if bound := stopGrace - shutdownMargin + time.Second; exited > bound {
 		t.Errorf("Dispatch exited %v after SIGTERM with the database unanswering, want within %v", exited, bound)
 	}
 	if !strings.Contains(process.Output.String(), "once the database stopped answering") {

@@ -101,7 +101,7 @@ func (s *server) deliverySettings(w http.ResponseWriter, r *http.Request) (deliv
 			writeError(w, "DELIVERY_NOT_CONFIGURED", http.StatusNotFound, "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery")
 			return delivery.DeliverySettings{}, false
 		}
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return delivery.DeliverySettings{}, false
 	}
 	return settings, true
@@ -130,9 +130,9 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	population, err := s.readDeliveryPopulation(r.Context(), settings, from, to, query, true)
+	population, err := s.readDeliveryPopulation(r.Context(), s.deps.Store.Pool, settings, from, to, query, true)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, deliveryTimelineCompute(settings, population, from, to, time.Now().UTC()))
@@ -293,29 +293,30 @@ type deliveryWaitingRow struct {
 // unowned P0 list); nothing that computes from it reads again. With withWaiting it also reads the
 // deploy repository's pull requests still waiting at `from` (ListPullRequestsWaitingAt), resolved
 // through the same issue and session lookups so the timeline's waiting line filters them alike;
-// the measures read none.
-func (s *server) readDeliveryPopulation(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, query url.Values, withWaiting bool) (deliveryPopulation, error) {
-	return s.readDeliveryRows(ctx, settings, from, to, query, withWaiting, true)
+// the measures read none. Every read goes through pool: a route's through the request pool it is
+// served on, the delivery hub's through the live pool (deliveryHub.liveRead).
+func (s *server) readDeliveryPopulation(ctx context.Context, pool *store.Pool, settings delivery.DeliverySettings, from, to time.Time, query url.Values, withWaiting bool) (deliveryPopulation, error) {
+	return s.readDeliveryRows(ctx, pool, settings, from, to, query, withWaiting, true)
 }
 
 // readDeliveryRows is readDeliveryPopulation, and with withMeasures false leaves out the measures'
 // runs and unowned P0 list, which the Pipeline page's lead times do not read.
-func (s *server) readDeliveryRows(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, query url.Values, withWaiting, withMeasures bool) (deliveryPopulation, error) {
-	pool := s.deps.Store.Pool
+func (s *server) readDeliveryRows(ctx context.Context, pool *store.Pool, settings delivery.DeliverySettings, from, to time.Time, query url.Values, withWaiting, withMeasures bool) (deliveryPopulation, error) {
 	pop := deliveryPopulation{query: query, withWaiting: withWaiting, jobsByRun: map[int64][]delivery.DeliveryRunJob{}, windowJobs: map[int64][]delivery.DeliveryRunJob{}}
 
-	// Independent reads, side by side. They never shared a transaction (each is its own
-	// statement on the pool, so each already read its own snapshot), so running them at once
-	// loses no consistency they had. Each takes one connection under a hold mark of its own
+	// Independent reads, side by side, at most two at once. They never shared a transaction (each
+	// is its own statement on the pool, so each already read its own snapshot), so running them at
+	// once loses no consistency they had. Each takes one connection under a hold mark of its own
 	// (store.ForConcurrentRead): on the request's shared mark one read's open cursor would refuse
 	// the rest. The run jobs depend on the runs, so they follow the runs in the same goroutine.
 	//
-	// A timeline request therefore holds up to seven of the shared pool's connections
-	// (store.sharedPoolSize) for the length of its longest read, where it held one at a time. That
-	// is fine because none of them holds a lock or opens a transaction, so none waits on
-	// another caller or makes another caller wait on it: the deadlock the pool's guard exists to
-	// prevent needs a caller already holding a connection, which ForConcurrentRead refuses. A read
-	// past the pool's free connections waits for one, as any request does.
+	// A timeline request therefore holds up to two of its pool's connections at once
+	// (concurrentReadWeight, the weight admission counts its route at). Two, not one per read: a
+	// read per connection would let a few open Delivery pages hold a large share of the pool that
+	// every other request reads through. None of them holds a lock or opens a transaction, so none
+	// waits on another caller or makes another caller wait on it: the deadlock the pool's guard
+	// exists to prevent needs a caller already holding a connection, which ForConcurrentRead
+	// refuses.
 	runsWithJobs := func(list func(ctx context.Context) ([]delivery.DeliveryRun, error), runs *[]delivery.DeliveryRun, jobs *map[int64][]delivery.DeliveryRunJob) func(ctx context.Context) error {
 		return func(ctx context.Context) error {
 			listed, err := list(ctx)
@@ -378,6 +379,7 @@ func (s *server) readDeliveryRows(ctx context.Context, settings delivery.Deliver
 		})
 	}
 	reads, readsCtx := errgroup.WithContext(ctx)
+	reads.SetLimit(concurrentReadWeight)
 	read := func(fn func(ctx context.Context) error) error {
 		readCtx, err := store.ForConcurrentRead(readsCtx)
 		if err != nil {
@@ -417,10 +419,10 @@ func (s *server) readDeliveryRows(ctx context.Context, settings delivery.Deliver
 	if pop.titles, err = delivery.ResolveSessionTitles(ctx, pool, sessionIDs); err != nil {
 		return deliveryPopulation{}, err
 	}
-	if pop.issues, err = s.deliveryIssueFacts(ctx, issueKeys); err != nil {
+	if pop.issues, err = s.deliveryIssueFacts(ctx, pool, issueKeys); err != nil {
 		return deliveryPopulation{}, err
 	}
-	if pop.components, err = s.deliveryComponents(ctx, deliveryIssueProjects(pop.issues)); err != nil {
+	if pop.components, err = s.deliveryComponents(ctx, pool, deliveryIssueProjects(pop.issues)); err != nil {
 		return deliveryPopulation{}, err
 	}
 	return pop, nil
@@ -681,12 +683,12 @@ func (s *server) getDeliveryRun(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "NOT_FOUND", http.StatusNotFound, "no run "+strconv.FormatInt(runID, 10)+" of "+settings.DeployRepo)
 			return
 		}
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	jobs, err := delivery.ListRunJobs(ctx, pool, settings.DeployRepo, runID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	views := make([]delivery.DeliveryRunJobDetailView, len(jobs))
@@ -759,12 +761,12 @@ type deliveryIssue struct {
 	components []string
 }
 
-func (s *server) deliveryIssueFacts(ctx context.Context, keys []string) (map[string]deliveryIssue, error) {
+func (s *server) deliveryIssueFacts(ctx context.Context, pool *store.Pool, keys []string) (map[string]deliveryIssue, error) {
 	issues := make(map[string]deliveryIssue, len(keys))
 	if len(keys) == 0 {
 		return issues, nil
 	}
-	rows, err := s.deps.Store.Pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
 		select i.key, i.project_key, i.title, i.priority, coalesce(comp.ids, '{}'::text[])
 		from issues i
 		`+issueComponentsLateral+`
@@ -797,12 +799,12 @@ func deliveryComponentKey(project, id string) string {
 }
 
 // deliveryComponents names every component of projects, keyed by deliveryComponentKey.
-func (s *server) deliveryComponents(ctx context.Context, projects []string) (map[string]delivery.DeliveryComponentView, error) {
+func (s *server) deliveryComponents(ctx context.Context, pool *store.Pool, projects []string) (map[string]delivery.DeliveryComponentView, error) {
 	components := map[string]delivery.DeliveryComponentView{}
 	if len(projects) == 0 {
 		return components, nil
 	}
-	rows, err := s.deps.Store.Pool.Query(ctx, `select project_key, id, title, parent from components where project_key = any($1)`, projects)
+	rows, err := pool.Query(ctx, `select project_key, id, title, parent from components where project_key = any($1)`, projects)
 	if err != nil {
 		return nil, err
 	}

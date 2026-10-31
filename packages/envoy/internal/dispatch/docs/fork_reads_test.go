@@ -310,7 +310,7 @@ func TestForkReadsAMarkQuoteAnswersItsAnchorAndAVersionAfterItReusesItsRendering
 				id := fmt.Sprintf("c-%s-%d", mode.name, index)
 				var anchored Anchored
 				var version int
-				if err := joinedWrite(service, func(ctx context.Context) error {
+				if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 					base := readForkReads(service)
 					var err error
 					if anchored, err = service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkComment, ID: id, By: reuseAlice}, anchor.quote, nil); err != nil {
@@ -402,7 +402,7 @@ func TestForkReadsAMarkQuoteAnswersItsAnchorAndAVersionAfterItReusesItsRendering
 					quote, mark = firstQuote, first
 				}
 				var version int
-				if err := joinedWrite(service, func(ctx context.Context) error {
+				if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 					if _, err := service.MarkQuote(ctx, artifactID, first, firstQuote, nil); err != nil {
 						return fmt.Errorf("the first mark: %w", err)
 					}
@@ -487,7 +487,7 @@ func TestForkReadsAMarkQuoteAnswersItsAnchorAndAVersionAfterItReusesItsRendering
 				if !errors.As(readErr, &readRefusal) {
 					t.Fatalf("a read of the document answered %v, want an OutsideSchemaError", readErr)
 				}
-				err := joinedWrite(service, func(ctx context.Context) error {
+				err := joinedWrite(service, document, func(ctx context.Context) error {
 					base := readForkReads(service)
 					_, err := service.MarkQuote(ctx, document, mark, quote, nil)
 					requireForkReads(t, "MarkQuote", readForkReads(service).minus(base), outside.reads)
@@ -527,7 +527,7 @@ func runForkSteps(t *testing.T, service *Service, artifactID string, checks *ren
 	mode.prepare(t, service, artifactID)
 	checks.take()
 	var failures []string
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		for _, step := range steps {
 			base := readForkReads(service)
 			if err := step.run(ctx); err != nil {
@@ -684,7 +684,7 @@ func TestForkReadsEveryReuseOfAWritesRenderingDescribesItsFork(t *testing.T) {
 	t.Run("warm/an accept", func(t *testing.T) {
 		const id = "s-accept"
 		quote := "Step 43 two is taken next"
-		if err := joinedWrite(service, func(ctx context.Context) error {
+		if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 			if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkSuggestion, ID: id, By: reuseBob}, quote, nil); err != nil {
 				return err
 			}

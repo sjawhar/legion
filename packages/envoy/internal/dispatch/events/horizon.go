@@ -188,7 +188,7 @@ type Horizon struct {
 	safeThrough uint64
 	// safeAt is the created_at of the event at safe, as the observation that saw it read it.
 	safeAt time.Time
-	// newest is the highest A observed this generation (Pending).
+	// newest is the highest A observed this generation (Behind).
 	newest int64
 	// pending holds the observations still waiting for a later one to prove them safe, oldest
 	// first, each with an A above safe.
@@ -263,10 +263,10 @@ func (h *Horizon) Persisted(ctx context.Context) (int64, error) {
 //
 // Like Await, Safe never settles for an observation already in flight when it is called: that
 // one took its snapshot before the call and can miss an id committed just before it, and if its
-// A were at or below H it would leave Pending false, so the reader would arm no re-read for that
-// id. Safe waits it out and joins or runs the next. Its own observation saw every id committed
-// before the call, so each such id is at or below H, or stands above it and keeps Pending true
-// until H reaches it.
+// A were at or below H it would leave Behind false for the H it answers, so the reader would arm
+// no re-read for that id. Safe waits it out and joins or runs the next. Its own observation saw
+// every id committed before the call, so each such id is at or below H, or stands above it and
+// keeps Behind true until H reaches it.
 func (h *Horizon) Safe(ctx context.Context) (int64, error) {
 	h.mu.Lock()
 	after := h.started
@@ -335,11 +335,16 @@ func (h *Horizon) Await(ctx context.Context) (int64, error) {
 	}
 }
 
-// Pending reports whether an observed id stands above H (a gap a reader must re-read for).
-func (h *Horizon) Pending() bool {
+// Behind reports whether an observed id stands above safe, the H its caller read the log
+// through: a gap that caller must re-read for. The caller passes the H it read through and not
+// the one the Horizon holds now, because between its Safe and this call another reader's
+// observation can prove the ids it could not read final, which raises H to the newest id
+// observed. Measured against that H nothing stands above, so the events in (safe, newest], which
+// no reader has read, would wait for the next commit to be read.
+func (h *Horizon) Behind(safe int64) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.newest > h.safe
+	return h.newest > safe
 }
 
 // Proven returns H as already proven, running no observation: 0 before any observation has been

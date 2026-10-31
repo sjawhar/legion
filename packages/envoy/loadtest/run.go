@@ -63,6 +63,12 @@ type runConfig struct {
 	// args are the run's flags as meta.json records them: the normalized flag list, the token
 	// values redacted and the URL passwords removed (recordedArgs).
 	args []string
+
+	// schedule is -schedule: the window's load factors, empty for the rates as given.
+	schedule schedule
+	// recoveryRefP99 is -recovery-ref-p99, the reference request p99 in ms of the recovery
+	// criterion; nil takes it from the last windows of the step (computeRecovery).
+	recoveryRefP99 *float64
 	// replay is the replay's plan and roster under -source replay; nil under -source requests.
 	replay *replaySetup
 }
@@ -88,7 +94,9 @@ func runLoad(args []string) error {
 	mixFlag := fs.String("event-mix", defaultEventMix, "event mix: a preset ("+eventMixPresetNames()+") or kind=weight,...")
 	routeFlag := fs.String("route-mix", "", "route-mix file (default: the committed "+defaultRouteMixName+")")
 	human := fs.Float64("human", 0.1, "share of writes made by a person")
-	live := fs.Int("live", -1, "dashboard live sockets (default max(1, round(requests/30)))")
+	live := fs.Int("live", -1, "dashboard live sockets (default max(1, round(requests × the highest -schedule factor / 30)))")
+	scheduleFlag := fs.String("schedule", "", "load factors over the window, <factor>x:<duration>,... (such as 1x:60s,5x:60s,1x:120s); each factor multiplies -events and -requests, and the window is their total")
+	recoveryRefP99 := fs.Float64("recovery-ref-p99", 0, "with -schedule: the reference request p99 in ms of the recovery criterion (default: the last three 10 s windows of the step)")
 	rngSeed := fs.Uint64("rng-seed", 1, "seed of the event and request schedules")
 	natsConns := fs.Int("nats-conns", 50, "NATS connections the sessions share")
 	out := fs.String("out", "", "output directory (required)")
@@ -105,7 +113,8 @@ func runLoad(args []string) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	// The endpoint guard, then the two mixes, then the rates: each refusal names its input.
+	// The endpoint guard, then the two mixes, the schedule, then the rates: each refusal names its
+	// input.
 	ep, err := ef.resolve()
 	if err != nil {
 		return err
@@ -118,16 +127,30 @@ func runLoad(args []string) error {
 	if err != nil {
 		return err
 	}
-	replay := *source == sourceReplay
-	if !replay && *source != sourceRequests {
-		return fmt.Errorf("-source must be %s or %s, not %q", sourceRequests, sourceReplay, *source)
-	}
+	given := map[string]bool{}
 	var replayOnly []string
 	fs.Visit(func(f *flag.Flag) {
+		given[f.Name] = true
 		if strings.HasPrefix(f.Name, "replay-") {
 			replayOnly = append(replayOnly, "-"+f.Name)
 		}
 	})
+	sched, err := parseSchedule(*scheduleFlag)
+	if err != nil {
+		return err
+	}
+	*duration, err = scheduleWindow(sched, *duration, given["duration"])
+	if err != nil {
+		return err
+	}
+	refP99, err := recoveryReference(sched, *recoveryRefP99, given["recovery-ref-p99"])
+	if err != nil {
+		return err
+	}
+	replay := *source == sourceReplay
+	if !replay && *source != sourceRequests {
+		return fmt.Errorf("-source must be %s or %s, not %q", sourceRequests, sourceReplay, *source)
+	}
 	switch {
 	case *events < 0 || !finite(*events):
 		return fmt.Errorf("-events is required and must be 0 or more")
@@ -188,7 +211,7 @@ func runLoad(args []string) error {
 		}
 	}
 	if *live < 0 {
-		*live = max(1, int(math.Round(*requests/30)))
+		*live = defaultLiveSockets(*requests, sched)
 	}
 	if *name == "" {
 		*name = filepath.Base(filepath.Clean(*out))
@@ -200,10 +223,43 @@ func runLoad(args []string) error {
 		ep: ep, allowForeign: ef.allowForeign, name: *name, out: *out, seedPath: *seedPath,
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
-		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns,
+		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, schedule: sched, recoveryRefP99: refP99,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 		replay: rs,
 	}, sf)
+}
+
+// scheduleWindow is the measured window of a step with schedule s: the schedule's total. A
+// -duration given (durationSet) must equal it. With no schedule it is duration.
+func scheduleWindow(s schedule, duration time.Duration, durationSet bool) (time.Duration, error) {
+	if len(s) == 0 {
+		return duration, nil
+	}
+	total := s.total()
+	if durationSet && duration != total {
+		return 0, fmt.Errorf("-duration %s differs from the -schedule total %s; the schedule fills the window, so give no -duration or one equal to that total", duration, total)
+	}
+	return total, nil
+}
+
+// recoveryReference is -recovery-ref-p99 when given (set), nil otherwise. It is refused without a
+// schedule, and when it is not a number of ms more than 0.
+func recoveryReference(s schedule, ms float64, set bool) (*float64, error) {
+	switch {
+	case !set:
+		return nil, nil
+	case len(s) == 0:
+		return nil, fmt.Errorf("-recovery-ref-p99 applies only with -schedule: a step without one has no drop to recover from")
+	case !finite(ms) || ms <= 0:
+		return nil, fmt.Errorf("-recovery-ref-p99 must be a number of ms more than 0")
+	}
+	return &ms, nil
+}
+
+// defaultLiveSockets is the dashboard live sockets when -live is not given: one per 30 requests
+// per second at the schedule's highest factor (1 with no schedule), at least one.
+func defaultLiveSockets(requests float64, s schedule) int {
+	return max(1, int(math.Round(requests*s.maxFactor()/30)))
 }
 
 // redacted replaces a token, or a value whose password cannot be found, in what a step records.
@@ -238,14 +294,18 @@ type session struct {
 type reqRec struct {
 	route  string
 	status int
-	// code is the error code of a non-2xx answer's body ({"code": ...}); "" for none.
+	// code is the refusal code of an answer outside 2xx (callResult.code); "" for none.
 	code string
 	// tolerated says the action expected this non-2xx answer (the CLI's own 404 on an absent
 	// optional resource): it is no failure.
 	tolerated bool
 	transport bool
-	latency   time.Duration // arrival (or start, when the write never completed) to response read
-	connWait  time.Duration
+	// connFailure is the class of a request that got no complete response (connFailureOf).
+	connFailure string
+	// at is when the client began the request, Unix ns.
+	at       int64
+	latency  time.Duration // arrival (or start, when the write never completed) to response read
+	connWait time.Duration
 }
 
 type routeSummary struct {
@@ -259,6 +319,9 @@ type routeSummary struct {
 	// ("<status>" alone when the body named none).
 	Codes           map[string]int `json:"codes,omitempty"`
 	TransportErrors int            `json:"transport_errors"`
+	// Refusals counts the route's answers that carry a refusal code (refusalCodes), by code; a
+	// code with none is absent.
+	Refusals map[string]int `json:"refusals,omitempty"`
 }
 
 type requestsSummary struct {
@@ -266,12 +329,17 @@ type requestsSummary struct {
 	Sent       int     `json:"sent"`
 	SentPerS   float64 `json:"sent_per_s"`
 	// BelowTarget is set when the generator sent under 95% of the target rate.
-	BelowTarget        bool                    `json:"below_target"`
-	OK2xx              int                     `json:"ok_2xx"`
-	DroppedInflightCap int                     `json:"dropped_inflight_cap"`
-	LatencyMs          stat                    `json:"latency_ms"`
-	ConnWaitMs         stat                    `json:"conn_wait_ms"`
-	Routes             map[string]routeSummary `json:"routes"`
+	BelowTarget        bool `json:"below_target"`
+	OK2xx              int  `json:"ok_2xx"`
+	DroppedInflightCap int  `json:"dropped_inflight_cap"`
+	LatencyMs          stat `json:"latency_ms"`
+	ConnWaitMs         stat `json:"conn_wait_ms"`
+	// Refusals splits the sent requests that failed: by refusal code, then by connection failure,
+	// with the latency of the 429 and 503 answers.
+	Refusals refusalSummary `json:"refusals"`
+	// Answered counts the sent requests that got an HTTP status, whatever it was.
+	Answered int                     `json:"answered"`
+	Routes   map[string]routeSummary `json:"routes"`
 }
 
 type summaryConfig struct {
@@ -292,6 +360,9 @@ type summaryConfig struct {
 	GraceS    float64  `json:"grace_s"`
 	RNGSeed   uint64   `json:"rng_seed"`
 	NATSConns int      `json:"nats_conns"`
+	// Schedule is -schedule, absent without one. EventsPerS and RequestsPerS are the 1x rates the
+	// factors multiply.
+	Schedule schedule `json:"schedule,omitempty"`
 	// MarkerNonce is the run's marker nonce (markerTag): every marker the run wrote starts with it,
 	// and the run counts only the commit rows that carry it.
 	MarkerNonce string `json:"marker_nonce"`
@@ -317,6 +388,11 @@ type summary struct {
 	Sessions        sessionsSummary   `json:"sessions"`
 	Live            liveSummary       `json:"live"`
 	LiveBytes       int64             `json:"live_bytes"`
+	// Metrics is Dispatch's /metrics over the window: the Pools and admission table.
+	Metrics metricsSummary `json:"metrics"`
+	// Recovery is the recovery after the -schedule's last drop, absent without a schedule of two
+	// segments or more.
+	Recovery *recoverySummary `json:"recovery,omitempty"`
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
@@ -372,8 +448,12 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
-	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d marker-nonce=%s",
-		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, formatNonce(nonce))
+	schedText := "none"
+	if len(cfg.schedule) > 0 {
+		schedText = cfg.schedule.String()
+	}
+	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s schedule=%s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d marker-nonce=%s",
+		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, schedText, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, formatNonce(nonce))
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -498,6 +578,12 @@ func (st *step) openWindow(start time.Time) {
 	st.winEnd = st.winStart.Add(st.cfg.duration)
 }
 
+// ratePlan is a generator's rate plan for its 1x rate: the warm-up at 1x, then the window's
+// -schedule factors, or the 1x rate throughout without a schedule.
+func (st *step) ratePlan(base float64) []rateSegment {
+	return ratePlan(base, st.start, st.winStart, st.cfg.schedule)
+}
+
 func (st *step) inWindow(t time.Time) bool { return inWindow(t, st.winStart, st.winEnd) }
 
 func inWindow(t, winStart, winEnd time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
@@ -537,23 +623,24 @@ func (st *step) startDashboard(ctx context.Context, url string) *liveSockets {
 	return ls
 }
 
-// openLoop is an open-loop Poisson schedule at rate per second, from stream `stream` of rngSeed:
-// it draws the next arrival from start until one is at or after winEnd, sleeps until it, and calls
-// fire with the stream and whether the arrival is in the window [winStart, winEnd). fire draws
-// what the arrival does from the same stream, so the draws alternate, an arrival then its plan,
-// and one seed gives one schedule. A rate of 0 or less fires nothing. It returns when the
-// schedule ends or ctx does.
-func openLoop(ctx context.Context, rngSeed, stream uint64, rate float64, start, winStart, winEnd time.Time, fire func(r *rand.Rand, in bool)) {
-	if rate <= 0 {
+// openLoop is an open-loop Poisson schedule whose rate per second the plan gives (ratePlan), from
+// stream `stream` of rngSeed: it draws the next arrival from the plan's start until one is at or
+// after winEnd, sleeps until it, and calls fire with the stream, the arrival and whether it is in
+// the window [winStart, winEnd). fire draws what the arrival does from the same stream, so the
+// draws alternate, an arrival then its plan, and one seed gives one schedule. A plan whose rates
+// are all 0 or less fires nothing. It returns when the schedule ends or ctx does.
+func openLoop(ctx context.Context, rngSeed, stream uint64, plan []rateSegment, winStart, winEnd time.Time, fire func(r *rand.Rand, at time.Time, in bool)) {
+	if !slices.ContainsFunc(plan, func(s rateSegment) bool { return s.rate > 0 }) {
 		return
 	}
 	r := rand.New(rand.NewPCG(rngSeed, stream))
-	for next := start; ; {
-		next = next.Add(time.Duration(r.ExpFloat64() / rate * float64(time.Second)))
-		if !next.Before(winEnd) || !sleepUntil(ctx, next) {
+	for next := plan[0].from; ; {
+		var ok bool
+		next, ok = nextArrival(plan, next, r.ExpFloat64())
+		if !ok || !next.Before(winEnd) || !sleepUntil(ctx, next) {
 			return
 		}
-		fire(r, inWindow(next, winStart, winEnd))
+		fire(r, next, inWindow(next, winStart, winEnd))
 	}
 }
 
@@ -567,12 +654,12 @@ func (st *step) runEvents(ctx context.Context, wr *writer) (writes *collector[wr
 		var wg sync.WaitGroup
 		defer wg.Wait()
 		var marker int64
-		openLoop(ctx, st.cfg.rngSeed, 1, st.cfg.events, st.start, st.winStart, st.winEnd, func(r *rand.Rand, in bool) {
+		openLoop(ctx, st.cfg.rngSeed, 1, st.ratePlan(st.cfg.events), st.winStart, st.winEnd, func(r *rand.Rand, at time.Time, in bool) {
 			marker++
 			p := planEvent(r, st.cfg, st.sessions, st.sf, marker)
 			wg.Go(func() {
 				rec := wr.do(ctx, p)
-				rec.InWindow = in
+				rec.Scheduled, rec.InWindow = at.UnixNano(), in
 				writes.add(rec)
 			})
 		})
@@ -597,7 +684,7 @@ func (st *step) runRequests(ctx context.Context, a *api) (load *requestLoad, don
 		var wg sync.WaitGroup
 		defer wg.Wait()
 		var inflight atomic.Int64
-		openLoop(ctx, st.cfg.rngSeed, 2, st.cfg.requests, st.start, st.winStart, st.winEnd, func(r *rand.Rand, in bool) {
+		openLoop(ctx, st.cfg.rngSeed, 2, st.ratePlan(st.cfg.requests), st.winStart, st.winEnd, func(r *rand.Rand, _ time.Time, in bool) {
 			rt := st.cfg.routes.pick(r.Float64())
 			path := rt.render(st.sf.Issues[r.IntN(st.active)], st.sf.Projects[r.IntN(len(st.sf.Projects))])
 			id := who{}
@@ -617,7 +704,8 @@ func (st *step) runRequests(ctx context.Context, a *api) (load *requestLoad, don
 				if !in {
 					return
 				}
-				load.recs.add(reqRec{route: rt.Name, status: res.status, code: res.errorCode(), transport: res.err != nil, latency: time.Duration(res.end - res.arrival()), connWait: res.connWait})
+				load.recs.add(reqRec{route: rt.Name, status: res.status, transport: res.err != nil, code: res.code, connFailure: res.connFailure,
+					at: res.start, latency: time.Duration(res.end - res.arrival()), connWait: res.connWait})
 			})
 		})
 	}()
@@ -710,16 +798,17 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		watcherCount[st.sf.Issues[i].Key] = len(subscribed)
 	}
 	durS := cfg.duration.Seconds()
+	rs := reqs.recs.snapshot()
 	sum := summary{
 		Config: summaryConfig{
 			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, Live: cfg.live,
 			Dashboard: cfg.dashboard,
 			EventMix:  cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
-			MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
+			Schedule: cfg.schedule, MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
 		},
 		Events:   joinDelivery(ws, commits, ns.receipts.snapshot(), watcherCount, durS),
-		Requests: summarizeRequests(reqs.recs.snapshot(), int(reqs.dropped.Load()), cfg.requests, durS),
+		Requests: summarizeRequests(rs, int(reqs.dropped.Load()), cfg.requests*cfg.schedule.meanFactor(), durS),
 		Sessions: sessionsSummary{
 			Registered: int(reg.ok.Load()), RegisterErrors: int(reg.errs.Load()), HeartbeatErrors: reg.heartbeatErrs.Load(),
 			NATSSubscriptions: ns.subs, NATSConnections: len(ns.conns),
@@ -745,6 +834,10 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 			// Its operations count the committed events, which were not read.
 			sum.Resources.DispatchCPUSPerOp = nil
 		}
+	}
+	sum.Metrics = summarizeMetrics(ss, sum.Requests.Answered+sum.Events.Answered)
+	if len(cfg.schedule) >= 2 {
+		sum.Recovery = computeRecovery(cfg.schedule, st.winStart, st.winEnd, rs, ws, commits, cfg.recoveryRefP99)
 	}
 	sum.StackExits = pr.smp.stackExits()
 	if st.replay != nil {
@@ -786,8 +879,11 @@ func errStackExits(exits []stackExit) error {
 	return fmt.Errorf("%s; this row does not measure the load", strings.Join(gone, ", "))
 }
 
+// summarizeRequests reduces the requests sent in the window; target is the requests per second
+// the generator aimed at over the window: the 1x rate times the schedule's mean factor.
 func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) requestsSummary {
 	out := requestsSummary{TargetPerS: target, Sent: len(reqs), DroppedInflightCap: dropped, Routes: map[string]routeSummary{}}
+	refusals := newRefusalTally()
 	byRoute := map[string][]float64{}
 	var all, wait []float64
 	for _, r := range reqs {
@@ -795,6 +891,10 @@ func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) re
 		byRoute[r.route] = append(byRoute[r.route], ms)
 		all = append(all, ms)
 		wait = append(wait, float64(r.connWait)/1e6)
+		refusals.add(r.transport, r.connFailure, r.status, r.code, ms)
+		if r.status != 0 {
+			out.Answered++
+		}
 		rs := out.Routes[r.route]
 		if rs.Status == nil {
 			rs.Status = map[string]int{}
@@ -818,6 +918,12 @@ func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) re
 			}
 			rs.Codes[strings.TrimSpace(strconv.Itoa(r.status)+" "+r.code)]++
 		}
+		if !r.transport && slices.Contains(refusalCodes, r.code) {
+			if rs.Refusals == nil {
+				rs.Refusals = map[string]int{}
+			}
+			rs.Refusals[r.code]++
+		}
 		out.Routes[r.route] = rs
 	}
 	for name, rs := range out.Routes {
@@ -826,6 +932,7 @@ func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) re
 	}
 	out.LatencyMs = mkStat(all)
 	out.ConnWaitMs = mkStat(wait)
+	out.Refusals = refusals.summary()
 	if durationS > 0 {
 		out.SentPerS = float64(out.Sent) / durationS
 	}

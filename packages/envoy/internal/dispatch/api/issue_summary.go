@@ -61,7 +61,7 @@ func (s *server) getIssueSummary(w http.ResponseWriter, r *http.Request) {
 	if err := s.deps.Store.Pool.QueryRow(ctx, `
 		select key, project_key, title, status from issues where key = $1
 	`, r.PathValue("key")).Scan(&summary.Key, &summary.Project, &summary.Title, &summary.Status); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(ctx, `
@@ -69,12 +69,12 @@ func (s *server) getIssueSummary(w http.ResponseWriter, r *http.Request) {
 		from artifacts a where a.issue_key = $1 order by a.created_at, a.id
 	`, summary.Key)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	summary.Documents, err = pgx.CollectRows(rows, pgx.RowToStructByPos[issueSummaryDocument])
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, summary)
@@ -103,7 +103,7 @@ func (s *server) getProjectDocumentSummary(w http.ResponseWriter, r *http.Reques
 		func(id string) (documentSummary, error) { return read(`a.id = $1::uuid`, id) },
 	)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, summary)

@@ -46,14 +46,14 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 	}
 	askID, err := parseAskID(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	var input struct {
 		SnoozedUntil *string `json:"snoozed_until"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if input.SnoozedUntil == nil {
@@ -77,7 +77,7 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 	// before the write, so a snooze to the moment the row already holds is known to move nothing.
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -92,7 +92,7 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 		on conflict (login, ask_id) do update set snoozed_until = excluded.snoozed_until
 		returning snoozed_until, (select snoozed_until from previous)
 	`, model.CanonicalLogin(actor.ID), askID, snoozedUntil).Scan(&stored, &previous); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if previous == nil || !previous.Equal(stored) {
@@ -100,7 +100,7 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, userAskSnooze{SnoozedUntil: timestampValue(stored)})
@@ -114,14 +114,14 @@ func (s *server) deleteAskSnooze(w http.ResponseWriter, r *http.Request) {
 	}
 	askID, err := parseAskID(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// Un-snoozing a row that is not snoozed is the state the caller asked for, so it answers
 	// the same 204 rather than a 404 the reader could do nothing with, and announces nothing.
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -129,7 +129,7 @@ func (s *server) deleteAskSnooze(w http.ResponseWriter, r *http.Request) {
 		delete from user_ask_snooze where login = $1 and ask_id = $2
 	`, model.CanonicalLogin(actor.ID), askID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if removed.RowsAffected() == 0 {
@@ -153,7 +153,7 @@ func (s *server) announceAskSnooze(w http.ResponseWriter, r *http.Request, tx pg
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return false
 	}
 	s.publish(event)

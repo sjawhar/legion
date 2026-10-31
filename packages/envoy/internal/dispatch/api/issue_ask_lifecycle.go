@@ -190,7 +190,10 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 // block is logged. An issue reopened in the meantime is left alone. The sweep never fails the
 // close: an error is logged.
 //
-// ctx must not end when the client goes away (outlivingTheClient), and no transaction is open.
+// ctx must not end when the client goes away (outlivingTheClient), and no transaction is open. It
+// carries the writer gates of the issue's documents the close took before its transaction
+// (docs.Service.AcquireDocumentWriter): no document is added to a closed issue, so those are every
+// document the sweep writes, and it takes no gate of its own.
 func (s *server) sweepClosedIssueAsks(ctx context.Context, issueKey string, withdrawn []model.Ask, actor model.Actor) {
 	if err := s.sweepClosedIssueAsksTx(ctx, issueKey, withdrawn, actor); err != nil {
 		slog.Error("dispatch: sweep the ask blocks of a closed issue", "issue", issueKey, "error", err)

@@ -30,7 +30,7 @@ type API interface {
 	SetIssueClosed(ctx context.Context, issueKey string, closed bool)
 	SettleIssueDocuments(ctx context.Context, issueKey string) error
 	WriteIssueAskStates(ctx context.Context, issueKey string, asks []model.Ask, actor model.Actor, markUnindexed bool) ([]BlockRef, error)
-	AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error)
+	AcquireDocumentWriter(ctx context.Context, artifactIDs ...string) (context.Context, func(), error)
 	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error)
 	SetBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error
 	SetAskBlockText(ctx context.Context, artifactID, blockID string, edit AskBlockEdit, actor model.Actor) (AskBlockText, error)

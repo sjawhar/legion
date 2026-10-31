@@ -54,6 +54,11 @@ const BOARD_NEIGHBOUR_REFUSAL =
 const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 
+const WRITE_REFUSAL_RETRY =
+  "OVERLOADED (the server had no room for the request) and EDIT_QUEUE_FULL (too many writes " +
+  "already waiting for the same document; any write to a document can get it) are refusals sent " +
+  "before anything ran: wait the Retry-After they name and send the same call again.";
+
 const ASK_QUESTION_CONTRACT =
   "The question names the concrete case first: which machines, files, sessions or people, and the " +
   "numbers. It asks the choice in those terms, saying what happens to whom under each option " +
@@ -606,7 +611,8 @@ export const dispatchToolSpecs = [
       `reference — it must be answerable from its own text and anchor alone, never "see above". ` +
       `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` +
       `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` +
-      `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
+      `An ask among the related items says whether it is answered, by whom and with which options. ` +
+      `${WRITE_REFUSAL_RETRY} ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -802,7 +808,7 @@ export const dispatchToolSpecs = [
     description:
       "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " +
       "Do not use it for an exact replacement; use " +
-      `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
+      `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${WRITE_REFUSAL_RETRY} ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -950,7 +956,8 @@ export const dispatchToolSpecs = [
       "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block\'s id, type, opening words and token, and each table\'s rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ' +
-      "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
+      "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read. " +
+      `${WRITE_REFUSAL_RETRY} ` +
       "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +

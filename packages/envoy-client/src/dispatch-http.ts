@@ -214,6 +214,45 @@ function isJson(response: Response): boolean {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
 
+/** `text`, the body of `response`, as JSON when it says it is and parses; otherwise the text. */
+function answerPayload(response: Response, text: string): unknown {
+  if (!text || !isJson(response)) return text;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+/** An answer whose body is read: the text, what it says, and the answer rebuilt around it. */
+interface ReadAnswer {
+  /** The body as text. */
+  readonly text: string;
+  /** That text as `answerPayload` reads it. */
+  readonly payload: unknown;
+  /** The answer rebuilt from `text`, since reading the body emptied the one that arrived. */
+  readonly response: Response;
+}
+
+/**
+ * Reads `response`'s body to its end, once, for every reading of it a caller needs: the text, the
+ * payload `answerPayload` makes of it, and an answer that still holds the body for whoever reads
+ * it next. The status must be one that carries a body, since `new Response` refuses one for a 204
+ * or a 304.
+ */
+async function readAnswer(response: Response): Promise<ReadAnswer> {
+  const text = await response.text();
+  return {
+    text,
+    payload: answerPayload(response, text),
+    response: new Response(text, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    }),
+  };
+}
+
 /** Whether `error` is a server's answer that it has no route for the request (`404 NOT_FOUND`,
  *  "no route for …"), as a server older than a route answers it; a `404 NOT_FOUND` for a
  *  resource the server does not know says "not found" instead. */
@@ -272,6 +311,63 @@ export const DISPATCH_TOOL_DEADLINE_MS = 60_000;
 function requestSignal(signal: AbortSignal | undefined): AbortSignal {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
+
+/**
+ * How many times a client asks again after Dispatch said to wait (`waitsOut`), on top of the first
+ * attempt. Two keeps an agent's call within a few seconds of `Retry-After` while a short burst of
+ * load passes, without turning a server that stays overloaded into three times the requests.
+ */
+const RETRIES = 2;
+
+/** The wait when an answer to wait out carries no `Retry-After` in seconds, as Dispatch sends. */
+const DEFAULT_RETRY_AFTER_SECONDS = 1;
+
+/**
+ * The most a retry waits past `Retry-After`, a random share of it per wait, so the agents one
+ * overload refused together do not all come back in the same instant.
+ */
+const RETRY_JITTER_MS = 250;
+
+/** Dispatch's own refusal: the JSON `{error, code}` its `writeError` sends. */
+type DispatchRefusal = DispatchServiceErrorShape & { readonly error: string };
+
+function isDispatchRefusal(value: DispatchServiceErrorShape): value is DispatchRefusal {
+  return typeof value.error === "string";
+}
+
+/** The error a refusal of Dispatch's own throws, its message `message` (its `error` unless told). */
+function refusalError(
+  status: number,
+  refusal: DispatchRefusal,
+  message = refusal.error
+): DispatchServiceError {
+  return new DispatchServiceError(
+    refusal.code ?? `HTTP_${status}`,
+    status,
+    message,
+    refusal.candidates,
+    refusal.current,
+    refusal.mismatches
+  );
+}
+
+/**
+ * Whether Dispatch's refusal `code`, answered with `status` to `method`, is one the client waits
+ * out (`Retry-After`) and asks again. A `429 OVERLOADED` (admission) or `429 EDIT_QUEUE_FULL` (the
+ * document writer queue) was sent before the request ran, or with its key released, so any method
+ * may repeat it. A `503 DATABASE_BUSY` (no database connection in time) or `503 REQUEST_TIMEOUT`
+ * (the read deadline) can come after a write committed, so only a read (GET, HEAD) repeats it; a
+ * write's retry is left to its idempotency key (`#keyedWrite`). Every other answer is the caller's
+ * at once.
+ */
+function waitsOut(method: string, status: number, code: string | undefined): boolean {
+  if (status === 429) return code === "OVERLOADED" || code === "EDIT_QUEUE_FULL";
+  return (
+    status === 503 &&
+    (method === "GET" || method === "HEAD") &&
+    (code === "DATABASE_BUSY" || code === "REQUEST_TIMEOUT")
+  );
 }
 
 /**
@@ -464,30 +560,21 @@ const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([101, 204, 205, 304]);
  * rebuilt from what was read; it is no definitive answer where `retriesUnderKey` says so: a 5xx (a
  * gateway's, or Dispatch's own, which Dispatch never stores under the key), a 408 or 429 (a timeout
  * or a rate limit), or Dispatch's `409 KEY_IN_FLIGHT` (an earlier attempt still runs under the
- * key).
+ * key). An answer `#send` waits out (`waitsOut`, Dispatch's own `429 OVERLOADED` or
+ * `429 EDIT_QUEUE_FULL`) is definitive here, so the one wait-out path asks it again rather than
+ * this loop asking it again under a key neither answer left behind.
  */
-async function writeAnswer(response: Response, key: string): Promise<WriteAnswer> {
+async function writeAnswer(response: Response, key: string, method: string): Promise<WriteAnswer> {
   const echoed = keyEchoed(response, key);
   if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
     return { response, again: false, reached: false, echoed, unjudged: false };
   }
   const { status } = response;
-  const text = await response.text();
-  let shape: DispatchServiceErrorShape = {};
-  if (isJson(response)) {
-    try {
-      shape = asErrorShape(JSON.parse(text));
-    } catch {
-      shape = {};
-    }
-  }
-  const again = retriesUnderKey(status, shape.code);
+  const read = await readAnswer(response);
+  const shape = asErrorShape(read.payload);
+  const again = retriesUnderKey(status, shape.code) && !waitsOut(method, status, shape.code);
   return {
-    response: new Response(text, {
-      status,
-      statusText: response.statusText,
-      headers: response.headers,
-    }),
+    response: read.response,
     again,
     reached: status >= 500 || (again && status === 409),
     echoed,
@@ -665,14 +752,19 @@ function excerpt(text: string, token: string): string {
 }
 
 /**
- * JSON HTTP client for Dispatch's native-tool API. Every request goes through `#send`, where each
- * write (POST or PATCH) carries an `Idempotency-Key` of its own and asks again under it as
- * `writeRetry` paces it.
+ * JSON HTTP client for Dispatch's native-tool API. Every request goes through `#send`, under one
+ * deadline, `DISPATCH_TOOL_DEADLINE_MS` from the client's construction (sooner when `signal`
+ * aborts first). An answer Dispatch asks the client to wait out (`waitsOut`) is asked again after
+ * its `Retry-After`, waited on `writeRetry`'s timer and clock, while that deadline allows the
+ * wait. Each write (POST or PATCH) also carries an `Idempotency-Key` of its own and asks again
+ * under it, as `writeRetry` paces it, while its attempts get no definitive answer.
  */
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
+  /** When `#signal`'s own deadline passes, on the write clock (`#now`). */
+  readonly #deadline: number;
 
   constructor(
     baseUrl: string,
@@ -683,6 +775,7 @@ export class DispatchClient {
   ) {
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
+    this.#deadline = this.#now() + DISPATCH_TOOL_DEADLINE_MS;
   }
 
   /**
@@ -1435,17 +1528,80 @@ export class DispatchClient {
   }
 
   /**
-   * The one request function: every call the client makes goes through here. A read, a PUT or a
-   * DELETE goes once, and `signal` aborts it beside the client's own signal. A write (POST or
-   * PATCH) carries an `Idempotency-Key`: the caller's own `callerKey`, where it has one intent
-   * across calls and processes, else one minted here for this call alone, so all its attempts are
-   * one intent to Dispatch, which runs it once and answers a
-   * repeat with the answer it stored, while two calls are two writes. Each attempt sends the same
-   * encoded body. While an attempt gets no definitive answer (`writeAnswer`, a transport failure,
-   * or `writeRetry.silenceMs` without progress, `#attempt`) the write asks again under its key,
-   * paced by `writeRetry`, and the first definitive answer is the call's: a 2xx, a replay of one
-   * included, or a refusal. The call's deadline and its caller's cancellation end the attempts at
-   * once, whether a fetch or a pause is under way (`#ended`).
+   * The one request function: every call the client makes goes through here. It sends `method` to
+   * `url` once (`#sendOnce`, which is where a write's own retries under its key happen), and asks
+   * again while Dispatch's answer is one it says to wait out (`waitsOut`): after its `Retry-After`
+   * (whole seconds, else `DEFAULT_RETRY_AFTER_SECONDS`) plus up to `RETRY_JITTER_MS`, at most
+   * `RETRIES` times, and only when that wait ends before the client's deadline, so no retry starts
+   * past it. Giving up throws that refusal with advice naming the attempts and the wait; any other
+   * answer comes back as it is. `signal` aborts the call beside the client's own signal, a send and
+   * a wait between two sends alike.
+   *
+   * A write repeated here is a new intent and carries a key of its own: Dispatch answers
+   * `429 OVERLOADED` before the keyed layer runs and releases the key behind a
+   * `429 EDIT_QUEUE_FULL`, so neither leaves a key for the repeat to replay. Where the caller
+   * named its own key, that key is the repeat's too: the refusal left none behind to replay, and
+   * the caller's one intent across calls and processes is one key, however many sends carry it.
+   */
+  async #send(
+    method: string,
+    url: string,
+    body?: EncodedBody,
+    accept = "application/json",
+    signal?: AbortSignal,
+    callerKey?: string
+  ): Promise<Response> {
+    for (let attempt = 1; ; attempt++) {
+      const response = await this.#sendOnce(method, url, body, accept, signal, callerKey);
+      if (response.status !== 429 && response.status !== 503) return response;
+      // The body is read, so the answer goes on as a Response that still holds it.
+      const { payload, response: answer } = await readAnswer(response);
+      const refusal = asErrorShape(payload);
+      if (!isDispatchRefusal(refusal) || !waitsOut(method, response.status, refusal.code)) {
+        return answer;
+      }
+      const waitMs = retryAfterMs(answer) || DEFAULT_RETRY_AFTER_SECONDS * 1_000;
+      const seconds = Math.round(waitMs / 1_000);
+      const wait = waitMs + Math.random() * RETRY_JITTER_MS;
+      const refused =
+        `${refusal.error}; Dispatch refused ${attempt === 1 ? "1 attempt" : `${attempt} attempts`} ` +
+        `with ${response.status} ${refusal.code}`;
+      if (attempt > RETRIES) {
+        throw refusalError(
+          response.status,
+          refusal,
+          `${refused}, waiting out its Retry-After between them, so wait ${seconds} s ` +
+            "(Retry-After) and try again"
+        );
+      }
+      if (this.#now() + wait >= this.#deadline) {
+        throw refusalError(
+          response.status,
+          refusal,
+          `${refused}, and waiting the ${seconds} s it asks for (Retry-After) would pass this ` +
+            `call's ${DISPATCH_TOOL_DEADLINE_MS / 1000} s deadline, so wait ${seconds} s and try again`
+        );
+      }
+      await (this.writeRetry.pause ?? pauseFor)(
+        wait,
+        signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal])
+      );
+    }
+  }
+
+  /**
+   * One send of `#send`'s: a read, a PUT or a DELETE goes once, and `signal` aborts it beside the
+   * client's own signal. A write (POST or PATCH) carries an `Idempotency-Key`: the caller's own
+   * `callerKey`, where it has one intent across calls and processes, else one minted here for this
+   * send alone, so all its attempts are one intent to Dispatch, which runs it once and answers a
+   * repeat with the answer it stored, while two sends are two writes unless one `callerKey` makes
+   * them the one intent it names. Each attempt sends the same encoded body. While an attempt gets
+   * no definitive answer (`writeAnswer`, a transport failure, or `writeRetry.silenceMs` without
+   * progress, `#attempt`) the write asks again under its key, paced by `writeRetry`, and the first
+   * definitive answer is the send's: a 2xx, a replay of one included, or a refusal. The call's
+   * deadline and its caller's cancellation end the attempts at once, whether a fetch or a pause is
+   * under way (`#ended`). An answer `#send` waits out is definitive here, so one wait-out path
+   * handles it for every method.
    *
    * It asks again only against a Dispatch this process has lately seen run the keyed layer: a
    * Dispatch without the layer would run a repeat as a second write, so its 5xx — which can come
@@ -1457,7 +1613,7 @@ export class DispatchClient {
    * say nothing, so they rely on what an answer or `/healthz` showed within
    * `KEYED_LAYER_MEMORY_MS`, and ask `/healthz` when nothing did (`#runsKeyedLayer`).
    */
-  async #send(
+  async #sendOnce(
     method: string,
     url: string,
     body?: EncodedBody,
@@ -1488,7 +1644,11 @@ export class DispatchClient {
       let answer: WriteAnswer | undefined;
       let thrown: unknown;
       try {
-        answer = await writeAnswer(await this.#attempt(url, method, headers, body, silenceMs), key);
+        answer = await writeAnswer(
+          await this.#attempt(url, method, headers, body, silenceMs),
+          key,
+          method
+        );
         if (answer.echoed) KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
         if (!answer.again) return answer.response;
         reached ||= answer.reached;
@@ -1701,17 +1861,10 @@ export class DispatchClient {
    */
   async #response<T>(method: string, url: string, response: Response): Promise<T> {
     const text = await response.text();
-    let payload: unknown = text;
-    if (text && isJson(response)) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = text;
-      }
-    }
+    const payload = answerPayload(response, text);
     if (!response.ok) {
       const error = asErrorShape(payload);
-      if (typeof error.error === "string") {
+      if (isDispatchRefusal(error)) {
         if (response.status === 409 && error.code === IDEMPOTENCY_KEY_COMMITTED) {
           throw new DispatchWriteLandedError(
             IDEMPOTENCY_KEY_COMMITTED,
@@ -1720,14 +1873,7 @@ export class DispatchClient {
             url
           );
         }
-        throw new DispatchServiceError(
-          error.code ?? `HTTP_${response.status}`,
-          response.status,
-          error.error,
-          error.candidates,
-          error.current,
-          error.mismatches
-        );
+        throw refusalError(response.status, error);
       }
       const quoted = excerpt(text, this.token);
       let body: string;

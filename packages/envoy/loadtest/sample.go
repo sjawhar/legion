@@ -37,28 +37,37 @@ type sample struct {
 	HeapAlloc  float64            `json:"heap_alloc"`
 	HeapSys    float64            `json:"heap_sys"`
 	NATS       map[string]float64 `json:"nats"`
-	InWindow   bool               `json:"in_window"`
+	// Metrics is Dispatch's /metrics: every dispatch_* series, by metricKey; absent when the
+	// scrape failed.
+	Metrics  map[string]float64 `json:"metrics,omitempty"`
+	InWindow bool               `json:"in_window"`
 	// FailedReads names the reads of this sample that failed: readPostgres, readGoroutines,
-	// readHeap, readNATS. Their values above stay 0 (NATS empty) and enter no statistic.
+	// readHeap, readMetrics, readNATS. Their values above stay 0 (Metrics absent, NATS empty) and
+	// enter no statistic.
 	FailedReads []string `json:"failed_reads,omitempty"`
 }
 
 // The sampler's reads that can fail, as sample.FailedReads names them: pg_stat_activity (a failed
-// connect included), Dispatch's goroutine and heap profiles, and NATS /varz.
+// connect included), Dispatch's goroutine and heap profiles, its /metrics, and NATS /varz. A failed
+// metrics scrape is a skipped metrics sample (summarizeMetrics), not one of the failed reads that
+// mark a Resources row: a Dispatch build without the endpoint fails every one.
 const (
 	readPostgres   = "postgres"
 	readGoroutines = "goroutines"
 	readHeap       = "heap"
+	readMetrics    = "metrics"
 	readNATS       = "nats"
 )
 
 // sampler takes a sample every 5 s: CPU and RSS of each stack process and of loadgen from /proc,
-// Postgres connections, Dispatch's goroutines and pool waiters, its heap every 15 s, and NATS
-// /varz. A failed Postgres, pprof or NATS read is marked in its sample (sample.FailedReads). At each
-// sample it also checks that every stack process is alive (checkAlive).
+// Postgres connections, Dispatch's goroutines and pool waiters, its heap every 15 s, its
+// /metrics, and NATS /varz. A failed Postgres, pprof, metrics or NATS read is marked in its sample
+// (sample.FailedReads). At each sample it also checks that every stack process is alive
+// (checkAlive).
 type sampler struct {
 	pids    map[string]int // by name; "postgres" is the postmaster
 	pprof   string
+	metrics string // Dispatch's metrics base URL; empty under -allow-foreign without -metrics
 	natsMon string
 	pgURL   string
 	mu      sync.Mutex
@@ -74,7 +83,7 @@ type stackExit struct {
 }
 
 func newSampler(ep endpoints) *sampler {
-	return &sampler{pids: ep.pids, pprof: ep.pprof, natsMon: ep.natsMon, pgURL: ep.pg, exits: map[string]stackExit{}}
+	return &sampler{pids: ep.pids, pprof: ep.pprof, metrics: ep.metrics, natsMon: ep.natsMon, pgURL: ep.pg, exits: map[string]stackExit{}}
 }
 
 // checkAlive records each stack process that is no longer alive, with the time it was first
@@ -234,12 +243,14 @@ func boxBusy(ctx context.Context, window time.Duration) (float64, bool) {
 }
 
 // loop samples every 5 s until ctx ends. A failed read is marked in its sample and logged as
-// readErrors does, one count each for the Postgres, the pprof and the NATS reads. A read that
-// failed once ctx had ended is neither marked nor counted, as poll does.
+// readErrors does, one count each for the Postgres, the pprof, the metrics and the NATS reads.
+// Without a metrics endpoint every sample's scrape is marked failed, unlogged. A read that failed
+// once ctx had ended is neither marked nor counted, as poll does.
 func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.Logger) {
 	var pg *pgx.Conn
 	pgErrs := readErrors{name: "sampler: postgres", lg: lg}
 	pprofErrs := readErrors{name: "sampler: pprof", lg: lg}
+	metricsErrs := readErrors{name: "sampler: metrics", lg: lg}
 	natsErrs := readErrors{name: "sampler: nats", lg: lg}
 	defer func() {
 		if pg != nil {
@@ -247,6 +258,7 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 		}
 		pgErrs.done()
 		pprofErrs.done()
+		metricsErrs.done()
 		natsErrs.done()
 	}()
 	t := time.NewTicker(5 * time.Second)
@@ -304,6 +316,11 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 			if sm.HeapInuse, sm.HeapAlloc, sm.HeapSys, err = heapStats(s.pprof); err != nil {
 				failed(readHeap, &pprofErrs, err)
 			}
+		}
+		if s.metrics == "" {
+			sm.FailedReads = append(sm.FailedReads, readMetrics)
+		} else if sm.Metrics, err = scrapeMetrics(s.metrics); err != nil {
+			failed(readMetrics, &metricsErrs, err)
 		}
 		if v, err := natsVarz(s.natsMon); err != nil {
 			failed(readNATS, &natsErrs, err)
@@ -678,6 +695,11 @@ func summarizeResources(ss []sample, ops int, durationS float64) *resourcesSumma
 }
 
 func logSamplerStart(lg *log.Logger, ep endpoints) {
+	if ep.metrics == "" {
+		lg.Printf("sampler: no -metrics endpoint (-allow-foreign): every metrics sample is skipped, so the Pools and admission columns stay empty")
+	} else {
+		lg.Printf("sampler: metrics %s/metrics", redactURL(ep.metrics))
+	}
 	names := make([]string, 0, len(ep.pids))
 	for name, pid := range ep.pids {
 		names = append(names, fmt.Sprintf("%s=%d", name, pid))

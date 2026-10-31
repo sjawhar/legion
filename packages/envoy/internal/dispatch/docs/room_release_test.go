@@ -277,7 +277,9 @@ func appendThroughAPI(t *testing.T, service *Service, id string) {
 		t.Fatalf("begin edit: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	writeCtx, release := gatedContext(t, service, ctx, id)
+	defer release()
+	joined, ledger := service.Join(writeCtx, tx)
 	defer ledger.Discard()
 	ops := []model.EditOp{{Op: "insert", After: "end", Markdown: "Room cap probe."}}
 	if _, err := service.ApplyOps(joined, id, ops, model.Actor{Kind: "session", ID: "agent"}, nil); err != nil {
@@ -403,15 +405,19 @@ func perDocumentStateProblems(service *Service) []string {
 			states, detached, len(live)))
 	}
 	for name, registry := range map[string]*sync.Map{
-		"conditional edit gates": &service.conditionalGates,
-		"preloads":               &service.preloads,
-		"rebuilds":               &service.rebuilding,
+		"preloads": &service.preloads,
+		"rebuilds": &service.rebuilding,
 	} {
 		registry.Range(func(key, _ any) bool {
 			problems = append(problems, fmt.Sprintf("the service's %s keep document %s", name, key))
 			return true
 		})
 	}
+	service.writers.mu.Lock()
+	for artifactID := range service.writers.gates {
+		problems = append(problems, fmt.Sprintf("the service's writer gates keep document %s", artifactID))
+	}
+	service.writers.mu.Unlock()
 	service.suppressMu.Lock()
 	suppressed := len(service.suppressed)
 	service.suppressMu.Unlock()

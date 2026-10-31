@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -132,7 +133,7 @@ func TestTheMaintenanceLoopKeepsAKeyForItsWholeWindow(t *testing.T) {
 		defer close(done)
 		RunSuggestionOutcomeSweep(ctx, rig.database.Pool, 50*time.Millisecond, sweepLeases(t, rig.database), nil)
 	}()
-	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease) == 0; {
+	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass ran", duty.SuggestionOutcomeLease) == 0; {
 		if time.Now().After(deadline) {
 			t.Fatalf("the loop never made a pass:\n%s", logs.Lines("lease="))
 		}
@@ -196,7 +197,8 @@ func TestARecoveredReplayKeepsNothingOfARefusal(t *testing.T) {
 		t.Fatalf("a success's stored body = %s, want it handed to the replay", body)
 	}
 	response := httptest.NewRecorder()
-	(&server{}).writeRefreshed(response, stored, map[string]any{"id": "m1"})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/TEST-1/messages", nil)
+	(&server{}).writeRefreshed(response, request, stored, map[string]any{"id": "m1"})
 	var answer map[string]json.RawMessage
 	if err := json.Unmarshal(response.Body.Bytes(), &answer); err != nil {
 		t.Fatal(err)

@@ -503,15 +503,15 @@ func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room str
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	return captureAuthors(state, owed, durableLatest, write, actor), nil
+	return captureAuthors(state, owed, durableLatest, write, actor, state.creditSeq.Load()), nil
 }
 
 // captureAuthors is whom a version lists: owed, the pending authors its transaction read under
-// the document's advisory lock; the room's in-flight credits no committed version has listed; the
-// authors the calling transaction's own write records once it commits; and actor. The version's
-// commit deletes the pending authors it read and marks the in-flight credits it took consumed
-// (commitConsuming); a credit observed after this take is not among them and stays pending for
-// the next version. The caller holds state.mu.
+// the document's advisory lock; the room's in-flight credits no committed version has listed,
+// observed no later than through (creditSeq); the authors the calling transaction's own write
+// records once it commits; and actor. The version's commit deletes the pending authors it read
+// and marks the in-flight credits it took consumed (commitConsuming); a credit observed after
+// through is not among them and stays pending for the next version. The caller holds state.mu.
 //
 // It also names who made the document's latest change (authorCapture.latest), which is the sender
 // of the latest edit and never a name taken out of the credited set. Every edit this room
@@ -527,7 +527,7 @@ func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room str
 // the in-flight credits within milliseconds, so the process that holds the room reads it as one
 // that never loaded the document does. actor, the version's writer, names nobody by itself: an
 // agent writing a named version over someone's edit did not make that edit.
-func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor, write *liveWrite, actor *model.Actor) authorCapture {
+func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor, write *liveWrite, actor *model.Actor, through uint64) authorCapture {
 	capture := authorCapture{
 		state:    state,
 		authors:  make(map[string]model.Actor, len(owed)+1),
@@ -537,7 +537,7 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest
 		capture.authors[key] = author
 		capture.rAuthors = append(capture.rAuthors, author)
 	}
-	capture.inflight = state.unconsumedInflightLocked(state.creditSeq.Load())
+	capture.inflight = state.unconsumedInflightLocked(through)
 	for _, record := range capture.inflight {
 		maps.Copy(capture.authors, record.authors)
 	}

@@ -770,9 +770,9 @@ func TestEditNoticeSweepSkipsDeletedArtifact(t *testing.T) {
 	}
 }
 
-// answerDecision answers the harness's ask as the answer route does: the row first, then the
+// answerHarnessAsk answers the harness's ask as the answer route does: the row first, then the
 // block's server-owned attributes, written as the person who answered.
-func answerDecision(t *testing.T, service *Service, artifactID, askID string, person model.Actor) {
+func answerHarnessAsk(t *testing.T, service *Service, artifactID, askID string, person model.Actor) {
 	t.Helper()
 	answeredAt := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
 	answerJSON, err := json.Marshal(model.AskAnswer{User: person.ID, Selected: []string{"REST"}, At: answeredAt})
@@ -795,7 +795,7 @@ func answerDecision(t *testing.T, service *Service, artifactID, askID string, pe
 func TestEditNoticeAnAnswerAloneSendsNone(t *testing.T) {
 	service, artifactID, askID, settle, _ := blockAskHarness(t)
 	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
-	answerDecision(t, service, artifactID, askID, alice)
+	answerHarnessAsk(t, service, artifactID, askID, alice)
 	settle()
 	if _, open := readEditNotice(t, service, artifactID); !open {
 		t.Fatal("the answer's version opened no window; this test needs one to show the sweep drops it")
@@ -844,7 +844,7 @@ func TestEditNoticeAResolveAloneSendsNone(t *testing.T) {
 func TestEditNoticeAnAnswerAndATypedEditSendOne(t *testing.T) {
 	service, artifactID, askID, settle, _ := blockAskHarness(t)
 	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
-	answerDecision(t, service, artifactID, askID, alice)
+	answerHarnessAsk(t, service, artifactID, askID, alice)
 	settle()
 	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("no drift.", "no drift at all."))
 	settle()
@@ -885,7 +885,7 @@ func TestEditNoticeAPersonsRebuildOpensTheWindow(t *testing.T) {
 func TestEditNoticeAPersonsQuestionEditSendsOne(t *testing.T) {
 	service, artifactID, _, settle, _ := blockAskHarness(t)
 	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		_, err := service.SetAskBlockText(ctx, artifactID, "decision", AskBlockEdit{Question: new("Which transport, gRPC or REST?")}, alice)
 		return err
 	}); err != nil {
@@ -924,7 +924,7 @@ func TestOutsideReviewColdAgentVersionLastHuman(t *testing.T) {
 	second := New(Deps{Store: storetest.SecondProcess(t, first.store), Events: events.NewBroker(), Settle: time.Hour})
 	t.Cleanup(func() { _ = second.Shutdown(context.Background()) })
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
-	if err := joinedWrite(second, func(ctx context.Context) error {
+	if err := joinedWrite(second, artifactID, func(ctx context.Context) error {
 		if _, err := second.ApplyOps(ctx, artifactID, []model.EditOp{{Op: "replace", Find: "Third.", With: "Third, by agent."}}, agent, nil); err != nil {
 			return err
 		}
@@ -955,7 +955,7 @@ func TestOutsideReviewJoinedHumanEditLastHuman(t *testing.T) {
 	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
 	editAsConnectedPeer(t, service, artifactID, 1, zoe, replaceRun("First.", "First, by zoe."))
 	waitForLandedAppends(t, service, artifactID)
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		if _, err := service.ApplyOps(ctx, artifactID, []model.EditOp{{Op: "replace", Find: "Second.", With: "Second, by adam."}}, adam, nil); err != nil {
 			return err
 		}
@@ -1029,7 +1029,7 @@ func TestEditNoticeABrowserEditAfterAJoinedWriteNamesTheBrowserEditor(t *testing
 	settleCurrentGeneration(t, service, artifactID)
 	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
 	zoe := model.Actor{Kind: "user", ID: "zoe@example.com"}
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		if _, err := service.ApplyOps(ctx, artifactID, []model.EditOp{
 			{Op: "replace", Find: "First.", With: "First, by adam's API write."},
 		}, adam, nil); err != nil {
@@ -1172,7 +1172,7 @@ func TestEditNoticeAClosedAndReopenedIssueNamesTheLaterBrowserEditor(t *testing.
 	settleCurrentGeneration(t, service, artifactID)
 	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
 	zoe := model.Actor{Kind: "user", ID: "zoe@example.com"}
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		if _, err := service.ApplyOps(ctx, artifactID, []model.EditOp{
 			{Op: "replace", Find: "First.", With: "First, by adam's API write."},
 		}, adam, nil); err != nil {

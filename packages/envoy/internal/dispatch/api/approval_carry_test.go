@@ -590,7 +590,11 @@ func TestAForgedServerAttributeOnADecidedBlockCarriesNothing(t *testing.T) {
 // session.
 func setLiveBlockAttributes(t *testing.T, database *store.Store, documents docs.API, artifactID, blockID string, attributes map[string]any) {
 	t.Helper()
-	ctx := context.Background()
+	ctx, release, err := documents.AcquireDocumentWriter(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("take the document's writer gate: %v", err)
+	}
+	defer release()
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin the attribute write: %v", err)

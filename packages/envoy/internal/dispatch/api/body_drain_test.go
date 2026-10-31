@@ -232,7 +232,7 @@ func (b repeatedByte) Read(p []byte) (int, error) {
 }
 
 // INFRA-258. An early answer drains at most the route's own limit and one byte
-// more (routeBodyLimit): a body that runs past it is answered as the limit answers it, 413 with the
+// more (apiRoute.bodyLimit): a body that runs past it is answered as the limit answers it, 413 with the
 // route's refusal and none of the early answer's headers, and the rest is never read. A body inside
 // the limit is read to its end and the early answer stands, whichever layer gave it: the keyed
 // layer's KEY_IN_FLIGHT, the closed-issue refusal of an upload, LOGIN_CHANGED on a JSON route. A
@@ -512,12 +512,13 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 }
 
 // INFRA-258. A drain is bounded in time as well as in bytes: a body that stops arriving is waited
-// for at most bodyDrainLimit, and then the answer goes out as it stood, with the connection closed
-// after it, rather than the request held open for as long as its client cares to. Both drains: the
-// one every early answer waits behind (drainBeforeAnswer), here an upload to a closed issue and a
-// message pressed by another login, and the keyed layer's reading of a repeat found in flight.
+// for within the bound the request's body arrives under (defaultBodyReadLimit), and then the
+// answer goes out as it stood, with the connection closed after it, rather than the request held
+// open for as long as its client cares to. Both drains: the one every early answer waits behind
+// (drainBeforeAnswer), here an upload to a closed issue and a message pressed by another login,
+// and the keyed layer's reading of a repeat found in flight.
 //
-// The drain's deadline stays on the connection once a drain ends short of the body's end, whether
+// The body's read bound stays on the connection once a drain ends short of the body's end, whether
 // its read failed or the body ran past the route's limit: net/http itself reads on after the
 // answer, up to 256 KiB more of a body whose Content-Length leaves that little unread (its discard
 // before the answer's header, and its Close of the body once the handler returns), and a deadline
@@ -528,7 +529,7 @@ func TestARepeatFoundInFlightIsJudgedOnceItsBodyHasArrived(t *testing.T) {
 func TestADrainStopsWaitingForABodyThatStalls(t *testing.T) {
 	const drainLimit = time.Second
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{files: filestest.NewMemory()})
-	served.drainReadLimit = drainLimit
+	served.bodyReadLimit = drainLimit
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	open := createArtifactIssue(t, handler)

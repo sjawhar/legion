@@ -7,8 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -17,7 +16,7 @@ import (
 
 // excerptLeases is the pool a reconciliation tick takes its lease on, the one cmd/dispatch gives
 // the loop.
-func excerptLeases(t *testing.T, database *store.Store) *pgxpool.Pool {
+func excerptLeases(t *testing.T, database *store.Store) *store.RawPool {
 	t.Helper()
 	leases, err := database.Pool.Leases()
 	if err != nil {
@@ -91,9 +90,9 @@ func TestTwoReconciliationRunnersRunTheTickOnceAndSkipOnce(t *testing.T) {
 		defer close(secondDone)
 		other.RunReferenceExcerptReconciliation(secondCtx, secondLeases)
 	}()
-	for deadline := time.Now().Add(30 * time.Second); countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", referenceExcerptLease) == 0; {
+	for deadline := time.Now().Add(30 * time.Second); countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", duty.ReferenceExcerptLease) == 0; {
 		if time.Now().After(deadline) {
-			t.Fatalf("the second runner never skipped the %s lease:\n%s", referenceExcerptLease, logs.Lines("lease="))
+			t.Fatalf("the second runner never skipped the %s lease:\n%s", duty.ReferenceExcerptLease, logs.Lines("lease="))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -112,12 +111,12 @@ func TestTwoReconciliationRunnersRunTheTickOnceAndSkipOnce(t *testing.T) {
 		t.Fatalf("release refs: %v", err)
 	}
 
-	entered := countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", referenceExcerptLease) +
-		countExcerptLeaseLines(logs, "dispatch duty: leased pass cut short by shutdown; its period is left unserved", referenceExcerptLease)
+	entered := countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", duty.ReferenceExcerptLease) +
+		countExcerptLeaseLines(logs, "dispatch duty: leased pass cut short by shutdown; its period is left unserved", duty.ReferenceExcerptLease)
 	if entered != 1 {
 		t.Fatalf("the two runners got into the tick %d times; want once:\n%s", entered, logs.Lines("lease="))
 	}
-	if skipped := countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", referenceExcerptLease); skipped == 0 {
+	if skipped := countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", duty.ReferenceExcerptLease); skipped == 0 {
 		t.Fatalf("neither runner skipped:\n%s", logs.Lines("lease="))
 	}
 }

@@ -220,7 +220,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := s.requestActor(r); err != nil {
 		if errors.Is(err, identity.ErrSignInUnavailable) {
-			identity.WriteError(w, err)
+			identity.WriteError(w, r, err)
 			return
 		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)

@@ -184,9 +184,12 @@ type rowEffect struct {
 
 // run is flow on the side, from history, the stored document both sides start from: in a joined
 // transaction, committed when the flow succeeds, and what it left before and after the commit.
+// The transaction opens holding the document's writer gate, as every caller of a document write
+// does.
 func (side *equivalenceSide) run(t *testing.T, document *equivalenceDocument, flow equivalenceFlow, ids flowIDs, history []storedRow) flowObservation {
 	t.Helper()
-	ctx := context.Background()
+	ctx, release := gatedContext(t, side.service, context.Background(), ids.artifact)
+	defer release()
 	var observed flowObservation
 	if side.classes == nil {
 		t.Fatal("no room of the side was loaded with the class recorder (recordClasses), which a flow that starts from the browser edit installs")

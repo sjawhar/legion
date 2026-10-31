@@ -205,7 +205,7 @@ func TestAnAskWhoseTextHoldsWebAddressesSettlesAsWritten(t *testing.T) {
 		{Label: "Plain", Description: "see http://x.test"},
 	}
 	var stored AskBlockText
-	if err := joinedWrite(service, func(ctx context.Context) (err error) {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) (err error) {
 		stored, err = service.SetAskBlockText(ctx, artifactID, "hosts", AskBlockEdit{Question: &question, Options: &options},
 			model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
 		return err
@@ -283,7 +283,9 @@ func agentEditVersion(t *testing.T, service *Service, artifactID string, actor m
 		t.Fatalf("begin agent edit: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	editCtx, ledger := service.Join(ctx, tx)
+	writeCtx, release := gatedContext(t, service, ctx, artifactID)
+	defer release()
+	editCtx, ledger := service.Join(writeCtx, tx)
 	defer ledger.Discard()
 	edit, err := service.ApplyOps(editCtx, artifactID, ops, actor, nil)
 	if err != nil {
@@ -945,7 +947,7 @@ func TestEditAskRepairsAnEmptyQuestion(t *testing.T) {
 		settleCurrentGeneration(t, service, artifactID)
 		options := firstAsk(liveTree(t, service, artifactID)).Children[1]
 		var stored AskBlockText
-		if err := joinedWrite(service, func(ctx context.Context) (err error) {
+		if err := joinedWrite(service, artifactID, func(ctx context.Context) (err error) {
 			stored, err = service.SetAskBlockText(ctx, artifactID, "ask-lists",
 				AskBlockEdit{Question: new("Should we ship it today?")}, model.Actor{Kind: "user", ID: "alice"})
 			return err
@@ -1001,7 +1003,7 @@ func TestEditAskRepairsAnEmptyQuestion(t *testing.T) {
 			t.Fatalf("the emptied decision holds %d bullet lists, want the two it was given", len(held))
 		}
 		var stored AskBlockText
-		if err := joinedWrite(service, func(ctx context.Context) (err error) {
+		if err := joinedWrite(service, artifactID, func(ctx context.Context) (err error) {
 			stored, err = service.SetAskBlockText(ctx, artifactID, "ask-lists",
 				AskBlockEdit{Question: new("Should we ship it today?")}, model.Actor{Kind: "user", ID: "alice"})
 			return err
@@ -1151,7 +1153,7 @@ func TestEditAskRefusalOfAnEmptyQuestionNamesAPathThatApplies(t *testing.T) {
 	// The ask edit sent again with a question writes it, and the row it reports holds that
 	// question and every option of both lists, which is what the block then parses back to.
 	var stored AskBlockText
-	if err := joinedWrite(service, func(ctx context.Context) (err error) {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) (err error) {
 		stored, err = service.SetAskBlockText(ctx, artifactID, "ask-lists",
 			AskBlockEdit{Question: new("Should we ship?")}, model.Actor{Kind: "user", ID: "alice"})
 		return err
@@ -2376,7 +2378,7 @@ func editAskUrgency(service *Service, artifactID, blockID string) error {
 
 // sendAskBlockEdit sends edit to the ask block blockID as alice.
 func sendAskBlockEdit(service *Service, artifactID, blockID string, edit AskBlockEdit) error {
-	return joinedWrite(service, func(ctx context.Context) error {
+	return joinedWrite(service, artifactID, func(ctx context.Context) error {
 		_, err := service.SetAskBlockText(ctx, artifactID, blockID, edit, model.Actor{Kind: "user", ID: "alice"})
 		return err
 	})
@@ -3835,7 +3837,9 @@ func TestAMarkInsideAWordWritesNoVersion(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback(context.Background())
-		ctx, ledger := service.Join(context.Background(), tx)
+		writeCtx, release := gatedContext(t, service, context.Background(), artifactID)
+		defer release()
+		ctx, ledger := service.Join(writeCtx, tx)
 		defer ledger.Discard()
 		if mark != nil {
 			if _, err := service.MarkQuote(ctx, artifactID, *mark, "case", nil); err != nil {
@@ -3944,7 +3948,7 @@ func TestAReaderIsNoAuthorOfAnAgentsVersion(t *testing.T) {
 					t.Fatalf("begin agent edit: %v", err)
 				}
 				defer tx.Rollback(context.Background())
-				joinedCtx, ledger := service.Join(context.Background(), tx)
+				joinedCtx, ledger := service.Join(gated(t, service, context.Background(), artifactID), tx)
 				defer ledger.Discard()
 				if _, err := service.ApplyOps(joinedCtx, artifactID, edit, agent, nil); err != nil {
 					t.Fatalf("agent edit: %v", err)
@@ -4176,7 +4180,40 @@ func TestSettleStampsLegacyChangeInExactlyOneVersion(t *testing.T) {
 	}
 }
 
-func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
+// rejectFirstStampAppend has the database refuse the first stored update that changes no rendered
+// markdown - here the settlement's block-id stamp, the one such update the test makes - so the
+// settlement's repair transaction fails once the stamp is in the room.
+func rejectFirstStampAppend(t *testing.T, database *store.Store) {
+	t.Helper()
+	for _, statement := range []string{
+		`create sequence dispatch_test_stamp_appends`,
+		`create function dispatch_test_reject_stamp_append() returns trigger language plpgsql as $$
+		begin
+			if nextval('dispatch_test_stamp_appends') = 1 then
+				raise exception 'reject the settlement''s stamp';
+			end if;
+			return new;
+		end;
+		$$`,
+		`create trigger dispatch_test_reject_stamp_append
+		before insert on doc_updates for each row when (not new.content_changed)
+		execute function dispatch_test_reject_stamp_append()`,
+	} {
+		if _, err := database.Pool.Exec(context.Background(), statement); err != nil {
+			t.Fatalf("arrange the stamp's refusal: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = database.Pool.Exec(context.Background(), `drop trigger if exists dispatch_test_reject_stamp_append on doc_updates`)
+		_, _ = database.Pool.Exec(context.Background(), `drop function if exists dispatch_test_reject_stamp_append()`)
+		_, _ = database.Pool.Exec(context.Background(), `drop sequence if exists dispatch_test_stamp_appends`)
+	})
+}
+
+// A settlement's stamp is committed in a transaction of its own, before the version. When that
+// transaction fails, the stamp it wrote into the room never reaches the store: the room fails and
+// reloads the stored document, and the next settlement stamps and versions it.
+func TestSettleDiscardsIdentityUpdateWhenItsRepairTransactionFails(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
@@ -4186,32 +4223,9 @@ func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	if _, err := database.Pool.Exec(context.Background(), `
-		create function dispatch_test_reject_identity_settlement() returns trigger language plpgsql as $$
-		begin
-			if new.number = 2 then
-				raise exception 'reject identity settlement version';
-			end if;
-			return new;
-		end;
-		$$
-	`); err != nil {
-		t.Fatalf("create identity settlement failure function: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `
-		create trigger dispatch_test_reject_identity_settlement
-		before insert on artifact_versions for each row
-		execute function dispatch_test_reject_identity_settlement()
-	`); err != nil {
-		t.Fatalf("create identity settlement failure trigger: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = database.Pool.Exec(context.Background(), `drop trigger if exists dispatch_test_reject_identity_settlement on artifact_versions`)
-		_, _ = database.Pool.Exec(context.Background(), `drop function if exists dispatch_test_reject_identity_settlement()`)
-	})
-
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	waitForPersistedProofText(t, database, artifactID, "after\n")
+	rejectFirstStampAppend(t, database)
 	state := service.room(artifactID)
 	state.mu.Lock()
 	generation := state.roomGeneration
@@ -4230,12 +4244,6 @@ func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
 	}
 	if versions != 1 {
 		t.Fatalf("versions after failed settlement = %d, want 1", versions)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `drop trigger dispatch_test_reject_identity_settlement on artifact_versions`); err != nil {
-		t.Fatalf("drop identity settlement failure trigger: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `drop function dispatch_test_reject_identity_settlement()`); err != nil {
-		t.Fatalf("drop identity settlement failure function: %v", err)
 	}
 	if err := service.awaitRoomRecovery(context.Background(), artifactID); err != nil {
 		t.Fatalf("await room recovery: %v", err)
@@ -4275,29 +4283,7 @@ func TestFailedSettlementDoesNotDiscardSuccessorRoomUpdate(t *testing.T) {
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	if _, err := database.Pool.Exec(context.Background(), `
-		create function dispatch_test_reject_successor_settlement() returns trigger language plpgsql as $$
-		begin
-			if new.number = 2 then
-				raise exception 'reject successor settlement version';
-			end if;
-			return new;
-		end;
-		$$
-	`); err != nil {
-		t.Fatalf("create successor settlement failure function: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `
-		create trigger dispatch_test_reject_successor_settlement
-		before insert on artifact_versions for each row
-		execute function dispatch_test_reject_successor_settlement()
-	`); err != nil {
-		t.Fatalf("create successor settlement failure trigger: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = database.Pool.Exec(context.Background(), `drop trigger if exists dispatch_test_reject_successor_settlement on artifact_versions`)
-		_, _ = database.Pool.Exec(context.Background(), `drop function if exists dispatch_test_reject_successor_settlement()`)
-	})
+	rejectFirstStampAppend(t, database)
 
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	<-entered
@@ -4593,7 +4579,7 @@ func TestRolledBackWriteNeverReachesTheRoom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	if _, err := service.ReplaceText(joined, artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
@@ -4741,7 +4727,7 @@ func TestSettleAttributesAServiceWrittenAskBlockToItsWriterAfterBrowserEdits(t *
 		t.Fatalf("begin agent edit: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	defer ledger.Discard()
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{
 		Op: "insert", After: "end", Markdown: ":::ask{#agent-after-browser urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n",
@@ -5641,12 +5627,52 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 	}
 }
 
-// joinedWrite runs write inside a transaction joined with Service.Join, as every caller of a
-// document write does, and commits it when write succeeds. It returns write's own error, which
-// tests assert on, or the transaction's, and never fails the test itself, so a goroutine may call
-// it.
-func joinedWrite(service *Service, write func(ctx context.Context) error) error {
-	ctx := context.Background()
+// testGateWait bounds a test's wait for a document's writer gate, so a gate an earlier write of
+// the same test still holds fails the test, naming the gate, instead of hanging the package.
+const testGateWait = 10 * time.Second
+
+// takeWriterGates takes the writer gates of artifactIDs as a handler does before its
+// transaction, waiting at most testGateWait, and returns ctx carrying them with their release.
+func takeWriterGates(service *Service, ctx context.Context, artifactIDs ...string) (context.Context, func(), error) {
+	wait, cancel := context.WithTimeout(ctx, testGateWait)
+	defer cancel()
+	gated, release, err := service.AcquireDocumentWriter(wait, artifactIDs...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("take the writer gates of %v: %w", artifactIDs, err)
+	}
+	return context.WithValue(ctx, documentWriterKey{}, gated.Value(documentWriterKey{})), release, nil
+}
+
+// joinedWrite runs write to artifactID inside a transaction joined with Service.Join, as every
+// caller of a document write does: holding the document's writer gate, taken before the
+// transaction opens, and committing when write succeeds. It returns write's own error, which
+// tests assert on, or the gate's or the transaction's, and never fails the test itself, so a
+// goroutine may call it.
+func joinedWrite(service *Service, artifactID string, write func(ctx context.Context) error) error {
+	return joinedWriteOf(service, []string{artifactID}, write)
+}
+
+// joinedIssueWrite is joinedWrite for a write to every document of issueKey (WriteIssueAskStates),
+// as the issue route and the ask repair take every one's writer gate before their transaction.
+func joinedIssueWrite(service *Service, issueKey string, write func(ctx context.Context) error) error {
+	rows, err := service.store.Pool.Query(context.Background(), issueDocumentIDs, issueKey)
+	if err != nil {
+		return fmt.Errorf("list the issue's documents: %w", err)
+	}
+	documents, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return fmt.Errorf("list the issue's documents: %w", err)
+	}
+	return joinedWriteOf(service, documents, write)
+}
+
+// joinedWriteOf is joinedWrite holding the writer gates of artifactIDs.
+func joinedWriteOf(service *Service, artifactIDs []string, write func(ctx context.Context) error) error {
+	ctx, release, err := takeWriterGates(service, context.Background(), artifactIDs...)
+	if err != nil {
+		return err
+	}
+	defer release()
 	tx, err := service.store.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin the write's transaction: %w", err)
@@ -5660,9 +5686,40 @@ func joinedWrite(service *Service, write func(ctx context.Context) error) error 
 	return ledger.Commit(ctx)
 }
 
+// gatedContext is ctx carrying the writer gates of artifactIDs, for a test that opens a write's
+// transaction itself, as a handler takes them before its transaction. The gates are released when
+// the test ends, or earlier by the release returned, which a test writing the same document again
+// runs once the first write has committed or rolled back.
+func gatedContext(t testing.TB, service *Service, ctx context.Context, artifactIDs ...string) (context.Context, func()) {
+	t.Helper()
+	gated, release, err := takeWriterGates(service, ctx, artifactIDs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	return gated, release
+}
+
+// gated is gatedContext's context alone, for a test that writes the document once.
+func gated(t testing.TB, service *Service, ctx context.Context, artifactIDs ...string) context.Context {
+	t.Helper()
+	ctx, _ = gatedContext(t, service, ctx, artifactIDs...)
+	return ctx
+}
+
+// beneathTheGate is ctx carrying artifactIDs' writer-gate mark without having queued for the gate,
+// for the tests that pin the writer slot and the lock order beneath the gate: what a second write
+// to a document does once it is inside its transaction while a first holds the slot. The gate
+// keeps two writes of one process from getting there together, so only such a test, giving the
+// second write the mark the gate would, still reaches the slot code it pins.
+func beneathTheGate(ctx context.Context, artifactIDs ...string) context.Context {
+	hold := &documentWriterHold{artifactIDs: slices.Compact(slices.Sorted(slices.Values(artifactIDs)))}
+	return context.WithValue(ctx, documentWriterKey{}, hold)
+}
+
 func joinedReplaceText(service *Service, artifactID, markdown string, actor model.Actor) (string, error) {
 	var canonical string
-	err := joinedWrite(service, func(ctx context.Context) (err error) {
+	err := joinedWrite(service, artifactID, func(ctx context.Context) (err error) {
 		canonical, err = service.ReplaceText(ctx, artifactID, markdown, actor)
 		return err
 	})
@@ -5671,7 +5728,7 @@ func joinedReplaceText(service *Service, artifactID, markdown string, actor mode
 
 func joinedApplyOps(service *Service, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error) {
 	var outcome EditOutcome
-	err := joinedWrite(service, func(ctx context.Context) (err error) {
+	err := joinedWrite(service, artifactID, func(ctx context.Context) (err error) {
 		outcome, err = service.ApplyOps(ctx, artifactID, ops, actor, precondition)
 		return err
 	})
@@ -5680,7 +5737,7 @@ func joinedApplyOps(service *Service, artifactID string, ops []model.EditOp, act
 
 func joinedMarkQuote(service *Service, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
 	var anchored Anchored
-	err := joinedWrite(service, func(ctx context.Context) (err error) {
+	err := joinedWrite(service, artifactID, func(ctx context.Context) (err error) {
 		anchored, err = service.MarkQuote(ctx, artifactID, mark, quote, occurrence)
 		return err
 	})
@@ -5688,25 +5745,25 @@ func joinedMarkQuote(service *Service, artifactID string, mark MarkSpec, quote s
 }
 
 func joinedProjectMark(service *Service, artifactID, markID string, record MarkRecord, actor model.Actor) error {
-	return joinedWrite(service, func(ctx context.Context) error {
+	return joinedWrite(service, artifactID, func(ctx context.Context) error {
 		return service.ProjectMark(ctx, artifactID, markID, record, actor)
 	})
 }
 
 func joinedAcceptSuggestion(service *Service, artifactID, id, replaceWith string, actor model.Actor) error {
-	return joinedWrite(service, func(ctx context.Context) error {
+	return joinedWrite(service, artifactID, func(ctx context.Context) error {
 		return service.AcceptSuggestion(ctx, artifactID, id, replaceWith, actor)
 	})
 }
 
 func joinedRejectSuggestion(service *Service, artifactID, id string, actor model.Actor) error {
-	return joinedWrite(service, func(ctx context.Context) error {
+	return joinedWrite(service, artifactID, func(ctx context.Context) error {
 		return service.RejectSuggestion(ctx, artifactID, id, actor)
 	})
 }
 
 func joinedSetBlockAttributes(service *Service, artifactID, blockID string, attributes map[string]any, actor model.Actor) error {
-	return joinedWrite(service, func(ctx context.Context) error {
+	return joinedWrite(service, artifactID, func(ctx context.Context) error {
 		return service.SetBlockAttributes(ctx, artifactID, blockID, attributes, actor)
 	})
 }

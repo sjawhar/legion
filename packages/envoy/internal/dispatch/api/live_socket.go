@@ -319,7 +319,7 @@ func (socket *liveSocket) writeFrame(frame any) bool {
 func (s *server) serveLiveSocket(w http.ResponseWriter, r *http.Request) {
 	_, human, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return
 	}
 	upgrader := gws.Upgrader{EnableCompression: true, ReadBufferSize: liveSocketReadBuffer}

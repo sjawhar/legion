@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -264,10 +265,15 @@ func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
 
 // A retry racing its original, sixteen times over, all held at the key's insert until the last of
 // them has arrived there: one makes the message and every other is told the first is in flight or,
-// once it has answered, given its answer. The session is handed the message once.
+// once it has answered, given its answer. The session is handed the message once. Admission lets
+// sixteen writes in at once here, since the race at the key, not admission's write limit, is what
+// this holds them at.
 func TestConcurrentSendsUnderOneKeyMakeOneMessage(t *testing.T) {
 	listener, sends := newBroadcastListener(t, agentSessions)
-	handler, database := newTargetedMessageHandler(t, listener.URL)
+	handler, database, _ := newTestServer(t, testServerOptions{
+		envoyURL:  listener.URL,
+		admission: admission.New(admission.Limits{Read: admission.MaxReadLimit, Write: 16}),
+	})
 	ctx := context.Background()
 	holder, err := database.Pool.Begin(ctx)
 	if err != nil {

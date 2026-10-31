@@ -143,8 +143,9 @@ func (e *ErrInvalidPrecondition) Error() string {
 	return "invalid document edit precondition: " + e.Reason
 }
 
-// ErrPreconditionBusy reports that a room's bounded conditional-edit queue is full.
-var ErrPreconditionBusy = errors.New("document conditional edit queue is full")
+// ErrPreconditionBusy reports that a document's writer gate already has as many writers queued as
+// it holds (maxQueuedDocumentWriters), so the write was refused before its transaction opened.
+var ErrPreconditionBusy = errors.New("document writer queue is full")
 
 // ErrPreconditionFailed reports a stale document or block token without changing the live tree.
 type ErrPreconditionFailed struct {

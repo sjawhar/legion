@@ -30,7 +30,7 @@ func TestAnApprovedVersionHoldingARepeatedBlockIDCarriesNothing(t *testing.T) {
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 
 	editLiveTree(t, service, artifactID, appendSecondRegionAsk(t))
-	joined(t, service, func(ctx context.Context, tx pgx.Tx) error {
+	joined(t, service, artifactID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := service.NamedVersion(ctx, artifactID, "Named by the agent with the repeat", agent)
 		return err
 	})
@@ -55,7 +55,7 @@ func TestAnApprovedVersionHoldingARepeatedBlockIDCarriesNothing(t *testing.T) {
 		return tree
 	})
 	answerBlockAs(t, service, artifactID, "region", "alice", []string{"East"})
-	joined(t, service, func(ctx context.Context, tx pgx.Tx) error {
+	joined(t, service, artifactID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := service.NamedVersion(ctx, artifactID, "Named by the agent without the repeat", agent)
 		return err
 	})

@@ -61,7 +61,7 @@ func TestMarkQuoteJoinsTheCallerTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined, ledger := service.Join(context.Background(), tx)
+	joined, ledger := service.Join(gated(t, service, context.Background(), artifactID), tx)
 	if _, err := service.MarkQuote(joined, artifactID, MarkSpec{
 		Kind: MarkComment,
 		ID:   "c1",
@@ -670,7 +670,7 @@ func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin projection transaction: %v", err)
 	}
-	joined, ledger := service.Join(context.Background(), tx)
+	joined, ledger := service.Join(gated(t, service, context.Background(), artifactID), tx)
 	if err := service.ProjectMark(joined, artifactID, "c1", MarkRecord{
 		Kind: "comment", By: "user:alice", CreatedAt: "2026-09-10T00:00:00Z", Text: "note",
 	}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
@@ -707,7 +707,7 @@ func TestTransactionalMarkWritesSettleWithoutAVersion(t *testing.T) {
 		t.Fatalf("begin comment transaction: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	ctx, ledger := service.Join(context.Background(), tx)
+	ctx, ledger := service.Join(gated(t, service, context.Background(), artifactID), tx)
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: alice}, "quick", nil); err != nil {
 		t.Fatalf("mark quote: %v", err)
@@ -797,7 +797,7 @@ func TestAReplaceKeepsTheAnchorOverItsWholeCurrentExtent(t *testing.T) {
 				t.Fatalf("begin edit: %v", err)
 			}
 			defer tx.Rollback(ctx)
-			joined, ledger := service.Join(ctx, tx)
+			joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 			defer ledger.Discard()
 			if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{
 				Op: "replace", Find: test.find, With: test.with,

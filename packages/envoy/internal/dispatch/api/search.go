@@ -420,14 +420,14 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 
 	response, err := s.runSearch(r.Context(), searchText, project, limit, offset)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// Where each ask hit stands is read for this route alone: the write-time suggestions share
 	// the ranking (runFusedSearch) but never show it. TookMS counts the read.
 	started := time.Now()
 	if err := s.attachAskStates(r.Context(), s.deps.Store.Pool, response.Results); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	response.TookMS += time.Since(started).Milliseconds()
