@@ -2,20 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-404",
-  "completed": "2026-10-31T09:05:00Z",
-  "round": 2,
-  "decision": "changes_requested",
+  "completed": "2026-10-31T13:20:00Z",
+  "round": 3,
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 3,
-  "reviewedCodeHead": "7d517024bf4d36c4982e1612610dcfa00574f0d9",
-  "roundOneFindings": "All five important findings are fixed at 7d517024 (latched refusal, connect step covering ensureConnection, unregisterTopics step, claimAdopted message, four remaining check() calls each after a catch-all or before a non-handle action), and so is the census. Seven of the eight minors are fixed; taskWasAbandoned was kept with the class made private, which I accept. The local-stack minor is fixed in part only (finding 2 below).",
-  "ci": "Run 41184223344 at code head 7d517024: every lane still queued at 08:47Z (runner backlog). Not a verdict; a REQUEST_CHANGES does not wait on it.",
-  "thermonuclear": "thermonuclear-deep-review at 87420373: APPROVE, no Medium or High finding. thermonuclear-code-quality at 7d517024: CHANGES (A: the claimed-or-not wording is decided twice; B: roleHolderUnread repeats the error; C: smoke-registration-stall.sh keeps two hand-written poll loops). I judged B not a defect, since it is the same verdict-plus-error shape as DeleteOutcome's EntryUnanswered in this push.",
-  "proseFixedByReviewer": "Commit above 87420373: packages/pi-envoy/AGENTS.md and .dispatch/architecture/pi-envoy.md (the handle's NATS step is the connection acquisition, and the refusal latches), packages/envoy/internal/session/registry.go decode comment (a type error fills the other fields wherever the bad field sits). PR body: census entry 2 now lists every hit of its own search command, with a disposition for each; the Not proven / risk line no longer names the two round-1 gaps the push closed; the Threads entry no longer says main's messages are back word for word.",
-  "keyFindings": [
-    {"severity": "minor", "file": "packages/pi-envoy/src/registration-state.ts:637", "description": "Which of the two messages the caller hears (a claim that landed vs one that did not) is decided twice. claimRole's refuse() messages at 612 and 637 branch on result.claimed, but run() swallows a StepRefused message, so nobody reads them. The sentence the model reads is chosen again at envoy.ts:2033-2035 from claimAdopted. Remove the unread branches, so that only one copy is left."},
-    {"severity": "minor", "file": "packages/pi-envoy/scripts/smoke-registration-stall.sh:262", "description": "Round-1 thread PRRT_kwDORFy7ds6yOyT6 is fixed in part only. This script sources local-stack.sh, but it keeps two hand-written poll-then-check-again loops (262-267, 273-278) where the other two smokes call poll_until. README.md:358 says readiness is polled with poll_until."},
-    {"severity": "minor", "file": "packages/pi-envoy/src/registration-state.ts:834", "description": "unregisterTopics replaced the recovery's specific warning ('could not unregister a resumed controller's retired Slack topics') with a generic one. The one caller is the controller's Slack retirement, and the line no longer says what the topics were or why they were dropped. Let the step carry the caller's reason."}
-  ]
+  "minor": 0,
+  "reviewedCodeHead": "fcf43506541cddbad31b4edbbfc2cc5d2bbbf22b",
+  "roundTwoFindings": "All three round-2 minors are fixed in fcf43506. claimRole's refusal messages no longer branch on result.claimed, so sessionLeftDuringClaim picks the model's sentence once. smoke-registration-stall.sh polls with local-stack.sh's poll_until (30 s and 60 s). unregisterTopics logs the caller's own sentence, and the one caller passes main's exact Slack-retirement text. Threads PRRT_kwDORFy7ds6yOyT6, PRRT_kwDORFy7ds6yPdPP, PRRT_kwDORFy7ds6yPdPR and PRRT_kwDORFy7ds6yPdPU each carry my acceptance; all 17 threads are resolved.",
+  "ci": "Run 41188502240 at code head fcf43506: ci-ok completed success at 13:17Z (30 jobs success, worker-image / attest skipped), pr-title success. The required set (rulesets) is ci-ok and pr-title; branch protection adds none. The compare from fcf43506 to the PR head changes only .legion/INFRA-404/.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at fcf43506: both APPROVE, with no finding. Deep review ran registration-state.test.ts (62 pass), tsc on pi-envoy and bash -n on the stall smoke.",
+  "judgedNotDefects": [
+    "The code-quality pass notes that the live()-branching StepRefused texts in guard and dial are also unread. This round did not touch them, and they choose no wording a caller reads, so nothing can drift. Not a defect.",
+    "roleHolderUnread is paired with its error, the same shape as DeleteOutcome's EntryUnanswered (round 2)."
+  ],
+  "keyFindings": []
 }
