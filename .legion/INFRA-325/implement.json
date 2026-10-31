@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-325",
+  "completed": "2026-10-31T17:45:00Z",
+  "proof": [
+    {
+      "criterion": "A8, the backlink count and the reference closure: each changed statement's plan and time, lower after, on the larger test database (R1, R2, R9).",
+      "surface": "The seeded 13 GB measurement database (20,000 issues, 200,000 document versions, 1,250,000 events), Postgres 18.6 with pgvector, running as a Job in the cluster's builds namespace and reached over its Service, with fsync=on, synchronous_commit=on, full_page_writes=on, shared_buffers=8GB, maintenance_work_mem=2GB, effective_cache_size=24GB.",
+      "command": "cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<the seeded database> go test -run TestStatementTimings -timeout 90m -count=1 -v ./internal/dispatch/refs",
+      "observed": "All three pass. refs.Closure: main's text 1.042458s, this branch's 49.669ms (21x), the pair's bound enforced by the harness. refs.BacklinkCounts over an issue 580us and over an issue's asks 485us, each with its plan, under protocol 2 (main's count read the whole 23-arm view on a schema without ask_followers_session_id, so one database cannot hold both sides).",
+      "headSha": "d515ee541061",
+      "negativeControl": "The same test with the ask page's subject bound to an issue that holds no ask fails rather than measuring an empty array: 'SEED1-1 holds no ask, so the ask page's count has no subject'. That failure is what sent the subject lookup to the issue carrying the most asks."
+    },
+    {
+      "criterion": "A8, the issue list, the project list, the agent activity read, the issue's children and search's document arm: each changed statement's time lower after (R3, R4, R6, R9).",
+      "surface": "The same seeded measurement database at the head's schema, and a second database of the same seed migrated from a checkout of main at the branch's merge base (92619d8d) for protocol 2's before side.",
+      "command": "cd packages/envoy && DISPATCH_BENCH_DATABASE_URL=<head database> go test -run TestStatementTimings -timeout 90m -count=1 -v ./internal/dispatch/api, then the same against the main-schema database",
+      "observed": "Every protocol 1 pair passes its bound. The issue list unpaged 5.288594s -> 241.601ms (22x); the issue list's first page of 20 5.293032s -> 16.532ms (320x); the project list 161.977ms -> 42.429ms (3.8x); agentLastActivity 977us -> 124us (7.9x); the issue's children 11.221ms -> 7.38ms (1.5x). Protocol 2, before against after: listIssueAsksQueryAll 5.935ms -> 328us (18x); listIssueRootMessagesQuery 3.687ms -> 73us (50x); searchQuery keywords only 198.718ms -> 69.668ms (2.9x); searchQueryMeaning 1.17036s -> 1.018553s; relatedKeywordQuery 4.20322s -> 4.089988s; relatedMeaningQuery 5.273862s -> 5.160966s; relatedProbeSQL 3.014ms -> 2.944ms. listArtifactAsksQueryOpen 1.61ms -> 2.65ms, higher after, which the spec allows: this change drops the partial index its before side used.",
+      "headSha": "d515ee541061",
+      "negativeControl": "Run against the main-schema database, the five document-arm statements' head text fails outright rather than reporting a number: 'explain the head's text: ERROR: relation \"document_search\" does not exist (SQLSTATE 42P01)'. That refusal is why the timing test now reads the schema and measures main's own text there, naming the side it read."
+    },
+    {
+      "criterion": "The migrations do not stop a Dispatch deploy: the pre-deploy census answers for every migration this change adds, on a database holding production's shape at ten times its row counts.",
+      "surface": "The pre-deploy census (cmd/dispatch census), run against the seeded database migrated from main at the merge base, whose tables are production-shaped: artifact_versions 3.3 GiB, comments 1.1 GiB, asks 233.6 MiB, messages 174.8 MiB.",
+      "command": "cd packages/envoy && DATABASE_URL=<the main-schema seeded database> go run ./cmd/dispatch census",
+      "observed": "'census: ok', exit 0, with all ten pending migrations read. Each census file answers 0. The two exemptions hold where the change depends on them: 0155's trigger on artifact_versions at 3.3 GiB and 0159's five triggers over comments at 1.1 GiB are each 'above the 1.0 GiB limit, from which the migration is exempt because its statements are only create function and create trigger'. No table above the limit is sized, and no migration is refused.",
+      "headSha": "d515ee541061",
+      "negativeControl": "The census is the control for its own exemption: a migration whose statements were not only a function and a trigger would be sized against the 1.0 GiB limit and refuse the deploy, which is what the report prints for every other migration's table (ask_followers 17.6 MiB, asks 233.6 MiB, issues 32.8 MiB, messages 174.8 MiB, search_term_totals 64.0 KiB, each 'limit 1.0 GiB')."
+    },
+    {
+      "criterion": "The changed reads answer a caller the same way: the issue read's backlink count, the issue list's page and total, the project list's open-ask counts, search's document arm, and the reference closure (R1, R2, R3, R4, R6, R9).",
+      "surface": "A Dispatch server built from this head and booted against the seeded 13 GB database, driven over its HTTP API.",
+      "command": "the server with DATABASE_URL at the seeded database, then curl of /api/v1/issues/SEED1-1, /api/v1/issues?project=SEED1[&limit=20&offset=20], /api/v1/projects, /api/v1/search?q=vyort&project=SEED1, /api/v1/issues/SEED1-1/references, /api/v1/projects/SEED1/related, /api/v1/issues/<key>/messages",
+      "observed": "The issue read answers referenced_by_count 110 with 104 children. The first page of 20 at offset 20 equals the same slice of the unpaged list, and total is 8000, the project's own issue count. The project list answers each project's open-ask count (SEED1 8838, SEED2 1981, SEED3 1314, SEED10 1315). A search for the rare word the seed printed answers 20 results. The references route (the closure) and the related-item check each answer 200, and so does an issue's root messages.",
+      "headSha": "d515ee541061",
+      "negativeControl": "Driving the ask page on that database answered 500 INTERNAL, 'ask ... has no event'. That is a defect this proof found in this change's own seed tool, not in the reads: the seed wrote 80,000 asks and no ask.opened event for any of them, so every ask read failed. It is fixed at this head (every seeded ask now carries its opening event, and a test of the seed holds it, failing without the fix), and a database re-seeded with the corrected tool is the surface the ask routes are driven on."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/refs/graph.go: the backlink count unions only the arms of graph_edges that can point at the asked node kind, each through its own index, and refuses a kind it declares no arm for.",
+    "packages/envoy/internal/dispatch/refs/closure.go: the closure probes a block's document through document_blocks_node_id instead of a hashed subplan that read all 800,000 rows.",
+    "packages/envoy/internal/dispatch/docs/marks.go, edits.go, mutation.go: every anchor read adds the uuid comparison its table's index carries, beside the text comparison that keeps the row set exactly main's.",
+    "packages/envoy/internal/dispatch/api/issue_queries.go, issue_components.go, issue_repo.go, issue_page.go, projects.go: the issue list has four statement texts, cuts its page and counts its total in the database, and resolves components and repository with one walk over the page; the project list counts open asks with one grouped join.",
+    "packages/envoy/internal/dispatch/api/search.go, suggestions.go, related_terms.go: search's document arm, the related-item check and the related-terms probe read document_search.",
+    "packages/envoy/internal/dispatch/api/related_terms.go, related_terms_before_snapshots.go: the refresh applies a queue under its own snapshot, rebuilding a project in full when a foreign writer moved refreshed_at.",
+    "packages/envoy/internal/dispatch/api/agents.go: the agents page reads each session's newest event through a lateral rather than aggregating every event.",
+    "packages/envoy/internal/dispatch/store/migrations/0150 through 0159: the ask_followers index, the two audit indexes and the drop of asks_open_artifact, document_search with its trigger and backfill, and the refresh queue with its columns and five triggers, each with its census file.",
+    "packages/envoy/cmd/dispatch-seed: the seed tool that builds the measurement database.",
+    "packages/envoy/internal/dispatch/benchtime and three statement_timing_test.go files: the committed timing harness, gated on DISPATCH_BENCH_DATABASE_URL.",
+    "packages/envoy/internal/explaintest/explaintest.go: the plan walk, and the first-key-column check every index assertion of this change uses.",
+    "packages/envoy/scripts/route-timings.sh, scripts/README.md: A9's route timings.",
+    "packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, .dispatch/architecture/dispatch-store.md: the texts this change makes false.",
+    "packages/envoy/.changes/unreleased/pr2589-Changed-20261031-151657.yaml: the changelog fragment."
+  ],
+  "trickyParts": [
+    "The pod is replaced every two hours or so, and each replacement takes the issue volume with it: both local Postgres clusters, every scratch file and every unpushed commit. Push after each seam. Two pod rolls cost work that the INFRA merge lane rescued to a branch; the third was survived by pushing first.",
+    "The measurement Postgres is a Job in the cluster's builds namespace, which a Legion release roll does not replace, so the seeded database outlives this pod. Job infra-325-postgres-w6pft, Service of the same name, image mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 (Postgres 18.6), 8 CPU, 32Gi, a 200Gi build-scratch ephemeral volume, activeDeadlineSeconds 43200. Its URL and password are in /legion/scratch/tmp/bench-job.env, which dies with the pod; read the Service and the Job's env to rebuild it. DELETE IT WHEN THE LAST MEASUREMENT IS DONE: kubectl -n builds delete job infra-325-postgres-w6pft, which takes its Service with it.",
+    "The local Postgres the Go tests run against is a rootless Postgres 17 unpacked onto the issue volume; /legion/scratch/pg/setup.sh rebuilds it, and 'bash setup.sh bench' builds a second cluster with durability on. A replacement pod re-runs it. For psql by hand, export PATH=/legion/scratch/pg/root/usr/lib/postgresql/17/bin:$PATH and LD_LIBRARY_PATH=/legion/scratch/pg/root/usr/lib/x86_64-linux-gnu:/legion/scratch/pg/root/usr/lib/postgresql/17/lib around the command.",
+    "internal/dispatch/api cannot run in this pod: api/rank_test.go refuses a cluster whose only collation is byte order, and storetest templates every test database from that cluster. Each test of that package runs under -run, and the whole package is CI's to run. The pod runs refs, docs, store, benchtime, explaintest and cmd/dispatch-seed.",
+    "A plan assertion that only demands an index condition proves nothing: ask_followers' primary key (ask_id, session_id) gives the session arm a full index scan with a condition on its non-leading column, so the backlink count's plan test passed with its own migration removed. Every index assertion in this change names the index or checks the condition is on the index's first key column, read with pg_get_indexdef(indexrelid, 1, true).",
+    "Migration numbers 0150 to 0159 are contiguous after main's 0149. The INFRA merge lane reports that sjawhar/legion#2411 is armed and closes the numbered series at 0149, requiring YYYYMMDDHHMMSS_<slug>.up.sql for every new migration; once it is on main this block must be renamed, which is the last forward merge's work. Five open pull requests also claim 0150 upward."
+  ],
+  "deviations": [
+    "The migration numbering the plan gave (0153 onward) was impossible: store_test.go's TestMigrationSetIsNumberedOneToN refuses a gap, and main's highest is 0149, so the block starts at 0150.",
+    "The plan's protocol 2 says to seed the before side with the branch's seed tool against a schema migrated from main. The seed's last step called this branch's refresh, which reads search_term_totals.snapshot and search_term_queue, so it failed on main's schema and failed the command. The seed now reads the schema from the catalogue and takes the matching build, which is what makes protocol 2 runnable at all.",
+    "The five document-arm statements cannot be a protocol 1 pair, so the timing test reads whether document_search exists and measures main's own text where it does not, naming the side in the measurement's label. That makes the two-commit run one test against two databases rather than a second harness."
+  ],
+  "openQuestions": [
+    "R2's share-of-plan reading for searchQueryMeaning is not yet recorded. The measurement shows the document arm is no longer the cost: searchQueryMeaning is 1.02s and relatedMeaningQuery 5.16s after the change, against 1.17s and 5.27s before, so the remaining time is in parts the plan names as candidates (the meaning document candidate CTE, which carries the same lateral for created_at alone; the headline lateral, which resolves the latest version a third time; and totals.total, which materialises the whole kinds union a second time). R2 asks for the share of each part over 10% and a fix or a reason for each. The plans are in the timing test's output; the share reading and its verdict are the work left on R6.",
+    "A9's route timings are not yet taken. The script is committed (packages/envoy/scripts/route-timings.sh) and the servers boot, but the ask-event defect found by driving the routes made the seeded asks unreadable, so the run waits on the database re-seeded with the corrected tool.",
+    "The agents route answers 503 ENVOY_UNAVAILABLE against this fixture because no Envoy listener runs beside it, not because of this change. agentLastActivity's own statement is measured and its equality test passes; the route needs a fixture with a listener."
+  ],
+  "discoveredComplexity": [
+    "Driving the routes against a production-shaped database found two defects no test had: the seed wrote no ask.opened event for any of its 80,000 asks, so every ask read answered 500, and its filler ask.opened events carried a payload that is no ask, so the events route answered 500 too. Both are fixed and both now have a test of the seed that fails without the fix. This is what the boot-and-drive rule is for: the Go suites were green throughout.",
+    "The closure's fault was not a missing index. document_blocks_node_id exists; the exists probe sat inside a disjunction, where no semijoin can carry a qual, so Postgres planned it as a hashed subplan that materialised all 800,000 rows, twice. A lateral with limit 1, plus an explicit to_kind in ('artifact','block') so the planner can still derive the target kinds, is what keyed it."
+  ]
+}
