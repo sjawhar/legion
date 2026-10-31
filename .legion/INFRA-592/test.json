@@ -2,57 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-592",
-  "completed": "2026-10-31T17:04:00Z",
-  "round": 10,
-  "headSha": "62d4a36178086f179719f8bc088b3c412334095a",
-  "codeHeadSha": "e9b1b005061aee7e942b23f2aff0a2b975036e05",
-  "loadRule": "Every run on pod 9534abcf-6826-448e-9408-b04ce8b93c7b; adjacent base (07c21242, worktree basewt) / head pairs; nothing else of mine ran during the load series; each run uploaded the moment it finished (dispatch://INFRA-592/artifact/infra-592-tester-r10-t10-*-tar-gz, 11 runs). Memory sampled every 2 s by a named job (mem-sampler-infra-592) beside the series: sampled peak 14.58 GiB of 19, 2,104 samples; during the red-test runs 3.96 GiB (67 samples); during the replays 3.65 GiB (107 samples).",
+  "completed": "2026-10-31T19:39:30Z",
+  "round": 11,
+  "headSha": "36554f7b8ec81ac025930263fc7f37ecab6aa5e6",
+  "codeHeadSha": "44aada0bdac58a1dae25bd2775c9e46ffed2202c",
+  "roundShape": "Narrow round, by the architect's scope: the settlement fix only (44aada0b changes docs/settlement.go and packages/envoy/AGENTS.md). Round 10's load evidence at e9b1b005 stands; no load step ran.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Their 1x attribution reproduced with my own lock sampler (below). Their 10x shape reproduced (only 429, 0 connection failures, about 1.5x the base's committed events, about 80% of its reads) at lower absolute numbers on this round's box: head 57.7-58.7 reads/s and 5.32-5.48 events/s against their 65 and 6.02; my base also ran lower (72.7-73.2 reads/s, 3.43-3.59 events/s against their 86 and 4.12). Their 30-minute run levelled at 9.4-9.6 GB RSS; mine levelled at 10.4 GB."
+    "how": "Re-ran their red-test command (3 of 3 pass) and the dispatch-memory test's steps on a real Dispatch process (settles in 4.02 s); confirmed both fail with only docs/settlement.go set back to b35eb407's. Their api selection and docs suite re-run ok under the caps. Their whole-lane dispatch-memory run cannot be repeated here with the meter (gVisor refuses clear_refs), and CI has not run it yet."
   },
-  "failed": 2,
-  "failures": [
-    {
-      "criterion": "Background work on limits of its own: a settlement completes (CI dispatch-memory at the head)",
-      "evidence": "CI dispatch-memory (go test -tags memory ./cmd/dispatch) failed at e9b1b005 (job 124574387034), 530c8669 and 07c21242, each only on TestReturnedAnswersCannotGrowADocumentPastWhatOneUploadMayHold, 'memory_test.go:631: document <id> never settled'; it passed at b18e2678 and on main (3b0ae77e). I missed this lane in rounds 8 and 9. The memory meter cannot run on this pod (gVisor refuses /proc/<pid>/clear_refs), so I replayed the test's steps without it in throwaway copies (memreplay_test.go): at e9b1b005 the returning edit answered 200 and the document never settled in 2 min; at b18e2678 it settled in 4.1 s. Dispatch's log at e9b1b005: 'settlement withholds restored answers from their blocks' withheld=23 (document too large to store: 21,604,099 bytes past 1 MiB) and then 'document settlement left owed after reading a moving document again; its next update or the resumption settles it' passes=7, repeated: the settlement's own write reads as the document moving (docs/settlement.go:272-279, maxSettleRereads/maxSettlePasses), so each trigger gives up and the document stays owed for good. Red test: packages/envoy/internal/dispatch/api/growth_test.go TestASettlementThatWithholdsReturnedAnswersCompletes (commit 'test(dispatch): red test: a settlement that withholds returned answers completes'): 24 asks answered with 900 KB, blocks deleted, all returned in one edit, then requires doc_settlements_pending to clear within 45 s. `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -p 1 ./internal/dispatch/api/ -run TestASettlementThatWithholdsReturnedAnswersCompletes -count=1` fails at the head ('growth_test.go:668: the document still owes a settlement 45 s after the answered blocks returned in one edit', 60.5 s) and passes at b18e2678 (17.5 s). Evidence: dispatch://INFRA-592/artifact/infra-592-tester-r10-settlement-tar-gz."
-    },
-    {
-      "criterion": "10x: reads at least 60/s (the architect's round-10 check 2)",
-      "evidence": "t10-head-10x-a 10,559 and t10-head-10x-b 10,387 reads 2xx in 180 s = 58.7 and 57.7 reads/s; the 30-minute run 59.5 reads/s. Base in the same pairs 73.2 and 72.7. Marginal (2-4% under), and this round's base ran about 13% under the implementer's base on the same pod (box variance); recorded as a failure of the stated number for the architect to judge."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "architectChecks": {
-    "oneX": "Head 0/0, 180 reads (1.67%) and 10 writes (1.39%), 0/0; base 0/2, 0/1, 0/0. The t10-head-1x-b burst (read refusals 82 -> 198 between the 15:01:37 and 15:01:42 samples, writes 10 -> 18; loadgen's write refusals at 15:01:51-54; read admission 28 in flight and 5 queued at 15:01:32) lines up with my 0.5 s lock sampler: 15:01:18 a dispatch-settlements backend waiting on 'select closed_at is null from issues where key = $1 for no key update' behind a dispatch-requests transaction idle in transaction; 15:01:33 a dispatch-requests write idle in transaction 1.53 s after its issue-open read (transaction 2.0 s old); 15:01:53 two artifact-listing reads active 2.0 and 2.6 s; 15:01:56 a settlement again waiting on an issue row behind a write idle 1.5 s; Dispatch WARN 15:01:53.906Z 'event horizon held back' 5.1 s by a write idle after 'release savepoint sp_2'. Box sampler longest tick 1.27 s. AGREES with the implementer: writes holding issue rows and the horizon during document work inside their transaction (INFRA-636's #2468 class), with slow listing reads beside them; not this PR's limits.",
-    "tenX": "Only 429 OVERLOADED, 0 connection failures, 0 other non-2xx in all four runs; head events 5.48 and 5.32/s against base 3.59 and 3.43 (+50%); head reads 58.7 and 57.7/s against base 73.2 and 72.7 (failure 2); head read in flight mean 21-22, write 17-18; goroutines waiting for a connection at most 9-14.",
-    "thirtyMinutes": "t10-head-10x-30m (1,800 s at 10x): 59.5 reads/s, 5.88 of 39.99 events/s, only 429, 0 connection failures. Per 5-minute bucket, Dispatch RSS max 7.9, 9.6, 9.7, 10.0, 10.4, 10.4 GB and heap in use max 5.6, 8.4, 8.7, 8.0, 8.5, 8.5 GiB; goroutines 2.0-2.5 thousand throughout. Heap flat from minute 10, RSS flat over the last 10 minutes (10,405 -> 10,418 MiB): it levels after its rise, at 10.4 GB.",
-    "realBinary": "PASS at the head: 13 slow-body writers all 400 REQUEST_BODY_UNREADABLE at 61.6-62.2 s, normal writes 201 in 0.08-0.19 s throughout; issues locked 30 s: 28 x 503 REQUEST_TIMEOUT at 20.00-20.11 s, 12 x 429 at 1.01-1.06 s; proxy frozen 20 s: 60 reads and 20 writes 503 DATABASE_BUSY within 3.02 s, /healthz 200 after.",
-    "ci": "At e9b1b005, 17:01Z: lint, typecheck, test, pr-title, ci-filters, dispatch, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-go-race-pmdoc success; dispatch-memory failure (failure 1); ci-ok queued (unread)."
+    "redTest": "PASS. growth_test.go has 0 diff lines between b35eb407 and 44aada0b. At the head: 3 of 3 pass (17.10, 16.52, 15.01 s). Reverted tree (44aada0b with docs/settlement.go from b35eb407): FAIL, 'growth_test.go:668: the document still owes a settlement 45 s after the answered blocks returned in one edit' (60.86 s).",
+    "dispatchMemory": "UNREAD in CI: at 19:38Z every lane at 44aada0b but changes and pr-title was queued, dispatch-memory included, so its peak-memory assertions are not read. Real-process replay of the test's steps without its meter (memreplay_test.go, -tags memory, starts the real server): at the head 'first settlement in 2.24s', 'returning edit answered 200', 'returning edit's settlement in 4.02s', PASS; reverted: 'document ... never settled', FAIL after 136.7 s.",
+    "suites": "PASS under -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB: api -run 'Settle|Settlement|Ask|Answer|Growth|Withhold|CopyLock|KeyedWrite' (skipping only the collation test this pod's Postgres fails) ok 313.6 s; ./internal/dispatch/docs/ ok 1,308.8 s.",
+    "ciOk": "UNREAD: ci-ok and every lane but changes and pr-title (success) queued at 19:38Z.",
+    "riskLines": "Line 18 carries round 10's 10x (57.7-59.5 reads/s, base about 13% slower) and memory (heap 8.0-8.7 GiB from minute 10, RSS 10.4 GB last 10 minutes) as measured. Line 17 names round 10's 1x burst and its 5.1 s horizon hold, but not its counts (180 reads, 1.67%; 10 writes, 1.39%), which the E2E (tester) line carries."
   },
+  "memory": "Pod cgroup sampled every 2 s beside the runs: peak 10.80 GiB of 19, 915 samples.",
+  "leftoverCheck": "After the runs and stack.sh stop: ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|r11.sh|go test|loadgen|infra-592/lt/' printed 0 lines.",
+  "evidence": "dispatch://INFRA-592/artifact/infra-592-tester-r11-tests-tar-gz",
   "proof": [
     {
-      "criterion": "10x refuses only with 429, no dropped connection, events above the base",
-      "surface": "INFRA-589's 2-core load reproduction, adjacent base/head pairs on one pod",
-      "command": "run-step.sh t10-{base,head}-10x-{a,b} --events 40 --sessions 1000 --requests 600 (r11.sh)",
-      "observed": "head 5.48 and 5.32 events/s committed, every refusal 429, 0 connection failures",
-      "headSha": "62d4a36178086f179719f8bc088b3c412334095a",
-      "negativeControl": "base 07c21242 in the same pairs: 3.59 and 3.43 events/s"
+      "criterion": "A settlement that withholds returned answers completes (red test unmodified)",
+      "surface": "Go test against a real Postgres (the pod's load-stack Postgres, port 11250)",
+      "command": "cd packages/envoy && go test -p 1 -count=3 -v ./internal/dispatch/api/ -run '^TestASettlementThatWithholdsReturnedAnswersCompletes$'",
+      "observed": "3 of 3 PASS in 15.0-17.1 s",
+      "headSha": "36554f7b8ec81ac025930263fc7f37ecab6aa5e6",
+      "negativeControl": "Same command with docs/settlement.go from b35eb407: FAIL at growth_test.go:668 after 60.9 s"
     },
     {
-      "criterion": "Memory at 10x over 30 minutes levels",
-      "surface": "the same harness, one 1,800 s 10x step of the head",
-      "command": "run-step.sh t10-head-10x-30m --events 40 --sessions 1000 --requests 600 --duration 1800s",
-      "observed": "heap in use 8.0-8.7 GiB from minute 10; RSS 10.4 GB over the last 10 minutes; 0 connection failures",
-      "headSha": "62d4a36178086f179719f8bc088b3c412334095a",
-      "negativeControl": "none run by me for 30 minutes on the base; the implementer's base 30-minute run levelled at 8.1-8.2 GB"
-    },
-    {
-      "criterion": "Slow bodies, request deadlines and bounded connection waits on the real binary",
-      "surface": "the real envoy-dispatch, raw HTTP clients and psql",
-      "command": "slowbody.py 11255 <issue>; bounds.sh",
-      "observed": "13 x 400 REQUEST_BODY_UNREADABLE at 61.6-62.2 s with normal writes 201 throughout; 28 x 503 REQUEST_TIMEOUT at 20.0-20.1 s; 80 x 503 DATABASE_BUSY within 3.0 s",
-      "headSha": "62d4a36178086f179719f8bc088b3c412334095a",
-      "negativeControl": "round 8 at 07c21242 (write limit 12): the 13th trickler 429 and normal writes refused until the tricklers were cut"
+      "criterion": "dispatch-memory's returned-answers scenario settles on a real Dispatch process",
+      "surface": "the real envoy-dispatch server started by the memory harness, driven over HTTP",
+      "command": "go test -tags memory -v ./cmd/dispatch/ -run '^TestReplayReturnedAnswersSettle$' (throwaway memreplay_test.go in a scratch copy of 44aada0b)",
+      "observed": "returning edit 200; its settlement completed in 4.02 s",
+      "headSha": "36554f7b8ec81ac025930263fc7f37ecab6aa5e6",
+      "negativeControl": "Same replay with docs/settlement.go from b35eb407: 'never settled', FAIL after 136.7 s"
     }
   ]
 }
