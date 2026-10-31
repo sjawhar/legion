@@ -203,7 +203,8 @@ func TestATokenFileItCannotUseSendsNothing(t *testing.T) {
 
 // TestABrokerItCannotReachNamesNoCredentialTheURLCarries: devrelay's refusal for a broker that
 // never answers, or a --broker URL that does not parse, names a URL redact.URL will not print as
-// redact.NotPrinted with the failure's class alone, and a clean URL as net/http wrote it.
+// redact.NotPrinted with the failure's class alone, and a clean URL as net/http wrote it. The
+// call it cannot make is machine-approve's first one, the lookup of the typed code.
 func TestABrokerItCannotReachNamesNoCredentialTheURLCarries(t *testing.T) {
 	token := tokenFile(t, "caller-token")
 	np := `"` + redact.NotPrinted + `": `
@@ -217,16 +218,16 @@ func TestABrokerItCannotReachNamesNoCredentialTheURLCarries(t *testing.T) {
 	defer closing.Close()
 	overHTTPS := "https://" + strings.TrimPrefix(plain.URL, "http://")
 	for _, row := range []struct{ base, want string }{
-		{"http://127.0.0.1:1", `Post "http://127.0.0.1:1/v1/credential-requests/record-1/approve": dial tcp 127.0.0.1:1: connect: connection refused`},
-		{overHTTPS, `Post "` + overHTTPS + `/v1/credential-requests/record-1/approve": http: server gave HTTP response to HTTPS client`},
-		{closing.URL, `Post "` + closing.URL + `/v1/credential-requests/record-1/approve": EOF`},
+		{"http://127.0.0.1:1", `Post "http://127.0.0.1:1/v1/machine-logins/lookup": dial tcp 127.0.0.1:1: connect: connection refused`},
+		{overHTTPS, `Post "` + overHTTPS + `/v1/machine-logins/lookup": http: server gave HTTP response to HTTPS client`},
+		{closing.URL, `Post "` + closing.URL + `/v1/machine-logins/lookup": EOF`},
 		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", np + "connection refused"},
 		{"http://127.0.0.1:1/?token=qtok77", np + "connection refused"},
 		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", np + "not a valid URL"},
 		{"http://ada@corp.example:hunter2pw%40127.0.0.1:1", np + "not a valid URL"},
 	} {
 		var stdout, stderr bytes.Buffer
-		code := run([]string{"approve", "--record", "record-1", "--broker", row.base, "--account-token-file", token, "--login", testApprover}, &stdout, &stderr)
+		code := run([]string{"machine-approve", "--code", "KQ7M-X4PZ", "--broker", row.base, "--account-token-file", token, "--login", testApprover}, &stdout, &stderr)
 		if code != 1 || !strings.Contains(stderr.String(), row.want) {
 			t.Errorf("--broker %s: exit %d, stderr %q; want 1 naming %s", row.base, code, stderr.String(), row.want)
 		}
@@ -244,11 +245,42 @@ func TestABrokerItCannotReachNamesNoCredentialTheURLCarries(t *testing.T) {
 func TestUsageNamesNoCredentialTheEnvironmentURLCarries(t *testing.T) {
 	t.Setenv("AGENT_SECRETS_URL", "https://tokuser9f3:hunter2pw@broker.invalid")
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"approve", "--bogus"}, &stdout, &stderr); code != exitUsageError {
+	if code := run([]string{"machine-approve", "--bogus"}, &stdout, &stderr); code != exitUsageError {
 		t.Fatalf("exit %d, want %d", code, exitUsageError)
 	}
 	if out := stdout.String() + stderr.String(); strings.Contains(out, "hunter2pw") || strings.Contains(out, "tokuser9f3") {
 		t.Fatalf("usage output names the URL's credential: %q", out)
+	}
+}
+
+// TestMachineApproveIsTheOnlySubcommand pins devrelay's one form: usage names machine-approve and
+// says where a secret request is decided instead, and the approve and deny subcommands it had
+// before that page are refused as unknown, with the usage text and exit 2.
+func TestMachineApproveIsTheOnlySubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("--help exit %d, want 0", code)
+	}
+	want := `usage:
+  agent-secrets-devrelay machine-approve --code XXXX-XXXX --login <login> --broker <url> --account-token-file <file> [--deny]
+
+A secret request is not decided here: its approver signs in to the broker and decides it on the
+broker's own page, <broker>/approve/<record>, the approve_url agent-secrets prints.
+
+Environment defaults: AGENT_SECRETS_URL, AGENT_SECRETS_ACCOUNT_TOKEN_FILE, AGENT_SECRETS_APPROVER.
+`
+	if stdout.String() != want || stderr.String() != "" {
+		t.Errorf("--help stdout = %q stderr = %q, want %q and nothing on stderr", stdout.String(), stderr.String(), want)
+	}
+	for _, gone := range []string{"approve", "deny"} {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{gone, "--record", "record-1"}, &stdout, &stderr)
+		if code != exitUsageError {
+			t.Errorf("%s: exit %d, want %d", gone, code, exitUsageError)
+		}
+		if !strings.Contains(stderr.String(), `unknown subcommand "`+gone+`"`) || !strings.Contains(stderr.String(), want) {
+			t.Errorf("%s: stderr = %q, want it to refuse the subcommand by name and print the usage text", gone, stderr.String())
+		}
 	}
 }
 
