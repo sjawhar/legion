@@ -611,9 +611,19 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	}
 }
 
-// deleteSessionHandler removes a live session registration at shutdown. The delete runs within
-// sendRequestBudget of the request's own context, so one the bus does not answer is the
-// bus-unavailable 503 with Retry-After: 1 inside the caller's attempt (writeStoreError).
+// deleteSessionHandler removes a live session registration at shutdown, and answers 200 whether or
+// not there was one to remove. A client that mints its own instance id sends it as the
+// client_instance_id query parameter, and then the registration is removed only while it carries
+// that id or carries none (session.SessionRegistry.DeleteIfInstance): a Claude Code /clear handoff
+// deregisters the session it hands off from before it claims that session's role, and the entry
+// under that id can by then be another process's live registration, which the handoff must leave
+// alone instead of clearing the predecessor its claim is then weighed against. Such a request
+// answers {"deleted":true} for a registration that is gone and {"deleted":false} with a reason for
+// one that stayed, both 200: the deregistering client has nothing to retry either way. A request
+// naming no instance id removes the registration whoever wrote it, and answers 200 with no body,
+// as this route always has. The delete runs within sendRequestBudget of the request's own context,
+// so one the bus does not answer is the bus-unavailable 503 with Retry-After: 1 inside the caller's
+// attempt (writeStoreError).
 func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
@@ -625,14 +635,38 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
+		instanceID := strings.TrimSpace(r.URL.Query().Get("client_instance_id"))
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		if err := sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+		if instanceID == "" {
+			if err := sessions.Delete(ctx, sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+				writeStoreError(ctx, w, err, http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		deleted, err := sessions.DeleteIfInstance(ctx, sessionID, instanceID)
+		if err != nil {
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		if !deleted {
+			writeJSON(w, http.StatusOK, deleteSessionResponse{
+				Reason: "the registration belongs to another client instance",
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, deleteSessionResponse{Deleted: true})
 	}
+}
+
+// deleteSessionResponse is what DELETE /v1/sessions/<session_id> answers a request that named a
+// client instance id: whether the registration is gone, and for one that stayed why it did. A
+// request that named none answers 200 with no body at all, as this route always has.
+type deleteSessionResponse struct {
+	Deleted bool   `json:"deleted"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
