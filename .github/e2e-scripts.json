@@ -93,6 +93,10 @@
       "needs": "a devbox: tmux, the pinned Oh My Pi on a model route (LEGION_E2E_MODEL_ROUTE), a Chromium that Playwright drives, and its own Postgres and NATS containers"
     },
     {
+      "script": "envoy-session-states.sh",
+      "needs": "a Legion pod: its own model route for all three agent runtimes (LEGION_E2E_MODEL_BASE_URL, LEGION_E2E_MODEL_KEY_FILE, LEGION_E2E_MODEL_ID and LEGION_E2E_CLAUDE_MODEL), the worker image's Oh My Pi and Claude Code pin, and a loopback PostgreSQL with pgvector (ENVOY_SESSION_STATES_PG_DSN); it starts its own NATS, listeners, Dispatch and OpenCode"
+    },
+    {
       "script": "multi-repo-acceptance.sh",
       "needs": "a live multi-repository run on the production cluster: it is the operator's acceptance observer, reads that run's daemon, Dispatch, GitHub and kubectl, and starts nothing of its own"
     },
