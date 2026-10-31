@@ -900,6 +900,20 @@ guarded_by_lock_read() {
     END { exit (index(before, "get configmap dispatch-loadtest-lock") ? 0 : 1) }' "$fake/kubectl-calls.log"
 }
 
+# own_calls_mark: a mark for own_calls_since, the number of calls in kubectl-calls.log now.
+own_calls_mark() { wc -l <"$fake/kubectl-calls.log" 2>/dev/null || echo 0; }
+
+# own_calls_since MARK: the kubectl calls made since MARK (own_calls_mark) by this test's own
+# session, one per line: the commands it runs (run_cluster, or a sourced helper) share its session,
+# and the run's daemons, each a session of its own (setsid), are left out, so a heartbeat patch or
+# a sampler exec that lands meanwhile is never read as the command's own call.
+own_calls_since() {
+  local sid
+  sid=$(sed -E 's/^.*\) //' "/proc/$$/stat" | cut -d' ' -f4)
+  awk -F '\t' -v from="$1" -v g="$sid" 'NR > from && $1 == g { sub(/^[^\t]*\t/, ""); print }' \
+    "$fake/kubectl-calls.log" 2>/dev/null || true
+}
+
 # all_gone PID...: none of the pids is a live process any more.
 all_gone() {
   local pid
@@ -1200,15 +1214,16 @@ grep -qF "step smoke: stored-order (envoy-dispatch of dispatch commit aaaaaaaaaa
 # or the replay touches anything (no scale, no psql; the daemons' calls go on beside it); and a
 # --typing-* flag without --typing.
 for sub in "step --namespace $ns typed 1 --duration 1m --typing" "replay --namespace $ns typed --typing"; do
-  calls=$(wc -l <"$fake/kubectl.log")
+  calls=$(own_calls_mark)
   read -ra words <<<"$sub"
   run_cluster "${words[@]}"
   ((RC != 0)) || fail "${words[0]} --typing ran although up was given no --browsertype-commit"
   grep -qF -- "${words[0]}: --typing needs INFRA-707's browsertype, and up was given no --browsertype-commit" "$tmp/out" ||
     fail "${words[0]} --typing without browsertype does not name --browsertype-commit"
   [ ! -e "$run_dir/steps/typed" ] || fail "${words[0]} --typing without browsertype made its step directory"
-  ! grep -qE ' (scale|cp) | psql ' <<<"$(tail -n +$((calls + 1)) "$fake/kubectl.log")" ||
-    fail "${words[0]} --typing without browsertype touched the copy: $(tail -n +$((calls + 1)) "$fake/kubectl.log")"
+  new_calls=$(own_calls_since "$calls")
+  ! grep -qE ' (scale|cp) | psql ' <<<"$new_calls" ||
+    fail "${words[0]} --typing without browsertype touched the copy: $new_calls"
 done
 run_cluster step --namespace "$ns" typed 1 --typing-peers 3
 { ((RC != 0)) && grep -qF -- '--typing-peers needs --typing' "$tmp/out"; } || fail "step accepted --typing-peers without --typing"
@@ -2139,9 +2154,11 @@ pass "a replay types into the documents with the most agent writes in its sub-wi
     shift
     : >"$fake/kubectl.log"
     rm -f "$fake/sleep.log"
+    local mark
+    mark=$(own_calls_mark)
     RC=0
     "$@" >"$tmp/retry.out" 2>"$tmp/retry.err" || RC=$?
-    CALLS=$(wc -l <"$fake/kubectl.log")
+    CALLS=$(own_calls_since "$mark" | wc -l)
     SLEEPS=""
     [ ! -f "$fake/sleep.log" ] || SLEEPS=$(tr '\n' ' ' <"$fake/sleep.log")
   }
@@ -2813,10 +2830,10 @@ guard_out=$tmp/guard.out
     fail "runner_start sent a job into run $other_run's runner pod: $(cat "$fake/runner-starts")"
   grep -qF 'the runner pod' "$guard_out" || fail "runner_start did not say which pod it left alone: $(cat "$guard_out")"
   guard_rc=0
-  calls=$(wc -l <"$fake/kubectl.log")
+  calls=$(own_calls_mark)
   (runner_put "$cluster" /work/loadgen) 2>"$guard_out" || guard_rc=$?
   ((guard_rc != 0)) || fail "runner_put returned 0 although the lock names run $other_run"
-  new_calls=$(tail -n +$((calls + 1)) "$fake/kubectl.log")
+  new_calls=$(own_calls_since "$calls")
   ! grep -q -- ' cp ' <<<"$new_calls" || fail "runner_put copied into run $other_run's runner pod: $(grep -- ' cp ' <<<"$new_calls")"
   guard_rc=0
   psqls=$(grep -c -- 'exec postgres-0 -c postgres -- psql' "$fake/kubectl.log" || true)
@@ -2830,7 +2847,7 @@ guard_out=$tmp/guard.out
 # collect reads this pod's run directory and runs loadgen here, so it packs and uploads run
 # $own_run while run $other_run holds the namespace, without reading the lock at all.
 : >"$fake/dispatch.log"
-collect_calls=$(wc -l <"$fake/kubectl.log")
+collect_calls=$(own_calls_mark)
 run_cluster collect --namespace "$ns" --run "$own_run" --upload-issue TEST-1
 ((RC == 0)) || fail "collect --run $own_run exited $RC while the lock names run $other_run: $(cat "$tmp/out")"
 [ -f "$own_dir/TABLES.md" ] || fail "collect --run $own_run wrote no TABLES.md: $(cat "$tmp/out")"
@@ -2838,7 +2855,8 @@ own_results=$(find "$own_dir/upload" -name 'cluster-load-test-*-raw-results.tar.
 [ -n "$own_results" ] || fail "collect --run $own_run packed no part of phase results"
 grep -q -- "--name ${own_results##*/}" "$fake/dispatch.log" ||
   fail "collect --run $own_run uploaded no part: $(cat "$fake/dispatch.log")"
-! tail -n +$((collect_calls + 1)) "$fake/kubectl.log" | grep -q 'configmap dispatch-loadtest-lock' ||
+collect_own=$(own_calls_since "$collect_calls")
+! grep -q 'configmap dispatch-loadtest-lock' <<<"$collect_own" ||
   fail "collect --run $own_run read the lock, which names another run, although it reaches no pod of the copy"
 # A command that drives the copy, named by --run, is refused before it drives run $other_run's.
 run_cluster step --namespace "$ns" --run "$own_run" guardstep 1 --duration 1m
