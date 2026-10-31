@@ -2,57 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-632",
-  "completed": "2026-10-28T20:28:00Z",
-  "round": 6,
-  "testedHead": "746077c027a18f4b19949c3f0ab265dfeda6d291",
+  "completed": "2026-10-31T01:25:00Z",
+  "round": 7,
+  "testedHead": "119c52c7c8890f8e71544052a000d9d831cd4e7b",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its claims at 746077c0: the two Envoy guides are byte-identical to sjawhar/legion#2422's merge cd9ecf51; this pull request's six files are byte-identical to bb0690b9; fd2a2c44's tree equals 746077c0's (git diff empty); fingerprints 3e74ab78… (bb0690b9) and dbfd73b8… (746077c0) reproduced; GitHub reports MERGEABLE."
+    "how": "Re-ran its claims at 119c52c7: one forward merge (parents 9c8ebad4 and main 8a72cf79, which squash-merged sjawhar/legion#2422); git diff main 8a72cf79 outside .legion is the three guides and the three checker files only; the checker files are byte-identical to the approved 9c8ebad4; restructure.ts --strict on main 8a72cf79's three guides reproduces the head's byte for byte; INFRA-821's changelog-fragment bullet keeps its words."
   },
   "failed": 0,
   "failures": [],
-  "rebaseCheck": {
-    "from": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
-    "to": "746077c027a18f4b19949c3f0ab265dfeda6d291",
-    "fingerprint": "3e74ab78084e8628550e53105809a3e774f00f34037c2a4a21ac96dd5bdca703 → dbfd73b844a18cf00049188f53649916a72dbeded119cb8391893268a3c68266: changed, so a full round",
-    "whatChanged": "Among the branch's files, packages/envoy/AGENTS.md is the only one whose branch delta changed (equal to #2422's cd9ecf51). bun.lock, package.json and packages/pi-envoy/AGENTS.md changed only by main's own edits: their diff against main is the same at both heads. Main 8b6ea377..af1ff09c touches packages/envoy/AGENTS.md alone among the guides and the checker files. Against #2422's newest head bed3ec1d, outside the three guides and .legion, only the checker and its two test files differ."
-  },
+  "fastPath": "The architect's fast path for this forward merge (01:03Z): check that the diff against main equals the approved diff plus the conflict resolution, that #2422's files are main's copy with only the three checker changes re-applied, that INFRA-821's bullet wording is kept, that the guides regenerate by the recipe and that the checker exits 0 on them. Each is a proof entry below.",
   "proof": [
     {
-      "criterion": "Acceptance 1: outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, no item or table row is longer than one screen; no fence left under ## Commands",
-      "surface": "the checker as a contributor runs it, an independent sentence scan of every non-fence line, and the on-demand guides test",
-      "command": "bun scripts/semantic-line-breaks.ts AGENTS.md scripts/e2e/README.md docs/kubernetes.md packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; awk Commands-fence check; bun $TMPDIR/infra632/scan.ts <three guides>; bun test scripts/semantic-line-breaks.guides.test.ts",
-      "observed": "checker exit 0, 0 B stdout, 0 B stderr on all five guides; awk exit 0; scan hits=0; guides test 3 pass, 0 fail",
-      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
-      "negativeControl": "the checker on main af1ff09c's three guides exits 1 with 2,411 R1, 295 R2 and 7 R3 findings"
+      "criterion": "Fast path 1-2: the diff against main is the approved diff plus the conflict resolution; #2422's files are main's copy with only the three checker changes re-applied",
+      "surface": "git on the merge commit and main 8a72cf79",
+      "command": "git log -1 --format=%P 119c52c7; git diff --stat 8a72cf79 119c52c7 -- . ':!.legion'; cmp of the three checker files at 9c8ebad4 and 119c52c7; sha256 of the +/- lines of git diff 1feb1dc4 9c8ebad4 (the approved checker delta against the #2422 head it carried) and of git diff 8a72cf79 119c52c7 over the same three files",
+      "observed": "parents 9c8ebad4 and 8a72cf79 (no rebase); the diff from main touches six files: AGENTS.md, scripts/e2e/README.md, docs/kubernetes.md and the three checker files, so every other #2422 file is main's copy; the checker files equal 9c8ebad4; both delta hashes are b5a67bec…, so the checker delta against main is exactly the approved one (3 files, +293/-32)",
+      "headSha": "119c52c7c8890f8e71544052a000d9d831cd4e7b",
+      "negativeControl": "the same cmp of scripts/semantic-line-breaks.ts at head against main 8a72cf79's own copy reports a difference (exit 1, the three named changes), so the comparison is not vacuous"
     },
     {
-      "criterion": "Acceptance 2: nothing lost; the head regenerates byte for byte from main; headings and anchors unchanged",
-      "surface": "restructure.ts and the difference and rendered-text checks on main af1ff09c's files",
-      "command": "bun .legion/INFRA-632/restructure.ts --strict --report r.json <main af1ff09c files> <outs>; cmp outs head; check-differences.ts and check-rendered.ts per file; heading and in-file link diffs",
-      "observed": "restructure exit 0 and all three outputs identical to head; 78/265/40 entries applied, 0 unexplained hunks; rendered 0 missing words, 109 Commands placeholders present; headings and in-file links identical per file",
-      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
-      "negativeControl": "round 1: the reclaim Go tests with the 'Delete list' line indented fail; this round they pass (sandbox ok, config ok, skills-guard 13 pass)"
+      "criterion": "Fast path 3: INFRA-821's wording of the changelog-fragment bullet is kept",
+      "surface": "the 'Changelog entries are fragment files' bullet of AGENTS.md on main 8a72cf79 and at head",
+      "command": "extract the bullet up to the next '- **' bullet from both, fold whitespace, cmp",
+      "observed": "identical, 304 words; one line on main, 19 lines at head (one sentence per line); it names fragments `pr<number>-<slug>.yaml` as main does",
+      "headSha": "119c52c7c8890f8e71544052a000d9d831cd4e7b",
+      "negativeControl": "the first extraction, which stopped at the item's first blank line, did not match (cmp EOF at byte 4036): the comparison fails on a truncated or changed bullet"
     },
     {
-      "criterion": "Acceptance 3: edits to different sentences or different items merge clean; two items added at different places of one list merge clean",
-      "surface": "git merge-tree --write-tree on throwaway repositories seeded with the head's guides",
-      "command": "TMPDIR=/legion/scratch/tmp bash .legion/INFRA-632/replay/run.sh; bash $TMPDIR/infra632/myreplay.sh $LEGION_WORKSPACE",
-      "observed": "run.sh exit 0, 36 PASS; my 8 pairs pass (6 clean, 2 controls conflict)",
-      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
-      "negativeControl": "the same 8 pairs on main af1ff09c's guides: the first pair (two sentences of the Production check paragraph) conflicts"
-    },
-    {
-      "criterion": "The checker's three changes still hold after the merge",
-      "surface": "bun scripts/semantic-line-breaks.ts on scratch files",
-      "command": "the reviewer's round-2 repro (a one-line parent with 50 one-line children); 'The proof fails, loudly. (A call is a helper.)'",
-      "observed": "the repro exits 0; the parenthesised second sentence exits 1 with R1; the checker is byte-identical to rounds 4 and 5",
-      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
-      "negativeControl": "the repro on the checker of 362ba0e9 gives 'R3: 51 screen rows: - Parent item.' (round 4)"
+      "criterion": "Fast path 4-5: the three guides regenerate by the recipe, nothing is lost, and the checker exits 0 on them",
+      "surface": "restructure.ts --strict, the difference and rendered-text checks, the checker as a contributor runs it, an independent sentence scan",
+      "command": "bun .legion/INFRA-632/restructure.ts --strict --report r.json <main 8a72cf79 files> <outs>; cmp outs head; check-differences.ts and check-rendered.ts per file; a word-count loss per token; heading and in-file link diffs; bun scripts/semantic-line-breaks.ts <three guides> <two Envoy guides>; bun $TMPDIR/infra632/scan.ts <three guides>; awk Commands-fence check; bun test scripts/semantic-line-breaks.guides.test.ts; replay/run.sh",
+      "observed": "restructure exit 0, all three outputs identical to head; 79/275/39 entries applied, 0 unexplained hunks; rendered 0 missing words (16,916 / 80,696 / 90,972 base words, 120 Commands placeholders); words lost are only table header, fence and named-reword words, the same set as rounds 1-6; headings and in-file links identical (10/0, 65/176, 57/176); checker exit 0, 0 B stdout and stderr on all five guides; scan hits=0; awk exit 0; guides test 3 pass; replay 36 PASS. check-rendered.ts's MOVE_GAP grew 40 to 80 and allows `dig` as moved: `dig` is the last item of the probe tools list at head (docs/kubernetes.md:377)",
+      "headSha": "119c52c7c8890f8e71544052a000d9d831cd4e7b",
+      "negativeControl": "the checker on main 8a72cf79's three guides exits 1 (2,638 R1, 308 R2, 6 R3); with the wider MOVE_GAP, a head docs/kubernetes.md with one word changed ('probed' -> 'checked') still fails check-rendered (exit 1, 'MISSING base word 5720 … [probed]')"
     }
   ],
   "notes": [
-    "CI at 746077c0 was queued at 20:26Z (lint, typecheck, test, build, changes, pr-title, Postgres 16 suite); read as queued, not awaited. CI at bb0690b9 never completed (30 runs cancelled), nor at 7cf8f4e4, 362ba0e9 or c3539293: no head of this pull request has a completed CI run yet.",
-    "The branch merges clean with main af1ff09c (git merge-tree)."
+    "CI at 119c52c7 at 01:23Z: changes and pr-title queued, the earlier pr-title runs cancelled; read as queued, not awaited. The handoff-only head c60ba5e7 carries no run.",
+    "Main has moved to 39b51494 since 8a72cf79; none of its commits touch the three guides or the checker files, and the head merges clean with it (git merge-tree)."
   ]
 }
