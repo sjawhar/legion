@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -14,6 +14,14 @@ import type {
 import { TextAskBlockCard } from "../doc/AskBlockCard";
 import { MarkdownBody } from "./MarkdownBody";
 import { TextAskCard } from "./markdown-cards";
+import { setParseDeadline, warmMarkdownRenderer } from "./markdown-engine";
+import { markdownWorkerThreshold } from "./markdown-worker-threshold";
+import {
+  flushTasks,
+  type InstalledParseWorker,
+  installFakeParseWorker,
+  restoreParseWorker,
+} from "./parse-worker-fixture";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -43,12 +51,21 @@ const testWindow = window as unknown as HappyDOMWindow;
 let pageBefore = "about:blank";
 
 describe("Dispatch pictures", () => {
+  // Three of the rows below name a document whose slug is 2,683 characters, which puts their
+  // body past `markdownWorkerThreshold` and so in the parse worker's hands. The page's own
+  // `new Worker(…)` names a module this process cannot serve, so these rows drive the faked one
+  // (`parse-worker-fixture.ts`) and answer it: what they prove - a long name drawn and opened -
+  // is proved on the path the dashboard itself takes for a body that size.
+  let worker: InstalledParseWorker;
+
   beforeEach(() => {
+    worker = installFakeParseWorker();
     pageBefore = window.location.href;
     testWindow.happyDOM.setURL("https://dispatch.test/issues/CORE-1/conversation");
   });
 
   afterEach(() => {
+    restoreParseWorker();
     testWindow.happyDOM.setURL(pageBefore);
   });
 
@@ -248,6 +265,7 @@ describe("Dispatch pictures", () => {
     );
 
     try {
+      await act(() => worker.answer(0));
       const shot = await within(view.container).findByRole("img", { name: "shot" });
       expect(shot.getAttribute("src")).toBe(`/api/v1/issues/CORE-1/artifacts/${slug}/versions/1`);
       expect(shot.closest("a")?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}?v=1`);
@@ -289,6 +307,7 @@ describe("Dispatch pictures", () => {
     );
 
     try {
+      await act(() => worker.answer(0));
       const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
       expect(designs).toHaveLength(2);
       for (const link of designs) {
@@ -341,6 +360,7 @@ describe("Dispatch pictures", () => {
     );
 
     try {
+      await act(() => worker.answer(0));
       const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
       expect(designs).toHaveLength(1);
       expect(designs[0]?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
@@ -1064,4 +1084,515 @@ test("a task item draws one disabled checkbox, ticked as its source is, in every
   } finally {
     view.unmount();
   }
+});
+
+/** The element a body is painted into (`markdownClassName`), which carries `data-markdown-pending`
+ *  while the worker owes its formatting and `data-markdown-fallback` when the parser refused it. */
+function markdownElement(container: HTMLElement): HTMLElement {
+  return container.firstElementChild as HTMLElement;
+}
+
+function pendingMark(container: HTMLElement): string | null {
+  return markdownElement(container).getAttribute("data-markdown-pending");
+}
+
+function fallbackMark(container: HTMLElement): string | null {
+  return markdownElement(container).getAttribute("data-markdown-fallback");
+}
+
+/** The body's own list items, not an `ask` block's options, so a row counts what it wrote. */
+function topItems(container: HTMLElement): HTMLElement[] {
+  return Array.from(markdownElement(container).querySelectorAll<HTMLElement>(":scope > ul > li"));
+}
+
+/** A list longer than the threshold, under a lead line that is the row's own, so no row reads
+ *  the answer the engine cached for another row's body. */
+const longItems = Math.ceil(markdownWorkerThreshold / "- x\n".length) + 200;
+
+function longBody(lead: string): string {
+  return `${lead}\n\n${"- x\n".repeat(longItems)}`;
+}
+
+/** A body past the threshold written as plain paragraphs, with no list in it, so the rows below
+ *  count what one task of a paint puts in without the body's finishing pass moving anything
+ *  after it. */
+const paragraphs = Math.ceil(markdownWorkerThreshold / "x\n\n".length) + 200;
+
+function paragraphBody(lead: string): string {
+  return `${lead}\n\n${"x\n\n".repeat(paragraphs)}`;
+}
+
+/** The body's own paragraphs, the lead one included. */
+function topParagraphs(container: HTMLElement): HTMLElement[] {
+  return Array.from(markdownElement(container).querySelectorAll<HTMLElement>(":scope > p"));
+}
+
+/**
+ * A body longer than `markdownWorkerThreshold` is parsed in a Web Worker (sjawhar/legion#2519),
+ * so the reader's own thread is free while the heaviest body on the page parses. These rows are
+ * what a reader sees of that: the text at once, the formatting when the answer lands, their
+ * place in the body kept across it, and - whatever becomes of the worker - a formatted body in
+ * the end. `data-markdown-fallback` keeps its one meaning, a body the parser itself refused.
+ */
+describe("A long body parsed in the worker", () => {
+  beforeEach(async () => {
+    await warmMarkdownRenderer();
+  });
+
+  afterEach(restoreParseWorker);
+
+  test("paints its text at once, marked pending, then its formatted body", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A list the worker is parsing");
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      // The reader has the body's own text while the worker parses it: readable, selectable,
+      // and never the failure marker.
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(view.container.textContent).toBe(markdown);
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(topItems(view.container)).toHaveLength(0);
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(view.container.textContent).not.toContain("- x");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The worker answers with the document as plain JSON, and the page builds a document of its own
+  // schema from it. `Schema.nodeFromJSON` cannot: it checks each attribute against its type, and
+  // the Markdown parser writes `title: null` for a picture with no title where the schema's
+  // `image.title` is a string, so every body holding a picture would be refused. This row is what
+  // fails if the page reaches for `nodeFromJSON` again.
+  test("rebuilds a body holding a picture, which its own parser writes a null title for", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody(
+      "A picture over a list\n\n![shot.png](dispatch://CORE-1/artifact/shot-png@v1)"
+    );
+    const view = render(withQueries(<MarkdownBody markdown={markdown} />));
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      const shot = view.container.querySelector("[data-dispatch-picture]");
+      expect(shot?.getAttribute("data-dispatch-picture")).toBe(
+        "dispatch://CORE-1/artifact/shot-png@v1"
+      );
+      expect(shot?.getAttribute("data-picture-caption")).toBe("shot.png");
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The live view hands each streamed delta to the same body as a longer `markdown`. Between the
+  // delta and the worker's answer the reader keeps the paint they were reading: a turn that
+  // flipped back to its source text on every delta would be unreadable while it streamed.
+  test("keeps the formatted body it painted when its text grows, until the new answer lands", async () => {
+    const worker = installFakeParseWorker();
+    const first = longBody("A turn still streaming");
+    const grown = `${first}${"- y\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+
+      view.rerender(<MarkdownBody markdown={grown} />);
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(topItems(view.container)).toHaveLength(longItems);
+      expect(view.container.textContent).not.toContain("- x");
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 50));
+      expect(topItems(view.container).at(-1)?.textContent).toBe("y");
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A turn streaming into the live view hands the same body a longer source every frame. The
+  // frame the worker has already started on cannot be taken back, so the page waits for that one
+  // answer and posts the frame the reader is waiting for in its place, rather than one message
+  // per frame: the worker is made to parse exactly one stale frame. That frame is the newest
+  // parse the reader can be given until the stream pauses, so it is painted when it lands, and
+  // the element stays marked pending because the frame they are on is still owed. A queue that
+  // posted each frame as it arrived would have the worker parse every one of them
+  // (sjawhar/legion#2519).
+  test("gives the worker one stale frame while a turn streams, and paints it while the newest is owed", async () => {
+    const worker = installFakeParseWorker();
+    const first = longBody("A turn streaming past the worker");
+    const grown = `${first}${"- y\n".repeat(50)}`;
+    const grownAgain = `${grown}${"- z\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await worker.waitForRequests(1);
+      view.rerender(<MarkdownBody markdown={grown} />);
+      view.rerender(<MarkdownBody markdown={grownAgain} />);
+      await flushTasks();
+      // The worker holds the frame it started on and nothing else: neither frame written since
+      // was posted behind it.
+      expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first]);
+
+      // The stale frame's answer lands. It is what the reader is shown, and the frame they are
+      // on takes its place in the worker.
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBe("true");
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first, grownAgain]);
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 100));
+      expect(topItems(view.container).at(-1)?.textContent).toBe("z");
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // What a reader watching a long turn sees. The live view renders up to ten frames a second
+  // (`AgentThread.tsx`), and a parse of a long body takes longer than the gap between two of
+  // them, so every frame cancels the parse of the frame before it. An element that took only
+  // the answer to the frame it is on would be shown nothing for as long as the stream ran: each
+  // answer would land for a frame already replaced. The answer to a frame this element asked
+  // for is painted instead, however many frames have been written since, so the body grows one
+  // parse behind the stream (sjawhar/legion#2519).
+  test("grows through a stream whose frames outrun the worker, a parse behind it", async () => {
+    const worker = installFakeParseWorker();
+    const frames = [0, 1, 2, 3, 4].map(
+      (frame) => `${longBody("A turn the worker cannot keep up with")}${"- y\n".repeat(frame * 20)}`
+    );
+    const view = render(<MarkdownBody markdown={frames[0]} />);
+
+    try {
+      await worker.waitForRequests(1);
+      // Two more frames are written while the worker is still on the first: the reader is shown
+      // the frame it was holding, and the newest takes its place.
+      view.rerender(<MarkdownBody markdown={frames[1]} />);
+      view.rerender(<MarkdownBody markdown={frames[2]} />);
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBe("true");
+
+      // The stream writes on while that frame is parsed, and the body grows again.
+      view.rerender(<MarkdownBody markdown={frames[3]} />);
+      view.rerender(<MarkdownBody markdown={frames[4]} />);
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 40));
+      expect(pendingMark(view.container)).toBe("true");
+
+      // The stream stops. The frame the reader is on is the one the worker is holding, and the
+      // body ends on it, marked neither pending nor as the fallback.
+      await act(() => worker.answer(2));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 80));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // Every edit of a long comment, and a streamed turn that crossed the threshold after a short
+  // paint, is a source the element does not hold - and 16,000 elements of it. Put in with one
+  // `replaceChildren` that is 918-971 ms of WebKit's thread (`MarkdownBody.tsx`, `ATTACH_BATCH`),
+  // so what decides is the source, not whether anything is painted here already
+  // (sjawhar/legion#2519).
+  test("slices the paint of a changed source into a body it already shows formatted", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A long comment before its edit");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      // The task the answer lands in puts in one batch of the body and hands the thread back.
+      // A paint of the whole body in one task - what a repaint of the source already painted
+      // here gets - would have every paragraph of it in by now.
+      expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 51);
+
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A sliced paint empties the element before its first batch and fills it 500 nodes a task, so
+  // between those tasks the element holds part of a body. A frame arriving in the middle of one
+  // must not stop it: the next render is pending and keeps whatever the element holds, so the
+  // reader would be left with a truncated prefix - 250 of 1,511 paragraphs in the deep review's
+  // reproduction - until that frame's own answer and its whole paint landed. The paint goes on
+  // to the end instead, which is the newest body the reader can be shown while the frame they
+  // are on is still owed (sjawhar/legion#2519).
+  test("goes on filling a body when the next frame arrives mid-paint, rather than leaving part of one", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A long comment the reader is watching");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const editedAgain = `${edited}${"z\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      // The paint of the edit has emptied the element and is filling it a batch at a task: what
+      // the element holds now is part of a body, fewer blocks than the paint before it left.
+      await waitFor(() =>
+        expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1)
+      );
+
+      // The next frame lands mid-paint. The body being painted still arrives whole, and the
+      // element stays marked pending, since that frame is owed.
+      view.rerender(<MarkdownBody markdown={editedAgain} />);
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      expect(pendingMark(view.container)).toBe("true");
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(2));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 101));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A body the engine already has the answer for is rendered in the commit that mounts it, never
+  // pending on the worker - and is still built across tasks, so between them the element holds
+  // part of a body. It carries the marker all the same, which is what a reader's surface, and
+  // every browser row that waits for a body to settle, reads to know the body is not all there.
+  test("marks a body painted in slices from the answer cache as pending until its last piece", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = paragraphBody("A body the engine has already parsed");
+    const first = render(<MarkdownBody markdown={markdown} />);
+    await act(() => worker.answer(0));
+    await waitFor(() => expect(topParagraphs(first.container)).toHaveLength(paragraphs + 1));
+    first.unmount();
+
+    const view = render(<MarkdownBody markdown={markdown} />);
+    try {
+      // The answer came from the cache: the worker was asked for this body once, on the mount
+      // before.
+      expect(worker.requests).toHaveLength(1);
+      expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1);
+      expect(pendingMark(view.container)).toBe("true");
+
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The body's finishing pass (`finishBlock`) runs on the sliced path as it does on the
+  // whole-body one: a task item draws its checkbox, ticked as its source is, and a tight item's
+  // paragraph is unwrapped so the item reads as one line.
+  test("draws its task checkboxes and unwraps its tight items when it is painted in slices", async () => {
+    const worker = installFakeParseWorker();
+    const pairs = Math.ceil(markdownWorkerThreshold / "- [ ] todo\n- [x] done\n".length) + 50;
+    const markdown = `A long task list\n\n${"- [ ] todo\n- [x] done\n".repeat(pairs)}`;
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(pairs * 2));
+
+      const items = topItems(view.container);
+      const boxes = items.map((item) => item.querySelector<HTMLInputElement>("input"));
+      expect(boxes.every((box) => box?.type === "checkbox" && box.disabled)).toBe(true);
+      expect(boxes.map((box) => box?.checked)).toEqual(
+        Array.from({ length: pairs * 2 }, (_unused, at) => at % 2 === 1)
+      );
+      // Each item is tight, so none of them keeps a paragraph of its own.
+      expect(items.some((item) => item.querySelector("p") !== null)).toBe(false);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The parser refusing a body is the one final failure, and the only thing
+  // `data-markdown-fallback` says: pending before it was interim, never a failure.
+  test("ends as its literal text, marked as the fallback, where the parser refuses it", async () => {
+    const worker = installFakeParseWorker();
+    const refused =
+      'A body with <span data-dispatch="bogus">a span</span> this schema has no node for';
+    const markdown = longBody(refused);
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(fallbackMark(view.container)).toBe("true"));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(view.container.textContent).toBe(markdown);
+      expect(topItems(view.container)).toHaveLength(0);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("ends formatted on the page's own thread when no worker can be created", async () => {
+    const worker = installFakeParseWorker({ refuseToCreate: true });
+    const view = render(<MarkdownBody markdown={longBody("A page that allows no worker")} />);
+
+    try {
+      // The page parses it itself: the reader waits, and then reads the body as a list. A
+      // worker that cannot be created is never the parser refusing the body.
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(worker.created).toBeGreaterThan(0);
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("ends formatted on the page's own thread when the worker crashes", async () => {
+    const worker = installFakeParseWorker();
+    const view = render(<MarkdownBody markdown={longBody("A worker that crashes")} />);
+
+    try {
+      await act(() => worker.crash(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // Nothing ever answers this body. The engine's deadline ends with the body parsed on the page;
+  // this row shortens it through `setParseDeadline`, the seam `resetMermaidDiagrams` is for the
+  // diagram renderer's own limit, so it proves what the deadline ends in without waiting out the
+  // page's own 10 s. The 25 s below is room for a loaded runner, not a second bound.
+  test("ends formatted on the page's own thread when the worker misses its deadline", async () => {
+    const worker = installFakeParseWorker();
+    setParseDeadline(50);
+    const view = render(<MarkdownBody markdown={longBody("A worker that never answers")} />);
+
+    try {
+      await worker.waitForRequests(1);
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems), {
+        interval: 250,
+        timeout: 25_000,
+      });
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      setParseDeadline();
+      view.unmount();
+    }
+  }, 40_000);
+
+  // Every paint recomputes the ask hosts, so a body whose decision card arrives late draws it
+  // from the answer it already has: the card is a dependency of the render, never a new parse.
+  test("repaints for a new decision card without sending the body a second time", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = `:::ask{urgency="high"}\n${askBody}\n${longBody("A decision above a list")}`;
+    const view = render(
+      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+        <TextAskCard.Provider value={undefined}>
+          <MarkdownBody markdown={markdown} />
+        </TextAskCard.Provider>
+      </MemoryRouter>
+    );
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      const shell = await findAskShell(view.container);
+      expect(within(shell).queryByText("Decision")).toBeNull();
+      expect(worker.requests).toHaveLength(1);
+
+      view.rerender(withAskCard(<MarkdownBody markdown={markdown} />));
+      const carded = await findAskShell(view.container);
+      expect(await within(carded).findByText("Decision")).toBeDefined();
+      await flushTasks();
+
+      expect(worker.requests).toHaveLength(1);
+      expect(topItems(view.container)).toHaveLength(longItems);
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // One body on two surfaces is one request with two waiters (the Conversation's card and the
+  // hover card of a reference to it both draw the same comment). A surface that goes away takes
+  // its own waiter and nothing else: the body stays with the worker, and the answer reaches the
+  // surface the reader is still looking at.
+  test("answers the surface still mounted when another drops the same body first", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A body two surfaces draw");
+    const leaving = render(<MarkdownBody markdown={markdown} />);
+    const staying = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await waitFor(() => expect(pendingMark(staying.container)).toBe("true"));
+      await worker.waitForRequests(1);
+      expect(worker.requests).toHaveLength(1);
+
+      leaving.unmount();
+      await flushTasks();
+      expect(worker.requests).toHaveLength(1);
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(staying.container)).toHaveLength(longItems));
+      expect(pendingMark(staying.container)).toBeNull();
+      expect(fallbackMark(staying.container)).toBeNull();
+    } finally {
+      staying.unmount();
+    }
+  });
+
+  // A surface that starts drawing a body the worker has already answered - the hover card of a
+  // reference the reader points at after the card below it formatted - reads the answer the
+  // engine kept, so it is formatted from its first paint and the worker hears nothing.
+  test("paints a body whose answer already landed, without asking the worker again", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A body answered before the second surface drew it");
+    const first = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(first.container)).toHaveLength(longItems));
+    } finally {
+      first.unmount();
+    }
+    await flushTasks();
+
+    const later = render(<MarkdownBody markdown={markdown} />);
+    try {
+      await waitFor(() => expect(topItems(later.container)).toHaveLength(longItems));
+      expect(pendingMark(later.container)).toBeNull();
+      expect(fallbackMark(later.container)).toBeNull();
+      await flushTasks();
+      expect(worker.requests).toHaveLength(1);
+    } finally {
+      later.unmount();
+    }
+  });
 });

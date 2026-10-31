@@ -267,7 +267,7 @@ func TestRejectSuggestionDeletesTheInsertsText(t *testing.T) {
 			waitForDocumentText(t, service, artifactID, test.want)
 			live := liveTree(t, service, artifactID)
 			for _, block := range live.Children {
-				if err := pmdoc.BlockShapeError(block); err != nil {
+				if err := pmdoc.ReadBackBlock(block).Shape; err != nil {
 					t.Errorf("after the reject a %s reads back otherwise: %v", block.Type, err)
 				}
 			}

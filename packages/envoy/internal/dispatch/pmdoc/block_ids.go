@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"sync"
@@ -13,15 +14,15 @@ const BlockIDAttr = "blockId"
 var blockIDGenerator = struct {
 	sync.RWMutex
 	mint func() string
-}{mint: uuid.NewString}
+}{mint: newBlockID}
 
-// SetBlockIDGenerator replaces the block ID generator. Passing nil restores UUID v4 IDs.
-// Fixture generators and tests use this to make generated documents deterministic.
+// SetBlockIDGenerator replaces the block ID generator. Passing nil restores UUID v4 IDs
+// (newBlockID). Fixture generators and tests use this to make generated documents deterministic.
 func SetBlockIDGenerator(mint func() string) {
 	blockIDGenerator.Lock()
 	defer blockIDGenerator.Unlock()
 	if mint == nil {
-		blockIDGenerator.mint = uuid.NewString
+		blockIDGenerator.mint = newBlockID
 		return
 	}
 	blockIDGenerator.mint = mint
@@ -32,6 +33,57 @@ func mintBlockID() string {
 	mint := blockIDGenerator.mint
 	blockIDGenerator.RUnlock()
 	return mint()
+}
+
+// blockIDEntropy is the random bytes ids are minted from, read from crypto/rand a block at a time.
+// The kernel is asked once per read, and a write mints an id for every block that names none: a
+// document of 8,000 list items spent about half its parse inside sixteen-byte reads, one per item
+// (the plain list of heavy_bodies_test.go). Every id still comes from those bytes alone, 122 of
+// them as a version 4 UUID holds.
+//
+// google/uuid's own EnableRandPool buffers the same way, and this reader exists instead of it
+// because that switch is process-wide and, as its doc says, "not thread-safe and should only be
+// called when there is no possibility that New or any other UUID Version 4 generation function
+// will be called concurrently": the server mints version 4 UUIDs from other goroutines while a
+// document is parsed (a process id in dispatch/processes, a suggestion row's in dispatch/api), so
+// there is no moment at which it may be turned on. This reader is handed to one call site
+// instead, and the buffer it draws from is this package's own.
+var blockIDEntropy blockIDBytes
+
+// blockIDEntropyIDs is how many ids one read of crypto/rand fills. Each costs sixteen bytes, so
+// the buffer is four kibibytes.
+const blockIDEntropyIDs = 256
+
+// blockIDBytes hands out the bytes of blockIDEntropy.
+type blockIDBytes struct {
+	sync.Mutex
+	bytes [blockIDEntropyIDs * len(uuid.UUID{})]byte
+	// unread is how many bytes at the end of the buffer no id has taken yet: zero before the
+	// first id of the process, and again once a block of them is spent.
+	unread int
+}
+
+// Read fills p from the block of bytes read last, reading crypto/rand again once they are spent,
+// so uuid.NewRandomFromReader mints an id without a read of its own. It is the io.Reader
+// uuid.NewRandomFromReader draws from, so what a block id holds of those bytes, and where its
+// version and variant go, is the library's own doing rather than this package's.
+func (b *blockIDBytes) Read(p []byte) (int, error) {
+	b.Lock()
+	defer b.Unlock()
+	if b.unread == 0 {
+		if _, err := rand.Read(b.bytes[:]); err != nil {
+			return 0, fmt.Errorf("pmdoc: reading randomness for a block id: %w", err)
+		}
+		b.unread = len(b.bytes)
+	}
+	read := copy(p, b.bytes[len(b.bytes)-b.unread:])
+	b.unread -= read
+	return read, nil
+}
+
+// newBlockID is a version 4 UUID, as uuid.NewString writes one, minted from blockIDEntropy.
+func newBlockID() string {
+	return uuid.Must(uuid.NewRandomFromReader(&blockIDEntropy)).String()
 }
 
 // EnsureBlockIDs gives every block in tree a unique blockId. Existing unique IDs stay

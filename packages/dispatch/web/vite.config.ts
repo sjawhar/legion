@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
@@ -10,6 +11,27 @@ import {
   viteRuntimeGeneratedCode,
 } from "../../../scripts/third-party-notices";
 
+/**
+ * `decode-named-character-reference`'s DOM-free implementation, which micromark decodes every
+ * named character reference through in every bundle this config builds. The package's `browser`
+ * export condition is a module whose body is `document.createElement('i')`, and Vite resolves a
+ * Web Worker's bundle with the client's conditions, so the parse worker
+ * (features/refs/markdown-parse.worker.ts) would throw before its first message. Its default
+ * condition answers from the `character-entities` table instead - the table Bun, Node, the unit
+ * suites and the pmdoc fixture generator already run - so a body reads the same above and below
+ * the parse worker's threshold, and the same as the generator that pins Go's fixtures
+ * (sjawhar/legion#2519), for 11.6 KB gzipped on the page's bundle.
+ *
+ * The package publishes no `./index.js` subpath, so the file is resolved rather than named: from
+ * the editor, which `micromark-core-commonmark` is a dependency of, and from that package, which
+ * decodes references with it. `require`'s own conditions hold no `browser`, so this is `index.js`.
+ */
+const proofEditor = createRequire(
+  fileURLToPath(new URL("../../proof-editor/src/lib-headless.ts", import.meta.url))
+);
+const characterReferenceDecoder = createRequire(
+  proofEditor.resolve("micromark-core-commonmark")
+).resolve("decode-named-character-reference");
 const vite = packageRoot("vite", fileURLToPath(new URL(".", import.meta.url)));
 /**
  * The code the build emits from no source file it records: Vite's own helpers (module preload,
@@ -91,6 +113,7 @@ export default defineConfig({
     // module identity rather than one per workspace import path.
     dedupe: ["prosemirror-model"],
     alias: {
+      "decode-named-character-reference": characterReferenceDecoder,
       "@legion/contracts/repo": fileURLToPath(
         new URL("../../contracts/src/repo.ts", import.meta.url)
       ),

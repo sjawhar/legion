@@ -378,7 +378,7 @@ func (s *Service) prepareSuppressedPersistence(room string) *suppressSlot {
 func (s *Service) applyCaptured(ctx context.Context, room string, origin any, mutate func(*crdt.Doc) error) ([][]byte, error) {
 	var updates [][]byte
 	var mutationErr error
-	err := s.srv.Apply(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.applyRoom(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		unsubscribe := doc.OnUpdate(func(update []byte, updateOrigin any) {
 			if updateOrigin == origin {
 				updates = append(updates, append([]byte(nil), update...))
@@ -1359,7 +1359,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		state.mu.Lock()
 		state.settleWarming = true
 		s.unlockState(room, state)
-		err := s.srv.Apply(parent, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+		err := s.applyRoom(parent, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
 		state.mu.Lock()
 		state.settleWarming = false
 		s.unlockState(room, state)
@@ -2091,7 +2091,7 @@ func (s *Service) closeRoomInstance(ctx context.Context, room string, live *crdt
 		return false, nil
 	}
 	var closeErr error
-	err = s.srv.Apply(withOwnerVerified(WithoutRecoveryWait(ctx)), room, func(held *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err = s.applyRoom(withOwnerVerified(WithoutRecoveryWait(ctx)), room, func(held *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		if held != live {
 			return
 		}

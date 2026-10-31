@@ -149,7 +149,7 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
 	updates := make(chan struct{}, 1)
 	var unsubscribe func()
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.applyRoom(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		if s.afterReadWarm != nil {
 			s.afterReadWarm(artifactID)
 		}
@@ -328,8 +328,12 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 				return acceptSpliceRefusal(err)
 			}
 		}
+		// The checks below read the blocks this accept changed, several of them the same blocks:
+		// each block is rendered and parsed once for all of them (blockReadBacks). A block the
+		// settlement rewrites (settleAccepted) is another node, and is read back again.
+		backs := blockReadBacks{}
 		if code {
-			if err := refuseAcceptedCodeThatReshapes(tree, next, range_, at, with); err != nil {
+			if err := refuseAcceptedCodeThatReshapes(tree, next, range_, at, with, backs); err != nil {
 				return err
 			}
 		}
@@ -340,10 +344,10 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return err
 		}
 		if !insideAsk(at) {
-			if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
+			if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement, backs); err != nil {
 				return err
 			}
-			if err := refuseReshapedAccept(tree, next, range_, at, with, replacement); err != nil {
+			if err := refuseReshapedAccept(tree, next, range_, at, with, replacement, backs); err != nil {
 				return err
 			}
 		}
@@ -871,7 +875,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 // unmarkExpired removes from room's live document each of expired that it still holds.
 func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 	var sweepErr error
-	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+	err := s.applyRoom(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		transact, release := s.serviceTransact(transact)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)

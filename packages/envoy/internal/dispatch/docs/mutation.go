@@ -499,7 +499,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if !joined {
 		return "", errUnjoined
 	}
-	tree, err := parseInput(markdown)
+	tree, read, err := parseWrittenReplacing(nil, markdown)
 	if err != nil {
 		return "", err
 	}
@@ -526,6 +526,10 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	// records it once the transaction commits (Ledger.creditRooms), so a seed that never commits
 	// leaves the document no state.
 	ledgerFrom(ctx).seeded(artifactID, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor)
+	// The parse read its markdown back already, to refuse a document that reads back otherwise;
+	// the rest of the request reads the rendering through that parse rather than making a second
+	// one of it (Ledger.ReadBackOf).
+	ledgerFrom(ctx).wroteReadBack(artifactID, read)
 	return canonical, nil
 }
 
@@ -552,6 +556,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		return "", err
 	}
 	var canonical string
+	var read pmdoc.WrittenReadBack
 	var unchanged bool
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
@@ -569,7 +574,8 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if repairing {
 			current = nil
 		}
-		target, err := parseReplacing(current, markdown)
+		var target *pmdoc.Node
+		target, read, err = parseWrittenReplacing(current, markdown)
 		if err != nil {
 			return err
 		}
@@ -692,12 +698,15 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		})
 		return updateErr
 	})
-	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
-		return canonical, nil
-	}
-	if err != nil {
+	// A write the document already held makes no change, and is as much a write that read its
+	// markdown back as one the fragment took.
+	if err != nil && !(unchanged && errors.Is(err, websocket.ErrNoChanges)) {
 		return "", wrapUnlessTooLarge(err, "replace live document")
 	}
+	// The parse read its markdown back already, to refuse a document that reads back otherwise;
+	// the rest of the request reads the rendering through that parse rather than making a second
+	// one of it (Ledger.ReadBackOf).
+	ledgerFrom(ctx).wroteReadBack(artifactID, read)
 	return canonical, nil
 }
 
@@ -1278,7 +1287,7 @@ func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snap
 }
 
 func (s *Service) warmLiveDocument(ctx context.Context, artifactID string) error {
-	err := s.srv.Apply(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+	err := s.applyRoom(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return err
 	}
@@ -1767,7 +1776,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		}
 		var readErr error
 		var behind bool
-		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		err = s.applyRoom(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
 			if cursor := s.cursorOf(live); cursor != nil && refuseRoomBehindHead(room, cursor, head) != nil {
 				behind = true
 				return

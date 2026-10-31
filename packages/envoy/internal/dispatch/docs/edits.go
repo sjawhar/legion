@@ -899,16 +899,20 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.WriteBudget
 		if err != nil {
 			return nil, err
 		}
+		// Both checks below read the blocks this replace changed, and the block it lands in can
+		// hold the whole document's text: each block is rendered and parsed once for the two
+		// (blockReadBacks).
+		backs := blockReadBacks{}
 		if code {
-			return next, refuseCodeThatReshapesItsBlock(tree, next, r, at, "with", op.With)
+			return next, refuseCodeThatReshapesItsBlock(tree, next, r, at, "with", op.With, backs)
 		}
 		if err := refuseCodePipeInTableCell(tree, next, r, "with", "with", op.With, ""); err != nil {
 			return nil, err
 		}
-		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
+		if err := refuseUnreadableReplacement(tree, next, r, op.With, backs); err != nil {
 			return nil, err
 		}
-		return next, refuseReshapedReplacement(tree, next, r, op.With)
+		return next, refuseReshapedReplacement(tree, next, r, op.With, backs)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -1261,9 +1265,10 @@ func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdo
 // the replacement alone: `<div>x</div>` over a whole paragraph, at a list item's start or after a
 // hard break opens an HTML block the Proof schema does not carry, while the same HTML inside a
 // line, a table cell or a heading is inline HTML and is kept. A block that was already unreadable,
-// or another block that is, is no reason to refuse this replace.
-func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	_, unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
+// or another block that is, is no reason to refuse this replace. backs holds the read-back of each
+// block it reads, which the replace's other check of the same blocks shares (blockReadBacks).
+func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string, backs blockReadBacks) error {
+	_, unreadable, err := replacementBroke(before, after, match, backs.read)
 	if err != nil || unreadable == nil {
 		return err
 	}
@@ -1274,8 +1279,8 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 // another shape where it lands: a heading and a table cell are written on one line, so a line
 // break inside a code span or inline HTML there ends the block, as a hard break would
 // (hasHardBreak), and the document reads back a heading and a paragraph, or a row as two rows.
-func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	_, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string, backs blockReadBacks) error {
+	_, reshaped, err := replacementBroke(before, after, match, backs.shape)
 	if err != nil || reshaped == nil {
 		return err
 	}
@@ -1458,8 +1463,8 @@ func inlineAware(markdown string, edges textEdges, opensDocument bool, budget *p
 // block's fence longer than any line of colons in its code that the browser editor's parser, or
 // this one, could read as that fence (pmdoc's typedFence). Code that only reads back with
 // different whitespace keeps its shape and is not refused.
-func refuseCodeThatReshapesItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
-	_, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+func refuseCodeThatReshapesItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string, backs blockReadBacks) error {
+	_, reshaped, err := replacementBroke(before, after, match, backs.shape)
 	if err != nil || reshaped == nil {
 		return err
 	}

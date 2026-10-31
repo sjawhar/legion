@@ -313,6 +313,108 @@ func TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable(t *testing.T) {
 	}
 }
 
+// refusedForTheItemCap checks a refusal naming the item count an update's header declares, the
+// count read from that header alone.
+func refusedForTheItemCap(t *testing.T, what string, err error, items uint64) {
+	t.Helper()
+	want := fmt.Sprintf("its %d items exceed the %d one document update can hold", items, maxUpdateItems)
+	if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("%s: %v, want ErrDocumentTooLarge saying %q", what, err, want)
+	}
+}
+
+// The store judges an update by the item count its header declares (updateItems) rather than by
+// decoding it: a transaction's append of an update this process encoded is refused past the cap
+// from that header (AppendUpdateTx, refuseUpdateItemCap), and so is a stored history a room is
+// about to take (servicePersistenceAdapter.LoadDoc, loadableHistory), which took that decode off
+// every cold load of a document one client wrote (sjawhar/legion#2519).
+//
+// A header that reads says nothing about the body behind it, so the append of a malformed update
+// is taken, and it is ygo that refuses the history, decoding it into the room it is loading
+// (loadRoomDoc). That refusal reaches the Apply the load answers rather than the adapter, and
+// fails the room there (applyRoom, failUnfinishedLoad) as a history the adapter itself refused
+// fails it: the room is left failed for the next access to reload, and the record the load began
+// goes with it, since no instance will ever take it (beginRoomLoad, keepInstance).
+func TestTheStoreJudgesAnUpdateByItsHeader(t *testing.T) {
+	overTheCap := encoding.NewEncoder()
+	overTheCap.WriteVarUint(1)
+	overTheCap.WriteVarUint(maxUpdateItems + 1)
+	malformed := encoding.NewEncoder()
+	malformed.WriteVarUint(1)
+	malformed.WriteVarUint(1)
+	malformed.WriteRaw([]byte{0xff, 0xff, 0xff})
+	for _, test := range []struct {
+		name     string
+		update   []byte
+		appended func(*testing.T, error)
+		loaded   func(*testing.T, error)
+	}{
+		{
+			name:   "a header declaring more items than one update may hold",
+			update: overTheCap.Bytes(),
+			appended: func(t *testing.T, err error) {
+				refusedForTheItemCap(t, "a transaction's append of an update over the cap", err, maxUpdateItems+1)
+			},
+			loaded: func(t *testing.T, err error) {
+				refusedForTheItemCap(t, "a room's load of a history over the cap", err, maxUpdateItems+1)
+			},
+		},
+		{
+			name:   "a header that reads over a body that does not",
+			update: malformed.Bytes(),
+			appended: func(t *testing.T, err error) {
+				if err != nil {
+					t.Fatalf("a transaction's append of a malformed update: %v, want it taken: its header is all this check reads", err)
+				}
+			},
+			loaded: func(t *testing.T, err error) {
+				if err == nil {
+					t.Fatal("a room took a history ygo cannot decode, want its load refused")
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database := storetest.Open(t)
+			artifactID := createDocument(t, database, "")
+			ctx := context.Background()
+			tx, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin the append: %v", err)
+			}
+			defer tx.Rollback(ctx)
+			_, appended := NewPgVersioned(database).AppendUpdateTx(ctx, tx, artifactID, test.update, true)
+			test.appended(t, appended)
+
+			service := New(Deps{
+				Store:       database,
+				Persistence: failingVersionedStore{VersionedStore: NewPgVersioned(database), loadUpdate: test.update},
+				Events:      events.NewBroker(),
+				Identity:    headerIdentity(database),
+				Settle:      time.Hour,
+			})
+			t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+			// The failed room's eviction is held, so the failure it carries is still the room's
+			// to read below: the eviction releases the room's state as it goes.
+			hold := make(chan struct{})
+			defer close(hold)
+			service.beforeFailedEviction = func(room string) {
+				if room == artifactID {
+					<-hold
+				}
+			}
+
+			test.loaded(t, service.warmLiveDocument(ctx, artifactID))
+			if failure := service.roomFailure(artifactID); failure == nil {
+				t.Error("the refused load left the room healthy, so nothing reloads the document")
+			}
+			if _, kept := service.roomLoads.Load(artifactID); kept {
+				t.Error("the refused load left its record behind, which no instance will take")
+			}
+		})
+	}
+}
+
 // A cold socket's admission check hands the room's load the history it decoded, so the history
 // is read once - but only while it is still the stored one. An update appended in between raises
 // the head, and the load reads the store again rather than open the room without that update.
