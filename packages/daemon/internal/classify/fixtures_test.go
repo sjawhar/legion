@@ -217,15 +217,6 @@ func replayFixture(function string, input json.RawMessage) ([]byte, error) {
 			return nil, err
 		}
 		return canonicalOutcome(EffectiveOutcome(decoded.PR.record(), decoded.Incoming.candidate()))
-	case "classifyPush":
-		var decoded struct {
-			PushPayload
-			Issue string `json:"issue"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		return canonicalJSON(ClassifyPush(decoded.PushPayload, decoded.Issue))
 	case "reduceDispatchEvent":
 		return replayDispatchDecision(input)
 	case "reduceGithubEvent":
@@ -283,17 +274,7 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 		}
 	case "push":
 		login := decoded.Config.ReviewAppLogin
-		// The push's issue is the one its branch, legion/<issue>, names; a push to any other
-		// branch names none, and changes no handoff of any issue.
-		issue, onIssueBranch := strings.CutPrefix(stringValue(payload, "ref"), "refs/heads/legion/")
-		if !onIssueBranch {
-			issue = ""
-		}
-		classification := ClassifyPush(PushPayload{
-			ChangedPaths: optionalString(payload, "changed_paths"), ChangedPathsTruncated: optionalString(payload, "changed_paths_truncated"),
-		}, issue)
 		push := record.ClassifiedPush{SHA: stringValue(payload, "after"), Before: stringValue(payload, "before"),
-			HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
 			ByReviewApp: login != "" && stringValue(payload, "pusher") == login}
 		// The shipped state marks a head its synchronize counted before its push arrived
 		// (headCounted), not the run the Go record keeps for it: the replay opens that run, its
@@ -587,13 +568,6 @@ func timestampJSON(raw json.RawMessage) time.Time {
 func stringValue(values map[string]any, key string) string {
 	value, _ := values[key].(string)
 	return value
-}
-func optionalString(values map[string]any, key string) *string {
-	value, ok := values[key].(string)
-	if !ok {
-		return nil
-	}
-	return &value
 }
 func numberValue(values map[string]any, key string) int {
 	switch value := values[key].(type) {

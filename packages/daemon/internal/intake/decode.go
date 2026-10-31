@@ -720,14 +720,10 @@ func decodePush(repository ghrepo.Repository, raw map[string]json.RawMessage) (F
 	if !ok || after == "" {
 		return nil, nil
 	}
-	changedPaths := rawStringPointer(raw, "changed_paths")
-	truncated := rawStringPointer(raw, "changed_paths_truncated")
 	pusher, _ := rawString(raw, "pusher")
 	before, _ := rawString(raw, "before")
-	forced := rawStringPointer(raw, "forced")
 	sender, _ := rawString(raw, "sender")
-	return Push{Repo: repository.String(), Branch: branch, Before: before, After: after, ChangedPaths: changedPaths,
-		Truncated: truncated, Forced: forced, Pusher: pusher, Sender: sender}, nil
+	return Push{Repo: repository.String(), Branch: branch, Before: before, After: after, Pusher: pusher, Sender: sender}, nil
 }
 
 func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
@@ -863,14 +859,6 @@ func rawString(raw map[string]json.RawMessage, key string) (string, bool) {
 		return "", false
 	}
 	return decoded, true
-}
-
-func rawStringPointer(raw map[string]json.RawMessage, key string) *string {
-	value, ok := rawString(raw, key)
-	if !ok {
-		return nil
-	}
-	return new(value)
 }
 
 func rawNumber(raw map[string]json.RawMessage, key string) (int, bool) {

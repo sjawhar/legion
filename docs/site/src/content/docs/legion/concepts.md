@@ -189,24 +189,27 @@ on a person's behalf, and the approval Dispatch records at your answer is yours,
 deployment that does not want the gate sets `gates.design: off`, and the tree starts as soon as the
 architect has written its spec.
 
-## Handoffs on the issue branch
+## Handoffs on the Dispatch issue
 
-Each phase ends by writing a **handoff**, a small JSON file committed to the issue's branch under
-its own `.legion/<issue>/` directory: `architect.json`, `plan.json`, `implement.json`, `test.json`,
-and `review.json`. The next phase reads the ones before it. A handoff is the copy that survives:
-when a worker comes back after a restart, or a memory disagrees with a file, the committed handoff
-wins. The merger writes none.
+Each phase ends by writing a **handoff**, a small JSON record on its Dispatch issue, kept under the
+phase's word: `plan`, `implement`, `test` and `review`. The worker writes it with
+`dispatch handoff-write` under its own session, and every write adds a version; the next phase's
+task names the version the daemon accepted, which it reads with
+`dispatch handoff-read --version <n>`. A handoff is the copy that survives: when a worker
+comes back after a restart, or a memory disagrees with a record, the record wins. The issue's
+Conversation in Dispatch lists every version, and opens each to its fields. The merger writes
+none, and nor does the architect.
 
-Each tree writes only under its own directory, so trees running at the same time never touch the
-same file. Handoffs belong to the issue branch, not the default branch: nothing on the default
-branch reads one, so retro's last commit removes the tree's `.legion/<issue>/` from the head that
-merges, and the merger's `READY` is refused while that head still carries it. The merge
-therefore brings no handoff onto the default branch, and no later branch starts with one. The
-removal sits above the reviewer's approved head beside retro's notes, so it costs no test or review
-round; the handoffs stay on the issue branch below it, where a worker still reads them. Those two
-are all that may sit there: the daemon compares the approved head with the head `READY` names, on
-GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything else changed since the
-approval, so that change goes back to review.
+A worker's completion names its record, and the daemon reads that record back from Dispatch before
+it moves the issue: it refuses a record another session wrote, one of another issue, phase or
+version, and the record the role named for its previous phase. No handoff is a commit, so the
+issue branch carries only work, every push gets its own CI, and the merge brings no handoff onto
+the default branch. Only retro's notes under `docs/solutions/` may sit above the reviewer's
+approved head, so they cost no test or review round: the daemon compares the approved head with
+the head `READY` names, on GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything
+else changed since the approval, so that change goes back to review. The one other change it lets
+through is the removal of files under `.legion/`, where handoffs were committed before they moved
+to Dispatch: `legion handoffs import` makes that commit once on each branch in flight at the move.
 
 ## Review signalling
 
@@ -220,14 +223,7 @@ Legion uses GitHub's own review mechanisms rather than labels:
   the daemon already applied, by webhook or by read, decides nothing again. A review submitted while
   no round is open (the work is being implemented or tested) decides no later round when the daemon
   reads it before the next round opens. One it first hears of after that round opened can still
-  decide it, as a webhook delivered late can. An approval of a head below the pull request's head
-  still counts when everything above it changed only the issue's own `.legion/<issue>/`: the
-  daemon learns that from each push's webhook, and the same two-minute read also asks GitHub to
-  compare the approved head with the head while the approval does not count, so a push webhook
-  lost or late, or an approved head the record never held, sets nothing aside. Any other change
-  above the approved head, another issue's `.legion/` included, or a head not built on it, sets the
-  approval aside, and only an approval of the head itself or a request for changes ends the round;
-  an approval of the head itself ends it as soon as the record reaches that head.
+  decide it, as a webhook delivered late can.
 - **CI** on the pull request's head counts: red checks while testing, reviewing, in retro or
   merging, or once the issue awaits its merge, send the issue back to the implementer, naming the
   failing checks. The tester, a reviewer whose round is not yet completed, or the merger has its
@@ -235,8 +231,7 @@ Legion uses GitHub's own review mechanisms rather than labels:
   after it. The implementer pushes and completes without waiting for CI: a red that settled while
   it was still implementing sends the work back the moment it completes, so no tester round runs
   on code CI already found broken. Once the issue awaits its merge, only a red of the head's own
-  counts: a red carried from the head a `.legion/`-only push replaced was already there when
-  `READY` was accepted, and says nothing new about the commit the daemon's submission names. Only
+  counts. Only
   what the base branch requires counts, the set the daemon reads for itself: its rulesets'
   required status checks and required workflows, and its branch protection's required
   status checks. CI is red when one of those checks failed, or when the latest pull-request run of
@@ -259,13 +254,11 @@ Legion uses GitHub's own review mechanisms rather than labels:
   Legion matches a required workflow to a run by its path and the repository that defines it, and
   a run belongs to the repository it ran for, so a required workflow another repository defines
   (an organization ruleset) never matches a run: the head never reads green, so Legion sends the
-  work nowhere for it, and whether it holds the merge is GitHub's to say. A head that a push
-  changing only the issue's own `.legion/<issue>/` made carries the checks and workflow runs of the
-  head before it, except a workflow run cancelled there, which the new head's own run superseded:
-  it leaves no verdict until that head's own CI settles, and a red carried that way is that code's
-  red and sends the work back as the code head's own would. The daemon reads each open pull
-  request's required set with the implement App as it starts and every two minutes after, with the
-  required workflows' runs on the head; until a read succeeds, no verdict stands for the head, and
+  work nowhere for it, and whether it holds the merge is GitHub's to say. A verdict stands only for
+  the head it names: a push leaves the new head with no verdict until its own CI settles. The
+  daemon reads each open pull request's required set with the implement App as it starts and every
+  two minutes after, with the required workflows' runs on the head; until a read succeeds, no
+  verdict stands for the head, and
   a read GitHub refuses is logged with the repository and the HTTP status. The same pass applies
   what a GitHub event lost, or still waiting behind the daemon's GitHub consumer, would have
   carried, so the record is behind for at most one pass. It lists each served repository's open
@@ -274,9 +267,8 @@ Legion uses GitHub's own review mechanisms rather than labels:
   issue whose implementer completed on to testing. It applies the close or merge GitHub shows of a
   pull request recorded open. When GitHub shows a head the daemon has not recorded, it takes it as
   the synchronize webhook would, after the pushes that took the branch there: those GitHub's
-  repository activity of the branch shows, when no recorded push ends at the head, or, when one does
-  or that activity cannot be followed, the one push GitHub's compare shows changed only the issue's
-  own `.legion/<issue>/`; any other push is still read from its webhook. For a head no CI
+  repository activity of the branch shows, when no recorded push ends at the head; when one does,
+  or that activity cannot be followed, each push is left to its own webhook. For a head no CI
   settlement stands for, it reads the head's check runs and, once every check's latest run has
   completed and the newest at least two minutes before, applies the settlement Envoy's listener
   would have published; the listener's own settlement arriving later changes nothing the pass
@@ -301,7 +293,8 @@ Legion uses GitHub's own review mechanisms rather than labels:
   green CI, or onto a settled head whose base branch requires no check and no workflow, raises no
   count and leaves the attempt, so its red sends the work back as usual. Every other push stays in
   the attempt, whether it is counted or not: one onto a head CI has not judged yet, and one onto the
-  held red that counts nothing, such as the tester's red tests or its handoff. The next push onto a
+  held red that counts nothing, such as the tester's red tests, which the review App pushes. The
+  next push onto a
   red raises the count and is told again. A `READY` is withdrawn on red CI at any count (below).
 
 ## READY and the merge

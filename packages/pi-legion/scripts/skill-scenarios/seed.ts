@@ -4,8 +4,20 @@
 // refuses to run while either is set. Each mode is also an exported function, which seed.test.ts
 // calls against a stubbed fetch.
 //
-//   seed.ts project                        project LWEVAL and LWEVAL-1, the issue the tester's world
-//                                          implements; the world of every scenario but brainstorm
+//   seed.ts project                        project LWEVAL, which each run's own issue is filed in;
+//                                          the world of every scenario but brainstorm
+//   seed.ts tester-proof <file>            one run's own issue, the greet() issue the tester's world
+//                                          implements; writes {issue} to <file>
+//   seed.ts implement-handoff <file> <body file>
+//                                          records <body file>, one JSON object, as the implement
+//                                          handoff of the issue <file> names, under the session
+//                                          IMPLEMENTER (never the run's); writes {issue, implement:
+//                                          {id, version}} to <file>
+//   seed.ts capture-handoffs <file> <run dir>
+//                                          every handoff record of the issue <file> names, newest
+//                                          first as Dispatch lists them, each with the body it
+//                                          stores, as score.ts's testerProof reads them
+//                                          (handoffs.json in <run dir>)
 //   seed.ts ask-on-message <file>          one run's own issue and the owner's message posting its
 //                                          plan; writes {issue, message} to <file>
 //   seed.ts measure-before-ask <file>      one run's own issue and the owner's message naming three
@@ -72,6 +84,8 @@ import {
   ASK_QUESTION_MAX,
   type Ask,
   type AskOption,
+  type Handoff,
+  type HandoffSummary,
 } from "@legion/contracts";
 import { z } from "zod";
 import {
@@ -79,6 +93,7 @@ import {
   baseUrl,
   createAsk,
   createComment,
+  createHandoff,
   createIssue,
   createIssueArtifact,
   createMessage,
@@ -114,6 +129,15 @@ const SpecFixture = z.object({ issue: z.string(), spec_artifact: z.string() });
 type SpecFixture = z.infer<typeof SpecFixture>;
 /** The session a seeded ask is opened as: another agent's, never the run's own. */
 export const SEED_ASKER = { kind: "session", id: "spec-source-agent" } as const;
+/** What `tester-proof` writes, and `implement-handoff` and `capture-handoffs` read: the run's issue,
+ * and once `implement-handoff` recorded it, the implementer's record. */
+const TesterFixture = z.object({
+  issue: z.string(),
+  implement: z.object({ id: z.string(), version: z.number().int() }).optional(),
+});
+/** The session the tester's predecessor wrote its implement handoff as: the implementer's, never
+ * the run's own. */
+export const IMPLEMENTER = { kind: "session", id: "rig-implementer" } as const;
 /** The person who files the run's issue, posts the source's input and answers every ask. */
 const PERSON = "alice";
 /** Dispatch's approval answer (packages/envoy/internal/dispatch/docs/approval_review.go). */
@@ -554,9 +578,17 @@ export async function captureSpec(file: string, runDir: string): Promise<void> {
 
 async function seedProject(): Promise<void> {
   await createProject({ key: "LWEVAL", name: "skill scenarios" });
+  console.log("seeded LWEVAL");
+}
+
+/** `tester-proof <file>`: the run's own greet() issue, whose spec lists the acceptance criteria
+ * rig.sh's worker_fixture meets. Each run's implement and test records go on its own issue alone,
+ * and `force` passes Dispatch's duplicate check should the issue be filed again. */
+export async function testerProofIssue(file: string): Promise<void> {
   const issue = await createIssue(
     {
       project: "LWEVAL",
+      force: true,
       title: "greet(): a greeting helper for the widgets CLI",
       spec: [
         "## Goal",
@@ -572,7 +604,51 @@ async function seedProject(): Promise<void> {
     },
     { as: "agent" }
   );
+  const fixture: z.infer<typeof TesterFixture> = { issue: issue.key };
+  writeFileSync(file, `${JSON.stringify(fixture)}\n`);
   console.log(`seeded ${issue.key}`);
+}
+
+/** `implement-handoff <file> <body file>`: the implementer's handoff on the run's issue, as
+ * `dispatch handoff-write` records it under the implementer's session. A body that is no JSON
+ * object is the fixture's fault, refused before anything is written. */
+export async function implementHandoff(file: string, bodyFile: string): Promise<void> {
+  const { issue } = TesterFixture.parse(JSON.parse(readFileSync(file, "utf8")));
+  const body: unknown = JSON.parse(readFileSync(bodyFile, "utf8"));
+  if (typeof body !== "object" || body === null || Array.isArray(body))
+    throw new Error(`${bodyFile} holds no JSON object, which a handoff body is`);
+  const recorded = await createHandoff(issue, "implement", body, IMPLEMENTER);
+  const fixture: z.infer<typeof TesterFixture> = {
+    issue,
+    implement: { id: recorded.id, version: recorded.version },
+  };
+  writeFileSync(file, `${JSON.stringify(fixture)}\n`);
+  console.log(`seeded ${issue}'s implement handoff, version ${recorded.version} (${recorded.id})`);
+}
+
+/** `GET route` as the agent bearer, its JSON answer; a refusal names the route and Dispatch's answer. */
+async function agentGet<T>(route: string): Promise<T> {
+  const response = await fetch(new URL(route, baseUrl), {
+    headers: { Authorization: `Bearer ${e2eAgentToken}` },
+  });
+  if (!response.ok)
+    throw new Error(`GET ${route} failed: ${response.status} ${await response.text()}`);
+  return (await response.json()) as T;
+}
+
+/** `capture-handoffs <file> <run dir>`: every handoff record of the run's issue, the seeded
+ * implement record among them, newest first as `GET …/handoffs` lists them, each read whole by id
+ * (`GET /api/v1/handoffs/{id}`) for its body. */
+export async function captureHandoffs(file: string, runDir: string): Promise<void> {
+  const { issue } = TesterFixture.parse(JSON.parse(readFileSync(file, "utf8")));
+  const summaries = await agentGet<HandoffSummary[]>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/handoffs`
+  );
+  const records: Handoff[] = [];
+  for (const summary of summaries)
+    records.push(await agentGet<Handoff>(`/api/v1/handoffs/${encodeURIComponent(summary.id)}`));
+  writeFileSync(path.join(runDir, "handoffs.json"), `${JSON.stringify(records)}\n`);
+  console.log(`captured ${issue}: ${records.length} handoff records`);
 }
 
 async function askOnMessage(file: string): Promise<void> {
@@ -772,7 +848,7 @@ async function captureBrainstorm(runDir: string): Promise<void> {
 }
 
 const USAGE =
-  "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm | capture-brainstorm <file> <run dir> | spec-writing <file> <source dir> | spec-rewrite <file> <source dir> | state <file> <turn> <run dir> | answer <file> <answers file> | approve <file> | capture-spec <file> <run dir> | askgate <file> | capture-askgate <file> <run dir>";
+  "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm | capture-brainstorm <file> <run dir> | spec-writing <file> <source dir> | spec-rewrite <file> <source dir> | state <file> <turn> <run dir> | answer <file> <answers file> | approve <file> | capture-spec <file> <run dir> | askgate <file> | capture-askgate <file> <run dir> | tester-proof <file> | implement-handoff <file> <body file> | capture-handoffs <file> <run dir>";
 
 /** Runs the mode `argv` names; false when argv names no mode, with its arguments. The first six
  * modes take extra arguments and ignore them, as they always did; each new mode takes exactly its
@@ -803,6 +879,12 @@ async function main(argv: string[]): Promise<boolean> {
   else if (command === "askgate" && file !== undefined && n === 2) await seedAskgate(file);
   else if (command === "capture-askgate" && file !== undefined && second !== undefined && n === 3)
     await captureAskgate(file, second);
+  else if (command === "tester-proof" && file !== undefined && n === 2)
+    await testerProofIssue(file);
+  else if (command === "implement-handoff" && file !== undefined && second !== undefined && n === 3)
+    await implementHandoff(file, second);
+  else if (command === "capture-handoffs" && file !== undefined && second !== undefined && n === 3)
+    await captureHandoffs(file, second);
   else return false;
   return true;
 }

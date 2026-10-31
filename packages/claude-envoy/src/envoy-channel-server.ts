@@ -59,7 +59,7 @@ import {
   mergeInterestSources,
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
-import { findHandoffCommit } from "@legion/pi-shared/handoff-commit"
+import { paneHandoffReport } from "@legion/pi-shared/handoff-record"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -1384,7 +1384,9 @@ export async function runEnvoyChannelServer(): Promise<void> {
   }
 
   // Only the `dispatch` command reads the stamp, so nothing is written while the session starts with
-  // Dispatch off, or under the QA override ENVOY_SESSION_ID, whose id that command never reads.
+  // Dispatch off. Nothing is written under the QA override ENVOY_SESSION_ID either, although that
+  // command acts as the override's id when it is set (`runDispatchCli` in envoy-client): a QA
+  // session's Dispatch writes carry no session title unless its shell sets DISPATCH_SESSION_TITLE.
   const stamping = dispatch.enabled && configuredValue(overrideSessionId) === undefined
   /** Stamp the title for the session id `resolveId` names, once, where nothing will register it. */
   const stampOnce = (resolveId: () => string): void => {
@@ -1498,7 +1500,9 @@ export async function runEnvoyChannelServer(): Promise<void> {
       const legionRuntime: LegionToolRuntime = {
         daemon,
         claim: () => claim?.capability(),
-        handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
+        // The pane's own environment and PATH's jj, and the Dispatch this session's envoy.json
+        // names, which the pane's `dispatch handoff-write` wrote the record to.
+        handoffReport: paneHandoffReport(configFile, process.env, directory),
       }
       // The request's signal aborts on the client's notifications/cancelled, which ends a wait
       // for a restarting daemon.

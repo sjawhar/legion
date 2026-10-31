@@ -78,10 +78,10 @@ func TestRealGitHubReadyHoldsTheHeadToRetrosCommits(t *testing.T) {
 	}
 	t.Logf("READY of %s#%d at %s, approved at %s: %d %s %q note %q (%s)", repository, number, head, approved,
 		recorder.Code, failure.Code, failure.Error, answer.Note, time.Since(started).Round(time.Millisecond))
-	// READY's refusals that only a head past its scope check can get: the handoffs, the conflict
-	// and the by-hand file list. Any other refusal ends READY before the check, or is the check's
-	// own, so it proves nothing about the head's change above the approved one.
-	afterScope := map[string]bool{"READY_HEAD_CARRIES_HANDOFFS": true, "READY_HEAD_CONFLICTS": true, "READY_FILES_TRUNCATED": true}
+	// READY's refusals that only a head past its scope check can get: the conflict and the by-hand
+	// file list. Any other refusal ends READY before the check, or is the check's own, so it proves
+	// nothing about the head's change above the approved one.
+	afterScope := map[string]bool{"READY_HEAD_CONFLICTS": true, "READY_FILES_TRUNCATED": true}
 	switch {
 	case refuse != "":
 		if failure.Code != "READY_UNREVIEWED_CHANGE" || !strings.Contains(failure.Error, refuse) {

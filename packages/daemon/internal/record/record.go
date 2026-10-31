@@ -24,31 +24,17 @@ type AttemptRun struct {
 	ID   int64  `json:"id"`
 }
 
-// ClassifiedPush is one branch push as its changed paths classify it: a fact about two commits,
-// the head it replaced (Before) and the head it left (SHA), true whenever it is learned.
+// ClassifiedPush is one branch push as the daemon records it: a fact about two commits, the head it
+// replaced (Before) and the head it left (SHA), true whenever it is learned, and whose push it was.
 type ClassifiedPush struct {
 	SHA string `json:"sha"`
 	// Before is the head the push replaced, empty when the push did not say.
 	Before string `json:"before,omitempty"`
-	// HandoffOnly is a push every one of whose changed paths is the issue's own handoff, under
-	// .legion/<issue>/ (classify.HandoffPath); a .legion/-only push names such a push throughout.
-	HandoffOnly bool   `json:"handoffOnly"`
-	Unknown     string `json:"unknown,omitempty"`
 	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).
 	ByReviewApp bool `json:"byReviewApp,omitempty"`
-	// Forced is a push that rewrote history, or did not say whether it did. Its changed paths list
-	// the commits it added since the merge base, not what it did to the head it replaced, so it
-	// never carries an approval across.
-	Forced bool `json:"forced,omitempty"`
 	// Sender is the login of the account that pushed (the webhook's sender), empty from a listener
 	// that predates the field. A synchronize names its move's push by it (classify.pushOf).
 	Sender string `json:"sender,omitempty"`
-}
-
-// MayChangeCode is whether the push may have changed anything outside the issue's own
-// .legion/<issue>/ in the head it replaced.
-func (p ClassifiedPush) MayChangeCode() bool {
-	return !p.HandoffOnly || p.Forced
 }
 
 // Issue is one durable workflow record. Status is the issue's lifecycle status as the daemon holds
@@ -311,18 +297,28 @@ func (m EventMark) ID() int64 {
 
 // PhaseRow is the durable part of a role's work on an issue; live claim facts are joined for state.
 type PhaseRow struct {
-	Issue         string
-	Role          claim.Role
-	Claim         claim.Token
+	Issue string
+	Role  claim.Role
+	Claim claim.Token
+	// HandoffCommit is the commit the role's completion of its current phase reported: the
+	// implementer's pushed tip for an implementing round, the commit retro stands on, the head the
+	// merger's READY names. The planner, the tester and the reviewer report none.
 	HandoffCommit string
-	Rounds        int
-	Verdict       string
+	// HandoffRecord and HandoffVersion are the Dispatch handoff record the role's completion of its
+	// current phase named, for a phase with a handoff (phase.Handoff), and that record's version
+	// among its phase's records: the next worker reads that version with `dispatch handoff-read
+	// --version <n>`, as its task's Handoff line says. Empty and zero for a phase that writes none.
+	HandoffRecord  string
+	HandoffVersion int
+	Rounds         int
+	Verdict        string
 	// Summary is what the role reported with its completion. The merger's is its READY packet,
 	// which the daemon posts when the issue reaches awaiting_merge.
 	Summary string
-	// LastHandoff is the carrying commit the role last reported for a file-backed phase. Unlike
-	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
-	// to carry no handoff written since.
+	// LastHandoff is the handoff record the role last named for a file-backed phase (a commit, on a
+	// row a daemon before the records last wrote, which no record id equals). Unlike HandoffRecord
+	// it survives the next phase's start, so a completion naming it again is known to carry no
+	// handoff written since.
 	LastHandoff string
 	// Decision is the review round's decision, on the reviewer's row: the newest review the
 	// reviewer's own review-App session (told from any other review-App session's by its Legion
@@ -332,7 +328,7 @@ type PhaseRow struct {
 	Decision *ReviewDecision
 	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until
 	// then. The reviewer's orders the reviews its round receives against the completion (workflow's
-	// reviewersAnswer and answerSkew), and is read only for a round whose HandoffCommit is set. It can
+	// reviewersAnswer and answerSkew), and is read only for a completed round (Completed). It can
 	// be stale: a daemon older than migration 0026 writes a completion without it, and
 	// ClearGeneration resets the row without it. Behind a completion an old daemon wrote, a stale time
 	// at worst makes a review read as the reviewer's answer: one extra review-stuck notice.
@@ -342,6 +338,13 @@ type PhaseRow struct {
 	// project's merge.by_hand names. The packet the daemon tells starts with it (ReadyPacket), the
 	// daemon submits no merge for it, and the disarm keeps nothing armed for such a READY.
 	MergeNote string
+}
+
+// Completed says whether the role completed its current phase: its completion reported a commit
+// or named a handoff record, both of which clearing the handoff at the next phase's start
+// (workflow's clearHandoff) and a new generation (ClearGeneration) empty.
+func (p PhaseRow) Completed() bool {
+	return p.HandoffCommit != "" || p.HandoffRecord != ""
 }
 
 // byHandMergeLine is the line ReadyPacket puts in place of the merger's line saying the daemon
@@ -409,10 +412,9 @@ type PullRequest struct {
 	// redelivery and changes nothing (classify.LateLifecycle).
 	HeadUpdatedAt time.Time
 	// CheckedHead is the head whose CI settlement Failing, Cancelled, CheckRuns, Generation and
-	// Snapshot record, empty while none is recorded: the current head, or a head the current one
-	// replaced through pushes that changed only .legion/ (a handoff push starts no CI of its own,
-	// so the code head's settlement is the head's), or an earlier head whose settlement no longer
-	// counts. What the settlement comes to is the required set's to say (classify.HeadVerdict).
+	// Snapshot record, empty while none is recorded: the current head, or an earlier head whose
+	// settlement no longer counts, since a settlement stands only for the head it names. What the
+	// settlement comes to is the required set's to say (classify.HeadVerdict).
 	CheckedHead string
 	// Failing and Cancelled are the checks the settlement names as failed and as cancelled.
 	Failing         []string
@@ -422,11 +424,11 @@ type PullRequest struct {
 	CheckRuns       []AttemptRun
 	Generation      int64
 	Snapshot        string
-	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
-	// and said which head it replaced, which carry an approval across, each pair of heads once; and
-	// every other push whose heads have not arrived yet, in the order they were delivered, two
-	// pushes of the same two heads kept apart. A push that may change code is spent once its head
-	// arrives.
+	// Pushes are the branch's pushes the daemon still reads: every push whose own move, its two
+	// heads, the record has not made (Moves) - a push still on its way from the head, a link of a
+	// chain still to complete, or one that returns the branch to a commit it held before
+	// (classify.unspentPushes) - in the order they were delivered, two pushes of the same two heads
+	// kept apart.
 	Pushes []ClassifiedPush
 	// Moves are the moves the record has made, newest last and at most the last 32, each pair of
 	// heads once: each head's arrival from the head before it, and each push on the chain of pushes
@@ -447,8 +449,8 @@ type PullRequest struct {
 	// each push (classify.ApplyPush). Nil when no head waits for a push, and once a run is cut to
 	// its bound with none left waiting.
 	Run *HeadRun
-	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
-	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
+	// PlannedRed is whether the newest head was the review App's (the tester's red tests): a red on
+	// it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
 	// Required is the checks the pull request's base branch requires (its rulesets' required status
 	// checks and its branch protection's), as the daemon last read them from GitHub
@@ -486,7 +488,7 @@ type PullRequest struct {
 }
 
 // HeadRun is a pull request's head run (PullRequest.Run): Anchor, the judgement before the run's
-// first step; Pushes, the anchor's code pushes and every code push recorded since, in delivery
+// first step; Pushes, the anchor's pushes and every push recorded since, in delivery
 // order, less those the record's bound let go; Names, the moves synchronizes that moved no head
 // named while the run was open (classify.NameMove), less those an arrival spent; and Steps, in the
 // order they were applied. Replaying the steps from the anchor with every push and every named
@@ -537,10 +539,9 @@ type Judgement struct {
 // Move is a move from the head Before to the head SHA, which a push with the same two heads makes.
 // Pushed is whether that push is recorded: the move was made by it, it arrived after the move and
 // the move spent it, or a chain of several recorded pushes made the move, for which GitHub sends no
-// push of its own. A move made by a push that carries an approval across is not pushed, since such
-// a push is never spent. Repeats are the code pushes of the same two heads that arrived once the
-// move was pushed, oldest first and at most 16: each is the push delivered again or the branch
-// moving between the two heads again, which only a head's next arrival by that move tells apart.
+// push of its own. Repeats are the pushes of the same two heads that arrived once the move was
+// pushed, oldest first and at most 16: each is the push delivered again or the branch moving
+// between the two heads again, which only a head's next arrival by that move tells apart.
 // An arrival takes one of them for its push only through the head its synchronize says it moved
 // from: its sender's when the synchronize names its sender, the oldest otherwise
 // (classify.arrivalPushes). A move recorded before these fields existed reads as not

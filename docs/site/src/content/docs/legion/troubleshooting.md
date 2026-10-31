@@ -624,39 +624,23 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   repository permission`, naming the installation's owner: the review App's installation cannot
   read the repository's collaborators, so until it can, no review but the review App's decides a
   round.
-- **A review round stuck on an approval of an earlier head.** The architect is told `the reviewer
-  approved <sha> on pull request #<n>, which does not approve head <sha>: a push since may have
-  changed code`. The approval counts at a later head only when everything above it changed only
-  the issue's own `.legion/<issue>/`; another issue's `.legion/` counts as code, as `READY` counts
-  it. The daemon learns that from each push's webhook, and every two minutes, while the round sits
-  so, it also asks GitHub's compare of the approved head with the head: when the head is built on
-  the approved head and only `.legion/<issue>/` changed between them, it applies that push and the
-  round ends, logged at warn as `workflow: only the issue's handoffs changed above the approved
-  head, and no recorded push says so; applying the push GitHub's compare shows`. Any other answer
-  is logged once at info as `workflow: the reviewer's approval stays set aside below the head; …`
-  with its `reason` (a path outside `.legion/<issue>/`; a head not built on the approved one; 300
-  or no changed files; an approved head GitHub does not know), and the remedy is the reviewer's
-  approval of the head itself, which ends the round once the record reaches that head, whether or
-  not its push webhook ever arrives.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
-  anything above the reviewer's approved head but retro's notes under `docs/solutions/` and its
-  removal of `.legion/<issue>/` (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
+  anything above the reviewer's approved head but retro's notes under `docs/solutions/` and the
+  removal of files under `.legion/` that `legion handoffs import` commits
+  (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
   is not built on the approved one, GitHub does not know the approved head, or GitHub's compare
   gives no file list or lists 300 files, the most it lists), or
   the review round recorded no approval (`READY_NOT_APPROVED`): either way the issue goes back to
-  `reviewing`. It is refused while the head still carries
-  the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
-  to `retro`); while the head conflicts with its base, which GitHub cannot merge and starts no
-  pull-request CI for (`READY_HEAD_CONFLICTS`, naming the base the implementer merges forward);
-  and while the design gate is closed. The refusal names the head and the directory, the base, or the spec version
-  that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
+  `reviewing`. It is refused while the head conflicts with its base, which GitHub cannot merge and
+  starts no pull-request CI for (`READY_HEAD_CONFLICTS`, naming the base the implementer merges
+  forward); and while the design gate is closed. The refusal names the base or the spec version
+  that needs approval. A refusal saying one of GitHub's reads failed is GitHub's
   failure, and the merger completes again. `READY` reads no check of the head: whether the merge
   happens is GitHub's to decide, under the base branch's own rules. None of these reads applies
   to a pull request a
   person already merged: its `READY` is published unread, and the merge closes the issue the moment
   it reaches `awaiting_merge` — or, for a root whose tree still runs, once the last other issue of
-  that tree is done or parked. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
-  for a pull request that deletes it.
+  that tree is done or parked.
 - **An implementer's completion refused `HANDOFF_NO_PULL_REQUEST`.** The implementer's completion
   of implementing reads GitHub, as the implement App, for the open pull request on the issue's
   branch, `legion/<KEY>`: the issue moves to testing only on an open pull request, or one the

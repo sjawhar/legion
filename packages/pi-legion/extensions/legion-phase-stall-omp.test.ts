@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { symlink, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { PHASE_STALL_ENTRY } from "@legion/pi-shared/phase-stall";
 import {
@@ -35,9 +35,9 @@ interface StallPane extends LegionPane {
   readonly publishes: () => Record<string, unknown>[];
   /** The persisted transcript's phase-stall entries, in order. */
   readonly phaseEntries: () => Promise<unknown[]>;
-  /** The pushed commit carrying `.legion/STALL-2/implement.json` in the pane's workspace: what
-   * its `handoff_complete` finds and reports. */
-  readonly handoffCommit: string;
+  /** The commit `legion/STALL-2@origin` names in the pane's workspace: the pushed tip its
+   * `handoff_complete` reports beside the record. */
+  readonly pushedTip: string;
 }
 
 /**
@@ -74,8 +74,21 @@ function published(body: Record<string, unknown>): Response {
 }
 
 /** The identity the daemon puts on every pane (runtime.GitIdentity), which the pane's jj commits
- * as and `handoff_complete` holds the carrying commit's author to. */
+ * as. */
 const PANE_IDENTITY = { JJ_USER: "Legion Test", JJ_EMAIL: "legion-test@example.invalid" };
+
+/** The implement handoff the worker wrote to the stand-in Dispatch with `dispatch handoff-write`
+ * before completing: the newest record of STALL-2's implement phase, which its `handoff_complete`
+ * reads and names. */
+const STALL_RECORD = {
+  id: "0c9e7d2a-41b6-4f58-9a3e-6d1b2c8f5e70",
+  issue_key: "STALL-2",
+  phase: "implement",
+  version: 1,
+  author: { kind: "agent", session_id: "ses_stall" },
+  created_at: "2026-10-09T08:00:00Z",
+  body: '{"schemaVersion":1,"phase":"implement","issue":"STALL-2"}',
+};
 
 /** Runs `jj` in `cwd` as the pane's identity, failing loudly on a non-zero exit, and answers its
  * stdout. */
@@ -96,7 +109,7 @@ async function runJj(jj: string, cwd: string, args: readonly string[]): Promise<
 }
 
 /** The daemon's state as the pane's `handoff_complete` reads it: STALL-2 at implementing, the
- * phase whose handoff is `.legion/STALL-2/implement.json`. */
+ * phase whose handoff is the `implement` record. */
 const STALL_STATE = {
   daemon: {
     project: "STALL",
@@ -177,7 +190,7 @@ function legionToolDescription(request: Request): string {
  * file's own routes, and the stand-in's open-ask snapshot. */
 interface PaneOptions
   extends Pick<LegionPaneOptions, "legion" | "quietMs" | "selfCheck" | "env" | "answer"> {
-  /** Configures Dispatch against the stand-in, whose open-ask snapshot answers with this count. */
+  /** The count the stand-in Dispatch's open-ask snapshot answers with. */
   readonly openAsks?: number;
   /** The held ask questions the stand-in returns in the session's open-ask snapshot. */
   readonly openAskQuestions?: readonly string[];
@@ -185,17 +198,20 @@ interface PaneOptions
 
 /**
  * Runs one implementer pane on the real Oh My Pi (`runLegionPane`), the stand-in answering the
- * daemon's state and completion routes and Dispatch's open-ask snapshot when a case configures
- * Dispatch, until its run settles. The pane's workspace is a jj repository with
- * `.legion/STALL-2/implement.json` committed and pushed to a bare origin's `legion/STALL-2`, as a
- * worker leaves it before completing, so the pane's `handoff_complete` finds the carrying commit.
+ * daemon's state and completion routes and, as Dispatch, the issue's handoff records and the
+ * open-ask snapshot, until its run settles. The pane's workspace is a jj repository whose change
+ * is committed and pushed to a bare origin's `legion/STALL-2`, and the stand-in Dispatch holds the
+ * implement record written to it, as a worker leaves both before completing, so the pane's
+ * `handoff_complete` finds the record and the pushed tip.
  */
 async function stallPane(
   binary: string,
   replies: readonly Reply[],
   options: PaneOptions = {}
 ): Promise<StallPane> {
-  let handoffCommit = "";
+  let pushedTip = "";
+  /** The stand-in Dispatch's handoff records of STALL-2's implement phase, oldest first. */
+  const records: (typeof STALL_RECORD)[] = [];
   const pane = await runLegionPane(
     binary,
     replies,
@@ -205,7 +221,7 @@ async function stallPane(
       tree: "STALL-1",
       issue: "STALL-2",
       prompt: "Implement STALL-2.",
-      dispatch: options.openAsks !== undefined || options.openAskQuestions !== undefined,
+      dispatch: true,
       legion: options.legion,
       quietMs: options.quietMs,
       selfCheck: options.selfCheck,
@@ -233,21 +249,26 @@ async function stallPane(
         await writeFile(path.join(workspace, "main.py"), 'print("stall")\n');
         await jjIn("describe", "-m", "implement: the change");
         await jjIn("new");
-        await mkdir(path.join(workspace, ".legion", "STALL-2"), { recursive: true });
-        await writeFile(
-          path.join(workspace, ".legion", "STALL-2", "implement.json"),
-          '{"schemaVersion":1,"phase":"implement","issue":"STALL-2","completed":"2026-10-09T08:00:00Z"}\n'
-        );
-        await jjIn("split", "-m", "implement: record handoff", ".legion/STALL-2/implement.json");
         await jjIn("bookmark", "set", "legion/STALL-2", "-r", "@-");
         await jjIn("git", "push", "--bookmark", "legion/STALL-2");
-        handoffCommit = await jjIn("log", "-r", "@-", "--no-graph", "-T", "commit_id");
+        pushedTip = await jjIn("log", "-r", "@-", "--no-graph", "-T", "commit_id");
+        // The worker's `dispatch handoff-write --issue STALL-2 --phase implement`.
+        records.push(STALL_RECORD);
       },
       answer: (url, body) => {
         const own = options.answer?.(url, body);
         if (own !== undefined) return own;
         if (url.pathname === "/legion/v1/state") return Response.json(STALL_STATE);
         if (url.pathname === "/legion/v1/handoff/complete") return Response.json({});
+        if (url.pathname === "/api/v1/issues/STALL-2/handoffs/implement/latest") {
+          const newest = records.at(-1);
+          return newest === undefined
+            ? Response.json(
+                { error: "no implement handoff on STALL-2", code: "HANDOFF_NOT_FOUND" },
+                { status: 404 }
+              )
+            : Response.json(newest);
+        }
         // The Envoy listener takes the architect notice unless a case refuses it.
         if (url.pathname === "/v1/messages/publish") return published(body);
         if (url.pathname !== "/api/v1/asks/open") return undefined;
@@ -289,7 +310,7 @@ async function stallPane(
         .filter((request) => request.path === "/v1/messages/publish")
         .map((request) => request.body),
     phaseEntries: () => pane.transcriptEntries(PHASE_STALL_ENTRY),
-    handoffCommit,
+    pushedTip,
   };
 }
 
@@ -315,10 +336,10 @@ test.skipIf(omp === undefined && !onActions)(
     ]);
 
     // The worker registered through the daemon's routes; the reminder's record check read the
-    // issue's record before it was sent, and the handoff_complete read it again, found the pushed
-    // commit carrying .legion/STALL-2/implement.json in its workspace with the pane's jj, minted
-    // a grant in-process and posted the completion with both: no grant file, no `legion` command,
-    // and no handoff read by the daemon.
+    // issue's record before it was sent, and the handoff_complete read it again, read the newest
+    // implement record from the pane's Dispatch and the pushed tip of legion/STALL-2@origin from
+    // the pane's jj, minted a grant in-process and posted the completion with them: no grant file,
+    // no `legion` command, and no handoff file.
     expect(
       pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
     ).toEqual([
@@ -329,14 +350,21 @@ test.skipIf(omp === undefined && !onActions)(
       "/legion/v1/grants",
       "/legion/v1/handoff/complete",
     ]);
-    expect(pane.handoffCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(pane.pushedTip).toMatch(/^[0-9a-f]{40}$/);
+    expect(
+      pane.requests
+        .filter((request) => request.path.startsWith("/api/v1/issues/STALL-2/handoffs/"))
+        .map((request) => request.path)
+    ).toEqual(["/api/v1/issues/STALL-2/handoffs/implement/latest"]);
     expect(pane.completions()).toEqual([
       {
         grantId: "stall-grant-1",
         summary: "Stall proof done.",
         verdict: "",
         ready: false,
-        commit: pane.handoffCommit,
+        commit: pane.pushedTip,
+        handoffId: STALL_RECORD.id,
+        handoffVersion: STALL_RECORD.version,
       },
     ]);
     const turns = pane.turns();

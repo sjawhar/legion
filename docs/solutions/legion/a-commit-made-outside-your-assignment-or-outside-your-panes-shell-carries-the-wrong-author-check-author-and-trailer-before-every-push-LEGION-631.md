@@ -39,8 +39,10 @@ Extends docs/solutions/legion/jj-commit-identity-is-per-process-and-the-working-
   assignment. When a phase changes while your merge is still unpushed, `@` becomes an empty,
   undescribed commit of the other App's above your merge, and `legion push` refuses that commit at
   `@-`. Put `@` directly on the commit to push (`jj new <merge commit>`), push, and tell the next
-  role to `jj new` onto the pushed head before it commits, so its handoff commit is its own App's
-  (`handoff_complete` refuses one another App authored).
+  role to `jj new` onto the pushed head before it commits, so its own commits carry its own App.
+  Before sjawhar/legion#2354 this guarded the round's handoff commit, which `handoff_complete`
+  refused when another App authored it. A handoff is a record on the Dispatch issue now, and
+  `handoff_complete` refuses a record another session wrote.
 
 ## Evidence
 

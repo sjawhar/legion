@@ -1,6 +1,6 @@
-# The PR body lines the changed paths require, and a pushed head that carries `skip-checks`
+# The PR body lines the changed paths require
 
-Read this at steps 5 and 6 of `skill://legion-retro`. A failure here stops retro as its
+Read this at steps 4 and 5 of `skill://legion-retro`. A failure here stops retro as its
 *When retro stops* section says.
 
 ## Bring the body up to date before the push
@@ -8,7 +8,7 @@ Read this at steps 5 and 6 of `skill://legion-retro`. A failure here stops retro
 A repository can require body lines derived from the pull request's changed paths (for example one
 checklist line when `src/**` changed and another when `docs/**` changed) and have a required check
 read them from the body. Your commits add `docs/solutions/` paths the approved body never
-accounted for and take away the `.legion/` paths it did, so that check fails at your head. The
+accounted for, so that check fails at your head. The
 merger reports a stale body rather than rewriting it, and GitHub will not merge a head whose
 required check failed, so the merge waits.
 
@@ -18,7 +18,8 @@ required check failed, so the merge waits.
    `CLAUDE.md`), its pull request template (`.github/pull_request_template.md` or
    `.github/PULL_REQUEST_TEMPLATE/`), and the workflow under `.github/workflows/` that reads the
    body, for lines they require per changed path. When they require none, skip to the push.
-2. List the paths the pull request will change once you push `<head>`, your removal commit:
+2. List the paths the pull request will change once you push `<head>`, your last commit (the
+   approved head when you committed no learning):
 
    ```bash
    base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(${base}@origin | <head>)" --to <head> --name-only
@@ -30,8 +31,7 @@ required check failed, so the merge waits.
    it. Before you write a line that says work was done, do that work for the paths your commits
    add, because the required check reads the line and does not redo the work. That work may
    change files under `docs/solutions/` only, since any other path after the approved head voids
-   the approval. Commit it below the removal, which must stay last:
-   `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths> && jj -R "$LEGION_WORKSPACE" rebase -r @- -B <head>`.
+   the approval. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths>`.
 3. Make a directory outside `$LEGION_WORKSPACE` with `dir=$(mktemp -d)`, the one place you write
    outside it: jj would commit a file inside it, and a fixed name in a shared `/tmp` can hold
    another session's body. Save the live body as `$dir/before.md` (to restore on failure) and
@@ -58,21 +58,3 @@ required check failed, so the merge waits.
 
 When the push is refused after step 4 wrote the body, write `$dir/before.md` back with the same
 command before you report the refusal, so the body matches the head GitHub has.
-
-## A pushed head that carries skip-checks
-
-For a head you already pushed whose message carries a `skip-checks: true` line or one of the
-bracket keywords in step 6 of `skill://legion-retro`. Read that head's message first and confirm
-it does:
-
-```bash
-cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" log -r "legion/${LEGION_ISSUE:?}@origin" --no-graph -T description
-```
-
-Describe that same commit again without the line and push it once, as
-`skill://legion-worker/references/conflicts-and-rewrites.md#rewriting-pushed-commits` says. Run
-that section's guard first: a non-empty result means another issue's work is built on the commit,
-so do not rewrite it; report the listed commits to the architect instead. Once the guard is clear,
-move the bookmark with `--allow-backwards` and push once. That is the only non-fast-forward push
-retro makes; never `--force`. GitHub runs the base branch's required checks on the rewritten head
-from scratch, and the merge waits for them.

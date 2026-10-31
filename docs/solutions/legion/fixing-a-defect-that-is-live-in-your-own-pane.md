@@ -1,5 +1,5 @@
 ---
-title: "Fixing a defect that is live in your own pane: pin the identity per command, rewrite born-wrong commits before push, and take the docs fast-follow before the .legion deletion"
+title: "Fixing a defect that is live in your own pane: pin the identity per command, rewrite born-wrong commits before push, and take the docs fast-follow before the approval"
 category: legion
 tags:
   - process
@@ -17,7 +17,7 @@ related_issues:
   - "sjawhar/legion#1025"
 ---
 
-# Fixing a defect that is live in your own pane: pin the identity per command, rewrite born-wrong commits before push, and take the docs fast-follow before the `.legion` deletion
+# Fixing a defect that is live in your own pane: pin the identity per command, rewrite born-wrong commits before push, and take the docs fast-follow before the approval
 
 ## Context
 
@@ -66,12 +66,13 @@ commits you made (the skill's pre-push check says exactly this since this issue)
 
 `jj new <conflicted>` → edit → `jj squash --into <conflicted>` is the clean way to resolve a
 conflict inside a rebased chain without `jj edit`. It leaves `@` on the (now empty) scratch
-child of that commit, not on your working-copy commit at the tip; `handoff_write` then
-writes into the wrong place. Return with `jj edit <your own working-copy change id>` — the
+child of that commit, not on your working-copy commit at the tip, so your next commit lands
+where you did not mean it to. Return with `jj edit <your own working-copy change id>` — the
 undescribed working-copy commit, never a described commit or another role's — and the empty
-scratch commit is abandoned automatically. Record the detour in the handoff.
+scratch commit is abandoned automatically. Before sjawhar/legion#2354 a handoff was a commit, and
+`handoff_write` wrote it into that scratch child. Record the detour in the handoff.
 
-## Take the docs fast-follow before the `.legion/` deletion
+## Take the docs fast-follow before the approval
 
 Round 2's review was clean pending the `.legion/` deletion and listed a docs-only fast-follow
 (two items that would mislead readers: a pre-push identity check that did not say "on your own
@@ -80,10 +81,11 @@ deletion cost one tester bare-gate pass and one short reviewer re-check — the 
 1's fast-follow paid — and left the PR with no follow-up. The alternative, a follow-up LEGION
 issue for wording, is a deferral in disguise; Sami's rule is no deferrals. The order that works:
 fast-follow commit → push → `legion threads resolve` (every thread accepted so far resolves, and
-its output describes the pushed head) → tester bare gates → reviewer re-check → `.legion/`
-deletion → approval of that head → retro. (2026-09-25, LEGION-285: the tester and the reviewer
-now push their own handoff commits; the order is unchanged. 2026-09-30, LEGION-386: `legion
-threads resolve` runs after the push, not before it.)
+its output describes the pushed head) → tester bare gates → reviewer re-check → approval of
+that head → retro. Before sjawhar/legion#2354 a `.legion/` deletion push sat between the re-check and
+the approval, and the fast-follow had to land before it. (2026-09-25, LEGION-285: the tester and
+the reviewer began pushing their own handoff commits; the order was unchanged. 2026-09-30,
+LEGION-386: `legion threads resolve` runs after the push, not before it.)
 
 ## Two fingerprints, one fileset — and `docs/solutions/` is shared surface
 

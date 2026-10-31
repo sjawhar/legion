@@ -65,20 +65,23 @@ seconds and both workflows completed green.
 
 ## Resolving a Legion branch's conflict without rewriting another tree's commits
 
-The shared issue workspace holds the reviewer's and tester's handoff commits, and every issue
-workspace is a `jj workspace` of one shared repository and operation log — jj rebases every
-descendant of any commit it rewrites, so a rebase rooted at the branch's fork point also rewrites
-another tree's branch whenever one happens to be stacked on this one (LEGION-118). Resolve with a
+Every issue workspace is a `jj workspace` of one shared repository and operation log — jj rebases
+every descendant of any commit it rewrites, so a rebase rooted at the branch's fork point also
+rewrites another tree's branch whenever one happens to be stacked on this one (LEGION-118). Before
+sjawhar/legion#2354 the shared workspace also held the reviewer's and tester's handoff commits. A
+handoff is a record on the Dispatch issue now, so only code commits are at stake. Resolve with a
 forward merge instead, which touches nothing that already exists:
 
 ```sh
 jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
 ```
 
-Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed commit,
-and `jj git push` refuses to push any commit without a description. If it conflicts, resolve it
-directly in that one commit — edit the markers; there is nothing to squash, since the merge is
-the only new commit, and never `jj abandon` a stray working-copy commit in the shared workspace.
+Merge from the bookmark, never from `@`: `@` is often an empty, undescribed commit, and `jj git
+push` refuses to push any commit without a description. Before sjawhar/legion#2354 a handoff split
+left `@` in that state, and the daemon's adoption of the working copy for the next role still can.
+If it conflicts, resolve it directly in that one commit — edit the markers; there is nothing to
+squash, since the merge is the only new commit, and never `jj abandon` a stray working-copy commit
+in the shared workspace.
 It is a genuine fast-forward (the merge descends from both the bookmark's old position and
 `main@origin`), so advance the bookmark onto it and push with the ordinary push procedure in
 `skills/legion-worker/SKILL.md`.
@@ -89,4 +92,5 @@ It is a genuine fast-forward (the merge descends from both the bookmark's old po
   check fails to appear (a path-filtered workflow triggered on `push` instead of
   `pull_request`) on a *mergeable* PR.
 - `docs/solutions/legion/handoff-file-conflicts-during-rebases.md`: the `.legion/` handoff-file
-  conflict a rebase spread across several commits; the forward merge above raises it once.
+  conflict a rebase once spread across several commits. That note is superseded, because a handoff
+  is a Dispatch record and a rebase meets no handoff file.

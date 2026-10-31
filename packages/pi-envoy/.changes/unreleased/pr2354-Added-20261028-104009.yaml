@@ -1,0 +1,12 @@
+kind: Added
+body: |-
+    The `dispatch` command records and reads Legion phase handoffs on their Dispatch issue:
+    `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <path>` records the file's
+    text, one JSON object of at most 262144 bytes, exactly as written, as this session's next version
+    of the phase's handoff, and `dispatch handoff-read --issue <KEY> --phase <phase>` prints a line
+    naming the record's version, id, session and time, then the body exactly as stored;
+    `--version <n>` reads an earlier version. The README says so, and to keep the file outside the
+    workspace, since jj snapshots every file in it.
+time: 2026-10-28T10:40:09.686926041Z
+custom:
+    Issue: pr2354

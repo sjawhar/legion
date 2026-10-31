@@ -301,6 +301,7 @@ jobs:
               - 'packages/daemon/internal/ghconfig/*'
               - 'packages/daemon/internal/ghrepo/*'
               - 'packages/daemon/internal/githubrest/*'
+              - 'packages/daemon/internal/handoffimport/*'
               - 'packages/daemon/internal/intake/*'
               - 'packages/daemon/internal/launcher/*'
               - 'packages/daemon/internal/lookpath/*'

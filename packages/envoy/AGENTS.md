@@ -184,6 +184,19 @@ Each item below names a task and where its code is, then notes on it.
   A process whose heartbeat lapsed (frozen, cut from the database) or whose row was pruned checks its keys again under the registry's lock before it counts as live once more (`Registration.renew`);
   beside a live process whose keys it does not share it is refused (`Registration.Lost`), stops serving after its HTTP drain, and exits 1
 
+- **Phase handoffs on an issue**: `internal/dispatch/api/handoffs.go`, `store/migrations/0150_handoffs.up.sql`
+
+  A session records its handoff for one phase of an issue with `POST /api/v1/issues/{key}/handoffs/{phase}` (bearer only:
+  the session names itself in `actor`, a cookie caller is `403 HANDOFF_FORBIDDEN`);
+  the phase is a lowercase slug (`^[a-z][a-z0-9-]{0,31}$`;
+  Legion writes `plan`, `implement`, `test`, `review`) and the body one JSON object, stored in `handoffs.body` as the exact text sent (a `text` column, never `jsonb`) and capped at `contracts.DispatchHandoffBodyMax` bytes (`413 CAP_EXCEEDED`).
+  The version is `coalesce(max(version), 0) + 1` inside the insert, after `requireOpenIssue` locks the issue row (a closed issue is `409 ISSUE_CLOSED`), and `unique (issue_key, phase, version)` holds it.
+  The same transaction appends `handoff.recorded` `{handoff_id, phase, version}` on the issue, which never carries the body and, a session's event, notifies no one;
+  a handoff writes no write advice and no reference edges.
+  `GET /api/v1/issues/{key}/handoffs` lists metadata newest first, `GET .../handoffs/{phase}/latest` and `GET /api/v1/handoffs/{id}` answer one record with its body (`404 HANDOFF_NOT_FOUND`), on a closed issue too.
+  A write is keyed: a repeat under the same `Idempotency-Key` is answered the first call's `201` and records no second version.
+  Shapes: `Handoff`, `HandoffSummary`, `HandoffRecordedPayload` in `packages/contracts/src/dispatch-api.ts`
+
 - **Load test**: `loadtest/`
 
   the 2-core reproduction of the 2026-10-26 outage load:
@@ -3278,13 +3291,14 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
 - Every other answer given before a request's body is read waits for that body (`drainBeforeAnswer`, `api/body_drain.go`, which `register` puts around every route but a `GET`):
   the layer's `KEY_INVALID`, the closed-issue refusal, `LOGIN_CHANGED`, a refused path parameter, a handler's refusal made before it decodes.
   The layer's `KEY_IN_FLIGHT` is not one of them: the layer reads that body itself, above.
-  The answer is written only once the rest of the body is read and discarded, never spooled, at most `routeBodyLimit` and one byte more.
+  The answer is written only once the rest of the body is read and discarded, never spooled, at most the route's limit (`routeBody`) and one byte more.
   An HTTP/1.1 client that sends a whole body before it reads the answer - WebKit and Firefox uploading a file - otherwise met net/http's close of a connection with its body unread as a reset, and dropped the answer with it (the browser suite's 20 MB in-flight upload row).
   Both reads, the drain's and the layer's, are bounded at `bodyDrainLimit` (a minute), a read deadline through `http.ResponseController.SetReadDeadline` lifted only once the body has reached its end:
   a body that stops arriving gets its answer as it stood, with `Connection: close`, and the connection closes as soon as the answer is out.
   A read that failed, or stopped at the limit, leaves the deadline in place, because net/http reads on after the answer, up to 256 KiB more of a `Content-Length` body that leaves that little unread (its discard before the answer's header, and its `Close` of the body once the handler returns):
   lifted, those reads let a stalled 100 KB body hold its connection open after its answer, and withheld the answer to one that stalled just past the limit (`TestADrainStopsWaitingForABodyThatStalls`).
-  A body past the limit is answered as the limit answers it, in place of the early answer and without its `Idempotency-Key` and `Retry-After` (`413 CAP_EXCEEDED` on the three upload routes, `413 REQUEST_TOO_LARGE` on every other), and the connection closes, so a client that sends past 26 MiB may still see a failed connection.
+  A body past the limit is answered as the limit answers it, in place of the early answer and without its `Idempotency-Key` and `Retry-After` (`413 CAP_EXCEEDED` on the three upload routes and on the handoff write, `413 REQUEST_TOO_LARGE` on every other;
+  `routeBody` gives each route its limit and its 413 alike), and the connection closes, so a client that sends past 26 MiB may still see a failed connection.
   The one early answer the limit does not replace is a `401`:
   a caller that resolves to nobody is refused before any limit is judged, and a page whose session lapsed reads that `401` as its cue to sign in again.
   A body a layer read to its end or past the limit itself is left as it is.
@@ -3292,8 +3306,9 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
   on go1.27 net/http decides that from the reader its own response keeps, not from the copy of the request `trackTransactions` hands the handler (the comment at the drain's mount in `server.go`).
   `routes.enforceCookieOrigin`'s `403` for a cross-origin cookie write is answered before the route, outside the drain.
 
-- The layer then reads the body, spooling at most the route's own limit (`routeBodyLimit`:
+- The layer then reads the body, spooling at most the route's own limit (`routeBody`:
   an upload's file and a megabyte of fields for the three upload routes, `keyedUploads`, 26 MiB;
+  `handoffRequestLimit`, 1,576,960 bytes, for the handoff write;
   `maxJSONRequestBytes`, 1 MiB, for every other); a body past it runs unkeyed and its route refuses it.
   A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`, and a spill Dispatch could not write (`keyedSpillError`:
   a full disk, a temporary directory it cannot write) is a 5xx with the key echoed, Dispatch's own failure, which the client asks again.
@@ -3550,7 +3565,8 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
   `contracts.GithubPushSubject`) with the payload fields `kind: "push"`, `repo`, `ref`, `after`, `before`, `pusher`, `head_subject` (the head commit's first non-empty message line, capped at 2,048 runes with a trailing `…` so the envelope stays under NATS's max payload), `commit_count`, `compare_url`, `changed_paths` (the unique paths across every pushed commit's `added`, `removed`, and `modified` lists, in first-seen order, newline-separated, at most 100 of them and 32,768 runes of text, each path listed whole or not at all;
   omitted when no commit is listed, since the payload drops empty strings), and `changed_paths_truncated` (`"true"` when the list stopped at either cap with a unique path left, else `"false"` — present on every push, so its absence alone tells a consumer the listener predates the field), and `forced` (`"true"` or `"false"`, GitHub's own flag, present on every push the same way).
   A forced push's commits are listed from the merge base, so its `changed_paths` do not describe what it did to the head it replaced.
-  Envoy forwards what GitHub sent; what counts as a handoff-only push is the Legion daemon's rule, not the listener's.
+  Envoy forwards what GitHub sent.
+  The Legion daemon reads no `changed_paths`, `changed_paths_truncated` or `forced` since sjawhar/legion#2354, when its handoffs moved from committed files to Dispatch records and no push is told apart by its paths; the listener still sends them.
 
 - A workflow run with no pull request publishes `workflow.<file>.<action>`.
   A finished Actions job on the default branch, of a run with no pull request, publishes `job.<run_id>.completed`:

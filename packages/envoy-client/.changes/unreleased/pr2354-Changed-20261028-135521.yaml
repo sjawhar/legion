@@ -1,0 +1,5 @@
+kind: Changed
+body: 'Under Claude Code (`DISPATCH_HOST=claude`) the `dispatch` command acts as `ENVOY_SESSION_ID`, else `CLAUDE_CODE_SESSION_ID`: the session claude-envoy registers and claims under, so a handoff it writes is written by the session the Legion daemon holds the phase''s completion to. With neither set it refuses the call, naming both variables.'
+time: 2026-10-28T13:55:21.825091407Z
+custom:
+    Issue: pr2354

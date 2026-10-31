@@ -30,8 +30,9 @@ related_issues:
   second time against the pre-change extension — `jj file show -r <base>@origin
   packages/pi-legion/extensions/legion.ts > packages/pi-legion/extensions/legion-<base>-control.ts`
   (a sibling file, so its relative imports resolve), a throwaway copy of the test loading it —
-  and quote the refusal strings it returns. Delete both files before the handoff commit; the PR
-  body and `proof[].negativeControl` carry the output.
+  and quote the refusal strings it returns. Delete both files before you push; the PR
+  body and `proof[].negativeControl` carry the output. Before sjawhar/legion#2354 the deletion
+  came before the handoff commit.
 - Keep one live-hook control in every pane: the last scripted call is an operation-log rewrite
   (`jj -R "$LEGION_WORKSPACE" undo`), whose refusal must come back `is_error: true`. Without it a
   pane whose extension failed to load would pass every "no refusal" assertion.

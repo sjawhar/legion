@@ -1,0 +1,21 @@
+kind: Added
+body: |-
+    **Breaking:** daemon API contract 44: a phase handoff is a record on the issue's Dispatch issue,
+    no longer a file committed under `.legion/<issue>/` on its branch. The `legion` tool's
+    `handoff_complete` for a planning, implementing, testing or reviewing phase reports the phase's
+    Dispatch handoff record, `handoffId` and `handoffVersion`: the newest record of the phase's word
+    (`plan`, `implement`, `test`, `review`), read from the Dispatch the pane's `dispatch` command
+    reaches, which the daemon reads back and holds to the issue, the phase, the version and the
+    claim's session. A phase with no record is refused naming `dispatch handoff-write`, and a
+    Dispatch that does not answer is refused with its answer. The implementer also reports its
+    pushed tip, the commit `legion/<issue>@origin` names, and is refused, naming the push, when `@-`
+    is not on that branch yet; retro and the merger's READY report `@-`. No committed `.legion/`
+    handoff file is looked up. Install this release with a `legion` built from the same commit, in
+    this order (docs/kubernetes.md, "Moving the handoffs onto their Dispatch issues"): deploy the
+    Dispatch server that carries the handoff routes first, then run `legion handoffs import` while
+    the old daemon still runs, then roll out the daemon and the plugins, then run the import again,
+    which catches a file an old worker pushed in between, until no line asks for another run and
+    none says `kept`.
+time: 2026-10-28T10:40:23.525829083Z
+custom:
+    Issue: pr2354

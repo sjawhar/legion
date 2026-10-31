@@ -5,9 +5,10 @@
 # as `legion claude-bridge -- claude -p …` in its pane. The proof holds that the Claude Code
 # implementer registers its transcript as its session and takes its phase, is reminded by Claude
 # Code's own `Stop` hook when a turn of its ends with that phase still open, completes the phase
-# through the `legion` MCP tool's handoff_complete with a pushed `.legion/<issue>/` handoff commit,
-# and, once its pane is killed, comes back with `--resume` into the same Claude Code session, its
-# transcript's earlier turns intact and in its context.
+# through the `legion` MCP tool's handoff_complete naming the Dispatch handoff record it wrote with
+# `dispatch handoff-write` under that session, beside its pushed code commit, which carries no
+# `.legion/` path, and, once its pane is killed, comes back with `--resume` into the same Claude
+# Code session, its transcript's earlier turns intact and in its context.
 #
 # Run it as `LEGION_E2E_MODEL_ROUTE=<gateway|key-file> … bash scripts/e2e/claude-backend-tmux.sh`.
 # LEGION_E2E_MODEL_ROUTE is required, as Stage 2's and Stage 3's is, and picks how the Oh My Pi
@@ -675,7 +676,7 @@ pass
 begin planner-handoff
 send_agent "$issue" planner "Claude backend proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$issue" implementing
-assert_handoff_committer "$issue" planner planning 0
+assert_handoff_record "$issue" planner planning 0
 pass
 
 begin claude-implementer-registers
@@ -730,15 +731,15 @@ pass
 
 begin claude-implementer-handoff
 marker="claude-proof-marker-$ptoken-$RANDOM$RANDOM"
-send_agent "$issue" implementer "Claude backend proof implementation operation ($marker): make the smallest one-file change this issue's spec describes in your $repo workspace, commit it on legion/$issue, write and commit the required implementation handoff, push the branch to origin, then call the legion tool's handoff_complete with a concise summary. Do not open a pull request and do not merge."
+send_agent "$issue" implementer "Claude backend proof implementation operation ($marker): make the smallest one-file change this issue's spec describes in your $repo workspace, commit it on legion/$issue, push the branch to origin, write the required implementation handoff with dispatch handoff-write, then call the legion tool's handoff_complete with a concise summary. Do not open a pull request and do not merge."
 until_true 900 "the daemon to record the implementer's handoff_complete" handoff_recorded
 commit=$(role_handoff "$issue" implementer implementing)
-assert_handoff_committer "$issue" implementer implementing 0
+assert_handoff_record "$issue" implementer implementing 0
 files=$(smoke_commit_files "$commit") || exit 1
-grep -q "^\.legion/$issue/" <<<"$files" || fail "the handoff commit $commit changes nothing under .legion/$issue/: $(tr '\n' ' ' <<<"$files")"
+! grep -q '^\.legion/' <<<"$files" || fail "the implementer's commit $commit changes files under .legion/, where no handoff goes now: $(tr '\n' ' ' <<<"$files")"
 legion_handoff_in || fail "the transcript $transcript holds no successful legion handoff_complete call"
 until_true 300 "the implementer's turn to end" issue_worker_state "$issue" implementer idle
-note "handoff_complete through mcp__legion__legion recorded commit $commit, pushed to $repo under .legion/$issue/"
+note "handoff_complete through mcp__legion__legion named the implementer's Dispatch handoff record, written under its Claude Code session $session, and its pushed commit $commit on $repo, which changes nothing under .legion/"
 pass
 
 begin kill-resumes-the-same-claude-session

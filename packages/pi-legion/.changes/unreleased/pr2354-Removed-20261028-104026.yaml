@@ -1,0 +1,10 @@
+kind: Removed
+body: |-
+    The handoff commit checks go with the committed handoff: `handoff_complete` no longer requires
+    that the commit carrying the handoff was authored by the identity the daemon put on the pane,
+    `JJ_USER`/`JJ_EMAIL` (the App-identity check). The skills drop the commit trailer that kept a
+    commit of handoffs alone from starting CI, and retro's removal of `.legion/<issue>/` from the
+    branch; the `legion-worker` reference on that trailer is deleted.
+time: 2026-10-28T10:40:26.457499929Z
+custom:
+    Issue: pr2354

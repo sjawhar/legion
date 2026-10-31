@@ -49,30 +49,24 @@ func runStep(pr record.PullRequest, step record.RunStep) (record.PullRequest, bo
 	return replayRun(pr)
 }
 
-// replayRun replays pr's open run: its steps from its anchor, with the run's pushes - every code
-// push recorded since the anchor's, in delivery order, two pushes of the same two heads kept
-// apart - and every push the pull request holds that carries an approval across, which no fact
-// drops (unspentPushes), so the run does not keep a copy of them; less every push whose move the
-// anchor had already made: a push delivered after its move was judged before the run opened is
-// spent there, as it is when it arrives first, and its move keeps it (pushedMoves). A head step
-// arrives by the move its synchronize named (record.RunStep.Before, Sender), with the moves late
-// synchronizes named (record.HeadRun.Names) whenever they were recorded, each spent by the arrival
-// that took it. The run stays open from its first head judged with no chain of pushes, or still
-// waiting for what its synchronize named, its anchor the judgement before that head, and closes
-// when there is none; past maxRunSteps its oldest steps fold into the anchor too. The pull request
-// keeps its own pushes. BlockedAttempts is what was reported, so it stays, unless the count it
-// reported is no longer reached, as when a count is taken back. It says whether the run's last
-// step, a settlement, adopted the fence (ApplySettlement).
+// replayRun replays pr's open run: its steps from its anchor, with the run's pushes - every push
+// recorded since the anchor's, in delivery order, two pushes of the same two heads kept apart -
+// less every push whose move the anchor had already made: a push delivered after its move was
+// judged before the run opened is spent there, as it is when it arrives first, and its move keeps
+// it (pushedMoves). A head step arrives by the move its synchronize named (record.RunStep.Before,
+// Sender), with the moves late synchronizes named (record.HeadRun.Names) whenever they were
+// recorded, each spent by the arrival that took it. The run stays open from its first head judged
+// with no chain of pushes, or still waiting for what its synchronize named, its anchor the
+// judgement before that head, and closes when there is none; past maxRunSteps its oldest steps
+// fold into the anchor too. The pull request keeps its own pushes. BlockedAttempts is what was
+// reported, so it stays, unless the count it reported is no longer reached, as when a count is
+// taken back. It says whether the run's last step, a settlement, adopted the fence
+// (ApplySettlement).
 func replayRun(pr record.PullRequest) (record.PullRequest, bool) {
 	run, live := pr.Run, pr.Pushes
 	blocked := pr.BlockedAttempts
 	at := withJudgement(pr, run.Anchor)
 	at.Pushes, at.Run = clone(run.Pushes), nil
-	for _, p := range live {
-		if carriesApproval(p) {
-			at.Pushes = withPush(at.Pushes, p)
-		}
-	}
 	for _, p := range at.Pushes {
 		at.Moves, _ = pushedMoves(at.Moves, p)
 	}
@@ -88,7 +82,7 @@ func replayRun(pr record.PullRequest) (record.PullRequest, bool) {
 	var unchained []int
 	var adopted bool
 	for i, step := range run.Steps {
-		before[i] = state{judgementOf(at), withoutApprovalCarriers(at.Pushes), names, since}
+		before[i] = state{judgementOf(at), clone(at.Pushes), names, since}
 		var chained bool
 		at, chained, names, adopted = applyStep(at, step, names, since)
 		if step.Head != "" {
@@ -114,17 +108,6 @@ func replayRun(pr record.PullRequest) (record.PullRequest, bool) {
 		at.BlockedAttempts = 0
 	}
 	return at, adopted
-}
-
-// withoutApprovalCarriers is pushes without those that carry an approval across.
-func withoutApprovalCarriers(pushes []record.ClassifiedPush) []record.ClassifiedPush {
-	kept := make([]record.ClassifiedPush, 0, len(pushes))
-	for _, p := range pushes {
-		if !carriesApproval(p) {
-			kept = append(kept, p)
-		}
-	}
-	return kept
 }
 
 // applyStep applies one step of a head run with the run's named moves and GitHub's clock of the

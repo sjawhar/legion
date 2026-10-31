@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
-	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -27,18 +26,16 @@ import (
 // and its protection), and, when the base requires a workflow, each pull request's workflow runs
 // once more, all on the implement App's installation, whose hourly limit every pane's gh shares:
 // about a hundred and twenty reads an hour for a pull request on a base of its own, sixty for each
-// more on the same base, and thirty more for each pull request whose base requires a workflow; it
-// compares an approved head with the head once for each review round whose approval is set aside
-// below the head (readApprovalCarry), until the approval stands or GitHub answers; for a head GitHub
-// shows moved with no recorded push ending at it, it reads the branch's activity once and compares
-// each push of the move the record lacks (lostPushes); for a head no CI settlement stands for, it
-// reads the head's check runs, a read per hundred runs each pass until one stands (readSettlement); and
-// it lists each served repository's open pull requests (readListings), a read per hundred of them,
-// thirty an hour for a repository with fewer than a hundred open. Two minutes also gives a newly
-// opened pull request its set well before its first CI settles, and bounds how long a review
-// decision, a head, a push, a close or merge, a settlement, or a pull request whose webhook never
-// arrived stays unread. It is also how long a head's newest check run must have completed before
-// the pass settles the head itself, the time Envoy's listener had to settle it first.
+// more on the same base, and thirty more for each pull request whose base requires a workflow; for
+// a head GitHub shows moved with no recorded push ending at it, it reads the branch's activity
+// once (lostPushes); for a head no CI settlement stands for, it reads the head's check runs, a
+// read per hundred runs each pass until one stands (readSettlement); and it lists each served
+// repository's open pull requests (readListings), a read per hundred of them, thirty an hour for a
+// repository with fewer than a hundred open. Two minutes also gives a newly opened pull request
+// its set well before its first CI settles, and bounds how long a review decision, a head, a push,
+// a close or merge, a settlement, or a pull request whose webhook never arrived stays unread. It
+// is also how long a head's newest check run must have completed before the pass settles the head
+// itself, the time Envoy's listener had to settle it first.
 const requiredChecksInterval = 2 * time.Minute
 
 // requiredChecksRead bounds one pull request's reads in a pass: its base branch, its reviews, then
@@ -79,25 +76,22 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 // recorded before the issue reached awaiting_merge is still acted on once it gets there; it is
 // applied again only once the record or the issue's phase changed (applyJudged). It then reads the
 // pull request's reviews and applies a deciding one the daemon has not recorded, whose webhook
-// never arrived (readReviews), whatever phase the issue is in, and, for a review round whose
-// approval is set aside below the head, GitHub's compare of the approved head with the head,
-// applying the handoff-only push it shows (readApprovalCarry). For a head no CI settlement stands
+// never arrived (readReviews), whatever phase the issue is in. For a head no CI settlement stands
 // for, it reads the head's check runs, and applies the settlement Envoy's listener would have
 // published once every run completed an interval ago (readSettlement). It then reads what the base branch
 // requires with the implement App's installation token, the credential the daemon reads GitHub
 // with for its own work (requiredchecks.Required, which this pass is the only reader of), and,
-// when that includes a workflow, each required workflow's latest run on the head whose settlement
-// stands for the pull request's (classify.WorkflowHead, requiredchecks.Workflows). It applies an
-// intake.RequiredChecks fact when that read differs from the one recorded, which decides the
-// head's verdict again (workflow's requiredChecks). Last it lists each served repository's open
-// pull requests (readListings). Every fact the pass applies carries an event id built from what
-// GitHub showed, and from the record a fact is judged against (passEventID), never from the time or
-// the boot, and one already applied is skipped before any transaction (unapplied). A read that
-// fails is logged with the repository, the pull request and GitHub's HTTP status, and changes
-// nothing: the pull request keeps the set and runs last read, and one never read keeps no checks
-// verdict, neither red nor green, until a later pass reads it. A rate-limit answer ends the pass
-// there, since every read after it on the same installation meets the same limit, and the panes
-// share it; the next pass starts over.
+// when that includes a workflow, each required workflow's latest run on the pull request's head
+// (requiredchecks.Workflows). It applies an intake.RequiredChecks fact when that read differs from
+// the one recorded, which decides the head's verdict again (workflow's requiredChecks). Last it
+// lists each served repository's open pull requests (readListings). Every fact the pass applies
+// carries an event id built from what GitHub showed, and from the record a fact is judged against
+// (passEventID), never from the time or the boot, and one already applied is skipped before any
+// transaction (unapplied). A read that fails is logged with the repository, the pull request and
+// GitHub's HTTP status, and changes nothing: the pull request keeps the set and runs last read,
+// and one never read keeps no checks verdict, neither red nor green, until a later pass reads it.
+// A rate-limit answer ends the pass there, since every read after it on the same installation
+// meets the same limit, and the panes share it; the next pass starts over.
 func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 	var open []record.PullRequest
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
@@ -134,12 +128,12 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			}
 			var answer *githubrest.Answer
 			if errors.As(err, &answer) && answer.RateLimited {
-				w.logPassFailure(pr, "what a pull request's new head changed, to follow it", err)
+				w.logPassFailure(pr, "GitHub's activity of a pull request's branch, to rebuild the pushes to its new head", err)
 				return
 			}
 			// The rest of the pull request's reads go on against the record as it stands, as they
-			// did before the pass followed heads: a comparison GitHub keeps failing must not stop
-			// them, and a later pass follows the head.
+			// did before the pass followed heads: a read GitHub keeps failing must not stop them,
+			// and a later pass follows the head.
 			w.log.Warn("follow the head GitHub shows for a pull request; this pass reads it at the recorded head, and a later pass follows it",
 				"repo", pr.Repo, "pullRequest", pr.Number, "recorded", pr.HeadSHA, "head", pull.Head.SHA, "error", err)
 		}
@@ -151,7 +145,7 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			fact := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: base, Mergeable: mergeable}
 			w.applyJudged(ctx, pr, fact, "mergeability", "whether a pull request's head can be merged into its base", pull.Head.SHA, clock(pull.UpdatedAt))
 		}
-		if w.readReviews(ctx, prCtx, github, pr) || w.readApprovalCarry(ctx, prCtx, github, pr) || w.readSettlement(ctx, prCtx, github, pr) {
+		if w.readReviews(ctx, prCtx, github, pr) || w.readSettlement(ctx, prCtx, github, pr) {
 			cancel()
 			return
 		}
@@ -305,8 +299,8 @@ func (w *workflowRuntime) implementClient(ctx context.Context, repository ghrepo
 
 // requiredFor reads what base requires for pr: its rulesets and protection, which read keeps for
 // the rest of the pass by repository and base, so pull requests on one base read them once, and
-// then, when the base requires a workflow, pr's own workflow runs on the head whose settlement
-// stands for its head. github and base are readPullRequest's own read for this pr, so a
+// then, when the base requires a workflow, pr's own workflow runs on its head. github and base are
+// readPullRequest's own read for this pr, so a
 // failure here - a flaky rulesets read, a repository with no workflow runs yet - never discards the
 // mergeability it already decoded: that fact was applied, if it needed to be, before this is ever
 // called.
@@ -324,7 +318,7 @@ func (w *workflowRuntime) requiredFor(ctx context.Context, github githubrest.Cli
 	if len(set.Workflows) == 0 {
 		return fact, nil
 	}
-	fact.WorkflowsHead = classify.WorkflowHead(pr)
+	fact.WorkflowsHead = pr.HeadSHA
 	runs, err := requiredchecks.Workflows(ctx, github, fact.WorkflowsHead, set.Workflows)
 	if err != nil {
 		return intake.RequiredChecks{}, fmt.Errorf("read the workflow runs on %s: %w", fact.WorkflowsHead, err)

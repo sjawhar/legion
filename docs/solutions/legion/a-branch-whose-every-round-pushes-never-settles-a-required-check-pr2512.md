@@ -27,9 +27,11 @@ required check survives round after round with nobody able to see it.
   has.
 - Read "queued" as no verdict. Reporting it twice in a row without acting is how a red check
   reaches its fourth round.
-- When a settled verdict at a code head is what the next role needs, push the code alone and let
-  the handoff follow in a `.legion/`-only commit carrying `skip-checks: true`: that push starts no
-  workflow, so it cancels nothing and the code head's run completes.
+- When a settled verdict at a code head is what the next role needs, push the round's code once
+  and push nothing after it in that round, so nothing cancels the code head's run. Before
+  sjawhar/legion#2354 the handoff followed in a `.legion/`-only commit carrying
+  `skip-checks: true`, which started no workflow; since then a handoff is a record on the Dispatch
+  issue (`dispatch handoff-write`), no phase pushes one, and a code push carries no trailer.
 - A reviewer who runs the lint or format tool by hand finds what the branch's own CI never
   reported. Expect that, and treat such a finding as a gap in the branch's evidence rather than a
   new defect.
@@ -51,4 +53,5 @@ From that round on, each push was preceded by the required set at the head: `bun
 over the whole tree, the touched package's `bun run typecheck`, and every gate script of the
 repository, each quoted in the round's report. The drain that followed also proved the trailer's
 half: the handoff commit above a code head started no workflow and cancelled nothing, so the code
-head's run completed for the reviewer.
+head's run completed for the reviewer. That was the handoff commit of the release before
+sjawhar/legion#2354, which moved handoffs onto the Dispatch issue; no phase pushes one now.

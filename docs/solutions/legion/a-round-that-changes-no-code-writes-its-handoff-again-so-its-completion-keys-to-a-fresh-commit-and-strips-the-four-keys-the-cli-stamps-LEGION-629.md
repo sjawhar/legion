@@ -8,7 +8,7 @@ tags:
   - forward-merge
   - legion-handoff-write
 date: 2026-10-09
-status: active
+status: superseded by sjawhar/legion#2354 — a phase's handoff is a record on its Dispatch issue, and no phase commits or pushes one; see docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md
 module: packages/daemon/cmd/legion
 symptoms:
   - "legion handoff complete: 409 HANDOFF_ALREADY_RECORDED: the implementer completion of phase implementing (round N) at commit <sha> was already received; this call changed nothing"

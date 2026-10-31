@@ -1,0 +1,19 @@
+kind: Changed
+body: |-
+    The plugin declares daemon API contract 44 in `package.json`'s `legion.daemonApiVersion`: the
+    `legion` MCP tool's `handoff_complete` reports the phase's Dispatch handoff record, `handoffId`
+    and `handoffVersion`, the newest record of the phase's word read from the Dispatch this session's
+    envoy.json names, and the implementer also its pushed tip (`legion/<issue>@origin`), refused when
+    `@-` is not pushed; retro and the merger's READY report `@-`. No committed `.legion/` handoff file
+    is looked up, and the check that the handoff commit was authored by the pane's
+    `JJ_USER`/`JJ_EMAIL` identity is gone. Its `legion/` copies of the Legion skills teach
+    `dispatch handoff-write` and `dispatch handoff-read`, drop the commit trailer that kept a
+    handoff commit from starting CI and retro's removal of `.legion/<issue>/`, and no longer carry
+    the reference on that trailer. Main's Rebuild Claude Envoy plugin workflow builds `dist/` and
+    `legion/` from this commit's source after the merge; until that rebuild lands, the committed
+    plugin is the contract-43 build, which a contract-44 daemon refuses at registration. Install the
+    plugin from main once the rebuild commit is there, in the cutover order pi-legion's changelog
+    gives.
+time: 2026-10-28T10:39:04.260011675Z
+custom:
+    Issue: pr2354
