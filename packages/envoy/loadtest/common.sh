@@ -288,11 +288,11 @@ build_migration_versions() {
 }
 
 # seed_migration_check compares the migration versions $2 (one per line) of the build $3 describes
-# with the set the seed's meta file $1 records; a non-empty $4 says $2 is only the build's highest. It dies when the seed holds a version this build lacks, since a newer build
-# made that seed, and notes the versions this build holds and the seed lacks. It compares the sets,
-# not the highest version of each: a migration whose version is below one the seed already holds, a
-# numbered migration merged after a timestamped one, leaves the highest version the same on both
-# sides.
+# with the set the seed's meta file $1 records; a non-empty $4 says $2 is only the build's highest.
+# It dies when the seed holds a version this build lacks, since a newer build made that seed, and
+# notes the versions this build holds and the seed lacks. It compares the sets, not the highest
+# version of each: a migration whose version is below one the seed already holds, a numbered
+# migration merged after a timestamped one, leaves the highest version the same on both sides.
 seed_migration_check() {
   local meta=$1 build=$2 what=$3 only_highest=${4:-}
   local seed behind ahead seed_max build_max reseed

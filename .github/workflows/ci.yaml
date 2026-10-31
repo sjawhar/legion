@@ -1291,7 +1291,7 @@ jobs:
       # on every pull request, rather than only warned about by the fold on main.
       - name: Check every changelog fragment belongs to a package the fold folds
         run: |
-          # shellcheck disable=SC2086 # the file is the spec list, split on purpose
+          # shellcheck disable=SC2046 # the file is the spec list, split on purpose
           .github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages)
 
       # A pull request's title, body and commit messages reach main's squash commit, the

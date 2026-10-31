@@ -509,6 +509,6 @@ case_prepare_stack_built_migration || failed=$((failed + 1))
 case_prepare_stack_migration_set || failed=$((failed + 1))
 case_stack_ports || failed=$((failed + 1))
 if ((failed > 0)); then
-  printf 'FAIL: %d of 9 cases failed\n' "$failed" >&2
+  printf 'FAIL: %d of 10 cases failed\n' "$failed" >&2
   exit 1
 fi
