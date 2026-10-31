@@ -321,7 +321,7 @@ func TestAPromptResultNamesTheDeliveryItsRequestIDCarries(t *testing.T) {
 	p.send(shimwire.AgentEnd{})
 	p.send(shimwire.PromptResult{ID: "a-request-no-prompt-carried", AgentInvoked: true})
 	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: true})
-	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: false, Error: "no model"})
+	p.send(shimwire.PromptResult{ID: frame.ID, AgentInvoked: false, Error: &shimwire.PromptError{Message: "no model"}})
 	want := []Event{
 		TurnEnd{Claim: testClaim},
 		PromptResult{Claim: testClaim, DeliveryID: "delivery-1", AgentInvoked: true},
@@ -331,6 +331,44 @@ func TestAPromptResultNamesTheDeliveryItsRequestIDCarries(t *testing.T) {
 		if got := h.next(); got != want {
 			t.Fatalf("event = %#v, want %#v", got, want)
 		}
+	}
+}
+
+// A turn whose provider request ran out of retries ends with a prompt_result Oh My Pi writes in
+// full: `status: "error"` and an error object of its PromptError, not a string. The line here is
+// the pinned binary's own shape, written verbatim rather than through the Go frame, so this test
+// reads what Oh My Pi writes however this package models it. The daemon must take it: a result
+// it drops is a prompt the supervisor waits on for the life of the process, and the next task
+// for that claim is refused as pending behind it. So the result reaches the supervisor with its
+// reason, and the connection takes the next delivery.
+func TestATurnThatEndedInAProviderErrorStillReportsItsResult(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	first, result := h.prompt(p, "delivery-1", "implement the plan")
+	p.send(shimwire.Response{ID: first.ID, Command: shimwire.TypePrompt, Success: true})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	p.send(shimwire.AgentEnd{})
+	p.writeRaw(`{"type":"prompt_result","id":"` + first.ID + `","agentInvoked":true,"status":"error",` +
+		`"error":{"message":"429 Too Many Requests","provider":"anthropic","model":"claude-opus-4-5","httpStatus":429,"retryable":true},` +
+		"\"sessionSettled\":true}\n")
+	for _, want := range []Event{
+		TurnEnd{Claim: testClaim},
+		PromptResult{Claim: testClaim, DeliveryID: "delivery-1", AgentInvoked: true, Error: "429 Too Many Requests"},
+	} {
+		if got := h.next(); got != want {
+			t.Fatalf("event = %#v, want %#v", got, want)
+		}
+	}
+
+	// The connection negotiated its protocol on the first prompt, so the next delivery is a
+	// prompt frame and nothing else.
+	next := async(func() error { return h.conn().Prompt(context.Background(), "delivery-2", "test the change") })
+	second := p.expect(shimwire.TypePrompt).(shimwire.Prompt)
+	p.send(shimwire.Response{ID: second.ID, Command: shimwire.TypePrompt, Success: true})
+	if err := awaitResult(t, next); err != nil {
+		t.Fatalf("the delivery after the failed turn: %v", err)
 	}
 }
 

@@ -206,3 +206,40 @@ func TestAPromptThatRanNoTurnIsChargedWhenItsResultSaysSo(t *testing.T) {
 		t.Error("the wait for a turn that will never start is still armed")
 	}
 }
+
+// A turn whose work ended in an error is still that prompt's turn: Oh My Pi reports the failure
+// in the prompt_result (`status: "error"` and its error object, shimwire.PromptError), which
+// says the agent ran the task and is done with it. The task retires on it like any other, and
+// the next one goes — the round after a provider's retries ran out is the implementer's next, or
+// the tester's, and a claim that kept waiting for a result it had already been given would
+// refuse every one of them (ErrDeliveryPending) until the daemon restarted.
+func TestATaskGoesAfterATurnWhoseWorkEndedInAnError(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Phase: phase.Implementing, Generation: 7, Assignment: "A1"})
+	h.must(StreamTurnStart{Claim: testToken})
+	failed := h.pending()
+	if failed.ConfirmedAt.IsZero() {
+		t.Fatal("the task's own turn did not confirm it")
+	}
+
+	// Oh My Pi's order: the turn's agent_end, then the result that names the prompt it ran and
+	// how that work ended.
+	h.mustQuiet(StreamTurnEnd{Claim: testToken})
+	h.must(StreamPromptResult{
+		Claim: testToken, DeliveryID: failed.ID, AgentInvoked: true, Error: "429 Too Many Requests",
+	})
+
+	h.wantState(StateIdle)
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("pending %+v, want the task the failed turn worked retired", *p)
+	}
+	// The agent ran the turn and answered for it; nothing about the provider's failure is the
+	// prompt's, so no budget is charged.
+	h.wantBudgets(Budgets{})
+
+	h.must(RequestDeliver{Claim: testToken, Task: "test the change", Phase: phase.Testing, Generation: 7, Assignment: "A1"})
+	if sent := h.wantPrompts(2)[1]; sent.Message != "test the change" {
+		t.Fatalf("sent %+v, want the round after the failed turn", sent)
+	}
+}

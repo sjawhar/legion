@@ -441,7 +441,7 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 	case shimwire.PromptResult:
 		if delivery := promptDelivery(frame.ID); delivery != "" {
 			c.events.push(PromptResult{
-				Claim: c.claim, DeliveryID: delivery, AgentInvoked: frame.AgentInvoked, Error: frame.Error,
+				Claim: c.claim, DeliveryID: delivery, AgentInvoked: frame.AgentInvoked, Error: frame.Reason(),
 			})
 		}
 	case shimwire.Response:
