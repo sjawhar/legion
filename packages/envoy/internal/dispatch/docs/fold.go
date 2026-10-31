@@ -86,7 +86,7 @@ func documentThrough(room string, version persistence.Version, updates updateSou
 		return nil, nil
 	}
 	doc := newCappedDocumentCopy(maxPending)
-	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
+	if err := decodeStoredState(doc, state); err != nil {
 		return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
 	return doc, nil

@@ -161,8 +161,27 @@ func validateUpdate(update []byte, maxPending int) error {
 	if len(update) == 0 {
 		return nil
 	}
-	return crdt.ApplyUpdateV1(newCappedDocumentCopy(maxPending), update, nil)
+	return decodeStoredState(newCappedDocumentCopy(maxPending), update)
 }
+
+// decodeStoredState applies state, a stored history or the state a room or cold read loads, to
+// doc. ygo's apply names a failure as ErrInvalidUpdate followed by the decoder's reason ("crdt:
+// invalid update: encoding: unexpected end of input"), except where its reader of an update's
+// structs fails with no reason of its own, which it reports as that sentinel wrapped in itself
+// ("crdt: invalid update: crdt: invalid update", on every fork release since v1.51.3-sami.4). That
+// one is returned as the sentinel alone, so the line a refusal logs states it once; every other
+// error is returned as ygo gave it.
+func decodeStoredState(doc *crdt.Doc, state []byte) error {
+	err := crdt.ApplyUpdateV1(doc, state, nil)
+	if err != nil && err.Error() == doubledInvalidUpdate {
+		return crdt.ErrInvalidUpdate
+	}
+	return err
+}
+
+// doubledInvalidUpdate is how ygo's apply words an update it refuses with no reason
+// (decodeStoredState).
+var doubledInvalidUpdate = crdt.ErrInvalidUpdate.Error() + ": " + crdt.ErrInvalidUpdate.Error()
 
 // bootstrapLoadedState decodes state, what room's load read (takeLoadedState), into doc, the
 // room's document. It is the one decode of the stored state a room's load makes: ygo is handed no
@@ -177,7 +196,7 @@ func (s *Service) bootstrapLoadedState(room string, doc *crdt.Doc, state []byte)
 	if s.bootstrapping != nil {
 		s.bootstrapping(room, state)
 	}
-	return crdt.ApplyUpdateV1(doc, state, nil)
+	return decodeStoredState(doc, state)
 }
 
 // preloadedDocument is the durable state a document socket's admission check decoded, kept for the
