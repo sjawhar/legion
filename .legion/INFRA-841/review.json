@@ -2,28 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-841",
-  "completed": "2026-10-31T00:20:00Z",
-  "round": 3,
+  "completed": "2026-10-31T02:15:00Z",
+  "round": 4,
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 3,
-  "roundTwoFindings": "All four fixed in ec52456102: the final check is testnats.AwaitStreamCopies(t, cluster.JetStream(t), bus.Stream, 3), which needs Replicas == 3 and three settled copies (internal/testnats/streams.go:40-43, 57-62); awaitReconciled's timeout reports HookStall(), the stall and the last failed run's error (internal/bus/nats.go:553-569); awaitHookFailure fails on HookedConnectionEvents() >= 1, which moves only on a successful run (internal/bus/recovery.go:216-217) of the publisher's one hook (nats.go:422-424); the four comments match the code.",
+  "forwardMerge": {
+    "lastReviewedHead": "0b4e17c1aaab34470653a67a6b29e9a61cc2968a (APPROVE, review 5720376335)",
+    "newHead": "b8092134d23beff5feff00fbf556904e1612922f (code head f89294cde69191fead238b95ad45ef9b47d8d06d, the merge of 0b4e17c1 with main at 39b51494)",
+    "fingerprints": "1febf71f78eefda4ff4f247b489c31973946f51b56d16ed3b08fe10a04695d48 -> 756fb89b1b0d8f5ba38f18deef45354f689510358b15f9754de4db3ad510fe73, changed, so a new round with the thermonuclear pair",
+    "whatMoved": "Only packages/envoy/AGENTS.md, in shape: main reflowed the guide to one sentence per line, and the PR's sentence, identical word for word, now replaces one line (2607). Against main, the merge changes that one line of AGENTS.md (-1/+1) and nothing else of main's; every other file of the PR's diff is byte-identical to the approved one. bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md exits 0."
+  },
   "keyFindings": [
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:124-125",
-      "description": "awaitHookFailure's timeout prints hooked events, which there is always 0 since :121-122 fails first on any success. The value is true and consistent with the timeout; judged not a defect, no change asked."
+      "file": "packages/envoy/AGENTS.md:2607",
+      "description": "The line passes R1-R3 (check mode exits 0), but the script's --write relayout would split it after 'reports it:' because it is over 160 characters (scripts/semantic-line-breaks.ts:47, 771-786). The documented rules hold, so judged not a defect; no push asked, since a push cancels the only queued CI run."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:179",
-      "description": "reconcileFailure returns a hookFailure; the name is accurate for this publisher, whose only hook is the reconcile. Judged not a defect, no rename asked."
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:210-215",
+      "description": "The new test relies on nats-server v2.10.29 refusing a three-copy create with a member down (AGENTS.md records v2.15.1 accepting it); a bump fails the test loudly at awaitHookFailure. Judged not a defect."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:102-103",
-      "description": "awaitReconciled's timeout does not print Connected(); the two cases where that would matter do not arise in these tests. Judged not a defect."
+      "file": "PR body",
+      "description": "The implementer's round 1 paragraph quoted the superseded settings sentence; the reviewer marked it superseded in the body (no commit)."
     }
   ]
 }
