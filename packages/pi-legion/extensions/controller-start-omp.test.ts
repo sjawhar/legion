@@ -6,6 +6,7 @@ import {
   controllerToken,
   legionControllerNoticeSubject,
   ROLE_TOPIC_PREFIX,
+  slackMentionTopic,
 } from "@legion/contracts";
 import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import {
@@ -84,6 +85,15 @@ const CONTROLLER_ARGS = [
 /** The project the cases' controller serves: the daemon state fixtures' `legion`. */
 const PROJECT = "legion";
 /**
+ * A Slack channel of the project, as the daemon names the controller it launches its channels
+ * (LEGION_SLACK_CHANNELS), and the team whose webhook publishes a mention in it. The controller
+ * registers the channel's mention topic (`slackMentionTopic`,
+ * `notifications.slack.*.<channel>.mention`); the stream stores a mention on the team's own
+ * subject, which that topic covers.
+ */
+const SLACK_CHANNEL = "C0CONTROLLER";
+const SLACK_TEAM = "T0LEGION";
+/**
  * The stream the stand-in listener names in its registration answers and in the relay frames it
  * sends: one stream for the whole case, so a frame never reads as a stream the session's resume
  * point does not name (`ConsumerDelivery.answered`).
@@ -152,6 +162,24 @@ const MessageEntrySchema = z.object({
   }),
 });
 type MessageEntry = z.infer<typeof MessageEntrySchema>;
+
+/** The one transcript Oh My Pi wrote under `sessions`, line by line; none until the file exists. */
+async function transcriptLines(sessions: string): Promise<string[]> {
+  const files = (await readdir(sessions, { recursive: true })).filter((file) =>
+    file.endsWith(".jsonl")
+  );
+  if (files.length === 0) return [];
+  if (files.length !== 1) throw new Error(`want one transcript under ${sessions}, found ${files}`);
+  return (await readFile(path.join(sessions, files[0] ?? ""), "utf8")).split("\n").filter(Boolean);
+}
+
+/** Its message entries, in order. */
+async function transcriptMessages(sessions: string): Promise<MessageEntry[]> {
+  return (await transcriptLines(sessions)).flatMap((line) => {
+    const entry = MessageEntrySchema.safeParse(JSON.parse(line));
+    return entry.success ? [entry.data] : [];
+  });
+}
 
 /** A running controller session, its terminal, and what it sent the stand-in. */
 interface ControllerSession {
@@ -253,6 +281,28 @@ interface StandinHooks {
    * start-turn mark set sent right before it.
    */
   readonly ready?: Hold;
+  /**
+   * Called with the session's id and the topics of each listener registration
+   * (`/v1/interests/subscribe`) as it arrives. The Response it answers with, when it gives one,
+   * is the listener's own in place of the interest the stand-in would give: a refusal there is
+   * the listener unable to give the session a consumer, which leaves the session receiving
+   * nothing at all until a later registration is accepted (`sendRegistration` in
+   * packages/pi-envoy/extensions/envoy.ts).
+   */
+  readonly onRegistration?: (sid: string, topics: readonly string[]) => Response | undefined;
+  /**
+   * Called with the topics of each removal from the registry (`/v1/interests/unsubscribe`): what
+   * a role's end takes out of the session's registration, and so out of its consumer's filter.
+   */
+  readonly onUnsubscribe?: (topics: readonly string[]) => void;
+  /**
+   * The session the listener names as the controller role's live holder from now on: while it
+   * answers one, the role read names that session and a claim of the role is refused 409 with
+   * it, as the listener refuses a claim of a role another live session holds. The heartbeat's
+   * re-assertion then ends the role here (`reassertRole` in
+   * packages/pi-envoy/src/registration-state.ts).
+   */
+  readonly roleHeldBy?: () => string | undefined;
 }
 
 /** A controller's scratch root, and the stand-in it runs against. */
@@ -348,19 +398,45 @@ async function serveController(
     // registration and any other read answer with an interest.
     const sid = typeof body.session_id === "string" ? body.session_id : "";
     hooks.onListener?.(sid);
+    // The role the controller holds is another live session's from the moment a case names one:
+    // the read below answers that session, and a claim of the role is refused with it, as the
+    // listener refuses a claim of a role a live session holds.
+    const otherHolder = hooks.roleHeldBy?.();
     if (url.pathname === "/v1/roles/set") {
+      if (otherHolder !== undefined && body.role === registered.claimToken) {
+        return Response.json(
+          {
+            error: `role ${registered.claimToken} is held by ${otherHolder}`,
+            role: body.role,
+            holder: otherHolder,
+          },
+          { status: 409 }
+        );
+      }
       if (body.role === registered.claimToken && roleHolder === "") {
         setImmediate(() => hooks.onRoleClaim?.(sid));
         noticeInterestDue = true;
       }
       roleHolder = sid;
     }
-    if (url.pathname === "/v1/interests/subscribe" && noticeInterestDue) {
-      noticeInterestDue = false;
-      await hooks.onNoticeInterest?.(sid);
+    const topics = Array.isArray(body.topics)
+      ? body.topics.filter((topic): topic is string => typeof topic === "string")
+      : [];
+    if (url.pathname === "/v1/interests/unsubscribe") hooks.onUnsubscribe?.(topics);
+    if (url.pathname === "/v1/interests/subscribe") {
+      if (noticeInterestDue) {
+        noticeInterestDue = false;
+        await hooks.onNoticeInterest?.(sid);
+      }
+      const answer = hooks.onRegistration?.(sid, topics);
+      if (answer !== undefined) return answer;
     }
     if (url.pathname === `/v1/roles/${registered.claimToken}`) {
-      return Response.json({ role: registered.claimToken, holder: roleHolder, last_seen: 1 });
+      return Response.json({
+        role: registered.claimToken,
+        holder: otherHolder ?? roleHolder,
+        last_seen: 1,
+      });
     }
     return Response.json({
       session_id: sid === "" ? roleHolder : sid,
@@ -476,18 +552,6 @@ async function startController(
     }
   };
 
-  const transcriptLines = async (): Promise<string[]> => {
-    const files = (await readdir(sessions, { recursive: true })).filter((file) =>
-      file.endsWith(".jsonl")
-    );
-    if (files.length === 0) return [];
-    if (files.length !== 1)
-      throw new Error(`want one transcript under ${sessions}, found ${files}`);
-    return (await readFile(path.join(sessions, files[0] ?? ""), "utf8"))
-      .split("\n")
-      .filter(Boolean);
-  };
-
   let taken = 0;
   return {
     terminal,
@@ -497,13 +561,8 @@ async function startController(
       taken += 1;
       return turn;
     },
-    transcriptLines,
-    async messages() {
-      return (await transcriptLines()).flatMap((line) => {
-        const entry = MessageEntrySchema.safeParse(JSON.parse(line));
-        return entry.success ? [entry.data] : [];
-      });
-    },
+    transcriptLines: () => transcriptLines(sessions),
+    messages: () => transcriptMessages(sessions),
     until,
     async shows(what, ...texts) {
       await until(what, () => {
@@ -533,6 +592,8 @@ interface DaemonController {
   state(): Promise<z.infer<typeof RpcStateSchema>>;
   /** Sends one RPC `abort`, as a Legion daemon interrupts a turn, and resolves on its answer. */
   abort(): Promise<void>;
+  /** The one transcript's lines, raw; none until Oh My Pi writes the file. */
+  transcriptLines(): Promise<string[]>;
   /** Polls `probe` until it returns a value, failing at the deadline or when omp exits. */
   until<T>(what: string, probe: () => T | undefined | Promise<T | undefined>): Promise<T>;
 }
@@ -540,12 +601,17 @@ interface DaemonController {
 /**
  * Starts the controller as the daemon launches it (`controller: daemon`): `omp --mode rpc` with
  * both extensions and the pod's environment — its boot token's file in place of a capability, the
- * project's Slack channels (none), and no LEGION_CONTROLLER_START_MESSAGE, since the daemon
- * delivers the start message itself once the controller reports ready — against the controller's
- * stand-in (`serveController`), which answers the daemon's state while the daemon holds the
- * controller's claim (internal/projection's golden), with `hooks`.
+ * project's Slack channels (none unless `launch` names them), and no
+ * LEGION_CONTROLLER_START_MESSAGE, since the daemon delivers the start message itself once the
+ * controller reports ready — against the controller's stand-in (`serveController`), which answers
+ * the daemon's state while the daemon holds the controller's claim (internal/projection's
+ * golden), with `hooks`. `launch.heartbeatMs` is Envoy's registration heartbeat
+ * (ENVOY_HEARTBEAT_MS, 90 s by default), which a case that watches a pass shortens.
  */
-async function startDaemonController(hooks: StandinHooks): Promise<DaemonController> {
+async function startDaemonController(
+  hooks: StandinHooks,
+  launch: { readonly slackChannels?: readonly string[]; readonly heartbeatMs?: number } = {}
+): Promise<DaemonController> {
   const { binary, nats, root, home, workspace, sessions, state, base, turns } =
     await serveController("state-controller-claim.json", hooks);
   const bootFile = path.join(root, "LEGION_BOOT_TOKEN");
@@ -565,7 +631,10 @@ async function startDaemonController(hooks: StandinHooks): Promise<DaemonControl
         LEGION_CONTROLLER: "1",
         LEGION_ROLE: "controller",
         LEGION_BOOT_TOKEN_FILE: bootFile,
-        LEGION_SLACK_CHANNELS: "",
+        LEGION_SLACK_CHANNELS: (launch.slackChannels ?? []).join(","),
+        ...(launch.heartbeatMs === undefined
+          ? {}
+          : { ENVOY_HEARTBEAT_MS: String(launch.heartbeatMs) }),
         LEGION_DAEMON_URL: base,
         LEGION_PROJECT: PROJECT,
         LEGION_STATE_DIR: state,
@@ -630,6 +699,7 @@ async function startDaemonController(hooks: StandinHooks): Promise<DaemonControl
     async abort() {
       await command({ type: "abort" });
     },
+    transcriptLines: () => transcriptLines(sessions),
     until,
   };
 }
@@ -676,6 +746,20 @@ interface SentCard {
 }
 
 /**
+ * One message the stream stored for a session: its summary, and the relay of that one frame.
+ * `deliver` sends it on the session's deliver subject under the sequence and the stored time the
+ * stream holds it at, and resolves once the session has taken it; a second call is the listener's
+ * redelivery of that same stored frame, which `delivered` counts (the ack floor a restarted relay
+ * resumes from). A message is stored where it is minted: one stored while nothing relays to the
+ * session carries that moment, which is what the session weighs its frame against
+ * (`ConsumerDelivery.followedBefore`).
+ */
+interface StoredMessage {
+  readonly summary: string;
+  deliver(sid: string, delivered?: number): Promise<unknown>;
+}
+
+/**
  * What reaches a controller session over the real NATS server. A session takes its messages from
  * its own consumer and from nothing else (INFRA-771), so every frame here goes where the Envoy
  * listener's relay would send it: the session's deliver subject
@@ -684,7 +768,9 @@ interface SentCard {
  * subject; a notice is what the daemon's controller-notice executor posts on the controller topic
  * (packages/daemon/internal/daemon/outbox.go `controllerNotice`, the listener's
  * `messageEnvelope` in packages/envoy/cmd/listener/api.go), which only a session holding that
- * project's controller role registers, and so only its consumer carries.
+ * project's controller role registers, and so only its consumer carries; a mention is what
+ * Envoy's Slack webhook publishes for an app mention in a channel, which only that controller's
+ * launch names.
  */
 interface ControllerInbound {
   /**
@@ -707,6 +793,14 @@ interface ControllerInbound {
    * role is what allows.
    */
   notice(sid: string): string;
+  /** The same notice, stored and not relayed: the stream holds it until `deliver`. */
+  storeNotice(): StoredMessage;
+  /**
+   * One app mention of `channel`, stored and not relayed, on the subject Envoy's Slack webhook
+   * publishes it on (`notifications.slack.<team>.<channel>.mention`) — the concrete subject the
+   * controller's registered topic (`slackMentionTopic`) covers.
+   */
+  storeMention(channel: string): StoredMessage;
 }
 
 async function controllerInbound(nats: string): Promise<ControllerInbound> {
@@ -714,24 +808,40 @@ async function controllerInbound(nats: string): Promise<ControllerInbound> {
   cleanup.push(() => connection.close());
   const codec = StringCodec();
   const noticeSubject = legionControllerNoticeSubject(PROJECT);
-  let relayed = 0;
+  // The stream's sequence: one stream for the whole case, so every frame of it is ordered by the
+  // sequence it was stored at, and a frame the session has written already is recognised by it.
+  let sequence = 0;
+  /** The sequence the stream stores the next message at. */
+  const nextSequence = (): number => {
+    sequence += 1;
+    return sequence;
+  };
   /**
    * One relay frame, as the listener's relay of the session's consumer sends it: the stored
    * subject, sequence, stream and time in its headers (`decodeRelayFrame`), on the session's
    * deliver subject. The request's answer is the session's own `received`, which it sends as it
    * decodes the frame; until the session has subscribed that subject the server reports no
-   * responder, so the frame is sent again.
+   * responder, so the frame is sent again, as the one frame it is. A frame with no stamp of its
+   * own is stored as it is relayed, at the sequence after the last.
    */
-  const relay = async (sid: string, subject: string, frame: Uint8Array): Promise<unknown> => {
+  const relay = async (
+    sid: string,
+    subject: string,
+    frame: Uint8Array,
+    stamp: { readonly seq: number; readonly storedAt: string; readonly delivered: number } = {
+      seq: nextSequence(),
+      storedAt: new Date().toISOString(),
+      delivered: 1,
+    }
+  ): Promise<unknown> => {
     const deadline = Date.now() + 30_000;
+    const header = natsHeaders();
+    header.set(RelayHeader.subject, subject);
+    header.set(RelayHeader.streamSeq, String(stamp.seq));
+    header.set(RelayHeader.streamID, STAND_IN_STREAM_ID);
+    header.set(RelayHeader.delivered, String(stamp.delivered));
+    header.set(RelayHeader.storedAt, stamp.storedAt);
     for (;;) {
-      relayed += 1;
-      const header = natsHeaders();
-      header.set(RelayHeader.subject, subject);
-      header.set(RelayHeader.streamSeq, String(relayed));
-      header.set(RelayHeader.streamID, STAND_IN_STREAM_ID);
-      header.set(RelayHeader.delivered, "1");
-      header.set(RelayHeader.storedAt, new Date().toISOString());
       try {
         return await connection.request(deliverSubject(sid), frame, {
           headers: header,
@@ -747,6 +857,45 @@ async function controllerInbound(nats: string): Promise<ControllerInbound> {
       }
     }
   };
+  /** One message the stream stores now on `subject`, its envelope's summary and topic set. */
+  const store = (
+    subject: string,
+    summary: string,
+    envelope: Record<string, unknown>
+  ): StoredMessage => {
+    const stored = { seq: nextSequence(), storedAt: new Date().toISOString() };
+    const frame = codec.encode(
+      JSON.stringify({ ...envelope, topic: subject, payload_summary: summary })
+    );
+    return {
+      summary,
+      deliver: (sid, delivered = 1) => relay(sid, subject, frame, { ...stored, delivered }),
+    };
+  };
+  const storeNotice = (): StoredMessage =>
+    store(noticeSubject, `triage on LEGION-${100_000 + Math.floor(Math.random() * 900_000)}`, {
+      event_id: randomUUID(),
+      // The daemon names no source, so the listener's default.
+      source: "agent",
+      source_event_id: randomUUID(),
+      dedupe_key: `legion-outbox:${randomUUID()}`,
+      issued_at: Date.now(),
+      payload: JSON.stringify({ kind: "triage" }),
+      trace_id: randomUUID(),
+    });
+  const storeMention = (channel: string): StoredMessage =>
+    store(
+      `notifications.slack.${SLACK_TEAM}.${channel}.mention`,
+      `@controller MENTION-${randomUUID().slice(0, 8)}`,
+      {
+        event_id: randomUUID(),
+        source: "slack",
+        source_event_id: `slack-${randomUUID()}`,
+        dedupe_key: `slack:${randomUUID()}`,
+        issued_at: Date.now(),
+        trace_id: randomUUID(),
+      }
+    );
   return {
     card(sid, label) {
       const summary = `CARD-${label}-${randomUUID().slice(0, 8)}`;
@@ -771,27 +920,12 @@ async function controllerInbound(nats: string): Promise<ControllerInbound> {
     },
     repeat: (sid, card) => relay(sid, `notifications.agent.${sid}`, card.frame),
     notice(sid) {
-      const text = `triage on LEGION-${100_000 + Math.floor(Math.random() * 900_000)}`;
-      void relay(
-        sid,
-        noticeSubject,
-        codec.encode(
-          JSON.stringify({
-            event_id: randomUUID(),
-            // The daemon names no source, so the listener's default.
-            source: "agent",
-            source_event_id: randomUUID(),
-            topic: noticeSubject,
-            dedupe_key: `legion-outbox:${randomUUID()}`,
-            issued_at: Date.now(),
-            payload_summary: text,
-            payload: JSON.stringify({ kind: "triage" }),
-            trace_id: randomUUID(),
-          })
-        )
-      );
-      return text;
+      const message = storeNotice();
+      void message.deliver(sid);
+      return message.summary;
     },
+    storeNotice,
+    storeMention,
   };
 }
 
@@ -1553,3 +1687,169 @@ for (const variant of ["the start claim never answers", "the start command never
     CASE_TIMEOUT_MS
   );
 }
+
+// The real pair's proof of the controller's own lanes (INFRA-771): a session receives what its
+// own consumer carries and nothing else, and the controller role is what puts its project's
+// notice lane (`notifications.legion.<project>.controller`) and its Slack channels' mention
+// topics into that consumer's filter. The controller the daemon launches is the one whose launch
+// names channels (LEGION_SLACK_CHANNELS), so it is the one here, with a 2 s registration
+// heartbeat so that the case watches its passes. Three things, in one session's life:
+//   - a notice stored while the session's registration had lapsed — the listener able to give it
+//     no consumer, so nothing at all reached it — is read once when the registration is back,
+//     the relay's redelivery of that same stored frame included;
+//   - a mention of the channel its launch names reaches it;
+//   - once the role ends (the heartbeat's re-assertion refused by a listener that names another
+//     live holder), the registration that follows carries neither topic, and the session's own
+//     consumer drops a frame stored on either, while a card on its agent subject still reaches
+//     it, so each of the two had its turn at the session first.
+// Stopping the session and starting it again is the one thing this rig cannot do — Oh My Pi
+// mints a new session id, and the daemon's controller is not launched with `--resume` — so the
+// lapse stands in for it: what the listener holds for the session is gone and comes back, which
+// is the state a stopped session leaves behind, and the frame that waited carries the time it
+// was stored at, which is what the session weighs it against. A mocked bus covers the same three
+// things at the plugin's own level in packages/pi-envoy/extensions/envoy.test.ts ("a controller
+// session registers its project's notice lane and its Slack mention topics, and takes a notice
+// on the lane").
+test.skipIf(skip)(
+  "the controller's notice lane and its channel's mentions reach the session through its consumer, and stop once its role ends",
+  async () => {
+    const lane = legionControllerNoticeSubject(PROJECT);
+    const mentions = slackMentionTopic(SLACK_CHANNEL);
+    const inbound = await controllerInbound(setup().nats);
+    /** The topics of every registration the stand-in accepted, in order. */
+    const registered: string[][] = [];
+    /** Every topic a removal from the registry named (`/v1/interests/unsubscribe`). */
+    const unregistered: string[] = [];
+    /** How many registrations the listener refused while the session had no consumer. */
+    let refusals = 0;
+    let lapsed = false;
+    let otherHolder: string | undefined;
+    let sid: string | undefined;
+    const session = await startDaemonController(
+      {
+        onRoleClaim: (claimed) => {
+          sid = claimed;
+        },
+        onRegistration: (_claimed, topics) => {
+          if (!lapsed) {
+            registered.push([...topics]);
+            return undefined;
+          }
+          refusals += 1;
+          return Response.json(
+            { error: "consumer_error: this session has no consumer" },
+            { status: 503 }
+          );
+        },
+        onUnsubscribe: (topics) => unregistered.push(...topics),
+        roleHeldBy: () => otherHolder,
+      },
+      { slackChannels: [SLACK_CHANNEL], heartbeatMs: 2_000 }
+    );
+    const claimed = await session.until("the controller role's claim", () => sid);
+    await session.until("the registration that carries the lane and the channel", () =>
+      registered.some((topics) => topics.includes(lane) && topics.includes(mentions))
+        ? true
+        : undefined
+    );
+
+    // The daemon's start prompt and the turn it runs: the session's startup phase ends there, so
+    // what arrives after it is an idle session's to read.
+    session.deliver(START_MESSAGE);
+    const start = await session.nextTurn("the start turn's model request");
+    expect(lastMessage(start.request)).toContain(START_MESSAGE_JSON);
+    start.reply("Start procedure done.");
+    let answered = 1;
+    /**
+     * Answers every model request in order until the session has settled with `done` true: a
+     * turn the session starts on its own (an inbound message, a wake, the notice a refused
+     * registration shows) is answered like any other.
+     */
+    const settled = async (what: string, done: () => boolean = () => true): Promise<void> => {
+      for (;;) {
+        const next = await session.until(`the next model request, or ${what}`, async () => {
+          if (session.turns.length > answered) return "request";
+          return done() && (await session.state()).isSettled ? "settled" : undefined;
+        });
+        if (next === "settled") return;
+        answered += 1;
+        (await session.nextTurn(`model request ${answered}`)).reply(`Reply ${answered}.`);
+      }
+    };
+    /** The same, until a request the session sent carries `text`: what it read. */
+    const read = (what: string, text: string): Promise<void> =>
+      settled(`the session settled having read ${what}`, () =>
+        session.turns.some(({ request }) => conversation(request).includes(text))
+      );
+    await settled("the session settled after the start turn");
+
+    // The listener can give this session no consumer: every registration from here is refused,
+    // and nothing is relayed to it. The notice is stored inside that window, as the stream holds
+    // what it stores while nothing reads the session's consumer.
+    lapsed = true;
+    await session.until("a registration refused while the session has no consumer", () =>
+      refusals > 0 ? true : undefined
+    );
+    const notice = inbound.storeNotice();
+    await session.until("a second refusal, with the notice stored behind it", () =>
+      refusals > 1 ? true : undefined
+    );
+    lapsed = false;
+    const lapsedUntil = registered.length;
+    await session.until("the registration the listener accepts again", () =>
+      registered.length > lapsedUntil ? true : undefined
+    );
+
+    // The relay restarts at its ack floor: the frame the stream held goes out, and the same
+    // frame again behind it, which the session has written by then.
+    await notice.deliver(claimed);
+    await notice.deliver(claimed, 2);
+    await read("the notice stored while its registration had lapsed", notice.summary);
+    const mention = inbound.storeMention(SLACK_CHANNEL);
+    await mention.deliver(claimed);
+    await read("the mention of its Slack channel", mention.summary);
+
+    /** Every transcript line that holds `text`: what a reader of the session sees of it. */
+    const written = async (text: string): Promise<string[]> =>
+      (await session.transcriptLines()).filter((line) => line.includes(text));
+    // Each was handed to the session once, as the delivery the host records (a card's entry).
+    const noticeWritten = await written(notice.summary);
+    expect(noticeWritten).toHaveLength(1);
+    expect(noticeWritten[0]).toContain('"custom_message"');
+    const mentionWritten = await written(mention.summary);
+    expect(mentionWritten).toHaveLength(1);
+    expect(mentionWritten[0]).toContain('"custom_message"');
+
+    // The role ends: the listener names another live session as its holder, the heartbeat's
+    // re-assertion is refused, and the subjects the controller opened for the role are closed
+    // and taken out of the registry, so the registration after that carries neither.
+    otherHolder = "ses-controller-start-other";
+    await session.until("the lane and the mention topic taken out of the registry", () =>
+      unregistered.includes(lane) && unregistered.includes(mentions) ? true : undefined
+    );
+    const ended = registered.length;
+    const after = await session.until("a registration that carries neither topic", () =>
+      registered.slice(ended).find((topics) => !topics.includes(lane) && !topics.includes(mentions))
+    );
+    expect(after).toContain(`notifications.agent.${claimed}`);
+
+    // What the stream stores on either subject still reaches the session's deliver subject, as a
+    // listener that went on relaying them would send it, and the session drops both itself: it
+    // follows neither topic now. The card behind them, on the agent subject it does still follow,
+    // is read, so each of the two reached the session's consumer before it.
+    const afterNotice = inbound.storeNotice();
+    await afterNotice.deliver(claimed);
+    const afterMention = inbound.storeMention(SLACK_CHANNEL);
+    await afterMention.deliver(claimed);
+    const { card, taken } = inbound.card(claimed, "after-role");
+    await taken;
+    await read("the card sent after the role ended", card.summary);
+    expect(await written(afterNotice.summary)).toEqual([]);
+    expect(await written(afterMention.summary)).toEqual([]);
+    for (const { request } of session.turns) {
+      expect(conversation(request)).not.toContain(afterNotice.summary);
+      expect(conversation(request)).not.toContain(afterMention.summary);
+    }
+  },
+  CASE_TIMEOUT_MS
+);

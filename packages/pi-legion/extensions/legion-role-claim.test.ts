@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
+import { deliverSubject } from "@legion/envoy-client/consumer-delivery";
 import type { ZodNumberProperty } from "@legion/pi-shared/pi-types";
 
 /** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
@@ -176,6 +177,14 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
         machine_id: "test",
         dir: "/tmp",
         topics: body.topics,
+        // A session receives only what its own consumer holds (INFRA-771), so every
+        // registration asks the listener for one, and one answered without it is refused.
+        delivery: {
+          mode: "consumer",
+          subject: deliverSubject(body.session_id),
+          stream_id: "legion-role-claim-stream",
+          gap: false,
+        },
       });
     }
     return Response.json({ session_id: sessionID, machine_id: "test", dir: "/tmp", topics: [] });

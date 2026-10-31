@@ -9,6 +9,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { deliverSubject } from "@legion/envoy-client/consumer-delivery";
 import { Terminal } from "@xterm/headless";
 import { linkOmpNatives } from "./omp-natives";
 
@@ -81,28 +82,6 @@ export function serveStandin(
     await server.stop(true);
   });
   return { requests, base: `http://127.0.0.1:${server.port}` };
-}
-
-/**
- * A NATS address that closes every connection as it opens, held for the case: the Envoy
- * extension takes it as a NATS server, so its Legion claim goes ahead, and its every connect fails,
- * so the session takes no inbound delivery. Returns the `nats://` URL.
- */
-export function refusingNats(cleanup: Cleanup): string {
-  const listener = Bun.listen({
-    hostname: "127.0.0.1",
-    port: 0,
-    socket: {
-      open(socket) {
-        socket.end();
-      },
-      data() {},
-    },
-  });
-  cleanup.push(async () => {
-    listener.stop(true);
-  });
-  return `nats://127.0.0.1:${listener.port}`;
 }
 
 /**
@@ -492,6 +471,12 @@ export interface LegionPaneOptions {
    * lower-cased.
    */
   readonly name: string;
+  /**
+   * The NATS server the pane runs against, as `ENVOY_NATS_URL`: a real one (the caller's
+   * `LEGION_TEST_NATS_URL`), since the session's relay subject lives on it and a session without
+   * one can register nothing and so claim nothing.
+   */
+  readonly nats: string;
   /** `LEGION_ROLE`. */
   readonly role: string;
   /** `LEGION_TREE`. */
@@ -549,12 +534,13 @@ export interface LegionPane {
 /**
  * Runs one Legion pane on the real Oh My Pi until its run settles: the Legion and Envoy
  * extensions from this checkout, booted against a stand-in for the daemon's claim and grant
- * routes and the Envoy listener, and a NATS address that refuses every connection
- * (`refusingNats`: the Envoy extension then takes no inbound delivery, and the role claim, which a
- * session with no NATS server refuses, is two listener calls), with a stand-in model gateway that
- * answers the pane's turns from `replies`. The daemon's assignment arrives as the RPC `prompt`.
- * Nothing in a pane runs `legion` from bash (LEGION-631), so no stand-in `legion` is on its PATH:
- * `bin` holds what `prepare` put there.
+ * routes and the Envoy listener, and the NATS server `options.nats` names, with a stand-in model
+ * gateway that answers the pane's turns from `replies`. The server is real: a session's only
+ * inbound is the consumer the listener builds for it, which it is relayed on its own relay
+ * subject, so a pane with no NATS server holds no relay subject, every registration of its fails
+ * saying so, and its Legion claim fails with it (INFRA-771). The daemon's assignment arrives as
+ * the RPC `prompt`. Nothing in a pane runs `legion` from bash (LEGION-631), so no stand-in
+ * `legion` is on its PATH: `bin` holds what `prepare` put there.
  */
 export async function runLegionPane(
   binary: string,
@@ -639,11 +625,25 @@ export async function runLegionPane(
       return Response.json({ error: `no stand-in route ${url.pathname}` }, { status: 404 });
     }
     // The Envoy listener: registration, the role claim, and any read answer with an interest.
+    const sessionID = typeof body.session_id === "string" ? body.session_id : "";
     return Response.json({
-      session_id: typeof body.session_id === "string" ? body.session_id : "",
+      session_id: sessionID,
       machine_id: `${name}-machine`,
       dir: workspace,
       topics: [],
+      // A session takes its messages from its own consumer, relayed on its own deliver subject:
+      // a registration answered without one leaves the session deaf, which the plugin refuses
+      // rather than accept, and with it every claim the pane makes (INFRA-771).
+      ...(url.pathname === "/v1/interests/subscribe"
+        ? {
+            delivery: {
+              mode: "consumer",
+              subject: deliverSubject(sessionID),
+              stream_id: `${name}-stream`,
+              gap: false,
+            },
+          }
+        : {}),
     });
   });
   await writeStandinProfile(home, base);
@@ -668,7 +668,7 @@ export async function runLegionPane(
       bin,
       env: {
         ENVOY_URL: base,
-        ENVOY_NATS_URL: refusingNats(cleanup),
+        ENVOY_NATS_URL: options.nats,
         ...(options.dispatch
           ? { DISPATCH_URL: base, DISPATCH_TOKEN: `${name}-dispatch-token` }
           : {}),

@@ -41,6 +41,13 @@ const (
 	dispatchMachineID = "example-dispatch"
 	dispatchSessionID = "00000000-0000-4000-8000-000000000001"
 	dispatchToken     = "example-agent-token"
+	// testClientMachineID is the machine of the live test's own NATS user, which holds a host's
+	// grant for it (testClientPermissions): a machine of its own, so no durable or bucket that
+	// grant names is Dispatch's.
+	testClientMachineID = "example-test-client"
+	// dispatchSessionUser is the NATS user of the session the agent stream checks play, holding
+	// SessionPermissions alone, as a deployment's sessions hold it.
+	dispatchSessionUser = "example-session"
 	// dispatchHealthWindow is how long Dispatch has to migrate its schema and answer /healthz.
 	dispatchHealthWindow = 120 * time.Second
 	// deliveryCreate is the delivery durable's filtered consumer create, the permission the
@@ -62,11 +69,24 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 				requireDurablesAcknowledge(t, live.js)
 				requireIssueEventPublished(t, live.process, live.conn, live.port)
 				requireCommentQuietPublished(t, live.process, live.conn, live.port)
-				requireAgentStreamRelayed(t, live.conn, live.port)
+				requireAgentStreamRelayed(t, live.sessionConn, live.port)
 				requireWebhookRedeliveryBucket(t, live.js, live.process, live.github)
 
-				// Dispatch's grant, built on the listener's, publishes every notification topic: an ad-hoc
-				// topic outside every stream subject reaches its subscriber, with no violation.
+				// The server refused the session nothing: SessionPermissions holds the control
+				// subject it subscribed, the frame it published and the inbox it answered the
+				// replay on, and that frame came back through Dispatch, so a violation for any of
+				// them would have arrived by now.
+				select {
+				case err := <-live.sessionErrs:
+					require.NoError(t, err, "the server refused the session a call SessionPermissions holds")
+				default:
+				}
+
+				// Dispatch's grant, built on the listener's, publishes every notification topic: a
+				// team topic it publishes over core NATS reaches a reader whose grant subscribes
+				// that family, the test client's host user, with no violation. No session is that
+				// reader: SessionPermissions subscribes a session's own relay subject alone, and
+				// the listener that relays its consumer is what carries it such a topic.
 				adhoc, err := live.conn.SubscribeSync("notifications.team.>")
 				require.NoError(t, err)
 				require.NoError(t, live.conn.Flush())
@@ -117,72 +137,94 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 	}
 }
 
-// liveDispatch is one envoy-dispatch process started under a grant: the NATS server holding two
-// users, Dispatch's (the grant) and the test client's (testClientPermissions), the fake GitHub App
-// API behind Dispatch, the test client's connection, and a connection as Dispatch's own user for
-// the checks of that grant itself.
+// liveDispatch is one envoy-dispatch process started under a grant: the NATS server holding three
+// users, Dispatch's (the grant), the test client's (testClientPermissions) and the session's
+// (core.SessionPermissions), the fake GitHub App API behind Dispatch, the test client's
+// connection, the session's, and a connection as Dispatch's own user for the checks of that grant
+// itself.
 type liveDispatch struct {
 	server  natsServer
 	github  *dispatchGitHub
 	process *cmdtest.Process
 	port    int
-	// conn is the test client's connection: a second user, so no check leans on Dispatch's grant.
+	// conn is the test client's connection: a host user, so no check leans on Dispatch's grant,
+	// and every notification topic the checks read is an entry that user holds itself.
 	conn *natsgo.Conn
 	errs <-chan error
 	js   natsgo.JetStreamContext
+	// sessionConn is a connection as the session the agent stream checks play, holding
+	// SessionPermissions alone, and sessionErrs the errors the server sent it: the checks read
+	// them to prove the server refused that session nothing.
+	sessionConn *natsgo.Conn
+	sessionErrs <-chan error
 	// dispatchConn is a connection as Dispatch's own user.
 	dispatchConn *natsgo.Conn
 	dispatchErrs <-chan error
 }
 
-// startLiveDispatch starts a NATS server whose authorization holds Dispatch's user (grant) and the
-// test client's (testClientPermissions), seeds the delivery settings in a fresh Postgres, starts
-// envoy-dispatch against both, waits for it to answer healthy, and connects the test client as its
-// own user and a second connection as Dispatch's.
+// startLiveDispatch starts a NATS server whose authorization holds Dispatch's user (grant), the
+// test client's (testClientPermissions) and the session's (core.SessionPermissions), seeds the
+// delivery settings in a fresh Postgres, starts envoy-dispatch against both, waits for it to
+// answer healthy, and connects the test client as its own user, the session as its own, and a
+// second connection as Dispatch's.
 func startLiveDispatch(t *testing.T, binary, image string, grant core.Permissions) liveDispatch {
 	t.Helper()
-	seed, clientSeed, server, uri := startDispatchServer(t, image, grant)
+	seeds, server, uri := startDispatchServer(t, image, grant)
 	databaseURL := testpg.URL(t)
 	seedDispatchDeliverySettings(t, databaseURL)
 	github := newDispatchGitHub(t)
-	process, port := startDispatch(t, binary, databaseURL, uri, seed, github.server.URL)
+	process, port := startDispatch(t, binary, databaseURL, uri, seeds.dispatch, github.server.URL)
 	requireHealthy(t, process, port, dispatchHealthWindow, dispatchHealthy)
-	conn, errs := connect(t, uri, clientSeed)
+	conn, errs := connect(t, uri, seeds.client)
 	js, err := conn.JetStream()
 	require.NoError(t, err)
-	dispatchConn, dispatchErrs := connect(t, uri, seed)
+	sessionConn, sessionErrs := connect(t, uri, seeds.session)
+	dispatchConn, dispatchErrs := connect(t, uri, seeds.dispatch)
 	return liveDispatch{server: server, github: github, process: process, port: port,
-		conn: conn, errs: errs, js: js, dispatchConn: dispatchConn, dispatchErrs: dispatchErrs}
+		conn: conn, errs: errs, js: js, sessionConn: sessionConn, sessionErrs: sessionErrs,
+		dispatchConn: dispatchConn, dispatchErrs: dispatchErrs}
 }
 
-// startDispatchServer runs image with two users: Dispatch's, holding grant with its seed, and the
-// test client's, holding testClientPermissions with a seed of its own. It returns both seeds, the
-// server and its client URL.
-func startDispatchServer(t *testing.T, image string, grant core.Permissions) (string, string, natsServer, string) {
+// dispatchSeeds are the nkey seeds of the three users the live server holds: Dispatch's own, the
+// test client's and the session's.
+type dispatchSeeds struct{ dispatch, client, session string }
+
+// startDispatchServer runs image with three users: Dispatch's, holding grant with its seed, the
+// test client's, holding testClientPermissions with a seed of its own, and the session's, holding
+// SessionPermissions with a third, as a session on a deployment holds it. It returns the three
+// seeds, the server and its client URL.
+func startDispatchServer(t *testing.T, image string, grant core.Permissions) (dispatchSeeds, natsServer, string) {
 	t.Helper()
 	dispatchSeed, dispatchKey := testnats.User(t)
 	clientSeed, clientKey := testnats.User(t)
-	client := testClientPermissions()
+	sessionSeed, sessionKey := testnats.User(t)
+	client, session := testClientPermissions(), core.SessionPermissions()
 	config, err := core.Authorization{Users: []core.User{
 		{Name: dispatchMachineID, NKey: dispatchKey, Publish: &grant.Publish, Subscribe: &grant.Subscribe, HasSeed: true},
-		{Name: "example-test-client", NKey: clientKey, Publish: &client.Publish, Subscribe: &client.Subscribe, HasSeed: true},
+		{Name: testClientMachineID, NKey: clientKey, Publish: &client.Publish, Subscribe: &client.Subscribe, HasSeed: true},
+		{Name: dispatchSessionUser, NKey: sessionKey, Publish: &session.Publish, Subscribe: &session.Subscribe, HasSeed: true},
 	}}.Render(nil)
 	require.NoError(t, err)
 	server, uri := testnats.StartImageConfig(t, image, config, hubServerArgs, false)
-	return dispatchSeed, clientSeed, server, uri
+	return dispatchSeeds{dispatch: dispatchSeed, client: clientSeed, session: sessionSeed}, server, uri
 }
 
-// testClientPermissions is the grant of the live test's own NATS user: SessionPermissions, which
-// lets it play a session (publish its frames, subscribe notifications and its control subject),
-// plus the exact calls its checks make, so it leans on nothing of Dispatch's grant: reply inboxes
-// for its JetStream requests, each Dispatch durable's consumer info, a JetStream publish into the
-// stream, and the redelivery bucket's reads, writes and watch — not the bucket's create or the
-// update that raises its copies, which are Dispatch's to make.
+// testClientPermissions is the grant of the live test's own NATS user: HostPermissions for a
+// machine of its own, the set of a host's one user, which holds every notification topic
+// (bus.NotificationTopicPrefix) and the reply inboxes its JetStream requests answer on. The
+// topics its checks read — an issue's events, an issue's comment.created, the team topic — are
+// that set's to subscribe and no session's: SessionPermissions subscribes a session's own relay
+// subject alone, and a session is carried such a topic by the listener that relays its consumer,
+// which is no part of what envoy-dispatch's grant must hold. A host user holds no
+// session-consumer call either, so the Dispatch durables' consumer info below is this reader's
+// own entry and it can create or delete none of the consumers it inspects. Added to the host's
+// set are the exact calls its checks make, so it leans on nothing of Dispatch's grant: each
+// Dispatch durable's consumer info and the redelivery bucket's reads, writes and watch — not the
+// bucket's create or the update that raises its copies, which are Dispatch's to make.
 func testClientPermissions() core.Permissions {
-	session := core.SessionPermissions()
+	client := core.HostPermissions(testClientMachineID)
 	redelivery := "KV_" + bus.WebhookRedeliveryBucket
-	publish := append(session.Publish.Allow,
-		bus.NotificationTopicPrefix+">",
+	client.Publish.Allow = append(client.Publish.Allow,
 		"$JS.API.CONSUMER.INFO."+bus.Stream+"."+bus.DispatchDeliveryDurable,
 		"$JS.API.CONSUMER.INFO."+bus.Stream+"."+bus.DispatchJobDurable,
 		"$JS.API.STREAM.INFO."+redelivery,
@@ -193,10 +235,7 @@ func testClientPermissions() core.Permissions {
 		"$JS.API.CONSUMER.DELETE."+redelivery+".>",
 		"$JS.FC."+redelivery+".>",
 	)
-	return core.Permissions{
-		Publish:   core.Rules{Allow: publish},
-		Subscribe: core.Rules{Allow: append(session.Subscribe.Allow, "_INBOX.>")},
-	}
+	return client
 }
 
 func seedDispatchDeliverySettings(t *testing.T, databaseURL string) {
@@ -302,11 +341,13 @@ func requireIssueEventPublished(t *testing.T, process *cmdtest.Process, conn *na
 }
 
 // requireCommentQuietPublished proves what a session subscribed to an issue is there for: a
-// comment an agent writes through Dispatch's HTTP API reaches a subscriber holding
-// SessionPermissions on that issue's own comment.created subject, and the frame says in a field
-// of its own, quiet, that it is not quiet. The actor is a session, not a person, which is the
-// case a reader judging the frame by notify drops: notify is false for every actor that is not a
-// person, so such a reader shows a session its peers' silence on the issue it watches. The
+// comment an agent writes through Dispatch's HTTP API is published on that issue's own
+// comment.created subject, read here by the test client's host user, since a session subscribes
+// to no notification topic and takes the frame from the listener that relays its consumer, and
+// the frame says in a field of its own, quiet, that it is not quiet. The actor is a session, not
+// a person, which is the case a reader judging the frame by notify drops: notify is false for
+// every actor that is not a person, so such a reader shows a session its peers' silence on the
+// issue it watches. The
 // payload is read as raw JSON so a frame carrying no quiet at all fails here; decoded into a
 // bool, a missing field would read as false and the check would pass on the frames that keep the
 // stored 72 hours quiet. The create is forced because its title shares "example", the only word
@@ -348,13 +389,16 @@ func requireCommentQuietPublished(t *testing.T, process *cmdtest.Process, conn *
 // requireAgentStreamRelayed signs a person in and watches the session's conversation through an
 // agent view on Dispatch's live socket: Dispatch tells the session a viewer is attached and asks
 // for its replay on the session's control subject, which its grant publishes, and relays the frame
-// the session publishes, which its grant subscribes.
-func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
+// the session publishes, which its grant subscribes. session is the session's own connection,
+// holding SessionPermissions alone: the control subject it subscribes, the frame it publishes and
+// the reply inbox it answers the replay on are every entry of that set beside the relay subject,
+// so this is the reach a session really has.
+func requireAgentStreamRelayed(t *testing.T, session *natsgo.Conn, port int) {
 	t.Helper()
-	control, err := conn.SubscribeSync(contracts.AgentStreamControlSubject(dispatchSessionID))
+	control, err := session.SubscribeSync(contracts.AgentStreamControlSubject(dispatchSessionID))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = control.Unsubscribe() })
-	require.NoError(t, conn.Flush())
+	require.NoError(t, session.Flush())
 
 	jar, err := cookiejar.New(nil)
 	require.NoError(t, err)
@@ -392,8 +436,8 @@ func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 	requireAgentFrame(t, socket, "responder", `{"v":1,"responding":true}`)
 
 	frame := `{"v":1,"kind":"message","seq":1}`
-	require.NoError(t, conn.Publish(contracts.AgentStreamFramesSubject(dispatchSessionID), []byte(frame)))
-	require.NoError(t, conn.Flush())
+	require.NoError(t, session.Publish(contracts.AgentStreamFramesSubject(dispatchSessionID), []byte(frame)))
+	require.NoError(t, session.Flush())
 	requireAgentFrame(t, socket, "frame", frame)
 }
 
