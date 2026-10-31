@@ -144,6 +144,47 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
+// The blank lines that end a typed block in a quoted list item are no blank lines of the item to
+// the browser editor's parser where a list the block ends with takes them - it ends that list past
+// the quotes' markers on the line after it - or where the block, closed by no fence, ends before
+// the last of them, which ends the item (typedEndBlankInItem). Each document below carries the
+// outer item's spread that parser was measured reading for it, in round 2 of PR #2507, which has
+// this reader store them again: the reader before that round refused every one of them, where the
+// merged base stored them and read them as that parser does. The corpus holds them as well, in
+// quoted-item-typed-blocks-ending-in-blank-lines and
+// quoted-item-typed-block-code-ending-in-a-blank-line, which lock the tree that parser reads;
+// this test names the spread those documents turn on.
+func TestQuotedItemsAreTightWhereTheirTypedBlocksEndInBlankLines(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		markdown string
+	}{
+		{"a list the block ends with, before its closing fence", "> - a\n>   :::callout{#c1 kind=\"note\" title=\"T\"}\n>   - x\n>\n>   :::\n"},
+		{"the same, with nothing in the document past the block", "> - a\n>   :::callout{#c1 kind=\"note\" title=\"T\"}\n>   - x\n>\n"},
+		{"indented code, with nothing in the document past the block", "> - a\n>   :::callout{#c1 kind=\"note\" title=\"T\"}\n>       code\n>\n"},
+		{"a list the block ends with, before a line of markers and spaces", "> - a\n>   :::callout{#c1 kind=\"note\" title=\"T\"}\n>   - x\n>   \n>   :::\n"},
+		{"a list the block ends with, before two blank lines", "> - a\n>   :::callout{#c1 kind=\"note\" title=\"T\"}\n>   - x\n>\n>\n>   :::\n"},
+		{"a list holding a list", "> - a\n>   :::callout{#c1 kind=\"note\" title=\"T\"}\n>   - x\n>     - y\n>\n>   :::\n"},
+		{"a list holding a lazy line of its own", "> - a\n>   :::callout{#c1 kind=\"note\" title=\"T\"}\n>   - x\n>         code\n>\n>   :::\n"},
+		{"a list in a typed block no fence closes inside the block", "> - a\n>   ::::callout{#c1 kind=\"note\" title=\"T\"}\n>   :::callout{#c2 kind=\"note\" title=\"T\"}\n>   - x\n>\n>\n>   ::::\n"},
+		{"a list the block ends with, in two quotes", "> > - a\n> >   :::callout{#c1 kind=\"note\" title=\"T\"}\n> >   - x\n> >\n> >   :::\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := ParseForWrite(test.markdown, nil)
+			if err != nil {
+				t.Fatalf("ParseForWrite(%q): %v", test.markdown, err)
+			}
+			item := firstNodeOfType(doc, "list_item")
+			if item == nil {
+				t.Fatalf("ParseForWrite(%q) read no list item", test.markdown)
+			}
+			if spread, _ := item.Attrs["spread"].(bool); spread {
+				t.Errorf("ParseForWrite(%q) reads its outer item spread, want tight, as the browser editor's parser reads it", test.markdown)
+			}
+		})
+	}
+}
+
 // A list in a quote is spread by where the browser editor's parser puts the list's exit event and
 // how many line endings it crosses walking back from there: an exit after a quote marker leaves
 // the blank line's ending and the item's last line ending behind it, so one blank line spreads the
@@ -255,17 +296,22 @@ func TestQuotedListsAreSpreadWhereTheBrowserEditorsExitLands(t *testing.T) {
 // would store it are refused by every reader of caller markdown: the blank lines after a quoted item
 // ending in a footnote definition whose typed block holds a fence no fence closed, which that
 // parser reads as the code's; a definition inside a typed block with a list item around it,
-// whose lines and the blank lines next to it that parser counts otherwise; and the three shapes
-// of blank line inside a typed block in a list item that parser reads as spacing the item where
-// goldmark reads it as no block's - indented code ending in a whitespace-only line shorter than
-// its own indentation, in a block a fence closes and in one nothing in the document follows, and
-// a blank line between a list the block ends with and the block's own end (measured for PR #2507,
-// at the fork point and at this head).
+// whose lines and the blank lines next to it that parser counts otherwise; and the blank lines
+// that end a typed block in a list item, which that parser reads as the item's and goldmark as no
+// block's (measured for PR #2507, at the fork point and at this head).
 func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 	for name, refusal := range map[string]string{
-		"item-callout-code-ending-in-a-short-whitespace-line":                                     typedCodeBlankInItem,
-		"item-callout-list-ending-in-a-short-whitespace-line":                                     typedListBlankInItem,
-		"item-unclosed-callout-code-ending-in-a-short-whitespace-line":                            unclosedTypedCodeBlankInItem,
+		"item-callout-code-ending-in-a-short-whitespace-line":                                     typedEndBlankInItem,
+		"item-callout-list-ending-in-a-short-whitespace-line":                                     typedEndBlankInItem,
+		"item-unclosed-callout-code-ending-in-a-short-whitespace-line":                            typedEndBlankInItem,
+		"item-callout-paragraph-ending-in-a-blank-line":                                           typedEndBlankInItem,
+		"item-callout-quote-ending-in-a-blank-line":                                               typedEndBlankInItem,
+		"item-unclosed-callout-paragraph-ending-in-a-blank-line":                                  typedEndBlankInItem,
+		"item-nested-callouts-ending-in-a-blank-line":                                             typedEndBlankInItem,
+		"quoted-item-callout-paragraph-ending-in-a-blank-line":                                    typedEndBlankInItem,
+		"quoted-item-unclosed-callout-paragraph-ending-in-two-blank-lines":                        typedEndBlankInItem,
+		"quoted-item-nested-callout-list-ending-in-a-blank-line":                                  typedEndBlankInItem,
+		"twice-quoted-item-callout-fence-ending-in-a-blank-line":                                  typedEndBlankInItem,
 		"quoted-star-item-definition-callout-unclosed-fence-then-blank-lines":                     quotedDefinitionFenceBlank,
 		"quoted-star-item-unspaced-definition-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,
 		"quoted-star-item-definition-unspaced-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,

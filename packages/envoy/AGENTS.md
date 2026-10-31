@@ -2272,12 +2272,19 @@ block or setext heading holding one (`htmlFlowRefusal`): that parser takes a tab
 patterns take only a space, in the line's indentation, inside the tag and after it, so `> </a\t>`
 and `> a` over `> \t<div>` are refused, and it reads a closing tag of a raw text name
 (`</script>`) as a block as well. A node holding such a line alone is read, not refused, where
-the two parsers read it alike: a block of kind 6 or 7 runs to the first blank line, and the
-editor draws it as a paragraph of inline HTML, which is goldmark's own reading of the line, so
-`ParseForWrite("> </a\t>\n")` is stored where `"> </a\t>\n> text\n"` is refused. The exemption
-asks the kind, since a block of kinds 1 to 5 runs to an end marker of its own (`</script>`,
-`-->`, `>`, `?>`, `]]>`) and swallows every line up to it. A block of kind 7, one complete tag and
-nothing else, interrupts a paragraph in neither parser, so a lone tag continuing one, lazily or
+the two parsers read it alike: a block of kind 7, one complete tag and nothing else, runs to the
+first blank line, and the editor draws it as a paragraph of inline HTML, which is goldmark's own
+reading of the line, so `ParseForWrite("> </a\t>\n")` is stored where `"> </a\t>\n> text\n"` is
+refused. The exemption asks the kind. A block of kinds 1 to 5 runs to an end marker of its own
+(`</script>`, `-->`, `>`, `?>`, `]]>`) and swallows every line up to it, and where such a marker
+ends it on its own line, which both parsers do read alike, goldmark refuses the same block
+written without the tab, so the tab form is refused the same way. A block of kind 6 runs to the
+first blank line as kind 7 does, and the exemption covered it until round 2 of PR #2507, which
+found it letting `- a\n\n  \t<div x\n` through: a tag of a block-level name opens kind 6 however
+unfinished it is, so the editor draws the inline HTML `<div x` where this reader reads the text
+`<div x` and stores `\<div x`, and the exemption cannot tell that tag from a whole one.
+A block of kind 7, one complete tag and nothing else, interrupts a paragraph in neither parser,
+so a lone tag continuing one, lazily or
 not, is read as inline HTML and refused nowhere; the refusal is a document's, so a textblock's
 inline markdown, which lands inside a paragraph the document already holds, keeps such a line
 (`dropHTMLFlowLines`).
@@ -2424,9 +2431,11 @@ a quote around the list's, which ends the list past that quote's markers (`opens
 fence - where no fence of its own closes a typed block, the fence of the typed block it stands in
 (`fenceEnding`) - three at the quote's end, or at the fence of a typed block around that quote
 (`endBefore`), where no fence ends the typed block and the last of them holds nothing past the
-quote's markers (`holdsOnlyQuoteMarkers`: `> :::callout{}\n> - a\n>\n>   \n` is a spread list), but
+quote's markers and the indentation the typed block's own lines carry (`holdsOnlyBlockIndent`:
+`> :::callout{}\n> - a\n>\n>   \n` is a spread list, where `> - a\n>   :::callout{}\n>   - x\n>  \n>  \n`
+is not), but
 for a container opening on the line right after them, and one more of each after an item ending
-in a quote in the typed block (`quotedListSpread`, `blanksEndingQuotedList`), and where a typed
+in a quote in the typed block (`quotedListSpread`, `blanksEndingBefore`), and where a typed
 block inside the list's quote stands in a quote that goes on past them, the blank lines of the
 quotes around the list's after one of its own count among them (`blanksThroughOuterQuotes`). A
 typed block's content is a document of its own to that parser, ending where its fence or the
@@ -2480,16 +2489,23 @@ a loose list's items holding more than one block are spread, the list when none 
 the documents Dispatch stores were read; but a blank line at or after a list in a typed block in a
 footnote definition is refused there too, unless goldmark spreads every item a blank line follows
 (`goldmarkSpreadsItemsBeforeBlanks`), since that parser spreads such an item and never the list,
-and so are three shapes of blank line inside a typed block in a list item, which that parser
-reads as spacing the item where goldmark reads the line as no block's and leaves the item tight:
-indented code ending in a whitespace-only line shorter than its own indentation, in a block a
-fence closes (`typedCodeBlankInItem`) and in one nothing in the document follows
-(`unclosedTypedCodeBlankInItem`), and a blank line between a list the block ends with and the
-block's own end (`typedListBlankInItem`, the three of `typedBlankInItem`). A block no fence closes
-that a block does follow is read, since that parser leaves the item unspread there as this reader
-does, and every other blank line in such a typed block is left to that looseness, which is how the
-documents Dispatch stores were read and what the writer writes for a tight item's typed block
-holding two blocks.
+and so are the blank lines that end a typed block in a list item, above its closing fence or with
+the block itself, which that parser reads as blank lines of the item where goldmark reads them as
+no block's and leaves the item tight (`typedEndBlankInItem`, `typedEndBlankSpreadsItem`). That
+parser counts a blank line toward an item's spread where no list or quote the item holds is open
+across it and the item does not drop it as one of the line endings that end it, and a typed block
+is no such container to it, so such a line is the item's however deep in typed blocks it stands.
+Three shapes keep it from the item, each measured at the fork point and at this head: a line the
+containers around the block do not read as blank - in a quote, one without the quote's markers,
+and anywhere, one indented code holds; a fenced code block no fence closed, which takes the lines
+as its own; and, in a quote alone, a list the block ends with, which that parser ends past the
+quotes' markers on the line after it, so the line falls inside the list. In a quote a block no
+fence closes that runs to the end of the document needs two such lines rather than one, since
+that parser ends it before the last, which holds nothing past the markers and so ends the item. A
+block no fence closes that a block in the document does follow is read, since that parser leaves
+the item unspread there as this reader does, and every other blank line in such a typed block is
+left to that looseness, which is how the documents Dispatch stores were read and what the writer
+writes for a tight item's typed block holding two blocks.
 
 A footnote definition is read where it is written, as that parser keeps it: inside another block,
 ahead of other blocks, in any order, and whether or not anything refers to it. One inside another

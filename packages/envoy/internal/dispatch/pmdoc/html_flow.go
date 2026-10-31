@@ -42,13 +42,13 @@ var (
 // neither parser, since the browser editor's copy of the construct drops micromark's exception for
 // a lazy line (packages/proof-editor/src/html-flow.ts), so a continuation line opens one nowhere
 // and is recorded nowhere. Kinds 1 to 6 interrupt a paragraph in both parsers.
-func recordHTMLFlowLine(kind int, continued bool, start int, pc parser.Context) {
-	if kind == 0 || kind == 7 && continued {
+func recordHTMLFlowLine(kind ast.HTMLBlockType, continued bool, start int, pc parser.Context) {
+	if kind == 0 || kind == ast.HTMLBlockType7 && continued {
 		return
 	}
-	recorded, _ := pc.Get(htmlFlowLinesKey).(map[int]int)
+	recorded, _ := pc.Get(htmlFlowLinesKey).(map[int]ast.HTMLBlockType)
 	if recorded == nil {
-		recorded = make(map[int]int)
+		recorded = make(map[int]ast.HTMLBlockType)
 		pc.Set(htmlFlowLinesKey, recorded)
 	}
 	recorded[start] = kind
@@ -57,12 +57,12 @@ func recordHTMLFlowLine(kind int, continued bool, start int, pc parser.Context) 
 // htmlFlowLines is which kind of block of HTML the browser editor's parser opens on each paragraph
 // line it reads as opening one, by where that line starts, recorded on the document node stands in
 // (htmlFlowLinesAttr), or nil where the document holds none.
-func htmlFlowLines(node ast.Node) map[int]int {
+func htmlFlowLines(node ast.Node) map[int]ast.HTMLBlockType {
 	for node.Parent() != nil {
 		node = node.Parent()
 	}
 	recorded, _ := node.Attribute(htmlFlowLinesAttr)
-	lines, _ := recorded.(map[int]int)
+	lines, _ := recorded.(map[int]ast.HTMLBlockType)
 	return lines
 }
 
@@ -76,7 +76,7 @@ func htmlFlowLines(node ast.Node) map[int]int {
 // is refused as before. Goldmark's node only sets attributes, so the lines are set to none rather
 // than removed, which htmlFlowLines reads as a document that holds none.
 func dropHTMLFlowLines(root ast.Node) {
-	root.SetAttribute(htmlFlowLinesAttr, map[int]int(nil))
+	root.SetAttribute(htmlFlowLinesAttr, map[int]ast.HTMLBlockType(nil))
 }
 
 // browserBlockHTML is why a line the browser editor's parser alone reads as opening a block of
@@ -92,18 +92,30 @@ const browserBlockHTML = "opens with HTML the browser editor's parser reads as a
 // goldmark opens itself, because the document is unreadable for the same reason and a caller
 // telling the two apart would learn nothing (docs/edits.go, unreadableReason).
 //
-// A node that is read alike is not refused: a block of kind 6 or 7 runs to the first blank line,
-// and the editor draws such a block as a paragraph holding its text as inline HTML
-// (packages/proof-editor, remarkHtmlBlockParagraphs), which is goldmark's own reading of the one
-// line. So the two agree where the block holds that line and nothing else: the line opens a block
-// of one of those two kinds, the node holds no other line, and nothing stands between it and the
-// blank line or the container's end - no block opening right under it (a heading, a list, a fence,
-// a rule, a table), which goldmark reads as its own and that parser swallows, and no setext
-// underline, which goldmark takes into the heading and that parser swallows the same way. A block
-// of kinds 1 to 5 runs to an end marker of its own instead (`</script>`, `-->`, `>`, `?>`, `]]>`)
-// and swallows every line up to it, blank lines among them, so a line opening one of those is
-// refused wherever it stands.
-func htmlFlowRefusal(node ast.Node, recorded map[int]int, source []byte, firstLine int) error {
+// A node that is read alike is not refused: a block of kind 7, one complete tag and nothing else,
+// runs to the first blank line, and the editor draws such a block as a paragraph holding its text
+// as inline HTML (packages/proof-editor, remarkHtmlBlockParagraphs), which is goldmark's own
+// reading of the one line. So the two agree where the block holds that line and nothing else: the
+// line opens a block of that kind, the node holds no other line, and nothing stands between it and
+// the blank line or the container's end - no block opening right under it (a heading, a list, a
+// fence, a rule, a table), which goldmark reads as its own and that parser swallows, and no setext
+// underline, which goldmark takes into the heading and that parser swallows the same way.
+//
+// A block of kind 6 runs to the first blank line the same way, and the exemption covered it until
+// PR #2507, which found it letting a divergent reading through: `- a\n\n  \t<div x\n` is one
+// line, alone before the container's end, whose block that parser draws as a paragraph holding
+// the inline HTML `<div x`, while this reader reads the text `<div x` and the writer stores it as
+// `\<div x`, which reads back as text. A tag of a block-level name opens kind 6 however
+// incomplete it is, where kind 7 asks for one whole tag and nothing after it, and it is the
+// unfinished tag the two read apart; the exemption cannot tell it from the whole one, so kind 6
+// is refused like the rest.
+//
+// A block of kinds 1 to 5 runs to an end marker of its own instead (`</script>`, `-->`, `>`, `?>`,
+// `]]>`) and swallows every line up to it, blank lines among them. Where the marker ends the block
+// on its own line the two do read it alike - `> \t<!-- c -->` is a paragraph holding the inline
+// HTML `<!-- c -->` to both - but goldmark refuses the same block written without the tab, which
+// its own patterns open (ErrBlockHTML), so refusing the tab form treats the two writings alike.
+func htmlFlowRefusal(node ast.Node, recorded map[int]ast.HTMLBlockType, source []byte, firstLine int) error {
 	if recorded == nil {
 		return nil
 	}
@@ -114,7 +126,7 @@ func htmlFlowRefusal(node ast.Node, recorded map[int]int, source []byte, firstLi
 		if !opens {
 			continue
 		}
-		if (kind == 6 || kind == 7) && lines.Len() < 2 && readAloneBeforeABlankLine(node) {
+		if kind == ast.HTMLBlockType7 && lines.Len() < 2 && readAloneBeforeABlankLine(node) {
 			return nil
 		}
 		end := bytes.IndexByte(source[start:], '\n')
@@ -143,8 +155,9 @@ func readAloneBeforeABlankLine(node ast.Node) bool {
 
 // htmlFlowKind is the kind of block of HTML the browser editor's parser (micromark's html-flow,
 // copied into packages/proof-editor/src/html-flow.ts) opens on line, what is left of a line from
-// column on, where nothing holds it off - 1 to 7 as CommonMark numbers them - or 0 where it opens
-// none. Four columns of indentation stop it, and then, read from the `<`: a raw text opening
+// column on, where nothing holds it off - ast.HTMLBlockType1 to ast.HTMLBlockType7, as CommonMark
+// numbers the seven kinds - or 0 where it opens none. Four columns of indentation stop it, and
+// then, read from the `<`: a raw text opening
 // (`<script`, `<pre`, `<style`, `<textarea`, the name ended by a space, a tab, `/`, `>` or the
 // line's end) is kind 1, `<!--` kind 2, `<?` kind 3, `<!` and a letter of either case kind 4
 // (opensDeclaration), `<![CDATA[` kind 5, an opening or closing tag of a block-level name
@@ -163,7 +176,7 @@ func readAloneBeforeABlankLine(node ast.Node) bool {
 // differ where it matters: micromark reads a tab as the whitespace it allows in the indentation,
 // between a tag's parts and after the tag, takes no space between a closing tag's slash and its
 // name, and lets a declaration open with a letter of either case.
-func htmlFlowKind[T string | []byte](line T, column int) int {
+func htmlFlowKind[T string | []byte](line T, column int) ast.HTMLBlockType {
 	indent, position := 0, 0
 	for ; position < len(line); position++ {
 		// A tab spans the columns to the next multiple of four from where it stands, which is
@@ -188,16 +201,16 @@ func htmlFlowKind[T string | []byte](line T, column int) int {
 	}
 	switch {
 	case htmlOpensWith(line, "<!--"):
-		return 2
+		return ast.HTMLBlockType2
 	case line[1] == '?':
-		return 3
+		return ast.HTMLBlockType3
 	case htmlOpensWith(line, "<![CDATA["):
-		return 5
+		return ast.HTMLBlockType5
 	case line[1] == '!':
 		// A declaration, which micromark and this package's reader open on a letter of either
 		// case where goldmark's own pattern takes an upper-case one alone (opensDeclaration).
 		if opensDeclaration(line) {
-			return 4
+			return ast.HTMLBlockType4
 		}
 		return 0
 	}
@@ -228,14 +241,14 @@ func htmlFlowKind[T string | []byte](line T, column int) int {
 	slash := next() == '/'
 	switch {
 	case raw && !slash && !closing:
-		return 1
+		return ast.HTMLBlockType1
 	case block && slash:
 		if index+1 < len(line) && line[index+1] == '>' {
-			return 6
+			return ast.HTMLBlockType6
 		}
 		return 0
 	case block:
-		return 6
+		return ast.HTMLBlockType6
 	}
 	if closing {
 		for htmlSpace(next()) {
@@ -254,7 +267,7 @@ func htmlFlowKind[T string | []byte](line T, column int) int {
 	if index != len(line) {
 		return 0
 	}
-	return 7
+	return ast.HTMLBlockType7
 }
 
 // htmlBlockStart reports whether the browser editor's parser opens a block of HTML at the `<` line
@@ -268,7 +281,7 @@ func htmlFlowKind[T string | []byte](line T, column int) int {
 // caller wrote that way (htmlFlowRefusal), so the two read the same line by the same rule.
 func htmlBlockStart(line string, interrupt bool) bool {
 	kind := htmlFlowKind(line, 0)
-	return kind != 0 && !(interrupt && kind == 7)
+	return kind != 0 && !(interrupt && kind == ast.HTMLBlockType7)
 }
 
 // completeAttributes reads a complete opening tag's attributes from line[*at] on, state by state

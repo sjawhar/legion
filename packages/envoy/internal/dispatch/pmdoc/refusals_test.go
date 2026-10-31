@@ -201,7 +201,10 @@ func TestParseInlineReadsHTMLADocumentIsRefusedFor(t *testing.T) {
 // tab or closing tag of a raw text name opens a block of HTML for that parser, where goldmark's
 // own patterns read the text of a paragraph, is refused by name (browserBlockHTML, html_flow.go):
 // the Proof schema holds no block of HTML, and that parser drops the one it reads together with
-// the container around it, so no tree the document could be stored as reads back.
+// the container around it, so no tree the document could be stored as reads back. A line that
+// opens a block of kind 6, a tag of a block-level name however unfinished, is refused with them
+// since round 2 of PR #2507, which found the exemption that passed kinds 6 and 7 letting a
+// divergent reading of an unfinished tag through.
 func TestCorpusErrorsOfDefinitionsAndBrowserBlockHTMLAreRefused(t *testing.T) {
 	for name, refusal := range map[string]string{
 		"nested-typed-blocks-definition-before-an-indented-underline":                     typedDefinitionHoldingBlock,
@@ -223,6 +226,8 @@ func TestCorpusErrorsOfDefinitionsAndBrowserBlockHTMLAreRefused(t *testing.T) {
 		"quoted-paragraph-then-a-tab-indented-block-tag":                                  browserBlockHTML,
 		"quoted-paragraph-then-a-tab-indented-comment":                                    browserBlockHTML,
 		"quoted-setext-heading-opening-with-a-closing-tag-a-tab-ends":                     browserBlockHTML,
+		"item-paragraph-then-a-tab-indented-unfinished-block-tag":                         browserBlockHTML,
+		"item-paragraph-then-a-tab-indented-closing-block-tag-a-tab-ends":                 browserBlockHTML,
 	} {
 		t.Run(name, func(t *testing.T) {
 			markdown, err := os.ReadFile("testdata/corpus-errors/" + name + ".md")

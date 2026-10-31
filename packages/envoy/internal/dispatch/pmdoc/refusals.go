@@ -38,7 +38,7 @@ func refuseBlocks(root ast.Node, source []byte, firstLine int) error {
 // keeps its attributes' values for conversion (typedDirective.values). htmlFlow is which kind of
 // block of HTML that parser opens on each of the document's paragraph lines it reads as opening
 // one, by where that line starts (htmlFlowLines).
-func blockRefusal(node ast.Node, source []byte, firstLine int, htmlFlow map[int]int) error {
+func blockRefusal(node ast.Node, source []byte, firstLine int, htmlFlow map[int]ast.HTMLBlockType) error {
 	refuse := func(reason string) error { return fmt.Errorf("%w: %s", ErrSchema, reason) }
 	switch current := node.(type) {
 	case *ast.Paragraph, *ast.TextBlock:

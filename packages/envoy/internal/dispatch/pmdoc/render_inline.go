@@ -628,7 +628,7 @@ func codeLineOpensHTML(rest string) bool {
 	if !whole || !strings.HasPrefix(strings.TrimLeft(line, " \t"), "<") {
 		return false
 	}
-	return htmlFlowKind(line, 0) == 7
+	return htmlFlowKind(line, 0) == ast.HTMLBlockType7
 }
 
 func (r *renderer) writeSyntax(value string) {
