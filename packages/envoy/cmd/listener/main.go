@@ -106,15 +106,18 @@ func listenerCaches(registry *store.Registry, sessions *session.SessionRegistry,
 }
 
 // sessionMayBeLive is the reapers' test of a session: it answers false only for a session that is
-// gone (session.Gone), and the session bucket itself is what says so (roleHolderSession: a record
+// gone (session.Gone), and the session bucket itself is what says so (liveSessionEntry: a record
 // the cache holds, or else a read of the session's own key). So a reaper takes nothing from a
 // session that has merely stopped answering - its interests and its role claims stand for the
 // whole gone horizon - nor from one another listener registered a moment ago, nor from one the
 // session cache does not hold because it has not read its bucket yet or is reading it again. Its
 // error is a read that did not answer, on which the reaper keeps what it would have removed for
 // its next cycle.
+//
+// A reaper answers no caller, so it holds no request context and reads under context.Background()
+// with roleHolderReadTimeout as its bound, the same bound role delivery's resolution waits.
 func sessionMayBeLive(sessions *session.SessionRegistry, sessionID string) (bool, error) {
-	_, _, err := roleHolderSession(sessions, sessionID, notGone)
+	_, _, err := liveSessionEntry(context.Background(), sessions, sessionID, roleHolderReadTimeout, notGone)
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return false, nil
 	}

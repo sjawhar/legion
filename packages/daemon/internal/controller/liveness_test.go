@@ -57,15 +57,15 @@ func newTestProber(url, token string, log *bytes.Buffer) *Prober {
 	})
 }
 
-// Alive while the listener names the registered session as the controller role's holder, which it
+// Live while the listener names the registered session as the controller role's holder, which it
 // does only inside its own live window; the lookup is the project's controller token, with the
 // listener's bearer.
-func TestProbeIsAliveWhileTheSessionHoldsTheRole(t *testing.T) {
+func TestProbeIsLiveWhileTheSessionHoldsTheRole(t *testing.T) {
 	var log bytes.Buffer
 	l := &listener{status: http.StatusOK, body: holder("ses_ctl", probeNow.Add(-4*time.Minute))}
 	url := l.serve(t)
-	if got := newTestProber(url, "envoy-bearer", &log).Probe(context.Background(), "ses_ctl"); got != Alive {
-		t.Fatalf("Probe = %s, want alive; log %s", got, log.String())
+	if got := newTestProber(url, "envoy-bearer", &log).Probe(context.Background(), "ses_ctl"); got != Live {
+		t.Fatalf("Probe = %s, want live; log %s", got, log.String())
 	}
 	if l.path != "/v1/roles/legion-demo-controller" || l.bearer != "Bearer envoy-bearer" {
 		t.Fatalf("lookup = %s with %q, want the controller token with the listener's bearer", l.path, l.bearer)
@@ -76,8 +76,8 @@ func TestProbeSendsNoBearerWithoutAToken(t *testing.T) {
 	var log bytes.Buffer
 	l := &listener{status: http.StatusOK, body: holder("ses_ctl", probeNow)}
 	url := l.serve(t)
-	if got := newTestProber(url, "", &log).Probe(context.Background(), "ses_ctl"); got != Alive {
-		t.Fatalf("Probe = %s, want alive", got)
+	if got := newTestProber(url, "", &log).Probe(context.Background(), "ses_ctl"); got != Live {
+		t.Fatalf("Probe = %s, want live", got)
 	}
 	if l.authorization {
 		t.Fatalf("the lookup carried Authorization %q with no token configured", l.bearer)

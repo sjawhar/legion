@@ -11,26 +11,20 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 )
 
 // probeTimeout bounds one role lookup, so a hung listener answers Unknown rather than holding the
 // caller.
 const probeTimeout = 10 * time.Second
 
-// stateUnresponsive is the `holder_state` the listener names in its 404 for a holder whose last
-// registration is past the live window but still inside the gone horizon (writeRoleHolderError,
-// packages/envoy/cmd/listener/api.go): the session is stalled, not dead — it keeps its role claim,
-// nothing is released for it, and it answers for itself once its heartbeats land. A probe of such
-// a holder is never a death verdict (dispatch://INFRA-392).
-const stateUnresponsive = "unresponsive"
-
 // Liveness is what the Envoy listener says of the registered controller session.
 type Liveness string
 
 const (
-	// Alive: the listener names the session as the controller role's holder, which it does only
+	// Live: the listener names the session as the controller role's holder, which it does only
 	// for a holder inside its live window.
-	Alive Liveness = "alive"
+	Live Liveness = "live"
 	// Gone: the role is unheld or expired, held by another session, or its holder reached the
 	// listener's gone horizon.
 	Gone Liveness = "gone"
@@ -87,15 +81,13 @@ type roleHolder struct {
 	LastSeen *int64 `json:"last_seen"`
 }
 
-// roleRefusal is the listener's 404 for a role it will not name a holder of (writeRoleHolderError,
-// packages/envoy/cmd/listener/api.go): `reason` is `unclaimed` when nobody holds the role and
-// `holder_lapsed` when its holder is past the live window, and `holder_state` is that holder's
-// state, `unresponsive` or `gone`. A listener of an earlier release names neither.
-type roleRefusal struct {
-	Reason      string `json:"reason"`
-	HolderState string `json:"holder_state"`
-	LastSeen    *int64 `json:"last_seen"`
-}
+// The listener's 404 for a role it will not name a holder of is notify.RoleRefusal
+// (writeRoleHolderError, packages/envoy/cmd/listener/api.go): `reason` is `unclaimed` when nobody
+// holds the role and `holder_lapsed` when its holder is past the live window, and `holder_state`
+// is that holder's state, `unresponsive` or `gone`. A listener of an earlier release names
+// neither. A holder the listener calls unresponsive is stalled, not dead — it keeps its role
+// claim, nothing is released for it, and it answers for itself once its heartbeats land — so a
+// probe of one is never a death verdict (dispatch://INFRA-392).
 
 // Probe says whether session — the one registered with the current controller capability — is
 // alive: Gone and Unknown each log why, naming the listener and, where the listener named them,
@@ -117,11 +109,11 @@ func (p *Prober) Probe(ctx context.Context, session string) Liveness {
 	defer response.Body.Close()
 	body, readErr := io.ReadAll(response.Body)
 	if response.StatusCode == http.StatusNotFound {
-		var refusal roleRefusal
+		var refusal notify.RoleRefusal
 		if readErr == nil {
 			_ = json.Unmarshal(body, &refusal)
 		}
-		if refusal.HolderState == stateUnresponsive {
+		if refusal.HolderState == notify.StateUnresponsive {
 			p.log.Info("controller liveness: the controller role's holder is unresponsive, not gone; the controller is left as it is",
 				"url", p.lookup, "session", session, "reason", refusal.Reason, "lastSeen", refusal.LastSeen)
 			return Unknown
@@ -148,5 +140,5 @@ func (p *Prober) Probe(ctx context.Context, session string) Liveness {
 			"holder", answer.Holder, "session", session)
 		return Gone
 	}
-	return Alive
+	return Live
 }

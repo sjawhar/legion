@@ -326,7 +326,7 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
 	send := &roleSend{w: w, record: record, d: d, item: item, role: role, arrived: arrived}
 	firstCtx, cancelFirst := context.WithDeadline(ctx, arrived.Add(sendRequestBudget))
-	first, err := resolveRoleHolder(firstCtx, d.registry, d.sessions, role, sessionIsLive)
+	first, err := resolveRoleHolder(firstCtx, d.registry, d.sessions, role)
 	cancelFirst()
 	if err != nil {
 		send.unresolved(err)
@@ -348,7 +348,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 	resolved := first
 	for pass := 0; ; pass++ {
 		if pass > 0 || !sessionIsLive(first.holderState) {
-			resolved, err = resolveRoleHolder(ctx, d.registry, d.sessions, role, sessionIsLive)
+			resolved, err = resolveRoleHolder(ctx, d.registry, d.sessions, role)
 			if err != nil && ctx.Err() != nil {
 				// The window ended under the resolution: what it read says nothing more.
 				break
@@ -388,9 +388,8 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 			}
 			lastForward = err
 		}
-		// Any resolution not answered above (a holder that has not heartbeated within
-		// session.ClaimStaleAfter and keeps its claim, a read that failed, a claim that churned)
-		// fails this attempt only.
+		// Any resolution not answered above (a holder past the live window, which keeps its
+		// claim, or a read that failed) fails this attempt only.
 		if !pauseBeforeRetry(ctx) {
 			break
 		}
@@ -411,7 +410,7 @@ func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
 		if interest.SessionID == item.SourceSession {
 			continue
 		}
-		if entry, state := d.sessions.Lookup(interest.SessionID); state != session.Gone && entry.SelfSubscribed {
+		if entry, state := d.sessions.Lookup(interest.SessionID); notGone(state) && entry.SelfSubscribed {
 			recipients = append(recipients, interest.SessionID)
 		}
 	}
@@ -449,7 +448,7 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 				slog.String("reason", string(sendUnresponsive)), slog.Int64("last_seen", entry.UpdatedAt))
 			return sendUnresponsive
 		}
-		if state == session.Live && entry.SelfSubscribed {
+		if sessionIsLive(state) && entry.SelfSubscribed {
 			window := receiptWindow(ctx)
 			if window <= 0 {
 				break

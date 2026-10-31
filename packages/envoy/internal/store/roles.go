@@ -228,6 +228,27 @@ func (r *Registry) RolesHeldBy(sessionID string) ([]string, error) {
 	return roles, nil
 }
 
+// RolesBySession is RolesHeldBy for every session at once: each holder's roles, sorted, read in
+// one pass over the claim copy under one lock, for a caller that would otherwise ask per row
+// (GET /v1/sessions, whose answer carries every listed session's roles). It refuses on the same
+// terms, and a session no claim names is simply absent from the map, which a caller reads as no
+// roles.
+func (r *Registry) RolesBySession() (map[string][]string, error) {
+	if err := r.RoleViewErr(); err != nil {
+		return nil, err
+	}
+	held := map[string][]string{}
+	r.holdersMu.RLock()
+	for role, holder := range r.roleHolders.All() {
+		held[holder] = append(held[holder], role)
+	}
+	r.holdersMu.RUnlock()
+	for _, roles := range held {
+		sort.Strings(roles)
+	}
+	return held, nil
+}
+
 // RoleViewErr is nil while the role claim view would answer a read, and otherwise the wrapped
 // ErrRoleViewNotReady that RolesHeldBy refuses that read with, naming the same reason: it is the
 // one test of the view's state, so a report that the view answers and a read it refuses can never

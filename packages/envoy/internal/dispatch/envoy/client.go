@@ -84,8 +84,9 @@ const (
 // includeUnresponsive is the selector every session read sends: without it the listener answers
 // with the live sessions alone, which is the reading of its registry this client must never
 // make - a session that missed its heartbeats under box load is still working its issue. Each
-// read then judges by the row's own State.
-const includeUnresponsive = "?include=unresponsive"
+// read then judges by the row's own State. It is written out of StateUnresponsive, so the
+// selector and the state it asks for cannot drift apart.
+const includeUnresponsive = "?include=" + StateUnresponsive
 
 // Session is the public subset of an Envoy listener session, live or unresponsive.
 type Session struct {
@@ -336,9 +337,16 @@ func (c *Client) Unsubscribe(ctx context.Context, sessionID string, topics []str
 
 // Role resolves a role's holder and returns its current session metadata. A role answer names
 // the holder's state as holder_state rather than state, and a holder that is only unresponsive
-// is answered like any other: the listener keeps its claim, so the caller delivers to it and
-// the message waits for it. Only a holder the listener has no live claim for at all is the
-// 404 listenerResponseError carries.
+// still holds the role: the caller delivers to it and the message waits for it. Only a holder
+// the listener has no live claim for at all is the 404 listenerResponseError carries.
+//
+// The listener answers an unresponsive holder either way, and both are resolved here. A 200
+// naming it holder_state unresponsive is read as it stands. The 404 the lookup route writes for
+// it (reason holder_lapsed, holder_state unresponsive, claim_released false) says the role
+// cannot be reached right now and that its claim still stands, which is not the same as the role
+// having no holder: that holder is read through the session route, which answers an unresponsive
+// record like any other, so the delivery still resolves to it and its frame is stored until it
+// answers again (lapsedRoleHolder).
 func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 	request, err := http.NewRequestWithContext(
 		ctx, http.MethodGet, c.baseURL+"/v1/roles/"+url.PathEscape(role)+includeUnresponsive, nil,
@@ -353,7 +361,7 @@ func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return Session{}, listenerResponseError(response)
+		return c.lapsedRoleHolder(ctx, response)
 	}
 	var responseBody struct {
 		Holder string `json:"holder"`
@@ -373,6 +381,40 @@ func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 	}
 	responseBody.Session.normalize(responseBody.Holder)
 	return responseBody.Session, nil
+}
+
+// lapsedRoleHolder answers a role lookup the listener refused, having read nothing of its body
+// yet. The refusal shape is cmd/listener's roleHolderError: a reason, and for a lapsed holder
+// the holder's id, the state its record puts it in, and claim_released false.
+//
+// A holder that is only unresponsive keeps its claim, so the role still has a holder and this
+// resolves to it: the lookup route refuses because the role cannot be reached now, not because
+// it is free. That holder's own record is the authoritative read of it (Session), and it carries
+// the title and capabilities a delivery is judged on, which the refusal does not.
+//
+// Everything else is the listener's own refusal: a role no session claims, a holder the registry
+// calls gone, and a holder whose record could not be read at all. A holder whose record has gone
+// between the two reads is the same answer, so a role is never resolved to a session the
+// listener no longer holds.
+func (c *Client) lapsedRoleHolder(ctx context.Context, response *http.Response) (Session, error) {
+	var refusal struct {
+		Error       string `json:"error"`
+		Holder      string `json:"holder"`
+		HolderState string `json:"holder_state"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&refusal); err != nil {
+		return Session{}, listenerRefusal(response, "")
+	}
+	if refusal.Holder != "" && refusal.HolderState == StateUnresponsive {
+		holder, err := c.Session(ctx, refusal.Holder)
+		if err == nil {
+			return holder, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return Session{}, err
+		}
+	}
+	return Session{}, listenerRefusal(response, refusal.Error)
 }
 
 // Session returns one session's listener metadata, whatever its state, or ErrNotFound if the
@@ -508,8 +550,17 @@ func listenerResponseError(response *http.Response) error {
 	var body struct {
 		Error string `json:"error"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&body); err == nil && body.Error != "" {
-		return errors.New(body.Error)
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		return listenerRefusal(response, "")
+	}
+	return listenerRefusal(response, body.Error)
+}
+
+// listenerRefusal is a refused answer as its caller reports it: the listener's own reason when
+// its body named one, and its status when the body named nothing a caller could act on.
+func listenerRefusal(response *http.Response, reason string) error {
+	if reason != "" {
+		return errors.New(reason)
 	}
 	return fmt.Errorf("%w: listener returned %d", ErrUnavailable, response.StatusCode)
 }

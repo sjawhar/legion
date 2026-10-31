@@ -89,18 +89,25 @@ type noLiveSessionRefusal struct {
 }
 
 // noLiveSession is the refusal body for sessionID in state, with the last registration the
-// registry can still name for it: the record's own when one stands, else the final heartbeat the
-// registry remembers, else none.
+// registry can still name for it (lastSeenOf).
 func noLiveSession(sessions *session.SessionRegistry, sessionID string, entry session.SessionEntry, state session.State) noLiveSessionRefusal {
-	lastSeen := entry.UpdatedAt
-	if lastSeen == 0 {
-		lastSeen = sessions.LastSeen(sessionID)
-	}
 	return noLiveSessionRefusal{
 		Error:    fmt.Sprintf("no live session %s", sessionID),
 		State:    state,
-		LastSeen: lastSeen,
+		LastSeen: lastSeenOf(sessions, sessionID, entry),
 	}
+}
+
+// lastSeenOf is the last registration this listener can still name for sessionID: the record's
+// own when one stands, else the final heartbeat the registry remembers for a session whose
+// record has gone (session.SessionRegistry.LastSeen), else zero, which every caller reads as
+// "not known". Both a refused send and a role whose holder lapsed report it, so a caller told a
+// session is not answering can say how long it has been so.
+func lastSeenOf(sessions *session.SessionRegistry, sessionID string, entry session.SessionEntry) int64 {
+	if entry.UpdatedAt != 0 {
+		return entry.UpdatedAt
+	}
+	return sessions.LastSeen(sessionID)
 }
 
 type publishResponse struct {
@@ -647,7 +654,7 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		// that did not answer is the 503 below, which asks it to try again instead.
 		target, state, err := liveSessionEntry(ctx, d.sessions, targetSession, sendSessionReadTimeout, notGone)
 		if errors.Is(err, nats.ErrKeyNotFound) {
-			record.refuseWith(w, http.StatusNotFound, outcomeNoLiveSession, noLiveSession(d.sessions, targetSession, target, session.Gone))
+			record.refuseWith(w, http.StatusNotFound, outcomeNoLiveSession, noLiveSession(d.sessions, targetSession, target, state))
 			return
 		}
 		if err != nil {
@@ -916,15 +923,15 @@ const sessionInterestReadTimeout = 1 * time.Second
 // empty, so the caller can still show the session and name what the read answered. Every other
 // error is a read that did not answer and is returned alone: a caller answers it as the
 // bus-unavailable 503, never as a session with no topics or roles.
-func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID string, entry session.SessionEntry, state session.State) (sessionInfo, error) {
-	roles, err := registry.RolesHeldBy(sessionID)
+func sessionInfoFor(ctx context.Context, registry *store.Registry, entry session.ListEntry) (sessionInfo, error) {
+	roles, err := registry.RolesHeldBy(entry.SessionID)
 	if err != nil {
 		return sessionInfo{}, err
 	}
-	info := sessionInfoWith(sessionID, entry, roles, state)
+	info := sessionInfoWith(entry, roles)
 	readCtx, cancel := context.WithTimeout(ctx, sessionInterestReadTimeout)
 	defer cancel()
-	interest, err := registry.Get(readCtx, sessionID)
+	interest, err := registry.Get(readCtx, entry.SessionID)
 	switch {
 	case errors.Is(err, nats.ErrKeyNotFound):
 		return info, nil
@@ -937,15 +944,15 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 	return info, nil
 }
 
-// sessionInfoWith is the row sessionID's entry makes, holding roles and no topics yet: the one
-// shape both sessionInfoFor and listedSessionInfo fill in, each from the read its route may make.
-// state is what that entry's last registration says about the session, which every row carries so
+// sessionInfoWith is the row entry makes, holding roles and no topics yet: the one shape both
+// sessionInfoFor and listedSessionInfo fill in, each from the read its route may make. The
+// entry's state is what its last registration says about the session, which every row carries so
 // that a caller reading a list, or one session's answer, can tell a session that is answering
 // from one that has stopped without comparing timestamps itself.
-func sessionInfoWith(sessionID string, entry session.SessionEntry, roles []string, state session.State) sessionInfo {
+func sessionInfoWith(entry session.ListEntry, roles []string) sessionInfo {
 	return sessionInfo{
-		SessionID:      sessionID,
-		State:          state,
+		SessionID:      entry.SessionID,
+		State:          entry.State,
 		MachineID:      entry.MachineID,
 		Host:           entry.HostOrMachine(),
 		Dir:            entry.Dir,
@@ -994,18 +1001,21 @@ func writeInterestRecordUnreadable(w http.ResponseWriter, sessionID string, err 
 // per-key bucket read, which over a slow KV leader would hold the answer for seconds per row.
 // listedSessions has already checked that the copy can be served, so a session it holds no
 // interest for subscribed to nothing. The roles are the ones whose claims name the session, as
-// every other answer's are (sessionInfoFor), and a claims view that cannot answer is returned
-// alone, as a read that did not answer.
-func listedSessionInfo(registry *store.Registry, entry session.ListEntry) (sessionInfo, error) {
-	roles, err := registry.RolesHeldBy(entry.SessionID)
-	if err != nil {
-		return sessionInfo{}, err
+// every other answer's are (sessionInfoFor); the list reads them for every row in one pass
+// (store.Registry.RolesBySession), and a claims view that cannot answer refuses that pass, as a
+// read that did not answer, before any row is built.
+func listedSessionInfo(registry *store.Registry, entry session.ListEntry, roles []string) sessionInfo {
+	if roles == nil {
+		// A session no claim names is absent from that pass's map, and its row says "no roles"
+		// with an empty list, as a per-session read does; a null there would be a changed answer
+		// for every session that holds no role.
+		roles = []string{}
 	}
-	info := sessionInfoWith(entry.SessionID, entry.SessionEntry, roles, entry.State)
+	info := sessionInfoWith(entry, roles)
 	if interest, found := registry.Cached(entry.SessionID); found {
 		info.Topics = interest.Topics
 	}
-	return info, nil
+	return info
 }
 
 // listedSessions is the one listing of sessions, which GET /v1/sessions answers and the
@@ -1079,6 +1089,11 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		roles, err := registry.RolesBySession()
+		if err != nil {
+			writeBusUnavailable(w, err)
+			return
+		}
 		dirFilter := r.URL.Query().Get("dir")
 		titleFilter := r.URL.Query().Get("title")
 		result := make([]sessionInfo, 0, len(entries))
@@ -1086,12 +1101,7 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			if !strings.Contains(entry.Dir, dirFilter) || !strings.Contains(entry.Title, titleFilter) {
 				continue
 			}
-			info, err := listedSessionInfo(registry, entry)
-			if err != nil {
-				writeBusUnavailable(w, err)
-				return
-			}
-			result = append(result, info)
+			result = append(result, listedSessionInfo(registry, entry, roles[entry.SessionID]))
 		}
 		writeJSON(w, http.StatusOK, result)
 	}
@@ -1155,7 +1165,7 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 			// literal was that copy's twin until the two changes met here.
 			writeBusUnavailable(w, err)
 		default:
-			info, err := sessionInfoFor(ctx, d.registry, sessionID, entry, state)
+			info, err := sessionInfoFor(ctx, d.registry, session.ListEntry{SessionID: sessionID, SessionEntry: entry, State: state})
 			switch {
 			case errors.Is(err, store.ErrMalformedInterest):
 				writeInterestRecordUnreadable(w, sessionID, err)
@@ -1443,7 +1453,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		result, err := resolveRoleHolder(ctx, d.registry, d.sessions, role, sessionIsLive)
+		result, err := resolveRoleHolder(ctx, d.registry, d.sessions, role)
 		if errors.Is(err, store.ErrMalformedRoleClaim) {
 			writeRoleClaimUnreadable(w, role, err)
 			return

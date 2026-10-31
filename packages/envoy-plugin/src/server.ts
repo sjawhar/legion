@@ -362,7 +362,7 @@ export default async (input: { serverUrl: URL }) => {
         clearTimeout(timer);
       }
     }
-    await client.unregisterSession(sessionID).catch(() => {});
+    await client.unregisterSession({ sessionID }).catch(() => {});
   };
 
   // A process registers ONLY the sessions it has actually run (see the busy

@@ -508,25 +508,38 @@ func (r *SessionRegistry) EntryState(entry SessionEntry) State {
 // registry built from a struct literal, which has no JetStream context, and on one whose
 // deployment sets no age, which leaves the bucket's own standing.
 //
+// A write answers with the age the bucket carries once it has run (bus.SetKeyValueMaxAge), so
+// only the registry that writes none reads the bucket's status for it: one stream read a pass,
+// not two.
+//
 // It adopts only a positive age, as the open-time read does: a status read that reports none is
 // as likely a bucket this build did not create as one that truly keeps its records for good, and
 // turning local expiry off on that word would keep every row of a recreated bucket for the life
 // of the process.
 func (r *SessionRegistry) applyMaxAge() error {
 	if r.js != nil && r.maxAge > 0 {
-		if _, err := bus.SetKeyValueMaxAge(r.js, bus.SessionBucket, r.maxAge); err != nil {
+		written, err := bus.SetKeyValueMaxAge(r.js, bus.SessionBucket, r.maxAge)
+		if err != nil {
 			return err
 		}
+		r.adoptMaxAge(written)
+		return nil
 	}
 	kv, _ := r.watcher.Handle()
 	status, err := kv.Status()
 	if err != nil {
 		return fmt.Errorf("read the %s bucket's maximum age: %w", bus.SessionBucket, err)
 	}
-	if ttl := status.TTL(); ttl > 0 && ttl != r.TTL() {
-		r.SetTTL(ttl)
-	}
+	r.adoptMaxAge(status.TTL())
 	return nil
+}
+
+// adoptMaxAge expires cached rows by age, the bucket's own backstop, when that age is positive
+// and is not the one this registry already runs with.
+func (r *SessionRegistry) adoptMaxAge(age time.Duration) {
+	if age > 0 && age != r.TTL() {
+		r.SetTTL(age)
+	}
 }
 
 // retention is how long after a session leaves the cache its lastSeen record is kept:
@@ -1003,9 +1016,18 @@ func (r *SessionRegistry) storedLocked(sessionID string, stored *cachedSession) 
 }
 
 func (r *SessionRegistry) removedLocked(sessionID string, removed *cachedSession) {
-	left := r.departedLocked(removed, r.now())
-	r.retainLastSeenLocked(sessionID, removed.entry.UpdatedAt, left)
-	r.scheduleLocked(sessionID, expireLastSeen, left.Add(r.retention()))
+	r.scheduleLocked(sessionID, expireLastSeen, r.retireLocked(sessionID, removed, r.now()))
+}
+
+// retireLocked keeps row's final heartbeat for the retention after the moment that row left the
+// live view (departedLocked), and returns the deadline that record expires at, which its caller
+// arms the way its own path arms deadlines: a removal schedules it (scheduleLocked), while the
+// expiry sweep sets it and re-arms once at the end (setExpiryLocked). Callers hold r.mu for
+// writing.
+func (r *SessionRegistry) retireLocked(sessionID string, row *cachedSession, now time.Time) time.Time {
+	left := r.departedLocked(row, now)
+	r.retainLastSeenLocked(sessionID, row.entry.UpdatedAt, left)
+	return left.Add(r.retention())
 }
 
 // departedLocked is the moment row left, or leaves, the live view, from which its last heartbeat

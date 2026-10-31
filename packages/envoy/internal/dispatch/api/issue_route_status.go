@@ -56,10 +56,11 @@ type routeRoster struct {
 	// sessions as well as the live ones (the client asks with include=unresponsive), so a row's
 	// presence is no longer liveness: every reader tests the row's State.
 	sessions []envoy.Session
-	// entries maps a session id to its row. A session the registry holds no record of, live or
-	// unresponsive, is simply absent, which is the one membership test left in this file and
-	// means gone.
-	entries map[string]envoy.Session
+	// entries maps a session id to the index of its row in sessions, which holds the row itself:
+	// a roster of a few hundred sessions keeps one copy of each. A session the registry holds no
+	// record of, live or unresponsive, is simply absent, which is the one membership test left
+	// in this file and means gone.
+	entries map[string]int
 	// holders maps a role to the session holding it, whatever that session's state. The listener
 	// gives a role one holder (last claim wins); should two rows ever name one role, the most
 	// recently seen session is named, and the id breaks a tie, so a read never flips between
@@ -72,17 +73,17 @@ type routeRoster struct {
 	err error
 }
 
-// state is the state the roster holds for a session: the row's own, or model.ClaimHolderGone
-// when the roster holds no row for it. The roster lists every session the registry holds a
-// record of, live and unresponsive alike, so an absent row is a session the registry has no
-// record of - which is exactly gone. It answers for an unanswered roster too, and a caller that
-// has not checked answered must not read that as gone.
+// state is the state the roster holds for a session: the row's own, or envoy.StateGone when the
+// roster holds no row for it. The roster lists every session the registry holds a record of,
+// live and unresponsive alike, so an absent row is a session the registry has no record of -
+// which is exactly gone. It answers for an unanswered roster too, and a caller that has not
+// checked answered must not read that as gone.
 func (r routeRoster) state(sessionID string) string {
-	entry, held := r.entries[sessionID]
+	index, held := r.entries[sessionID]
 	if !held {
-		return model.ClaimHolderGone
+		return envoy.StateGone
 	}
-	return entry.State
+	return r.sessions[index].State
 }
 
 // routeRosterTimeout bounds the one listener read a roster fetch makes. The listener answers in
@@ -217,12 +218,12 @@ func (s *server) listRouteRoster(ctx context.Context) routeRoster {
 	roster := routeRoster{
 		answered: true,
 		sessions: sessions,
-		entries:  make(map[string]envoy.Session, len(sessions)),
+		entries:  make(map[string]int, len(sessions)),
 		holders:  map[string]string{},
 	}
 	lastSeen := map[string]int64{}
-	for _, session := range sessions {
-		roster.entries[session.SessionID] = session
+	for index, session := range sessions {
+		roster.entries[session.SessionID] = index
 		for _, role := range session.Roles {
 			current, held := roster.holders[role]
 			if held && (lastSeen[current] > session.LastSeen ||
@@ -247,13 +248,14 @@ func (r routeRoster) reach(route *string) model.IssueRouteReach {
 	if route == nil {
 		return model.IssueRouteReach{}
 	}
-	status := func(value string) *string { return &value }
 	if !r.answered {
-		return model.IssueRouteReach{RouteStatus: status(model.RouteUnknown), RouteStatusReason: status(r.reason)}
+		return model.IssueRouteReach{
+			RouteStatus: new(model.RouteUnknown), RouteStatusReason: new(r.reason),
+		}
 	}
 	parsed, err := model.ParseRoute(*route)
 	if err != nil {
-		return model.IssueRouteReach{RouteStatus: status(model.RouteNoHolder)}
+		return model.IssueRouteReach{RouteStatus: new(model.RouteNoHolder)}
 	}
 	holder := ""
 	switch parsed.Kind {
@@ -264,13 +266,13 @@ func (r routeRoster) reach(route *string) model.IssueRouteReach {
 	}
 	switch r.state(holder) {
 	case envoy.StateLive:
-		return model.IssueRouteReach{RouteStatus: status(model.RouteLive), RouteHolder: &holder}
+		return model.IssueRouteReach{RouteStatus: new(model.RouteLive), RouteHolder: &holder}
 	case envoy.StateUnresponsive:
 		return model.IssueRouteReach{
-			RouteStatus: status(model.RouteHolderUnresponsive), RouteHolder: &holder,
+			RouteStatus: new(model.RouteHolderUnresponsive), RouteHolder: &holder,
 		}
 	}
-	return model.IssueRouteReach{RouteStatus: status(model.RouteNoHolder)}
+	return model.IssueRouteReach{RouteStatus: new(model.RouteNoHolder)}
 }
 
 // claimLiveness is what an issue read says about the session holding its claim: the state this
@@ -288,14 +290,13 @@ func (r routeRoster) claimLiveness(claim *model.IssueClaim, now time.Time) model
 	if claim == nil || claim.Actor.Kind != "session" {
 		return model.IssueClaimLiveness{}
 	}
-	state := func(value string) *string { return &value }
 	if !r.answered {
-		return model.IssueClaimLiveness{HolderState: state(model.ClaimHolderUnknown)}
+		return model.IssueClaimLiveness{HolderState: new(model.ClaimHolderUnknown)}
 	}
 	held := r.state(claim.Actor.ID)
-	liveness := model.IssueClaimLiveness{HolderState: state(held)}
-	if entry, found := r.entries[claim.Actor.ID]; found && entry.LastSeen > 0 {
-		lastSeen := time.UnixMilli(entry.LastSeen).UTC()
+	liveness := model.IssueClaimLiveness{HolderState: new(held)}
+	if index, found := r.entries[claim.Actor.ID]; found && r.sessions[index].LastSeen > 0 {
+		lastSeen := time.UnixMilli(r.sessions[index].LastSeen).UTC()
 		liveness.LastSeen = &lastSeen
 	}
 	switch held {

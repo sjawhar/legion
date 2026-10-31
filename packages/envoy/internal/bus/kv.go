@@ -118,11 +118,14 @@ func raiseReplicas(js nats.JetStreamContext, bucket string, replicas int) (int, 
 }
 
 // SetKeyValueMaxAge sets the maximum age of the existing bucket's stream to maxAge when it carries
-// another, and returns the age it had then, 0 when it left the bucket alone. As raiseReplicas does
-// for the copies, the update writes back the stream's deployed configuration with only its MaxAge
-// changed, so the bucket's replicas, history, discard policy, direct get, rollup, delete settings,
-// metadata and the rest stay as they are. A non-positive maxAge sets none: a caller whose setting
-// is unset leaves the bucket's own age standing (ParseSessionMaxAge), as it leaves one copy alone.
+// another, and returns the age the bucket carries once it has: maxAge, whether it was written now
+// or already there, and 0 only when no age was asked for and the bucket was left alone - so a
+// caller that must know the age it is expiring against is answered by this call and makes no
+// second read of its own. As raiseReplicas does for the copies, the update writes back the
+// stream's deployed configuration with only its MaxAge changed, so the bucket's replicas,
+// history, discard policy, direct get, rollup, delete settings, metadata and the rest stay as
+// they are. A non-positive maxAge sets none: a caller whose setting is unset leaves the bucket's
+// own age standing (ParseSessionMaxAge), as it leaves one copy alone.
 // An age an answer never came for succeeds when the stream, read again, carries it, and one the
 // server refused as overlapping the bucket's own stream is sent again (updateStream). Its error
 // names the bucket's stream: `set KV_envoy_sessions max age: ...`.
@@ -136,14 +139,14 @@ func SetKeyValueMaxAge(js nats.JetStreamContext, bucket string, maxAge time.Dura
 		return 0, fmt.Errorf("set %s max age: %w", stream, err)
 	}
 	if info.Config.MaxAge == maxAge {
-		return 0, nil
+		return maxAge, nil
 	}
 	aged := info.Config
 	aged.MaxAge = maxAge
 	if err := updateStream(js, &aged, func(again *nats.StreamInfo) bool { return again.Config.MaxAge == maxAge }); err != nil {
 		return 0, fmt.Errorf("set %s max age: %w", stream, err)
 	}
-	return info.Config.MaxAge, nil
+	return maxAge, nil
 }
 
 // OpenKeyValue opens the existing KV bucket named bucket on conn, through js, and creates nothing,

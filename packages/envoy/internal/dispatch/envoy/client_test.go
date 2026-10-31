@@ -444,6 +444,59 @@ func TestRolePreservesListenerNotFoundText(t *testing.T) {
 	}
 }
 
+// dispatch://INFRA-392. The listener's lookup route answers an unresponsive holder with its 404:
+// the role cannot be reached now, its state is named, and claim_released is false because the
+// claim stands (cmd/listener roleHolderError, pinned by its own
+// TestLookupsAndAReaperPassLeaveAStalledHoldersRoleClaimExactlyAsItWas). A reader that took that
+// refusal for "the role has no holder" dropped every role-routed message to a session that
+// missed its heartbeats - the failure this change exists to remove - so the holder it names is
+// resolved through the session route, which answers an unresponsive record like any other and
+// carries the capabilities a delivery is judged on.
+func TestARoleRefusedForAnUnresponsiveHolderResolvesToThatHolder(t *testing.T) {
+	var registryReads int
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/roles/legion-planner":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"role legion-planner holder s1 lapsed; claim retained (last seen 42)",` +
+				`"reason":"holder_lapsed","holder":"s1","holder_state":"unresponsive","last_seen":42,` +
+				`"claim_released":false}`))
+		case "/v1/roles/legion-reviewer":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"role legion-reviewer holder s9 lapsed; claim retained (last seen 1)",` +
+				`"reason":"holder_lapsed","holder":"s9","holder_state":"gone","last_seen":1,` +
+				`"claim_released":false}`))
+		case "/v1/registry/s1":
+			registryReads++
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","state":"unresponsive",` +
+				`"last_seen":42,"capabilities":["steer","btw"]}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	client := New(listener.URL)
+
+	holder, err := client.Role(context.Background(), "legion-planner")
+	if err != nil {
+		t.Fatalf("resolve a role whose holder is unresponsive: %v", err)
+	}
+	if holder.SessionID != "s1" || holder.State != StateUnresponsive || holder.LastSeen != 42 ||
+		!reflect.DeepEqual(holder.Capabilities, []string{"steer", "btw"}) {
+		t.Fatalf("holder = %#v, want the unresponsive session s1 with its capabilities", holder)
+	}
+	if registryReads != 1 {
+		t.Fatalf("session reads = %d, want the holder read once", registryReads)
+	}
+
+	// A holder the registry calls gone is the refusal it is: nothing holds the role now.
+	if _, err := client.Role(context.Background(), "legion-reviewer"); err == nil ||
+		err.Error() != "role legion-reviewer holder s9 lapsed; claim retained (last seen 1)" {
+		t.Fatalf("role error for a gone holder = %v, want the listener's own refusal", err)
+	}
+}
+
 // A per-session read is the question "is this session live, and how is it named", so the body it
 // decodes is one row of GET /v1/sessions: the same fields, filled the same way. The listener may
 // leave the id out of its own answer, and leaves a session with no roles or no capabilities

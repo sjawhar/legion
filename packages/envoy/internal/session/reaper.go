@@ -19,12 +19,13 @@ import (
 	"github.com/sjawhar/envoy/internal/metrics"
 )
 
-// reapStoredMessageCap and reapStoredReadBudget bound the stored-message count a pass makes for
-// one reaped session, as replayMaxMessages and replayReadBudget bound one /v1/replay answer
-// (cmd/listener/replay.go). A pass holds no caller's deadline, but it shares one bus with every
-// delivery this listener makes, and a count that read a whole retention window per record would
-// take that bus away from them. A count that stopped at either bound says so on its log line, so
-// the number is never read as the whole of what was stored.
+// reapStoredMessageCap bounds the messages one reaped session's stored-message count reads, and
+// reapStoredReadBudget bounds the time a whole pass spends on those counts, as replayMaxMessages
+// and replayReadBudget bound one /v1/replay answer (cmd/listener/replay.go). A pass holds no
+// caller's deadline, but it shares one bus with every delivery this listener makes, and counts
+// that read a whole retention window per record would take that bus away from them. A count that
+// stopped at either bound says so on its log line, so the number is never read as the whole of
+// what was stored.
 const (
 	reapStoredMessageCap = 500
 	reapStoredReadBudget = 5 * time.Second
@@ -115,6 +116,10 @@ func (r *SessionRegistry) ReapSessions(ctx context.Context, reaper SessionReaper
 		return 0
 	}
 	stream := reaper.streamState(ctx)
+	// One budget for the whole pass, not one per record: a pass that reaped sixty records with a
+	// budget each could spend sixty times it on the one bus every delivery this listener makes
+	// crosses, and the next tick would already be due.
+	deadline := time.Now().Add(reapStoredReadBudget)
 	reaped := 0
 	for _, candidate := range candidates {
 		deleted, err := r.deleteGone(ctx, candidate)
@@ -129,13 +134,9 @@ func (r *SessionRegistry) ReapSessions(ctx context.Context, reaper SessionReaper
 			continue // registered again between the pass's decision and its delete
 		}
 		reaped++
-		stored, bounded := reaper.storedAfterLastSeen(ctx, candidate.sessionID, candidate.lastSeen, stream)
-		if reaper.Reaped != nil {
-			reaper.Reaped.Inc()
-		}
-		if reaper.StoredAfterLastSeen != nil {
-			reaper.StoredAfterLastSeen.Add(int64(stored))
-		}
+		stored, bounded := reaper.storedAfterLastSeen(ctx, candidate.sessionID, candidate.lastSeen, stream, deadline)
+		reaper.Reaped.Inc()
+		reaper.StoredAfterLastSeen.Add(int64(stored))
 		r.logger().Warn("session reaper deleted the record of a session that reached the gone horizon with no clean stop",
 			slog.String("session_id", candidate.sessionID),
 			slog.Int64("last_seen", candidate.lastSeen),
@@ -151,13 +152,12 @@ func (r *SessionRegistry) ReapSessions(ctx context.Context, reaper SessionReaper
 // horizon, with the revision the copy holds for each. It takes the shared lock once and asks
 // nothing of the bus while it holds it, as store's interest reaper collects its own candidates.
 func (r *SessionRegistry) goneCandidates(now time.Time) []goneCandidate {
-	live, horizon := r.windows()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	_, epoch := r.watcher.Handle()
 	var candidates []goneCandidate
 	for sessionID, cs := range r.cache.All() {
-		if StateOf(cs.entry, now, live, horizon) != Gone {
+		if r.stateOf(cs.entry, now) != Gone {
 			continue
 		}
 		candidates = append(candidates, goneCandidate{
@@ -245,20 +245,25 @@ func (reaper SessionReaper) streamState(ctx context.Context) nats.StreamState {
 // them leaves exactly the same stream behind as one that took none. The number says how much a
 // replacement would have to replay, not how much was lost.
 //
-// bounded reports a count that stopped at reapStoredMessageCap, at reapStoredReadBudget, at the
-// end of ctx or at a read that failed, so a partial count is never read as the whole of what was
-// stored.
-func (reaper SessionReaper) storedAfterLastSeen(ctx context.Context, sessionID string, lastSeen int64, stream nats.StreamState) (count int, bounded bool) {
+// bounded reports a count that stopped at reapStoredMessageCap, at the pass's read deadline, at
+// the end of ctx or at a read that failed, so a partial count is never read as the whole of what
+// was stored.
+func (reaper SessionReaper) storedAfterLastSeen(ctx context.Context, sessionID string, lastSeen int64, stream nats.StreamState, deadline time.Time) (count int, bounded bool) {
 	if reaper.Client == nil || stream.LastSeq == 0 || lastSeen <= 0 {
 		return 0, false
 	}
 	subject := contracts.AgentSubject(sessionID)
 	after := time.UnixMilli(lastSeen)
-	deadline := time.Now().Add(reapStoredReadBudget)
+	// The cap is on messages read, not on messages counted. The walk starts at the stream's
+	// first sequence, and every message this subject holds from before the session's last
+	// registration is read and discarded on the way to the ones that count - a count capped on
+	// its hits alone would read a whole retention window to reach a cap it never hit.
+	reads := 0
 	for seq := stream.FirstSeq; seq <= stream.LastSeq; {
-		if count >= reapStoredMessageCap || time.Now().After(deadline) || ctx.Err() != nil {
+		if reads >= reapStoredMessageCap || time.Now().After(deadline) || ctx.Err() != nil {
 			return count, true
 		}
+		reads++
 		stored, err := reaper.Client.NextStoredMessage(ctx, subject, seq)
 		if errors.Is(err, nats.ErrMsgNotFound) {
 			return count, false

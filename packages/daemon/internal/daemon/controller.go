@@ -258,7 +258,7 @@ func watchController(ctx context.Context, st *store.Store, cfg config.Config, p 
 			liveness = prober.Probe(ctx, record.Session)
 		}
 		switch liveness {
-		case controller.Alive:
+		case controller.Live:
 			logged = time.Time{}
 		case controller.Gone:
 			if logged.IsZero() || time.Since(logged) >= cfg.WorkerBootTimeout {

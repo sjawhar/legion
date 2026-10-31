@@ -27,9 +27,11 @@ import (
 // when it is sent.
 const noticeExceptionSubjects = "notifications.envoy.exceptions." + notify.RoleTopicPrefix + "*"
 
-// The listener's liveness windows for a role holder (packages/envoy/internal/session): a session's
-// registration lives for listenerSessionTTL after its last heartbeat (registry.go), delivery drops
-// a holder whose claim went unrefreshed for listenerClaimStale (claim.go, ClaimStaleAfter), and the
+// The listener's liveness windows for a role holder (packages/envoy/internal/session). A
+// session's last registration keeps it live for listenerSessionTTL, the copy of
+// session.LiveWindow kept here (state.go); past it the holder reads unresponsive, keeps its role
+// claim to the gone horizon, and a delivery to it fails that attempt and releases nothing.
+// listenerClaimStale is the claim's own staleness window (claim.go, ClaimStaleAfter), and the
 // plugin heartbeats every pluginHeartbeat (DEFAULT_HEARTBEAT_MS,
 // packages/envoy-client/src/envoy-settings.ts). A session that stops running can therefore stay a
 // registered holder for up to the longer of the two windows, and until then the listener accepts a
@@ -43,13 +45,15 @@ const (
 // noticeReholdDelays is how long each copy of a notice whose forward failed waits: the nth copy
 // waits the nth delay after the report of the one before it, except that a copy goes at once when
 // copyDueAtOnce says so. The first catches a quick relaunch, the second one heartbeat later, and
-// the last is sent after any registration a stopped session left behind must have lapsed, past both
-// windows with a minute to spare. That copy then either reaches the relaunched session or is
-// refused (notify.ErrNoHolder) and held by the executor until a session holds the role again, so
-// nothing is dropped while the architect's claim lives. There are three, as the TypeScript daemon
-// re-sends one at most three times (processes.ts, resendToRootArchitect): a holder that keeps its
-// registration alive but never confirms a delivery would otherwise be sent copies without end, and
-// the report of its last copy is logged and queues nothing.
+// the last is sent once the clean stop of a stopped session's registration (daemon.go,
+// cleanSessionStop) has had time to land, past both windows with a minute to spare. A holder
+// that is only unresponsive keeps the row on the outbox's backoff instead. That copy then either
+// reaches the relaunched session or is refused (notify.ErrNoHolder) and held by the executor
+// until a session holds the role again, so nothing is dropped while the architect's claim lives.
+// There are three, as the TypeScript daemon re-sends one at most three times (processes.ts,
+// resendToRootArchitect): a holder that keeps its registration alive but never confirms a
+// delivery would otherwise be sent copies without end, and the report of its last copy is logged
+// and queues nothing.
 var noticeReholdDelays = [...]time.Duration{30 * time.Second, pluginHeartbeat, max(listenerSessionTTL, listenerClaimStale) + time.Minute}
 
 // errNoticeException is a report the listener sent that cannot be read as the failed forward of

@@ -169,10 +169,8 @@ func (r *SessionRegistry) expireDue() {
 			if !ok || !cs.expiresAt.Equal(item.deadline) {
 				continue
 			}
-			left := r.departedLocked(cs, now)
-			r.retainLastSeenLocked(id, cs.entry.UpdatedAt, left)
+			r.setExpiryLocked(id, expireLastSeen, r.retireLocked(id, cs, now))
 			r.cache.Remove(id)
-			r.setExpiryLocked(id, expireLastSeen, left.Add(r.retention()))
 		case expireLastSeen:
 			if seen, ok := r.lastSeen[id]; ok {
 				if seen.expiresAt.After(now) {

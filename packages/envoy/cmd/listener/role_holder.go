@@ -31,9 +31,9 @@ const (
 )
 
 // roleHolderResult is one resolution of a role's holder (resolveRoleHolder). holder names the
-// claim's holder whenever one was read, and holderState the state that holder's record puts it in
-// (session.StateOf); entry is set only for roleHolderLive; lastSeen and lastSeenAvailable only for
-// roleHolderLapsed.
+// claim's holder whenever one was read, and holderState the state that holder's record puts it
+// in (session.StateOf), on the two outcomes a record was read on; entry is set only for
+// roleHolderLive; lastSeen and lastSeenAvailable only for roleHolderLapsed.
 type roleHolderResult struct {
 	state             roleHolderState
 	holder            string
@@ -276,17 +276,6 @@ func roleSupersessionVerdict(ctx context.Context, sessions *session.SessionRegis
 	}
 }
 
-// roleHolderSession is liveSessionEntry as the role paths that hold no request context ask it: the
-// reaper answers no caller at all, and shares one bound with role delivery's resolution
-// (resolveRoleHolder under context.Background()), so every such decision that can take a role from
-// its holder waits the same roleHolderReadTimeout. A route does not come here: GET
-// /v1/roles/<role>, a role send through the publish route (resolveRoleHolder), a soft claim (POST
-// /v1/roles/set) and GET /v1/registry/<session_id> read through liveSessionEntry under their
-// request's own context, with roleHolderReadTimeout as the cap.
-func roleHolderSession(sessions *session.SessionRegistry, sessionID string, accept func(session.State) bool) (session.SessionEntry, session.State, error) {
-	return liveSessionEntry(context.Background(), sessions, sessionID, roleHolderReadTimeout, accept)
-}
-
 // notGone is the state test of every caller that may not act on a session for having stopped
 // answering: a lookup, a soft claim's liveness read, both reapers, a session-addressed send, an
 // agent delivery and the publish route's first resolution of a role. A session within the gone
@@ -306,20 +295,17 @@ func sessionIsLive(state session.State) bool { return state == session.Live }
 // and so ends at the earlier of the two.
 const roleHolderReadTimeout = 2 * time.Second
 
-// resolveRoleHolder resolves role's current holder inside ctx: the claim's holder, live when
-// accept takes the state of its session record (liveSessionEntry). A holder whose record accept
-// refuses has lapsed, and its claim is left exactly as it is - this resolution writes nothing to
+// resolveRoleHolder resolves role's current holder inside ctx: the claim's holder, live when that
+// holder's own record reads live (liveSessionEntry with sessionIsLive). A holder whose record
+// does not has lapsed, and its claim is left exactly as it is - this resolution writes nothing to
 // the role bucket, so a stalled holder's claim and its claimed_at outlive any number of lookups,
 // and only the role reaper, finding the holder gone, ever releases one.
 //
-// Every caller passes sessionIsLive: a role reaches its holder only while that holder is
-// answering, and a holder past the live window answers neither a forward's receipt nor anything
-// else. What changed is what that costs the holder - nothing. The lookup and the publish route
-// report it lapsed with its state and its claim intact, and role delivery fails the one attempt
-// and leaves the claim for the holder to come back to, where both used to release it. accept
-// stays an argument because the state a caller may act on is the one thing these paths could
-// reasonably differ on, and reading which rule a call uses at the call site is how the two kinds
-// of caller stay told apart (liveSessionEntry's own callers do differ: notGone).
+// Live is the rule for every caller, and the one rule: a role reaches its holder only while that
+// holder is answering, and a holder past the live window answers neither a forward's receipt nor
+// anything else. What changed is what that costs the holder - nothing. The lookup and the publish
+// route report it lapsed with its state and its claim intact, and role delivery fails the one
+// attempt and leaves the claim for the holder to come back to, where both used to release it.
 //
 // Every bus call it makes waits no longer than ctx: the claim read, which store.Registry bounds by
 // ctx, and the holder's session read through liveSessionEntry, which also keeps
@@ -332,7 +318,7 @@ const roleHolderReadTimeout = 2 * time.Second
 // can name it. It unwraps to the read's own error: an ended ctx, wrapped naming the call that did
 // not answer, which a route answers as a bus that did not answer; or store.ErrMalformedRoleClaim,
 // a claim record that cannot be read (writeRoleClaimUnreadable).
-func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string, accept func(session.State) bool) (roleHolderResult, error) {
+func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
 	if err := ctx.Err(); err != nil {
 		return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: fmt.Errorf("resolve role %s's holder: %w", role, err)}
 	}
@@ -344,20 +330,14 @@ func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions
 	if holder == "" {
 		return roleHolderResult{state: roleHolderUnclaimed}, nil
 	}
-	entry, state, err := liveSessionEntry(ctx, sessions, holder, roleHolderReadTimeout, accept)
+	entry, state, err := liveSessionEntry(ctx, sessions, holder, roleHolderReadTimeout, sessionIsLive)
 	if err == nil {
 		return roleHolderResult{state: roleHolderLive, holder: holder, holderState: state, entry: entry}, nil
 	}
 	if !errors.Is(err, nats.ErrKeyNotFound) {
-		return roleHolderResult{holder: holder, holderState: state}, &roleHolderFailure{step: roleHolderSessionRead, cause: err}
+		return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderSessionRead, cause: err}
 	}
-	// A holder whose record still stands reports that record's own last registration; one the
-	// bucket holds nothing for reports the final heartbeat the registry still remembers for it,
-	// and nothing when that too has been forgotten.
-	lastSeen := entry.UpdatedAt
-	if lastSeen == 0 {
-		lastSeen = sessions.LastSeen(holder)
-	}
+	lastSeen := lastSeenOf(sessions, holder, entry)
 	return roleHolderResult{
 		state:             roleHolderLapsed,
 		holder:            holder,

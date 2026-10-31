@@ -300,15 +300,11 @@ type IssueRouteReach struct {
 	RouteStatusReason *string `json:"route_status_reason"`
 }
 
-// Claim holder states: what an issue read says about the session holding its claim. The first
-// three are the registry's own states; ClaimHolderUnknown is this read's own answer for a
-// listener that gave it no list, and never a state the registry reports.
-const (
-	ClaimHolderLive         = "live"
-	ClaimHolderUnresponsive = "unresponsive"
-	ClaimHolderGone         = "gone"
-	ClaimHolderUnknown      = "unknown"
-)
+// ClaimHolderUnknown is what an issue read says about the session holding its claim when it
+// cannot judge: the listener gave it no list. It is this read's own answer and never a state the
+// registry reports - those are the registry's own three, which a reader names through the
+// listener client (envoy.StateLive, envoy.StateUnresponsive, envoy.StateGone).
+const ClaimHolderUnknown = "unknown"
 
 // IssueClaimLiveness is what an issue read says about the session holding its claim: its state,
 // when it was last seen, and from when another agent may take or release the claim without a

@@ -336,10 +336,10 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 // itself and reporting ok=false when there is nobody to deliver to. An unclaimed role is
 // no_holder; a holder that is not answering and every failed read are delivery_failed, each under
 // a log line that names which it was. Role delivery answers no caller, so it resolves under
-// context.Background(): the holder's session read keeps roleHolderReadTimeout (roleHolderSession's
+// context.Background(): the holder's session read keeps roleHolderReadTimeout (liveSessionEntry's
 // bound) as its own cap.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
-	resolved, err := resolveRoleHolder(context.Background(), cfg.registry, cfg.sessions, role, sessionIsLive)
+	resolved, err := resolveRoleHolder(context.Background(), cfg.registry, cfg.sessions, role)
 	sessionID := resolved.holder
 	// Every error resolveRoleHolder returns is a *roleHolderFailure naming the read that failed.
 	// One that is not would still be a read that failed, so it is logged as the claim read with
@@ -381,9 +381,9 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			},
 			exceptionReason: "delivery_failed",
 		})
-	default:
-		// roleHolderSessionRead: the holder's record could not be read, so nothing is known about
-		// its state and nothing is taken from it.
+	case roleHolderSessionRead:
+		// The holder's record could not be read, so nothing is known about its state and nothing
+		// is taken from it.
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
@@ -714,7 +714,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			})
 			continue
 		}
-		targetLive := targetState == session.Live
+		targetLive := sessionIsLive(targetState)
 		var target *session.SessionEntry
 		if targetLive {
 			target = &targetEntry
