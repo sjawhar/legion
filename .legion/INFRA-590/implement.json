@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-31T13:43:45Z",
+  "completed": "2026-10-31T17:00:35Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "6281961837c6c9de25c410ab192d4f2688f85127",
-  "round": "25 (CI red at 3668fb95, ci-ok: envoy-go job 124521125018 failed on TestAReconnectCatchesUpWhatTheListenerMissed, fixed on main by #2594 3b0ae77e9, and TestIdenticalViewsShareOneRecompute, a flake of main's; neither in a file this PR touches): a forward merge of main b0cc910f5, no conflict, unchanged-diff fingerprint equal (eba4675c...). #2391 still open, so migrations stay 0150/0151 and connections 91. Diff-check comment 6544145910. Sampled memory peak 3.47 GiB of 19, 68 samples every 2 s.",
+  "head": "1b15f353a747d01eaf3505a5bd42c8420b123453",
+  "round": "26 (review round 18, changes requested for the merge): forward merge of main 151d2d7996 (#2592, a soft claim takes a role from its predecessor only within one client instance). Conflicts in cmd/listener/role_holder.go (kept #2592's bucketSessionEntry, roleSupersession, roleSupersessionVerdict with liveness on roles.Registered; this PR's roleHolderSession comment, now naming bucketSessionEntry for the predecessor) and cmd/listener/api.go (main's verdict switch). The client-instance rule stays in the soft-claim route: only a claim takes a role from a live predecessor; roles.ResolveHolder resolves a holder for delivery and writes only the release of a gone holder. kv.go changed only comments; ClientInstanceID rides in session.SessionEntry, which roles.Buckets.Holder decodes. #2592's tests unmodified (diff hashes equal). Fingerprint eba4675c -> 0e1f9bcd. Diff-check comment 6546429898. Sampled memory peak 3.02 GiB of 19, 772 samples every 2 s.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -246,6 +246,14 @@
       "observed": "build and vet clean; both hub tests -count=5 ok (26.2 s); pglisten ok; unchanged-diff fingerprint eba4675c... before and after; GitHub MERGEABLE at 62819618.",
       "headSha": "6281961837c6c9de25c410ab192d4f2688f85127",
       "negativeControl": "At 3668fb95, before the merge, CI's envoy-go job 124521125018 failed with '--- FAIL: TestAReconnectCatchesUpWhatTheListenerMissed' and '--- FAIL: TestIdenticalViewsShareOneRecompute'."
+    },
+    {
+      "criterion": "After the merge with #2592, the listener's soft-claim client-instance rule and its role lane both work over this PR's roles package, and the outbox's single publisher, take-over and per-issue order still hold.",
+      "surface": "cmd/listener, internal/roles, internal/session, internal/store, the outbox package and the two-process cmd/dispatch suite on in-process NATS and pod Postgres 17",
+      "command": "cd packages/envoy && export GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<pod Postgres>; go build ./... && go vet ./cmd/listener/ ./internal/roles/ ./internal/session/ ./internal/store/ && for p in ./internal/roles/ ./internal/session/ ./internal/store/ ./cmd/listener/; do go test -p 1 -count=1 $p; done && go test -p 1 -parallel 4 -count=1 ./internal/dispatch/outbox/ && go test -p 1 -parallel 4 -count=1 -timeout 25m -tags multiprocess ./cmd/dispatch/",
+      "observed": "roles ok 0.3 s, session ok 10.1 s, store ok 30.4 s, cmd/listener ok 412.8 s (with #2592's api_test/main_test soft-claim tests, unmodified), outbox ok 264.8 s, cmd/dispatch multiprocess ok 816.6 s; zero '--- FAIL' lines; GitHub MERGEABLE at 1b15f353.",
+      "headSha": "1b15f353a747d01eaf3505a5bd42c8420b123453",
+      "negativeControl": "Before the merge, git merge-tree of 7455fe29 with main reported 'CONFLICT (content)' in packages/envoy/cmd/listener/api.go and role_holder.go, and GitHub showed the head CONFLICTING."
     }
   ],
   "filesChanged": [
