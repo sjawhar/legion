@@ -591,6 +591,18 @@ FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a
 # nothing under the root-owned /var/run, so the image makes them. The controller's pod mounts its
 # volumes over the same paths, as it always has. The final step refuses an image where any is not
 # root's or is not empty.
+# /etc/apt/preferences.d/pgdg holds apt.postgresql.org to the PostgreSQL packages. That suite
+# rebuilds packages trixie also carries, and without a pin its versions would win on candidate
+# order for anything the two archives share, so a server upgrade could quietly pull a different
+# libssl or ca-certificates into the fleet's image. Everything from that origin is priority 100,
+# below the 500 a Debian suite gets, and `postgresql*` and libpq5 are 600: the server, the client,
+# postgresql-common and the pgvector extension come from pgdg, libpq5 with them because 18's client
+# needs a newer one than trixie ships, and every other package stays Debian's.
+# The RUN also deletes /etc/ssl/private/ssl-cert-snakeoil.key and its certificate. postgresql-common
+# depends on ssl-cert, whose postinst generates that self-signed pair at install time; this image is
+# public, so it must carry no private key, and nothing here serves TLS from one — the pod's cluster
+# listens on loopback with ssl off. The `find … -xtype l -delete` clears the hash link the
+# certificate left behind in the trust directory, which would otherwise dangle.
 ARG PGDG_KEY_SHA256
 # hadolint ignore=DL3008
 RUN install -d -m 0755 /etc/apt/keyrings \
@@ -601,9 +613,14 @@ RUN install -d -m 0755 /etc/apt/keyrings \
     && rm -f /tmp/pgdg-key.sha256 \
     && echo 'deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main' \
       > /etc/apt/sources.list.d/pgdg.list \
+    && printf '%s\n' 'Package: *' 'Pin: origin apt.postgresql.org' 'Pin-Priority: 100' '' \
+      'Package: postgresql* libpq5' 'Pin: origin apt.postgresql.org' 'Pin-Priority: 600' \
+      > /etc/apt/preferences.d/pgdg \
     && apt-get update \
     && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-18 postgresql-18-pgvector postgresql-client python3 python3-yaml redis-tools socat sqlite3 util-linux wget \
     && rm -rf /var/lib/apt/lists/* /var/lib/postgresql /etc/postgresql \
+      /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem \
+    && find /etc/ssl/certs -xtype l -delete \
     && chmod u-s /usr/lib/openssh/ssh-keysign \
     && chmod g-s /usr/bin/ssh-agent \
     && groupadd --gid 1000 legion \

@@ -185,14 +185,19 @@ start() {
 	# huge_pages and dynamic_shared_memory_type are the pod's: gVisor serves no huge pages, and
 	# each role mounts its own 64 MiB /dev/shm, too small for the posix segments the default
 	# picks. jit off keeps LLVM out of a test's plan times. The WAL settings bound the cluster's
-	# share of the pod's 10Gi ephemeral-storage limit, which every role is evicted over:
-	# wal_level=minimal writes no WAL for a table built in the transaction that made it (and
-	# needs max_wal_senders=0, since no walsender can serve that level), max_wal_size=1GB is the
-	# checkpoint distance that caps the recycled segments, min_wal_size=80MB keeps the floor at
-	# five segments rather than the 1GB default's worth, and wal_keep_size=0 retains nothing for
-	# a replica this cluster will never have.
+	# share of the pod's 10Gi ephemeral-storage limit, which the kubelet evicts all six roles
+	# over, and each is below its default: wal_level=minimal writes no WAL at all for a table
+	# built, copied into or rewritten in the transaction that made it, which is most of what a
+	# suite's fixture does (and it needs max_wal_senders=0, since no walsender can serve that
+	# level, and no replication slot can exist to pin segments); max_wal_size=512MB halves the
+	# checkpoint distance, and with it the recycled segments a long run settles at;
+	# min_wal_size=64MB lets the floor fall to four segments between runs; and wal_keep_size=0
+	# retains nothing for a replica this cluster will never have. Measured on 18: a database
+	# grown to 985 MB, updated across a third of its rows, VACUUM FULLed and dropped left the
+	# data directory at 1.1 GB with the defaults and at 425 MB with these.
+	# shellcheck disable=SC2094 # pg_ctl writes $log through --log and this append; it reads none
 	"$bin/pg_ctl" --pgdata "$data" --log "$log" --wait --timeout 120 \
-		--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB -c huge_pages=off -c dynamic_shared_memory_type=mmap -c jit=off -c wal_level=minimal -c max_wal_senders=0 -c max_wal_size=1GB -c min_wal_size=80MB -c wal_keep_size=0" \
+		--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB -c huge_pages=off -c dynamic_shared_memory_type=mmap -c jit=off -c wal_level=minimal -c max_wal_senders=0 -c max_wal_size=512MB -c min_wal_size=64MB -c wal_keep_size=0" \
 		start >> "$log" 2>&1 ||
 		die "pg_ctl start failed; $log holds its output"
 	# vector in template1 reaches every database a test makes from it, so a suite that needs
