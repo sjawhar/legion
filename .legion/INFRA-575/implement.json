@@ -2,53 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-575",
-  "completed": "2026-10-31T00:20:00Z",
-  "round": 3,
+  "completed": "2026-10-31T00:30:00Z",
+  "round": 4,
   "answersTestFailures": [
-    "The only failure of .legion/INFRA-575/test.json round 2: the `docs / build` job of CI run 41128214713 failed, and `ci-ok` with it, because four documentation screenshots open the Inbox at the desktop viewport and waited for a question's card in the list - which from 1280 px is a short row, the card having moved into the reading column, and for an approval request there is no card in the column at all. All four are taken again against the Inbox this change ships, and the pages that embed them say what a reader now sees."
+    "The only failure of .legion/INFRA-575/test.json round 3: no GitHub Actions run existed for round 3's commits, so what CI said about this pull request was still round 2's red `docs / build`. The cause was this role's push, not the change: round 3's docs commit de8b7ea3 and its handoff commit 6ad7ca1f reached origin in one push whose head ends `skip-checks: true`, and GitHub starts no workflow run for such a head. No code or documentation changed this round; the fix is the push."
   ],
   "proof": [
     {
-      "criterion": "The four documentation shots the `docs / build` job takes are taken again and pass: dispatch/inbox, dispatch/ask-card, dispatch/shortcuts and legion/spec-approval.",
-      "surface": "The documentation media harness - the same built SPA and real Go server the e2e suite runs, seeded with the example workspace and captured in a real Chromium (docs/site/media/README.md).",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web, then DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_implementer_docs?sslmode=disable bun docs/site/media/shots.ts",
-      "observed": "Every shot of both sets taken, no failure line, exit 0: dispatch/inbox, ask-card, issue-spec, margin-thread, board, agents, broadcast, broadcast-result, palette, shortcuts, inbox-phone, delivery-measures, pipeline, and legion/handover, admitted, decision-block, spec-approval, status-events, pull-request, ready, signed-off, daily-report. I looked at the two that changed most: dispatch/inbox.png is the two columns - three short rows with their Decision and Question badges under Waiting on you, Later (1) folded, the CORE-1 decision row selected, and on the right the head (CORE-1, Open page, P1, Snooze, Skip to the answer) over the Local testing workflow document with the Which sign-in path? decision block drawn in it; legion/spec-approval.png is the SHOP-1 approval row selected in the list and, in the column, Awaiting approval with Approve and Request changes at the head, then Version 3 and the spec below.",
-      "headSha": "de8b7ea325de4f10a18aa134eba6ca61900452a4",
-      "negativeControl": "The tester's own control for this failure stands: the same command on a clean export of main (ecbc2c8f, /legion/scratch/tmp/main-docs) takes all three dispatch shots, so the failure was this change's; and at the previous head the run failed `4 shot(s) failed` with `getByRole('article', { name: 'Urgency: Blocking' })` not found. The shots that were green before are green now, which is the control in the other direction: the set is run whole, not only the four."
+      "criterion": "A GitHub Actions run exists for the head the reviewer reads, so CI judges this pull request's current code - the docs fix of round 3 included.",
+      "surface": "GitHub Actions on sjawhar/legion, at this round's head.",
+      "command": "gh api 'repos/sjawhar/legion/actions/runs?head_sha=<this head>' --jq .total_count, and gh pr checks 2549 --repo sjawhar/legion",
+      "observed": "RECORDED_AT_PUSH: the run created for this round's head, named in the pull request body and in the completion report. Before the push: `actions/runs?head_sha=de8b7ea325de…` -> total_count 0, `?head_sha=6ad7ca1f…` -> 0, `commits/6ad7ca1f…/check-suites` -> 0, and the newest run on this branch was 41128214713 at the round-2 code head 93c4ab64, whose `docs / build` failed.",
+      "headSha": "RECORDED_AT_PUSH",
+      "negativeControl": "Round 2 is the control that the trailer is what stopped the run, not the branch or the repository: its code head 93c4ab64 was pushed alone, before its trailered handoff 232b6c25, and CI ran (run 41128214713, every lane but `docs / build` green). Round 3 changed only the shape of the push and the run disappeared."
     },
     {
-      "criterion": "The documentation site still builds, and its prose no longer describes an Inbox the product does not have.",
-      "surface": "The Astro site build the `docs` job runs after the shots, over the pages that embed those images.",
-      "command": "cd docs/site && bun run typecheck && bun run build, and bunx biome check docs/ and bash .github/scripts/check-private-names.sh from the repository root",
-      "observed": "typecheck clean; `43 page(s) built in 9.69s`, `All internal links are valid.`; biome `Checked 40 files in 15s. No fixes applied.`; check-private-names: `no file or path names the private deployment repository or the company … (6652 files)`.",
+      "criterion": "The documentation lane's own work passes at this head, which is what the run has to confirm.",
+      "surface": "The documentation media harness and the Astro site build, run here as the `docs` job runs them.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web, then DATABASE_URL=<this role's docs lane> bun docs/site/media/shots.ts, then cd docs/site && bun run build",
+      "observed": "Round 3's run of exactly these commands at this same code: every shot of both sets taken, no failure, exit 0; `43 page(s) built`, `All internal links are valid.`; biome over docs/ clean; check-private-names clean. Nothing of the tree changed since, so the lane's inputs are byte for byte what passed.",
       "headSha": "de8b7ea325de4f10a18aa134eba6ca61900452a4",
-      "negativeControl": "The site build reads every embed's path, so a shot renamed or not taken fails it with a missing asset; the four images are written under docs/site/public/media/ by the run above, which is what the build then reads."
-    },
-    {
-      "criterion": "Nothing of the product changed this round, so the browser proof the tester verified at the previous head still describes this one.",
-      "surface": "The branch's own diff.",
-      "command": "jj diff --from 232b6c25dccf --to de8b7ea3 --stat",
-      "observed": "Nine files: .legion/INFRA-575/test.json (the tester's handoff) and eight under docs/. Nothing under packages/. So the tester's round-2 verification stands unchanged: e2e/inbox-reading-pane.e2e.ts 8 passed, the whole chromium project 932 passed / 25 skipped / 1 failed, that one failure main's own.",
-      "headSha": "de8b7ea325de4f10a18aa134eba6ca61900452a4",
-      "negativeControl": "The claim is the diff itself: a file under packages/ in that listing would refute it."
+      "negativeControl": "At the round-2 head the same command failed `4 shot(s) failed` with `getByRole('article', { name: 'Urgency: Blocking' })` not found, which is the failure round 3 fixed."
     }
   ],
   "filesChanged": [
-    "docs/site/media/shots.config.ts - inboxReady split into inboxPaneReady (the list, the column and one selected row) and inboxCardsReady (no column, the card in the row); the inbox shot selects the decision row and waits for its document in the column; the ask-card shot takes its own width below 1280 px, where the card is still in the row; the shortcuts shot waits for the pane behind its overlay",
-    "docs/site/media/legion/shots.config.ts - the spec-approval shot opens the Inbox at ?item=<the approval ask> and waits for Approve and Request changes in the column's head and the version below them",
-    "docs/site/media/shot-runner.ts and docs/site/media/README.md - a Shot may name its own size, which newViewerContext already honoured",
-    "docs/site/src/content/docs/dispatch/inbox-and-asks.md - a section for the two columns and what each kind of question opens as, the selection and the keys, the address, and what happens when the server drops a question; the narrow page and the drawer named as unchanged",
-    "docs/site/src/content/docs/dispatch/keyboard.md, dispatch/index.md, legion/walkthrough.md - the keys against the selected row, and the two embeds' alt text"
+    "None. This round changes no file of the product, the tests or the documentation: .legion/INFRA-575/implement.json is this handoff."
   ],
   "trickyParts": [
-    "The docs shots run on a database of their own: this role used dispatch_implementer_docs, never the tester's dispatch_tester_docs, since the harness truncates what it is given. packages/dispatch's web build must be current (bun run build:web) or the shots capture the previous head's page.",
-    "The approval shot shows no change marks, and says so: the example journey approves nothing of that spec before the request, so there is no baseline to mark against and the pane draws neither marks nor Next change. The conditional is stated in the Inbox page's prose rather than claimed by the picture."
+    "This round's handoff push deliberately carries NO `skip-checks: true` line, though it touches only `.legion/INFRA-575/`. The line exists so GitHub starts no run for a handoff push and the daemon carries the code head's verdict to it (skill://legion-worker/references/skip-checks-trailer.md). Here the code head carries no verdict at all - no run was ever created for de8b7ea3 - so there is nothing to carry, and a trailered push would leave the pull request with no CI for a third round. Retro's push is the rule's own precedent for omitting the line when the head must have checks: 'a base that requires a check will not merge a head whose checks never ran'. The daemon classifies a push by the paths its commits touch and never by the trailer, so this is still a handoff push to it; the only difference is that GitHub now runs the lanes on the head the reviewer reads, which is better than a verdict carried from an ancestor. The architect sanctioned a head without the trailer for this round.",
+    "The rule this round breaks for me, so the next role does not repeat it: a push that carries a code commit and a trailered handoff commit TOGETHER gets no run at all, because GitHub reads only the head's message. Push the code first, on its own, and the handoff after it - which is what round 2 did and round 3 did not."
   ],
-  "deviations": [],
+  "deviations": [
+    "No `skip-checks: true` on a handoff-only push, for the reason above."
+  ],
   "openQuestions": [
-    "e2e/hover-preview.e2e.ts:87 is still red in the pod's whole-project run and is still main's, not this change's: it reproduces on a clean export of main with nothing of this branch in the tree, and CI's own `dispatch` lane passed at this head. It is with the controller (dispatch://INFRA-49/comment/19bce48d-5646-46d4-968a-5afdeb025fce) and the session fixing it has this pod's pw:api log."
+    "e2e/hover-preview.e2e.ts:87, the one red row of this pod's whole-project run, is main's and is now FIXED on main by sjawhar/legion#2581 at df771175. I confirmed that fix in this pod at the fixing session's request, on a clean export of df771175 outside the workspace: the row five times (5 passed, about 4.5 s each, where it used to time out at 30 s) and the whole spec once (4 passed, 1 skipped). The architect has ruled against an extra forward merge to pick it up, since CI's own `dispatch` lane passed that row at our head; the pull request body keeps one line naming the row as main's and fixed above us. Note for the merger: sjawhar/legion has no merge queue (GitHub refused one, HTTP 422: a queue needs an organization-owned repository) and 'require branches to be up to date' is off, so this pull request merges on its own head's required checks and will not carry df771175 at the merge."
   ],
   "discoveredComplexity": [
-    "The documentation shots are part of this change's acceptance in practice: they are taken from the running app by the `docs` job, so a page the change redraws stops them, and `ci-ok` fails with them. Nothing in the plan named them."
+    "Two rounds of this issue were spent on what CI did or did not judge rather than on the change: round 2's forward merge (a conflicting pull request gets no merge ref and no `on: pull_request` run at all) and round 4's push shape (a head carrying the trailer gets no run either). Both are stated in skill://legion-worker/references/skip-checks-trailer.md; neither is visible from the branch itself, only from GitHub."
   ]
 }
