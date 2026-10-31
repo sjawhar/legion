@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-593",
-  "completed": "2026-10-31T10:22:00Z",
-  "round": 14,
-  "headTested": "be665c15029c6fcdd9895719a71283e291f39bdb",
-  "prHead": "c76ee972959804b5d6e97baae3b4ec8f54b7f38e",
-  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-14-txt",
-  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-14-tar-gz",
+  "completed": "2026-10-31T17:00:00Z",
+  "round": 15,
+  "headTested": "6bc39af6e5ddde93cc87659549136006300aaf61",
+  "prHead": "8707ee2bc3b90804e3018a5ffea58f2387c5fda6",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-15-txt",
+  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-15-tar-gz",
   "previousRounds": [
     "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
@@ -21,82 +21,59 @@
     "dispatch://INFRA-593/artifact/infra-593-tester-round-10-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-11-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-12-txt",
-    "dispatch://INFRA-593/artifact/infra-593-tester-round-13-txt"
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-13-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-14-txt"
   ],
   "roundShape": {
     "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3",
-    "oldHead": "eb992560d00799f117f86275ac233bc9bd368149",
-    "newHead": "be665c15029c6fcdd9895719a71283e291f39bdb",
+    "oldHead": "be665c15029c6fcdd9895719a71283e291f39bdb",
+    "newHead": "6bc39af6e5ddde93cc87659549136006300aaf61",
     "differs": [
-      "packages/envoy/.changes/unreleased/INFRA-593-document-load-and-compaction.yaml",
       "packages/envoy/.changes/unreleased/pr2444-document-load-and-compaction.yaml",
-      "packages/envoy/AGENTS.md",
       "packages/envoy/go.mod",
       "packages/envoy/go.sum",
-      "packages/envoy/internal/dispatch/docs/livewrite.go",
-      "packages/envoy/internal/dispatch/docs/mutation.go",
-      "packages/envoy/internal/dispatch/docs/tree.go",
       "packages/envoy/internal/dispatch/docs/websocket.go"
     ],
     "equalOnlyAfterMigrationNormalisation": [],
-    "round": "full (ygo pin moved to v1.54.1-sami.1; the four docs .go files changed in comments only)"
+    "round": "full, on the architect's call (runtime conflict in docs/service.go); service.go's own PR diff is byte-identical across the merge, main's keepAlive removal kept, websocket.go's own diff differs by a re-wrapped comment, go.mod/go.sum leave the PR's diff (main pins the tag)"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "go.sum's h1 lines equal sum.golang.org's; the four tests pass 300/300 under -race at the tag; the ygo changes it names (#356, #357, #343) driven on the real binary against the rc a23bc871 control; the held scenarios re-run."
+    "how": "Read the service.go resolution (PR's own diff unchanged, keepAlive gone on both sides); re-ran the four tests 300x each under -race, round 14's real-binary checks and the held scenarios on envoy-dispatch built from 6bc39af6."
   },
   "failed": 0,
   "failures": [],
   "memory": {
     "cap": "go test -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, -race one package at a time",
-    "sampledPeaksGiB": {
-      "refused": 2.93,
-      "foldReason": 2.71,
-      "parked": 2.49,
-      "history": 2.71
-    },
-    "samples": {
-      "refused": 97,
-      "foldReason": 5,
-      "parked": 81,
-      "history": 72
-    },
-    "note": "sampled peaks of /sys/fs/cgroup/memory/memory.usage_in_bytes every 2 s, floors; no sampler loop was left running (ps)"
+    "sampler": "named job mem-sampler-infra-593, bounded at 600 samples, stopped via proc://mem-sampler-infra-593/kill",
+    "samples": 247,
+    "sampledPeakGiB": 3.72
   },
   "proof": [
     {
-      "criterion": "Architect check 1: go.sum's h1 for the tag matches sum.golang.org.",
-      "surface": "packages/envoy/go.sum at be665c15; sum.golang.org; GitHub's tag object",
-      "command": "grep sjawhar/ygo go.sum; curl https://sum.golang.org/lookup/github.com/sjawhar/ygo@v1.54.1-sami.1; gh api repos/sjawhar/ygo/git/ref/tags/v1.54.1-sami.1 and git/tags/<sha>",
-      "observed": "Both lines equal: h1:71YqsDIb1u2SUwUlANY/YkhqZ/t+hhrQVuXO+CyxCwU= and /go.mod h1:LpzEyyGErwVVVLNB+8rZfVy/zbZbhWjdkONAobCIlYA= (sum.golang.org record 70519256). The tag is an annotated tag object 1d92267b for commit 8dae657d, verified=true reason=valid.",
-      "headSha": "be665c15029c6fcdd9895719a71283e291f39bdb",
-      "negativeControl": "A mismatched h1 would fail go's own verification against GOSUMDB at build; the build at be665c15 succeeded with the default GOSUMDB."
+      "criterion": "Architect check 2: a22f0f29, 7c35d610, the parked and history tests 300 times each under -race at the merged head.",
+      "surface": "internal/dispatch/docs at 6bc39af6 against Postgres 16.2",
+      "command": "GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -race -p 1 -count=300 ./internal/dispatch/docs -run '^<test>$', one test at a time",
+      "observed": "300 PASS, 0 FAIL, 0 DATA RACE for each of the four; sampled peak 3.72 GiB of 19 over 247 samples.",
+      "headSha": "6bc39af6e5ddde93cc87659549136006300aaf61",
+      "negativeControl": "a22f0f29 fails on sami.7/sami.9 and 7c35d610 with fold.go reverted (rounds 12-13)."
     },
     {
-      "criterion": "Architect check 2: a22f0f29, 7c35d610 and the parked and history tests 300 times each under -race at the tag.",
-      "surface": "internal/dispatch/docs at be665c15 against Postgres 16.2",
-      "command": "GOMAXPROCS=4 GOMEMLIMIT=12GiB go test -race -p 1 -count=300 ./internal/dispatch/docs -run '^<test>$', one test at a time, with the bounded sampler",
-      "observed": "300 PASS, 0 FAIL, 0 DATA RACE for each of the four; sampled peaks 2.93, 2.71, 2.49, 2.71 GiB of 19.",
-      "headSha": "be665c15029c6fcdd9895719a71283e291f39bdb",
-      "negativeControl": "a22f0f29 fails on sami.7 and sami.9 and 7c35d610 with fold.go reverted (rounds 12 and 13)."
+      "criterion": "Architect check 3: #357, #356, #343 across a SIGTERM, and an unfoldable log logged once, on the real binary.",
+      "surface": "envoy-dispatch 6bc39af6 (ygo v1.54.1-sami.1) and the rc control eb992560 (a23bc871), real processes on Postgres 16.2, three browser-style peers and a reconnecting typing client on the document websocket",
+      "command": "bash scenM.sh (head, rc); SHAPE=clock|client bash scenN.sh; MODE=sigterm bash scenK.sh (and NO_RESEND=1); CUTTER=<finder> bash scenD.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-15-tar-gz)",
+      "observed": "#357: the watcher parks the relayed 'xy', ends at 'ok / Zxy / Seed paragraph.', equal to the live and the cold read after a restart. #356: a row at clock 2^53 or client 2^55 -> 503 on GET /text and the socket, logged once as 'crdt: invalid update'. #343: 1,500 of 1,500 keystrokes stored in order through two SIGTERMs. Unfoldable log (reasonless cut): 'apply a stored document update: crdt: invalid update' once on each line, rows left as stored.",
+      "headSha": "6bc39af6e5ddde93cc87659549136006300aaf61",
+      "negativeControl": "rc a23bc871: the watcher parks 0 and ends at 'ok / Z / ...' while room and store read 'ok / Zxy / ...'. Resend off: 521 of 1,500 stored, 979 missing."
     },
     {
-      "criterion": "Architect check 3: #357 relays a partly applied peer update's committed and parked parts to the peers and the store; #356 refuses a stored document past the bounds at load and Dispatch's ids never reach them; #343's resend holds across a SIGTERM.",
-      "surface": "envoy-dispatch be665c15 (tag) and eb992560 (rc a23bc871), real processes on Postgres 16.2, three browser-style peers on the document websocket (t593partial), a reconnecting typing client (t593typer)",
-      "command": "SIDE=head|r13 bash scenM.sh; SIDE=head|r13 SHAPE=clock|client bash scenN.sh; SIDE=head MODE=sigterm bash scenK.sh x3 (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-14-tar-gz)",
-      "observed": "#357 tag: the watcher parks the relayed 'xy' after the partly applied update (editor statuses [1 0]), then reads 'ok / Zxy / Seed paragraph.'; live and cold reads after a restart equal it. #356 tag: a row at clock 2^53 or client 2^55 makes GET /text answer 503 DOC_SERVICE_UNAVAILABLE and the socket 503, logged once as 'crdt: invalid update'; Dispatch forks use crdt.NewClientID (uint32) and refuse a fork past 2^20 clocks. #343 tag: 1,500 of 1,500 keystrokes stored in order through two SIGTERMs, 3 of 3 runs.",
-      "headSha": "be665c15029c6fcdd9895719a71283e291f39bdb",
-      "negativeControl": "rc a23bc871: the watcher parks 0 and ends at 'ok / Z / Seed paragraph.' while the room and the store read 'ok / Zxy / ...' (cold read differs from the watcher); the out-of-bound rows load (200, socket 101). The typing client with its resend off: 517 of 1,500 stored, 983 missing."
-    },
-    {
-      "criterion": "Architect check 4: round 12/13's held scenarios once at the tag.",
-      "surface": "envoy-dispatch main 21b40359 and head be665c15, real processes on Postgres 16.2, HTTP API",
-      "command": "bash scenU4.sh; CUTTER=<reasonless-cut finder> bash scenD.sh; bash scenC2.sh",
-      "observed": "Upgrade through 0150 (schema 150): start sweep candidates=4 compacted=4 rows_deleted=31, none unnamed; rolling update with main killed: head's queue folded main's document 120 s after a read. Unfoldable log (row 10 cut at 2,541 of 4,123 bytes where ygo gives no reason): both lines 'apply a stored document update: crdt: invalid update', once; rows left as stored. 12 writers during a sweep: every text exact, 12 owed, no ERROR. go build ./... and go vet ./... clean.",
-      "headSha": "be665c15029c6fcdd9895719a71283e291f39bdb",
+      "criterion": "Architect check 4: the held scenarios once.",
+      "surface": "envoy-dispatch main 290625b7 and head 6bc39af6, real processes on Postgres 16.2, HTTP API",
+      "command": "bash scenU4.sh; bash scenC2.sh",
+      "observed": "Upgrade through 0150 (schema 150): start sweep candidates=4 compacted=4 rows_deleted=31, none unnamed; rolling update with main killed: head's queue folded main's document 121 s after a read. 12 writers during a sweep: every text exact, 12 owed, no ERROR. go build ./... and go vet ./... clean.",
+      "headSha": "6bc39af6e5ddde93cc87659549136006300aaf61",
       "negativeControl": "Main's upload is the case doc_compaction_owed misses; only head's queue, through a read, folded it."
     }
   ],
-  "ci": "Read on GitHub at be665c15, 10:18 UTC: run 41189788585 (CI) queued; its only check run, changes, queued; pr-title one cancelled, one queued. Every lane unread: lint, typecheck, test, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-go-race-docs, ci-ok and the rest.",
-  "discarded": "Four typing runs this turn ran before the typing client was built (a cp in my setup chain failed): they typed nothing and are not evidence."
+  "ci": "Read on GitHub at 6bc39af6, run 41217194819 (created 15:56Z), 16:56 UTC: changes, lint, pr-title, docs/build success; typecheck and nine other lanes skipped by the change filter; test and worker-image/build in progress; dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-docs, envoy-infra-go, envoy-session-stall, envoy-smoke, listener-server-change, ci-filters and pi-legion queued; ci-ok not posted. All of those unread."
 }
