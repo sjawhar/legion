@@ -271,6 +271,15 @@ func (m *Machine) vmAllowed(account, service, host string) bool {
 	return err == nil && matched
 }
 
+// vmRemoved reports whether e is a vm enrollment its fleet no longer allows (vmAllowed): such a VM
+// has no identity left, so Create treats it as an enrollment that is not live (pgx.ErrNoRows),
+// Values releases nothing to it (ErrGrantNotLive), and ApplyDecision's approval of its pending
+// request grants nothing, as for an ended session. enroll.Service.Lookup already refuses its
+// session proofs; this keeps the decision and the release refused whatever calls them.
+func (m *Machine) vmRemoved(e enrollmentRow) bool {
+	return e.Kind == "vm" && (e.Subject == nil || e.Service == nil || !m.vmAllowed(*e.Subject, *e.Service, deref(e.Host)))
+}
+
 // Create verifies the request object (record.VerifyRequestObject, jti replay through the Replay
 // seam), requires iss to be this enrollment's own key and no login_hint (session requests never
 // name their own approver — that's the policy's job), rereads each name the live policy does not
@@ -707,8 +716,10 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	next, detail := "denied", ""
 	if approve {
 		event = "approved"
-		if live {
+		if live && !m.vmRemoved(enr) {
 			next = "granted"
+		} else if live {
+			detail = "the requesting VM is no longer one its fleet's settings allow"
 		} else {
 			detail = "the requesting enrollment is no longer live"
 		}
@@ -966,13 +977,17 @@ func mayRevoke(login string, approver, operator *string) (allowed, asOperator bo
 	return false, false
 }
 
-// enrollment reads a live enrollment (not revoked, lease not lapsed); pgx.ErrNoRows otherwise.
+// enrollment reads a live enrollment (not revoked, lease not lapsed, and, for a VM, one its fleet
+// still allows: vmRemoved); pgx.ErrNoRows otherwise.
 func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, error) {
 	var e enrollmentRow
 	err := m.Store.Pool.QueryRow(ctx, `select e.id, e.kind, e.operator, c.service, c.host, e.subject, e.thumbprint, e.runtime_id, e.slot from enrollments e
 		left join launcher_credentials c on c.id = e.launcher_credential_id
 		where e.id=$1 and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at)`, id).
 		Scan(&e.ID, &e.Kind, &e.Operator, &e.Service, &e.Host, &e.Subject, &e.Thumbprint, &e.RuntimeID, &e.Slot)
+	if err == nil && m.vmRemoved(e) {
+		return enrollmentRow{}, pgx.ErrNoRows
+	}
 	return e, err
 }
 

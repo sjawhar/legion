@@ -1102,17 +1102,31 @@ func endCredential(ctx context.Context, tx pgx.Tx, id, host string, service *str
 // Postgres, whose uuid column would otherwise reject it with a type-mismatch error (SQLSTATE
 // 22P02) that propagates out as a Lookup error instead of ("", false, nil), which
 // proof.Verifier.Verify would in turn surface as a 500 instead of the 401 a forged eid deserves.
+// A vm enrollment is live only while its fleet still allows the VM (tokenLoginListed over its
+// runtime id, its credential's service and host): once an operator narrows the fleet's account,
+// project or instance names past it, the VM has no session identity at all, so every call it signs
+// — a request, a release, a grant reuse, a renewal — is refused as an ended session's is, while
+// its row waits for its lease to lapse.
 func (s *Service) Lookup(ctx context.Context, id string) (string, bool, error) {
 	if _, err := uuid.Parse(id); err != nil {
 		return "", false, nil
 	}
-	var thumbprint string
+	var thumbprint, kind, runtimeID string
+	var service, host *string
 	var live bool
-	err := s.Store.Pool.QueryRow(ctx, `select thumbprint, revoked_at is null and enrollment_lease_live(lease_expires_at) from enrollments where id=$1`, id).Scan(&thumbprint, &live)
+	err := s.Store.Pool.QueryRow(ctx, `select e.thumbprint, e.revoked_at is null and enrollment_lease_live(e.lease_expires_at), e.kind, e.runtime_id, c.service, c.host
+		from enrollments e left join launcher_credentials c on c.id = e.launcher_credential_id where e.id=$1`, id).
+		Scan(&thumbprint, &live, &kind, &runtimeID, &service, &host)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
-	return thumbprint, live, err
+	if err != nil {
+		return "", false, err
+	}
+	if kind == "vm" && (service == nil || host == nil || !s.tokenLoginListed(runtimeID, *service, *host)) {
+		live = false
+	}
+	return thumbprint, live, nil
 }
 
 // Get answers this enrollment's own metadata (kind, operator, slot, lease expiry) for

@@ -382,7 +382,13 @@ func TestANarrowedFleetEndsAnEnrolledVMAtItsNextRenewal(t *testing.T) {
 			one := vm(vmTokenZone, "1001")
 			cred := r.login(t, one)
 			enr := r.enroll(t, cred, one)
+			if _, live, err := r.svc.Lookup(ctx, enr.ID.String()); err != nil || !live {
+				t.Fatalf("Lookup(the fleet's VM) before narrowing: live = %v, %v; want live", live, err)
+			}
 			narrow(r.svc)
+			if _, live, err := r.svc.Lookup(ctx, enr.ID.String()); err != nil || live {
+				t.Fatalf("Lookup after %s: live = %v, %v; want not live, the VM has no identity", name, live, err)
+			}
 			var before time.Time
 			if err := r.svc.Store.Pool.QueryRow(ctx, `select lease_expires_at from enrollments where id = $1`, enr.ID).Scan(&before); err != nil {
 				t.Fatal(err)

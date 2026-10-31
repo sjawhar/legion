@@ -74,7 +74,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 	if owner != enrollmentID {
 		return nil, nil, ErrNotYours
 	}
-	if !live {
+	if !live || m.vmRemoved(enr) {
 		return nil, nil, ErrGrantNotLive
 	}
 	if err := m.VerifyChain(ctx, grantID); err != nil {

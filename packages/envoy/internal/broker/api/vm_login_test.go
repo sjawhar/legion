@@ -464,44 +464,118 @@ func TestAVMRenewsOnlyWithItsCurrentToken(t *testing.T) {
 	}
 }
 
-// TestANarrowedFleetStopsAnEnrolledVMAtOnce: once the fleet's project or instance names are changed
-// so that an enrolled VM is no longer one of them, the VM's existing grant of FLEET_KEY releases
-// nothing, its next request for it is denied, its renewal with its own current token is 403
-// VM_NOT_LISTED, and its launcher credential no longer enrolls: all while its lease is still live.
-func TestANarrowedFleetStopsAnEnrolledVMAtOnce(t *testing.T) {
-	for name, narrow := range map[string]func(*vmServer){
-		"another project":       func(ts *vmServer) { ts.projects[fleetAccount] = "example-other-project" },
-		"another instance glob": func(ts *vmServer) { ts.instances[fleetAccount] = "other-vm-*" },
-	} {
+// narrowings are the two ways an operator narrows a fleet past an enrolled VM: another project,
+// and an instance-name glob its name no longer matches. Each edits the broker's live settings as
+// changing them and redeploying does.
+var narrowings = map[string]func(*vmServer){
+	"another project":       func(ts *vmServer) { ts.projects[fleetAccount] = "example-other-project" },
+	"another instance glob": func(ts *vmServer) { ts.instances[fleetAccount] = "other-vm-*" },
+}
+
+// askAs posts a request for names as the VM's session and answers the status and body.
+func (ts *vmServer) askAs(t *testing.T, key *ecdsa.PrivateKey, enrollmentID string, names ...string) (int, []byte) {
+	t.Helper()
+	return ts.session(t, key, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": signAgentSecretRequest(t, key, ts.URL, "git fetch", names...), "session_id": nil})
+}
+
+// TestANarrowedVMReleasesNoGrantItHolds: a fleet VM holds live grants of WORKER_TOKEN (shared,
+// agent tier) and of FLEET_KEY (its service's); once the fleet is narrowed past it, releasing
+// either is refused 401: the VM has no session identity left, whichever secret the grant holds.
+func TestANarrowedVMReleasesNoGrantItHolds(t *testing.T) {
+	for name, narrow := range narrowings {
+		t.Run(name, func(t *testing.T) {
+			ts := newVMTestServer(t)
+			_, _, enrollmentID, key := ts.enrolled(t, member("example-zone-a", "1001"))
+			var grants []string
+			for _, secret := range []string{"WORKER_TOKEN", "FLEET_KEY"} {
+				status, body := ts.askAs(t, key, enrollmentID, secret)
+				granted := decode[wireCreateRequestResponse](t, body)
+				if status != http.StatusOK || granted.State != "granted" || granted.GrantID == nil {
+					t.Fatalf("the fleet's VM asking for %s = %d %s, want granted", secret, status, body)
+				}
+				grants = append(grants, *granted.GrantID)
+			}
+			narrow(ts)
+			for _, grant := range grants {
+				if status, body := ts.session(t, key, enrollmentID, http.MethodPost, "/v1/grants/"+grant+"/values", nil); status != http.StatusUnauthorized {
+					t.Fatalf("releasing grant %s after the fleet was narrowed to %s = %d %s, want 401", grant, name, status, body)
+				}
+			}
+		})
+	}
+}
+
+// TestANarrowedVMOpensNoRequest: once the fleet is narrowed past an enrolled VM, a new request is
+// refused 401 whatever it asks for: SHARED_KEY (shared, human tier, which would open a record
+// anyone may approve), WORKER_TOKEN (shared, agent tier) and FLEET_KEY (its service's). No request
+// row and no record is written.
+func TestANarrowedVMOpensNoRequest(t *testing.T) {
+	for name, narrow := range narrowings {
+		t.Run(name, func(t *testing.T) {
+			ts := newVMTestServer(t)
+			_, _, enrollmentID, key := ts.enrolled(t, member("example-zone-a", "1001"))
+			narrow(ts)
+			for _, secret := range []string{"SHARED_KEY", "WORKER_TOKEN", "FLEET_KEY"} {
+				if status, body := ts.askAs(t, key, enrollmentID, secret); status != http.StatusUnauthorized {
+					t.Fatalf("the VM asking for %s after the fleet was narrowed to %s = %d %s, want 401", secret, name, status, body)
+				}
+			}
+			if got := ts.column(t, `select count(*)::text from requests where enrollment_id = $1`, enrollmentID); !slices.Equal(got, []string{"0"}) {
+				t.Fatalf("requests of the narrowed VM = %v, want none", got)
+			}
+		})
+	}
+}
+
+// TestANarrowedVMsPendingRequestGrantsNothingWhenApproved: a fleet VM's request for DEEL_API_KEY
+// (a person's, human tier) waits on that person; once the fleet is narrowed past the VM, the
+// person's approval grants nothing: the request ends denied, naming why, with no grant, as a
+// request of a session that ended does.
+func TestANarrowedVMsPendingRequestGrantsNothingWhenApproved(t *testing.T) {
+	for name, narrow := range narrowings {
+		t.Run(name, func(t *testing.T) {
+			ts := newVMTestServer(t)
+			_, _, enrollmentID, key := ts.enrolled(t, member("example-zone-a", "1001"))
+			status, body := ts.askAs(t, key, enrollmentID, "DEEL_API_KEY")
+			pending := decode[wireCreateRequestResponse](t, body)
+			if status != http.StatusOK || pending.State != "pending" || pending.RecordID == nil {
+				t.Fatalf("the fleet's VM asking for DEEL_API_KEY = %d %s, want pending on a record", status, body)
+			}
+			narrow(ts)
+			status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+*pending.RecordID+"/approve", map[string]any{"approver": testApprover})
+			if approved := decode[wireCreateRequestResponse](t, body); approved.GrantID != nil || approved.State == "granted" {
+				t.Fatalf("approving the narrowed VM's request (%s) = %d %s, want no grant", name, status, body)
+			}
+			if got := ts.column(t, `select state || ' ' || coalesce(decision_detail, '') from requests where id = $1`, pending.RequestID); !slices.Equal(got, []string{"denied the requesting VM is no longer one its fleet's settings allow"}) {
+				t.Fatalf("the narrowed VM's request after the approval = %v, want denied naming the fleet", got)
+			}
+			if got := ts.column(t, `select count(*)::text from grants where enrollment_id = $1`, enrollmentID); !slices.Equal(got, []string{"0"}) {
+				t.Fatalf("grants of the narrowed VM = %v, want none", got)
+			}
+		})
+	}
+}
+
+// TestANarrowedVMNeitherRenewsNorEnrolls: once the fleet is narrowed past an enrolled VM, its
+// renewal with its own current token is refused 401 ENROLLMENT_NOT_LIVE, on which `agent-secrets
+// renew` stops, its launcher credential no longer enrolls (401), and its next login is 403
+// ACCOUNT_NOT_LISTED.
+func TestANarrowedVMNeitherRenewsNorEnrolls(t *testing.T) {
+	for name, narrow := range narrowings {
 		t.Run(name, func(t *testing.T) {
 			ts := newVMTestServer(t)
 			vm := member("example-zone-a", "1001")
-			credentialID, launcherKey, enrollmentID, sessionKey := ts.enrolled(t, vm)
-			ask := func() wireCreateRequestResponse {
-				t.Helper()
-				status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
-					map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "git fetch", "FLEET_KEY"), "session_id": nil})
-				if status != http.StatusOK {
-					t.Fatalf("POST /v1/requests FLEET_KEY = %d %s", status, body)
-				}
-				return decode[wireCreateRequestResponse](t, body)
-			}
-			granted := ask()
-			if granted.State != "granted" || granted.GrantID == nil {
-				t.Fatalf("the fleet's VM asking for FLEET_KEY = %+v, want granted", granted)
-			}
+			credentialID, launcherKey, enrollmentID, key := ts.enrolled(t, vm)
 			narrow(ts)
-			if status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+*granted.GrantID+"/values", nil); status == http.StatusOK {
-				t.Fatalf("the VM's grant values after the fleet was narrowed = %d %s, want a refusal", status, body)
-			}
-			if again := ask(); again.State != "denied" || again.GrantID != nil {
-				t.Fatalf("the VM asking again after the fleet was narrowed = %+v, want denied", again)
-			}
-			if status, body := ts.renewVM(t, sessionKey, enrollmentID, map[string]any{"vm_token": ts.current(t, vm)}); status != http.StatusForbidden || decode[wireError](t, body).Code != "VM_NOT_LISTED" {
-				t.Fatalf("the VM's renewal after the fleet was narrowed = %d %s, want 403 VM_NOT_LISTED", status, body)
+			if status, body := ts.renewVM(t, key, enrollmentID, map[string]any{"vm_token": ts.current(t, vm)}); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ENROLLMENT_NOT_LIVE" {
+				t.Fatalf("the VM's renewal after the fleet was narrowed to %s = %d %s, want 401 ENROLLMENT_NOT_LIVE", name, status, body)
 			}
 			if status, body := ts.enrolVM(t, credentialID, launcherKey, vm, ts.current(t, vm), newSigningKey(t)); status != http.StatusUnauthorized {
-				t.Fatalf("the VM's credential enrolling after the fleet was narrowed = %d %s, want 401", status, body)
+				t.Fatalf("the VM's credential enrolling after the fleet was narrowed to %s = %d %s, want 401", name, status, body)
+			}
+			if status, body := ts.vmLogin(t, vm, ts.current(t, vm), newSigningKey(t)); status != http.StatusForbidden || decode[wireError](t, body).Code != "ACCOUNT_NOT_LISTED" {
+				t.Fatalf("the VM's login after the fleet was narrowed to %s = %d %s, want 403 ACCOUNT_NOT_LISTED", name, status, body)
 			}
 		})
 	}

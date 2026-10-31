@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -41,11 +43,11 @@ func newVMEnrollment(t *testing.T, st *store.Store, service, account, runtimeID 
 	return id, key
 }
 
-// TestAVMsGrantStopsWhenItsFleetIsNarrowed pins that a VM's grant of its service's secret is
-// re-checked against its fleet's project and instance names on every use, not only at the VM's
-// login and renewal: once BROKER_VM_PROJECTS names another project, or BROKER_VM_INSTANCES a glob
-// its name does not match, its grant releases nothing and its next request is denied, while its
-// enrollment's lease has not lapsed.
+// TestAVMsGrantStopsWhenItsFleetIsNarrowed pins that a VM is held to its fleet's project and
+// instance names on every use, not only at its login and renewal: once BROKER_VM_PROJECTS names
+// another project, or BROKER_VM_INSTANCES a glob its name does not match, its grant releases nothing
+// and its next request finds no live enrollment at all (pgx.ErrNoRows), while its lease has not
+// lapsed.
 func TestAVMsGrantStopsWhenItsFleetIsNarrowed(t *testing.T) {
 	for name, narrow := range map[string]func(*Machine){
 		"another project":       func(m *Machine) { m.VMProjects = map[string]string{fixtureVMAccount: "example-other-project"} },
@@ -64,9 +66,8 @@ func TestAVMsGrantStopsWhenItsFleetIsNarrowed(t *testing.T) {
 			if values, _, err := m.Values(ctx, *granted.GrantID, vm, nil); !errors.Is(err, ErrGrantNotLive) {
 				t.Fatalf("Values after the fleet was narrowed to %s = %v, %v; want ErrGrantNotLive", name, values, err)
 			}
-			again, err := m.Create(ctx, vm, signRequest(t, m, vmKey, "need it again", "SERVICE_KEY"), "")
-			if err != nil || again.ID == granted.ID || again.State != "denied" || again.GrantID != nil {
-				t.Fatalf("Create after the fleet was narrowed to %s = %+v, %v; want a new request, denied", name, again, err)
+			if again, err := m.Create(ctx, vm, signRequest(t, m, vmKey, "need it again", "SHARED_KEY"), ""); !errors.Is(err, pgx.ErrNoRows) {
+				t.Fatalf("Create after the fleet was narrowed to %s = %+v, %v; want pgx.ErrNoRows, no identity", name, again, err)
 			}
 		})
 	}
@@ -75,10 +76,11 @@ func TestAVMsGrantStopsWhenItsFleetIsNarrowed(t *testing.T) {
 // TestAServicesSecretGoesToItsOwnVMsAlone pins who a VM service's secret reaches: a VM enrolled
 // under its own login for the service, running as the account BROKER_VM_SERVICES binds to that
 // service, gets SERVICE_KEY at once, with a grant and no record, and its value is released, also
-// after the policy moves. A VM under the service's login running as another account, a VM running
-// as the bound account under another service's login, a VM whose account BROKER_SERVICES binds for
-// pods but BROKER_VM_SERVICES does not, and a pod whose subject is the VM account (a pod proves its
-// service only through BROKER_SERVICES) are each denied it with no record.
+// after the policy moves. A VM its fleet does not allow — under the service's login running as
+// another account, running as the bound account under another service's login, or running as an
+// account BROKER_SERVICES binds for pods but BROKER_VM_SERVICES does not — has no identity at all
+// (pgx.ErrNoRows, for any secret), and a pod whose subject is the VM account (a pod proves its
+// service only through BROKER_SERVICES) is denied it with no record.
 func TestAServicesSecretGoesToItsOwnVMsAlone(t *testing.T) {
 	m, _, _, _ := newFixture(t)
 	withVMFleet(m)
@@ -105,15 +107,19 @@ func TestAServicesSecretGoesToItsOwnVMsAlone(t *testing.T) {
 		enrollment string
 		key        *ecdsa.PrivateKey
 	}{
-		"a VM under the service's login running as another account":                      {impostor, impostorKey},
-		"a VM running as the bound account under an unlisted service":                    {unlisted, unlistedKey},
-		"a VM running as the account BROKER_SERVICES binds for the service's pods":       {podAccountVM, podAccountVMKey},
-		"a pod whose subject is the VM account BROKER_VM_SERVICES binds for its service": {vmAccountPod, vmAccountPodKey},
+		"a VM under the service's login running as another account":                {impostor, impostorKey},
+		"a VM running as the bound account under an unlisted service":              {unlisted, unlistedKey},
+		"a VM running as the account BROKER_SERVICES binds for the service's pods": {podAccountVM, podAccountVMKey},
 	} {
-		denied, err := m.Create(ctx, r.enrollment, signRequest(t, m, r.key, "need it", "SERVICE_KEY"), "")
-		if err != nil || denied.State != "denied" || denied.GrantID != nil || denied.RecordID != nil {
-			t.Errorf("Create(%s) = %+v, %v; want denied with no grant and no record", who, denied, err)
+		for _, secret := range []string{"SERVICE_KEY", "SHARED_KEY"} {
+			if refused, err := m.Create(ctx, r.enrollment, signRequest(t, m, r.key, "need it", secret), ""); !errors.Is(err, pgx.ErrNoRows) {
+				t.Errorf("Create(%s, %s) = %+v, %v; want pgx.ErrNoRows, no identity", who, secret, refused, err)
+			}
 		}
+	}
+	denied, err := m.Create(ctx, vmAccountPod, signRequest(t, m, vmAccountPodKey, "need it", "SERVICE_KEY"), "")
+	if err != nil || denied.State != "denied" || denied.GrantID != nil || denied.RecordID != nil {
+		t.Errorf("Create(a pod whose subject is the VM account) = %+v, %v; want denied with no grant and no record", denied, err)
 	}
 	var records int
 	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from credential_requests`).Scan(&records); err != nil || records != 0 {
@@ -123,8 +129,8 @@ func TestAServicesSecretGoesToItsOwnVMsAlone(t *testing.T) {
 
 // TestAVMGrantStopsWhenItsServiceAccountChanges pins that a VM's grant of its service's secret is
 // re-checked on every release, as a pod's is: once BROKER_VM_SERVICES binds another account to the
-// service and no longer the VM's, the VM's grant releases nothing and its next request is denied
-// rather than reusing the grant.
+// service and no longer the VM's, the VM's grant releases nothing and its next request finds no
+// live enrollment, rather than reusing the grant.
 func TestAVMGrantStopsWhenItsServiceAccountChanges(t *testing.T) {
 	m, _, _, _ := newFixture(t)
 	withVMFleet(m)
@@ -138,8 +144,7 @@ func TestAVMGrantStopsWhenItsServiceAccountChanges(t *testing.T) {
 	if values, _, err := m.Values(ctx, *granted.GrantID, vm, nil); !errors.Is(err, ErrGrantNotLive) {
 		t.Fatalf("Values after the service's account changed = %v, %v; want ErrGrantNotLive", values, err)
 	}
-	again, err := m.Create(ctx, vm, signRequest(t, m, vmKey, "need it again", "SERVICE_KEY"), "")
-	if err != nil || again.ID == granted.ID || again.State != "denied" || again.GrantID != nil {
-		t.Fatalf("Create after the service's account changed = %+v, %v; want a new request, denied, not request %s reused", again, err, granted.ID)
+	if again, err := m.Create(ctx, vm, signRequest(t, m, vmKey, "need it again", "SERVICE_KEY"), ""); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("Create after the service's account changed = %+v, %v; want pgx.ErrNoRows, not request %s reused", again, err, granted.ID)
 	}
 }

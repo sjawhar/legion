@@ -13,15 +13,17 @@ body: |-
     account never move or end each other's. `POST /v1/enrollments` takes kind `vm` with `vm_token`
     (`403 VM_IDENTITY_MISMATCH`, `403 VM_TOKEN_EXPIRED`), every renewal of one carries the VM's
     current token (`403 VM_TOKEN_REQUIRED` without it), and a VM service's secrets go to its own VMs
-    at once. The broker re-checks a VM's account, project and instance name at its login, enrollment
-    and renewal and on every request and release, so narrowing a fleet stops a VM it no longer
-    allows at once, and refuses that VM's renewal `403 VM_NOT_LISTED`. On the client,
-    `agent-secrets enroll --vm --service <name> [--audience <aud>] [--out <dir>]` fetches the
-    token, logs in with a key it keeps in memory, enrolls `key.pem`, and prints the enrollment id;
-    run again over the same directory it keeps `key.pem` and extends the lease. `agent-secrets renew
-    --vm` renews with a fresh token each time and stops (exit 76) on `VM_TOKEN_REQUIRED` or
-    `VM_NOT_LISTED`. With no Google audience nothing changes: kind `vm` is still
-    `400 INVALID_KIND`, and the Kubernetes and GitHub paths are untouched.
+    at once. A VM its fleet's settings no longer allow (its account dropped, or another project or
+    instance-name glob configured) has no identity from then on: every call it signs is refused
+    `401`, as an ended session's is, so it releases no grant it holds, opens no request and renews
+    nothing, and a person's approval of a request it left pending grants nothing; a new enrollment
+    of it is `403 VM_NOT_LISTED`. On the client, `agent-secrets enroll --vm --service <name>
+    [--audience <aud>] [--out <dir>]` fetches the token, logs in with a key it keeps in memory,
+    enrolls `key.pem`, and prints the enrollment id; run again over the same directory it keeps
+    `key.pem` and extends the lease. `agent-secrets renew --vm` renews with a fresh token each time
+    and stops (exit 76) on `VM_TOKEN_REQUIRED`, `VM_NOT_LISTED` or `ENROLLMENT_NOT_LIVE`. With no
+    Google audience nothing changes: kind `vm` is still `400 INVALID_KIND`, and the Kubernetes and
+    GitHub paths are untouched.
 time: 2026-10-31T23:30:00Z
 custom:
-    Issue: INFRA-782
+    Issue: pr2615
