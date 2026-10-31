@@ -8,12 +8,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Image is the Postgres server image a developer starts for the daemon's own tests: PostgreSQL 18
@@ -52,13 +56,56 @@ func Database(t testing.TB, prefix string) string {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
-		if _, err := conn.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
+		if err := Drop(context.Background(), conn, name); err != nil {
 			t.Errorf("drop %s: %v", name, err)
 		}
 	})
 	database := *base
 	database.Path = "/" + name
 	return database.String()
+}
+
+// insufficientPrivilege is PostgreSQL's SQLSTATE 42501, which a forced drop answers when the
+// login may not terminate a session of another role.
+const insufficientPrivilege = "42501"
+
+// Execer is the one method Drop needs, which pgx.Conn and pgxpool.Pool each have.
+type Execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// Drop drops a test's own database, waiting out a backend it may not terminate.
+//
+// `with (force)` terminates every other session on the database, and PostgreSQL refuses that to a
+// login that is neither a superuser nor a member of pg_signal_backend as soon as one of those
+// sessions belongs to another role (SQLSTATE 42501, "permission denied to terminate process").
+// The test's own sessions are its own role's and are no trouble; what arrives unbidden is an
+// autovacuum worker, which runs as the server's superuser and attaches to a database the test
+// just filled. It leaves of its own accord within moments, so the drop is tried again until it
+// does, rather than asking the deployment for a privilege a test does not need: every Legion pod
+// shares one PostgreSQL whose `legion_test` login holds neither (skill://legion-worker's
+// references/tools.md, "The database your tests use"), where CI's container runs the tests as the
+// superuser and never sees this. A refusal that outlasts the wait is returned as it stands.
+func Drop(ctx context.Context, admin Execer, name string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for attempt := 0; ; attempt++ {
+		_, err := admin.Exec(ctx, "drop database "+name+" with (force)")
+		if err == nil {
+			return nil
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != insufficientPrivilege {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w (still refused after %d attempts over 30s: a session of another role, an autovacuum worker, holds the database and this login may not terminate it)", err, attempt+1)
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 // DSNFile is a 0600 file under the test's temporary directory holding Database's URL, as the

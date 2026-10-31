@@ -936,15 +936,19 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	}
 
 	// Resuming from a session file found nowhere over a pane's previous incarnation starts nothing
-	// and is a refusal, never runtime.ErrSessionFileMissing: this runtime takes no claim over,
-	// since `runtime.tmux.take_over` is unset here, and only while that key is set does a session
-	// found nowhere get a fresh agent.
+	// and is runtime.ErrSessionFileMissing, whatever `runtime.tmux.take_over` says — unset here.
+	// The search is the same search either way, and a session no folder holds is the same fact
+	// however the daemon is configured (spawn.go's launch), so the runtime reports the fact and
+	// the claim's machine decides what to do with it: it starts a fresh agent in its place,
+	// charged nothing and reported. Before R8 this host refused the launch outright unless the
+	// takeover key was set, which left a claim whose session file had gone relaunching into the
+	// same refusal for ever.
 	missing := r.spec("LEGION-1", "LEGION-1", claim.RoleArchitect)
 	missing.ResumeSessionFile = filepath.Join(r.dir, "no-such-session.jsonl")
 	before = len(r.recorded())
-	if _, err := r.rt.Resume(ctx, &loc2, missing); err == nil || errors.Is(err, runtime.ErrSessionFileMissing) ||
-		!strings.HasPrefix(err.Error(), "Refusing to start LEGION-1 fresh while resurrecting: recorded OMP session file is missing: "+missing.ResumeSessionFile) {
-		t.Errorf("Resume from a missing session file = %v, want the refusal to start fresh", err)
+	if _, err := r.rt.Resume(ctx, &loc2, missing); err == nil || !errors.Is(err, runtime.ErrSessionFileMissing) ||
+		!strings.Contains(err.Error(), "no OMP session at "+missing.ResumeSessionFile) {
+		t.Errorf("Resume from a missing session file = %v, want it to name the session and wrap runtime.ErrSessionFileMissing", err)
 	}
 	for _, argv := range r.recorded()[before:] {
 		if v := verb(argv); v == "new-window" || v == "split-window" {

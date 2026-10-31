@@ -32,6 +32,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -1629,7 +1630,7 @@ func migratedPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
+		if err := testpg.Drop(context.Background(), admin, name); err != nil {
 			t.Errorf("drop %s: %v", name, err)
 		}
 	})

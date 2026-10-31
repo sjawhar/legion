@@ -1774,10 +1774,15 @@ describe("Legion OMP extension", () => {
     });
 
     // dispatch://INFRA-264: every turn of that implementer was refused by its provider, and every
-    // reminder it earned bought another refused turn. The worker read nothing and said nothing,
-    // so the turn earns neither the continuation nor a timer, and the record stands as the last
-    // real turn left it.
-    test("a turn the provider refused earns no reminder, no timer and no record", async () => {
+    // reminder it earned bought another refused turn. The worker read nothing and said nothing, so
+    // the turn earns no continuation and the record stands as the last real turn left it. One
+    // timer is armed all the same: the task the refused turn carried ended with it, and below
+    // `launch_failure_limit` the daemon counts the turn rather than failing the claim, so without
+    // it a single transient refusal would leave the issue idle with nothing to wake it. By the
+    // time the timer fires the daemon has had every refusal of the run reported, and at the limit
+    // the claim it reads is failed and the reminder is dropped — which is what ends the reminding
+    // of a session the provider refuses for ever.
+    test("a turn the provider refused earns no continuation and no record, and is woken by one timer", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
       expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
@@ -1785,9 +1790,16 @@ describe("Legion OMP extension", () => {
 
       expect(await worker.refuses("Overloaded: the model is busy")).toBeUndefined();
 
-      expect(worker.timers).toEqual([]);
+      // Nothing is steered as the refused turn ends: the host would turn a continuation into
+      // another turn at once and the provider would refuse that one the same way.
       expect(steered(worker)).toEqual([]);
       expect(recorded(worker)).toEqual(before);
+      expect(worker.timers.map((timer) => timer.delayMs)).toEqual([
+        DEFAULT_STALL_LIMITS.reminderMs,
+      ]);
+
+      await fires(worker);
+      expect(steered(worker)).toEqual([steeredReminder(REMINDER)]);
     });
 
     // The daemon's own counter: every turn's end is reported, under a sequence this plugin counts

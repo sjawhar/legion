@@ -58,7 +58,7 @@ func emptyStore(t *testing.T) *Store {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
+		if err := testpg.Drop(context.Background(), admin, name); err != nil {
 			t.Errorf("drop %s: %v", name, err)
 		}
 	})

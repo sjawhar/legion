@@ -21,6 +21,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
 func TestOutboxMessageCrashRecoveryPostsOnceAgainstScratchDispatch(t *testing.T) {
@@ -173,7 +174,7 @@ func startScratchDispatchOn(t *testing.T, natsURL string) (string, string) {
 		t.Fatalf("create scratch Dispatch database: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+database+" with (force)"); err != nil {
+		if err := testpg.Drop(context.Background(), admin, database); err != nil {
 			t.Errorf("drop scratch Dispatch database: %v", err)
 		}
 	})
